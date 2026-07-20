@@ -72,6 +72,126 @@ func TestNetworkPeerMemberKeys(t *testing.T) {
 	})
 }
 
+func TestNetworkPeerProvideUpdateCannotResurrectMember(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		clientId := server.NewId()
+		residentId := server.NewId()
+		memberKey := networkPeerMemberKey(networkId, clientId)
+		metaKey := networkPeerMetaKey(networkId)
+		member := string(clientId.Bytes())
+
+		AddNetworkPeer(ctx, networkId, &NetworkPeer{
+			ClientId: clientId,
+		}, residentId, time.Minute)
+		updateNetworkPeerProvideModes(
+			ctx,
+			networkId,
+			clientId,
+			map[ProvideMode]bool{ProvideModePublic: true},
+		)
+
+		var registeredMeta []byte
+		server.Redis(ctx, func(r server.RedisClient) {
+			registeredMeta, _ = r.HGet(ctx, metaKey, member).Bytes()
+			ttl := r.TTL(ctx, memberKey).Val()
+			if ttl <= 0 {
+				t.Fatalf("normal update lost member ttl: %s", ttl)
+			}
+		})
+
+		// A remove/expiry between the metadata read and write must not be
+		// converted into a persistent member by SET KEEPTTL.
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Del(ctx, memberKey)
+		})
+		updateNetworkPeerProvideModes(
+			ctx,
+			networkId,
+			clientId,
+			map[ProvideMode]bool{ProvideModeStream: true},
+		)
+		server.Redis(ctx, func(r server.RedisClient) {
+			if r.Exists(ctx, memberKey).Val() != 0 {
+				t.Fatal("provide update resurrected a missing member key")
+			}
+			got, _ := r.HGet(ctx, metaKey, member).Bytes()
+			connect.AssertEqual(t, got, registeredMeta)
+		})
+
+		// Also refuse an already-corrupt persistent member rather than
+		// preserving its missing TTL.
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Set(ctx, memberKey, registeredMeta, 0)
+		})
+		updateNetworkPeerProvideModes(
+			ctx,
+			networkId,
+			clientId,
+			map[ProvideMode]bool{ProvideModeStream: true},
+		)
+		server.Redis(ctx, func(r server.RedisClient) {
+			connect.AssertEqual(t, r.TTL(ctx, memberKey).Val(), -1*time.Nanosecond)
+			got, _ := r.HGet(ctx, metaKey, member).Bytes()
+			connect.AssertEqual(t, got, registeredMeta)
+		})
+	})
+}
+
+func TestNetworkPeerCorrectiveReadRepairsMissedExpiry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		AddNetworkPeer(
+			ctx,
+			networkId,
+			&NetworkPeer{ClientId: clientId, DeviceName: "expiring"},
+			server.NewId(),
+			500*time.Millisecond,
+		)
+		eventIdBefore := GetNetworkPeerEventId(ctx, networkId)
+
+		events := make(chan *NetworkPeerEvent, 8)
+		listener := NewNetworkPeerListener(
+			ctx,
+			networkId,
+			func(event *NetworkPeerEvent) { events <- event },
+			100*time.Millisecond,
+			1, // authoritative corrective read every tick
+		)
+		defer listener.Close()
+		listener.Resync()
+
+		select {
+		case event := <-events:
+			if len(event.Peers) != 1 || event.Peers[0].DisconnectTime != nil {
+				t.Fatalf("unexpected initial peers: %+v", event.Peers)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for initial peer snapshot")
+		}
+
+		// No key-event delta is delivered to this listener. Expiry also does
+		// not bump the registry version, so only state-based reconciliation
+		// can repair it.
+		select {
+		case event := <-events:
+			if event.NetworkPeerEventType != NetworkPeerEventTypeReset ||
+				len(event.Peers) != 1 ||
+				event.Peers[0].DisconnectTime == nil {
+				t.Fatalf("unexpected expiry repair: %+v", event)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("corrective read did not repair missed peer expiry")
+		}
+		connect.AssertEqual(t, GetNetworkPeerEventId(ctx, networkId), eventIdBefore)
+	})
+}
+
 // TestNetworkPeerListenerDeltas drives the listener's key-event inputs
 // directly: a `set` delta delivers a single-peer Updated event, `del`
 // delivers a disconnect marker, and Resync forces a full-read Reset even
@@ -179,4 +299,34 @@ func TestNetworkPeerKeyEventParse(t *testing.T) {
 	connect.AssertEqual(t, parsedClientId, clientId)
 	_, ok = ParseStreamHopsKeyEvent(channel)
 	connect.AssertEqual(t, ok, false)
+}
+
+func TestNetworkPeerSnapshotStateFingerprint(t *testing.T) {
+	clientId := server.NewId()
+	firstDisconnect := time.Unix(100, 0)
+	secondDisconnect := time.Unix(200, 0)
+
+	first := PrepareNetworkPeerSnapshot(1, []*NetworkPeer{{
+		ClientId:       clientId,
+		DisconnectTime: &firstDisconnect,
+	}})
+	second := PrepareNetworkPeerSnapshot(2, []*NetworkPeer{{
+		ClientId:       clientId,
+		DisconnectTime: &secondDisconnect,
+	}})
+	if first.stateHash != second.stateHash {
+		t.Fatal("disconnect marker timestamp changed the logical snapshot fingerprint")
+	}
+
+	connected := PrepareNetworkPeerSnapshot(3, []*NetworkPeer{{
+		ClientId:   clientId,
+		DeviceName: "device a",
+	}})
+	changed := PrepareNetworkPeerSnapshot(4, []*NetworkPeer{{
+		ClientId:   clientId,
+		DeviceName: "device b",
+	}})
+	if connected.stateHash == changed.stateHash {
+		t.Fatal("peer metadata change did not change the snapshot fingerprint")
+	}
 }

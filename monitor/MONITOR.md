@@ -445,11 +445,12 @@ WARP_HOME=... WARP_ENV=main ... go run ./monitor   # the 60s loop
    normalized to shapes, per-family counts recorded as baseline metrics;
    alert = family > 3x its trailing 7-day median and > 20k in sample;
    the full histogram logs daily as the diagnostician's inventory.
-   Tailer calibration from the first live pass: two contract-error classes
-   promoted out of `novel` with measured background rates
-   (insufficient-balance ~1,000+/min, missing-origin-contract ~90/min —
-   SIGNALS.md §4 rows added); grafana panic-loop found (real: stale
-   CloudWatch datasource, log group missing).
+   Tailer calibration from the first live pass measured two contract-error
+   backgrounds (insufficient-balance ~1,000+/min,
+   missing-origin-contract ~90/min). Those lines are now rate-limited
+   exemplars; the lossless bounded counter and file-provisioned Grafana rules
+   own their rate alerts (SIGNALS.md §4). The same pass found a real Grafana
+   panic-loop (stale CloudWatch datasource, log group missing).
 6. **Log tailers — DONE (2026-07-17)** (§3.7): standing `warpctl logs -f`
    per service (service list from `warpctl ls services`), §4 taxonomy
    classifier + novel-class detection, per-minute drain through a probe
@@ -473,9 +474,10 @@ Decided (2026-07-17):
 - **Grafana split**: the monitor identifies issues — events/alerts that
   need investigation, delivered as tickets. Grafana collects metrics to
   support decisions: it is the data source for the *fixer/debugger* working
-  a ticket, not an issue-identification path. Grafana is for fixing issues,
-  not identifying them; the monitor never consumes grafana/prometheus as a
-  probe input (principle 5).
+  a ticket. The monitor never consumes Grafana/Prometheus as a probe input
+  (principle 5). File-provisioned Grafana alerts are the explicit exception
+  for bounded application counters whose lossless rate cannot be reconstructed
+  after required log sampling; contract-failure causes use that path.
 - **Runtime**: developed and run locally first (address_mode: overlay,
   ssh_override with the existing workstation access) against main; in-LAN
   deployment as a warp service comes after the probe set stabilizes.

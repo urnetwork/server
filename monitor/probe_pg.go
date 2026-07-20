@@ -12,15 +12,22 @@ import (
 // pgStateProbe is SIGNALS.md 1.3: the active / idle-in-tx state split, the
 // tier-0 read of pg load and the redis-latency mirror. It emits two signals:
 // active-pileup (page, §7) and idle-in-tx (warn, §7). When either trips it
-// runs the 1.3 / 5.8 escalation batteries so the ticket names the real query
-// load.
-type pgStateProbe struct{}
+// runs the 1.3 / 5.8 escalation batteries — once per trip, not per tick
+// (batteryLatch) — so the ticket names the real query load without the
+// batteries themselves landing load on the sick target every minute.
+type pgStateProbe struct {
+	batteries *batteryLatch
+}
 
-func (self pgStateProbe) id() string             { return "pg/state-split" }
-func (self pgStateProbe) tier() string           { return tierPage }
-func (self pgStateProbe) cadence() time.Duration { return 60 * time.Second }
+func newPgStateProbe() *pgStateProbe {
+	return &pgStateProbe{batteries: newBatteryLatch()}
+}
 
-func (self pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self *pgStateProbe) id() string             { return "pg/state-split" }
+func (self *pgStateProbe) tier() string           { return tierPage }
+func (self *pgStateProbe) cadence() time.Duration { return 60 * time.Second }
+
+func (self *pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := "pg"
 	if h := env.cfg.hostByRole("pg-primary"); h != nil {
 		target = h.name
@@ -49,9 +56,11 @@ func (self pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 
 	// active-pileup (page): active > 100 for 2 min (SIGNALS.md §7 / 1.3 / 5.8)
 	if active > 100 {
-		evidence := activeBattery(ctx, env)
-		// full 5.8 discriminators: statements/idx_scan deltas + landmine check
-		evidence += "\n" + planWallBattery(ctx, env)
+		evidence := self.batteries.broken("active-pileup", func() string {
+			// full 5.8 discriminators: query_id grouping + statements/idx_scan
+			// deltas + landmine check
+			return activeBattery(ctx, env) + "\n" + planWallBattery(ctx, env)
+		})
 		findings = append(findings, finding{
 			probeId: "pg/active-pileup", tier: tierPage,
 			class: "active-pileup", target: target, sustain: 2,
@@ -62,6 +71,7 @@ func (self pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			playbook: "SIGNALS.md 5.8",
 		})
 	} else {
+		self.batteries.healthy("active-pileup")
 		findings = append(findings, healthyFinding("pg/active-pileup", tierPage, "active-pileup", target))
 	}
 
@@ -73,10 +83,13 @@ func (self pgStateProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			symptom:  fmt.Sprintf("pg (%s) idle-in-transaction = %d, oldest %ds (threshold > 100 / > 30m)", target, idleInTx, oldestIdleS),
 			baseline: "idle_in_tx < 30 healthy (2 when healthy); > 100 = redis latency leaking into pg through tx-scoped calls (1.3)",
 			observed: fmt.Sprintf("idle_in_tx=%d oldest=%ds active=%d", idleInTx, oldestIdleS, active),
-			evidence: idleTxBattery(ctx, env),
+			evidence: self.batteries.broken("idle-in-tx", func() string {
+				return idleTxBattery(ctx, env)
+			}),
 			playbook: "SIGNALS.md 5.6",
 		})
 	} else {
+		self.batteries.healthy("idle-in-tx")
 		findings = append(findings, healthyFinding("pg/idle-in-tx", tierWarn, "idle-in-tx", target))
 	}
 
@@ -165,9 +178,20 @@ func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		env.baseline.record(contractRateMetric, time.Now(), float64(rate))
 	}
 
+	// a churn window pollutes the trailing-hour median: the 2026-07-19
+	// ansible restart wave drove contracts to ~11k/min for 40 min, and the
+	// recovery back to the ~4.5k baseline then paged as a < 50% "collapse".
+	// When the hour median is itself >= 1.5x the trailing-6h median, judge
+	// against the longer window instead
+	if haveBaseline && env.baseline != nil {
+		if longMedian, _, haveLong := env.baseline.trailingMedian(contractRateMetric, 6*time.Hour, 120); haveLong && median >= 1.5*longMedian {
+			median = longMedian
+		}
+	}
+
 	baselineText := func() string {
 		if haveBaseline {
-			return fmt.Sprintf("trailing-hour median %.0f/min (learned); daily cycle 8,000–13,000/min; < 1,000 observed only during full redis outage", median)
+			return fmt.Sprintf("trailing median %.0f/min (learned); daily cycle 8,000–13,000/min; < 1,000 observed only during full redis outage", median)
 		}
 		return "8,000–13,000/min daily cycle (static; learned band pending history); < 1,000/min observed only during full redis outage"
 	}
@@ -191,10 +215,10 @@ func (self pgContractRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		return []finding{{
 			probeId: "pg/contracts-collapse", tier: tierPage,
 			class: "contracts-collapse", target: target, sustain: 3,
-			symptom: fmt.Sprintf("pg (%s) contract creation = %d/min, < 50%% of the trailing-hour median %.0f/min",
+			symptom: fmt.Sprintf("pg (%s) contract creation = %d/min, < 50%% of the trailing median %.0f/min",
 				target, rate, median),
 			baseline: baselineText(),
-			observed: fmt.Sprintf("contracts_last_min=%d trailing_hour_median=%.0f ratio=%.0f%%", rate, median, 100*float64(rate)/median),
+			observed: fmt.Sprintf("contracts_last_min=%d trailing_median=%.0f ratio=%.0f%%", rate, median, 100*float64(rate)/median),
 			context:  "cliff = systemic (cluster state, deploy); sag = partial failure; ramp = recovery (1.1)",
 			playbook: "SIGNALS.md 5.1",
 		}}, nil

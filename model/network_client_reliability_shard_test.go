@@ -108,6 +108,45 @@ func TestClientReliabilityStatsShardedDrain(t *testing.T) {
 	})
 }
 
+// Production defaults to the legacy writer until every taskworker can read
+// shards. This models an old-reader/new-writer overlap: with the gate closed,
+// the new binary still emits exactly the legacy hash the old rollup expects.
+// TestClientReliabilityStatsShardedWriter asserts writers always shard: a
+// recorded range lands in the shard key and never in the legacy unsharded key.
+func TestClientReliabilityStatsShardedWriter(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		hash := server.ClientIpHashForAddr(netip.MustParseAddr("10.9.0.1"))
+		now := server.NowUtc()
+		blockNumber := reliabilityBlockNumber(now)
+
+		RecordClientReliabilityStatsRange(
+			ctx,
+			networkId,
+			clientId,
+			hash,
+			now,
+			now,
+			&ClientReliabilityStats{ConnectionEstablishedCount: 1},
+		)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			shard, err := r.HGetAll(
+				ctx,
+				clientReliabilityStatsKey(blockNumber, clientReliabilityStatsShard(clientId)),
+			).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(shard), 1)
+			legacy, err := r.HGetAll(ctx, clientReliabilityStatsLegacyKey(blockNumber)).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(legacy), 0)
+		})
+	})
+}
+
 // TestClientReliabilityStatsLegacyDrain simulates a rolling deploy: an
 // old-build writer fills the legacy unsharded key with ascii fields while a
 // new-build writer fills a shard key in the same block. One drain must merge

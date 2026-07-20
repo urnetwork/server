@@ -19,7 +19,11 @@ existing version counter. There is no application-managed publish channel —
 the delta transport is the redis server itself announcing its own writes.
 
 The v2 poll stays in the codebase as the corrective loop and as the
-kill-switch fallback: events off → v2 behavior, exactly.
+kill-switch fallback: events off → the v2 poll cadence and read pattern
+(v2 intervals, insurance full read every `ListenerFullReadEvery`-th tick),
+with one deliberate difference from v2 — a full read delivers to the
+listener callback only when the observed state actually changed
+(state-compare in the listener), not on every version-counter movement.
 
 ## 2. Why: the v2 steady-state read burden
 
@@ -139,12 +143,16 @@ and its 24h/8h TTL semantics unchanged; corrective poll interval also 5min
 
 ### 5.4 Corrective poll (the v2 loop, retimed)
 
-Per resident, unchanged v2 semantics with `!=` counter comparison and
-per-tick error containment, at `PollInterval = 5min ± 20%` when events are
-enabled (v2 default intervals when disabled). `FullReadEvery`'s
-unconditional insurance read is REMOVED in event mode — the corrective poll
-itself is the insurance; delivery still only happens on a version change or
-an event-driven delta.
+Per resident, the v2 loop with `!=` counter comparison and per-tick error
+containment, at `PollInterval = 5min ± 20%` when events are enabled (v2
+default intervals — including the `FullReadEvery` insurance read — when
+disabled). `FullReadEvery`'s unconditional insurance read is removed in
+event mode only (`listenerFullReadEvery()` returns 0) — the corrective poll
+itself is the insurance there. A corrective READ triggers on a version
+mismatch, an event, a forced resync, or (poll mode) the insurance tick;
+DELIVERY is gated on the read observing a state change, so an expiry —
+which does not bump the counter — still delivers via the event-driven
+`Reconcile()`, and a read that finds converged state delivers nothing.
 
 ### 5.5 What gets deleted / kept
 
@@ -182,7 +190,8 @@ for the throughput win.
 - Silent death: TTL + active-expiry notice lag (seconds) — better than v2
   (which also waited for a poll tick after prune).
 - Dropped/missed events: repaired ≤ 5min + jitter (corrective poll), or
-  immediately on any resubscribe resync.
+  sooner when a resubscribe resync detects and covers the gap (best-effort —
+  the corrective poll is the guaranteed bound).
 - `/network/peers` API remains a live read. SDK's 1s local epoch watcher
   unchanged.
 
@@ -191,13 +200,13 @@ for the throughput win.
 | Failure | v3 behavior |
 |---|---|
 | `notify-keyspace-events` off / wrong classes on a node (config drift) | silent no-events from that node; corrective poll bounds staleness to 5min; monitor signal: per-node keyevent rate vs write rate (new, monitor/SIGNALS.md) |
-| subscriber conn killed (output-buffer limit, node restart) | reconnect + forced resync (jittered) of registrations routed via that node; events in the gap repaired by the resync |
+| subscriber conn killed (output-buffer limit, node restart) | go-redis reconnects the PubSub transparently; the subscriber detects this best-effort (a post-initial psubscribe confirmation ends the epoch) → resubscribe + forced resync (jittered) of registrations routed via that node; a gap the detection misses is repaired by the ≤5min corrective poll |
 | resharding / slot migration | topology watch → resubscribe on new owner → resync affected registrations; MOVED on the corrective poll also triggers it |
 | redis node down | events stop AND polls error-backoff for that slot's networks → stale lists only; no goroutine death; auto-recovery |
 | event storm (mass reconnect after an outage) | fanout is per-process; dirty flags coalesce (a listener already dirty absorbs further events); reads are per-reader jittered |
 | counter flushed / evicted | unchanged v2 `!=` resync semantics on the corrective poll |
 | subscriber process bug marks nothing dirty | corrective poll is a full independent path — v2 behavior at 5min cadence |
-| kill switch | `EnableKeyEventDelivery=false` → pure v2 at v2 intervals, no schema rollback needed (per-member keys are additive) |
+| kill switch | `EnableKeyEventDelivery=false` → v2 poll cadence at v2 intervals (delivery is state-compare, see §1), no schema rollback needed (per-member keys are additive) |
 
 ## 9. Rollout plan
 

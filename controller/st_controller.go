@@ -329,6 +329,9 @@ type StClient interface {
 	// UnaccountedStakeRao reads getStake(treasuryHotkey, selfColdkey) -
 	// accountedStake: α already pushed but not yet credited by deposit().
 	UnaccountedStakeRao(ctx context.Context) (*big.Int, error)
+	// BuybackTotal reads buybackTotal() — the cumulative α (rao) ever
+	// deposited into the contract, monotone across sweeps and claims.
+	BuybackTotal(ctx context.Context) (*big.Int, error)
 	// CommitPayoutRoot calls commitOperator(e, noId, root, off) (ops key).
 	CommitPayoutRoot(ctx context.Context, epoch uint64, noId uint64, root [32]byte, off []byte) (txHash string, err error)
 	// FinalizeEpoch calls the permissionless finalizeEpoch(e) (ops key).
@@ -664,6 +667,10 @@ func (self *CoreStClient) DepositPush(ctx context.Context, alphaRao *big.Int) (s
 func (self *CoreStClient) DepositCredit(ctx context.Context, noId uint64, alphaRao *big.Int) (string, error) {
 	calldata := self.st.PackDeposit(new(big.Int).SetUint64(noId), alphaRao)
 	return self.send(ctx, self.cfg.DepositKey, self.cfg.ContractAddress, calldata)
+}
+
+func (self *CoreStClient) BuybackTotal(ctx context.Context) (*big.Int, error) {
+	return stView(self, ctx, self.st.PackBuybackTotal(), self.st.UnpackBuybackTotal)
 }
 
 func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, error) {

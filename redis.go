@@ -195,6 +195,11 @@ func (self *safeRedisClient) reset() {
 
 var safeClient = &safeRedisClient{}
 
+var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_redis_key_event_merge_drops_total",
+	Help: "Keyspace notifications dropped at the process-wide merge; each drop terminates the subscription epoch and forces a full resync",
+})
+
 // pool stats flow to grafana via the default registry (see StartStatsPusher).
 // Timeouts is the earliest caller-side signal of a wedged node or exhausted
 // pool — it fires before user-visible failures.
@@ -209,6 +214,7 @@ func init() {
 		}
 	}
 	prometheus.MustRegister(
+		redisKeyEventMergeDrops,
 		prometheus.NewCounterFunc(
 			prometheus.CounterOpts{Name: "urnetwork_redis_pool_hits_total", Help: "redis pool free-connection hits"},
 			poolStat(func(s *redis.PoolStats) float64 { return float64(s.Hits) }),
@@ -424,20 +430,45 @@ func SubscribeKeyEvents(
 
 	drain := func(pubsub *redis.PubSub) {
 		defer doneOnce()
-		c := pubsub.Channel()
+		c := pubsub.ChannelWithSubscriptions(
+			redis.WithChannelSize(1024),
+		)
+		initialSubscriptionReady := false
 		for {
 			select {
 			case <-cancelCtx.Done():
 				return
-			case message, ok := <-c:
+			case value, ok := <-c:
 				if !ok {
 					// the subscription died; the caller resubscribes + resyncs
 					return
 				}
-				select {
-				case <-cancelCtx.Done():
-					return
-				case out <- message:
+				switch value := value.(type) {
+				case *redis.Subscription:
+					if value.Kind == "psubscribe" {
+						if initialSubscriptionReady {
+							// go-redis transparently reconnected. End this
+							// generation so the caller performs the required
+							// full resync for the unseen gap.
+							return
+						}
+						if len(patterns) <= value.Count {
+							initialSubscriptionReady = true
+						}
+					}
+					continue
+				case *redis.Message:
+					select {
+					case <-cancelCtx.Done():
+						return
+					case out <- value:
+					default:
+						// Never stop draining a node's PubSub socket behind a
+						// congested shared merge. A drop invalidates this
+						// epoch; reconnect + full resync restores state.
+						redisKeyEventMergeDrops.Inc()
+						return
+					}
 				}
 			}
 		}

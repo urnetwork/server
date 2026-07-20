@@ -16,6 +16,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"os/exec"
 	"regexp"
 	"sync"
 	"time"
@@ -32,6 +34,10 @@ type logClass struct {
 	tier          string
 	playbook      string
 	meaning       string
+	// metricOnly classes are still recognized so their rate-limited
+	// exemplars do not become "novel" log errors, but alerting comes from a
+	// lossless counter rather than the sampled log volume.
+	metricOnly bool
 }
 
 // the §4 taxonomy. Order matters: first match wins.
@@ -66,21 +72,30 @@ var logClasses = []logClass{
 	{name: "panic", re: regexp.MustCompile(`panic:|Unexpected error|goroutine [0-9]+ \[`),
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
 		meaning: "panic stack — the innermost app frame identifies the load-bearing call path"},
-	// contract-error classes measured at steady state 2026-07-17 (they ran as
-	// `novel` on the tailers' first live pass): insufficient-balance ~1,000+/min
-	// background from out-of-data free users — only a step-change matters (the
-	// netEscrow drift signature); missing-origin ~90/min background
+	// Contract errors are emitted here only as rate-limited exemplars. Their
+	// lossless rates come from urnetwork_connect_contract_failures_total and
+	// are evaluated by the provisioned Grafana rules; counting these sampled
+	// lines would under-report the actual rate.
 	{name: "insufficient-balance", re: regexp.MustCompile(`\[contract\]\[error\].*Insufficient balance`),
 		rateThreshold: 4000, tier: tierWarn, playbook: "SIGNALS.md §4",
-		meaning: "payer has no usable balance — routine at a background rate for out-of-data users; a step-change = netEscrow drift re-emerging (contracts reconcile-net-escrow) or a balance-grant regression"},
+		meaning:    "payer has no usable balance — routine at a background rate for out-of-data users; a step-change = netEscrow drift re-emerging (contracts reconcile-net-escrow) or a balance-grant regression",
+		metricOnly: true},
 	{name: "missing-origin-contract", re: regexp.MustCompile(`Missing origin contract for companion`),
 		rateThreshold: 500, tier: tierWarn, playbook: "SIGNALS.md §4",
-		meaning: "companion contract creation cannot find its origin contract — a spike = companion-path regression (origin closed early or client sequence bug)"},
+		meaning:    "companion contract creation cannot find its origin contract — a spike = companion-path regression (origin closed early or client sequence bug)",
+		metricOnly: true},
 	// decoded from the taskworker novel class 2026-07-18: the payout wallet is
 	// out of funds — a finance action, not an api bug
 	{name: "payout-wallet-insufficient", re: regexp.MustCompile(`asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet`),
 		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "the payout wallet balance cannot cover pending payouts (usdc) — fund the wallet or pause payouts; retries park AdvancePayment tasks until funded"},
+	// taskworker drain outcome (§12.1): the drain phases log exactly one
+	// outcome line; "finished cleanly" / "finished after cancel" are healthy
+	// and not classified — only "gave up" means a ctx-ignoring task rode to
+	// SIGKILL and stuck leases follow (pg/task-lease-stranded confirms which)
+	{name: "taskworker-drain-gave-up", re: regexp.MustCompile(`\[taskworker\]drain gave up`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 12.1",
+		meaning: "a taskworker drain exceeded finish+cancel timeouts and the process was killed with tasks running — every in-flight claim is leased until its max time; check pg/task-lease-stranded and release stranded claims"},
 }
 
 // errorShaped marks lines that count toward the novel class when no taxonomy
@@ -116,9 +131,13 @@ type logTailer struct {
 	// normalized novel shape -> count
 	novelCounts map[string]int
 	novelSample string
-	// tailer self-health
-	lastLineTime time.Time
-	restartCount int
+	// tailer self-health (§3.7), read by the logTailProbe health findings
+	lastLineTime   time.Time
+	restartCount   int
+	scanErrorCount int
+
+	// stream is a test seam over runner.warpctlStream; nil = the real stream
+	stream func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error)
 }
 
 func newLogTailer(service string, env *probeEnv) *logTailer {
@@ -129,6 +148,8 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 		classSamples: map[string]string{},
 		classTargets: map[string]string{},
 		novelCounts:  map[string]int{},
+		// silence is measured from tailer start until the first line arrives
+		lastLineTime: time.Now(),
 	}
 }
 
@@ -143,18 +164,12 @@ func (self *logTailer) run(ctx context.Context) {
 		default:
 		}
 
-		streamCtx, cancel := context.WithCancel(ctx)
-		cmd, stdout, err := self.env.runner.warpctlStream(streamCtx, "logs", self.env.cfg.env, self.service, "-f")
-		if err == nil {
-			scanner := bufio.NewScanner(stdout)
-			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-			for scanner.Scan() {
-				self.classify(scanner.Text())
-			}
-			cmd.Wait()
+		if err := self.tailOnce(ctx); err == nil {
+			// a clean stream end (warpctl exited without a scan error):
+			// restart promptly. Start failures and scan errors keep the
+			// escalating backoff.
 			backoff = time.Second
 		}
-		cancel()
 
 		func() {
 			self.stateLock.Lock()
@@ -163,7 +178,7 @@ func (self *logTailer) run(ctx context.Context) {
 		}()
 
 		// rate-limit restarts; the stream dying repeatedly surfaces via the
-		// probe's visibility finding
+		// probe's tailer-restarting visibility finding
 		select {
 		case <-ctx.Done():
 			return
@@ -171,6 +186,64 @@ func (self *logTailer) run(ctx context.Context) {
 		}
 		backoff = min(backoff*2, time.Minute)
 	}
+}
+
+// tailOnce runs one log stream to completion: start, scan lines, reap the
+// child. On a scanner error (a > 1MB line overflows the buffer as
+// bufio.ErrTooLong) the child is killed and the read end closed BEFORE Wait —
+// otherwise the child keeps writing into a pipe nobody reads, blocks when the
+// pipe fills, and Wait never returns (a silently dead tailer). An oversized
+// line costs one counted stream restart, never a wedge.
+func (self *logTailer) tailOnce(ctx context.Context) error {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	cmd, stdout, err := self.openStream(streamCtx)
+	if err != nil {
+		return err
+	}
+	// the parent's read end of the pipe is owned here; without this close
+	// every stream restart leaks one fd
+	defer stdout.Close()
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		self.classify(scanner.Text())
+	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		// the scan loop stopped consuming mid-stream: kill the child now so
+		// Wait cannot block on the full pipe
+		cancel()
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.scanErrorCount += 1
+		}()
+	}
+	cmd.Wait()
+	return scanErr
+}
+
+// openStream starts the warpctl log stream (or the injected test stream).
+func (self *logTailer) openStream(ctx context.Context) (*exec.Cmd, io.ReadCloser, error) {
+	if self.stream != nil {
+		return self.stream(ctx)
+	}
+	// --since=1s: without it, warpctl -f first replays a 5-minute
+	// search window (up to 10k lines) before live-tailing, and the
+	// replay lands in one minute window as a false rate spike (observed
+	// 2026-07-19: a monitor restart during incident recovery opened
+	// page-tier panic tickets from replayed restart-era lines)
+	return self.env.runner.warpctlStream(ctx, "logs", self.env.cfg.env, self.service, "--since=1s", "-f")
+}
+
+// healthSnapshot returns the tailer's self-health counters (§3.7 visibility).
+func (self *logTailer) healthSnapshot() (lastLine time.Time, restarts int, scanErrors int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.lastLineTime, self.restartCount, self.scanErrorCount
 }
 
 // classify folds one log line into the current window.
@@ -220,6 +293,13 @@ func (self *logTailer) drainWindow() []finding {
 	// observed after the 2026-07-18 crash-loop outage).
 	findings := []finding{}
 	for _, c := range logClasses {
+		if c.metricOnly {
+			// The matching line is a sampled diagnostic exemplar, not a
+			// cardinality-preserving signal. Keep old log-derived tickets
+			// resolved and let Grafana evaluate the counter.
+			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
+			continue
+		}
 		count := self.classCounts[c.name]
 		attribution := self.classTargets[c.name]
 		if count >= c.rateThreshold {
@@ -248,9 +328,13 @@ func (self *logTailer) drainWindow() []finding {
 		}
 	}
 	if novelTotal >= novelRateThreshold {
+		// identity discipline: the top shape varies minute to minute, so it
+		// must NOT be the frame — frame is part of ticket identity, and a
+		// shifting frame resets the sustain-2 streak so the ticket would
+		// never open. The shape lives in the evidence instead.
 		findings = append(findings, finding{
 			probeId: "logs/novel", tier: tierWarn,
-			class: "novel", target: self.service, frame: topShape, sustain: 2,
+			class: "novel", target: self.service, sustain: 2,
 			symptom:  fmt.Sprintf("service %s: %d/min error-shaped lines matching no known class (top shape %d/min)", self.service, novelTotal, topCount),
 			baseline: "unmatched error-shaped lines ~0/min; a new signature at rate = new failure mode (1.5)",
 			observed: fmt.Sprintf("rate=%d/min distinct_shapes=%d", novelTotal, len(self.novelCounts)),
@@ -279,20 +363,80 @@ func truncateLine(line string) string {
 }
 
 // logTailProbe adapts a set of tailers to the probe interface: each check
-// drains every tailer's minute window. The tailers themselves run as standing
-// goroutines started in main.
+// drains every tailer's minute window and evaluates each tailer's own health
+// (§3.7 promises a monitor/visibility finding for a tailer that cannot stay
+// up). The tailers themselves run as standing goroutines started in main.
 type logTailProbe struct {
 	tailers []*logTailer
+	// restart counts at the previous check, per tailer, for the hot-restart
+	// delta. Only the probe goroutine touches this (a probe never overlaps
+	// itself).
+	lastRestartCounts []int
 }
+
+// tailerSilentThreshold: no line for this long means the monitor is blind to
+// that service's logs — the stream is dead, or the service itself is.
+const tailerSilentThreshold = 10 * time.Minute
+
+// tailerHotRestartThreshold: restarts within one check window (60s) at or
+// above which the stream is flapping rather than recovering (e.g. a poison
+// oversized line replayed at each reconnect, or warpctl itself failing).
+const tailerHotRestartThreshold = 3
 
 func (self *logTailProbe) id() string             { return "logs/tail" }
 func (self *logTailProbe) tier() string           { return tierWarn }
 func (self *logTailProbe) cadence() time.Duration { return 60 * time.Second }
 
 func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if self.lastRestartCounts == nil {
+		self.lastRestartCounts = make([]int, len(self.tailers))
+	}
 	findings := []finding{}
-	for _, tailer := range self.tailers {
+	now := time.Now()
+	for i, tailer := range self.tailers {
 		findings = append(findings, tailer.drainWindow()...)
+
+		lastLine, restarts, scanErrors := tailer.healthSnapshot()
+		restartDelta := restarts - self.lastRestartCounts[i]
+		self.lastRestartCounts[i] = restarts
+		findings = append(findings, tailerHealthFindings(tailer.service, now, lastLine, restartDelta, scanErrors)...)
 	}
 	return findings, nil
+}
+
+// tailerHealthFindings evaluates one tailer's self-health: silent beyond the
+// threshold, or restarting hot within one check window. Pure so the thresholds
+// are unit-testable.
+func tailerHealthFindings(service string, now time.Time, lastLine time.Time, restartDelta int, scanErrors int) []finding {
+	findings := []finding{}
+	target := "logs/" + service
+
+	if silent := now.Sub(lastLine); silent >= tailerSilentThreshold {
+		findings = append(findings, finding{
+			probeId: "monitor/visibility", tier: tierWarn,
+			class: "tailer-silent", target: target, sustain: 2,
+			symptom:  fmt.Sprintf("log tailer for %s has read no line in %s (threshold %s)", service, silent.Round(time.Second), tailerSilentThreshold),
+			baseline: "every tailed service logs continuously; a silent tailer means the monitor is blind to that service's logs (§3.7)",
+			observed: fmt.Sprintf("silent_for=%s scan_errors_total=%d", silent.Round(time.Second), scanErrors),
+			context:  "either the warpctl stream is broken (restart the monitor / check warpctl auth) or the service itself is down (warpctl ls versions)",
+			playbook: "SIGNALS.md 1.5",
+		})
+	} else {
+		findings = append(findings, healthyFinding("monitor/visibility", tierWarn, "tailer-silent", target))
+	}
+
+	if restartDelta >= tailerHotRestartThreshold {
+		findings = append(findings, finding{
+			probeId: "monitor/visibility", tier: tierWarn,
+			class: "tailer-restarting", target: target, sustain: 2,
+			symptom:  fmt.Sprintf("log tailer for %s restarted %d times in the last check window (threshold %d)", service, restartDelta, tailerHotRestartThreshold),
+			baseline: "a healthy stream restarts rarely; hot restarts = the stream dies immediately after starting (oversized lines, warpctl failure)",
+			observed: fmt.Sprintf("restart_delta=%d scan_errors_total=%d", restartDelta, scanErrors),
+			playbook: "SIGNALS.md 1.5",
+		})
+	} else {
+		findings = append(findings, healthyFinding("monitor/visibility", tierWarn, "tailer-restarting", target))
+	}
+
+	return findings
 }

@@ -254,6 +254,7 @@ func AddToStream(
 	streamId server.Id,
 ) {
 	ttl := 8 * time.Hour
+	ttlSeconds := int64(ttl / time.Second)
 	streamKey := newStreamKey(sourceId, destinationId, intermediaryIds)
 
 	// will be overwritten if already set
@@ -292,7 +293,7 @@ func AddToStream(
 			},
 			server.NewId().Bytes(),
 			contractId.Bytes(),
-			ttl,
+			ttlSeconds,
 		)
 		values, err := result.Slice()
 		if err != nil {
@@ -408,6 +409,7 @@ func joinStream(
 ) (streamId server.Id, ok bool) {
 
 	ttl := 8 * time.Hour
+	ttlSeconds := int64(ttl / time.Second)
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		// note the keys in eval have to be in the same hash slot.
@@ -438,7 +440,7 @@ func joinStream(
 				streamContractsKey(key),
 			},
 			contractId.Bytes(),
-			ttl,
+			ttlSeconds,
 		)
 		streamIdBytes, err := result.Text()
 		if err == server.RedisNil {
@@ -696,6 +698,7 @@ type StreamHopListener struct {
 	// discards the synced state (dropped events, subscriber (re)connect)
 	kick        chan struct{}
 	forceResync atomic.Bool
+	reconcile   atomic.Bool
 }
 
 // NewStreamHopListener polls the client's hops version counter every
@@ -736,6 +739,14 @@ func (self *StreamHopListener) Resync() {
 	self.Kick()
 }
 
+// Reconcile forces an authoritative full read without forcing a callback when
+// state is unchanged. It repairs expiry/missed events without periodic reset
+// traffic to clients.
+func (self *StreamHopListener) Reconcile() {
+	self.reconcile.Store(true)
+	self.Kick()
+}
+
 func (self *StreamHopListener) run() {
 	defer self.cancel()
 
@@ -745,6 +756,7 @@ func (self *StreamHopListener) run() {
 	// permanently stale across a counter reset.)
 	var eventId int64
 	synced := false
+	streamHopState := map[StreamHop]bool{}
 
 	// full-read and deliver the snapshot when the version moved. `!=` (never
 	// `<`): the counter moves backward when it ttl-expires or the db is
@@ -755,9 +767,11 @@ func (self *StreamHopListener) run() {
 	// go permanently stale across a counter reset.)
 	reset := func() {
 		resetEventId, resetStreamHops := GetStreamHops(self.ctx, self.clientId)
-		if !synced || resetEventId != eventId {
+		stateChanged := !maps.Equal(streamHopState, resetStreamHops)
+		eventId = resetEventId
+		streamHopState = resetStreamHops
+		if !synced || stateChanged {
 			synced = true
-			eventId = resetEventId
 
 			resetEvent := &StreamHopEvent{
 				StreamHopEventType: StreamHopEventTypeReset,
@@ -791,6 +805,7 @@ func (self *StreamHopListener) run() {
 
 		tick += 1
 		force := self.forceResync.Swap(false)
+		reconcile := self.reconcile.Swap(false)
 		// contain redis panics to the tick: a failed poll must never kill the
 		// listener (2026-07-15: panicked listeners died permanently and their
 		// clients silently stopped receiving updates). The periodic full read
@@ -802,6 +817,7 @@ func (self *StreamHopListener) run() {
 				synced = false
 			}
 			if !synced ||
+				reconcile ||
 				(0 < self.fullReadEvery && tick%self.fullReadEvery == 0) ||
 				GetStreamEventId(self.ctx, self.clientId) != eventId {
 				reset()
@@ -811,6 +827,9 @@ func (self *StreamHopListener) run() {
 			if force {
 				// the resync did not complete; keep it pending
 				self.forceResync.Store(true)
+			}
+			if reconcile {
+				self.reconcile.Store(true)
 			}
 		} else {
 			consecutiveErrors = 0

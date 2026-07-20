@@ -123,6 +123,12 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	self.stats.Success(route.id, endTime.Sub(startTime))
 }
 
+// FlushStats logs the current stats buckets immediately. Called at drain end
+// so the final window's requests are reported before the process exits.
+func (self *Router) FlushStats() {
+	self.stats.Flush()
+}
+
 // GetPathValues returns the regex capture groups for the matched route, or nil
 // if the route has none. The nil case is safe: static routes do not populate the
 // context, and only capture-group handlers call this.

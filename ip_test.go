@@ -5,6 +5,7 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"net"
+	"net/netip"
 	"time"
 
 	"testing"
@@ -178,4 +179,57 @@ func TestArinInfo(t *testing.T) {
 
 	connect.AssertEqual(t, arinInfo2.OrgCountryCodes[0], "mu")
 
+}
+
+func TestParseIpOverrides(t *testing.T) {
+	// mirrors the yaml parse shape: []any of map[string]any
+	settingsObj := []any{
+		map[string]any{
+			"subnet":       "198.18.0.0/16",
+			"country_code": "ZZ",
+			"country":      "Sim",
+			"region":       "Sim",
+			"city":         "Sim",
+		},
+		map[string]any{
+			"subnet":       "198.19.0.0/20",
+			"country_code": "zz",
+			"country":      "Sim",
+			"hosting":      true,
+			"latitude":     10,
+			"longitude":    20.5,
+		},
+	}
+
+	overrides := parseIpOverrides(settingsObj)
+	connect.AssertEqual(t, len(overrides), 2)
+
+	find := func(addr string) *IpInfo {
+		for _, override := range overrides {
+			if override.prefix.Contains(netip.MustParseAddr(addr)) {
+				ipInfo := override.ipInfo
+				return &ipInfo
+			}
+		}
+		return nil
+	}
+
+	ipInfo := find("198.18.5.4")
+	connect.AssertNotEqual(t, ipInfo, nil)
+	connect.AssertEqual(t, ipInfo.CountryCode, "zz")
+	connect.AssertEqual(t, ipInfo.Country, "Sim")
+	connect.AssertEqual(t, ipInfo.Region, "Sim")
+	connect.AssertEqual(t, ipInfo.City, "Sim")
+	connect.AssertEqual(t, ipInfo.UserType, UserTypeConsumer)
+	connect.AssertEqual(t, ipInfo.Hosting, false)
+
+	ipInfo = find("198.19.0.100")
+	connect.AssertNotEqual(t, ipInfo, nil)
+	connect.AssertEqual(t, ipInfo.UserType, UserTypeHosting)
+	connect.AssertEqual(t, ipInfo.Hosting, true)
+	connect.AssertEqual(t, ipInfo.Latitude, float64(10))
+	connect.AssertEqual(t, ipInfo.Longitude, 20.5)
+
+	// outside every override subnet
+	connect.AssertEqual(t, find("198.20.0.1") == nil, true)
 }

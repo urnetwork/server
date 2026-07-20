@@ -27,6 +27,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/search"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/stats"
 )
 
 func init() {
@@ -3060,6 +3061,22 @@ func FindProviders2(
 				HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
 			}
 			providers = append(providers, provider)
+		}
+
+		// export one anonymized stats sample tracing this call's pool and
+		// selection. Best-effort and gated on stats being enabled, so it is
+		// inert unless a process opts in (see recordFindProviders2Sample).
+		if s := stats.Default(); s.Enabled() {
+			recordFindProviders2Sample(
+				s,
+				findProviders2,
+				rankMode,
+				count,
+				ipInfo.CountryCode,
+				loadMillis,
+				clientScores,
+				clientIds,
+			)
 		}
 	}
 

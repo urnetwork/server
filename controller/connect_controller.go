@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
@@ -55,8 +57,75 @@ var transferByteCounter = prometheus.NewCounter(
 	},
 )
 
+var contractFailureCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "contract_failures_total",
+		Help:      "Create-contract failures partitioned by a bounded cause class and companion mode",
+	},
+	[]string{"cause", "companion"},
+)
+
+var contractFailureLogState = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{
+	last: map[string]time.Time{},
+}
+
 func init() {
-	prometheus.MustRegister(transferByteCounter)
+	prometheus.MustRegister(transferByteCounter, contractFailureCounter)
+}
+
+func contractFailureClass(err error) string {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "insufficient balance"):
+		return "insufficient_balance"
+	case strings.Contains(message, "missing origin contract for companion"):
+		return "missing_companion_origin"
+	case strings.Contains(message, "client does not exist"):
+		return "client_not_found"
+	default:
+		return "other"
+	}
+}
+
+func recordContractFailure(
+	clientId server.Id,
+	destinationId server.Id,
+	companion bool,
+	transferByteCount model.ByteCount,
+	err error,
+) {
+	cause := contractFailureClass(err)
+	companionLabel := fmt.Sprintf("%t", companion)
+	contractFailureCounter.WithLabelValues(cause, companionLabel).Inc()
+
+	// The historical line exceeded 1,000/minute in normal operation. Keep a
+	// visible exemplar for each bounded class/mode without restoring that log
+	// volume; the counter is the lossless rate signal.
+	key := cause + ":" + companionLabel
+	now := time.Now()
+	contractFailureLogState.Lock()
+	last := contractFailureLogState.last[key]
+	shouldLog := last.IsZero() || time.Minute <= now.Sub(last)
+	if shouldLog {
+		contractFailureLogState.last[key] = now
+	}
+	contractFailureLogState.Unlock()
+	if shouldLog {
+		glog.Infof(
+			"[contract][error] class=%s %s->%s companion=%t transferByteCount=%d err = %v\n",
+			cause,
+			clientId,
+			destinationId,
+			companion,
+			transferByteCount,
+			err,
+		)
+	}
 }
 
 type ConnectControlArgs struct {
@@ -333,11 +402,16 @@ func CreateContract(
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
-		// always log the underlying error: the client only sees
-		// InsufficientBalance, which also covers unrelated causes here (e.g. a
-		// reaped client id failing FindClientNetwork, or a missing companion
-		// origin contract), so this line is the only place to tell them apart
-		glog.Infof("[contract][error]%s->%s companion=%t transferByteCount=%d err = %v\n", clientId, destinationId, createContract.Companion, model.ByteCount(createContract.TransferByteCount), err)
+		// The client sees only InsufficientBalance, including unrelated
+		// failures. Preserve the cause as a lossless bounded metric and a
+		// rate-limited default-visible exemplar.
+		recordContractFailure(
+			clientId,
+			destinationId,
+			createContract.Companion,
+			model.ByteCount(createContract.TransferByteCount),
+			err,
+		)
 		contractError := protocol.ContractError_InsufficientBalance
 		result := &protocol.CreateContractResult{
 			Error: &contractError,

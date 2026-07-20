@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,28 +61,66 @@ func (self pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 // discriminator between existing sessions working (contract rate) and new
 // connections being established. Compared against the trailing-hour median
 // from local history, like the contract rate.
-type pgConnectRateProbe struct{}
+type pgConnectRateProbe struct {
+	lock        sync.Mutex
+	initialized bool
+	lastCount   int64
+	lastTime    time.Time
+}
 
 const connectRateMetric = "pg/connect-rate"
 
-func (self pgConnectRateProbe) id() string             { return "pg/connects-rate" }
-func (self pgConnectRateProbe) tier() string           { return tierWarn }
-func (self pgConnectRateProbe) cadence() time.Duration { return 60 * time.Second }
+func (self *pgConnectRateProbe) id() string             { return "pg/connects-rate" }
+func (self *pgConnectRateProbe) tier() string           { return tierWarn }
+func (self *pgConnectRateProbe) cadence() time.Duration { return 60 * time.Second }
 
-func (self pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+// observe converts PostgreSQL's cumulative insert counter into a per-minute
+// rate. The first observation and a stats reset are warmups, not zero-rate
+// incidents.
+func (self *pgConnectRateProbe) observe(count int64, now time.Time) (rate int, ok bool) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if !self.initialized || count < self.lastCount || !self.lastTime.Before(now) {
+		self.initialized = true
+		self.lastCount = count
+		self.lastTime = now
+		return 0, false
+	}
+	elapsedMinutes := now.Sub(self.lastTime).Minutes()
+	delta := count - self.lastCount
+	self.lastCount = count
+	self.lastTime = now
+	if elapsedMinutes <= 0 {
+		return 0, false
+	}
+	return int(float64(delta)/elapsedMinutes + 0.5), true
+}
+
+func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := "pg"
 	if h := env.cfg.hostByRole("pg-primary"); h != nil {
 		target = h.name
 	}
+	// pg_stat_user_tables is one row per table. n_tup_ins is approximate but
+	// exactly suited to a rate signal, and avoids scanning the high-churn
+	// network_client_connection table once per minute.
 	rows, err := env.runner.pg(ctx, `
-		SELECT count(*) FROM network_client_connection
-		WHERE connect_time >= date_trunc('minute',now())-interval '1 minute'
-		  AND connect_time <  date_trunc('minute',now());
+		SELECT COALESCE(sum(n_tup_ins), 0)
+		FROM pg_stat_user_tables
+		WHERE schemaname = current_schema()
+		  AND relname = 'network_client_connection';
 	`)
 	if err != nil {
 		return nil, err
 	}
-	rate := atoiRow(rows[0], 0)
+	count := int64(atoiRow(rows[0], 0))
+	rate, rateReady := self.observe(count, time.Now())
+	if !rateReady {
+		return []finding{
+			healthyFinding("pg/connects-rate", tierWarn, "connects-rate", target),
+			healthyFinding("pg/connects-rate", tierWarn, "connects-storm", target),
+		}, nil
+	}
 
 	var median float64
 	var haveBaseline bool
@@ -90,20 +129,57 @@ func (self pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]find
 		env.baseline.record(connectRateMetric, time.Now(), float64(rate))
 	}
 
-	// the median >= 1000 guard keeps the band meaningful during overnight lows
-	if haveBaseline && median >= 1000 && float64(rate) < 0.5*median {
-		return []finding{{
-			probeId: "pg/connects-rate", tier: tierWarn,
-			class: "connects-rate", target: target, sustain: 5,
-			symptom: fmt.Sprintf("new client connections = %d/min, < 50%% of the trailing-hour median %.0f/min",
-				rate, median),
-			baseline: fmt.Sprintf("trailing-hour median %.0f/min (learned); ~6,300–7,400/min observed healthy 2026-07-17 evening", median),
-			observed: fmt.Sprintf("connects_last_min=%d median=%.0f", rate, median),
-			context:  "contract rate still healthy = long-lived sessions fine, NEW connects failing (auth/lb/announce); both collapsed = systemic (5.1)",
-			playbook: "SIGNALS.md 2.7",
-		}}, nil
+	// a sustained storm/churn window pollutes the trailing-hour median (it
+	// inflated to 10,875/min during the 2026-07-19 ansible restart wave);
+	// when the hour median is itself >= 1.5x the trailing-6h median, judge
+	// against the longer window instead — for both directions
+	if haveBaseline && env.baseline != nil {
+		if longMedian, _, haveLong := env.baseline.trailingMedian(connectRateMetric, 6*time.Hour, 120); haveLong && median >= 1.5*longMedian {
+			median = longMedian
+		}
 	}
-	return []finding{healthyFinding("pg/connects-rate", tierWarn, "connects-rate", target)}, nil
+
+	switch {
+	// the median >= 1000 guard keeps the band meaningful during overnight lows
+	case haveBaseline && median >= 1000 && float64(rate) < 0.5*median:
+		return []finding{
+			{
+				probeId: "pg/connects-rate", tier: tierWarn,
+				class: "connects-rate", target: target, sustain: 5,
+				symptom: fmt.Sprintf("new client connections = %d/min, < 50%% of the trailing median %.0f/min",
+					rate, median),
+				baseline: fmt.Sprintf("trailing median %.0f/min (learned); ~6,300–7,400/min observed healthy 2026-07-17 evening", median),
+				observed: fmt.Sprintf("connects_last_min=%d median=%.0f", rate, median),
+				context:  "contract rate still healthy = long-lived sessions fine, NEW connects failing (auth/lb/announce); both collapsed = systemic (5.1)",
+				playbook: "SIGNALS.md 2.7",
+			},
+			healthyFinding("pg/connects-rate", tierWarn, "connects-storm", target),
+		}, nil
+	// high side: a reconnect storm. Mass simultaneous eviction (ansible unit
+	// restart wave, simultaneous multi-block deploy) shows as a sustained
+	// multiple of the baseline connect rate while everything else looks
+	// healthy — observed 2026-07-19 22:55 (2.5k/min -> 7k plateau, 15k final
+	// drain burst) with no ticket fired. Connections establish then die
+	// young; median connection lifetime confirms (29s vs 60s that day)
+	case haveBaseline && median >= 500 && float64(rate) > 2.5*median:
+		return []finding{
+			{
+				probeId: "pg/connects-rate", tier: tierWarn,
+				class: "connects-storm", target: target, sustain: 3,
+				symptom: fmt.Sprintf("new client connections = %d/min, > 2.5x the trailing median %.0f/min — mass reconnect churn",
+					rate, median),
+				baseline: fmt.Sprintf("trailing median %.0f/min (learned)", median),
+				observed: fmt.Sprintf("connects_last_min=%d median=%.0f ratio=%.1fx", rate, median, float64(rate)/median),
+				context:  "correlate with deploys AND systemd/ansible unit restarts (8.5): simultaneous fleet restart evicts every client at once; expect a plateau while drains walk, a final eviction burst spike, then decay to baseline ~10 min after the burst",
+				playbook: "SIGNALS.md 2.7",
+			},
+			healthyFinding("pg/connects-rate", tierWarn, "connects-rate", target),
+		}, nil
+	}
+	return []finding{
+		healthyFinding("pg/connects-rate", tierWarn, "connects-rate", target),
+		healthyFinding("pg/connects-rate", tierWarn, "connects-storm", target),
+	}, nil
 }
 
 // pgSelectionFreshnessProbe is SIGNALS.md 2.8: the provider-selection

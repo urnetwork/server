@@ -66,6 +66,9 @@ type keyEventSubscriber struct {
 	nextListenerId int64
 	peerListeners  map[server.Id]map[int64]*model.NetworkPeerListener
 	hopListeners   map[server.Id]map[int64]*model.StreamHopListener
+
+	resyncLock   sync.Mutex
+	resyncCancel context.CancelFunc
 }
 
 func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings) *keyEventSubscriber {
@@ -130,14 +133,14 @@ func (self *keyEventSubscriber) AddHopListener(clientId server.Id, listener *mod
 // the resync spread timeout so a resubscribe does not stampede the registry
 // with simultaneous full reads.
 func (self *keyEventSubscriber) resyncAll() {
-	peerListeners := []*model.NetworkPeerListener{}
+	peerListeners := map[server.Id][]*model.NetworkPeerListener{}
 	hopListeners := []*model.StreamHopListener{}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		for _, listeners := range self.peerListeners {
+		for networkId, listeners := range self.peerListeners {
 			for _, listener := range listeners {
-				peerListeners = append(peerListeners, listener)
+				peerListeners[networkId] = append(peerListeners[networkId], listener)
 			}
 		}
 		for _, listeners := range self.hopListeners {
@@ -151,21 +154,48 @@ func (self *keyEventSubscriber) resyncAll() {
 		return
 	}
 	spacing := self.settings.ResyncSpreadTimeout / time.Duration(count)
+
+	self.resyncLock.Lock()
+	if self.resyncCancel != nil {
+		self.resyncCancel()
+	}
+	resyncCtx, resyncCancel := context.WithCancel(self.ctx)
+	self.resyncCancel = resyncCancel
+	self.resyncLock.Unlock()
+
 	go server.HandleError(func() {
-		for _, listener := range peerListeners {
-			listener.Resync()
-			keyEventResyncs.Inc()
+		for networkId, listeners := range peerListeners {
+			// One authoritative read per network/process, then distribute the
+			// immutable snapshot to every resident listener. This prevents a
+			// normal network mutation or reconnect from becoming N duplicate
+			// full reads and N copies of the peer list.
+			var eventId int64
+			var peers []*model.NetworkPeer
+			if r := server.HandleError(func() {
+				eventId, peers = model.GetNetworkPeers(resyncCtx, networkId)
+			}); r != nil {
+				// Do not fan a failed shared read back into one full read per
+				// listener: that recreates the incident-time N-way Redis
+				// stampede this process-wide reconcile exists to avoid. The
+				// next corrective epoch retries the one shared read.
+			} else {
+				snapshot := model.PrepareNetworkPeerSnapshot(eventId, peers)
+				for _, listener := range listeners {
+					listener.ApplySnapshot(snapshot)
+					keyEventResyncs.Inc()
+				}
+			}
 			select {
-			case <-self.ctx.Done():
+			case <-resyncCtx.Done():
 				return
 			case <-time.After(spacing):
 			}
 		}
 		for _, listener := range hopListeners {
-			listener.Resync()
+			listener.Reconcile()
 			keyEventResyncs.Inc()
 			select {
-			case <-self.ctx.Done():
+			case <-resyncCtx.Done():
 				return
 			case <-time.After(spacing):
 			}
@@ -208,7 +238,15 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 			}
 		}()
 		for _, listener := range listeners {
-			listener.Kick()
+			switch event {
+			case "del", "expired", "evicted", "unlink":
+				// Expiry/removal does not increment the stream event id.
+				// Force a state-based full reconcile rather than only checking
+				// the unchanged counter.
+				listener.Reconcile()
+			default:
+				listener.Kick()
+			}
 			keyEventsDispatchedHops.Inc()
 		}
 	}
@@ -255,6 +293,15 @@ func (self *keyEventSubscriber) run() {
 
 		drain := func() {
 			defer unsub()
+			correctivePollInterval := self.settings.CorrectivePollInterval
+			if correctivePollInterval <= 0 {
+				// Defensive fallback for partially populated settings. Avoid
+				// a process panic from time.NewTicker while preserving the
+				// production default convergence bound.
+				correctivePollInterval = defaultKeyEventCorrectivePollInterval
+			}
+			correctiveTicker := time.NewTicker(correctivePollInterval)
+			defer correctiveTicker.Stop()
 			for {
 				select {
 				case <-self.ctx.Done():
@@ -266,6 +313,11 @@ func (self *keyEventSubscriber) run() {
 						return
 					}
 					self.dispatch(message.Channel, message.Payload)
+				case <-correctiveTicker.C:
+					// Correct missed expiry/events even when the registry
+					// version did not move. resyncAll cancels an older wave
+					// before starting this generation.
+					self.resyncAll()
 				}
 			}
 		}
@@ -280,5 +332,10 @@ func (self *keyEventSubscriber) run() {
 }
 
 func (self *keyEventSubscriber) Close() {
+	self.resyncLock.Lock()
+	if self.resyncCancel != nil {
+		self.resyncCancel()
+	}
+	self.resyncLock.Unlock()
 	self.cancel()
 }

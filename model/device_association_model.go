@@ -753,7 +753,64 @@ func DeviceConfirmAdopt(
 	confirmAdopt *DeviceConfirmAdoptArgs,
 	clientSession *session.ClientSession,
 ) (confirmAdoptResult *DeviceConfirmAdoptResult, returnErr error) {
+	// Discover the target network without mutating the adoption record. The
+	// entitlement lookup owns separate PostgreSQL/Redis operations and must
+	// finish before the adoption transaction checks out its connection.
+	var entitlementNetworkId *server.Id
+	server.Db(clientSession.Ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			clientSession.Ctx,
+			`
+				SELECT device_adopt.owner_network_id
+				FROM device_association_code
+				INNER JOIN device_adopt ON
+					device_adopt.device_association_id =
+						device_association_code.device_association_id
+				INNER JOIN network ON
+					network.network_id = device_adopt.owner_network_id
+				WHERE
+					device_association_code.code = $1 AND
+					device_association_code.code_type = $2 AND
+					network.network_name = $3 AND
+					device_adopt.confirmed = false AND
+					device_adopt.adopt_secret = $4 AND
+					$5 < device_adopt.expire_time
+			`,
+			confirmAdopt.AdoptCode,
+			CodeTypeAdopt,
+			confirmAdopt.AssociatedNetworkName,
+			confirmAdopt.AdoptSecret,
+			server.NowUtc(),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var networkId server.Id
+				server.Raise(result.Scan(&networkId))
+				entitlementNetworkId = &networkId
+			}
+		})
+	})
+	if entitlementNetworkId == nil {
+		return &DeviceConfirmAdoptResult{
+			Error: &DeviceConfirmAdoptError{Message: "Invalid code."},
+		}, nil
+	}
+	isPro := IsProFresh(clientSession.Ctx, entitlementNetworkId)
+
+	var adopted bool
+	var deviceId server.Id
+	var clientId server.Id
+	var networkId server.Id
+	var networkName string
+	var userId server.Id
+	var authType AuthType
+
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		// the tx callback reruns on commit errors: reset the outcome latch so
+		// a rerun that loses the adopt race to a concurrent confirm cannot
+		// mint a jwt for the rolled-back device/client of the prior attempt
+		adopted = false
+
 		result, err := tx.Query(
 			clientSession.Ctx,
 			`
@@ -795,12 +852,14 @@ func DeviceConfirmAdopt(
                     device_adopt.owner_network_id = network.network_id AND
                     device_adopt.confirmed = false AND
                     device_adopt.adopt_secret = $4 AND
-                    $3 < device_adopt.expire_time
+                    $3 < device_adopt.expire_time AND
+					device_adopt.owner_network_id = $5
             `,
 			deviceAssociationId,
 			confirmAdopt.AssociatedNetworkName,
 			adoptTime,
 			confirmAdopt.AdoptSecret,
+			*entitlementNetworkId,
 		))
 
 		if tag.RowsAffected() == 0 {
@@ -830,10 +889,6 @@ func DeviceConfirmAdopt(
 
 		var deviceName string
 		var deviceSpec string
-		var networkId server.Id
-		var networkName string
-		var userId server.Id
-		var authType AuthType
 
 		server.WithPgResult(result, err, func() {
 			result.Next()
@@ -847,8 +902,8 @@ func DeviceConfirmAdopt(
 			))
 		})
 
-		deviceId := server.NewId()
-		clientId := server.NewId()
+		deviceId = server.NewId()
+		clientId = server.NewId()
 
 		server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
@@ -889,28 +944,21 @@ func DeviceConfirmAdopt(
 			adoptTime,
 		))
 
-		isGuestMode := (authType == AuthTypeGuest)
+		adopted = true
+	})
 
-		isPro := IsProFresh(
-			clientSession.Ctx,
-			&networkId,
-		)
-
+	if adopted {
 		byJwtWithClientId := jwt.NewByJwt(
 			networkId,
 			userId,
 			networkName,
-			isGuestMode,
+			authType == AuthTypeGuest,
 			isPro,
 		).Client(deviceId, clientId).Sign()
-
 		confirmAdoptResult = &DeviceConfirmAdoptResult{
-			// AssociatedNetworkName: confirmAdopt.AssociatedNetworkName,
 			ByClientJwt: byJwtWithClientId,
 		}
-	})
-
-	if confirmAdoptResult == nil && returnErr == nil {
+	} else if returnErr == nil {
 		confirmAdoptResult = &DeviceConfirmAdoptResult{
 			Error: &DeviceConfirmAdoptError{
 				Message: "Invalid code.",

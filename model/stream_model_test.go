@@ -289,6 +289,16 @@ func TestAddCompanionContractToStream(t *testing.T) {
 		// scenario 1: the escrow-linked origin carries the stream
 		originContractId := server.NewId()
 		streamId := AddToStream(ctx, originContractId, sourceId, destinationId, intermediaryIds)
+		streamKey := newStreamKey(sourceId, destinationId, intermediaryIds)
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, key := range []string{streamIdKey(streamKey), streamContractsKey(streamKey)} {
+				ttl, err := r.TTL(ctx, key).Result()
+				connect.AssertEqual(t, err, nil)
+				if ttl < 7*time.Hour+59*time.Minute || 8*time.Hour < ttl {
+					t.Fatalf("%s ttl = %s, want approximately 8h", key, ttl)
+				}
+			}
+		})
 
 		companionContractId := server.NewId()
 		companionStreamId, ok := AddCompanionContractToStream(
@@ -305,7 +315,16 @@ func TestAddCompanionContractToStream(t *testing.T) {
 		memberStreamId, memberStreamKey, found := GetStream(ctx, companionContractId)
 		connect.AssertEqual(t, found, true)
 		connect.AssertEqual(t, memberStreamId, streamId)
-		connect.AssertEqual(t, memberStreamKey, newStreamKey(sourceId, destinationId, intermediaryIds))
+		connect.AssertEqual(t, memberStreamKey, streamKey)
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, key := range []string{streamIdKey(streamKey), streamContractsKey(streamKey)} {
+				ttl, err := r.TTL(ctx, key).Result()
+				connect.AssertEqual(t, err, nil)
+				if ttl < 7*time.Hour+59*time.Minute || 8*time.Hour < ttl {
+					t.Fatalf("%s ttl after companion join = %s, want approximately 8h", key, ttl)
+				}
+			}
+		})
 
 		// the origin closing out of the stream must not tear it down while
 		// the companion reply is still open
@@ -445,6 +464,61 @@ func TestCompanionStreamCloseLifecycle(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 		connect.AssertEqual(t, c.StreamIds(), map[server.Id]bool{})
+	})
+}
+
+func TestStreamHopCorrectiveReadRepairsMissedExpiry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sourceId := server.NewId()
+		destinationId := server.NewId()
+		hopClientId := server.NewId()
+		AddToStream(
+			ctx,
+			server.NewId(),
+			sourceId,
+			destinationId,
+			[]server.Id{hopClientId},
+		)
+		eventIdBefore := GetStreamEventId(ctx, hopClientId)
+
+		events := make(chan *StreamHopEvent, 8)
+		listener := NewStreamHopListener(
+			ctx,
+			hopClientId,
+			func(event *StreamHopEvent) { events <- event },
+			100*time.Millisecond,
+			1,
+		)
+		defer listener.Close()
+		listener.Resync()
+
+		select {
+		case event := <-events:
+			if len(event.StreamHops) != 1 {
+				t.Fatalf("initial stream hops = %d, want 1", len(event.StreamHops))
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for initial stream-hop snapshot")
+		}
+
+		// Expire only the hop set. Redis expiry does not increment the event
+		// id and no key-event is delivered to this listener.
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Expire(ctx, clientStreamHopsKey(hopClientId), 500*time.Millisecond)
+		})
+
+		select {
+		case event := <-events:
+			if event.StreamHopEventType != StreamHopEventTypeReset || len(event.StreamHops) != 0 {
+				t.Fatalf("unexpected expiry repair: %+v", event)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("corrective read did not repair missed stream-hop expiry")
+		}
+		connect.AssertEqual(t, GetStreamEventId(ctx, hopClientId), eventIdBefore)
 	})
 }
 

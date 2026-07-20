@@ -265,6 +265,10 @@ func AuthNetworkClient(
 		}
 
 		var clientId server.Id
+		// A client JWT is durable, so entitlement must come from the source of
+		// truth. Resolve it before opening the write transaction: IsProFresh
+		// performs its own PostgreSQL read and Redis cache refresh.
+		isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
 
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			createTime := server.NowUtc()
@@ -410,11 +414,14 @@ func AuthNetworkClient(
 			// token was minted would otherwise get a client token stamped Pro=false for
 			// its 30-day lifetime. (The concurrent-client gate above already reads Pro
 			// live for the same reason.)
-			isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
-			byJwtWithClientId := jwt.NewByJwt(
+			// preserve the root jwt's create time: derivative auth carries the
+			// root lineage so expiring the root can expire everything derived
+			// from it (see AuthCodeCreate)
+			byJwtWithClientId := jwt.NewByJwtWithCreateTime(
 				session.ByJwt.NetworkId,
 				session.ByJwt.UserId,
 				session.ByJwt.NetworkName,
+				session.ByJwt.CreateTime,
 				session.ByJwt.GuestMode,
 				isPro,
 			).Client(deviceId, clientId)
@@ -542,6 +549,11 @@ func AuthNetworkClient(
 			return
 		}
 
+		// Resolve durable-token entitlement before opening the transaction.
+		// IsProFresh checks PostgreSQL and refreshes Redis, neither of which
+		// may be nested under this transaction's checked-out connection.
+		isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
+
 		// important: must check `network_id = session network_id`
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
@@ -652,11 +664,13 @@ func AuthNetworkClient(
 
 			// re-derive Pro from the source of truth rather than copying the caller's
 			// (possibly stale) jwt claim — see the new-client branch above.
-			isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
-			byJwtWithClientId := jwt.NewByJwt(
+			// preserve the root jwt's create time (root lineage; see the
+			// new-client branch above)
+			byJwtWithClientId := jwt.NewByJwtWithCreateTime(
 				session.ByJwt.NetworkId,
 				session.ByJwt.UserId,
 				session.ByJwt.NetworkName,
+				session.ByJwt.CreateTime,
 				session.ByJwt.GuestMode,
 				isPro,
 			).Client(*deviceId, *authClient.ClientId)

@@ -83,8 +83,10 @@ SET drain_excuse_<clientId> <residentId> EX <DrainExcuseTtl>   # ~5 min
 
 Operator-scoped by construction: the ONLY writers are the server's own drain /
 replace paths. A provider cannot self-excuse — it never sees this key. The TTL
-bounds a stale marker to one excuse window; `<residentId>` lets the consumer
-ignore a marker from a resident other than the one it is replacing.
+bounds a stale marker to one excuse window. Consumption is on presence, not
+residentId-scoped: any reconnect of the client within the TTL is excused,
+whichever resident it lands on; `<residentId>` is stored only for
+observability of which resident was drained (`model/drain_excuse_model.go`).
 
 **Consume (reader = the announce new-connection branch).** In
 `transport_announce.go` where the else-branch sets `ConnectionNewCount=1`
@@ -167,13 +169,13 @@ the natural place to hang the new-vs-old service coordination.
 `Drain()` already logs remaining-resident count every 100 evictions
 (`resident.go:1087`). Export as metrics + a monitor/SIGNALS.md entry:
 
-- `urnetwork_drain_residents_remaining` (gauge, per service) — drain ETA
-  without ssh-ing to find the `docker stop` child, which is what today's
+- `urnetwork_connect_drain_residents_remaining` (gauge, per service) — drain
+  ETA without ssh-ing to find the `docker stop` child, which is what today's
   incident required.
-- `urnetwork_drain_excuses_written_total` / `_consumed_total` — excuse markers
-  minted vs redeemed; a large written-minus-consumed gap = clients not
-  returning (real capacity loss, not a deploy artifact).
-- `urnetwork_connection_new_total{excused="true|false"}` — organic vs
+- `urnetwork_connect_drain_excuses_written` / `urnetwork_connect_drain_excuses_consumed`
+  — excuse markers minted vs redeemed; a large written-minus-consumed gap =
+  clients not returning (real capacity loss, not a deploy artifact).
+- `urnetwork_connect_connection_new{excused="true|false"}` — organic vs
   drain-excused reconnects, so a deploy's reliability impact is visible as
   excused (benign) rather than showing up as a score dip.
 
@@ -181,7 +183,7 @@ the natural place to hang the new-vs-old service coordination.
 
 | Concern | Answer |
 |---|---|
-| Provider self-excuses to hide flapping | Impossible: `drain_excuse_*` is written ONLY by the server drain/replace path; the client never sees or sets it. `GETDEL` = one use; TTL-bounded; residentId-scoped. |
+| Provider self-excuses to hide flapping | Impossible: `drain_excuse_*` is written ONLY by the server drain/replace path; the client never sees or sets it. `GETDEL` = one use; TTL-bounded. (Consumption is presence-based; the stored residentId is observability only, not a consume filter.) |
 | Excuse marker outlives the drain and excuses an organic reconnect | ≤ `DrainExcuseTtl` (~5min) and consumed-once. A genuine reconnect >5min later is not excused. Tune the TTL to the drain window. |
 | Skipping RemoveNetworkPeer strands a peer that really left | No: the per-member key TTL (`ExchangeResidentTtl`) converts a non-returning entry to a marker; skipping is never staler than the TTL, and the residentId guard already handles the replacement race. |
 | Make-before-break doubles a client's residents mid-migration | Bounded to the migrate window; the nomination replaces atomically (residentId guard). Concurrent-client limit counts the client once (same clientId). |

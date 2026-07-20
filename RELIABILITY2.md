@@ -1,9 +1,17 @@
 # RELIABILITY2 — client reliability stats: redis hot-path optimization plan
 
-STATUS 2026-07-18: §3.1–3.3 IMPLEMENTED in
-model/network_client_reliability_model.go (uncommitted) — sharded keys,
-hscan drain with the §4 legacy-key transition read, packed binary fields
-with a dual-form parser. Tests: TestClientReliabilityStatsShardedDrain
+STATUS 2026-07-20: §3.1–3.3 IMPLEMENTED, sharded writes UNCONDITIONAL.
+The interim `client_reliability_sharded_writes` writer gate was removed
+(FIXPLAN1.md decision 2): the 2026-07-18 rollout completed everywhere —
+every taskworker runs the shard-aware drain and every fresh environment
+stands up both services from the same build, so a gated legacy writer only
+created a mis-provisioning hazard (an env without the setting would silently
+re-concentrate the fleet's counters on one node). The rollup keeps the §4
+legacy-key transition read for counters written by pre-shard builds; rollback
+of a taskworker to a pre-shard build remains forbidden (an old rollup cannot
+read shard hashes and would orphan them). Tests:
+TestClientReliabilityStatsShardedWriter (writes land only in shard keys),
+TestClientReliabilityStatsShardedDrain
 (multi-shard record → merge-drain → absolute pg rows → keys removed),
 TestClientReliabilityStatsLegacyDrain (rolling-deploy mix of legacy ascii +
 sharded packed fields in one block, distinct clients),
@@ -100,32 +108,33 @@ riskier at 60s. Revisit only if 3.1–3.4 prove insufficient.
 
 ## 4. Rollout safety (rolling deploy, two writer generations live)
 
-During a rolling deploy, old-build writers still fill the legacy unsharded
-key while new-build writers fill shards. The drain therefore reads, per
-block: the legacy key `client_reliability_stats.<block>` PLUS all 32 shard
-keys, merged before the upsert, and DELs all of them. Same pattern covers
-3.3's mixed field encodings (parser accepts both). The legacy read can be
-removed once no deployed build writes the old key. No flag day, no data
-loss, re-drains stay idempotent.
+During a rolling deploy, old-build writers fill the legacy unsharded key.
+The shard-aware drain reads, per block, that legacy key PLUS all 32 shard
+keys, merges them before the upsert, and deletes all forms. This supports
+old-writer/new-reader overlap and mixed field encodings.
 
-Deploy ORDER: the drain lives in taskworker, the writers in connect. An OLD
-taskworker cannot see shard keys, so until the new taskworker lands, sharded
-counters ride the 15-min ttl backstop (bounded stats loss). Roll taskworker
-first or concurrently with connect.
+The reverse overlap is not safe: an old taskworker reads only the legacy
+hash, can mark a block drained, and can orphan shard data. The 2026-07-18
+rollout followed exactly this ordering (shard-aware taskworkers first, then
+sharded writers); with the rollout complete the interim writer gate was
+removed and sharded writes are now unconditional (FIXPLAN1.md decision 2).
+What remains operative:
 
-DRAIN COMPLETE ~14:25 UTC 2026-07-18: old connect generation fully retired
-fleet-wide, newest-block legacy field count 0 with shards carrying 100% of
-the volume (shard0 alone 6,703 fields), blocks set at 2 (minimal). The
-legacy-key read in the drain (§4) is now dead code on prod — schedule its
-removal in a future build once this deploy is considered settled.
+1. Rollback of any taskworker to a pre-shard build is FORBIDDEN — an old
+   rollup cannot read shard hashes and silently orphans them to the TTL.
+2. The legacy drain read stays until the rollback horizon has passed and no
+   pre-shard writer can exist; it also covers any residual legacy-keyed
+   counters.
 
-Rolled out 2026-07-18 (~13:36–13:45 UTC): cutover verified live — sharded
-fields grew as new connect took traffic, legacy volume tracked the draining
-old generation (non-monotonic across blocks; see monitor/SIGNALS.md 3.7
-rollout observations for the verification discipline), the new taskworker
-landed ~3 min in and drained mixed blocks cleanly (blocks set steady at ~3),
-and per-node hincrby deltas showed the concentration dissolve (top sampled
-node 7,014/s → 165/s). Canary and tier-0 held throughout.
+The
+15-minute Redis TTL is not a safety mechanism: an old reader can remove the
+shared pending marker and make shard data undiscoverable before that TTL.
+If unsafe mixed generations ever ran, audit every affected block rather than
+assuming the loss was bounded.
+
+The 2026-07-18 canary demonstrated the expected performance shape once shards
+were active (top sampled-node HINCRBY rate fell from 7,014/s to 165/s), but it
+does not replace the ordered gate protocol above.
 
 ## 5. Verification
 

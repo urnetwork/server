@@ -10,8 +10,69 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
+
+// batteryLatch runs a probe's escalation battery once per trip: the battery
+// fires when its finding key transitions healthy -> broken, and a healthy tick
+// re-arms it. While the key stays broken, the trip-time output is reattached
+// to each subsequent finding (annotated with when it was collected), so ticket
+// updates keep their evidence without re-landing battery load on an
+// already-sick target every tick. One latch per probe instance; a probe never
+// overlaps itself, but the lock keeps the map safe regardless.
+type batteryLatch struct {
+	lock sync.Mutex
+	// finding key -> battery output captured when the key tripped; a key is
+	// present exactly while its finding is broken (disarmed)
+	tripped map[string]trippedBattery
+	now     func() time.Time
+}
+
+type trippedBattery struct {
+	at       time.Time
+	evidence string
+}
+
+func newBatteryLatch() *batteryLatch {
+	return &batteryLatch{
+		tripped: map[string]trippedBattery{},
+		now:     time.Now,
+	}
+}
+
+// broken folds one broken tick of key, invoking battery only on the first
+// broken tick since the key was last healthy. Returns the evidence to attach:
+// fresh output on the trip, the cached trip-time output afterward.
+func (self *batteryLatch) broken(key string, battery func() string) string {
+	cached, alreadyTripped := func() (trippedBattery, bool) {
+		self.lock.Lock()
+		defer self.lock.Unlock()
+		cached, ok := self.tripped[key]
+		return cached, ok
+	}()
+	if alreadyTripped {
+		return cached.evidence + fmt.Sprintf(
+			"\n(battery collected once at trip %s; re-runs after a healthy tick re-arms)",
+			cached.at.UTC().Format(time.RFC3339))
+	}
+	// run the battery outside the lock — batteries block (15s snapshot deltas)
+	evidence := battery()
+	func() {
+		self.lock.Lock()
+		defer self.lock.Unlock()
+		self.tripped[key] = trippedBattery{at: self.now(), evidence: evidence}
+	}()
+	return evidence
+}
+
+// healthy folds one healthy tick of key, re-arming its battery so the next
+// trip collects fresh evidence.
+func (self *batteryLatch) healthy(key string) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	delete(self.tripped, key)
+}
 
 // planWallBattery is SIGNALS.md 5.8 steps 2–3, the discriminators for a
 // query-plan cpu wall beyond the query_id grouping (which activeBattery

@@ -2,10 +2,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
-
-	"fmt"
 
 	"google.golang.org/protobuf/proto"
 
@@ -14,6 +13,23 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+func TestContractFailureClassIsBounded(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("Insufficient balance (0)."), "insufficient_balance"},
+		{fmt.Errorf("Missing origin contract for companion."), "missing_companion_origin"},
+		{fmt.Errorf("Client does not exist."), "client_not_found"},
+		{fmt.Errorf("postgres unavailable"), "other"},
+	}
+	for _, test := range tests {
+		if got := contractFailureClass(test.err); got != test.want {
+			t.Fatalf("contractFailureClass(%q) = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
 
 // TestResolveNonCompanionProvideMode covers the provide-mode selection for
 // non-companion contract requests, in particular the backward-compatibility

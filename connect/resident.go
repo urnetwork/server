@@ -248,6 +248,14 @@ type ExchangeSettings struct {
 	// bound on enqueueing one migrate frame during the broadcast, so a
 	// wedged client cannot stall the drain
 	DrainMigrateSendTimeout time.Duration
+	// maximum number of migrate sends in flight. Together with
+	// DrainMigrateBroadcastTimeout this prevents a large or wedged resident
+	// population from serially consuming the whole migration window.
+	DrainMigrateFanout int
+	// aggregate wall-clock bound for the migrate broadcast. Residents that
+	// cannot be attempted inside this budget fall through to the straggler
+	// sweep instead of delaying every successfully notified client.
+	DrainMigrateBroadcastTimeout time.Duration
 	// target duration for the straggler sweep; the per-resident pace adapts
 	// to the remaining count within this budget, capped by `DrainOneTimeout`
 	DrainStragglerSweepTimeout time.Duration
@@ -341,12 +349,14 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		// this is set by warp
 		DrainAllTimeout: 60 * time.Minute,
 
-		EnableDrainExcuse:          true,
-		EnableDrainCoordination:    true,
-		DrainExcuseTtl:             5 * time.Minute,
-		DrainMigrateWindow:         2 * time.Minute,
-		DrainMigrateSendTimeout:    1 * time.Second,
-		DrainStragglerSweepTimeout: 60 * time.Second,
+		EnableDrainExcuse:            true,
+		EnableDrainCoordination:      true,
+		DrainExcuseTtl:               5 * time.Minute,
+		DrainMigrateWindow:           2 * time.Minute,
+		DrainMigrateSendTimeout:      1 * time.Second,
+		DrainMigrateFanout:           64,
+		DrainMigrateBroadcastTimeout: 10 * time.Second,
+		DrainStragglerSweepTimeout:   60 * time.Second,
 
 		ContractManagerCheckTimeout: 5 * time.Second,
 
@@ -388,6 +398,8 @@ type KeyEventDeliverySettings struct {
 	ResyncSpreadTimeout time.Duration
 }
 
+const defaultKeyEventCorrectivePollInterval = 5 * time.Minute
+
 type Exchange struct {
 	// cleanupCtx context.Context
 	ctx    context.Context
@@ -420,6 +432,10 @@ type Exchange struct {
 
 	// client id -> connection id -> cancel func
 	connections map[server.Id]map[server.Id]context.CancelFunc
+	// client ids already given a drain excuse. Residents carry their own
+	// drained bit for teardown behavior, but connection-only split state has
+	// no Resident on which to store that bit.
+	drainedClients map[server.Id]struct{}
 }
 
 func (self *Exchange) IsDraining() bool {
@@ -448,6 +464,7 @@ func NewExchange(
 		settings:           settings,
 		residents:          map[server.Id]*Resident{},
 		connections:        map[server.Id]map[server.Id]context.CancelFunc{},
+		drainedClients:     map[server.Id]struct{}{},
 	}
 
 	if settings.KeyEventDelivery.Enabled {
@@ -1129,21 +1146,35 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 	}
 }
 
-// markDrained marks the resident's teardown as drain-caused and writes its
-// excuse marker, exactly once per resident (CONNECTDRAIN2.md §3.1, §3.2)
-func (self *Exchange) markDrained(resident *Resident) {
-	if resident.drained.Swap(true) {
+// markClientDrained writes a drain excuse exactly once per client, including
+// the split-state case where the client has a local transport connection but
+// its Resident is hosted on another exchange. A zero resident id records that
+// there was no local resident at the time of the drain.
+func (self *Exchange) markClientDrained(clientId server.Id, residentId server.Id) {
+	self.stateLock.Lock()
+	if _, ok := self.drainedClients[clientId]; ok {
+		self.stateLock.Unlock()
 		return
 	}
+	self.drainedClients[clientId] = struct{}{}
+	self.stateLock.Unlock()
+
 	if self.settings.EnableDrainExcuse {
 		model.SetDrainExcuse(
 			self.ctx,
-			resident.clientId,
-			resident.residentId,
+			clientId,
+			residentId,
 			self.settings.DrainExcuseTtl,
 		)
 		drainExcusesWrittenCounter.Inc()
 	}
+}
+
+// markDrained marks the resident's teardown as drain-caused and writes its
+// excuse marker, exactly once per client (CONNECTDRAIN2.md §3.1, §3.2).
+func (self *Exchange) markDrained(resident *Resident) {
+	resident.drained.Store(true)
+	self.markClientDrained(resident.clientId, resident.residentId)
 }
 
 // sendResidentMigrate asks the resident's client to establish a replacement
@@ -1151,7 +1182,11 @@ func (self *Exchange) markDrained(resident *Resident) {
 // (CONNECTDRAIN2.md §3.3). Returns false when the migrate frame was not sent.
 // An older client ignores the unknown message type and falls back to the
 // eviction plus excuse path.
-func (self *Exchange) sendResidentMigrate(resident *Resident, migrateTime time.Time) bool {
+func (self *Exchange) sendResidentMigrate(
+	resident *Resident,
+	migrateTime time.Time,
+	timeout time.Duration,
+) bool {
 	frame, err := connect.ToFrame(&protocol.ResidentMigrate{
 		MigrateTime: uint64(migrateTime.UnixMilli()),
 	}, connect.DefaultProtocolVersion)
@@ -1162,37 +1197,110 @@ func (self *Exchange) sendResidentMigrate(resident *Resident, migrateTime time.T
 		frame,
 		connect.DestinationId(connect.Id(resident.clientId)),
 		nil,
-		self.settings.DrainMigrateSendTimeout,
+		timeout,
 	)
 }
 
 // migrateResidents broadcasts migrate frames with migrate times jittered
 // across `DrainMigrateWindow`, then waits for the clients to move themselves:
 // a migrated client closes its old transport once its replacement is up, so
-// the wait watches the connection count. Returns when the connections are
-// gone or the migrate window (bounded by the drain deadline) elapses;
-// whatever remains falls to the straggler sweep.
+// the wait watches only clients that actually received a migrate frame.
+// Bounded fanout and an aggregate broadcast deadline prevent a large number of
+// wedged send queues from serially consuming the migration window. Returns
+// when those connections are gone or the migrate window (bounded by the drain
+// deadline) elapses; whatever remains falls to the straggler sweep.
 func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.Time) {
 	if len(residents) == 0 {
 		return
 	}
 
-	sentCount := 0
-	for _, resident := range residents {
-		migrateTime := time.Now().Add(time.Duration(rand.Int63n(int64(self.settings.DrainMigrateWindow))))
-		if self.sendResidentMigrate(resident, migrateTime) {
-			sentCount += 1
-		}
-	}
-	if sentCount == 0 {
-		return
-	}
-	glog.Infof("[c]drain migrate broadcast to %d residents\n", sentCount)
-
-	migrateEndTime := time.Now().Add(self.settings.DrainMigrateWindow)
+	startTime := time.Now()
+	migrateEndTime := startTime.Add(self.settings.DrainMigrateWindow)
 	if drainEndTime.Before(migrateEndTime) {
 		migrateEndTime = drainEndTime
 	}
+
+	broadcastEndTime := startTime.Add(self.settings.DrainMigrateBroadcastTimeout)
+	if migrateEndTime.Before(broadcastEndTime) {
+		broadcastEndTime = migrateEndTime
+	}
+	if !startTime.Before(broadcastEndTime) {
+		return
+	}
+
+	fanout := self.settings.DrainMigrateFanout
+	if fanout < 1 {
+		fanout = 1
+	}
+	if len(residents) < fanout {
+		fanout = len(residents)
+	}
+
+	type migrateResult struct {
+		clientId server.Id
+		sent     bool
+	}
+	jobs := make(chan *Resident)
+	results := make(chan migrateResult, len(residents))
+	var workers sync.WaitGroup
+	for range fanout {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for resident := range jobs {
+				remaining := time.Until(broadcastEndTime)
+				if remaining <= 0 {
+					results <- migrateResult{clientId: resident.clientId}
+					continue
+				}
+				sendTimeout := self.settings.DrainMigrateSendTimeout
+				if remaining < sendTimeout {
+					sendTimeout = remaining
+				}
+				migrateTime := startTime
+				if jitterWindow := migrateEndTime.Sub(startTime); 0 < jitterWindow {
+					migrateTime = migrateTime.Add(time.Duration(rand.Int63n(int64(jitterWindow))))
+				}
+				results <- migrateResult{
+					clientId: resident.clientId,
+					sent:     self.sendResidentMigrate(resident, migrateTime, sendTimeout),
+				}
+			}
+		}()
+	}
+
+	attemptedCount := 0
+sendLoop:
+	for _, resident := range residents {
+		select {
+		case jobs <- resident:
+			attemptedCount += 1
+		case <-self.ctx.Done():
+			break sendLoop
+		case <-time.After(time.Until(broadcastEndTime)):
+			break sendLoop
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	close(results)
+
+	sentClientIds := map[server.Id]struct{}{}
+	for result := range results {
+		if result.sent {
+			sentClientIds[result.clientId] = struct{}{}
+		}
+	}
+	if len(sentClientIds) == 0 {
+		return
+	}
+	glog.Infof(
+		"[c]drain migrate broadcast to %d residents (%d/%d attempted)\n",
+		len(sentClientIds),
+		attemptedCount,
+		len(residents),
+	)
+
 	for {
 		if migrateEndTime.Before(time.Now()) {
 			return
@@ -1200,7 +1308,13 @@ func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.
 		remainingCount := func() int {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			return len(self.connections)
+			n := 0
+			for clientId := range sentClientIds {
+				if 0 < len(self.connections[clientId]) {
+					n += 1
+				}
+			}
+			return n
 		}()
 		drainResidentsRemainingGauge.Set(float64(remainingCount))
 		if remainingCount == 0 {
@@ -1212,6 +1326,17 @@ func (self *Exchange) migrateResidents(residents []*Resident, drainEndTime time.
 		case <-time.After(1 * time.Second):
 		}
 	}
+}
+
+func (self *Exchange) drainClientCountLocked() int {
+	clientIds := make(map[server.Id]struct{}, len(self.connections)+len(self.residents))
+	for clientId := range self.connections {
+		clientIds[clientId] = struct{}{}
+	}
+	for clientId := range self.residents {
+		clientIds[clientId] = struct{}{}
+	}
+	return len(clientIds)
 }
 
 // Drain sheds this exchange's residents for shutdown (CONNECTDRAIN2.md):
@@ -1229,13 +1354,23 @@ func (self *Exchange) Drain() {
 	self.draining.Store(true)
 	drainEndTime := time.Now().Add(self.settings.DrainAllTimeout)
 
-	residents := func() []*Resident {
+	residents, connectionOnlyClientIds := func() ([]*Resident, []server.Id) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		return slices.Collect(maps.Values(self.residents))
+		residents := slices.Collect(maps.Values(self.residents))
+		connectionOnlyClientIds := make([]server.Id, 0)
+		for clientId := range self.connections {
+			if self.residents[clientId] == nil {
+				connectionOnlyClientIds = append(connectionOnlyClientIds, clientId)
+			}
+		}
+		return residents, connectionOnlyClientIds
 	}()
 	for _, resident := range residents {
 		self.markDrained(resident)
+	}
+	for _, clientId := range connectionOnlyClientIds {
+		self.markClientDrained(clientId, server.Id{})
 	}
 
 	if self.settings.EnableDrainCoordination {
@@ -1259,28 +1394,28 @@ func (self *Exchange) Drain() {
 			remainingCount := func() int {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()
-				return max(len(self.connections), len(self.residents))
+				return self.drainClientCountLocked()
 			}()
 			drainResidentsRemainingGauge.Set(float64(remainingCount))
 			glog.Infof("[c]drain deadline with at least %d remaining\n", remainingCount)
 			break
 		}
-		resident, handleCancels, remainingCount, ok := func() (*Resident, []context.CancelFunc, int, bool) {
+		clientId, resident, handleCancels, remainingCount, ok := func() (server.Id, *Resident, []context.CancelFunc, int, bool) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 
-			n := max(len(self.connections), len(self.residents))
+			n := self.drainClientCountLocked()
 
 			// active connections with potential residents
 			for clientId, handleCancels := range self.connections {
 				resident := self.residents[clientId]
-				return resident, slices.Collect(maps.Values(handleCancels)), n - 1, true
+				return clientId, resident, slices.Collect(maps.Values(handleCancels)), n - 1, true
 			}
 			// residents without active connections
-			for _, resident := range self.residents {
-				return resident, nil, n - 1, true
+			for clientId, resident := range self.residents {
+				return clientId, resident, nil, n - 1, true
 			}
-			return nil, nil, 0, false
+			return server.Id{}, nil, nil, 0, false
 		}()
 		if !ok {
 			drainResidentsRemainingGauge.Set(0)
@@ -1294,6 +1429,8 @@ func (self *Exchange) Drain() {
 		if resident != nil {
 			self.markDrained(resident)
 			resident.Close()
+		} else {
+			self.markClientDrained(clientId, server.Id{})
 		}
 		for _, handleCancel := range handleCancels {
 			handleCancel()
@@ -1321,16 +1458,26 @@ func (self *Exchange) Drain() {
 // is disabled (PEERSSTREAMS2.md §5.4)
 func (self *Exchange) networkPeersPollInterval() time.Duration {
 	if self.settings.KeyEventDelivery.Enabled {
-		return self.settings.KeyEventDelivery.CorrectivePollInterval
+		// The process-wide key-event subscriber performs one shared
+		// authoritative reconcile per network at the corrective cadence.
+		// Per-listener polling remains a slower independent backstop.
+		return 2 * self.keyEventCorrectivePollInterval()
 	}
 	return self.settings.NetworkPeersPollInterval
 }
 
 func (self *Exchange) streamHopsPollInterval() time.Duration {
 	if self.settings.KeyEventDelivery.Enabled {
-		return self.settings.KeyEventDelivery.CorrectivePollInterval
+		return 2 * self.keyEventCorrectivePollInterval()
 	}
 	return self.settings.StreamHopsPollInterval
+}
+
+func (self *Exchange) keyEventCorrectivePollInterval() time.Duration {
+	if interval := self.settings.KeyEventDelivery.CorrectivePollInterval; 0 < interval {
+		return interval
+	}
+	return defaultKeyEventCorrectivePollInterval
 }
 
 func (self *Exchange) listenerFullReadEvery() int {

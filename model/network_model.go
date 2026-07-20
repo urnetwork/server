@@ -1098,6 +1098,14 @@ func UpgradeGuest(
 		return result, nil
 	}
 
+	// Social/wallet upgrades issue a durable JWT. Resolve the fresh
+	// entitlement before the update transaction so the lookup's PostgreSQL
+	// and Redis I/O cannot nest under an open transaction.
+	isPro := false
+	if (upgradeGuest.AuthJwt != nil && upgradeGuest.AuthJwtType != nil) ||
+		upgradeGuest.WalletAuth != nil {
+		isPro = IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
+	}
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 
 		if upgradeGuest.UserAuth != nil {
@@ -1243,13 +1251,14 @@ func UpgradeGuest(
 					upgradeGuest.AuthJwt,
 				))
 
-				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+				setUserAuthAttemptSuccessInTx(
+					session.Ctx,
+					tx,
+					userAuthAttemptId,
+					true,
+				)
 
 				isGuest := false
-				isPro := IsProFresh(
-					session.Ctx,
-					&session.ByJwt.NetworkId,
-				)
 
 				byJwt := jwt.NewByJwt(
 					session.ByJwt.NetworkId,
@@ -1338,13 +1347,14 @@ func UpgradeGuest(
 				AuthTypeSolana,
 			))
 
-			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+			setUserAuthAttemptSuccessInTx(
+				session.Ctx,
+				tx,
+				userAuthAttemptId,
+				true,
+			)
 
 			isGuest := false
-			isPro := IsProFresh(
-				session.Ctx,
-				&session.ByJwt.NetworkId,
-			)
 
 			byJwt := jwt.NewByJwt(
 				session.ByJwt.NetworkId,

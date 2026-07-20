@@ -681,6 +681,134 @@ func (self *IpInfo) unmarshalIpInfo(d *mmdbdata.Decoder) error {
 	return nil
 }
 
+// test/simulation ip overrides
+//
+// `ip_overrides` in settings (config or site settings.yml) defines subnets
+// whose ip info is served from configuration instead of the packaged mmdb
+// databases. Local simulation environments (e.g. sim-latency) use this to
+// give fake testing subnets a location and net type; production settings do
+// not define the key, so the packaged databases serve every lookup.
+//
+//	ip_overrides:
+//	  - subnet: "198.18.0.0/16"
+//	    country_code: "zz"
+//	    country: "Sim"
+//	    region: "Sim"
+//	    city: "Sim"
+//
+// optional fields: continent, continent_code, latitude, longitude, timezone,
+// hosting, privacy, virtual. An overridden subnet also short-circuits
+// `GetArinInfo` with a non-foreign org, so the net type is fully determined
+// by the settings entry. Malformed entries panic at first lookup: an override
+// is only ever present deliberately, and a silently skipped entry would make
+// a simulation quietly wrong.
+type ipOverride struct {
+	prefix netip.Prefix
+	ipInfo IpInfo
+}
+
+var ipOverrides = sync.OnceValue(func() []*ipOverride {
+	settingsObj, ok := GetSettings()["ip_overrides"]
+	if !ok {
+		return []*ipOverride{}
+	}
+	overrides := parseIpOverrides(settingsObj)
+	if 0 < len(overrides) {
+		glog.Infof("[ip]%d ip override subnets active\n", len(overrides))
+	}
+	return overrides
+})
+
+func parseIpOverrides(settingsObj any) []*ipOverride {
+	entries, ok := settingsObj.([]any)
+	if !ok {
+		panic(fmt.Errorf("ip_overrides must be a list"))
+	}
+	overrides := []*ipOverride{}
+	for _, entryObj := range entries {
+		entry, ok := entryObj.(map[string]any)
+		if !ok {
+			panic(fmt.Errorf("ip_overrides entry must be a map"))
+		}
+		stringValue := func(key string) string {
+			if v, ok := entry[key]; ok {
+				if s, ok := v.(string); ok {
+					return s
+				}
+				panic(fmt.Errorf("ip_overrides %s must be a string", key))
+			}
+			return ""
+		}
+		boolValue := func(key string) bool {
+			if v, ok := entry[key]; ok {
+				if b, ok := v.(bool); ok {
+					return b
+				}
+				panic(fmt.Errorf("ip_overrides %s must be a bool", key))
+			}
+			return false
+		}
+		floatValue := func(key string) float64 {
+			if v, ok := entry[key]; ok {
+				switch f := v.(type) {
+				case float64:
+					return f
+				case int:
+					return float64(f)
+				}
+				panic(fmt.Errorf("ip_overrides %s must be a number", key))
+			}
+			return 0
+		}
+
+		prefix, err := netip.ParsePrefix(stringValue("subnet"))
+		if err != nil {
+			panic(fmt.Errorf("ip_overrides subnet %q: %w", stringValue("subnet"), err))
+		}
+
+		userType := UserTypeConsumer
+		if boolValue("hosting") {
+			userType = UserTypeHosting
+		}
+		region := stringValue("region")
+		regions := []string{}
+		if region != "" {
+			regions = []string{region}
+		}
+		overrides = append(overrides, &ipOverride{
+			prefix: prefix,
+			ipInfo: IpInfo{
+				ContinentCode: strings.ToLower(stringValue("continent_code")),
+				Continent:     stringValue("continent"),
+				CountryCode:   strings.ToLower(stringValue("country_code")),
+				Country:       stringValue("country"),
+				Region:        region,
+				Regions:       regions,
+				City:          stringValue("city"),
+				Longitude:     floatValue("longitude"),
+				Latitude:      floatValue("latitude"),
+				Timezone:      stringValue("timezone"),
+				UserType:      userType,
+				Hosting:       boolValue("hosting"),
+				Privacy:       boolValue("privacy"),
+				Virtual:       boolValue("virtual"),
+			},
+		})
+	}
+	return overrides
+}
+
+func ipOverrideFor(addr netip.Addr) *IpInfo {
+	for _, override := range ipOverrides() {
+		if override.prefix.Contains(addr) {
+			// copy so callers cannot mutate the shared template
+			ipInfo := override.ipInfo
+			return &ipInfo
+		}
+	}
+	return nil
+}
+
 func GetIpInfoFromString(ip string) (*IpInfo, error) {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
@@ -702,6 +830,10 @@ func GetIpInfoFromIp(ip net.IP) (*IpInfo, error) {
 }
 
 func GetIpInfo(addr netip.Addr) (*IpInfo, error) {
+	if ipInfo := ipOverrideFor(addr); ipInfo != nil {
+		return ipInfo, nil
+	}
+
 	ipDb, schemaType := ipDb()
 
 	r := ipDb.Lookup(addr)
@@ -858,6 +990,13 @@ func GetArinInfoFromIp(ip net.IP) (*ArinInfo, error) {
 }
 
 func GetArinInfo(addr netip.Addr) (*ArinInfo, error) {
+	if ipInfo := ipOverrideFor(addr); ipInfo != nil {
+		// org matches the override country, so the net type is never foreign
+		return &ArinInfo{
+			OrgCountryCodes: []string{ipInfo.CountryCode},
+		}, nil
+	}
+
 	arinDb, schemaType := arinDb()
 
 	r := arinDb.Lookup(addr)

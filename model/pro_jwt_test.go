@@ -136,3 +136,34 @@ func TestProJwtAuthClientReadsSourceOfTruthNotCache(t *testing.T) {
 		connect.AssertEqual(t, proJwtParse(t, ctx, result.ByClientJwt).Pro, true)
 	})
 }
+
+// Client tokens must carry the ROOT jwt's create time, not a fresh one: the
+// root-lineage convention (see AuthCodeCreate) lets all derivative auth be
+// expired by expiring the root. Pins both AuthNetworkClient branches.
+func TestClientJwtPreservesRootCreateTime(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+
+		// a distinctive root create time, far from now
+		rootCreateTime := server.CodecTime(server.NowUtc().Add(-45 * 24 * time.Hour))
+		sess := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId, UserId: userId, NetworkName: "test",
+			CreateTime: rootCreateTime,
+		})
+
+		// new-client branch
+		result := proJwtAuthClient(t, sess, &AuthNetworkClientArgs{Description: "d", DeviceSpec: "s"})
+		newClientJwt := proJwtParse(t, ctx, result.ByClientJwt)
+		connect.AssertEqual(t, newClientJwt.CreateTime.Equal(rootCreateTime), true)
+
+		// re-auth branch (same client id presented back)
+		reauthResult := proJwtAuthClient(t, sess, &AuthNetworkClientArgs{
+			Description: "d", DeviceSpec: "s", ClientId: result.ClientId,
+		})
+		reauthJwt := proJwtParse(t, ctx, reauthResult.ByClientJwt)
+		connect.AssertEqual(t, reauthJwt.CreateTime.Equal(rootCreateTime), true)
+	})
+}

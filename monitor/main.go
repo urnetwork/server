@@ -67,19 +67,21 @@ Options:
 
 	probes := []probe{
 		// tier-0 (SIGNALS.md §1)
-		pgStateProbe{},
+		newPgStateProbe(),
 		pgContractRateProbe{},
 		taskCanaryProbe{},
 		redisClusterProbe{},
 		// tier-1 + daily (§2, §3)
 		pgOpenSetProbe{},
-		pgConnectRateProbe{},
+		&pgConnectRateProbe{},
 		pgSelectionFreshnessProbe{},
 		pgbouncerProbe{},
 		pgVacuumProbe{},
 		pgStatsLandmineProbe{},
 		taskDurationProbe{},
-		redisMemoryProbe{},
+		// taskworker drain / task-plane liveness (§12)
+		taskworkerDrainProbe{},
+		newRedisMemoryProbe(),
 		redisTopologyProbe{},
 		redisFamilyProbe{},
 		redisKeyEventProbe{},

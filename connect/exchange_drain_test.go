@@ -90,6 +90,16 @@ func TestExchangeDrainTrackA(t *testing.T) {
 			connect.AssertEqual(t, false, gone)
 		}()
 
+		// Connection-only split state is excused even though there was no
+		// local Resident to mark. The all-zero resident id is the observable
+		// sentinel for that case.
+		splitStateExcuse := model.TakeDrainExcuse(ctx, stuckClientId)
+		connect.AssertEqual(t, true, splitStateExcuse != nil)
+		connect.AssertEqual(t, server.Id{}, *splitStateExcuse)
+		goneExcuse := model.TakeDrainExcuse(ctx, goneClientId)
+		connect.AssertEqual(t, true, goneExcuse != nil)
+		connect.AssertEqual(t, server.Id{}, *goneExcuse)
+
 		// draining refuses new nominations before any model work
 		connect.AssertEqual(t, false, exchange.NominateLocalResident(server.NewId(), server.NewId(), nil))
 

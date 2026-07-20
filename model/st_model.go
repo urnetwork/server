@@ -762,6 +762,86 @@ func SumStDepositedRao(ctx context.Context, epoch uint64, noId uint64) *big.Int 
 	return total
 }
 
+// SumStDepositedInBlockRangeRao sums the α (rao) of every mirrored
+// Deposited event with block_number in [minBlock, maxBlock), across epochs
+// and NOs — the demand deposits inside a wall-clock window mapped to chain
+// blocks (the public stats collector, controller/stats_collector.go). The
+// kind+block index covers the scan.
+func SumStDepositedInBlockRangeRao(ctx context.Context, minBlock uint64, maxBlock uint64) *big.Int {
+	total := big.NewInt(0)
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT data_json
+                FROM st_event
+                WHERE kind = 'Deposited' AND $1 <= block_number AND block_number < $2
+            `,
+			int64(minBlock),
+			int64(maxBlock),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var dataJson string
+				server.Raise(result.Scan(&dataJson))
+				if _, _, amount, ok := parseDepositedEvent(dataJson); ok {
+					total.Add(total, amount)
+				}
+			}
+		})
+	})
+	return total
+}
+
+// parsePoolSweptEvent extracts the measured α (rao) from a PoolSwept
+// `st_event.data_json` (the decimal-string fields written by the event
+// decoder in st_controller.go: `no_id`, `measured`, `swept`, `move_ok`).
+// Returns ok=false on any malformed row.
+func parsePoolSweptEvent(dataJson string) (measured *big.Int, ok bool) {
+	var data struct {
+		Measured string `json:"measured"`
+	}
+	if err := json.Unmarshal([]byte(dataJson), &data); err != nil {
+		return nil, false
+	}
+	m, mOk := new(big.Int).SetString(data.Measured, 10)
+	if !mOk {
+		return nil, false
+	}
+	return m, true
+}
+
+// SumStPoolSweptMeasuredInBlockRangeRao sums the measured α (rao) of every
+// mirrored PoolSwept event with block_number in [minBlock, maxBlock) — the
+// miner emission captured by the D-4 sweeps inside a wall-clock window
+// mapped to chain blocks (the public stats collector,
+// controller/stats_collector.go).
+func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, minBlock uint64, maxBlock uint64) *big.Int {
+	total := big.NewInt(0)
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT data_json
+                FROM st_event
+                WHERE kind = 'PoolSwept' AND $1 <= block_number AND block_number < $2
+            `,
+			int64(minBlock),
+			int64(maxBlock),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var dataJson string
+				server.Raise(result.Scan(&dataJson))
+				if measured, ok := parsePoolSweptEvent(dataJson); ok {
+					total.Add(total, measured)
+				}
+			}
+		})
+	})
+	return total
+}
+
 // GetStHighWaterBlock returns the next block the event sync should scan
 // from (0 when never synced).
 func GetStHighWaterBlock(ctx context.Context) uint64 {
@@ -1069,20 +1149,28 @@ func GetStContributingClientCkeys(ctx context.Context, clientIds []server.Id) ma
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		cmds := make([]*redis.StringCmd, len(clientIds))
-		_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		// the aggregate error is ignored deliberately: it is the FIRST
+		// per-command error in command order, which redis.Nil (an expected
+		// miss) can mask — errors must be classified per command below. A
+		// real error must raise: silently skipping it would omit the
+		// client→ckey mapping and let a head-bound provider through the
+		// head-tier exclusion into a double payout, immutable once the
+		// epoch root is committed
+		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for i, clientId := range clientIds {
 				cmds[i] = pipe.Get(ctx, clientPublicKeyRedisKey(clientId))
 			}
 			return nil
 		})
-		// Pipelined surfaces redis.Nil when any key is missing; misses are
-		// expected and read per command below
-		if err != nil && !errors.Is(err, redis.Nil) {
-			server.Raise(err)
-		}
 		for i, cmd := range cmds {
 			raw, err := cmd.Result()
-			if err != nil || len(raw) != 32 {
+			if errors.Is(err, redis.Nil) {
+				// no published ckey for this client; expected
+				continue
+			}
+			server.Raise(err)
+			if len(raw) != 32 {
+				// malformed value; treat as unpublished
 				continue
 			}
 			var ckey [32]byte

@@ -255,6 +255,30 @@ GROUP BY 1 ORDER BY 1;
 - BROKEN: sustained < 50% of the hour-ago window = new connects failing
   (auth, lb, or announce path) even if contract rate still looks fine on
   long-lived sessions.
+- BROKEN (high side): sustained > 2.5x baseline = a RECONNECT STORM —
+  connections establish then die young, so clients cycle. Confirm with the
+  median connection lifetime (it halves during churn):
+  ```sql
+  SELECT date_trunc('hour', connect_time),
+         percentile_cont(0.5) WITHIN GROUP (ORDER BY
+           EXTRACT(EPOCH FROM (disconnect_time - connect_time)))
+  FROM network_client_connection
+  WHERE connected = false AND connect_time >= now() - interval '6 hours'
+    AND disconnect_time IS NOT NULL GROUP BY 1 ORDER BY 1;
+  ```
+  First correlate with deploys AND unit restarts (8.5): 2026-07-19 22:55 an
+  ansible restart wave took the baseline 2.5k/min to a 7k plateau for 40
+  min, a 15k/min final drain burst, then decay to baseline within ~6 min —
+  with contract rate, canary, api error rates all healthy throughout. If NOT
+  restart-correlated, a storm means something is killing established
+  connections (transport, lb flapping, provide churn).
+- MEDIAN-POLLUTION CAUTION: a 40-minute storm drags any trailing-hour median
+  up to storm levels, so (a) the storm signal un-trips as the window fills,
+  and (b) the RECOVERY back to true baseline then reads as < 50% "collapse"
+  (false page observed 2026-07-19 23:42: contracts 4.5k/min vs a 10.9k
+  churn-inflated median). Judge recovery against a pre-incident window; the
+  probes fall back to the trailing-6h median whenever the hour median is
+  >= 1.5x it.
 
 ### 2.8 Provider-selection freshness — the score-cache staleness canary
 `FindProviders2` (the app's provider list) reads ONLY the redis
@@ -428,9 +452,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `EOF` / `connection reset by peer` | Server closed the conn (COBL kill, maxmemory-clients eviction, restart). | Correlate with server-side events; retried in-client. |
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
-| `[contract][error] ... Insufficient balance` | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | Watch the RATE: a step-change up = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. |
+| `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
 | `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, circle payment path) | The payout wallet cannot cover pending payouts (usdc on solana — mint EPjFWdd5...Dt1v in the error text). NOT an api failure: every AdvancePayment retry 400s until the wallet is funded, parking the tasks on backoff (decoded 2026-07-18 from the novel class — the full error text names the wallet id, its balance, and the required amount). | Finance/ops: fund the payout wallet (or pause payouts). Task-side symptoms clear on their own once funded and the backoff run_at arrives. |
-| `[contract][error] ... Missing origin contract for companion` | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` lines mean NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | A sustained step-change = clients being pointed at non-contractable destinations: stale provider selection (2.8, playbook 5.9) or an announce/provide-key regression. Sample failing pairs and check the dest's `{pm_<clientId>}sk_*` keys. |
+| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
 Extract (class, target ip:port, innermost app frame) as the alert identity;
@@ -570,6 +594,18 @@ control plane and selection API work; the per-candidate contract path fails.
    reliability nodes fall back to baseline, dots green on next app
    connect). Clients holding pre-rebuild candidate lists keep failing until
    they re-fetch — a decaying tail, not a re-incident.
+7. POST-CHURN VARIANT (2026-07-19): a rebuild that OVERLAPS a churn window
+   is itself polluted, so ONE completion does not recover — the snapshot
+   scores "flash clients" that connected for only 9–30 SECONDS during the
+   churn (verified: failing destinations' entire connection lifetime sat
+   inside the restart wave). Apps re-fetch after that completion, get the
+   zombies, and the missing-origin counter CLIMBS again (observed 900/min -> 5.6k/min
+   after the 23:57 completion). The run takes ~45 min, so count on the
+   SECOND post-churn completion (started strictly after the churn ended)
+   for genuine recovery; verify the failing destinations flip from
+   flash-client zombies to live providers. Follow-up idea: the scorer
+   should exclude candidates whose current connection is younger than a
+   floor or already gone at write time.
 
 ### 5.10 Service crash-loop from a bad build (the 2026-07-18 connect outage)
 Signature: the service's public endpoint returns 502 (lb up, no healthy
@@ -695,7 +731,8 @@ Tier-1 (warn):
 | stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, or any open-partial index reltuples=0 after analyze | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
-| missing-origin-rate | logs | §4 companion-origin class rate vs its ~90/min background | sustained > 3x background |
+| contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
+| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` 5-minute rate vs its ~90/min background | > 500/min for 5 min |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 
@@ -797,6 +834,42 @@ builds running X, Y; old-tag drain in progress"). A signal that step-changes
 within ~10 min of a build-tag change is deploy-correlated — correlate before
 diagnosing, and do not re-alert during a post-deploy recovery ramp (1.1).
 
+### 8.5 Ansible provisioning restarts every warp unit SIMULTANEOUSLY
+
+A `warpctl deploy` is rolling and graceful (8.2). An ansible provisioning run
+is neither: it rewrites the systemd unit files, systemd does `Reloading.`, and
+every `warp-main-*` unit on the host restarts — all blocks, all services, and
+(since the playbook runs hosts in parallel) the same minute FLEET-WIDE.
+Observed 2026-07-19 22:53–22:55: edges 0/1/4 all logged
+`Stopping Warpctl main connect g3/g4` within a 40-second window.
+
+- Each unit restart stops the running container (which then drains up to its
+  stop timeout) and starts a fresh container of the SAME version — so
+  `docker ps` shows same-tag containers with reset `Up` times, NOT a new
+  build. Distinguish from a crash loop (5.10): statuses stay `Up`, no
+  `Exited`/`Restarting` churn, and journalctl shows systemd
+  `Stopping`/`Started` pairs, not container deaths.
+- Client effect: every client of every block evicted at once → reconnect
+  storm (2.7 high side) with a plateau (drain walkers evicting), a final
+  eviction burst (15k/min observed at the 40-min mark), then fast decay to
+  baseline. Median connection lifetime halves during the window. Score
+  effects follow CONNECTDRAIN2: reconnect + provide-change invalidate
+  reliability blocks fleet-wide.
+- Diagnosis: `journalctl --since '<window>' | grep -E "systemd\[1\]: (Stopping|Started) Warp|ansible-ansible"`
+  on any edge. Ansible module invocations log as `python3.10[...]:
+  ansible-ansible.builtin....` — their presence at the inflection minute is
+  the confirmation.
+- Log access during such windows: `warpctl logs` rides loki via
+  main-grafana, which may itself be down/redeploying (it panicked and timed
+  out throughout the 2026-07-19 incident). Container stdout is NOT in
+  journald (`--log-driver=local`; journalctl -u warp-* has only the warpctl
+  supervisor lines) — the fallback is `sudo docker logs --since <t>
+  <container>` over ssh.
+- Expectation to verify recovery: connect rate back within ~±20% of the
+  pre-incident baseline within ~10 min of the final burst, old same-tag
+  containers gone by their stop timeout, no residual page-tier tickets
+  except known standing ones.
+
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
 Signals for the redis keyspace-notification transport for peers + stream hops
@@ -810,6 +883,16 @@ Signals for the redis keyspace-notification transport for peers + stream hops
   One per process start; anything sustained = conn deaths or topology flapping.
 - `urnetwork_key_event_resyncs_total` — listener resyncs; spikes with
   resubscribes and registrations, otherwise quiet.
+- `urnetwork_redis_key_event_merge_drops_total` (`server/redis.go`) — keyspace
+  notifications dropped at the per-node/per-process merge (each master's
+  PubSub drain goroutine feeds a shared 1024-slot merge channel; a full merge
+  drops the message rather than blocking the socket). Every drop TERMINATES
+  that subscription epoch → resubscribe + corrective full resync, so nothing
+  is silently lost — each drop shows up as a resubscribe+resync cycle above.
+  Occasional drops during a mass reconnect are self-healing; a SUSTAINED
+  nonzero rate = a key-event burst storm outrunning the merge buffer, forcing
+  continuous resubscribe/resync churn — find the write storm generating the
+  events before tuning buffer sizes or intervals.
 - `urnetwork_network_peer_listener_resets_total` — full-read deliveries. In
   poll mode this is normal change delivery. In key-event mode it should be
   ≈ registrations + resyncs; a SUSTAINED rate above that means the corrective
@@ -888,12 +971,18 @@ Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
   `Removal In Progress`/`Exited` while the new image's container is `Up`.
 
 ### 10.2 Drain health signals
-- **`urnetwork_drain_residents_remaining`** (gauge, per service; CONNECTDRAIN2
-  §3.5) is the drain ETA WITHOUT ssh-ing to find the stop-child: nonzero and
-  falling = draining; 0 = drain complete. Replaces reading the stop-child
-  `etime` for progress (that recipe is §10.1, still valid when scraping is
-  down). A gauge that plateaus nonzero for minutes = a stuck drain (the sweep
-  found residents it cannot evict); the hard `DrainAllTimeout` bounds it.
+- **`urnetwork_connect_drain_residents_remaining`** (gauge, per service;
+  CONNECTDRAIN2 §3.5) is the drain ETA WITHOUT ssh-ing to find the stop-child.
+  Query it as a RANGE, not a last value: the gauge rides the stats pusher's
+  {env, service, block, host} series, and the replacement container overwrites
+  that same series with 0 within one ~15s push, so an instant `> 0` check
+  misses the whole drain after the fact. Use
+  `max_over_time(urnetwork_connect_drain_residents_remaining[15m]) > 0` to
+  detect that a drain ran, and the range graph falling to 0 for live progress.
+  A value that stays nonzero across consecutive pushes for minutes = a stuck
+  drain (the sweep found residents it cannot evict); the hard
+  `DrainAllTimeout` bounds it. Replaces reading the stop-child `etime` for
+  progress (that recipe is §10.1, still valid when scraping is down).
 - **`urnetwork_connect_drain_excuses_written` − `urnetwork_connect_drain_excuses_consumed`**
   (two counters): markers minted at drain/migrate vs redeemed at reconnect. A
   large sustained written-minus-consumed gap = clients that did NOT come back
@@ -945,3 +1034,419 @@ Signals learned draining `by-us-fmt-5-edge-4` live during a rolling deploy
 `ssh by@172.28.208.175` (edge-4). Orchestrator child: `ps --ppid <MainPID>`.
 Docker (root): `echo by-pass | sudo -S docker ps`. Redis registry lives on
 edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no auth). Readonly only.
+
+## 11. Grafana / loki / mimir observability stack (the 2026-07-19 outage)
+
+The observability PLANE itself: grafana + loki + mimir + alloy behind a Go front
+(`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on 6-of-7
+lb/host_services hosts (edge-0/1/3/4, crisp, fireside; **edge-5 offline**). The
+front is PID1 and supervises the children via `warp.Child` (restart-on-exit).
+Access: `by-pass <secmd-key> by` → per-host sudo pw, then
+`echo "$PW" | ssh by@<ip> 'sudo -S -p "" bash -s' <<'EOS' … EOS` — the `by` user
+is NOT in the docker group, so docker needs sudo. Log driver is now `local`, so
+`sudo docker logs <c>` WORKS (was awslogs → cloudwatch). IPs: edge-0=.173,
+edge-1=.51, edge-3=.174, edge-4=.175, edge-5=.176 (OFFLINE), crisp=.58,
+fireside=.3 (all 172.28.208.x mgmt). Route-net (eno1) IPs live in
+`config/main/settings.yml` routes.
+
+### 11.1 Fleet health one-shot — the composite line
+One line per host tells the whole story. Service ports are NOT the bind ports —
+read the container's `WARP_PORTS` for the per-deploy internal port, then probe:
+```
+c=$(docker ps --filter name=grafana --filter status=running -q | head -1)
+wp=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' $c | grep ^WARP_PORTS= | cut -d= -f2)
+getp(){ echo "$wp" | tr , '\n' | awk -F: -v s=$1 '$1==s{print $2}'; }   # service port -> internal
+gw=$(ip -4 addr show warpservices | grep -oE '172\.[0-9]+\.0\.1' | head -1)
+curl -so/dev/null -w '%{http_code}' http://$gw:$(getp 80)/status              # front (warpctl's OWN poll target)
+curl ... 127.0.0.1:$(getp 3101)/ready ; :$(getp 3201)/ready ; :$(getp 3000)/api/health  # loki/mimir/grafana
+curl -sG 127.0.0.1:3100/loki/api/v1/label/service/values | grep -oE '"[^"]+"' | wc -l  # svc
+```
+HEALTHY BAND: `up=1 front=200 loki=200 mimir=200 graf=200 svc>0 restarts=0/0/0`.
+`svc` = distinct `service` labels loki knows = proof of BOTH log ingest and
+cross-host read (label fixed 2026-07-19: it is `service`, not `warp_service`;
+healthy main knows 9 — api app connect grafana lb mcp proxy taskworker web.
+The labels api defaults to a recent window: pass explicit start/end before
+reading an empty result as "nothing was ever ingested"). Any field off names
+a class below.
+
+### 11.2 up-count & child restarts — overlap vs crash-loop
+- `up` = running grafana containers. **`up>1` = redeploy overlap** (old container
+  draining) — normal for a few minutes, STUCK for hours = the poll deadlock (11.7).
+- Child restarts from the front's supervisor:
+  `docker logs --tail 200 $c | grep -c '\[loki\]exited'` (also `[mimir]`, `[alloy]`).
+  Stable = **0**; nonzero-and-climbing = crash-loop. **CRITICAL: front + grafana
+  read 200 while loki/mimir crash-loop** — the front supervises the children, so
+  the container still passes its readiness poll and a broken build still
+  "deploys". Always check restarts, never trust "container Up" alone.
+
+### 11.3 The bind paradox — `ss` shows LISTEN but connect is REFUSED
+The single most misleading signal here. `ss -tlnp` shows a service `LISTEN` on
+`127.0.0.1:<port>` (or the docker-gw ip), yet `curl`/`/dev/tcp` to it is
+**refused** — even from inside the same netns. Mechanism: a listener bound to a
+SPECIFIC ip (loopback or the gateway) is refused during a container overlap,
+while `0.0.0.0`-bound sockets (front `:3100`, the ring grpc, and post-fix
+loki/mimir/grafana http) accept fine. Discriminators:
+```
+timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'$(getp 3101)   # raw connect, bypasses curl
+# CONTROL: a throwaway 127.0.0.1 listener DOES accept -> host loopback is fine; it's the service bind
+```
+So **do NOT trust `ss` "LISTEN" as healthy**, and **probe loki through the front
+proxy** (`127.0.0.1:3100/loki/...` → 200 vs 502), not the backend port. FIX for
+every component: bind `0.0.0.0` (loki/mimir `server.http_listen_address`, grafana
+`http_addr`, the front's main `server` in `serve()`). The exact kernel reason for
+the specific-ip refuse during overlap is unexplained; `0.0.0.0` is the empirical
+cure (bridges are DOWN, gw ips route via lo — suspected but unproven).
+
+### 11.4 Config parse failure — flag names ≠ yaml keys
+loki/mimir crash-loop (11.2 restarts climbing) with, in the logs:
+```
+docker logs --tail 300 $c | grep -iE 'not found in type|error parsing|unmarshal'
+#   field instance_addr not found in type frontend.CombinedFrontendConfig
+#   field ring not found in type scheduler.Config
+```
+The flag name is NOT the yaml key: `-frontend.instance-addr` → yaml
+`frontend.address`; loki's scheduler block is `scheduler_ring`, mimir's is `ring`.
+**Verify keys against the binary BEFORE building:**
+```
+docker exec $c sh -c 'printf "target: all\nfrontend:\n  address: 1.2.3.4\n  port: 6490\n" >/tmp/t.yml; /usr/local/sbin/loki -config.file=/tmp/t.yml 2>&1 | grep "not found"'
+```
+Empty = keys OK. This break passes `front=200/graf=200` (11.2), so it looks "deployed".
+
+### 11.5 Ring formation & cross-host reads (svc=0, frontend healthcheck)
+`svc=0` on a host that is otherwise 200 = its querier can't read the cluster. Tells:
+```
+docker logs --tail 500 $c | grep -iE 'removing frontend failing healthcheck|unexpected status received for init|reached_nodes'
+#   removing frontend failing healthcheck addr=192.168.51.196:14609 ... DeadlineExceeded
+#   re-joined memberlist cluster reached_nodes=6   <- gossip is fine; it's the query grpc
+```
+`14609` is the per-deploy INTERNAL grpc port. Internal ports are LOCAL-ONLY
+(reachable via loopback/own-lan/interface-gw, but firewalled/timeout cross-host —
+the `dport 14609→gw:14609` DNAT is OUTPUT-only, ingress pkts=0). The
+ingester/distributor rings advertise the EXTERNAL front-proxied port (loki 6490 /
+mimir 6491) and work; the query-frontend + query-scheduler DEFAULTED to the
+internal port and broke cross-host reads on the no-LB hosts (crisp/fireside, which
+have no local logs). Discriminator: `conn <peer> 6490` OK vs `conn <peer> 14609`
+timeout. FIX: pin frontend+scheduler to the external port (loki `frontend.port` +
+`query_scheduler.scheduler_ring.instance_port`=6490; mimir `.../ring.instance_port`=6491).
+
+### 11.6 minio object-store persistence (edge-6)
+loki chunks + mimir blocks land in minio (`192.168.51.193:23900`, data
+`/data/minio`, on edge-6 172.28.208.177). Signals:
+```
+du -sh /data/minio/loki /data/minio/mimir                              # growth = writing
+find /data/minio/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
+ls /data/minio/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
+find /data/minio/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
+```
+loki flushes on `chunk_idle_period`/shutdown; **mimir uploads only after a ~2h
+TSDB block boundary** — an empty mimir bucket right after a healthy start is
+EXPECTED, not a fault (populates on the next boundary). An empty/stale loki bucket
+while loki is crash-looping = writes stopped (11.2/11.4), not a storage bug.
+
+### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
+On a host with a lingering old container, the new one never converges: the journal
+loops the poll, the old container is Up for HOURS, new containers `Exited(0)` churn:
+```
+journalctl -u warp-main-grafana-g1 -n 40 | grep -oE 'Poll http.*|Found overlapping.*'
+#   Poll http://172.18.0.1:14488/status   (repeats forever)
+docker ps -a --filter name=grafana --format '{{.Image}} {{.Status}}'
+#   ...996260400  Up 3 hours          <- old, never drained
+#   ...996359920  Exited (0) 1m ago   <- new, killed by poll timeout
+```
+Root (`warpctl/run.go` `deploy()`): the DNAT `redirect`, `cleanupStaleConntrack`,
+and draining the OLD container ALL run only AFTER a passing poll; on poll-fail a
+`defer` KILLS THE NEW container and leaves the old. So a poll that can't pass while
+an old container lingers is self-perpetuating. `cleanupStaleConntrack` can't break
+it — UDP-ONLY (`run.go:~925`, built for wireguard keepalives) AND post-poll. The
+grafana trigger was 11.3 (front main server bound the specific gw ip; fixed by
+`0.0.0.0`). BREAK IT: reboot the host (clears containers + conntrack), or
+`docker stop` the old container + `conntrack -D -d <gw>`. LATENT for any service
+until the deploy loop drains-old on prolonged poll-fail instead of only after a pass.
+
+### 11.7b Memberlist island (join_members rendered empty) — the 2026-07-19 night tail
+After breaking the 11.7 deadlock on edge-0 (stale containers stopped, unit
+relaunched solo), its loki/mimir came up as a ONE-NODE gossip cluster: lb
+queries flipped from hang to fast `500: too many unhealthy instances in the
+ring`, then to answering with edge-0's data invisible; edge-0's own `/ring`
+showed a single ACTIVE member (itself) while the other 5 hosts' shared ring
+was healthy without it.
+- ROOT: `ringJoinMembers` (warp/grafana/main.go) looked up services.yml ring
+  hosts (FQDN keys, `by-us-fmt-5-edge-0.bringyour.com`) in settings.yml routes
+  (SHORT keys, `by-us-fmt-5-edge-0`) — every lookup missed and EVERY host
+  rendered `join_members: []`. The fleet mesh only ever formed because a
+  rolling deploy's OLD containers (already meshed) gossip-dial the new
+  instance's advertised port and bridge it in — a host restarted ALONE has no
+  inbound dial and stays an island forever. Fixed 2026-07-19 (build 997082420):
+  fqdn→short-name resolution + fall back to ALL routed hosts when the seed
+  list resolves empty (dead seeds are tolerated; an empty list is the only
+  fatal render).
+- TELLS: rendered `join_members: []` in `/run/warp-grafana/loki.yml` (docker
+  exec + sed the memberlist block — THE decisive read); single-member `/ring`
+  on the island vs n−1 members elsewhere; lb queries 500 "too many unhealthy
+  instances" only when landing on the island. RED HERRING: grafana-server's
+  `msg="no peer discovery configured" service=cluster` line is its alerting-HA
+  cluster, not loki/mimir memberlist.
+- RING HYGIENE: instance id = short hostname, so old+new containers of one
+  host SHARE a ring entry (an overlap never dirties the ring), but SIGKILLing
+  loki (docker stop -t shorter than its shutdown flush) skips unregister —
+  use a generous stop timeout. Leftover UNHEALTHY entries: forget via the loki
+  http `/ring` page (internal port from WARP_PORTS, host-loopback, no root).
+
+### 11.8 systemd unit port baking (WARP_PORTS staleness)
+`warpctl service run` reads ports from `--portblocks` BAKED into the unit at
+`create-units` time, NOT live services.yml. Symptom: front panics
+`ring port 6490 must be declared ... Missing host port for 6490` because WARP_PORTS
+still has the old ports.
+```
+grep -o 'portblocks=[^ ]*' /etc/systemd/system/warp-main-grafana-g1.service  # baked ports
+docker inspect $c --format '{{range .Config.Env}}{{println .}}{{end}}' | grep WARP_PORTS  # what the container got
+```
+FIX: `warpctl service create-units main` → commit the regenerated `xops` units →
+redeploy. Editing services.yml alone does nothing until the units are regenerated.
+
+### 11.9 Playbook: grafana/loki/mimir "no data / 502 / stuck deploy"
+1. `up>1` for hours or `Poll …` looping in the journal → deadlock (11.7): clear stale container + reboot.
+2. loki/mimir restarts climbing → config parse (11.4): read `not found in type`, fix the yaml key, re-verify on the binary.
+3. front=200 but backend connect refused while `ss` shows LISTEN → bind paradox (11.3): probe via the front proxy; real fix is `0.0.0.0`.
+4. `svc=0` on some hosts + `removing frontend failing healthcheck addr=:14609` → cross-host frontend/scheduler on the internal port (11.5): advertise the external ring port.
+5. minio empty → mimir-pre-2h-boundary (expected) vs loki-crash-looping (11.2)?
+6. front panics `Missing host port` → stale baked units (11.8): regenerate.
+7. lb queries hang or 500 `too many unhealthy instances in the ring`, or one
+   host's data missing → memberlist island (11.7b): check `/ring` member count
+   per host + rendered `join_members`; a redeploy re-bridges, the code fix
+   (build ≥997082420) prevents it.
+
+---
+
+## 12. Taskworker drain (deploy) — TASKDRAIN1
+
+The taskworker plane has no client connections; its "clients" are the chain
+cadences (contract close ×8, handler reap 60s, reliability rollup 1min,
+client scores 30s). Deploys are make-before-break over the shared pg queue,
+so a HEALTHY deploy pauses nothing. These signals catch the unhealthy paths.
+
+### 12.1 Drain outcome (log classes, service=taskworker)
+PROBE: `logs/taskworker-drain-gave-up` (tailer class; only the gave-up line is
+a finding — the other outcomes are healthy-by-design).
+The drain logs one start line and exactly one outcome line per SIGTERM:
+```
+[taskworker]drain start with N in flight
+[taskworker]drain finished cleanly in Xs                      # phase 1 (common)
+[taskworker]drain canceling N in-flight tasks after Xs         # phase 2 entered
+[taskworker]drain finished after cancel in Xs (N canceled and rescheduled)
+[taskworker]drain gave up after Xs with N tasks still running  # phase 3 (bad)
+```
+- HEALTHY: "finished cleanly"; "finished after cancel" with small N is fine
+  (the canceled tasks were rescheduled with claims released — re-run within
+  seconds elsewhere; their reschedule_error starts with `Drained:` and does
+  NOT advance reschedule_error_count).
+- BROKEN: "drain gave up" = a ctx-ignoring task rode to SIGKILL. Its claim
+  (and EVERY claim of that container) is now leased until claim +
+  max(30s, run_max_time_seconds) — find them with 12.3 and decide whether to
+  `bringyourctl task release`. Also broken: no outcome line within
+  DrainFinishTimeout+DrainCancelTimeout+30s of the start line (process hung
+  outside task work).
+- Metrics mirror: `urnetwork_taskworker_drain_inflight`, `_drain_seconds`,
+  `_drain_canceled` (push-based; the series goes stale when the process
+  exits, so the log lines are the durable record).
+
+### 12.2 Readiness gate (deploy-time)
+`/status` latches at startup: one-shot pg SELECT 1 + redis PING before any
+task is claimed. Status `error not ready: ...` → the warpctl poll fails
+(`^(?i)error(\s|:)`) for the full 120s → deploy reverts, old containers keep
+the plane running. Status `draining` after SIGTERM is informational (NOT an
+error — deliberate, so fleet status sampling doesn't count drains).
+- Signal: a deploy that reverts with `error not ready: redis ...` = the new
+  build cannot reach a dependency — fix the build/config, do NOT force.
+- GOTCHA: readiness is start-time-latched by design. A runtime redis outage
+  does not flip /status; that is 1.2's job (task canaries).
+
+### 12.3 Stuck leases (post-SIGKILL / crash)
+PROBE: `pg/task-lease-stranded` (probe_taskworker_drain.go, 60s cadence):
+claim with a future release_time whose keepalive (claim_time refresh every
+~10s while running) has been silent > 2 minutes = claiming worker gone.
+```sql
+-- claims held with a future release: normal while a task RUNS; suspect when
+-- the claiming container is gone (correlate with deploys/restarts)
+SELECT split_part(function_name,'.',3) AS task, task_id,
+       claim_time, release_time,
+       round(extract(epoch from (release_time - now()))) AS lease_remaining_s,
+       run_max_time_seconds
+FROM pending_task
+WHERE now() < release_time
+ORDER BY release_time DESC;
+```
+- HEALTHY: rows whose task genuinely runs long (compare finished_task
+  duration history, 2.5) and whose worker is alive.
+- BROKEN: lease_remaining_s ≈ run_max_time_seconds shortly AFTER a
+  taskworker kill/crash = stranded claim; the chain is paused until release.
+  DbMaintenance strands for up to 24h (skips a nightly window),
+  UpdateClientScores/UpdateReliabilities up to 2h (selection freshness, 2.8),
+  a CloseExpiredContracts slice 30min (close backlog, 2.6).
+- ACTION: verify the claiming worker is dead (deploy log / container list),
+  then `bringyourctl task release <task_id>` (immediate re-claim per run_at)
+  and/or `bringyourctl task kick <run_once_key>` (pull run_at to now).
+  Releasing a RUNNING task re-opens the duplicate-execution window — verify
+  first.
+
+### 12.4 Post-deploy convergence
+PROBES: `pg/task-due-lag` (oldest due-and-unclaimed > 180s sustained = the
+plane stopped claiming) and `pg/task-target-missing` (`Target not found`
+past 100 retries = beyond any overlap, a missing registration) — both in
+probe_taskworker_drain.go, 60s cadence.
+Within ~1min of a taskworker deploy completing:
+- oldest-due lag returns to ~0:
+```sql
+SELECT round(extract(epoch from (now() - min(run_at)))) AS oldest_due_s
+FROM pending_task
+WHERE available_block <= extract(epoch from now()) AND run_at <= now();
+```
+  (transient spikes while both build generations overlap are normal; a lag
+  that GROWS after the old containers exited = workers not claiming — check
+  12.2 and 1.2.)
+- `Drained:` reschedules from the drain complete their re-runs (the rows
+  disappear or complete; reschedule_error_count stayed 0).
+- `Target not found` reschedule errors are overlap noise and retry on a flat
+  ~16s cadence; they must clear once the fleet is on one build generation.
+  PERSISTING target-not-found on one build = a task type shipped without its
+  target registration — a code bug, page it (it no longer hides behind the
+  1h backoff).
+
+## 13. Api drain (deploy) — APIDRAIN1
+
+The api drains via the shared http drain sequence (`server/http_drain.go`):
+SIGTERM → /status latches "draining" → 10s keepalive retire grace (every
+http/1 response stamped `Connection: close`, so nginx retires its pooled
+conns cleanly) → `Shutdown` with a 60s ceiling → exit. Metrics are
+service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
+{env, service, block, host} grouping; any service adopting
+`HttpServerOptions.KeepaliveDrainTimeout` emits the same series.
+
+### 13.1 The one page-worthy signal
+- `max_over_time(urnetwork_http_server_drain_cut_connections[15m]) > 0`
+  (service="api"): a drain hit the 60s ceiling with connections still open —
+  those were HARD CUT at exit (client-visible truncation; a cut
+  sent-but-unanswered POST may be replayed by nginx's non_idempotent retry =
+  possible double execution). The RANGE query is required: the gauge reaches
+  the series in the dying container's exit flush, and the replacement
+  container overwrites the same {env, service, block, host} series with 0
+  within one ~15s push — an instant `> 0` check misses the event.
+  Must be 0 forever: the ceiling (60s) exceeds the max request lifetime
+  (ReadTimeout 15s + WriteTimeout 30s), so a nonzero means a handler is
+  wedged past its write deadline or the timeouts were misconfigured.
+  Log line: `[http]drain deadline after <dur>: N connection(s) cut`.
+
+### 13.2 Drain-window observability
+- `urnetwork_http_server_draining` 1 during the drain sequence;
+  `drain_seconds` = last drain duration (expect ~10s grace + seconds);
+  `drain_inflight` = requests mid-handler at SIGTERM (context for cut>0).
+- The stats pusher and the router stats reporter run through the drain (the
+  process ctx outlives the serve ctx) and both FLUSH at exit — the drain
+  window's requests appear in the final `[host][api][block]` route lines
+  instead of vanishing with the process.
+- /status returns the latched json status "draining" (deliberately NOT an
+  error: the deploy poll never targets the draining container, and fleet
+  status sampling must not count an operator drain as a service error).
+
+### 13.3 Deploy-window client impact (expected: none)
+- nginx retry classes are narrowed to `error timeout http_502 http_503
+  non_idempotent` (warp config.go): a draining/flipping upstream is ridden
+  over; http_500/http_504 no longer re-execute POSTs on a sibling.
+- Go clients additionally retry GETs once (jittered) on a surfaced 502/503
+  (`connect` ClientStrategy `GetRetry*` settings); the JS SDK retries its
+  GETs likewise. POSTs are never replayed by clients.
+- BROKEN: deploy-window 5xx spikes at the lb for service=api, or client
+  reports of failed POSTs during deploys → check 13.1 first, then whether
+  both retry tries landed on draining blocks (host drain flock should make
+  that impossible — one block per host drains at a time).
+
+### 13.4 Readiness latch (P0)
+- `urnetwork_api_ready` 1 after the startup latch passed (one-shot pg
+  `SELECT 1` + redis `PING`, `api/readiness.go`), 0 on a failed check and
+  from drain start. A failed check latches /status to
+  `error not ready: <check>: ...` — the deploy poll reads it, times out,
+  and reverts to the old container. The not-ready container does NOT exit
+  (no restart flap; a restart-in-place, where the DNAT already targets it,
+  is served best-effort with warmup skipped).
+- BROKEN: a deploy that keeps reverting with `error not ready: redis ...`
+  = the new build/config cannot reach a dependency the old build can —
+  diagnose the dependency (vault drift, network, auth), not the poll.
+
+## 14. Proxy drain (deploy) — PROXYDRAIN1
+
+The proxy hosts (fireside/crisp, 10 blocks each) are transparent-lb: direct
+DNAT, no nginx, and `warpctl deploy main proxy` is fire-and-forget at the
+CLI (no lb status polling) — the HOST-side run worker's 120s /status poll is
+the only gate before the DNAT flip. Clients are pinned to their (host,
+block) forever, so there is no sibling absorption: the replacement container
+of the SAME block is the only thing that can serve them. All metrics below
+are pushed by the standard stats pusher {env, service=proxy, block, host}.
+
+### 14.1 Readiness gate (deploy-time)
+- `urnetwork_proxy_ready` 1 once the initial proxy-client sync has been
+  APPLIED (every watched host/block stream completed its first successful
+  read AND delivery — the wg peer table is restored), 0 before and again
+  from drain start. Unlike api/taskworker (a pg/redis latch), proxy
+  readiness is the peer restore itself: /status 503
+  `not ready: initial proxy client sync in progress` until then, so the
+  DNAT flip can no longer beat the peer install (the pre-PROXYDRAIN1 race:
+  a wg handshake arriving before its peer was silently dropped).
+- Log tell: `[proxy]initial proxy client sync applied; ready`. A deploy
+  that reverts without that line = the sync cannot complete (pg/redis
+  unreachable from the new build, or the delivery keeps failing —
+  `[proxy]proxy clients callback err=... (will retry)`).
+
+### 14.2 Drain window (the old container, SIGTERM → exit)
+- `urnetwork_proxy_drain_active_remaining` (1s cadence): in-flight
+  socks/http connections still relaying. Falling to 0 → the process exits
+  IMMEDIATELY (exit 0), so `docker stop` returns right away. A plateau
+  until the 2min `DrainGraceTimeout` = long-lived tunnels riding the grace
+  (expected; cut at the deadline). Logs: `[proxy]drain start (N active,
+  grace 2m0s)` → `[proxy]drain in progress (N active)` every 10s →
+  `[proxy]drain complete in Xs` | `[proxy]drain deadline with N active`.
+- The wg ingress serves through the WHOLE drain on purpose (not a drain
+  target): its conntrack-pinned clients cannot migrate until this process
+  exits and warpctl flushes their entries (run.go cleanupStaleConntrack,
+  §10.1 stop-child recipe applies here too). New tcp conns already go to
+  the replacement (the flip preceded SIGTERM); only established flows are
+  in play.
+- `[wg]handoff export: N peers` right before exit = the endpoint handoff
+  was written (peers with a handshake in the last 10min). `no recently
+  active peers` on a busy block = wrong: check PeerStatuses/last-handshake
+  plumbing.
+
+### 14.3 Post-flip convergence (the replacement container)
+- wg re-establishment is SERVER-initiated: `[wg]handoff apply: N/M
+  endpoints seeded` then per-peer `[wg]handoff re-established <ip> in Xms`
+  and `all peers re-established in Xs`. Expect sub-second-to-seconds after
+  the old container exits — initiations sent before the conntrack flush
+  blackhole harmlessly and retry (5s pace, 5min budget). `initiate budget
+  ended with N peers pending` = clients genuinely gone OR the flush never
+  ran (verify the drained container actually exited and warpctl's
+  post-drain cleanupStaleConntrack fired).
+- `urnetwork_proxy_prewarmed_devices` + `[proxy]prewarm: N/M devices
+  ready`: devices for clients active in the last 10min are warmed before
+  their first packet arrives. N far below M = providers unreachable from
+  the new build (egress window never satisfied) — the lazy open path still
+  covers misses, at cold-start cost.
+- `urnetwork_proxy_devices_live` (1min cadence) should recover toward the
+  pre-deploy level as actives return; `urnetwork_proxy_wg_peers` should
+  match the block's client set right after the initial sync. A wg_peers
+  collapse post-deploy = restore problem — read the `[wg]sync clients:
+  applied/removed (...)` drop-reason counts (key mismatch / bad auth /
+  not entitled).
+
+### 14.4 Inner-flow continuity (window identity reuse)
+- `[pd][<proxyId>]window identity restore: N identities` on the
+  replacement = the recreated device reuses its window client ids against
+  the same providers, so provider-side NAT flows (udp 60s idle, tcp 300s)
+  resume. Absence for a recently-active device = the 10min store ttl
+  lapsed (restart gap too long) or persistence is disabled
+  (`DisableWindowIdentityPersistence`).
+- Flows that can NOT resume (identity not restored, or the flow landed on
+  a different window entry) now fail FAST: the provider answers orphaned
+  mid-stream packets with a RST (`TcpBufferSettings.EnableOrphanRst`,
+  256/s valve) instead of letting the app hang to its own timeout. A
+  deploy-window burst of client-side connection resets that immediately
+  reconnect is this mechanism working; sustained resets outside deploys
+  are worth investigating (source flow state being lost somewhere).

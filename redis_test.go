@@ -103,3 +103,60 @@ func TestRedisPublishSubscribe(t *testing.T) {
 		connect.AssertEqual(t, received.Payload, message)
 	})
 }
+
+// TestSubscribeKeyEventsConnDeathResubscribes pins the reconnect-detection
+// contract of `SubscribeKeyEvents`: go-redis transparently reconnects and
+// re-PSUBSCRIBEs a killed pubsub connection, and events published during the
+// gap are gone — so a post-initial psubscribe confirmation must terminate the
+// epoch (`done` fires) and force the caller to resubscribe + resync. Without
+// the detection, a killed connection would silently resume with a gap and the
+// caller would never resync (REVIEW2 §5, PEERSSTREAMS2 §8).
+func TestSubscribeKeyEventsConnDeathResubscribes(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		Testing_EnableKeyspaceNotifications(ctx)
+
+		prefix := fmt.Sprintf("test:kes:%s", NewId())
+		pattern := fmt.Sprintf("__keyspace@%d__:%s:*", RedisDb(), prefix)
+
+		messages, done, unsub, err := SubscribeKeyEvents(ctx, 60*time.Second, pattern)
+		Raise(err)
+		defer unsub()
+
+		// the subscription delivers: a SET on a matching key arrives. Retry
+		// the SET until delivery — psubscribe confirmation timing means the
+		// first write can race the subscription becoming active.
+		deliverCtx, deliverCancel := context.WithTimeout(ctx, 15*time.Second)
+		defer deliverCancel()
+		delivered := false
+		for !delivered {
+			Redis(ctx, func(r RedisClient) {
+				Raise(r.Set(ctx, fmt.Sprintf("%s:a", prefix), "1", 30*time.Second).Err())
+			})
+			select {
+			case <-deliverCtx.Done():
+				t.Fatal("no key event delivered before conn kill")
+			case message := <-messages:
+				connect.AssertEqual(t, message.Payload, "set")
+				delivered = true
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+
+		// kill every pubsub connection server-side; go-redis auto-reconnects
+		// and re-PSUBSCRIBEs, which must surface as an epoch termination
+		Redis(ctx, func(r RedisClient) {
+			Raise(r.Do(ctx, "CLIENT", "KILL", "TYPE", "pubsub").Err())
+		})
+
+		select {
+		case <-done:
+			// the epoch ended: the caller resubscribes + resyncs (the
+			// key-event subscriber's run loop does exactly this)
+		case <-time.After(15 * time.Second):
+			t.Fatal("done did not fire after the pubsub connection was killed")
+		}
+	})
+}

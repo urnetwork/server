@@ -244,6 +244,12 @@ const clientReliabilityBlocksKey = "client_reliability_stats_blocks"
 // deletes a block's hash within ~2 blocks + one rollup period
 const clientReliabilityStatsRedisTtl = 15 * time.Minute
 
+// Writers always shard. The rollup still reads the legacy unsharded key
+// (clientReliabilityStatsLegacyKey) so counters written by pre-shard builds
+// before the 2026-07 cutover, and any cross-generation reads, continue to
+// drain. Rollback of a taskworker to a pre-shard build remains forbidden: an
+// old rollup cannot read shard hashes and would orphan them.
+
 const clientReliabilityCounterCount = 9
 
 // index order of the packed counters; must match the drain insert below.
@@ -301,7 +307,10 @@ func RecordClientReliabilityStatsRange(
 		// only after two full blocks have elapsed, so the two can never race.
 		minBlockNumber := reliabilityBlockNumber(server.NowUtc()) - 1
 		if startBlockNumber < minBlockNumber {
-			glog.Infof(
+			// routine (a late stats write clamped to the drainable window), and
+			// once per client per write — at fleet scale that is thousands of
+			// lines, so keep it at V(1) rather than default output.
+			glog.V(1).Infof(
 				"[ncr]drop reliability stats for stale blocks [%d, %d) client_id=%s\n",
 				startBlockNumber,
 				min(minBlockNumber, endBlockNumber+1),
@@ -329,7 +338,8 @@ func RecordClientReliabilityStatsRange(
 				r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 					for i, count := range counters {
 						if count != 0 {
-							pipe.HIncrBy(ctx, statsKey, fieldPrefix+string([]byte{byte(i)}), count)
+							field := fieldPrefix + string([]byte{byte(i)})
+							pipe.HIncrBy(ctx, statsKey, field, count)
 						}
 					}
 					// backstop ttl only — the rollup normally deletes the

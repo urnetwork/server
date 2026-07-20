@@ -3,9 +3,10 @@ package model
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
-	"github.com/prometheus/client_golang/prometheus"
 	mathrand "math/rand"
 	"slices"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
@@ -867,11 +869,20 @@ func UpdateNetworkPeerProvideModes(
 	if networkId == nil {
 		return
 	}
+	updateNetworkPeerProvideModes(ctx, *networkId, clientId, provideModes)
+}
+
+func updateNetworkPeerProvideModes(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	provideModes map[ProvideMode]bool,
+) {
 	member := string(clientId.Bytes())
 	provideModesList := sortedProvideModesList(provideModes)
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		metaBytes, _ := r.HGet(ctx, networkPeerMetaKey(*networkId), member).Bytes()
+		metaBytes, _ := r.HGet(ctx, networkPeerMetaKey(networkId), member).Bytes()
 		meta, _ := loadNetworkPeerMeta(metaBytes)
 		if meta == nil {
 			// not a registered peer
@@ -883,17 +894,55 @@ func UpdateNetworkPeerProvideModes(
 		}
 
 		meta.Peer.ProvideModes = provideModesList
-		pipe := r.TxPipeline()
-		pipe.HSet(ctx, networkPeerMetaKey(*networkId), member, meta.Bytes())
-		// rewrite the member key preserving the registration ttl: the `set`
-		// notification is the provide-change delta for key-event listeners
-		pipe.SetArgs(ctx, networkPeerMemberKey(*networkId, clientId), meta.Bytes(), redis.SetArgs{KeepTTL: true})
-		_, err := pipe.Exec(ctx)
+		updatedMetaBytes := meta.Bytes()
+
+		// Metadata, membership existence/TTL, resident ownership (encoded in
+		// the exact old metadata), and the version bump are one atomic
+		// transition. SET KEEPTTL would create a missing member without a TTL;
+		// this script instead refuses missing/persistent/stale registrations.
+		updated, err := r.Eval(
+			ctx,
+			`
+			local meta_key = KEYS[1]
+			local member_key = KEYS[2]
+			local event_id_key = KEYS[3]
+			local member = ARGV[1]
+			local expected_meta = ARGV[2]
+			local updated_meta = ARGV[3]
+			local event_ttl_seconds = ARGV[4]
+
+			local hash_meta = redis.call('HGET', meta_key, member)
+			local member_meta = redis.call('GET', member_key)
+			local member_ttl_ms = redis.call('PTTL', member_key)
+			if hash_meta == false or member_meta == false or member_ttl_ms <= 0 then
+				return 0
+			end
+			if hash_meta ~= expected_meta or member_meta ~= expected_meta then
+				return 0
+			end
+
+			redis.call('HSET', meta_key, member, updated_meta)
+			redis.call('SET', member_key, updated_meta, 'PX', member_ttl_ms)
+			redis.call('INCR', event_id_key)
+			redis.call('EXPIRE', event_id_key, event_ttl_seconds)
+			return 1
+			`,
+			[]string{
+				networkPeerMetaKey(networkId),
+				networkPeerMemberKey(networkId, clientId),
+				networkPeerEventIdKey(networkId),
+			},
+			member,
+			metaBytes,
+			updatedMetaBytes,
+			int64(networkPeerKeyTtl/time.Second),
+		).Int()
 		if err != nil {
 			panic(err)
 		}
-
-		bumpNetworkPeerVersion(ctx, r, *networkId)
+		if updated != 1 {
+			return
+		}
 	})
 }
 
@@ -1050,7 +1099,72 @@ func init() {
 type networkPeerKeyEventDelta struct {
 	clientId server.Id
 	// "set" | "del" | "expired" (see NetworkPeerListener.Delta)
-	event string
+	event      string
+	eventId    int64
+	hasEventId bool
+}
+
+type networkPeerStateHash [sha256.Size]byte
+
+// NetworkPeerSnapshot is an immutable, prepared full-state reconcile shared
+// by every listener for one network in a process. The per-peer and aggregate
+// hashes are computed once, rather than JSON-encoding every peer again in
+// every resident listener.
+//
+// Its fields are deliberately private: callers may distribute a snapshot but
+// cannot mutate the state used for convergence decisions.
+type NetworkPeerSnapshot struct {
+	eventId   int64
+	peers     []*NetworkPeer
+	peerState map[server.Id]networkPeerStateHash
+	stateHash networkPeerStateHash
+}
+
+func networkPeerStateEntryHash(peer *NetworkPeer) networkPeerStateHash {
+	kind := byte(1)
+	var encoded []byte
+	if peer.DisconnectTime != nil {
+		// The exact disconnect time can differ between a key-event marker and
+		// the authoritative zset score. Both represent the same state.
+		kind = 0
+	} else {
+		var err error
+		encoded, err = json.Marshal(peer)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	input := make([]byte, 0, 1+len(peer.ClientId.Bytes())+len(encoded))
+	input = append(input, kind)
+	input = append(input, peer.ClientId.Bytes()...)
+	input = append(input, encoded...)
+	return sha256.Sum256(input)
+}
+
+func xorNetworkPeerStateHash(dst *networkPeerStateHash, value networkPeerStateHash) {
+	for i := range dst {
+		dst[i] ^= value[i]
+	}
+}
+
+// PrepareNetworkPeerSnapshot prepares a GetNetworkPeers result once for
+// process-wide fanout. The caller and listeners must treat peers as immutable.
+func PrepareNetworkPeerSnapshot(eventId int64, peers []*NetworkPeer) *NetworkPeerSnapshot {
+	snapshot := &NetworkPeerSnapshot{
+		eventId:   eventId,
+		peers:     peers,
+		peerState: make(map[server.Id]networkPeerStateHash, len(peers)),
+	}
+	for _, peer := range peers {
+		hash := networkPeerStateEntryHash(peer)
+		if oldHash, ok := snapshot.peerState[peer.ClientId]; ok {
+			xorNetworkPeerStateHash(&snapshot.stateHash, oldHash)
+		}
+		snapshot.peerState[peer.ClientId] = hash
+		xorNetworkPeerStateHash(&snapshot.stateHash, hash)
+	}
+	return snapshot
 }
 
 type NetworkPeerListener struct {
@@ -1068,6 +1182,10 @@ type NetworkPeerListener struct {
 	deltas      chan *networkPeerKeyEventDelta
 	resync      chan struct{}
 	forceResync atomic.Bool
+
+	snapshotLock    sync.Mutex
+	pendingSnapshot *NetworkPeerSnapshot
+	snapshotReady   chan struct{}
 }
 
 // NewNetworkPeerListener polls the network's peer version counter every
@@ -1094,6 +1212,7 @@ func NewNetworkPeerListener(
 		fullReadEvery: fullReadEvery,
 		deltas:        make(chan *networkPeerKeyEventDelta, 32),
 		resync:        make(chan struct{}, 1),
+		snapshotReady: make(chan struct{}, 1),
 	}
 	go server.HandleError(npl.run)
 	return npl
@@ -1104,10 +1223,41 @@ func NewNetworkPeerListener(
 // listener degrades to a resync — a delayed full read, never a lost change.
 // Safe to call from the subscriber's demux goroutine.
 func (self *NetworkPeerListener) Delta(clientId server.Id, event string) {
+	self.delta(clientId, event, 0, false)
+}
+
+// DeltaWithEventId is Delta with the registry version observed once by the
+// process-wide subscriber. Advancing the local version after a delivered
+// delta prevents every listener from redundantly full-reading the same
+// network on its next corrective tick.
+func (self *NetworkPeerListener) DeltaWithEventId(clientId server.Id, event string, eventId int64) {
+	self.delta(clientId, event, eventId, true)
+}
+
+func (self *NetworkPeerListener) delta(clientId server.Id, event string, eventId int64, hasEventId bool) {
 	select {
-	case self.deltas <- &networkPeerKeyEventDelta{clientId: clientId, event: event}:
+	case self.deltas <- &networkPeerKeyEventDelta{
+		clientId:   clientId,
+		event:      event,
+		eventId:    eventId,
+		hasEventId: hasEventId,
+	}:
 	default:
 		self.Resync()
+	}
+}
+
+// ApplySnapshot supplies a prepared snapshot fetched once for all listeners
+// of a network by the process-wide key-event subscriber. Only the newest
+// pending snapshot is retained; snapshots are full state, so replacing an
+// older one is lossless.
+func (self *NetworkPeerListener) ApplySnapshot(snapshot *NetworkPeerSnapshot) {
+	self.snapshotLock.Lock()
+	self.pendingSnapshot = snapshot
+	self.snapshotLock.Unlock()
+	select {
+	case self.snapshotReady <- struct{}{}:
+	default:
 	}
 }
 
@@ -1129,30 +1279,37 @@ func (self *NetworkPeerListener) run() {
 	// resyncs from a full read.
 	var eventId int64
 	synced := false
+	peerState := map[server.Id]networkPeerStateHash{}
+	var stateHash networkPeerStateHash
 
-	// full-read and deliver the snapshot when the version moved. `!=` (never
-	// `<`): the counter moves backward on flush / ttl-expiry / eviction, and
-	// any mismatch resyncs. A flush-and-rebuild is not atomic in production
-	// (heartbeats repopulate over seconds), so a poll observes the
-	// intermediate empty state and the version diverges — the comparison
-	// catches every realistic case without re-delivering on a static registry.
-	reset := func() {
-		resetEventId, resetPeers := GetNetworkPeers(self.ctx, self.networkId)
-		if !synced || resetEventId != eventId {
+	applyReset := func(snapshot *NetworkPeerSnapshot) {
+		stateChanged := len(peerState) != len(snapshot.peerState) || stateHash != snapshot.stateHash
+		// Always acknowledge the authoritative version, even when a delivered
+		// delta already brought local state to the same result.
+		eventId = snapshot.eventId
+		if !synced || stateChanged {
+			peerState = make(map[server.Id]networkPeerStateHash, len(snapshot.peerState))
+			for clientId, hash := range snapshot.peerState {
+				peerState[clientId] = hash
+			}
+			stateHash = snapshot.stateHash
 			// in key-event mode (long corrective poll) this counts corrective
 			// deliveries — expected near zero beyond registrations/resyncs; a
 			// sustained rate means events are being dropped (PEERSSTREAMS2.md)
 			networkPeerListenerResets.Inc()
 			synced = true
-			eventId = resetEventId
 
 			resetEvent := &NetworkPeerEvent{
 				NetworkPeerEventType: NetworkPeerEventTypeReset,
-				EventId:              resetEventId,
-				Peers:                resetPeers,
+				EventId:              snapshot.eventId,
+				Peers:                snapshot.peers,
 			}
 			self.callback(resetEvent)
 		}
+	}
+	reset := func() {
+		resetEventId, resetPeers := GetNetworkPeers(self.ctx, self.networkId)
+		applyReset(PrepareNetworkPeerSnapshot(resetEventId, resetPeers))
 	}
 
 	// handleDelta applies one per-peer key event (PEERSSTREAMS2.md): `set`
@@ -1160,9 +1317,18 @@ func (self *NetworkPeerListener) run() {
 	// delivers a disconnect marker. No version movement — the corrective poll
 	// reconciles the counter on its own cadence.
 	handleDelta := func(delta *networkPeerKeyEventDelta) {
+		if synced && delta.hasEventId {
+			eventId = delta.eventId
+		}
 		switch delta.event {
 		case "set":
 			if peer := GetNetworkPeerMember(self.ctx, self.networkId, delta.clientId); peer != nil {
+				if oldHash, ok := peerState[delta.clientId]; ok {
+					xorNetworkPeerStateHash(&stateHash, oldHash)
+				}
+				newHash := networkPeerStateEntryHash(peer)
+				peerState[delta.clientId] = newHash
+				xorNetworkPeerStateHash(&stateHash, newHash)
 				self.callback(&NetworkPeerEvent{
 					NetworkPeerEventType: NetworkPeerEventTypeUpdated,
 					EventId:              eventId,
@@ -1173,10 +1339,17 @@ func (self *NetworkPeerListener) run() {
 			// the registration raced a remove; fall through to the marker
 			fallthrough
 		case "del", "expired":
+			if oldHash, ok := peerState[delta.clientId]; ok {
+				xorNetworkPeerStateHash(&stateHash, oldHash)
+			}
+			marker := networkPeerDisconnectMarker(delta.clientId, server.NowUtc())
+			newHash := networkPeerStateEntryHash(marker)
+			peerState[delta.clientId] = newHash
+			xorNetworkPeerStateHash(&stateHash, newHash)
 			self.callback(&NetworkPeerEvent{
 				NetworkPeerEventType: NetworkPeerEventTypeRemoved,
 				EventId:              eventId,
-				Peers:                []*NetworkPeer{networkPeerDisconnectMarker(delta.clientId, server.NowUtc())},
+				Peers:                []*NetworkPeer{marker},
 			})
 		}
 	}
@@ -1199,11 +1372,26 @@ func (self *NetworkPeerListener) run() {
 			return
 		case delta := <-self.deltas:
 			// contain redis panics to the delta; a failed delta read degrades
-			// to a forced resync, never a lost change
+			// to a forced resync, never a lost change. Resync (not a bare
+			// flag store) so the repair wakes promptly instead of waiting
+			// for the next poll
 			if r := server.HandleError(func() {
 				handleDelta(delta)
 			}); r != nil {
-				self.forceResync.Store(true)
+				self.Resync()
+			}
+			continue
+		case <-self.snapshotReady:
+			self.snapshotLock.Lock()
+			snapshot := self.pendingSnapshot
+			self.pendingSnapshot = nil
+			self.snapshotLock.Unlock()
+			if snapshot != nil {
+				if r := server.HandleError(func() {
+					applyReset(snapshot)
+				}); r != nil {
+					self.Resync()
+				}
 			}
 			continue
 		case <-self.resync:

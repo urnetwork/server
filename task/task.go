@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"maps"
@@ -62,6 +63,28 @@ var RescheduleTimeout = 2 * BlockSizeSeconds * time.Second
 // pending_task to ~94% dead tuples and made the poll query 39% of all db exec
 // time. The count resets when the task completes (the pending row is deleted).
 var RescheduleBackoffMaxTimeout = 1 * time.Hour
+
+// clamp for the backoff exponent in the reschedule write (bounds power())
+const rescheduleBackoffMaxExponent = 24
+
+// exponent clamp for the version-skew retry: a target-not-found error
+// usually means the task type exists only on the other build generation of a
+// deploy overlap, so the full exponential backoff would push a brand-new
+// chain out for no reason. Retries converge to
+// RescheduleTimeout * 2^targetNotFoundBackoffMaxExponent (~16s) — negligible
+// load, and a PERMANENTLY missing target stays loudly visible in
+// has_reschedule_error instead of hiding behind an hour-long backoff.
+const targetNotFoundBackoffMaxExponent = 3
+
+// ErrTargetNotFound tags a claimed task whose function has no registered
+// target in this worker (deploy version skew, or a missing registration).
+var ErrTargetNotFound = errors.New("Target not found")
+
+// ErrDrained tags a task error caused by `Drain` canceling the task context.
+// The reschedule write for these skips the error-count increment and the
+// backoff (retry ~RescheduleTimeout later, claim released immediately), so a
+// deploy never pushes a healthy chain toward the backoff cap.
+var ErrDrained = errors.New("Drained")
 
 type TaskPriority = int
 
@@ -534,6 +557,58 @@ func RemovePendingTask(ctx context.Context, taskId server.Id) {
 	})
 }
 
+// ReleaseTask clears the claim lease on a pending task, making it claimable
+// again per its run_at (release_time <= run_at puts available_block back on
+// the run_at schedule). This is the operator recovery for a claim stranded
+// by a killed worker, which otherwise blocks the task — and its RunOnce
+// chain — until claim + max time passes; a deploy cannot heal it (the
+// InitTasks upsert never touches claims). Releasing a task that is actually
+// STILL RUNNING re-opens the duplicate-execution window the lease exists to
+// prevent, so verify the claiming worker is really gone first.
+func ReleaseTask(ctx context.Context, taskId server.Id) (released bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE pending_task
+				SET
+					claim_time = $2,
+					release_time = $2
+				WHERE task_id = $1
+			`,
+			taskId,
+			time.Time{},
+		))
+		released = tag.RowsAffected() == 1
+	})
+	return
+}
+
+// KickTasks pulls the next run of the pending tasks matching a run-once key
+// to now. The key matches both the raw form the Schedule* helpers use
+// (e.g. "update_client_scores") and the exact stored json-encoded form.
+// A claimed task still waits out its release_time (use ReleaseTask).
+func KickTasks(ctx context.Context, runOnceKey string) (kickedCount int64) {
+	// the stored key is the json-encoded RunOnce key list
+	jsonKey := RunOnce(runOnceKey).String()
+	now := server.NowUtc()
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE pending_task
+				SET run_at = LEAST(run_at, $2)
+				WHERE run_once_key IN ($1, $3)
+			`,
+			runOnceKey,
+			now,
+			jsonKey,
+		))
+		kickedCount = tag.RowsAffected()
+	})
+	return
+}
+
 // removes finished tasks older than `minTime` where the post was successfully
 // run. Tasks whose post permanently errored are kept longer for debugging but
 // still removed after `postErrorMinTime`, so they cannot strand forever.
@@ -757,7 +832,17 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 	}
 
 	runPost = func(tx server.PgTx) error {
-		clientSession, err := task.ClientSession(ctx)
+		// the post runs in the finalize tx AFTER the function completed. It
+		// must not be severed by the function's max-time/drain cancel (a
+		// completed task's chain re-arm would strand into the RunPost retry
+		// path), so it drops the function context's cancellation; the
+		// finalize tx's own context still bounds the db work.
+		postCtx, postCancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			DefaultTaskFinalizeTimeout,
+		)
+		defer postCancel()
+		clientSession, err := task.ClientSession(postCtx)
 		if err != nil {
 			return err
 		}
@@ -850,13 +935,29 @@ func DefaultTaskWorkerSettings() *TaskWorkerSettings {
 		BatchSize:              4,
 		RetryTimeoutAfterError: 30 * time.Second,
 		PollTimeout:            5 * time.Second,
+		DrainFinishTimeout:     60 * time.Second,
+		DrainCancelTimeout:     30 * time.Second,
+		FinalizeTimeout:        DefaultTaskFinalizeTimeout,
 	}
 }
+
+const DefaultTaskFinalizeTimeout = 30 * time.Second
 
 type TaskWorkerSettings struct {
 	BatchSize              int
 	RetryTimeoutAfterError time.Duration
 	PollTimeout            time.Duration
+	// how long `Drain` waits for in-flight tasks to finish naturally before
+	// canceling their contexts
+	DrainFinishTimeout time.Duration
+	// how long `Drain` waits after the cancel for the canceled task
+	// functions to unwind; a function that ignores its context keeps its
+	// claim lease and rides to the process kill
+	DrainCancelTimeout time.Duration
+	// bounds the detached transaction that records completion/reschedule and
+	// releases claims after task functions return. It deliberately outlives
+	// the serving root context during shutdown.
+	FinalizeTimeout time.Duration
 }
 
 type TaskWorker struct {
@@ -864,9 +965,19 @@ type TaskWorker struct {
 	cancel    context.CancelFunc
 	runCtx    context.Context
 	runCancel context.CancelFunc
-	runWg     sync.WaitGroup
-	targets   map[string]Target
-	settings  *TaskWorkerSettings
+	// canceled by `Drain` after DrainFinishTimeout to abort the in-flight
+	// task function contexts (the eval/finalize machinery stays on ctx)
+	drainCtx    context.Context
+	drainCancel context.CancelFunc
+	runWg       sync.WaitGroup
+	targets     map[string]Target
+	settings    *TaskWorkerSettings
+
+	stateLock sync.Mutex
+	draining  bool
+
+	inflightCount      atomic.Int64
+	drainCanceledCount atomic.Int64
 }
 
 func NewTaskWorkerWithDefaults(ctx context.Context) *TaskWorker {
@@ -876,14 +987,17 @@ func NewTaskWorkerWithDefaults(ctx context.Context) *TaskWorker {
 func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorker {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	runCtx, runCancel := context.WithCancel(cancelCtx)
+	drainCtx, drainCancel := context.WithCancel(cancelCtx)
 
 	taskWorker := &TaskWorker{
-		ctx:       cancelCtx,
-		cancel:    cancel,
-		runCtx:    runCtx,
-		runCancel: runCancel,
-		targets:   map[string]Target{},
-		settings:  settings,
+		ctx:         cancelCtx,
+		cancel:      cancel,
+		runCtx:      runCtx,
+		runCancel:   runCancel,
+		drainCtx:    drainCtx,
+		drainCancel: drainCancel,
+		targets:     map[string]Target{},
+		settings:    settings,
 	}
 
 	taskWorker.AddTargets(
@@ -894,7 +1008,9 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 }
 
 func (self *TaskWorker) Run() {
-	self.runWg.Add(1)
+	if !self.enterRun() {
+		return
+	}
 	defer self.runWg.Done()
 
 	emptyCount := 0
@@ -929,10 +1045,122 @@ func (self *TaskWorker) Run() {
 	}
 }
 
+// enterRun registers a run loop with the drain wait group. Once `Drain` has
+// started, run loops must not re-enter: a `runWg.Add` concurrent with the
+// drain's `Wait` at counter zero is a WaitGroup reuse violation that panics
+// and aborts the drain mid-flight. The taskworker main re-enters `Run` every
+// second, so without this guard the race was real at the drain tail.
+func (self *TaskWorker) enterRun() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.draining {
+		return false
+	}
+	self.runWg.Add(1)
+	return true
+}
+
+func (self *TaskWorker) setDraining() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.draining = true
+}
+
+func (self *TaskWorker) Draining() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.draining
+}
+
+// InflightCount is the number of claimed tasks currently executing in this
+// worker.
+func (self *TaskWorker) InflightCount() int {
+	return int(self.inflightCount.Load())
+}
+
+// DrainCanceledCount is the number of task executions that errored under a
+// drain cancel; each was rescheduled with its claim released for another
+// worker to re-run immediately.
+func (self *TaskWorker) DrainCanceledCount() int {
+	return int(self.drainCanceledCount.Load())
+}
+
+// Drain stops the worker with a bounded wait (TASKDRAIN1 §2.1):
+//  1. stop starting new batches and wait DrainFinishTimeout for in-flight
+//     tasks to finish naturally (the common case — most tasks run seconds);
+//  2. cancel the in-flight task function contexts. A canceled function
+//     errors into the normal reschedule path, which releases its claim
+//     immediately (release_time = now) for the new container or a sibling
+//     block to re-run within seconds;
+//  3. wait DrainCancelTimeout for the canceled functions to unwind. A
+//     function that ignores its context keeps its lease and rides to the
+//     process kill — logged, and the lease correctly prevents a duplicate
+//     execution until it expires.
 func (self *TaskWorker) Drain() {
+	self.setDraining()
 	self.runCancel()
 
-	self.runWg.Wait()
+	startTime := time.Now()
+	elapsedSeconds := func() float32 {
+		return float32(time.Since(startTime)/time.Millisecond) / 1000
+	}
+
+	if self.waitRunDone(self.settings.DrainFinishTimeout) {
+		glog.Infof("[taskworker]drain finished cleanly in %.1fs\n", elapsedSeconds())
+		return
+	}
+
+	glog.Infof(
+		"[taskworker]drain canceling %d in-flight tasks after %.1fs\n",
+		self.InflightCount(),
+		elapsedSeconds(),
+	)
+	self.drainCancel()
+	if self.waitRunDone(self.settings.DrainCancelTimeout) {
+		glog.Infof(
+			"[taskworker]drain finished after cancel in %.1fs (%d canceled and rescheduled)\n",
+			elapsedSeconds(),
+			self.DrainCanceledCount(),
+		)
+		return
+	}
+
+	glog.Infof(
+		"[taskworker]drain gave up after %.1fs with %d tasks still running (claims release per task max time)\n",
+		elapsedSeconds(),
+		self.InflightCount(),
+	)
+}
+
+// WaitFinalHandback keeps the process alive for one bounded finalization
+// grace after Drain. It is immediate when the run loops already finished.
+// When Drain gave up on a context-ignoring task, this lets that task unwind
+// and run the detached claim handback before the taskworker CLI cancels its
+// serving context and exits. A task that still has not returned at the end of
+// the grace retains its lease, preserving the no-duplicate-execution rule.
+func (self *TaskWorker) WaitFinalHandback() bool {
+	timeout := self.settings.FinalizeTimeout
+	if timeout <= 0 {
+		timeout = DefaultTaskFinalizeTimeout
+	}
+	return self.waitRunDone(timeout)
+}
+
+// waitRunDone waits up to timeout for all run loops (and their in-flight
+// batches) to complete. Multiple concurrent waiters are safe; `enterRun`
+// guarantees no `Add` races the `Wait` once draining is set.
+func (self *TaskWorker) waitRunDone(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go server.HandleError(func() {
+		defer close(done)
+		self.runWg.Wait()
+	})
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func (self *TaskWorker) AddTargets(taskTargets ...Target) {
@@ -956,10 +1184,11 @@ func (self *TaskWorker) RunPost(
 		return
 	}
 
-	// attach the finished task function name and args
+	// attach the finished task function name and args (%w keeps the error
+	// class visible to the reschedule write, e.g. ErrTargetNotFound)
 	defer func() {
 		if returnErr != nil {
-			returnErr = fmt.Errorf("%s(%s) = %s", finishedTask.FunctionName, finishedTask.ArgsJson, returnErr.Error())
+			returnErr = fmt.Errorf("%s(%s) = %w", finishedTask.FunctionName, finishedTask.ArgsJson, returnErr)
 		}
 	}()
 
@@ -978,7 +1207,7 @@ func (self *TaskWorker) RunPost(
 		})
 		return
 	} else {
-		returnErr = fmt.Errorf("Target not found (%s).", finishedTask.FunctionName)
+		returnErr = fmt.Errorf("%w (%s).", ErrTargetNotFound, finishedTask.FunctionName)
 		return
 	}
 }
@@ -1140,7 +1369,11 @@ func (self *TaskWorker) EvalTasks(n int) (
 		return
 	}
 
-	evalCtx, evalCancel := context.WithCancel(self.ctx)
+	// Once tasks are claimed, their result collection and final handback must
+	// survive cancellation of the process-serving context. Task functions
+	// still receive root/drain cancellation below; this detached orchestration
+	// context only keeps the collector alive long enough to finalize them.
+	evalCtx, evalCancel := context.WithCancel(context.WithoutCancel(self.ctx))
 	defer evalCancel()
 
 	for _, task := range tasks {
@@ -1189,6 +1422,21 @@ func (self *TaskWorker) EvalTasks(n int) (
 					var result any
 					var err error
 					func() {
+						self.inflightCount.Add(1)
+						defer self.inflightCount.Add(-1)
+
+						// the function context additionally cancels when a
+						// drain gives up waiting (`Drain` phase 2). The task
+						// session derives from it, so the cancel aborts the
+						// function's db work and surfaces as a normal task
+						// error into the reschedule path below.
+						fnCtx, fnCancel := context.WithCancel(evalCtx)
+						defer fnCancel()
+						stopAfterRoot := context.AfterFunc(self.ctx, fnCancel)
+						defer stopAfterRoot()
+						stopAfterDrain := context.AfterFunc(self.drainCtx, fnCancel)
+						defer stopAfterDrain()
+
 						defer func() {
 							if r := recover(); r != nil {
 								glog.Infof("Unexpected error: %s\n", server.ErrorJson(r, debug.Stack()))
@@ -1200,7 +1448,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 								}
 							}
 						}()
-						result, r.runPost, err = target.Run(evalCtx, task)
+						result, r.runPost, err = target.Run(fnCtx, task)
 					}()
 
 					if err == nil {
@@ -1210,9 +1458,16 @@ func (self *TaskWorker) EvalTasks(n int) (
 							r.resultJson = string(resultJsonBytes)
 						}
 					}
+					if err != nil && self.drainCtx.Err() != nil {
+						// errored while draining (usually the drain cancel
+						// itself): tag so the reschedule skips the error
+						// count and backoff
+						err = fmt.Errorf("%w: %v", ErrDrained, err)
+						self.drainCanceledCount.Add(1)
+					}
 					r.err = err
 				} else {
-					r.err = fmt.Errorf("Target not found (%s).", task.FunctionName)
+					r.err = fmt.Errorf("%w (%s).", ErrTargetNotFound, task.FunctionName)
 				}
 
 				r.runEndTime = server.NowUtc()
@@ -1260,8 +1515,21 @@ func (self *TaskWorker) EvalTasks(n int) (
 					}
 				}
 
-				server.Tx(self.ctx, func(tx server.PgTx) {
-					server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
+				// A drain give-up can cancel the serving root while a
+				// context-ignoring task is still unwinding. Keep its lease
+				// heartbeat bounded but detached too; otherwise a canceled
+				// heartbeat panics out of EvalTasks before the later result
+				// can reach the detached finalization transaction.
+				heartbeatTimeout := self.settings.FinalizeTimeout
+				if heartbeatTimeout <= 0 {
+					heartbeatTimeout = DefaultTaskFinalizeTimeout
+				}
+				heartbeatCtx, heartbeatCancel := context.WithTimeout(
+					context.WithoutCancel(self.ctx),
+					heartbeatTimeout,
+				)
+				server.Tx(heartbeatCtx, func(tx server.PgTx) {
+					server.BatchInTx(heartbeatCtx, tx, func(batch server.PgBatch) {
 						claimTime := server.NowUtc()
 						releaseTime := claimTime.Add(ReleaseTimeout)
 
@@ -1284,6 +1552,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 						}
 					})
 				})
+				heartbeatCancel()
 			}
 		}
 	}()
@@ -1300,8 +1569,18 @@ func (self *TaskWorker) EvalTasks(n int) (
 		}
 	}
 
-	server.Tx(self.ctx, func(tx server.PgTx) {
-		server.BatchInTx(self.ctx, tx, func(batch server.PgBatch) {
+	finalizeTimeout := self.settings.FinalizeTimeout
+	if finalizeTimeout <= 0 {
+		finalizeTimeout = DefaultTaskFinalizeTimeout
+	}
+	finalizeCtx, finalizeCancel := context.WithTimeout(
+		context.WithoutCancel(self.ctx),
+		finalizeTimeout,
+	)
+	defer finalizeCancel()
+
+	server.Tx(finalizeCtx, func(tx server.PgTx) {
+		server.BatchInTx(finalizeCtx, tx, func(batch server.PgBatch) {
 			for taskId, finished := range finishedTasks {
 				batch.Queue(
 					`
@@ -1365,14 +1644,30 @@ func (self *TaskWorker) EvalTasks(n int) (
 				// (external rate limit, hard failure) converges to the cap
 				// instead of hammering pending_task and its dependency every
 				// ~2s. The exponent is clamped in SQL to keep power() bounded.
+				//
+				// Two error classes adjust the backoff:
+				// - drained (operator-caused): no error-count advance and a
+				//   flat ~RescheduleTimeout retry; release_time = now below
+				//   releases the claim so another worker re-runs immediately
+				// - target not found (deploy version skew): the count still
+				//   advances (visibility) but the exponent clamps low, so the
+				//   retry converges to ~16s instead of the backoff cap
+				errorCountDelta := 1
+				backoffMaxExponent := rescheduleBackoffMaxExponent
+				if errors.Is(err, ErrDrained) {
+					errorCountDelta = 0
+					backoffMaxExponent = 0
+				} else if errors.Is(err, ErrTargetNotFound) {
+					backoffMaxExponent = targetNotFoundBackoffMaxExponent
+				}
 				batch.Queue(
 					`
 						UPDATE pending_task
 						SET
 							reschedule_error = $2,
-							reschedule_error_count = pending_task.reschedule_error_count + 1,
+							reschedule_error_count = pending_task.reschedule_error_count + $7,
 							run_at = $3::timestamp + make_interval(secs => LEAST(
-								$5::double precision * power(2::double precision, LEAST(pending_task.reschedule_error_count, 24)::double precision),
+								$5::double precision * power(2::double precision, LEAST(pending_task.reschedule_error_count, $8)::double precision),
 								$6::double precision
 							)),
 							release_time = $4
@@ -1384,6 +1679,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 					now,
 					float64(RescheduleTimeout/time.Second),
 					float64(RescheduleBackoffMaxTimeout/time.Second),
+					errorCountDelta,
+					backoffMaxExponent,
 				)
 			}
 		})
@@ -1395,7 +1692,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				postRescheduledTasks[taskId] = err
 
 				tx.Exec(
-					self.ctx,
+					finalizeCtx,
 					`
 						UPDATE finished_task
 						SET
@@ -1412,7 +1709,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					now := server.NowUtc()
 					rescheduleTime := now.Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
 					task := tasks[taskId]
-					clientSession, err := task.ClientSession(self.ctx)
+					clientSession, err := task.ClientSession(finalizeCtx)
 					if err != nil {
 						panic(err)
 					}

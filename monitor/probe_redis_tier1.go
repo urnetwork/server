@@ -13,12 +13,19 @@ import (
 // redisMemoryProbe is SIGNALS.md 3.1/3.2/3.5: the per-node memory table (skew
 // detector), dataset-vs-clients attribution, and connected_clients. One ssh
 // round collects INFO from every node; findings are per-node so each sick node
-// gets its own ticket identity.
-type redisMemoryProbe struct{}
+// gets its own ticket identity. The per-node escalation battery runs once per
+// trip (batteryLatch), not on every 5-minute tick while a node stays sick.
+type redisMemoryProbe struct {
+	batteries *batteryLatch
+}
 
-func (self redisMemoryProbe) id() string             { return "redis/node-mem" }
-func (self redisMemoryProbe) tier() string           { return tierWarn }
-func (self redisMemoryProbe) cadence() time.Duration { return 5 * time.Minute }
+func newRedisMemoryProbe() *redisMemoryProbe {
+	return &redisMemoryProbe{batteries: newBatteryLatch()}
+}
+
+func (self *redisMemoryProbe) id() string             { return "redis/node-mem" }
+func (self *redisMemoryProbe) tier() string           { return tierWarn }
+func (self *redisMemoryProbe) cadence() time.Duration { return 5 * time.Minute }
 
 // redisNodeMem is one node's parsed INFO memory/clients numbers.
 type redisNodeMem struct {
@@ -30,7 +37,7 @@ type redisNodeMem struct {
 	connectedClients float64
 }
 
-func (self redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	h := env.cfg.hostByRole("redis-cluster")
 	if h == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
@@ -116,10 +123,13 @@ done`, lo, hi)
 				symptom:  fmt.Sprintf("redis node %d at %.0f%% of maxmemory (page > 92%%)", n.port, usedPct),
 				baseline: "fleet baseline 3–8G used; volatile-ttl means a full node of no-ttl keys rejects all writes while reads work (3.1)",
 				observed: fmt.Sprintf("used=%.2fG max=%.2fG dataset=%.2fG clients=%.2fG connected=%.0f", gb(n.usedBytes), gb(n.maxmemoryBytes), gb(n.datasetBytes), gb(n.clientsBytes), n.connectedClients),
-				evidence: redisNodeBattery(ctx, env, n.port),
+				evidence: self.batteries.broken("node-mem-critical/"+target, func() string {
+					return redisNodeBattery(ctx, env, n.port)
+				}),
 				playbook: "SIGNALS.md 5.4",
 			})
 		case usedPct > 85:
+			self.batteries.healthy("node-mem-critical/" + target)
 			findings = append(findings, finding{
 				probeId: "redis/node-mem-high", tier: tierWarn,
 				class: "node-mem-high", target: target, sustain: 1,
@@ -129,6 +139,7 @@ done`, lo, hi)
 				playbook: "SIGNALS.md 5.4",
 			})
 		default:
+			self.batteries.healthy("node-mem-critical/" + target)
 			findings = append(findings, healthyFinding("redis/node-mem-high", tierWarn, "node-mem-high", target))
 			findings = append(findings, healthyFinding("redis/node-mem-critical", tierPage, "node-mem-critical", target))
 		}
@@ -155,10 +166,13 @@ done`, lo, hi)
 				symptom:  fmt.Sprintf("redis node %d client buffers %.2fG (%.0f%% of used) — output-buffer accumulation", n.port, gb(n.clientsBytes), 100*n.clientsBytes/n.usedBytes),
 				baseline: "used_memory_clients well under 25% of used_memory and under 2G; growth here = pubsub/slow consumers, not keys (3.2)",
 				observed: fmt.Sprintf("clients=%.2fG used=%.2fG dataset=%.2fG", gb(n.clientsBytes), gb(n.usedBytes), gb(n.datasetBytes)),
-				evidence: redisNodeBattery(ctx, env, n.port),
+				evidence: self.batteries.broken("client-buffers/"+target, func() string {
+					return redisNodeBattery(ctx, env, n.port)
+				}),
 				playbook: "SIGNALS.md 5.5",
 			})
 		} else {
+			self.batteries.healthy("client-buffers/" + target)
 			findings = append(findings, healthyFinding("redis/client-buffers", tierWarn, "client-buffers", target))
 		}
 

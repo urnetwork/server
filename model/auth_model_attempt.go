@@ -184,17 +184,26 @@ func SetUserAuthAttemptSuccess(
 	success bool,
 ) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				UPDATE user_auth_attempt
-				SET success = $1
-				WHERE user_auth_attempt_id = $2
-			`,
-			success,
-			userAuthAttemptId,
-		))
+		setUserAuthAttemptSuccessInTx(ctx, tx, userAuthAttemptId, success)
 	})
+}
+
+func setUserAuthAttemptSuccessInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	userAuthAttemptId server.Id,
+	success bool,
+) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE user_auth_attempt
+			SET success = $1
+			WHERE user_auth_attempt_id = $2
+		`,
+		success,
+		userAuthAttemptId,
+	))
 }
 
 // removeExpiredAuthAttemptsBatchSize bounds each delete pass. user_auth_attempt

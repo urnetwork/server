@@ -350,6 +350,47 @@ func subnetContains(subnet netip.Prefix, addr netip.Addr) bool {
 	return false
 }
 
+// ActiveProxyIds returns the proxy ids of open devices whose last activity
+// falls within the window. This feeds the per-(host, block) activity set
+// that a replacement instance pre-warms from (PROXYDRAIN1.md §3.3).
+func (self *ProxyDeviceManager) ActiveProxyIds(window time.Duration) []server.Id {
+	pds := func() map[server.Id]*ProxyDevice {
+		self.stateLock.RLock()
+		defer self.stateLock.RUnlock()
+		pds := make(map[server.Id]*ProxyDevice, len(self.proxyDevices))
+		for proxyId, pdState := range self.proxyDevices {
+			pdState.StateLock.Lock()
+			pd := pdState.ProxyDevice
+			pdState.StateLock.Unlock()
+			if pd != nil {
+				pds[proxyId] = pd
+			}
+		}
+		return pds
+	}()
+
+	activityStartTime := time.Now().Add(-window)
+	proxyIds := []server.Id{}
+	for proxyId, pd := range pds {
+		select {
+		case <-pd.Done():
+			continue
+		default:
+		}
+		if activityStartTime.Before(time.Unix(0, pd.lastActivityNanos.Load())) {
+			proxyIds = append(proxyIds, proxyId)
+		}
+	}
+	return proxyIds
+}
+
+// DeviceCount reports the number of proxy ids with an installed device.
+func (self *ProxyDeviceManager) DeviceCount() int {
+	self.stateLock.RLock()
+	defer self.stateLock.RUnlock()
+	return len(self.proxyDevices)
+}
+
 func (self *ProxyDeviceManager) Close() {
 	self.cancel()
 }
@@ -392,6 +433,11 @@ type ProxyDeviceSettings struct {
 	Mtu                           int
 	ProxyDeviceIdleTimeout        time.Duration
 	SequenceBufferSize            int
+	// DisableWindowIdentityPersistence turns off the window identity store
+	// (PROXYDRAIN1.md §3.5); a recreated device then mints fresh window
+	// client ids, orphaning established inner flows (the pre-persistence
+	// behavior).
+	DisableWindowIdentityPersistence bool
 }
 
 type ProxyDevice struct {
@@ -460,6 +506,12 @@ func NewProxyDevice(
 	deviceLocalSettings := sdk.DefaultDeviceLocalSettings()
 	// embedded devices must be silent: this host runs thousands of clients
 	deviceLocalSettings.DisableLogging = true
+	// persist the window client identities so a recreated device (deploy
+	// restart) reuses them against the same providers, keeping established
+	// inner flows resumable (PROXYDRAIN1.md §3.5)
+	if !settings.DisableWindowIdentityPersistence {
+		deviceLocalSettings.MultiClientIdentityStore = newWindowIdentityStore(ctx, proxyDeviceConfig.ProxyId)
+	}
 	// hosted devices must never route traffic locally or provide: local egress
 	// would leave the proxy host's real interface (datacenter LAN, loopback,
 	// metadata endpoint). This hard-guards route-local/provide setters on the
