@@ -86,11 +86,21 @@ func changeNetworkName(
 		}, nil
 	}
 
+	// Claim (first-time name set, reachable once per account) and change
+	// (renaming an existing name) get separate daily budgets: bundling them
+	// would let a normal onboarding claim consume half of a new user's
+	// same-day rename budget before they've even picked a real name.
+	rateLimitAction := model.AccountActionClaimNetworkName
+	rateLimitDailyLimit := model.AccountActionClaimNetworkNameDailyLimit
+	if reclaimCooldown {
+		rateLimitAction = model.AccountActionChangeNetworkName
+		rateLimitDailyLimit = model.AccountActionChangeNetworkNameDailyLimit
+	}
 	if err := model.CheckAndRecordAccountActionRateLimit(
 		session.Ctx,
 		session.ByJwt.UserId,
-		model.AccountActionChangeNetworkName,
-		model.AccountActionChangeNetworkNameDailyLimit,
+		rateLimitAction,
+		rateLimitDailyLimit,
 		model.AccountActionDailyWindow,
 	); err != nil {
 		return &ChangeNetworkNameResult{

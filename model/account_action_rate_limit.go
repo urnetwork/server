@@ -14,6 +14,7 @@ import (
 const (
 	AccountActionAddAuth              = "add_auth"
 	AccountActionRemoveAuth           = "remove_auth"
+	AccountActionClaimNetworkName     = "claim_network_name"
 	AccountActionChangeNetworkName    = "change_network_name"
 	AccountActionGenerateSeedphrase   = "generate_seedphrase"
 	AccountActionRegenerateSeedphrase = "regenerate_seedphrase"
@@ -22,6 +23,7 @@ const (
 const (
 	AccountActionAddAuthDailyLimit              = 5
 	AccountActionRemoveAuthDailyLimit           = 5
+	AccountActionClaimNetworkNameDailyLimit     = 2
 	AccountActionChangeNetworkNameDailyLimit    = 2
 	AccountActionGenerateSeedphraseDailyLimit   = 5
 	AccountActionRegenerateSeedphraseDailyLimit = 5
@@ -29,8 +31,24 @@ const (
 
 const AccountActionDailyWindow = 24 * time.Hour
 
-func maxAccountActionAttemptsError() error {
-	return fmt.Errorf("429 You have reached the maximum number of attempts for this action today. Please try again later.")
+// actionDisplayNames gives each action a human-readable name for the
+// rate-limit error message, so a client can tell which of the several
+// daily limits it hit instead of seeing one generic message for all of them.
+var actionDisplayNames = map[string]string{
+	AccountActionAddAuth:              "adding a sign-in method",
+	AccountActionRemoveAuth:           "removing a sign-in method",
+	AccountActionClaimNetworkName:     "setting your network name",
+	AccountActionChangeNetworkName:    "changing your network name",
+	AccountActionGenerateSeedphrase:   "generating a seedphrase",
+	AccountActionRegenerateSeedphrase: "regenerating a seedphrase",
+}
+
+func maxAccountActionAttemptsError(action string) error {
+	name, ok := actionDisplayNames[action]
+	if !ok {
+		name = "this action"
+	}
+	return fmt.Errorf("You have reached the maximum number of attempts for %s today. Please try again later.", name)
 }
 
 func countRecentAccountActionAttempts(
@@ -87,7 +105,7 @@ func CheckAccountActionRateLimit(
 		})
 	})
 	if limit <= count {
-		return maxAccountActionAttemptsError()
+		return maxAccountActionAttemptsError(action)
 	}
 	return nil
 }
@@ -136,7 +154,7 @@ func CheckAndRecordAccountActionRateLimit(
 		))
 	})
 	if limit <= count {
-		return maxAccountActionAttemptsError()
+		return maxAccountActionAttemptsError(action)
 	}
 	return nil
 }

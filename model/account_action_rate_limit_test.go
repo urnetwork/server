@@ -77,14 +77,14 @@ func TestCheckAndRecordAccountActionRateLimitAllowsUpToLimitThenBlocks(t *testin
 
 		const limit = 2
 		for i := 0; i < limit; i++ {
-			err := CheckAndRecordAccountActionRateLimit(ctx, userId, "change_network_name", limit, AccountActionDailyWindow)
+			err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionChangeNetworkName, limit, AccountActionDailyWindow)
 			assert.Equal(t, err, nil)
 		}
 
 		// the 3rd attempt, already at limit, must be blocked -- and blocked
 		// attempts must not themselves record (else the block would never
 		// clear even after the window passes)
-		err := CheckAndRecordAccountActionRateLimit(ctx, userId, "change_network_name", limit, AccountActionDailyWindow)
+		err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionChangeNetworkName, limit, AccountActionDailyWindow)
 		assert.NotEqual(t, err, nil)
 	})
 }
@@ -107,6 +107,53 @@ func TestAccountActionRateLimitWindowExpires(t *testing.T) {
 		// took non-zero time), the prior attempt falls outside the window and
 		// no longer counts
 		err = CheckAccountActionRateLimit(ctx, userId, "test_action", limit, time.Nanosecond)
+		assert.Equal(t, err, nil)
+	})
+}
+
+func TestAccountActionConstantsAreDistinctAndHaveDisplayNames(t *testing.T) {
+	actions := []string{
+		AccountActionAddAuth,
+		AccountActionRemoveAuth,
+		AccountActionClaimNetworkName,
+		AccountActionChangeNetworkName,
+		AccountActionGenerateSeedphrase,
+		AccountActionRegenerateSeedphrase,
+	}
+
+	seen := map[string]bool{}
+	for _, action := range actions {
+		// every real action constant must have a distinct string value --
+		// two constants colliding would silently merge their rate limits
+		assert.Equal(t, seen[action], false)
+		seen[action] = true
+
+		// every real action constant must produce a specific, non-generic
+		// error message -- the fallback "this action" wording should only
+		// ever be reached for a caller-supplied action string that isn't
+		// one of the real constants, never for a real one
+		err := maxAccountActionAttemptsError(action)
+		assert.NotEqual(t, err.Error(), maxAccountActionAttemptsError("not_a_real_action").Error())
+	}
+}
+
+func TestClaimAndChangeNetworkNameHaveIndependentCounters(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		userId := server.NewId()
+
+		// exhaust the claim budget
+		for i := 0; i < AccountActionClaimNetworkNameDailyLimit; i++ {
+			err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionClaimNetworkName, AccountActionClaimNetworkNameDailyLimit, AccountActionDailyWindow)
+			assert.Equal(t, err, nil)
+		}
+		err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionClaimNetworkName, AccountActionClaimNetworkNameDailyLimit, AccountActionDailyWindow)
+		assert.NotEqual(t, err, nil)
+
+		// a subsequent rename (a real, separate action) must still be
+		// allowed -- claiming a name during onboarding must not consume the
+		// same-day rename budget
+		err = CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionChangeNetworkName, AccountActionChangeNetworkNameDailyLimit, AccountActionDailyWindow)
 		assert.Equal(t, err, nil)
 	})
 }
