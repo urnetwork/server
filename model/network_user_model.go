@@ -1346,6 +1346,43 @@ func MigrateNetworkUserChildAuths(
 	})
 }
 
+// HasAnyAuthMethod reports whether userId has at least one bound
+// password/phone, SSO, wallet, or seedphrase auth method.
+//
+// This exists because neither the JWT's GuestMode claim nor
+// network_user.auth_type reliably reflect whether a legacy guest account
+// (auth_type = 'guest', now silently treated as a normal account since guest
+// signup was retired) has since added a real auth method via AddAuth:
+// RefreshToken re-signs guest JWTs with GuestMode=false unconditionally, and
+// AddAuth never updates network_user.auth_type when adding a guest's first
+// real method. A live count across the auth tables is the only accurate
+// signal, and it self-heals the moment a guest adds a method -- no refresh
+// or auth_type backfill required.
+func HasAnyAuthMethod(ctx context.Context, userId server.Id) bool {
+	var count int
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_auth_password WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_sso WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_wallet WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1
+			) AS auth_counts`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return 0 < count
+}
+
 func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 	if err := CheckAccountActionRateLimit(
 		ctx,

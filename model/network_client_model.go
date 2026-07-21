@@ -190,15 +190,24 @@ type ProxyAuthResult struct {
 }
 
 // validateClientIdentityArgs resolves the roles and principal a new client or
-// auth code is created with. Explicit values require a network-level non-guest
-// session; when omitted, the session's own roles and principal are inherited.
+// auth code is created with. Explicit values require a network-level session
+// on an account with at least one real auth method; when omitted, the
+// session's own roles and principal are inherited.
+//
+// This checks HasAnyAuthMethod rather than session.ByJwt.GuestMode: guest
+// signup is retired, but legacy guest accounts (auth_type = 'guest', zero
+// rows in any auth table) still exist and their JWTs still carry a stale
+// GuestMode claim that RefreshToken unconditionally zeroes out on the very
+// next refresh regardless of real account state. A live auth-method check
+// is the only signal that's both accurate for a still-bare guest and
+// self-healing the moment that guest adds a real method via AddAuth.
 func validateClientIdentityArgs(
 	roles []string,
 	principal string,
 	session *session.ClientSession,
 ) (resolvedRoles []string, resolvedPrincipal string, message string) {
 	if 0 < len(roles) || principal != "" {
-		if session.ByJwt.ClientId != nil {
+		if session.ByJwt.ClientId != nil || !HasAnyAuthMethod(session.Ctx, session.ByJwt.UserId) {
 			message = "Roles and principal can only be assigned by a network session."
 			return
 		}
