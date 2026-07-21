@@ -24,6 +24,8 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/search"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/stats"
+	"github.com/urnetwork/server/stats/sample"
 	"github.com/urnetwork/server/task"
 
 	"github.com/urnetwork/proxy"
@@ -47,6 +49,9 @@ Usage:
     bringyourctl search --realm=<realm> --type=<type> clear
     bringyourctl stats compute
     bringyourctl stats export
+    bringyourctl stats export-samples [--days=<days>] [--out=<path>]
+    bringyourctl stats export-samples-flat [--days=<days>] [--from=<dir>] [--out=<path>]
+    bringyourctl stats diff-samples --a=<path> --b=<path> [--json] [--label-a=<label>] [--label-b=<label>]
     bringyourctl stats providers-map
     bringyourctl stats import
     bringyourctl stats add
@@ -74,8 +79,11 @@ Usage:
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
+    bringyourctl streams expire-leaked-ttls
     bringyourctl task ls
     bringyourctl task rm <task_id>
+    bringyourctl task release <task_id>
+    bringyourctl task kick <run_once_key>
     bringyourctl auth login <auth_code>
     bringyourctl account-points populate --plan_id=<plan_id>
     bringyourctl client connection fix
@@ -157,6 +165,12 @@ Options:
 	} else if stats, _ := opts.Bool("stats"); stats {
 		if compute, _ := opts.Bool("compute"); compute {
 			statsCompute(opts)
+		} else if exportSamplesFlat, _ := opts.Bool("export-samples-flat"); exportSamplesFlat {
+			statsExportSamplesFlat(opts)
+		} else if diffSamples, _ := opts.Bool("diff-samples"); diffSamples {
+			statsDiffSamples(opts)
+		} else if exportSamples, _ := opts.Bool("export-samples"); exportSamples {
+			statsExportSamples(opts)
 		} else if export, _ := opts.Bool("export"); export {
 			statsExport(opts)
 		} else if providersMap, _ := opts.Bool("providers-map"); providersMap {
@@ -231,6 +245,10 @@ Options:
 		if reconcile, _ := opts.Bool("reconcile-net-escrow"); reconcile {
 			reconcileNetEscrow(opts)
 		}
+	} else if streams, _ := opts.Bool("streams"); streams {
+		if expireLeakedTtls, _ := opts.Bool("expire-leaked-ttls"); expireLeakedTtls {
+			streamsExpireLeakedTtls(opts)
+		}
 	} else if wallets, _ := opts.Bool("wallets"); wallets {
 		if syncCircle, _ := opts.Bool("sync-circle"); syncCircle {
 			populateMissingCircleAccountWallets()
@@ -240,6 +258,10 @@ Options:
 			taskLs(opts)
 		} else if rm, _ := opts.Bool("rm"); rm {
 			taskRm(opts)
+		} else if release, _ := opts.Bool("release"); release {
+			taskRelease(opts)
+		} else if kick, _ := opts.Bool("kick"); kick {
+			taskKick(opts)
 		}
 	} else if auth, _ := opts.Bool("auth"); auth {
 		if login, _ := opts.Bool("login"); login {
@@ -570,6 +592,112 @@ func statsExport(opts docopt.Opts) {
 	ctx := context.Background()
 	stats := model.ComputeStats(ctx, 90)
 	model.ExportStats(ctx, stats)
+}
+
+// statsExportSamples packs the last N days of anonymized FindProviders2 sample
+// segments from minio into a self-describing tarball (SIM-LATENCY.md goal 10).
+func statsExportSamples(opts docopt.Opts) {
+	ctx := context.Background()
+
+	days := 7
+	if s, err := opts.String("--days"); err == nil && s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			days = v
+		}
+	}
+	out := "stats.tgz"
+	if s, err := opts.String("--out"); err == nil && s != "" {
+		out = s
+	}
+
+	store, ok := server.LoadBlobStore()
+	if !ok {
+		panic("no blob store configured (vault/<env>/minio.yml)")
+	}
+	env := server.RequireEnv()
+
+	if err := stats.ExportSamples(ctx, store, env, days, server.NowUtc().UnixMilli(), out); err != nil {
+		panic(err)
+	}
+	fmt.Printf("exported %d days of stats samples to %s\n", days, out)
+}
+
+// statsExportSamplesFlat exports FindProviders2 samples into a single
+// xz-compressed varint-delimited protobuf file — from local segments
+// (--from=<dir>) or the last N days in minio. This is the flat dump handed to
+// competitors and consumed by diff-samples.
+func statsExportSamplesFlat(opts docopt.Opts) {
+	out := "samples.pb.xz"
+	if s, err := opts.String("--out"); err == nil && s != "" {
+		out = s
+	}
+
+	if from, err := opts.String("--from"); err == nil && from != "" {
+		paths, err := stats.SegmentPaths(from)
+		if err != nil {
+			panic(err)
+		}
+		count, err := stats.WriteFlatFromSegmentFiles(paths, out)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("flattened %d samples from %d local segments to %s\n", count, len(paths), out)
+		return
+	}
+
+	days := 7
+	if s, err := opts.String("--days"); err == nil && s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			days = v
+		}
+	}
+	store, ok := server.LoadBlobStore()
+	if !ok {
+		panic("no blob store configured (vault/<env>/minio.yml); use --from=<dir> for local segments")
+	}
+	env := server.RequireEnv()
+	count, err := stats.ExportSamplesFlat(context.Background(), store, env, days, server.NowUtc().UnixMilli(), out)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("exported %d samples (%d days) to %s\n", count, days, out)
+}
+
+// statsDiffSamples summarizes and compares two flat sample dumps (the official
+// one from main and the evaluation one). Prints a side-by-side of matchmaking
+// health and selection quality, or JSON with --json.
+func statsDiffSamples(opts docopt.Opts) {
+	pathA, _ := opts.String("--a")
+	pathB, _ := opts.String("--b")
+	labelA := "A"
+	if s, err := opts.String("--label-a"); err == nil && s != "" {
+		labelA = s
+	}
+	labelB := "B"
+	if s, err := opts.String("--label-b"); err == nil && s != "" {
+		labelB = s
+	}
+
+	load := func(path string) stats.Report {
+		metrics := stats.NewMetrics()
+		if err := stats.ReadFlat(path, func(s *sample.FindProviders2Sample) error {
+			metrics.Add(s)
+			return nil
+		}); err != nil {
+			panic(fmt.Errorf("%s: %w", path, err))
+		}
+		return metrics.Report()
+	}
+	reportA := load(pathA)
+	reportB := load(pathB)
+
+	if isJson, _ := opts.Bool("--json"); isJson {
+		out, err := stats.DiffJSON(reportA, reportB)
+		server.Raise(err)
+		fmt.Printf("%s\n", out)
+		return
+	}
+	fmt.Print(stats.FormatDiff(labelA, reportA, labelB, reportB))
 }
 
 // statsProvidersMap seeds the /stats/providers-map blob once (the taskworker
@@ -1414,6 +1542,36 @@ func taskRm(opts docopt.Opts) {
 	taskId := server.RequireParseId(taskIdStr)
 
 	task.RemovePendingTask(ctx, taskId)
+}
+
+// taskRelease clears the claim lease on a pending task so it is claimable
+// again per its run_at — the recovery for a task stranded by a killed
+// worker, whose claim otherwise blocks it (and its RunOnce chain) until
+// claim + max time passes. Releasing a task that is actually STILL RUNNING
+// re-opens the duplicate-execution window the lease exists to prevent, so
+// verify the claiming worker is really gone first.
+func taskRelease(opts docopt.Opts) {
+	ctx := context.Background()
+	taskIdStr, _ := opts.String("<task_id>")
+	taskId := server.RequireParseId(taskIdStr)
+
+	if task.ReleaseTask(ctx, taskId) {
+		fmt.Printf("released %s\n", taskId)
+	} else {
+		fmt.Printf("no pending task %s\n", taskId)
+	}
+}
+
+// taskKick pulls the next run of the pending tasks matching a run-once key
+// to now. Accepts the key as scheduled (e.g. "update_client_scores"); the
+// exact stored json-encoded form also matches. A claimed task still waits
+// out its release_time (use `task release`).
+func taskKick(opts docopt.Opts) {
+	ctx := context.Background()
+	runOnceKey, _ := opts.String("<run_once_key>")
+
+	kickedCount := task.KickTasks(ctx, runOnceKey)
+	fmt.Printf("kicked %d task(s) for key %s\n", kickedCount, runOnceKey)
 }
 
 func authLogin(opts docopt.Opts) {

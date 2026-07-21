@@ -22,6 +22,7 @@ type stubStClient struct {
 	pool              *StPoolState
 	epochCloseBlocks  map[uint64]uint64
 	unaccountedRao    *big.Int
+	buybackTotalRao   *big.Int
 	nextFinalizeEpoch uint64
 
 	rollCount     int
@@ -39,6 +40,7 @@ func newStubStClient(state *StEpochState) *stubStClient {
 		},
 		epochCloseBlocks: map[uint64]uint64{},
 		unaccountedRao:   big.NewInt(0),
+		buybackTotalRao:  big.NewInt(0),
 	}
 }
 
@@ -75,6 +77,10 @@ func (self *stubStClient) DepositCredit(ctx context.Context, noId uint64, alphaR
 
 func (self *stubStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, error) {
 	return new(big.Int).Set(self.unaccountedRao), nil
+}
+
+func (self *stubStClient) BuybackTotal(ctx context.Context) (*big.Int, error) {
+	return new(big.Int).Set(self.buybackTotalRao), nil
 }
 
 func (self *stubStClient) CommitPayoutRoot(ctx context.Context, epoch uint64, noId uint64, root [32]byte, off []byte) (string, error) {

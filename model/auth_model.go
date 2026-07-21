@@ -456,7 +456,7 @@ func handleLoginParsedAuthJwt(
 
 	isGuestMode := false
 
-	isPro := IsPro(
+	isPro := IsProFresh(
 		ctx,
 		&networkId,
 	)
@@ -564,7 +564,7 @@ func handleLoginWallet(
 
 	if found {
 
-		pro := IsPro(
+		pro := IsProFresh(
 			ctx,
 			&networkId,
 		)
@@ -763,7 +763,7 @@ func AuthLoginWithPassword(
 
 			isGuestMode := false
 
-			pro := IsPro(
+			pro := IsProFresh(
 				session.Ctx,
 				&networkId,
 			)
@@ -922,7 +922,7 @@ func AuthVerify(
 
 	isGuestMode := false
 
-	isPro := IsPro(
+	isPro := IsProFresh(
 		session.Ctx,
 		&networkId,
 	)
@@ -1540,6 +1540,47 @@ func AuthCodeLogin(
 	codeLogin *AuthCodeLoginArgs,
 	session *session.ClientSession,
 ) (codeLoginResult *AuthCodeLoginResult, returnErr error) {
+	// Resolve the network without consuming the code, then load entitlement
+	// before opening the code-consumption transaction. The transaction repeats
+	// every validity check, so expiration or a competing last-use consumer
+	// between these steps still returns an invalid-code result.
+	var entitlementNetworkId *server.Id
+	server.Db(session.Ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			session.Ctx,
+			`
+				SELECT auth_code.network_id
+				FROM auth_code
+				WHERE
+					auth_code.auth_code = $1 AND
+					auth_code.active = true AND
+					$2 < auth_code.end_time
+			`,
+			codeLogin.AuthCode,
+			server.NowUtc(),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var networkId server.Id
+				server.Raise(result.Scan(&networkId))
+				entitlementNetworkId = &networkId
+			}
+		})
+	})
+	if entitlementNetworkId == nil {
+		return &AuthCodeLoginResult{
+			Error: &AuthCodeLoginError{Message: "Invalid auth code."},
+		}, nil
+	}
+	isPro := IsProFresh(session.Ctx, entitlementNetworkId)
+
+	var networkId server.Id
+	var userId server.Id
+	var createTime time.Time
+	var principal string
+	var networkName string
+	var roles []string
+
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		result, err := tx.Query(
 			session.Ctx,
@@ -1560,20 +1601,17 @@ func AuthCodeLogin(
 				WHERE
 					auth_code.auth_code = $1 AND
 					auth_code.active = true AND
-					$2 < auth_code.end_time
+					$2 < auth_code.end_time AND
+					auth_code.network_id = $3
 			`,
 			codeLogin.AuthCode,
 			server.NowUtc(),
+			*entitlementNetworkId,
 		)
 
 		exists := false
 		var authCodeId server.Id
-		var networkId server.Id
-		var userId server.Id
-		var createTime time.Time
 		var remainingUses int
-		var principal string
-		var networkName string
 
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -1598,7 +1636,7 @@ func AuthCodeLogin(
 			return
 		}
 
-		roles := []string{}
+		roles = []string{}
 		result, err = tx.Query(
 			session.Ctx,
 			`
@@ -1649,28 +1687,25 @@ func AuthCodeLogin(
 			))
 		}
 
-		isGuestMode := false
-
-		isPro := IsPro(
-			session.Ctx,
-			&networkId,
-		)
-
-		byJwt := jwt.NewByJwtWithCreateTime(
-			networkId,
-			userId,
-			networkName,
-			createTime,
-			isGuestMode,
-			isPro,
-		)
-		byJwt.Roles = roles
-		byJwt.Principal = principal
-
-		codeLoginResult = &AuthCodeLoginResult{
-			ByJwt: byJwt.Sign(),
-		}
 	})
+
+	if codeLoginResult != nil {
+		return
+	}
+
+	byJwt := jwt.NewByJwtWithCreateTime(
+		networkId,
+		userId,
+		networkName,
+		createTime,
+		false,
+		isPro,
+	)
+	byJwt.Roles = roles
+	byJwt.Principal = principal
+	codeLoginResult = &AuthCodeLoginResult{
+		ByJwt: byJwt.Sign(),
+	}
 
 	return
 }

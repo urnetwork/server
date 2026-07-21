@@ -26,7 +26,7 @@ import (
 )
 
 func main() {
-	usage := `BringYour task worker.
+	usage := `BringYour connect server.
 
 Usage:
   connect [--port=<port>]
@@ -57,8 +57,33 @@ Options:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	exchange := connectserver.NewExchangeFromEnvWithDefaults(ctx)
-	defer exchange.Close()
+	routes := []*router.Route{
+		router.NewRoute("GET", "/status", router.WarpStatus),
+	}
+
+	// one-shot readiness latch before listen (same pattern as api/taskworker,
+	// TASKDRAIN1 §2.2 / APIDRAIN1 §2.1): a container that cannot reach
+	// pg/redis serves only the latched `error not ready ...` status and hosts
+	// NO exchange — the deploy poll fails for the full window and warpctl
+	// reverts while the old container keeps its residents. Never exit instead
+	// (that flaps the container without the truthful status). Warmup is
+	// skipped when not ready: it hard-depends on pg and would panic into a
+	// crash loop.
+	var exchange *connectserver.Exchange
+	if err := router.StartupReadiness(ctx); err != nil {
+		glog.Infof("[connect]not ready (%s)\n", err)
+	} else {
+		exchange = connectserver.NewExchangeFromEnvWithDefaults(ctx)
+		defer exchange.Close()
+
+		connectRouter := connectserver.NewConnectRouterWithDefaults(ctx, cancel, exchange)
+		routes = append(routes,
+			router.NewRoute("GET", "/", connectRouter.Connect),
+			// router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
+		)
+
+		server.Warmup()
+	}
 
 	// drain on sigterm
 	go server.HandleError(func() {
@@ -66,7 +91,14 @@ Options:
 		select {
 		case <-ctx.Done():
 		case <-quitEvent.Ctx.Done():
-			exchange.Drain()
+			// flip /status so pollers and dashboards see a truthful draining
+			// signal through the migrate/evict window (deliberately not an
+			// error status). IfReady: a not-ready container keeps reporting
+			// its error through SIGTERM instead of hiding it
+			router.SetWarpStatusDrainingIfReady()
+			if exchange != nil {
+				exchange.Drain()
+			}
 		}
 	})
 
@@ -83,17 +115,7 @@ Options:
 		}
 	})
 
-	connectRouter := connectserver.NewConnectRouterWithDefaults(ctx, cancel, exchange)
-
-	routes := []*router.Route{
-		router.NewRoute("GET", "/status", router.WarpStatus),
-		router.NewRoute("GET", "/", connectRouter.Connect),
-		// router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
-	}
-
 	port, _ := opts.Int("--port")
-
-	server.Warmup()
 
 	glog.Infof(
 		"[connect]serving %s %s on *:%d\n",

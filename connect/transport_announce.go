@@ -8,12 +8,41 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
+
+// connectionNewCounter splits reconnects into drain-excused (benign, caused by
+// a server drain / migrate) vs organic, so a deploy's reliability impact shows
+// up as excused instead of a score dip (CONNECTDRAIN2.md §3.5)
+var connectionNewCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connection_new",
+		Help:      "New (non-established) connection syncs, split by whether a drain excuse marker was consumed",
+	},
+	[]string{"excused"},
+)
+
+var drainExcusesConsumedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "drain_excuses_consumed",
+		Help:      "Drain excuse markers consumed by the announce new-connection branch",
+	},
+)
+
+func init() {
+	prometheus.MustRegister(connectionNewCounter)
+	prometheus.MustRegister(drainExcusesConsumedCounter)
+}
 
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
@@ -23,8 +52,10 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		// NewConnectHandler (must equal the heartbeat refresh ttl or
 		// disconnect detection is delayed); this default is a placeholder.
 		PeerRegisterTtl: 300 * time.Second,
-		// 2026-07-15: network peers disabled pending the PEERS2 poll rollout
+		// overridden in NewConnectHandler from ExchangeSettings.EnableNetworkPeers
+		// (the single source of truth); this default is only the pre-wiring value.
 		EnableNetworkPeers:       false,
+		EnableDrainExcuse:        false,
 		MaxLatencyCount:          16,
 		MinTestTimeout:           12 * time.Hour,
 		MaxTestTimeout:           24 * time.Hour,
@@ -44,12 +75,16 @@ type ConnectionAnnounceSettings struct {
 	LocationRetryTimeout  time.Duration
 	// ttl for the network peer registration made at announce
 	PeerRegisterTtl time.Duration
-	// mirrors ExchangeSettings.EnableNetworkPeers (2026-07-15: disabled
-	// pending pubsub throughput redesign)
+	// set from ExchangeSettings.EnableNetworkPeers in NewConnectHandler (the
+	// single network-peers switch); gates the announce-time peer registration
 	EnableNetworkPeers bool
-	MaxLatencyCount    int
-	MinTestTimeout     time.Duration
-	MaxTestTimeout     time.Duration
+	// set from ExchangeSettings.EnableDrainExcuse in NewConnectHandler (the
+	// single drain-excuse switch); gates consuming drain excuse markers in the
+	// new-connection branch (CONNECTDRAIN2.md §3.1)
+	EnableDrainExcuse bool
+	MaxLatencyCount   int
+	MinTestTimeout    time.Duration
+	MaxTestTimeout    time.Duration
 
 	LatencySampleWindowCount int
 	SpeedSampleWindowCount   int
@@ -143,6 +178,12 @@ type ConnectionAnnounce struct {
 	passiveWindowSendByteCount    ByteCount
 	passiveWindowReceiveByteCount ByteCount
 	passiveMaxBytesPerSecond      ByteCount
+
+	// while now is before this time, a provide key change is not counted as
+	// `ProvideChangedCount`: the sync consumed a drain excuse marker, and the
+	// first re-announce after a drain-caused reconnect is mechanical, not a
+	// real provide flap. Only touched by the run goroutine's sync loop.
+	provideChangeSuppressUntil time.Time
 
 	testConfig         *TestConfig
 	PendingLatencyTest chan *LatencyTest
@@ -460,11 +501,36 @@ func (self *ConnectionAnnounce) run() {
 						stats.ProvideEnabledCount = 1
 					}
 					if 0 < changedCount {
-						stats.ProvideChangedCount = 1
+						if server.NowUtc().Before(self.provideChangeSuppressUntil) {
+							// the mechanical provide re-announce after a
+							// drain-excused reconnect, not a real provide flap
+						} else if self.settings.EnableDrainExcuse && model.HasDrainProvideChangeExcuse(self.ctx, self.clientId) {
+							// this client is inside a drain window (marker
+							// armed at drain broadcast); the change is the
+							// mechanical re-announce. Only checked when a
+							// change is present, so the hot path adds nothing
+						} else {
+							if glog.V(1) {
+								glog.Infof("[t]provide change counted client=%s changed=%d enableExcuse=%t\n", self.clientId, changedCount, self.settings.EnableDrainExcuse)
+							}
+							stats.ProvideChangedCount = 1
+						}
 					}
 				} else {
 					established = provideEnabled
-					stats.ConnectionNewCount = 1
+					if self.settings.EnableDrainExcuse && model.TakeDrainExcuse(self.ctx, self.clientId) != nil {
+						// the reconnect was caused by a server drain / migrate
+						// (CONNECTDRAIN2.md §3.1). Record it as excused so the
+						// block stays valid, and suppress the mechanical
+						// provide re-announce that follows
+						stats.ConnectionExcusedNewCount = 1
+						self.provideChangeSuppressUntil = server.NowUtc().Add(2 * model.ReliabilityBlockDuration)
+						drainExcusesConsumedCounter.Inc()
+						connectionNewCounter.WithLabelValues("true").Inc()
+					} else {
+						stats.ConnectionNewCount = 1
+						connectionNewCounter.WithLabelValues("false").Inc()
+					}
 				}
 				// record to redis only (never pg): the per-sync stats of every
 				// connected provider were the single largest statement load on

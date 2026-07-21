@@ -26,10 +26,10 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 	// "github.com/urnetwork/server/ulid"
-	// "github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/connect"
 )
 
@@ -266,6 +266,10 @@ func AuthNetworkClient(
 		}
 
 		var clientId server.Id
+		// A client JWT is durable, so entitlement must come from the source of
+		// truth. Resolve it before opening the write transaction: IsProFresh
+		// performs its own PostgreSQL read and Redis cache refresh.
+		isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
 
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			createTime := server.NowUtc()
@@ -406,7 +410,22 @@ func AuthNetworkClient(
 				})
 			}
 
-			byJwtWithClientId := session.ByJwt.Client(deviceId, clientId)
+			// re-derive Pro from the source of truth rather than copying the caller's
+			// (possibly stale) jwt claim: a network that turned Pro after the caller's
+			// token was minted would otherwise get a client token stamped Pro=false for
+			// its 30-day lifetime. (The concurrent-client gate above already reads Pro
+			// live for the same reason.)
+			// preserve the root jwt's create time: derivative auth carries the
+			// root lineage so expiring the root can expire everything derived
+			// from it (see AuthCodeCreate)
+			byJwtWithClientId := jwt.NewByJwtWithCreateTime(
+				session.ByJwt.NetworkId,
+				session.ByJwt.UserId,
+				session.ByJwt.NetworkName,
+				session.ByJwt.CreateTime,
+				session.ByJwt.GuestMode,
+				isPro,
+			).Client(deviceId, clientId)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			byClientJwtSigned := byJwtWithClientId.Sign()
@@ -531,6 +550,11 @@ func AuthNetworkClient(
 			return
 		}
 
+		// Resolve durable-token entitlement before opening the transaction.
+		// IsProFresh checks PostgreSQL and refreshes Redis, neither of which
+		// may be nested under this transaction's checked-out connection.
+		isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
+
 		// important: must check `network_id = session network_id`
 		server.Tx(session.Ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
@@ -639,7 +663,18 @@ func AuthNetworkClient(
 				}
 			})
 
-			byJwtWithClientId := session.ByJwt.Client(*deviceId, *authClient.ClientId)
+			// re-derive Pro from the source of truth rather than copying the caller's
+			// (possibly stale) jwt claim — see the new-client branch above.
+			// preserve the root jwt's create time (root lineage; see the
+			// new-client branch above)
+			byJwtWithClientId := jwt.NewByJwtWithCreateTime(
+				session.ByJwt.NetworkId,
+				session.ByJwt.UserId,
+				session.ByJwt.NetworkName,
+				session.ByJwt.CreateTime,
+				session.ByJwt.GuestMode,
+				isPro,
+			).Client(*deviceId, *authClient.ClientId)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			byClientJwtSigned := byJwtWithClientId.Sign()
@@ -1933,7 +1968,7 @@ func IsIpConnectedToNetwork(
 // non-HOT update that maintains all of network_client's ~10 indexes -- and the
 // per-connection refresh is the highest-frequency write on the table. Its
 // consumers are coarse retention thresholds (`TopLevelClientIdleExpiration`
-// 90d, `NetworkClientReapAfterDeactivate` 30d), so sub-hour freshness buys
+// 30d, `NetworkClientReapAfterDeactivate` 30d), so sub-hour freshness buys
 // nothing: skip the write entirely while auth_time is fresh.
 const clientAuthTimeRefreshMinInterval = time.Hour
 
@@ -2083,7 +2118,19 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // FindActiveClientNetwork), and the reap hard deletes it
 // `NetworkClientReapAfterDeactivate` later. A returning user logs in again
 // with a fresh client id.
-const TopLevelClientIdleExpiration = 90 * 24 * time.Hour
+//
+// Tightened 90d -> 30d (2026-07-18). A top-level client stays active for this
+// whole window, so under identity churn (a fresh device_id per login) or a
+// leaking client a network accumulates a large dormant-but-active fleet. At 90d
+// that reached ~8.2M active top-level clients fleet-wide (~78% idle >30d) and,
+// before the recent-auth peer valve (NetworkPeersEnabled), disabled peer
+// discovery for >5,000 networks. 30d ages the dormant backlog out sooner while
+// still letting a monthly-active user re-login rather than stranding a session.
+// Tradeoff: a device idle longer than this is logged out on its next jwt
+// refresh; raise the constant to be gentler. NOTE: the first reaper run after a
+// decrease deactivates the entire newly-eligible band, in bounded 10k batches
+// (a large one-time pass).
+const TopLevelClientIdleExpiration = 30 * 24 * time.Hour
 
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id.

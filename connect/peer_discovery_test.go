@@ -34,6 +34,14 @@ type peerDiscoveryEnv struct {
 }
 
 func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, servicePort int) *peerDiscoveryEnv {
+	return testing_newPeerDiscoveryEnvWithSettings(ctx, t, port, servicePort, nil)
+}
+
+func testing_newPeerDiscoveryEnvWithSettings(ctx context.Context, t testing.TB, port int, servicePort int, mutateExchangeSettings func(*ExchangeSettings)) *peerDiscoveryEnv {
+	return testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, port, servicePort, mutateExchangeSettings, nil)
+}
+
+func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.TB, port int, servicePort int, mutateExchangeSettings func(*ExchangeSettings), mutateHandlerSettings func(*ConnectHandlerSettings)) *peerDiscoveryEnv {
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
@@ -47,11 +55,17 @@ func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, se
 
 	exchangeSettings := DefaultExchangeSettings()
 	exchangeSettings.ExchangeResidentTtl = 5 * time.Second
-	// network peers default off (PEERS2.md rollout); this suite tests them.
-	// Poll-only delivery: fast ticks so the test's wait windows catch changes.
+	// Poll-only delivery BASELINE: key-event delivery (default on,
+	// PEERSSTREAMS2.md) is pinned off here so these tests keep covering the
+	// v2 poll path; the key-event tests opt back in via the settings mutator.
+	// Fast ticks so the test's wait windows catch changes.
 	exchangeSettings.EnableNetworkPeers = true
+	exchangeSettings.KeyEventDelivery.Enabled = false
 	exchangeSettings.NetworkPeersPollInterval = 200 * time.Millisecond
 	exchangeSettings.StreamHopsPollInterval = 200 * time.Millisecond
+	if mutateExchangeSettings != nil {
+		mutateExchangeSettings(exchangeSettings)
+	}
 	hostToServicePorts := map[int]int{servicePort: servicePort}
 	exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, exchangeSettings)
 
@@ -64,6 +78,9 @@ func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, se
 	handlerSettings.ConnectionAnnounceTimeout = 0
 	handlerSettings.ConnectionAnnounceSettings.EnableNetworkPeers = true
 	handlerSettings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
+	if mutateHandlerSettings != nil {
+		mutateHandlerSettings(handlerSettings)
+	}
 	connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, handlerSettings)
 
 	// NewConnectHandler must derive the announce registration ttl from the
@@ -723,6 +740,341 @@ func TestExchangePeerDiscoveryLargeNetwork(t *testing.T) {
 		}
 		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
 			return len(connected) == initialPeerCount+diffPeerCount
+		})
+		connect.AssertEqual(t, ok, true)
+	})
+}
+
+// TestExchangePeerDiscoveryLateJoinReconnect drives the peers-online label's
+// exact lifecycle from the vantage of one settled client: a peer that comes
+// online later appears live (no reconnect of the watcher), a peer whose
+// transport drops without a clean client teardown (the vpn-off shape) ages
+// into a disconnect marker at the registration ttl, and a reconnect of the
+// same client clears the marker and restores the peer.
+func TestExchangePeerDiscoveryLateJoinReconnect(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		env := testing_newPeerDiscoveryEnv(ctx, t, 8095, 9015)
+		defer env.Close()
+
+		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "device a",
+		})
+		clientIdB, byClientJwtB := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "device b",
+		})
+
+		// a connects and settles alone
+		clientA := env.newClient(clientIdA)
+		defer clientA.Close()
+		transportA := env.newTransport(byClientJwtA, server.NewId(), clientA.RouteManager())
+		defer transportA.Close()
+		env.setProvideModes(clientA, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		ok := waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return len(connected) == 0 && disconnectedCount == 0
+		})
+		connect.AssertEqual(t, ok, true)
+		// hold a settled beat past a's own connect replay, so the appearance
+		// below is a live cross-peer diff and not part of a's initial sync
+		select {
+		case <-time.After(2 * time.Second):
+		}
+
+		// b comes online later; a sees it appear without reconnecting
+		clientB := env.newClient(clientIdB)
+		defer clientB.Close()
+		instanceIdB := server.NewId()
+		transportB := env.newTransport(byClientJwtB, instanceIdB, clientB.RouteManager())
+		env.setProvideModes(clientB, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			peerB := findPeer(connected, clientIdB)
+			return peerB != nil && peerB.ProvideEnabled
+		})
+		connect.AssertEqual(t, ok, true)
+
+		// b's transport drops with no clean client teardown: the registration
+		// stops refreshing, expires at the resident ttl, and a sees b move to
+		// a disconnect marker
+		transportB.Close()
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return findPeer(connected, clientIdB) == nil && 1 <= disconnectedCount
+		})
+		connect.AssertEqual(t, ok, true)
+
+		// b reconnects on a new transport; a sees b connected again with the
+		// marker cleared
+		transportB2 := env.newTransport(byClientJwtB, instanceIdB, clientB.RouteManager())
+		defer transportB2.Close()
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return findPeer(connected, clientIdB) != nil && disconnectedCount == 0
+		})
+		connect.AssertEqual(t, ok, true)
+	})
+}
+
+// TestExchangePeerDiscoveryNetworkIsolation asserts the peer registry and the
+// peer announcements are scoped to the network: clients of another network
+// never appear in the peer list or the registry, and a disconnect in one
+// network leaves the other network's view untouched.
+func TestExchangePeerDiscoveryNetworkIsolation(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		env := testing_newPeerDiscoveryEnv(ctx, t, 8096, 9016)
+		defer env.Close()
+
+		// a second network on the same exchange
+		networkId2 := server.NewId()
+		userId2 := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId2, fmt.Sprintf("peerdiscovery2-%s", networkId2), userId2)
+		userSession2 := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId2,
+			UserId:    userId2,
+		})
+		authClient2 := func(args *model.AuthNetworkClientArgs) (server.Id, string) {
+			result, err := model.AuthNetworkClient(args, userSession2)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Error, nil)
+			return *result.ClientId, *result.ByClientJwt
+		}
+
+		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "net1 device a",
+		})
+		clientIdB, byClientJwtB := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "net1 device b",
+		})
+		clientIdX, byClientJwtX := authClient2(&model.AuthNetworkClientArgs{
+			Description: "net2 device x",
+		})
+
+		clientA := env.newClient(clientIdA)
+		defer clientA.Close()
+		clientB := env.newClient(clientIdB)
+		defer clientB.Close()
+		clientX := env.newClient(clientIdX)
+		defer clientX.Close()
+
+		transportA := env.newTransport(byClientJwtA, server.NewId(), clientA.RouteManager())
+		defer transportA.Close()
+		transportB := env.newTransport(byClientJwtB, server.NewId(), clientB.RouteManager())
+		defer transportB.Close()
+		transportX := env.newTransport(byClientJwtX, server.NewId(), clientX.RouteManager())
+		defer transportX.Close()
+
+		env.setProvideModes(clientA, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		env.setProvideModes(clientB, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		env.setProvideModes(clientX, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+
+		// net1 converges to exactly its own peer
+		ok := waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return findPeer(connected, clientIdB) != nil
+		})
+		connect.AssertEqual(t, ok, true)
+		connectedA, _ := clientA.NetworkPeers()
+		connect.AssertEqual(t, len(connectedA), 1)
+		connect.AssertEqual(t, findPeer(connectedA, clientIdX), nil)
+
+		// net2's client sees no peers, even after the announcements settle
+		select {
+		case <-time.After(3 * time.Second):
+		}
+		connectedX, disconnectedCountX := clientX.NetworkPeers()
+		connect.AssertEqual(t, len(connectedX), 0)
+		connect.AssertEqual(t, disconnectedCountX, 0)
+
+		// the registries are disjoint
+		_, peers1 := model.GetNetworkPeers(ctx, env.networkId)
+		for _, peer := range peers1 {
+			connect.AssertNotEqual(t, peer.ClientId, clientIdX)
+		}
+		_, peers2 := model.GetNetworkPeers(ctx, networkId2)
+		connect.AssertEqual(t, len(peers2), 1)
+		connect.AssertEqual(t, peers2[0].ClientId, clientIdX)
+
+		// a disconnect in net1 surfaces there and leaves net2 untouched
+		clientB.Cancel()
+		transportB.Close()
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return findPeer(connected, clientIdB) == nil && 1 <= disconnectedCount
+		})
+		connect.AssertEqual(t, ok, true)
+		connectedX, disconnectedCountX = clientX.NetworkPeers()
+		connect.AssertEqual(t, len(connectedX), 0)
+		connect.AssertEqual(t, disconnectedCountX, 0)
+	})
+}
+
+// TestExchangePeerDiscoveryKeyEvents runs the peers-online lifecycle with
+// key-event delivery enabled (PEERSSTREAMS2.md) and the corrective poll far
+// outside the test window — every assertion below can only pass if the
+// redis keyspace-notification path delivers: late join appears, a clean
+// disconnect markers, and a reconnect clears the marker.
+func TestExchangePeerDiscoveryKeyEvents(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		server.Testing_EnableKeyspaceNotifications(ctx)
+
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, 8097, 9017, func(settings *ExchangeSettings) {
+			settings.KeyEventDelivery.Enabled = true
+			// far outside the test window: delivery must come from key events
+			settings.KeyEventDelivery.CorrectivePollInterval = 10 * time.Minute
+			settings.KeyEventDelivery.ResyncSpreadTimeout = 1 * time.Second
+		})
+		defer env.Close()
+
+		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "device a",
+		})
+		clientIdB, byClientJwtB := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "device b",
+		})
+
+		// a connects and settles alone
+		clientA := env.newClient(clientIdA)
+		defer clientA.Close()
+		transportA := env.newTransport(byClientJwtA, server.NewId(), clientA.RouteManager())
+		defer transportA.Close()
+		env.setProvideModes(clientA, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		ok := waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return len(connected) == 0 && disconnectedCount == 0
+		})
+		connect.AssertEqual(t, ok, true)
+		// hold a settled beat past a's own connect resync, so the appearance
+		// below is a live key-event delta
+		select {
+		case <-time.After(3 * time.Second):
+		}
+
+		// b comes online later; a sees it via the `set` key event
+		clientB := env.newClient(clientIdB)
+		defer clientB.Close()
+		instanceIdB := server.NewId()
+		transportB := env.newTransport(byClientJwtB, instanceIdB, clientB.RouteManager())
+		env.setProvideModes(clientB, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			peerB := findPeer(connected, clientIdB)
+			return peerB != nil && peerB.ProvideEnabled
+		})
+		connect.AssertEqual(t, ok, true)
+
+		// b drops without a clean client teardown; the resident teardown or
+		// registration expiry emits the disconnect (`del`/`expired`) and a
+		// sees the marker
+		transportB.Close()
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return findPeer(connected, clientIdB) == nil && 1 <= disconnectedCount
+		})
+		connect.AssertEqual(t, ok, true)
+
+		// b reconnects; the re-registration `set` event restores it and
+		// clears the marker
+		transportB2 := env.newTransport(byClientJwtB, instanceIdB, clientB.RouteManager())
+		defer transportB2.Close()
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return findPeer(connected, clientIdB) != nil && disconnectedCount == 0
+		})
+		connect.AssertEqual(t, ok, true)
+	})
+}
+
+// TestExchangePeerDiscoveryKeyEventDropRepair proves the corrective backstop:
+// with event GENERATION silenced at redis (the worst drop — nothing is even
+// published), a change must still deliver via the corrective poll, and
+// re-enabling generation restores live event delivery.
+func TestExchangePeerDiscoveryKeyEventDropRepair(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		server.Testing_EnableKeyspaceNotifications(ctx)
+
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, 8098, 9018, func(settings *ExchangeSettings) {
+			settings.KeyEventDelivery.Enabled = true
+			// short corrective so the repair lands inside the test window;
+			// still far above the event path's latency, so the live-delivery
+			// assertions below are meaningful
+			settings.KeyEventDelivery.CorrectivePollInterval = 5 * time.Second
+			settings.KeyEventDelivery.ResyncSpreadTimeout = 1 * time.Second
+		})
+		defer env.Close()
+
+		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "device a",
+		})
+		clientIdB, byClientJwtB := env.authClient(&model.AuthNetworkClientArgs{
+			Description: "device b",
+		})
+
+		clientA := env.newClient(clientIdA)
+		defer clientA.Close()
+		transportA := env.newTransport(byClientJwtA, server.NewId(), clientA.RouteManager())
+		defer transportA.Close()
+		env.setProvideModes(clientA, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		ok := waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			return len(connected) == 0 && disconnectedCount == 0
+		})
+		connect.AssertEqual(t, ok, true)
+
+		// silence event generation entirely: the worst possible drop
+		server.Testing_SetKeyspaceNotifications(ctx, "")
+
+		// b joins while events are silent; a must still converge via the
+		// corrective poll
+		clientB := env.newClient(clientIdB)
+		defer clientB.Close()
+		instanceIdB := server.NewId()
+		transportB := env.newTransport(byClientJwtB, instanceIdB, clientB.RouteManager())
+		defer transportB.Close()
+		env.setProvideModes(clientB, map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+		})
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			peerB := findPeer(connected, clientIdB)
+			return peerB != nil && peerB.ProvideEnabled
+		})
+		connect.AssertEqual(t, ok, true)
+
+		// restore generation: live delivery works again (b's provide change
+		// rewrites the member key -> `set` event -> a sees the mode drop)
+		server.Testing_EnableKeyspaceNotifications(ctx)
+		env.setProvideModes(clientB, map[protocol.ProvideMode]bool{})
+		ok = waitForPeers(ctx, clientA, func(connected []*connect.NetworkPeer, disconnectedCount int) bool {
+			peerB := findPeer(connected, clientIdB)
+			return peerB != nil && !peerB.ProvideEnabled
 		})
 		connect.AssertEqual(t, ok, true)
 	})

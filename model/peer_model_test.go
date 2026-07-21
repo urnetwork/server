@@ -104,7 +104,7 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		ttl := 60 * time.Second
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 5*time.Second)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
 		defer listener.Close()
 
 		// the listener syncs an empty reset on subscribe
@@ -197,7 +197,7 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 
 		// a new listener syncs to the head state with a reset
 		c2 := newTestNetworkPeerAccumulator()
-		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 5*time.Second)
+		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5)
 		defer listener2.Close()
 
 		select {
@@ -242,7 +242,7 @@ func TestNetworkPeerExpiry(t *testing.T) {
 		// another peer's activity prunes the expired entry and publishes
 		// the disconnect marker
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 5*time.Second)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
 		defer listener.Close()
 
 		AddNetworkPeer(ctx, networkId, peer2, residentId2, 60*time.Second)
@@ -289,7 +289,7 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		AddNetworkPeer(ctx, networkId, profile, residentId, 60*time.Second)
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 5*time.Second)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
 		defer listener.Close()
 
 		// SetProvide publishes a provide modes update for the registered peer
@@ -505,7 +505,7 @@ func TestNetworkProxyPeer(t *testing.T) {
 
 		// a listener sees the client peer but never the proxy peer
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 1*time.Second)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
 		defer listener.Close()
 
 		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId}, residentId, ttl)
@@ -555,7 +555,7 @@ func TestNetworkPeerEventGapReset(t *testing.T) {
 		ttl := 60 * time.Second
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 1*time.Second)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
 		defer listener.Close()
 
 		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId1}, residentId, ttl)
@@ -617,7 +617,7 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		}
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 1*time.Second)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
 		defer listener.Close()
 
 		AddNetworkPeer(ctx, networkId, peer, residentId, ttl)
@@ -641,28 +641,39 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		})
 
 		// the registration is lost: the heartbeat refresh reports not
-		// registered, and the caller re-adds (the resident recovery branch)
+		// registered. A flush and rebuild are not atomic in production (the
+		// heartbeat re-adds over seconds), so the listener first polls the
+		// intermediate empty state (missing counter reads as 0, below the
+		// synced value -> resync to empty), then the re-add diverges the
+		// version again.
 		assert.Equal(t, RefreshNetworkPeer(ctx, networkId, clientId, residentId, ttl), false)
-		AddNetworkPeer(ctx, networkId, peer, residentId, ttl)
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		assert.Equal(t, len(c.Connected()), 0)
 
-		// the registry recovered
+		// the resident recovery branch re-adds (a different peer here to show
+		// the resync carries fresh data, not stale accumulator state)
+		clientId2 := server.NewId()
+		residentId2 := server.NewId()
+		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId2, Principal: "svc-b"}, residentId2, ttl)
+
 		_, peers := GetNetworkPeers(ctx, networkId)
 		connected, _ := splitNetworkPeers(peers)
 		assert.Equal(t, len(connected), 1)
-		assert.Equal(t, connected[clientId].Principal, "svc-a")
+		assert.Equal(t, connected[clientId2].Principal, "svc-b")
 
-		// the already-subscribed listener resyncs on the backward event id
-		// (or its poll), rather than staying quiet forever
+		// the already-subscribed listener resyncs to the rebuilt state
 		select {
 		case <-time.After(3 * time.Second):
 		}
 		connectedAccumulated := c.Connected()
 		assert.Equal(t, len(connectedAccumulated), 1)
-		assert.NotEqual(t, connectedAccumulated[clientId], nil)
+		assert.NotEqual(t, connectedAccumulated[clientId2], nil)
 
 		// a fresh listener converges too
 		c2 := newTestNetworkPeerAccumulator()
-		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 1*time.Second)
+		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5)
 		defer listener2.Close()
 
 		select {
@@ -698,7 +709,7 @@ func TestNetworkPeerChurn(t *testing.T) {
 		}
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 5*time.Second)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
 		defer listener.Close()
 
 		// each peer churns on its own goroutine; half end connected,
@@ -774,7 +785,7 @@ func TestNetworkPeerChurn(t *testing.T) {
 
 		// a fresh listener converges to the same state
 		c2 := newTestNetworkPeerAccumulator()
-		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 5*time.Second)
+		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5)
 		defer listener2.Close()
 
 		select {
@@ -928,5 +939,133 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 		assert.Equal(t, topLevel, true)
 		assert.NotEqual(t, profile, nil)
 		assert.Equal(t, peersEnabled, false)
+	})
+}
+
+// TestNetworkTopLevelClientLimitDisabled is the counterpart to the test above:
+// while the concurrent-client limit is DISABLED (dark by default in prod), a
+// network must be able to connect MORE than LimitTopLevelClientIdsPerNetwork
+// top-level clients — a network with a large provider fleet must never have a
+// provider refused. The connection/creation gates are all dark in this state:
+// AuthNetworkClient (creation), NetworkConcurrentClientsExceeded (plan), and
+// CanConnectNetworkPeer (connection activation).
+//
+// The peer-feature valve (NetworkPeersEnabled), however, is enforced
+// INDEPENDENTLY of enforce_concurrent_clients (the 2026-07-17 fix): an
+// over-limit network connects normally but gets peersEnabled=false, so its
+// O(size^2) peer full-read fan-out never lands on a single redis shard.
+func TestNetworkTopLevelClientLimitDisabled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+
+		// explicitly disabled (also the prod default) + a tiny plan limit that
+		// MUST NOT bite while disabled
+		defer Testing_SetEnforceConcurrentClients(false)()
+		defer Testing_SetConcurrentClientsLimit(1, 1)()
+		Testing_ClearNetworkPeersEnabledCache()
+
+		// create well beyond the top-level limit — every provider connects
+		const overLimit = LimitTopLevelClientIdsPerNetwork + 25
+		clientIds := make([]server.Id, 0, overLimit)
+		for i := range overLimit {
+			authClientResult, err := AuthNetworkClient(
+				&AuthNetworkClientArgs{Description: fmt.Sprintf("provider %d", i)},
+				userSession,
+			)
+			assert.Equal(t, err, nil)
+			if authClientResult.Error != nil {
+				t.Fatalf("provider %d refused while limit disabled: %s (ClientLimitExceeded=%v)",
+					i, authClientResult.Error.Message, authClientResult.Error.ClientLimitExceeded)
+			}
+			clientIds = append(clientIds, *authClientResult.ClientId)
+		}
+		assert.Equal(t, len(clientIds), overLimit)
+
+		// the plan gates report no limit while disabled, at a count over the cap
+		assert.Equal(t, NetworkConcurrentClientsExceeded(ctx, networkId), false)
+		// every client may connect — the connection activation gate is dark
+		for i, clientId := range clientIds {
+			if !CanConnectNetworkPeer(ctx, clientId) {
+				t.Fatalf("provider %d (%s) cannot connect while limit disabled", i, clientId)
+			}
+		}
+		// BUT the peer valve is enforced independently of
+		// enforce_concurrent_clients: an over-limit network gets NO peer
+		// registrations/subscriptions even while disabled, so its O(size^2)
+		// full-read fan-out never lands on redis (2026-07-17 fix).
+		assert.Equal(t, NetworkPeersEnabled(ctx, networkId), false)
+		// the per-client profile resolves the same peers-off decision while
+		// still reporting the client as a valid top-level client
+		_, topLevel, _, profile, peersEnabled := GetNetworkPeerProfile(ctx, clientIds[0])
+		assert.Equal(t, topLevel, true)
+		assert.NotEqual(t, profile, nil)
+		assert.Equal(t, peersEnabled, false)
+	})
+}
+
+// TestNetworkProviderConnectionExemptFromLimit guards the specific provider
+// concern under FUTURE enforcement: even when the concurrent-client limit is
+// ENABLED and the network is at its plan limit, PUBLIC PROVIDERS can still
+// connect — they add capacity rather than consume it, so they are exempt from
+// both the enforceable connected count and the activation gate. A network's
+// providers are never blocked by its own client limit.
+func TestNetworkProviderConnectionExemptFromLimit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		networkId := server.NewId()
+
+		// enforcement ON, plan limit of 1 connected top-level client
+		defer Testing_SetEnforceConcurrentClients(true)()
+		defer Testing_SetConcurrentClientsLimit(1, 1)()
+		Testing_ClearNetworkPeersEnabledCache()
+
+		// register one ordinary (non-provider) connected client: the network is
+		// now at its plan limit of 1. (Testing_CreateDevice arg order is
+		// networkId, deviceId, clientId.)
+		ordinaryId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), ordinaryId, "ordinary", "ordinary")
+		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: ordinaryId}, server.NewId(), 60*time.Second)
+		assert.Equal(t, GetNetworkEnforceableConnectedCount(ctx, networkId), 1)
+
+		// a second ordinary client would exceed the limit -> refused
+		ordinary2Id := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), ordinary2Id, "ordinary2", "ordinary2")
+		assert.Equal(t, CanConnectNetworkPeer(ctx, ordinary2Id), false)
+
+		// a PUBLIC PROVIDER connects regardless: exempt from the count and the
+		// activation gate. SetProvide gives the DB provide modes the gate reads;
+		// register several beyond the limit.
+		publicStream := map[ProvideMode][]byte{
+			ProvideModePublic: make([]byte, 32),
+			ProvideModeStream: make([]byte, 32),
+		}
+		for i := range 5 {
+			providerId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), providerId,
+				fmt.Sprintf("provider %d", i), fmt.Sprintf("provider %d", i))
+			SetProvide(ctx, providerId, publicStream)
+			AddNetworkPeer(ctx, networkId, &NetworkPeer{
+				ClientId:     providerId,
+				ProvideModes: []ProvideMode{ProvideModePublic, ProvideModeStream},
+			}, server.NewId(), 60*time.Second)
+			if !CanConnectNetworkPeer(ctx, providerId) {
+				t.Fatalf("public provider %d refused at the network's client limit", i)
+			}
+		}
+
+		// providers did not consume the enforceable count (still 1: the lone
+		// ordinary client)
+		assert.Equal(t, GetNetworkEnforceableConnectedCount(ctx, networkId), 1)
 	})
 }

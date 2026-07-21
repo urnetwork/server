@@ -269,6 +269,300 @@ func TestStream(t *testing.T) {
 
 }
 
+// TestAddCompanionContractToStream covers the companion-side stream marking:
+// a companion contract must join its origin flow's active stream so the
+// receive sequence on the other side sees the stream id when it inspects the
+// contract, and so the stream stays alive while the reply is open. The
+// escrow-linked origin is the earliest origin, which can predate the stream
+// or have already closed out of it — the resolution must fall back to the
+// pair marker, and prune marker members whose stream is gone.
+func TestAddCompanionContractToStream(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// origin direction: sourceId -> destinationId
+		// companion direction: destinationId -> sourceId
+		sourceId := server.NewId()
+		destinationId := server.NewId()
+		intermediaryIds := []server.Id{server.NewId()}
+
+		// scenario 1: the escrow-linked origin carries the stream
+		originContractId := server.NewId()
+		streamId := AddToStream(ctx, originContractId, sourceId, destinationId, intermediaryIds)
+		streamKey := newStreamKey(sourceId, destinationId, intermediaryIds)
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, key := range []string{streamIdKey(streamKey), streamContractsKey(streamKey)} {
+				ttl, err := r.TTL(ctx, key).Result()
+				connect.AssertEqual(t, err, nil)
+				if ttl < 7*time.Hour+59*time.Minute || 8*time.Hour < ttl {
+					t.Fatalf("%s ttl = %s, want approximately 8h", key, ttl)
+				}
+			}
+		})
+
+		companionContractId := server.NewId()
+		companionStreamId, ok := AddCompanionContractToStream(
+			ctx,
+			companionContractId,
+			originContractId,
+			destinationId,
+			sourceId,
+		)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, companionStreamId, streamId)
+
+		// the companion is a stream member with the origin's stream key
+		memberStreamId, memberStreamKey, found := GetStream(ctx, companionContractId)
+		connect.AssertEqual(t, found, true)
+		connect.AssertEqual(t, memberStreamId, streamId)
+		connect.AssertEqual(t, memberStreamKey, streamKey)
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, key := range []string{streamIdKey(streamKey), streamContractsKey(streamKey)} {
+				ttl, err := r.TTL(ctx, key).Result()
+				connect.AssertEqual(t, err, nil)
+				if ttl < 7*time.Hour+59*time.Minute || 8*time.Hour < ttl {
+					t.Fatalf("%s ttl after companion join = %s, want approximately 8h", key, ttl)
+				}
+			}
+		})
+
+		// the origin closing out of the stream must not tear it down while
+		// the companion reply is still open
+		RemoveFromStream(ctx, originContractId)
+		memberStreamId, _, found = GetStream(ctx, companionContractId)
+		connect.AssertEqual(t, found, true)
+		connect.AssertEqual(t, memberStreamId, streamId)
+
+		// scenario 2: a companion renewal after the origin closed out of the
+		// stream (the linger window) resolves the stream through the pair
+		// marker — the previous still-open companion holds the stream alive
+		renewalContractId := server.NewId()
+		renewalStreamId, ok := AddCompanionContractToStream(
+			ctx,
+			renewalContractId,
+			originContractId,
+			destinationId,
+			sourceId,
+		)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, renewalStreamId, streamId)
+
+		// scenario 3: an escrow-linked origin that was never in the stream
+		// still resolves through the pair marker
+		companionContractId2 := server.NewId()
+		companionStreamId2, ok := AddCompanionContractToStream(
+			ctx,
+			companionContractId2,
+			server.NewId(),
+			destinationId,
+			sourceId,
+		)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, companionStreamId2, streamId)
+
+		// closing all members tears the stream down and clears the marker
+		for _, contractId := range []server.Id{companionContractId, renewalContractId, companionContractId2} {
+			RemoveFromStream(ctx, contractId)
+		}
+		_, _, found = GetStream(ctx, companionContractId2)
+		connect.AssertEqual(t, found, false)
+
+		// scenario 4: no active stream for the pair — the companion stays
+		// unmarked and must not resurrect the dead stream. A stale marker
+		// member (redis loss, expiry race) must be pruned, not joined
+		server.Redis(ctx, func(r server.RedisClient) {
+			staleKey := newStreamKey(sourceId, destinationId, intermediaryIds)
+			connect.AssertEqual(t, r.SAdd(ctx, pairStreamsKey(destinationId, sourceId), staleKey.Bytes()).Err(), nil)
+		})
+		companionContractId3 := server.NewId()
+		_, ok = AddCompanionContractToStream(
+			ctx,
+			companionContractId3,
+			originContractId,
+			destinationId,
+			sourceId,
+		)
+		connect.AssertEqual(t, ok, false)
+		_, _, found = GetStream(ctx, companionContractId3)
+		connect.AssertEqual(t, found, false)
+		server.Redis(ctx, func(r server.RedisClient) {
+			count, err := r.SCard(ctx, pairStreamsKey(sourceId, destinationId)).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, count, int64(0))
+		})
+	})
+}
+
+// TestCompanionStreamCloseLifecycle covers the companion's stream membership
+// through the production close path: the intermediary hop keeps its stream
+// config while only the companion holds the stream (the origin closed out),
+// and the companion settling via CloseContract removes it from the stream —
+// the per-contract keys written at join time are what RemoveFromStream needs
+// to find the membership — tearing the stream down for the hops only then.
+func TestCompanionStreamCloseLifecycle(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		networkId := server.NewId()
+		// origin direction: sourceId -> destinationId
+		sourceId := server.NewId()
+		destinationId := server.NewId()
+		intermediaryId := server.NewId()
+
+		c := NewStreamHopAccumulator(
+			func(hop StreamHop) {},
+			func(hop StreamHop) {},
+		)
+		l := NewStreamHopListener(ctx, intermediaryId, c.Event, 200*time.Millisecond, 5)
+		defer l.Close()
+
+		originContractId := server.NewId()
+		streamId := AddToStream(ctx, originContractId, sourceId, destinationId, []server.Id{intermediaryId})
+
+		// the companion has a real contract row so the production close path
+		// (CloseContract -> settle -> RemoveFromStream) applies to it
+		companionContractId, err := CreateContractNoEscrow(
+			ctx,
+			networkId,
+			destinationId,
+			networkId,
+			sourceId,
+			ByteCount(1024*1024),
+		)
+		connect.AssertEqual(t, err, nil)
+		_, ok := AddCompanionContractToStream(
+			ctx,
+			companionContractId,
+			originContractId,
+			destinationId,
+			sourceId,
+		)
+		connect.AssertEqual(t, ok, true)
+
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		connect.AssertEqual(t, c.StreamIds(), map[server.Id]bool{streamId: true})
+
+		// the origin closing out must not tear down the hop config while the
+		// companion reply is still open
+		RemoveFromStream(ctx, originContractId)
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		connect.AssertEqual(t, c.StreamIds(), map[server.Id]bool{streamId: true})
+
+		// both parties settle the companion through the production close path
+		connect.AssertEqual(t, CloseContract(ctx, companionContractId, destinationId, ByteCount(0), false), nil)
+		connect.AssertEqual(t, CloseContract(ctx, companionContractId, sourceId, ByteCount(0), false), nil)
+
+		_, _, found := GetStream(ctx, companionContractId)
+		connect.AssertEqual(t, found, false)
+
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		connect.AssertEqual(t, c.StreamIds(), map[server.Id]bool{})
+	})
+}
+
+func TestStreamHopCorrectiveReadRepairsMissedExpiry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		sourceId := server.NewId()
+		destinationId := server.NewId()
+		hopClientId := server.NewId()
+		AddToStream(
+			ctx,
+			server.NewId(),
+			sourceId,
+			destinationId,
+			[]server.Id{hopClientId},
+		)
+		eventIdBefore := GetStreamEventId(ctx, hopClientId)
+
+		events := make(chan *StreamHopEvent, 8)
+		listener := NewStreamHopListener(
+			ctx,
+			hopClientId,
+			func(event *StreamHopEvent) { events <- event },
+			100*time.Millisecond,
+			1,
+		)
+		defer listener.Close()
+		listener.Resync()
+
+		select {
+		case event := <-events:
+			if len(event.StreamHops) != 1 {
+				t.Fatalf("initial stream hops = %d, want 1", len(event.StreamHops))
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for initial stream-hop snapshot")
+		}
+
+		// Expire only the hop set. Redis expiry does not increment the event
+		// id and no key-event is delivered to this listener.
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.Expire(ctx, clientStreamHopsKey(hopClientId), 500*time.Millisecond)
+		})
+
+		select {
+		case event := <-events:
+			if event.StreamHopEventType != StreamHopEventTypeReset || len(event.StreamHops) != 0 {
+				t.Fatalf("unexpected expiry repair: %+v", event)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("corrective read did not repair missed stream-hop expiry")
+		}
+		connect.AssertEqual(t, GetStreamEventId(ctx, hopClientId), eventIdBefore)
+	})
+}
+
+// TestExpireLeakedStreamKeys covers the one-shot cleanup for the
+// duration-as-nanoseconds ttl leak: keys carrying the effectively-infinite
+// pre-fix ttl are clamped to 8h, healthy keys are left alone.
+func TestExpireLeakedStreamKeys(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// a healthy stream written by the fixed path
+		healthyContractId := server.NewId()
+		AddToStream(ctx, healthyContractId, server.NewId(), server.NewId(), nil)
+		_, healthyKey, found := GetStream(ctx, healthyContractId)
+		connect.AssertEqual(t, found, true)
+
+		// a leaked stream id key: reproduce the pre-fix state, an EXPIRE of
+		// the 8h ttl in nanoseconds
+		leakedKey := streamIdKey(newStreamKey(server.NewId(), server.NewId(), nil))
+		server.Redis(ctx, func(r server.RedisClient) {
+			connect.AssertEqual(t, r.Set(ctx, leakedKey, server.NewId().Bytes(), 0).Err(), nil)
+			connect.AssertEqual(t, r.Do(ctx, "EXPIRE", leakedKey, int64(8*time.Hour/time.Nanosecond)).Err(), nil)
+			leakedTtl, err := r.TTL(ctx, leakedKey).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, 8*time.Hour < leakedTtl, true)
+		})
+
+		scannedCount, fixedCount, err := ExpireLeakedStreamKeys(ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, 2 <= scannedCount, true)
+		connect.AssertEqual(t, 1 <= fixedCount, true)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			leakedTtl, err := r.TTL(ctx, leakedKey).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, 0 < leakedTtl && leakedTtl <= 8*time.Hour, true)
+
+			healthyTtl, err := r.TTL(ctx, streamIdKey(healthyKey)).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, 0 < healthyTtl && healthyTtl <= 8*time.Hour, true)
+		})
+	})
+}
+
 // TestStreamHopFlushRecovery guards the PEERS2 backward-counter resync for the
 // stream listener — the exact case the pre-v2 `<` comparison got wrong (it
 // went permanently stale once the counter reset). When the hops counter is
@@ -299,20 +593,28 @@ func TestStreamHopFlushRecovery(t *testing.T) {
 
 		// flush the client's hop state and its version counter (redis loss /
 		// 24h idle expiry). The counter restarts, so a later event id is
-		// BELOW the listener's last synced value.
+		// at or below the listener's last synced value.
 		server.Redis(ctx, func(r server.RedisClient) {
 			connect.AssertEqual(t, r.Del(ctx, clientStreamHopsKey(clientId), clientEventIdKey(clientId)).Err(), nil)
 		})
 
-		// a new hop repopulates the set and bumps the (reset) counter to 1,
-		// below the listener's previous value — the `!=` resync must fire and
-		// deliver the new head state
+		// a flush and rebuild are not atomic in production — the hops
+		// repopulate over time, so the listener polls the intermediate empty
+		// state first (missing counter reads as 0, below the synced value ->
+		// resync to empty). Reproduce that gap so the version diverges.
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		connect.AssertEqual(t, len(c.StreamHops()), 0)
+
+		// a new hop repopulates the set and bumps the (reset) counter — the
+		// listener resyncs to the new head state
 		contractId2 := server.NewId()
 		destinationId2 := server.NewId()
 		AddToStream(ctx, contractId2, clientId, destinationId2, nil)
 
 		select {
-		case <-time.After(3 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 		_, headHops := GetStreamHops(ctx, clientId)
 		connect.AssertEqual(t, c.StreamHops(), headHops)

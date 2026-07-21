@@ -8,6 +8,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
@@ -74,13 +75,27 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 	})
+
+	// apply per-stream stats retention (MinIO ILM, or the local reaper) once at
+	// init, from the central defaults in the stats package
+	stats.ApplyStreamRetention(ctx)
 }
 
-// InitTaskWorker creates a TaskWorker with all task targets registered.
-// One TaskWorker can be shared with many goroutines calling EvalTasks.
+// InitTaskWorker preserves the historical exact Go signature, including
+// assignability to func(context.Context) *task.TaskWorker. New callers that
+// need non-default settings use InitTaskWorkerWithSettings.
 func InitTaskWorker(ctx context.Context) *task.TaskWorker {
+	return InitTaskWorkerWithSettings(ctx, nil)
+}
 
-	taskWorker := task.NewTaskWorkerWithDefaults(ctx)
+// InitTaskWorkerWithSettings creates a TaskWorker with all task targets
+// registered. One TaskWorker can be shared with many goroutines calling
+// EvalTasks. Passing nil uses the defaults.
+func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSettings) *task.TaskWorker {
+	if settings == nil {
+		settings = task.DefaultTaskWorkerSettings()
+	}
+	taskWorker := task.NewTaskWorker(ctx, settings)
 
 	// 2024.11.15 migration from "bringyour.com" to new package
 

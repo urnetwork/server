@@ -120,6 +120,8 @@ type proxyTestHarness struct {
 	// (simulating an instance restart) without tearing down the harness
 	proxySettings      *ProxySettings
 	proxyDeviceManager *ProxyDeviceManager
+	socks5             *socks5Server
+	httpS              *httpServer
 	wg                 *wgServer
 	wgCancel           context.CancelFunc
 
@@ -408,8 +410,8 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		deviceRpcUrl = fmt.Sprintf("ws://127.0.0.1:%d", testDeviceRpcPort)
 	}
 
-	NewSocks5Server(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
-	NewHttpServer(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
+	socks5 := NewSocks5Server(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
+	httpS := NewHttpServer(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
 	wgCtx, wgCancel := context.WithCancel(ctx)
 	wg := NewWgServer(wgCtx, wgCancel, proxyDeviceManager, proxySettings)
 	NewApiServer(ctx, cancel, proxyDeviceManager, transportTls, nil, InternalApiPort, proxySettings)
@@ -443,6 +445,8 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		proxyClient:        proxyClient,
 		proxySettings:      proxySettings,
 		proxyDeviceManager: proxyDeviceManager,
+		socks5:             socks5,
+		httpS:              httpS,
 		wg:                 wg,
 		wgCancel:           wgCancel,
 		pdNetworkId:        pdNetworkId,

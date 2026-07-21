@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -137,6 +138,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				MaxRedirects: 8,
 			}
 			self.client = redis.NewClusterClient(options)
+			self.client.AddHook(redisTtlWarnHook{})
 		} else {
 			// see https://github.com/redis/go-redis/blob/master/options.go#L31
 			options := &redis.Options{
@@ -166,6 +168,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				// FailingTimeoutSeconds: 0,
 			}
 			self.client = redis.NewClient(options)
+			self.client.AddHook(redisTtlWarnHook{})
 		}
 	}
 	return self.client
@@ -194,6 +197,11 @@ func (self *safeRedisClient) reset() {
 
 var safeClient = &safeRedisClient{}
 
+var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_redis_key_event_merge_drops_total",
+	Help: "Keyspace notifications dropped at the process-wide merge; each drop terminates the subscription epoch and forces a full resync",
+})
+
 // pool stats flow to grafana via the default registry (see StartStatsPusher).
 // Timeouts is the earliest caller-side signal of a wedged node or exhausted
 // pool — it fires before user-visible failures.
@@ -208,6 +216,7 @@ func init() {
 		}
 	}
 	prometheus.MustRegister(
+		redisKeyEventMergeDrops,
 		prometheus.NewCounterFunc(
 			prometheus.CounterOpts{Name: "urnetwork_redis_pool_hits_total", Help: "redis pool free-connection hits"},
 			poolStat(func(s *redis.PoolStats) float64 { return float64(s.Hits) }),
@@ -367,6 +376,201 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 
 		return
 	}
+}
+
+// RedisDb returns the logical db index of the configured redis, used to
+// build keyspace-notification channel names (cluster mode is always db 0).
+func RedisDb() int {
+	redisKeys := Vault.RequireSimpleResource("redis.yml")
+	if redisKeys.RequireBool("cluster") {
+		return 0
+	}
+	return redisKeys.RequireInt("db")
+}
+
+// SubscribeKeyEvents psubscribes the patterns on every master node — redis
+// keyspace notifications are emitted only by the node holding the key's slot
+// — and merges the messages into one channel (PEERSSTREAMS2.md). The done
+// channel closes when any node subscription dies or the master set changes
+// (checked every topologyRefresh); events during any gap are gone forever,
+// so on done the caller must unsub, resubscribe, and RESYNC its state. On a
+// non-cluster client this is a single psubscribe.
+func SubscribeKeyEvents(
+	ctx context.Context,
+	topologyRefresh time.Duration,
+	patterns ...string,
+) (messages <-chan RedisMessage, done <-chan struct{}, unsub func(), returnErr error) {
+	var client RedisClient
+	Redis(ctx, func(c RedisClient) {
+		client = c
+	})
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+	out := make(chan RedisMessage, 1024)
+	doneOnce := sync.OnceFunc(cancel)
+
+	// ForEachMaster runs its callback CONCURRENTLY, one goroutine per master —
+	// every write to state shared across callbacks must hold stateLock
+	// (unsynchronized writes here crash-looped the connect fleet on 2026-07-18:
+	// fatal concurrent map writes at startup with 32 masters)
+	var stateLock sync.Mutex
+	pubsubs := []*redis.PubSub{}
+	masterAddrs := func() (map[string]bool, error) {
+		addrs := map[string]bool{}
+		clusterClient, ok := client.(*redis.ClusterClient)
+		if !ok {
+			return addrs, nil
+		}
+		err := clusterClient.ForEachMaster(cancelCtx, func(ctx context.Context, node *redis.Client) error {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			addrs[node.Options().Addr] = true
+			return nil
+		})
+		return addrs, err
+	}
+
+	drain := func(pubsub *redis.PubSub) {
+		defer doneOnce()
+		c := pubsub.ChannelWithSubscriptions(
+			redis.WithChannelSize(1024),
+		)
+		initialSubscriptionReady := false
+		for {
+			select {
+			case <-cancelCtx.Done():
+				return
+			case value, ok := <-c:
+				if !ok {
+					// the subscription died; the caller resubscribes + resyncs
+					return
+				}
+				switch value := value.(type) {
+				case *redis.Subscription:
+					if value.Kind == "psubscribe" {
+						if initialSubscriptionReady {
+							// go-redis transparently reconnected. End this
+							// generation so the caller performs the required
+							// full resync for the unseen gap.
+							return
+						}
+						if len(patterns) <= value.Count {
+							initialSubscriptionReady = true
+						}
+					}
+					continue
+				case *redis.Message:
+					select {
+					case <-cancelCtx.Done():
+						return
+					case out <- value:
+					default:
+						// Never stop draining a node's PubSub socket behind a
+						// congested shared merge. A drop invalidates this
+						// epoch; reconnect + full resync restores state.
+						redisKeyEventMergeDrops.Inc()
+						return
+					}
+				}
+			}
+		}
+	}
+
+	if clusterClient, ok := client.(*redis.ClusterClient); ok {
+		initialAddrs, err := masterAddrs()
+		if err != nil {
+			cancel()
+			returnErr = err
+			return
+		}
+		if len(initialAddrs) == 0 {
+			cancel()
+			returnErr = fmt.Errorf("no master nodes")
+			return
+		}
+		err = clusterClient.ForEachMaster(cancelCtx, func(ctx context.Context, node *redis.Client) error {
+			pubsub := node.PSubscribe(cancelCtx, patterns...)
+			func() {
+				stateLock.Lock()
+				defer stateLock.Unlock()
+				pubsubs = append(pubsubs, pubsub)
+			}()
+			go HandleError(func() {
+				drain(pubsub)
+			})
+			return nil
+		})
+		if err != nil {
+			for _, pubsub := range pubsubs {
+				pubsub.Close()
+			}
+			cancel()
+			returnErr = err
+			return
+		}
+		// watch the master set: a moved slot emits events on the new owner,
+		// which the current subscriptions do not cover
+		go HandleError(func() {
+			defer doneOnce()
+			for {
+				select {
+				case <-cancelCtx.Done():
+					return
+				case <-time.After(topologyRefresh):
+				}
+				clusterClient.ReloadState(cancelCtx)
+				addrs, err := masterAddrs()
+				if err != nil || !maps.Equal(addrs, initialAddrs) {
+					return
+				}
+			}
+		})
+	} else {
+		pubsub := client.PSubscribe(cancelCtx, patterns...)
+		pubsubs = append(pubsubs, pubsub)
+		go HandleError(func() {
+			drain(pubsub)
+		})
+	}
+
+	messages = out
+	done = cancelCtx.Done()
+	unsub = func() {
+		doneOnce()
+		for _, pubsub := range pubsubs {
+			pubsub.Close()
+		}
+	}
+	return
+}
+
+// Testing_EnableKeyspaceNotifications turns on the keyspace-notification
+// classes the key-event transport needs (PEERSSTREAMS2.md), on every node.
+// Tests only — production nodes get this from redis.conf.j2 (xops).
+func Testing_EnableKeyspaceNotifications(ctx context.Context) {
+	Testing_SetKeyspaceNotifications(ctx, "Kg$sx")
+}
+
+// Testing_SetKeyspaceNotifications sets the notification classes on every
+// node ("" disables — used by the drop-repair test to silence events).
+func Testing_SetKeyspaceNotifications(ctx context.Context, classes string) {
+	Redis(ctx, func(client RedisClient) {
+		set := func(c *redis.Client) error {
+			return c.ConfigSet(ctx, "notify-keyspace-events", classes).Err()
+		}
+		if clusterClient, ok := client.(*redis.ClusterClient); ok {
+			err := clusterClient.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error {
+				return set(node)
+			})
+			if err != nil {
+				panic(err)
+			}
+		} else if nodeClient, ok := client.(*redis.Client); ok {
+			if err := set(nodeClient); err != nil {
+				panic(err)
+			}
+		}
+	})
 }
 
 // channel messages can be: RedisMessage, RedisSubscription

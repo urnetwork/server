@@ -4,7 +4,7 @@ Replaces the pubsub event delivery of PEERS.md (v1) after the 2026-07-15
 outage. The registry data model, protocol frames, API, and SDK surface are
 UNCHANGED — this redesign replaces only the change-notification transport.
 Incident record and first-principles throughput accounting: FOLLOWUP.md
-"Network peers pubsub". Monitoring signals referenced here: MONITOR.md.
+"Network peers pubsub". Monitoring signals referenced here: monitor/SIGNALS.md.
 
 ## 1. Design statement
 
@@ -76,16 +76,21 @@ every tick (PollInterval + jitter ±20%):
 - `!=` comparison, not `>`: a flushed/expired counter restarts at 1; any
   mismatch (including regression) triggers a full read. Missing key reads as
   0 — also a mismatch. Self-healing against every redis data-loss mode.
-- `FullReadEvery` (default: every 10th tick) is belt-and-braces against a
-  missed bump (writer crash between mutation and INCR is impossible inside
-  one TxPipeline, but cheap insurance against unknown-unknowns). The
-  insurance tick FORCES delivery of the snapshot even when the version
-  matches the last synced value — a version comparison alone cannot detect a
-  missed bump or a counter that resets to an already-synced value, so the
-  insurance path bypasses the version guard and re-delivers (idempotent; the
-  downstream accumulator diffs locally). Found via TestStreamHopFlushRecovery
-  — without this, the "insurance" read fetched data but suppressed delivery,
-  adding nothing over the normal poll.
+- `FullReadEvery` (default: every 10th tick) is a cheap hygiene re-read of
+  the snapshot; it still delivers ONLY on a version change (same `!=` guard as
+  the normal poll), so a static registry never re-delivers — the "no change →
+  no event" contract holds (clients react to peer events, and a periodic
+  redundant Reset would be wasted wire traffic + spurious client churn). The
+  `!=` comparison catches every realistic flush/expiry/eviction: a
+  flush-and-rebuild is NOT atomic in production (heartbeats repopulate over
+  seconds), so a poll observes the intermediate empty state (missing counter
+  reads as 0, below the synced value) and the version diverges. (An earlier
+  design force-delivered on the insurance tick to also cover a counter that
+  resets to the *exact* value already synced between two polls — but that
+  requires a sub-poll-interval atomic flush+rebuild that does not occur in
+  production, and the cost was a redundant Reset per client every
+  FullReadEvery ticks. Reverted; the flush tests now use the realistic
+  non-atomic timing.)
 - The accumulator/diff and the frame batching (Reset + Update, 50 peers per
   frame) are v1 code reused as-is; only the event source changes from
   pubsub messages to poll diffs. Client protocol (MessageType 26/27) and SDK
@@ -145,7 +150,7 @@ failure: peers lists go stale. That is the entire blast radius.
    assertions with a short PollInterval); keep TestNetworkPeerEventGapReset
    semantics as counter-mismatch resync; churn test asserting NO redis
    connection growth (connected_clients flat) and bounded full-read counts.
-3. Canary: enable on one connect block; watch MONITOR.md signals — per-node
+3. Canary: enable on one connect block; watch monitor/SIGNALS.md signals — per-node
    connected_clients (flat), used_memory_clients (flat), cmd rate (+small),
    pubsub-drop log class (zero by construction), contract rate (unaffected).
 4. Fleet enable. Re-enable checklist from FOLLOWUP applies (maxmemory-clients

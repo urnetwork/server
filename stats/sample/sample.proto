@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package sample;
+
+option go_package = "github.com/urnetwork/server/stats/sample";
+
+// one sample per FindProviders2 call: the loaded candidate pool (after redis
+// shard sub-sampling, before any per-call filtering) in scaled-weight
+// descending order, and the chosen providers in result order. Together with
+// the call args this is enough to replay the selection.
+//
+// client and network ids are anonymized 16-byte pseudonyms (see
+// server/stats). The same real id maps to the same pseudonym across every
+// sample, so providers can be traced through the stats without being
+// matchable to production ids.
+message FindProviders2Sample {
+    uint64 time_unix_milli = 1;
+    // caller country code (lowercase), resolved from the caller ip. The
+    // caller itself is not identified.
+    string caller_country_code = 2;
+    string rank_mode = 3;
+    bool force_minimum = 4;
+    bool force_count = 5;
+    // the requested count and the effective count after the min block size
+    int32 requested_count = 6;
+    int32 effective_count = 7;
+    // shape of the specs, not the specs themselves
+    int32 spec_location_count = 8;
+    int32 spec_location_group_count = 9;
+    int32 spec_client_count = 10;
+    bool spec_best_available = 11;
+    int32 exclude_client_count = 12;
+    int32 exclude_destination_count = 13;
+    // redis sample shard load time for this call
+    float load_millis = 14;
+    // total loaded pool size. when larger than len(candidates) the export
+    // was capped and the lowest-weight tail was dropped.
+    int32 pool_count = 15;
+    repeated Candidate candidates = 16;
+    // chosen (anonymized) client ids in result order (after tier banding)
+    repeated bytes chosen_client_ids = 17;
+}
+
+// one loaded candidate, with the weights the selection used
+message Candidate {
+    // anonymized client id
+    bytes client_id = 1;
+    // anonymized network id
+    bytes network_id = 2;
+    // the weight used by the weighted selection for the call's rank mode
+    float scaled_weight = 3;
+    int32 tier = 4;
+    int32 score = 5;
+    double reliability_weight = 6;
+    double independent_reliability_weight = 7;
+    int32 min_relative_latency_millis = 8;
+    int64 max_bytes_per_second = 9;
+    bool has_latency_test = 10;
+    bool has_speed_test = 11;
+}

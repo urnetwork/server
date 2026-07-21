@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
@@ -55,8 +57,75 @@ var transferByteCounter = prometheus.NewCounter(
 	},
 )
 
+var contractFailureCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "contract_failures_total",
+		Help:      "Create-contract failures partitioned by a bounded cause class and companion mode",
+	},
+	[]string{"cause", "companion"},
+)
+
+var contractFailureLogState = struct {
+	sync.Mutex
+	last map[string]time.Time
+}{
+	last: map[string]time.Time{},
+}
+
 func init() {
-	prometheus.MustRegister(transferByteCounter)
+	prometheus.MustRegister(transferByteCounter, contractFailureCounter)
+}
+
+func contractFailureClass(err error) string {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "insufficient balance"):
+		return "insufficient_balance"
+	case strings.Contains(message, "missing origin contract for companion"):
+		return "missing_companion_origin"
+	case strings.Contains(message, "client does not exist"):
+		return "client_not_found"
+	default:
+		return "other"
+	}
+}
+
+func recordContractFailure(
+	clientId server.Id,
+	destinationId server.Id,
+	companion bool,
+	transferByteCount model.ByteCount,
+	err error,
+) {
+	cause := contractFailureClass(err)
+	companionLabel := fmt.Sprintf("%t", companion)
+	contractFailureCounter.WithLabelValues(cause, companionLabel).Inc()
+
+	// The historical line exceeded 1,000/minute in normal operation. Keep a
+	// visible exemplar for each bounded class/mode without restoring that log
+	// volume; the counter is the lossless rate signal.
+	key := cause + ":" + companionLabel
+	now := time.Now()
+	contractFailureLogState.Lock()
+	last := contractFailureLogState.last[key]
+	shouldLog := last.IsZero() || time.Minute <= now.Sub(last)
+	if shouldLog {
+		contractFailureLogState.last[key] = now
+	}
+	contractFailureLogState.Unlock()
+	if shouldLog {
+		glog.Infof(
+			"[contract][error] class=%s %s->%s companion=%t transferByteCount=%d err = %v\n",
+			cause,
+			clientId,
+			destinationId,
+			companion,
+			transferByteCount,
+			err,
+		)
+	}
 }
 
 type ConnectControlArgs struct {
@@ -333,11 +402,16 @@ func CreateContract(
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
-		// always log the underlying error: the client only sees
-		// InsufficientBalance, which also covers unrelated causes here (e.g. a
-		// reaped client id failing FindClientNetwork, or a missing companion
-		// origin contract), so this line is the only place to tell them apart
-		glog.Infof("[contract][error]%s->%s companion=%t transferByteCount=%d err = %v\n", clientId, destinationId, createContract.Companion, model.ByteCount(createContract.TransferByteCount), err)
+		// The client sees only InsufficientBalance, including unrelated
+		// failures. Preserve the cause as a lossless bounded metric and a
+		// rate-limited default-visible exemplar.
+		recordContractFailure(
+			clientId,
+			destinationId,
+			createContract.Companion,
+			model.ByteCount(createContract.TransferByteCount),
+			err,
+		)
 		contractError := protocol.ContractError_InsufficientBalance
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
@@ -520,6 +594,28 @@ func newContract(
 			if forceStream || 0 < len(intermediaryIds) {
 				streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
 				streamId = &streamId_
+			} else {
+				// when the pair has an active stream, every network contract
+				// between the pair joins it — this is the platform directing
+				// the client to switch to the stream (see
+				// `CreateContractResult`). The load-bearing case is the
+				// same-network reply: the provider's return traffic for a
+				// network source carries NO companion flag (the client skips
+				// the companion contract for the network relationship), so
+				// the request is indistinguishable from a forward send, yet
+				// its send sequence is stream-bound (`source.Reverse()`
+				// keeps the stream id) — an unstamped contract would steer
+				// the reply OFF the stream onto the platform path and hide
+				// the stream from the contract stats on both ends
+				streamId_, ok := model.AddContractToPairStream(
+					ctx,
+					contractId,
+					sourceId,
+					destinationId,
+				)
+				if ok {
+					streamId = &streamId_
+				}
 			}
 		}
 	} else if companionContract {
@@ -543,8 +639,18 @@ func newContract(
 		case 0:
 			// companion stream is not supported
 		default:
-			companionContractId := *escrow.CompanionContractId
-			streamId_, _, ok := model.GetStream(ctx, companionContractId)
+			// when the origin flow has an active stream, the companion must
+			// carry the stream id — the receive sequence on the other side
+			// inspects the contract to know the stream is active — and join
+			// the stream so it stays open while the reply is in flight
+			originContractId := *escrow.CompanionContractId
+			streamId_, ok := model.AddCompanionContractToStream(
+				ctx,
+				contractId,
+				originContractId,
+				sourceId,
+				destinationId,
+			)
 			if ok {
 				streamId = &streamId_
 			}

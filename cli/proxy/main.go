@@ -54,13 +54,25 @@ Options:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// drain on sigterm
+	// readiness gates /status (PROXYDRAIN1.md §3.1): warpctl's new-container
+	// health poll gets a 503 until the initial proxy client sync has been
+	// applied, so the DNAT flip cannot beat the wg peer restore
+	readiness := proxy.NewReadiness()
+
+	// the drain coordinator runs the graceful shutdown on SIGTERM
+	// (PROXYDRAIN1.md §3.2); ingress targets are registered below
+	drainCoordinator := proxy.NewDrainCoordinator(readiness, settings)
+
+	// drain on sigterm, then cancel: established socks/http tunnels and the
+	// (conntrack-pinned) wg flows are served through the drain grace, and the
+	// process exits the moment the drain completes rather than idling toward
+	// the `docker stop -t` ceiling
 	go server.HandleError(func() {
 		defer cancel()
 		select {
 		case <-ctx.Done():
 		case <-quitEvent.Ctx.Done():
-			// FIXME drain
+			drainCoordinator.Drain(ctx)
 		}
 	})
 
@@ -78,28 +90,42 @@ Options:
 
 	server.StartStatsPusher(ctx)
 
-	proxy.NewSocks5Server(
+	socks5Server := proxy.NewSocks5Server(
 		ctx,
 		cancel,
 		proxyDeviceManager,
 		transportTls,
 		settings,
 	)
+	drainCoordinator.AddTarget(socks5Server)
 
-	proxy.NewHttpServer(
+	httpServer := proxy.NewHttpServer(
 		ctx,
 		cancel,
 		proxyDeviceManager,
 		transportTls,
 		settings,
 	)
+	drainCoordinator.AddTarget(httpServer)
 
+	// the wg server is NOT a drain target: its conntrack-pinned clients
+	// cannot migrate until this process exits and warpctl flushes their
+	// entries, so it serves until the final teardown (PROXYDRAIN1.md §3.2)
 	wg := proxy.NewWgServer(
 		ctx,
 		cancel,
 		proxyDeviceManager,
 		settings,
 	)
+	// Advertise this replacement generation before readiness. The old
+	// instance tags its drain-end export for this generation, and the
+	// post-readiness sequence below waits for it (the drain-complete
+	// beacon) before pre-warming.
+	wg.PrepareWgHandoff(ctx)
+	// at drain end, export the active wg peers' endpoints so the replacement
+	// instance can re-establish their sessions from the server side
+	// (PROXYDRAIN1.md §3.4)
+	drainCoordinator.AddBeforeExit(wg.ExportWgHandoff)
 
 	warmup := func(proxyClient *model.ProxyClient) error {
 		return wg.AddProxyClients(proxyClient)
@@ -119,6 +145,11 @@ Options:
 	// directly with the device's signed proxy id to control the hosted device)
 	// is served on GET /device-rpc by the proxy api TLS listener (NewApiServer).
 
+	// The watchdog stays disabled deliberately: its end-to-end poll raised
+	// too many false positives and restarted the service too frequently
+	// (each restart is a client-visible blip, even with the drain). Deploy
+	// health is covered by the readiness gate above; if an e2e probe comes
+	// back, it must alert, not exit.
 	// if server.RequireEnv() != "local" {
 	// 	newWatchdog(
 	// 		ctx,
@@ -127,7 +158,47 @@ Options:
 	// 	)
 	// }
 
+	// flush this instance's recently active proxy ids so a replacement
+	// instance can pre-warm them during a deploy (PROXYDRAIN1.md §3.3)
+	proxy.StartActivityFlusher(ctx, proxyDeviceManager, settings)
+
 	notif := proxy.NewProxyClientNotification(ctx, settings)
+	// flip readiness once the initial sync has been applied (wg peers
+	// restored); until then /status returns 503 and warpctl will not flip
+	// traffic to this instance. Readiness is gated on the sync ONLY — the
+	// handoff/pre-warm sequence below never holds up the flip.
+	go server.HandleError(func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-notif.InitialSyncDone():
+			glog.Infof("[proxy]initial proxy client sync applied; ready\n")
+			readiness.SetInitialSyncDone()
+		}
+		// Consume the drained instance's endpoint handoff and re-establish
+		// its wg sessions from the server side (PROXYDRAIN1.md §3.4).
+		// ApplyWgHandoff blocks until the old instance's generation-tagged
+		// export appears — written at drain END, so it doubles as the old
+		// instance's drain-complete beacon (an empty peer set is the
+		// completion marker on no-peer deploys) — or until the poll budget
+		// expires (the old-instance-crashed fallback). Only then does the
+		// pre-warm run. Sequencing the pre-warm AFTER the handoff outcome,
+		// instead of racing the old instance's drain grace, keeps the reused
+		// persisted window identities from running live in BOTH containers
+		// during the grace, where the old side's live-ctx window eviction
+		// could api-remove the exact identity this side is using
+		// (REVIEW2-UPDATE1 §4.4). The accepted trade: the pre-warmed set
+		// turns warm at old-drain-end rather than at flip. Customer-driven
+		// lazy device opens are NOT gated — only the forced pre-warm
+		// establishment is — and the wg endpoint seeding lands before the
+		// pre-warmed devices establish, in the order the packets will flow.
+		// The handoff runs in its own error scope so a handoff failure
+		// still falls through to the pre-warm.
+		server.HandleError(func() {
+			wg.ApplyWgHandoff(ctx)
+		})
+		proxy.Prewarm(ctx, proxyDeviceManager, settings)
+	})
 	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) error {
 		if 0 < settings.WarmupTimeout {
 			warmupStartTime := server.NowUtc().Add(-settings.WarmupTimeout)
@@ -165,7 +236,7 @@ Options:
 	defer fullSyncSub()
 
 	routes := []*router.Route{
-		router.NewRoute("GET", "/status", router.WarpStatus),
+		router.NewRoute("GET", "/status", readiness.StatusHandler),
 	}
 
 	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
@@ -204,5 +275,10 @@ Options:
 	case <-ctx.Done():
 	}
 
+	if drainCoordinator.Drained() {
+		// a graceful drained shutdown; exit promptly and cleanly so `docker
+		// stop` returns immediately instead of waiting toward its -t ceiling
+		os.Exit(0)
+	}
 	os.Exit(1)
 }

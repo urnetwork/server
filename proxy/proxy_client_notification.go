@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"maps"
@@ -39,6 +40,15 @@ type proxyClientNotification struct {
 
 	proxyClientsCallbacks *connect.CallbackList[ProxyClientsFunction]
 	fullSyncCallbacks     *connect.CallbackList[ProxyClientsFullSyncFunction]
+
+	// initial sync tracking (PROXYDRAIN1.md §3.1): the readiness gate needs
+	// to know when every watch stream has completed its first successful
+	// read-and-deliver cycle, i.e. the wg peer set has been restored from
+	// the db. initialSyncPending counts the watches not yet done;
+	// initialSyncNotify closes when it reaches zero.
+	initialSyncLock    sync.Mutex
+	initialSyncPending int
+	initialSyncNotify  chan struct{}
 }
 
 func NewProxyClientNotification(ctx context.Context, settings *ProxySettings) *proxyClientNotification {
@@ -49,9 +59,32 @@ func NewProxyClientNotification(ctx context.Context, settings *ProxySettings) *p
 		settings:              settings,
 		proxyClientsCallbacks: connect.NewCallbackList[ProxyClientsFunction](),
 		fullSyncCallbacks:     connect.NewCallbackList[ProxyClientsFullSyncFunction](),
+		initialSyncNotify:     make(chan struct{}),
 	}
 	go server.HandleError(p.run, cancel)
 	return p
+}
+
+// InitialSyncDone is closed once every watched (host, block) stream has
+// completed its first successful read and delivery — the point where the wg
+// peer set has been restored and the instance can take the traffic flip.
+func (self *proxyClientNotification) InitialSyncDone() <-chan struct{} {
+	return self.initialSyncNotify
+}
+
+func (self *proxyClientNotification) addInitialSyncWatch() {
+	self.initialSyncLock.Lock()
+	defer self.initialSyncLock.Unlock()
+	self.initialSyncPending += 1
+}
+
+func (self *proxyClientNotification) initialSyncWatchDone() {
+	self.initialSyncLock.Lock()
+	defer self.initialSyncLock.Unlock()
+	self.initialSyncPending -= 1
+	if self.initialSyncPending == 0 {
+		close(self.initialSyncNotify)
+	}
 }
 
 func (self *proxyClientNotification) run() {
@@ -65,14 +98,19 @@ func (self *proxyClientNotification) run() {
 	if DebugWatchFqHost && !strings.Contains(proxyHost, ".") {
 		fqProxyHost := fmt.Sprintf("%s.%s", proxyHost, server.RequireDomain())
 		hosts = append(hosts, fqProxyHost)
-		go server.HandleError(func() {
-			self.watch(fqProxyHost, block)
-		})
 	}
 
-	go server.HandleError(func() {
-		self.watch(proxyHost, block)
-	})
+	// register every watch with the initial-sync gate BEFORE starting any of
+	// them, so a fast first watch cannot close the gate while another watch
+	// has yet to register
+	for range hosts {
+		self.addInitialSyncWatch()
+	}
+	for _, host := range hosts {
+		go server.HandleError(func() {
+			self.watch(host, block)
+		})
+	}
 
 	go server.HandleError(func() {
 		self.reconcile(hosts, block)
@@ -170,6 +208,7 @@ func (self *proxyClientNotification) watch(host string, block string) {
 	})
 
 	nextChangeId := int64(0)
+	initialSyncDone := false
 	for {
 		notify := monitor.NotifyChannel()
 		proxyClients, maxChangeId, err := model.GetProxyClientsSince(
@@ -184,11 +223,22 @@ func (self *proxyClientNotification) watch(host string, block string) {
 			glog.Infof("[proxy]found %d new proxy clients (%d..%d)\n", len(proxyClients), nextChangeId, maxChangeId)
 			if err := self.proxyClients(slices.Collect(maps.Values(proxyClients))); err == nil {
 				nextChangeId = maxChangeId + 1
+				if !initialSyncDone {
+					// the first successful read AND delivery: the full set
+					// since change id 0 has been applied (wg peers restored)
+					initialSyncDone = true
+					self.initialSyncWatchDone()
+				}
 			} else {
 				// do not advance past a failed delivery;
 				// the same range is retried on the next poll
 				glog.Infof("[proxy]proxy clients callback err=%s (will retry)\n", err)
 			}
+		} else if !initialSyncDone {
+			// an empty successful read IS a complete initial sync: this
+			// host/block has no proxy clients to restore
+			initialSyncDone = true
+			self.initialSyncWatchDone()
 		}
 		select {
 		case <-self.ctx.Done():

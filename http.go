@@ -377,10 +377,21 @@ func (self *HttpStatusError) Error() string {
 }
 
 type HttpServerOptions struct {
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+	// the ceiling for in-flight requests once the drain begins. Must exceed
+	// the max request lifetime (~ReadTimeout+WriteTimeout) or conforming
+	// requests can be hard-cut at the deadline (APIDRAIN1.md §2.2).
+	// `Shutdown` returns the moment the last connection drains, so a high
+	// ceiling costs nothing in the common case.
 	ShutdownTimeout time.Duration
+	// when positive, insert a drain grace between ctx cancel and `Shutdown`:
+	// keep serving while stamping `Connection: close` on every http/1
+	// response, so the lb retires its pooled keepalive connections cleanly
+	// instead of racing the snap-close of an idle pool (APIDRAIN1.md §2.3).
+	// 0 disables the grace (previous behavior).
+	KeepaliveDrainTimeout time.Duration
 }
 
 func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions) error {
@@ -398,33 +409,29 @@ func HttpListenAndServeWithReusePort(ctx context.Context, addr string, handler h
 	}
 	defer listener.Close()
 
+	drainHandler := newDrainHandler(handler)
+	tracker := newHttpConnTracker()
+
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      handler,
+		Handler:      drainHandler,
 		ReadTimeout:  httpServerOptions.ReadTimeout,
 		WriteTimeout: httpServerOptions.WriteTimeout,
 		IdleTimeout:  httpServerOptions.IdleTimeout,
+		ConnState:    tracker.connState,
 	}
 
-	errs := make(chan error)
-
-	go func() {
-		defer cancel()
-		err := server.Serve(listener)
-		select {
-		case errs <- err:
-		case <-cancelCtx.Done():
-		}
-	}()
-
-	select {
-	case <-cancelCtx.Done():
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpServerOptions.ShutdownTimeout)
-		defer shutdownCancel()
-		return server.Shutdown(shutdownCtx)
-	case err := <-errs:
-		return err
-	}
+	return httpServeWithDrain(
+		cancelCtx,
+		cancel,
+		server,
+		drainHandler,
+		tracker,
+		func() error {
+			return server.Serve(listener)
+		},
+		httpServerOptions,
+	)
 }
 
 func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handler http.Handler, reusePort bool, httpServerOptions HttpServerOptions, tlsConfig *tls.Config) error {
@@ -442,32 +449,28 @@ func HttpListenAndServeTlsWithReusePort(ctx context.Context, addr string, handle
 	}
 	defer listener.Close()
 
+	drainHandler := newDrainHandler(handler)
+	tracker := newHttpConnTracker()
+
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      handler,
+		Handler:      drainHandler,
 		TLSConfig:    tlsConfig,
 		ReadTimeout:  httpServerOptions.ReadTimeout,
 		WriteTimeout: httpServerOptions.WriteTimeout,
 		IdleTimeout:  httpServerOptions.IdleTimeout,
+		ConnState:    tracker.connState,
 	}
 
-	errs := make(chan error)
-
-	go func() {
-		defer cancel()
-		err := server.ServeTLS(listener, "", "")
-		select {
-		case errs <- err:
-		case <-cancelCtx.Done():
-		}
-	}()
-
-	select {
-	case <-cancelCtx.Done():
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpServerOptions.ShutdownTimeout)
-		defer shutdownCancel()
-		return server.Shutdown(shutdownCtx)
-	case err := <-errs:
-		return err
-	}
+	return httpServeWithDrain(
+		cancelCtx,
+		cancel,
+		server,
+		drainHandler,
+		tracker,
+		func() error {
+			return server.ServeTLS(listener, "", "")
+		},
+		httpServerOptions,
+	)
 }

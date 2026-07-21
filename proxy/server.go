@@ -10,7 +10,10 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
@@ -18,6 +21,22 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+// wgPeersGauge is the wg device's registered peer table size. Updated on
+// every peer-set change (add / sync / reconcile), so a post-deploy collapse
+// is visible without grepping the `[wg]... clients` log counts.
+var wgPeersGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_peers",
+		Help:      "Registered wg peers on this instance's device",
+	},
+)
+
+func init() {
+	prometheus.MustRegister(wgPeersGauge)
+}
 
 const InternalSocksPort = 8080
 const InternalHttpPort = 8081
@@ -37,6 +56,28 @@ func DefaultProxySettings() *ProxySettings {
 		MaxRequestBytes:          32 * model.Kib,
 		EventRateLimitTimeout:    1 * time.Second,
 		ReconcileTimeout:         30 * time.Minute,
+		EnableDrain:              true,
+		DrainGraceTimeout:        2 * time.Minute,
+		DrainBeforeExitTimeout:   10 * time.Second,
+		ActivityFlushTimeout:     1 * time.Minute,
+		EnablePrewarm:            true,
+		PrewarmActivityWindow:    10 * time.Minute,
+		PrewarmConcurrency:       8,
+		PrewarmReadyTimeout:      30 * time.Second,
+		PrewarmTimeout:           2 * time.Minute,
+		EnableWgHandoff:          true,
+		WgHandoffActivityWindow:  10 * time.Minute,
+		// generous: warpctl's host drain flock serializes blocks, so the old
+		// instance's drain-end export can land up to ~blocks x (grace + exit +
+		// replacement startup) after this instance becomes ready
+		WgHandoffPollTimeout:  15 * time.Minute,
+		WgHandoffPollInterval: 1 * time.Second,
+		// from export-seen (not from boot): covers the old instance's exit +
+		// conntrack flush + the clients' first post-flush packets
+		WgHandoffInitiateTimeout: 5 * time.Minute,
+		WgHandoffInitiatePace:    5 * time.Second,
+		// must outlive WgHandoffPollTimeout with margin (see the field comment)
+		WgHandoffRequestTtl: 20 * time.Minute,
 	}
 }
 
@@ -55,6 +96,74 @@ type ProxySettings struct {
 	// (healing clients dropped by a partial restore) and removes peers whose
 	// proxy client no longer exists. <= 0 disables the reconcile.
 	ReconcileTimeout time.Duration
+
+	// graceful drain on SIGTERM (PROXYDRAIN1.md §3.2). When disabled, SIGTERM
+	// tears everything down immediately (the pre-drain behavior).
+	EnableDrain bool
+	// DrainGraceTimeout bounds how long established socks/http tunnels (and
+	// the pinned wg flows, which cannot migrate until this process exits)
+	// keep being served after SIGTERM. It trades customer continuity against
+	// rollout time: the host drain flock serializes blocks, so a host-wide
+	// rollout takes up to blocks x this value in the worst case.
+	DrainGraceTimeout time.Duration
+	// DrainBeforeExitTimeout bounds the before-exit hooks (e.g. the wg
+	// endpoint handoff export) so a stuck hook cannot hang the shutdown.
+	DrainBeforeExitTimeout time.Duration
+
+	// activity tracking + pre-warm (PROXYDRAIN1.md §3.3). The instance
+	// flushes its recently active proxy ids to a per-(host, block) redis set
+	// every ActivityFlushTimeout (<= 0 disables); a replacement instance
+	// pre-warms devices for clients active within PrewarmActivityWindow so
+	// the post-deploy first packet hits a warm device.
+	ActivityFlushTimeout  time.Duration
+	EnablePrewarm         bool
+	PrewarmActivityWindow time.Duration
+	// PrewarmConcurrency bounds concurrent device creations (each is a db
+	// load + platform dial), so the startup pre-warm cannot herd.
+	PrewarmConcurrency  int
+	PrewarmReadyTimeout time.Duration
+	// PrewarmTimeout bounds the whole pre-warm pass.
+	PrewarmTimeout time.Duration
+
+	// wg endpoint handoff (PROXYDRAIN1.md §3.4): at drain end the instance
+	// exports its active peers' learned endpoints; the replacement seeds
+	// them and initiates handshakes from the server side, so wg clients
+	// re-establish in ~1 RTT after the deploy's conntrack flush instead of
+	// waiting out their own dead-session timers. The export doubles as the
+	// old instance's drain-complete beacon: the replacement sequences its
+	// device pre-warm after the export (or the poll budget), so the reused
+	// persisted window identities never run live in both containers during
+	// the drain grace (REVIEW2-UPDATE1 §4.4).
+	EnableWgHandoff bool
+	// WgHandoffActivityWindow filters the export to peers with a recent
+	// handshake — the ones plausibly still there to answer an initiation.
+	WgHandoffActivityWindow time.Duration
+	// WgHandoffPollTimeout bounds how long a ready replacement waits for the
+	// old instance's generation-tagged drain-end export before proceeding
+	// without it (the old-instance-crashed fallback). Because the pre-warm
+	// is sequenced after this wait, the same budget is the pre-warm gate
+	// budget. warpctl's host drain flock serializes blocks, so on a
+	// multi-block host the export can land up to ~blocks x (drain grace +
+	// exit + replacement startup) after this instance becomes ready — keep
+	// this generous (default 15min), and keep WgHandoffRequestTtl above it.
+	WgHandoffPollTimeout time.Duration
+	// WgHandoffPollInterval is how often a ready replacement checks for the
+	// generation-tagged export that the old instance produces at drain end.
+	WgHandoffPollInterval time.Duration
+	// WgHandoffInitiateTimeout bounds the replacement's handshake initiation
+	// loop. The budget starts when the export appears — not at instance
+	// boot — so it only needs to cover the old instance's exit + conntrack
+	// flush + the clients' first post-flush packets; a long serialized host
+	// drain ahead of this block cannot eat it (REVIEW2-UPDATE1 §5.6).
+	// Initiations before the flush are harmlessly blackholed.
+	WgHandoffInitiateTimeout time.Duration
+	WgHandoffInitiatePace    time.Duration
+	// WgHandoffRequestTtl is the redis ttl on the handoff keys: the
+	// generation request this instance publishes at boot (the old instance
+	// reads it at its drain end, so it must survive the whole serialized
+	// host drain — keep it > WgHandoffPollTimeout with margin; default
+	// 20min) and the drain-end export itself.
+	WgHandoffRequestTtl time.Duration
 }
 
 type socks5Server struct {
@@ -63,6 +172,7 @@ type socks5Server struct {
 	proxyDeviceManager *ProxyDeviceManager
 	transportTls       *server.TransportTls
 	settings           *ProxySettings
+	socksProxy         *proxy.SocksProxy
 }
 
 func NewSocks5Server(
@@ -79,15 +189,31 @@ func NewSocks5Server(
 		transportTls:       transportTls,
 		settings:           settings,
 	}
+	// built here, not in run, so the drain surface (Drain/ActiveCount/
+	// WaitIdle) is valid as soon as the constructor returns
+	s.socksProxy = s.newSocksProxy()
 
 	go server.HandleError(s.run, cancel)
 
 	return s
 }
 
-func (self *socks5Server) run() {
-	defer self.cancel()
+// Drain begins the graceful drain of the socks ingress (PROXYDRAIN1.md §3.2):
+// listeners close while established relays keep running until the root ctx
+// cancels.
+func (self *socks5Server) Drain() {
+	self.socksProxy.Drain()
+}
 
+func (self *socks5Server) ActiveCount() int {
+	return self.socksProxy.ActiveCount()
+}
+
+func (self *socks5Server) WaitIdle(ctx context.Context) bool {
+	return self.socksProxy.WaitIdle(ctx)
+}
+
+func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 	validUser := func(username string, password string, userAddr string) bool {
 		proxyId, err := model.ParseSignedProxyId(username)
 		if err != nil {
@@ -151,12 +277,17 @@ func (self *socks5Server) run() {
 	socksProxy := proxy.NewSocksProxy(socksSettings)
 	socksProxy.ConnectDialWithRequest = connectDial
 	socksProxy.ValidUser = validUser
+	return socksProxy
+}
+
+func (self *socks5Server) run() {
+	defer self.cancel()
 
 	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalSocksPort)
 
 	go server.HandleError(func() {
 		defer self.cancel()
-		err := socksProxy.ListenAndServe(
+		err := self.socksProxy.ListenAndServe(
 			self.ctx,
 			"tcp4",
 			net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
@@ -169,7 +300,7 @@ func (self *socks5Server) run() {
 	if listenIpv6 != "" {
 		go server.HandleError(func() {
 			defer self.cancel()
-			err := socksProxy.ListenAndServe(
+			err := self.socksProxy.ListenAndServe(
 				self.ctx,
 				"tcp6",
 				net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
@@ -191,6 +322,7 @@ type httpServer struct {
 	proxyDeviceManager *ProxyDeviceManager
 	transportTls       *server.TransportTls
 	settings           *ProxySettings
+	httpProxy          *proxy.HttpProxy
 }
 
 func NewHttpServer(
@@ -207,22 +339,31 @@ func NewHttpServer(
 		transportTls:       transportTls,
 		settings:           settings,
 	}
+	// built here, not in run, so the drain surface (Drain/ActiveCount/
+	// WaitIdle) is valid as soon as the constructor returns
+	s.httpProxy = s.newHttpProxy()
 
 	go server.HandleError(s.run, cancel)
 
 	return s
 }
 
-func (self *httpServer) run() {
-	defer self.cancel()
+// Drain begins the graceful drain of the http/https ingress
+// (PROXYDRAIN1.md §3.2): listeners close and new requests are refused while
+// established tunnels keep relaying until the root ctx cancels.
+func (self *httpServer) Drain() {
+	self.httpProxy.Drain()
+}
 
-	// tr := &http.Transport{
-	// 	IdleConnTimeout: 300 * time.Second,
-	// 	TLSHandshakeTimeout: 30 * time.Second,
+func (self *httpServer) ActiveCount() int {
+	return self.httpProxy.ActiveCount()
+}
 
-	// }
-	// httpProxy.Tr = tr
+func (self *httpServer) WaitIdle(ctx context.Context) bool {
+	return self.httpProxy.WaitIdle(ctx)
+}
 
+func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	authProxyId := func(r *http.Request) (server.Id, error) {
 		if r.TLS != nil {
 			host := r.TLS.ServerName
@@ -279,16 +420,11 @@ func (self *httpServer) run() {
 	// httpProxy.Logger = self
 	httpProxy.GetTlsConfigForClient = self.transportTls.GetTlsConfigForClient
 	httpProxy.ConnectDialWithRequest = connectDial
-	// httpProxy.AllowHTTP2 = true
-	// httpProxy.Tr = &http.Transport{
-	// 	TLSHandshakeTimeout:   self.settings.TlsHandshakeTimeout,
-	// 	ResponseHeaderTimeout: self.settings.ResponseHeaderTimeout,
-	// 	IdleConnTimeout:       300 * time.Second,
-	// 	MaxIdleConns:          0,
-	// 	MaxIdleConnsPerHost:   4,
-	// 	MaxConnsPerHost:       0,
-	// 	ForceAttemptHTTP2:     true,
-	// }
+	return httpProxy
+}
+
+func (self *httpServer) run() {
+	defer self.cancel()
 
 	// listen http
 	func() {
@@ -296,7 +432,7 @@ func (self *httpServer) run() {
 
 		go server.HandleError(func() {
 			defer self.cancel()
-			err := httpProxy.ListenAndServe(
+			err := self.httpProxy.ListenAndServe(
 				self.ctx,
 				"tcp4",
 				net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
@@ -308,7 +444,7 @@ func (self *httpServer) run() {
 		if listenIpv6 != "" {
 			go server.HandleError(func() {
 				defer self.cancel()
-				err := httpProxy.ListenAndServe(
+				err := self.httpProxy.ListenAndServe(
 					self.ctx,
 					"tcp6",
 					net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
@@ -326,7 +462,7 @@ func (self *httpServer) run() {
 
 		go server.HandleError(func() {
 			defer self.cancel()
-			err := httpProxy.ListenAndServeTls(
+			err := self.httpProxy.ListenAndServeTls(
 				self.ctx,
 				"tcp4",
 				net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
@@ -338,7 +474,7 @@ func (self *httpServer) run() {
 		if listenIpv6 != "" {
 			go server.HandleError(func() {
 				defer self.cancel()
-				err := httpProxy.ListenAndServeTls(
+				err := self.httpProxy.ListenAndServeTls(
 					self.ctx,
 					"tcp6",
 					net.JoinHostPort(listenIpv6, strconv.Itoa(listenPort)),
@@ -361,6 +497,9 @@ type wgServer struct {
 	proxyDeviceManager *ProxyDeviceManager
 	settings           *ProxySettings
 	wgProxy            *proxy.WgProxy
+
+	handoffPrepareOnce sync.Once
+	handoffGeneration  string
 }
 
 func NewWgServer(
@@ -514,6 +653,10 @@ func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[net
 }
 
 func (self *wgServer) logClientCounts(op string, applied int, removed int, counts *wgClientCounts) {
+	peerCount := self.wgProxy.ClientCount()
+	// every peer-set mutation path (add / sync / reconcile) ends here, so
+	// the gauge is exact between changes
+	wgPeersGauge.Set(float64(peerCount))
 	glog.Infof(
 		"[wg]%s clients: %d/%d applied, %d removed (%d no wg config, %d key mismatch, %d bad auth token, %d not entitled), peers %d/%d\n",
 		op,
@@ -527,7 +670,7 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 		// other drop reasons on purpose: a client silently vanishing from the peer set
 		// is exactly the kind of thing that turns into an unexplainable support ticket.
 		counts.notEntitled,
-		self.wgProxy.ClientCount(),
+		peerCount,
 		proxy.MaxClients,
 	)
 }

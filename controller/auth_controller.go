@@ -292,7 +292,7 @@ func RefreshToken(session *session.ClientSession) (*RefreshTokenResult, error) {
 		}, nil
 	}
 
-	isPro := model.IsPro(
+	isPro := model.IsProFresh(
 		session.Ctx,
 		&networkId,
 	)
