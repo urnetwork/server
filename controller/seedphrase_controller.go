@@ -45,10 +45,26 @@ func RegenerateSeedphrase(
 		}, nil
 	}
 
+	if err := model.CheckAccountActionRateLimit(
+		session.Ctx,
+		session.ByJwt.UserId,
+		model.AccountActionRegenerateSeedphrase,
+		model.AccountActionRegenerateSeedphraseDailyLimit,
+		model.AccountActionDailyWindow,
+	); err != nil {
+		return &RegenerateSeedphraseResult{
+			Error: &RegenerateSeedphraseError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
 	seedphrase, err := model.RegenerateSeedphrase(session.Ctx, session.ByJwt.UserId)
 	if err != nil {
 		return nil, err
 	}
+
+	model.RecordAccountActionAttempt(session.Ctx, session.ByJwt.UserId, model.AccountActionRegenerateSeedphrase)
 
 	return &RegenerateSeedphraseResult{
 		Seedphrase: seedphrase,
@@ -71,10 +87,26 @@ func GenerateSeedphrase(
 		}, nil
 	}
 
+	if err := model.CheckAccountActionRateLimit(
+		session.Ctx,
+		session.ByJwt.UserId,
+		model.AccountActionGenerateSeedphrase,
+		model.AccountActionGenerateSeedphraseDailyLimit,
+		model.AccountActionDailyWindow,
+	); err != nil {
+		return &GenerateSeedphraseResult{
+			Error: &GenerateSeedphraseError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
 	seedphrase, err := model.GenerateSeedphrase(session.Ctx, session.ByJwt.UserId)
 	if err != nil {
 		return nil, err
 	}
+
+	model.RecordAccountActionAttempt(session.Ctx, session.ByJwt.UserId, model.AccountActionGenerateSeedphrase)
 
 	return &GenerateSeedphraseResult{
 		Seedphrase: seedphrase,

@@ -4411,4 +4411,21 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE client_reliability ADD COLUMN connection_excused_new_count bigint NOT NULL DEFAULT 0
     `),
+
+	// account-based (not IP-based) daily rate limits on sensitive account
+	// actions: add/remove auth method, change/claim network name, and
+	// generate/regenerate seedphrase. One shared table, keyed by (user_id,
+	// action), so each action gets its own independent daily counter.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_user_action_attempt (
+            network_user_action_attempt_id uuid NOT NULL PRIMARY KEY,
+            user_id                        uuid NOT NULL,
+            action                         varchar(64) NOT NULL,
+            create_time                    timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_user_action_attempt_user_action_time
+            ON network_user_action_attempt (user_id, action, create_time)
+    `),
 }

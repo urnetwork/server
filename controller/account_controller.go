@@ -86,6 +86,20 @@ func changeNetworkName(
 		}, nil
 	}
 
+	if err := model.CheckAndRecordAccountActionRateLimit(
+		session.Ctx,
+		session.ByJwt.UserId,
+		model.AccountActionChangeNetworkName,
+		model.AccountActionChangeNetworkNameDailyLimit,
+		model.AccountActionDailyWindow,
+	); err != nil {
+		return &ChangeNetworkNameResult{
+			Error: &ChangeNetworkNameError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
 	var oldName *string
 	server.Db(session.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(

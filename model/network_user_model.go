@@ -170,7 +170,26 @@ type AddAuthMethodError struct {
 func AddAuth(
 	authArgs AddAuthMethod,
 	session *session.ClientSession,
-) (*AddAuthMethodResult, error) {
+) (result *AddAuthMethodResult, resultErr error) {
+	if err := CheckAccountActionRateLimit(
+		session.Ctx,
+		session.ByJwt.UserId,
+		AccountActionAddAuth,
+		AccountActionAddAuthDailyLimit,
+		AccountActionDailyWindow,
+	); err != nil {
+		return &AddAuthMethodResult{
+			Error: &AddAuthMethodError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
+	defer func() {
+		if resultErr == nil && result != nil && result.Error == nil {
+			RecordAccountActionAttempt(session.Ctx, session.ByJwt.UserId, AccountActionAddAuth)
+		}
+	}()
 
 	if authArgs.UserAuth != nil && authArgs.Password != nil {
 		/**
@@ -1328,6 +1347,16 @@ func MigrateNetworkUserChildAuths(
 }
 
 func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
+	if err := CheckAccountActionRateLimit(
+		ctx,
+		userId,
+		AccountActionRemoveAuth,
+		AccountActionRemoveAuthDailyLimit,
+		AccountActionDailyWindow,
+	); err != nil {
+		return err
+	}
+
 	var validationErr error
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -1427,6 +1456,10 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 			userId,
 		))
 	})
+
+	if validationErr == nil {
+		RecordAccountActionAttempt(ctx, userId, AccountActionRemoveAuth)
+	}
 
 	return validationErr
 }
