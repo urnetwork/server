@@ -4362,4 +4362,27 @@ var migrations = []any{
 	newSqlMigration(`
         ALTER TABLE client_reliability ADD COLUMN connection_excused_new_count bigint NOT NULL DEFAULT 0
     `),
+
+	// block users marker (model/network_stats_model.go
+	// `StampTopLevelClientContractTime`): the last time a transfer contract
+	// was created with this top-level client — or one of its child clients —
+	// as the paying side. The public block_users stat counts this marker, so
+	// "user" means contract-creating usage: auth/connect events fire only at
+	// session setup, so they miss a client in continuous use across a block
+	// rollover and count connected-but-idle clients that transfer nothing.
+	// Stamps are throttled to once per `clientAuthTimeRefreshMinInterval`
+	// per identity. Metadata-only ALTER (nullable, no default): no rewrite.
+	newSqlMigration(`
+        ALTER TABLE network_client ADD COLUMN contract_time timestamp NULL
+    `),
+
+	// serves `CountTopLevelClientsWithContractSince`: the predicate matches
+	// the count query exactly ($1 <= contract_time implies IS NOT NULL) so
+	// the scan is a bounded ordered range. network_client is hot: pre-create
+	// manually with CREATE INDEX CONCURRENTLY out of band; the IF NOT EXISTS
+	// gate makes this migration a no-op once pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_top_level_contract_time
+        ON network_client (contract_time) WHERE (active = true AND source_client_id IS NULL AND contract_time IS NOT NULL)
+    `),
 }

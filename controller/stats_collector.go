@@ -6,7 +6,7 @@ package controller
 // which implements the network operator stats contract consumed by ur.xyz:
 //
 //	urnetwork_stats_total_networks                   total networks (db)
-//	urnetwork_stats_block_users                      unique top-level clients served this block (db)
+//	urnetwork_stats_block_users                      unique top-level identities with contract usage this block (db)
 //	urnetwork_stats_countries                        countries with connected valid providers (db)
 //	urnetwork_stats_staked_alpha                     cumulative α staked in the ST contract (chain)
 //	urnetwork_stats_block_demand_deposits_alpha      demand deposits this block (st_event mirror)
@@ -89,7 +89,7 @@ var statsTotalNetworksGauge = newStatsGauge(
 )
 var statsBlockUsersGauge = newStatsGauge(
 	"block_users",
-	"Unique active top-level clients served this block",
+	"Unique top-level clients with contract usage this block",
 )
 var statsCountriesGauge = newStatsGauge(
 	"countries",
@@ -113,7 +113,7 @@ var statsAlphaUsdGauge = newStatsGauge(
 )
 var statsPrevBlockUsersGauge = newStatsGauge(
 	"prev_block_users",
-	"Unique active top-level clients served in the last finished block",
+	"Unique top-level clients with contract usage in the last finished block",
 )
 var statsPrevBlockDemandDepositsAlphaGauge = newStatsGauge(
 	"prev_block_demand_deposits_alpha",
@@ -165,7 +165,7 @@ func statsRefreshDb(ctx context.Context) {
 	statsTotalNetworksGauge.set(float64(model.CountNetworks(ctx)))
 	statsCountriesGauge.set(float64(model.CountProviderCountries(ctx)))
 
-	users := model.CountTopLevelClientsActiveSince(ctx, model.SubnetBlockStart(now))
+	users := model.CountTopLevelClientsWithContractSince(ctx, model.SubnetBlockStart(now))
 	statsBlockUsersGauge.set(float64(users))
 	// freeze the running count forward; the last write before rollover is
 	// the finished block's final value (see model.SetBlockUsersSnapshot)

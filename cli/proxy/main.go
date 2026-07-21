@@ -145,19 +145,6 @@ Options:
 	// directly with the device's signed proxy id to control the hosted device)
 	// is served on GET /device-rpc by the proxy api TLS listener (NewApiServer).
 
-	// The watchdog stays disabled deliberately: its end-to-end poll raised
-	// too many false positives and restarted the service too frequently
-	// (each restart is a client-visible blip, even with the drain). Deploy
-	// health is covered by the readiness gate above; if an e2e probe comes
-	// back, it must alert, not exit.
-	// if server.RequireEnv() != "local" {
-	// 	newWatchdog(
-	// 		ctx,
-	// 		5*time.Second,
-	// 		InternalHttpPort,
-	// 	)
-	// }
-
 	// flush this instance's recently active proxy ids so a replacement
 	// instance can pre-warm them during a deploy (PROXYDRAIN1.md §3.3)
 	proxy.StartActivityFlusher(ctx, proxyDeviceManager, settings)
