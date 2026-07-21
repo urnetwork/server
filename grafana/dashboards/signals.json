@@ -1,0 +1,1298 @@
+{
+  "uid": "urnetwork-signals",
+  "title": "urnetwork / signals",
+  "tags": [
+    "urnetwork",
+    "signals"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "description": "The SIGNALS.md signal catalog, charted. Panel titles carry the section numbers; panel descriptions carry the playbook pointers. Loaded by `bringyourctl grafana load-defaults`.",
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_build_info, env)",
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "tier-0 vitals (SIGNALS.md \u00a71\u20132)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "2.7 new connections / min",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_connection_new{env=\"$env\"}[$__rate_interval])) * 60",
+          "refId": "A",
+          "legendFormat": "fleet"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (host) (rate(urnetwork_connect_connection_new{env=\"$env\"}[$__rate_interval])) * 60",
+          "refId": "B",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "description": "The new-connection rate (SIGNALS.md 2.7). Two failure directions: sustained < 50% of the trailing baseline = new connects failing (auth/lb/announce); sustained > 2.5x = a RECONNECT STORM \u2014 mass simultaneous eviction (ansible unit-restart wave 8.5, simultaneous multi-block deploy). During a storm expect a plateau, a final eviction burst spike, then decay to baseline ~10 min after."
+    },
+    {
+      "type": "timeseries",
+      "title": "1.1 transfer throughput (contract-path proxy)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0,
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_transfer_bytes{env=\"$env\"}[$__rate_interval])) * 8",
+          "refId": "C",
+          "legendFormat": "fleet"
+        }
+      ],
+      "description": "Bytes acked through closed/checkpointed transfer contracts \u2014 the mimir-side proxy for the 1.1 contract-creation rate (the exact per-minute pg rate lives in the monitor). A cliff = systemic; a sag = partial failure; a ramp = recovery."
+    },
+    {
+      "type": "timeseries",
+      "title": "population: connected clients",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_connect_connected_clients{env=\"$env\"})",
+          "refId": "D",
+          "legendFormat": "fleet"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (host) (urnetwork_connect_connected_clients{env=\"$env\"})",
+          "refId": "E",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "\u00a74 contract failures / min by cause (lossless)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (cause) (rate(urnetwork_connect_contract_failures_total{env=\"$env\"}[$__rate_interval])) * 60",
+          "refId": "F",
+          "legendFormat": "{{cause}}"
+        }
+      ],
+      "description": "urnetwork_connect_contract_failures_total \u2014 the lossless counter behind the sampled contract-error log exemplars. missing_companion_origin climbing while everything else is healthy = stale provider selection serving zombies (playbook 5.9; post-churn variant 5.9.7). insufficient_balance step-change = netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
+    },
+    {
+      "type": "timeseries",
+      "title": "2.8-adjacent: findproviders2 sample drops / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_findproviders2_sample_drops_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "G",
+          "legendFormat": "drops"
+        }
+      ],
+      "description": "Selection-path pressure signal. Selection FRESHNESS (2.8, the UpdateClientScores completion gap and cs_ ttls) is pg/redis-side and lives in the monitor."
+    },
+    {
+      "type": "timeseries",
+      "title": "service readiness (processes reporting ready)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_api_ready{env=\"$env\"})",
+          "refId": "H",
+          "legendFormat": "api"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_ready{env=\"$env\"})",
+          "refId": "I",
+          "legendFormat": "proxy"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_taskworker_ready{env=\"$env\"})",
+          "refId": "J",
+          "legendFormat": "taskworker"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "count(urnetwork_connect_connected_clients{env=\"$env\"})",
+          "refId": "K",
+          "legendFormat": "connect (reporting)"
+        }
+      ],
+      "description": "A step DOWN that does not recover within a deploy window = processes dying (crash-loop playbook 5.10: confirm with docker ps Exited churn on one build tag)."
+    },
+    {
+      "type": "timeseries",
+      "title": "1.4-adjacent: redis pool timeouts / s by service",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (rate(urnetwork_redis_pool_timeouts_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "L",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "description": "App-side redis backpressure (3.5): pool timeouts mean something is slow consuming the pool \u2014 find the slow node/command (per-node view: urnetwork / redis cluster; \u00a75.2/5.3 batteries live in the monitor)."
+    },
+    {
+      "type": "row",
+      "title": "log signal taxonomy (SIGNALS.md \u00a74) \u2014 all services, lines/min",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "\u00a74 page-tier classes / min",
+      "datasource": {
+        "type": "loki",
+        "uid": "warp-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `dial tcp [0-9.]+:[0-9]+.*i/o timeout` [1m]))",
+          "refId": "A",
+          "legendFormat": "dial-io-timeout (page >10/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `connect: connection refused` [1m]))",
+          "refId": "B",
+          "legendFormat": "connection-refused (page >10/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `CLUSTERDOWN` [1m]))",
+          "refId": "C",
+          "legendFormat": "clusterdown (page >5/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `OOM command not allowed` [1m]))",
+          "refId": "D",
+          "legendFormat": "oom-writes (page >1/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `panic:|goroutine [0-9]+ \\[` [1m]))",
+          "refId": "E",
+          "legendFormat": "panic (page >5/min)"
+        }
+      ],
+      "description": "First-match taxonomy from the monitor tailers. dial-io-timeout = accept-path starvation (5.2); connection-refused = process dead / wrong interface (5.2); clusterdown = slot coverage lost (5.3); oom-writes = node at maxmemory, writes fail while reads work (5.4); panic = read the innermost app frame."
+    },
+    {
+      "type": "timeseries",
+      "title": "\u00a74 warn-tier classes / min",
+      "datasource": {
+        "type": "loki",
+        "uid": "warp-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `connect: cannot assign requested address` [1m]))",
+          "refId": "F",
+          "legendFormat": "port-exhaustion (warn >100/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `redis: connection pool timeout` [1m]))",
+          "refId": "G",
+          "legendFormat": "pool-timeout (warn >10/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `channel is full for .* \\(message is dropped\\)` [1m]))",
+          "refId": "H",
+          "legendFormat": "pubsub-drops (warn >10/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `connection reset by peer|unexpected EOF` [1m]))",
+          "refId": "I",
+          "legendFormat": "conn-reset (warn >50/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `LOADING|READONLY` [1m]))",
+          "refId": "J",
+          "legendFormat": "redis-loading (warn >50/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet` [1m]))",
+          "refId": "K",
+          "legendFormat": "payout-wallet-insufficient (warn >5/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `\\[taskworker\\]drain gave up` [1m]))",
+          "refId": "L",
+          "legendFormat": "taskworker-drain-gave-up (warn >1/min)"
+        }
+      ],
+      "description": "port-exhaustion self-drains ~60s after its target is fixed; redis-loading only matters sustained > 2 min; payout-wallet = fund the wallet (finance, not a bug); drain-gave-up = check stranded task leases (12.1)."
+    },
+    {
+      "type": "timeseries",
+      "title": "\u00a74 contract-error exemplars / min (sampled logs)",
+      "datasource": {
+        "type": "loki",
+        "uid": "warp-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `\\[contract\\]\\[error\\].*Insufficient balance` [1m]))",
+          "refId": "M",
+          "legendFormat": "insufficient-balance (warn >4000/min)"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum(count_over_time({env=\"$env\"} |~ `Missing origin contract for companion` [1m]))",
+          "refId": "N",
+          "legendFormat": "missing-origin-contract (warn >500/min)"
+        }
+      ],
+      "description": "SAMPLED log exemplars (the api rate-limits these lines) \u2014 judge rates from the lossless contract-failures counter above once the instrumented build is live."
+    },
+    {
+      "type": "timeseries",
+      "title": "novel error-shaped volume / min by service",
+      "datasource": {
+        "type": "loki",
+        "uid": "warp-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          },
+          "expr": "sum by (service) (count_over_time({env=\"$env\"} |~ `error|panic|fatal` [1m]))",
+          "refId": "O",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "description": "Cheap approximation of the monitor's `novel` classifier (the full word-boundary regex times out in loki at fleet volume). A NEW sustained band that no \u00a74 class explains is the novel signal \u2014 drill in with urnetwork / service logs; the monitor normalizes and samples the exact shapes."
+    },
+    {
+      "type": "row",
+      "title": "deploy + drain (SIGNALS.md \u00a78, \u00a712 / CONNECTDRAIN2)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "connect drain: residents remaining",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (host, block) (urnetwork_connect_drain_residents_remaining{env=\"$env\"})",
+          "refId": "M",
+          "legendFormat": "{{host}} {{block}}"
+        }
+      ],
+      "description": "Nonzero = a connect block is draining (deploy/rebalance walking residents off, 8.2). MANY blocks nonzero at once = a simultaneous restart wave (8.5), not a rolling deploy."
+    },
+    {
+      "type": "timeseries",
+      "title": "drain excuses written / consumed / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_drain_excuses_written{env=\"$env\"}[$__rate_interval]))",
+          "refId": "N",
+          "legendFormat": "written"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_drain_excuses_consumed{env=\"$env\"}[$__rate_interval]))",
+          "refId": "O",
+          "legendFormat": "consumed"
+        }
+      ],
+      "description": "CONNECTDRAIN2 track A: drain-caused disruption marked at the source and excused at reliability ingest. written without consumed = the excusal is not reaching ingest."
+    },
+    {
+      "type": "timeseries",
+      "title": "service drain state",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service) (urnetwork_http_server_drain_inflight{env=\"$env\"})",
+          "refId": "P",
+          "legendFormat": "http inflight {{service}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_taskworker_drain_inflight{env=\"$env\"})",
+          "refId": "Q",
+          "legendFormat": "taskworker inflight"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_drain_active_remaining{env=\"$env\"})",
+          "refId": "R",
+          "legendFormat": "proxy active remaining"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "proxy fleet",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_devices_live{env=\"$env\"})",
+          "refId": "S",
+          "legendFormat": "devices live"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_prewarmed_devices{env=\"$env\"})",
+          "refId": "T",
+          "legendFormat": "prewarmed"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_wg_peers{env=\"$env\"})",
+          "refId": "U",
+          "legendFormat": "wg peers"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "8.1 running versions (build_info)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 51
+      },
+      "description": "The publish-side deploy clock. The authoritative deploy state is the containers on the edges (docker ps, 8.1) \u2014 a fix is live only once the OLD build tag is gone (8.2/8.3).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "count by (service, block, version) (urnetwork_build_info{env=\"$env\"})",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "key-event delivery (SIGNALS.md \u00a79 / PEERSSTREAMS2)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 59
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "9 dispatched key events / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_key_events_dispatched_peers_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "V",
+          "legendFormat": "peers"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_key_events_dispatched_hops_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "W",
+          "legendFormat": "hops"
+        }
+      ],
+      "description": "Should track registry churn (connects/disconnects/provide changes; hop opens/closes). Flat DURING churn = events not arriving (notify-keyspace-events off on a node \u2014 9.1 class-set check \u2014 or the subscriber is down)."
+    },
+    {
+      "type": "timeseries",
+      "title": "9 subscription health / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_key_event_resubscribes_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "X",
+          "legendFormat": "resubscribes"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_key_event_resyncs_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "Y",
+          "legendFormat": "resyncs"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_network_peer_listener_resets_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "Z",
+          "legendFormat": "listener resets"
+        }
+      ],
+      "description": "Resubscribes: one per process start; sustained = conn deaths or topology flapping. Listener resets should be \u2248 registrations + resyncs; sustained excess = the corrective poll is repairing dropped events \u2014 find the drop first."
+    },
+    {
+      "type": "timeseries",
+      "title": "9 key-event merge drops / s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 60
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_redis_key_event_merge_drops_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "merge drops"
+        }
+      ],
+      "description": "In-process consumer stall on the key-event channel (pairs with the \u00a74 pubsub-drops log class, playbook 5.5)."
+    },
+    {
+      "type": "row",
+      "title": "coverage notes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      }
+    },
+    {
+      "type": "text",
+      "title": "signals not on this board (and where they live)",
+      "datasource": null,
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Grafana sees only **warp-mimir** and **warp-loki**, so pg-backed and ssh-backed signals cannot be charted here \u2014 they run in the monitor (`server/monitor`, SIGNALS.md is the catalog):\n\n- **1.1 pg contract rate / 1.2 canary + task health (\u00a77, \u00a712) / 1.3 active vs idle-in-tx state split / 2.x tier-1 pg (open-set, vacuum, stats landmine, task durations) / 2.8 selection freshness** \u2014 pg via ssh; no pg datasource is provisioned.\n- **\u00a73 per-node redis internals** \u2014 `urnetwork / redis cluster` charts the redis_* exporter series; the slowlog/latency/keyspace batteries (5.2\u20135.4, 3.3 family histogram, 9.1 config checks) are monitor-side redis-cli.\n- **\u00a75 escalation batteries, \u00a78 container-level deploy state** \u2014 ssh/docker on the edges.\n\nRelated boards: `urnetwork / redis cluster` (\u00a73), `urnetwork / host metrics`, `urnetwork / services overview` (process vitals + versions), `urnetwork / service logs` (drill-in)."
+      }
+    }
+  ]
+}

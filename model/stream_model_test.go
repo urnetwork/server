@@ -522,6 +522,47 @@ func TestStreamHopCorrectiveReadRepairsMissedExpiry(t *testing.T) {
 	})
 }
 
+// TestExpireLeakedStreamKeys covers the one-shot cleanup for the
+// duration-as-nanoseconds ttl leak: keys carrying the effectively-infinite
+// pre-fix ttl are clamped to 8h, healthy keys are left alone.
+func TestExpireLeakedStreamKeys(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// a healthy stream written by the fixed path
+		healthyContractId := server.NewId()
+		AddToStream(ctx, healthyContractId, server.NewId(), server.NewId(), nil)
+		_, healthyKey, found := GetStream(ctx, healthyContractId)
+		connect.AssertEqual(t, found, true)
+
+		// a leaked stream id key: reproduce the pre-fix state, an EXPIRE of
+		// the 8h ttl in nanoseconds
+		leakedKey := streamIdKey(newStreamKey(server.NewId(), server.NewId(), nil))
+		server.Redis(ctx, func(r server.RedisClient) {
+			connect.AssertEqual(t, r.Set(ctx, leakedKey, server.NewId().Bytes(), 0).Err(), nil)
+			connect.AssertEqual(t, r.Do(ctx, "EXPIRE", leakedKey, int64(8*time.Hour/time.Nanosecond)).Err(), nil)
+			leakedTtl, err := r.TTL(ctx, leakedKey).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, 8*time.Hour < leakedTtl, true)
+		})
+
+		scannedCount, fixedCount, err := ExpireLeakedStreamKeys(ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, 2 <= scannedCount, true)
+		connect.AssertEqual(t, 1 <= fixedCount, true)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			leakedTtl, err := r.TTL(ctx, leakedKey).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, 0 < leakedTtl && leakedTtl <= 8*time.Hour, true)
+
+			healthyTtl, err := r.TTL(ctx, streamIdKey(healthyKey)).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, 0 < healthyTtl && healthyTtl <= 8*time.Hour, true)
+		})
+	})
+}
+
 // TestStreamHopFlushRecovery guards the PEERS2 backward-counter resync for the
 // stream listener — the exact case the pre-v2 `<` comparison got wrong (it
 // went permanently stale once the counter reset). When the hops counter is

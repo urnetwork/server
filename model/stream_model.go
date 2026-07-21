@@ -375,7 +375,22 @@ func AddCompanionContractToStream(
 			return
 		}
 	}
+	return AddContractToPairStream(ctx, contractId, sourceId, destinationId)
+}
 
+// AddContractToPairStream marks a contract with the pair's active stream and
+// joins it to the stream's membership, resolving candidates through the pair
+// marker. This is the resolution for reply contracts that carry no origin
+// linkage — a same-network companion reply normalized to a network no-escrow
+// contract still has to carry the origin flow's stream id, or the receive
+// sequence on the other side cannot see that the stream is active when it
+// inspects the contract.
+func AddContractToPairStream(
+	ctx context.Context,
+	contractId server.Id,
+	sourceId server.Id,
+	destinationId server.Id,
+) (streamId server.Id, ok bool) {
 	pairKey := pairStreamsKey(sourceId, destinationId)
 	var candidateKeys []streamKey
 	server.Redis(ctx, func(r server.RedisClient) {
@@ -397,6 +412,81 @@ func AddCompanionContractToStream(
 			r.SRem(ctx, pairKey, key.Bytes())
 		})
 	}
+	return
+}
+
+// ExpireLeakedStreamKeys is a one-shot cleanup for stream keys written with
+// an effectively-infinite ttl: before 2026-07-20 the AddToStream/joinStream
+// evals passed the 8h ttl as a raw `time.Duration` eval arg, which go-redis
+// writes as its int64 NANOSECONDS — `EXPIRE <key> 28800000000000` (~913,000
+// years). Orphaned streams therefore never aged out (~1.1M stream id keys
+// plus their contract sets observed on main 2026-07-20). Any
+// `s2_sk_sid` / `s2_sk_cs` key with a ttl beyond the intended 8h is clamped
+// to 8h: an active stream re-refreshes on its next contract add, an orphan
+// finally expires.
+func ExpireLeakedStreamKeys(ctx context.Context) (scannedCount int64, fixedCount int64, returnErr error) {
+	ttl := 8 * time.Hour
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		fixNode := func(nodeCtx context.Context, node redis.UniversalClient) error {
+			var cursor uint64
+			for {
+				keys, nextCursor, err := node.Scan(nodeCtx, cursor, "*s2_sk_*", 5000).Result()
+				if err != nil {
+					return err
+				}
+				if 0 < len(keys) {
+					atomic.AddInt64(&scannedCount, int64(len(keys)))
+
+					pttlCmds := make([]*redis.DurationCmd, len(keys))
+					_, err := node.Pipelined(nodeCtx, func(pipe redis.Pipeliner) error {
+						for i, key := range keys {
+							pttlCmds[i] = pipe.PTTL(nodeCtx, key)
+						}
+						return nil
+					})
+					if err != nil {
+						return err
+					}
+					leakedKeys := []string{}
+					for i, pttlCmd := range pttlCmds {
+						// negative ttls are missing (-2) or persistent (-1)
+						// keys; the stream writers always set a ttl, so
+						// leave those to inspection
+						if ttl < pttlCmd.Val() {
+							leakedKeys = append(leakedKeys, keys[i])
+						}
+					}
+					if 0 < len(leakedKeys) {
+						_, err := node.Pipelined(nodeCtx, func(pipe redis.Pipeliner) error {
+							for _, key := range leakedKeys {
+								pipe.Expire(nodeCtx, key, ttl)
+							}
+							return nil
+						})
+						if err != nil {
+							return err
+						}
+						atomic.AddInt64(&fixedCount, int64(len(leakedKeys)))
+					}
+				}
+				cursor = nextCursor
+				if cursor == 0 {
+					return nil
+				}
+			}
+		}
+
+		if clusterClient, ok := r.(*redis.ClusterClient); ok {
+			// ForEachMaster runs its callback CONCURRENTLY, one goroutine
+			// per master — the counts are atomics
+			returnErr = clusterClient.ForEachMaster(ctx, func(nodeCtx context.Context, node *redis.Client) error {
+				return fixNode(nodeCtx, node)
+			})
+		} else {
+			returnErr = fixNode(ctx, r)
+		}
+	})
 	return
 }
 

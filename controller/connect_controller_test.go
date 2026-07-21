@@ -370,6 +370,226 @@ func TestCreateContractCompanionStreamId(t *testing.T) {
 	})
 }
 
+// TestCreateContractNetworkNormalizedCompanionStreamId reproduces the
+// 2026-07-20 same-network report: the streamed (force_stream) contract
+// between the pair rode a stream and reported it, but the reply shipped
+// without the stream id, so neither the provider send nor the client receive
+// stats saw the stream — and, worse, the unstamped contract steered the
+// reply traffic off the stream (`openContractMultiRouteWriter` follows the
+// contract path once set). The reply request carries NO companion flag for
+// the network relationship (`RemoteUserNatProvider` skips
+// `CompanionContract()` for a network-mode source) and no stream request, so
+// it is indistinguishable from a forward send: while the pair has an active
+// stream, EVERY network contract between the pair must join it — the
+// platform directing the client to switch to the stream. Covers the
+// companion=true (older builds normalize) and companion=false (current
+// builds) request shapes.
+func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkKey := []byte("test-provide-secret-key-network0")
+		streamKey := []byte("test-provide-secret-key-stream00")
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+
+		newClient := func() server.Id {
+			clientId := server.NewId()
+			deviceId := server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+			return clientId
+		}
+		// the app / original sender, and the provider replying
+		client := newClient()
+		provider := newClient()
+
+		// both peers advertise the network mode (and Stream, like real
+		// clients), so both directions settle as network no-escrow contracts
+		for _, clientId := range []server.Id{client, provider} {
+			model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{
+				model.ProvideModeNetwork: networkKey,
+				model.ProvideModeStream:  streamKey,
+			})
+		}
+
+		streamVersion1 := uint32(1)
+
+		createContract := func(source server.Id, destination server.Id, companion bool, forceStream bool) *protocol.CreateContractResult {
+			frames, err := CreateContract(ctx, source, &protocol.CreateContract{
+				DestinationId:     destination.Bytes(),
+				TransferByteCount: uint64(1024 * 1024),
+				Companion:         companion,
+				ForceStream:       &forceStream,
+				StreamVersion:     &streamVersion1,
+			}, connect.DefaultContractManagerSettings())
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(frames), 1)
+			message, err := connect.FromFrame(frames[0])
+			connect.AssertEqual(t, err, nil)
+			result, ok := message.(*protocol.CreateContractResult)
+			connect.AssertEqual(t, ok, true)
+			return result
+		}
+
+		storedContract := func(result *protocol.CreateContractResult) *protocol.StoredContract {
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
+			stored := &protocol.StoredContract{}
+			connect.AssertEqual(t, proto.Unmarshal(result.Contract.StoredContractBytes, stored), nil)
+			return stored
+		}
+
+		// forward: the client requests a streamed network contract to the
+		// provider (force_stream, the p2p shape)
+		forwardResult := createContract(client, provider, false, true)
+		forwardStored := storedContract(forwardResult)
+		connect.AssertEqual(t, forwardResult.Contract.ProvideMode, protocol.ProvideMode_Network)
+		connect.AssertEqual(t, len(forwardStored.StreamId) == 0, false)
+		streamId := server.Id(forwardStored.StreamId)
+
+		// reply, current build shape: NO companion flag, no stream request —
+		// must still carry the SAME stream id and join the stream
+		replyResult := createContract(provider, client, false, false)
+		replyStored := storedContract(replyResult)
+		connect.AssertEqual(t, replyResult.Contract.ProvideMode, protocol.ProvideMode_Network)
+		connect.AssertEqual(t, len(replyStored.StreamId) == 0, false)
+		connect.AssertEqual(t, server.Id(replyStored.StreamId), streamId)
+
+		replyContractId := server.Id(replyStored.ContractId)
+		memberStreamId, _, ok := model.GetStream(ctx, replyContractId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, memberStreamId, streamId)
+
+		// reply, older build shape: companion request normalized to network —
+		// same outcome
+		replyNormalizedResult := createContract(provider, client, true, false)
+		replyNormalizedStored := storedContract(replyNormalizedResult)
+		connect.AssertEqual(t, replyNormalizedResult.Contract.ProvideMode, protocol.ProvideMode_Network)
+		connect.AssertEqual(t, server.Id(replyNormalizedStored.StreamId), streamId)
+
+		// the replies keep the stream alive when the streamed contract
+		// closes out of it
+		model.RemoveFromStream(ctx, server.Id(forwardStored.ContractId))
+		_, _, ok = model.GetStream(ctx, replyContractId)
+		connect.AssertEqual(t, ok, true)
+
+		// a forward-direction network contract without an explicit stream
+		// request also joins the pair's active stream — both directions of
+		// an actively streaming pair ride the stream
+		forward2Result := createContract(client, provider, false, false)
+		forward2Stored := storedContract(forward2Result)
+		connect.AssertEqual(t, server.Id(forward2Stored.StreamId), streamId)
+
+		// a stream-version-0 request (older protocol build) must NOT be
+		// steered onto the pair stream even while it is active — those
+		// clients cannot handle a stream id in the contract
+		v0Frames, err := CreateContract(ctx, provider, &protocol.CreateContract{
+			DestinationId:     client.Bytes(),
+			TransferByteCount: uint64(1024 * 1024),
+			Companion:         false,
+		}, connect.DefaultContractManagerSettings())
+		connect.AssertEqual(t, err, nil)
+		v0Message, err := connect.FromFrame(v0Frames[0])
+		connect.AssertEqual(t, err, nil)
+		v0Stored := storedContract(v0Message.(*protocol.CreateContractResult))
+		connect.AssertEqual(t, len(v0Stored.StreamId), 0)
+		_, _, ok = model.GetStream(ctx, server.Id(v0Stored.ContractId))
+		connect.AssertEqual(t, ok, false)
+
+		// with no active stream left for the pair, contracts stay unmarked
+		// (and must not resurrect the dead stream)
+		for _, contractId := range []server.Id{replyContractId, server.Id(replyNormalizedStored.ContractId), server.Id(forward2Stored.ContractId)} {
+			model.RemoveFromStream(ctx, contractId)
+		}
+		reply2Result := createContract(provider, client, false, false)
+		reply2Stored := storedContract(reply2Result)
+		connect.AssertEqual(t, len(reply2Stored.StreamId), 0)
+	})
+}
+
+// TestCreateContractEscrowForwardNoAutoJoin pins the escrow (cross-network)
+// branch boundary of pair-stream steering: auto-join applies only to the
+// network no-escrow branch. A cross-network forward contract WITHOUT an
+// explicit stream request stays direct even while the pair has an active
+// stream — cross-network senders choose streams explicitly via
+// force_stream/intermediary_ids, and the cross-network reply joins through
+// the companion escrow branch instead.
+func TestCreateContractEscrowForwardNoAutoJoin(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		publicKey := []byte("test-provide-secret-key-public00")
+
+		newClient := func(networkId server.Id) server.Id {
+			clientId := server.NewId()
+			deviceId := server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+			return clientId
+		}
+		newFundedNetwork := func() server.Id {
+			networkId := server.NewId()
+			userId := server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+			balanceCode, err := model.CreateBalanceCode(
+				ctx,
+				model.ByteCount(1024*1024*1024*1024),
+				365*24*time.Hour,
+				model.UsdToNanoCents(10.00),
+				server.NewId().String(), "", "",
+			)
+			connect.AssertEqual(t, err, nil)
+			_, err = model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+				Secret:    balanceCode.Secret,
+				NetworkId: networkId,
+			}, ctx)
+			connect.AssertEqual(t, err, nil)
+			return networkId
+		}
+
+		// cross-network: funded consumer network pays the forward escrow
+		consumer := newClient(newFundedNetwork())
+		provider := newClient(newFundedNetwork())
+		model.SetProvide(ctx, provider, map[model.ProvideMode][]byte{
+			model.ProvideModePublic: publicKey,
+		})
+
+		streamVersion1 := uint32(1)
+		createContract := func(forceStream bool) *protocol.StoredContract {
+			frames, err := CreateContract(ctx, consumer, &protocol.CreateContract{
+				DestinationId:     provider.Bytes(),
+				TransferByteCount: uint64(1024 * 1024),
+				ForceStream:       &forceStream,
+				StreamVersion:     &streamVersion1,
+			}, connect.DefaultContractManagerSettings())
+			connect.AssertEqual(t, err, nil)
+			message, err := connect.FromFrame(frames[0])
+			connect.AssertEqual(t, err, nil)
+			result, ok := message.(*protocol.CreateContractResult)
+			connect.AssertEqual(t, ok, true)
+			connect.AssertEqual(t, result.Error == nil, true)
+			connect.AssertEqual(t, result.Contract != nil, true)
+			connect.AssertEqual(t, result.Contract.ProvideMode, protocol.ProvideMode_Public)
+			stored := &protocol.StoredContract{}
+			connect.AssertEqual(t, proto.Unmarshal(result.Contract.StoredContractBytes, stored), nil)
+			return stored
+		}
+
+		// a streamed forward establishes the pair stream (escrow branch,
+		// explicit force_stream)
+		streamedStored := createContract(true)
+		connect.AssertEqual(t, len(streamedStored.StreamId) == 0, false)
+
+		// an escrow forward without an explicit stream request stays direct
+		// while the pair stream is active
+		directStored := createContract(false)
+		connect.AssertEqual(t, len(directStored.StreamId), 0)
+		_, _, ok := model.GetStream(ctx, server.Id(directStored.ContractId))
+		connect.AssertEqual(t, ok, false)
+	})
+}
+
 // TestCreateContractCompanionNetworkNormalization guards the boundaries of the
 // companion -> network normalization: a companion request between same-network
 // peers where the destination advertises the network mode settles as a

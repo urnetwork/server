@@ -138,6 +138,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				MaxRedirects: 8,
 			}
 			self.client = redis.NewClusterClient(options)
+			self.client.AddHook(redisTtlWarnHook{})
 		} else {
 			// see https://github.com/redis/go-redis/blob/master/options.go#L31
 			options := &redis.Options{
@@ -167,6 +168,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				// FailingTimeoutSeconds: 0,
 			}
 			self.client = redis.NewClient(options)
+			self.client.AddHook(redisTtlWarnHook{})
 		}
 	}
 	return self.client

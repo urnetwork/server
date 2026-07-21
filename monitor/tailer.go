@@ -89,6 +89,13 @@ var logClasses = []logClass{
 	{name: "payout-wallet-insufficient", re: regexp.MustCompile(`asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet`),
 		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "the payout wallet balance cannot cover pending payouts (usdc) — fund the wallet or pause payouts; retries park AdvancePayment tasks until funded"},
+	// server-side redis ttl guard (server/redis_ttl_warn.go): any command
+	// carrying a raw time.Duration arg (serialized as nanoseconds) or an
+	// effective ttl > 120 days logs this line — the 2026-07-20 stream-key
+	// leak signature (EXPIRE <8h-in-ns> ≈ 913,000 years, ~1.1M orphaned keys)
+	{name: "redis-ttl-suspect", re: regexp.MustCompile(`\[redis\]\[ttl\]`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4",
+		meaning: "a redis write carried a ttl beyond 120 days or a raw time.Duration arg — a unit conversion issue at the named command/key; find the write site and convert to seconds/ms"},
 	// taskworker drain outcome (§12.1): the drain phases log exactly one
 	// outcome line; "finished cleanly" / "finished after cancel" are healthy
 	// and not classified — only "gave up" means a ctx-ignoring task rode to

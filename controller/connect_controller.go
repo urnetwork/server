@@ -594,6 +594,28 @@ func newContract(
 			if forceStream || 0 < len(intermediaryIds) {
 				streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
 				streamId = &streamId_
+			} else {
+				// when the pair has an active stream, every network contract
+				// between the pair joins it — this is the platform directing
+				// the client to switch to the stream (see
+				// `CreateContractResult`). The load-bearing case is the
+				// same-network reply: the provider's return traffic for a
+				// network source carries NO companion flag (the client skips
+				// the companion contract for the network relationship), so
+				// the request is indistinguishable from a forward send, yet
+				// its send sequence is stream-bound (`source.Reverse()`
+				// keeps the stream id) — an unstamped contract would steer
+				// the reply OFF the stream onto the platform path and hide
+				// the stream from the contract stats on both ends
+				streamId_, ok := model.AddContractToPairStream(
+					ctx,
+					contractId,
+					sourceId,
+					destinationId,
+				)
+				if ok {
+					streamId = &streamId_
+				}
 			}
 		}
 	} else if companionContract {
