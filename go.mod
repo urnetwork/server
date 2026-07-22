@@ -11,6 +11,7 @@ require (
 	github.com/ethereum/go-ethereum v1.16.7
 	github.com/gagliardetto/solana-go v1.21.0
 	github.com/go-jose/go-jose/v3 v3.0.4
+	github.com/go-playground/assert/v2 v2.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6

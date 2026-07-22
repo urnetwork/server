@@ -11,6 +11,7 @@ import (
 	// "github.com/urnetwork/glog"
 
 	goaway "github.com/TwiN/go-away"
+	bip39 "github.com/tyler-smith/go-bip39"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -58,7 +59,7 @@ const (
 
 func NetworkCheck(check *NetworkCheckArgs, session *session.ClientSession) (*NetworkCheckResult, error) {
 
-	_, err := validateNetworkName(check.NetworkName)
+	_, err := ValidateNetworkName(check.NetworkName)
 	if err != nil {
 		return &NetworkCheckResult{
 			Available: false,
@@ -81,25 +82,16 @@ type NetworkCreateArgs struct {
 	Password         *string         `json:"password,omitempty"`
 	NetworkName      string          `json:"network_name"`
 	Terms            bool            `json:"terms"`
-	GuestMode        bool            `json:"guest_mode"`
 	VerifyUseNumeric bool            `json:"verify_use_numeric"`
 	ReferralCode     *string         `json:"referral_code,omitempty"`
 	BalanceCode      *string         `json:"balance_code,omitempty"`
 	WalletAuth       *WalletAuthArgs `json:"wallet_auth,omitempty"`
 }
 
-type UpgradeGuestArgs struct {
-	NetworkName string          `json:"network_name"`
-	UserAuth    *string         `json:"user_auth,omitempty"`
-	AuthJwt     *string         `json:"auth_jwt,omitempty"`
-	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
-	Password    *string         `json:"password,omitempty"`
-	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
-}
-
 type NetworkCreateResult struct {
 	Network              *NetworkCreateResultNetwork      `json:"network,omitempty"`
 	UserAuth             *string                          `json:"user_auth,omitempty"`
+	Seedphrase           *string                          `json:"seedphrase,omitempty"`
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
 	IsPro                bool                             `json:"is_pro,omitempty"`
@@ -120,7 +112,7 @@ type NetworkCreateResultError struct {
 	Message string `json:"message"`
 }
 
-func validateNetworkName(networkName string) (string, error) {
+func ValidateNetworkName(networkName string) (string, error) {
 	trimmed := strings.TrimSpace(networkName)
 
 	// to lowercase
@@ -147,7 +139,6 @@ func validateNetworkName(networkName string) (string, error) {
 	}
 
 	return normalized, nil
-
 }
 
 func NetworkCreate(
@@ -156,6 +147,72 @@ func NetworkCreate(
 ) (*NetworkCreateResult, error) {
 	userAuth, _ := NormalUserAuthV1(networkCreate.UserAuth)
 
+	// seedphrase path: no auth method provided
+	if networkCreate.UserAuth == nil && networkCreate.AuthJwt == nil && networkCreate.WalletAuth == nil {
+
+		if !networkCreate.Terms {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: AgreeToTerms,
+				},
+			}
+			return result, nil
+		}
+
+		// rate limit: max 5 seedphrase accounts per IP per day
+		if err := CheckNetworkCreateRateLimit(session.Ctx, session); err != nil {
+			return nil, err
+		}
+
+		validatedNetworkName, err := generateRandomNetworkName()
+		if err != nil {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "Failed to generate network name.",
+				},
+			}
+			return result, nil
+		}
+
+		resultNetworkCreate := networkCreateSeedphrase(
+			session.Ctx,
+			&networkCreate,
+			validatedNetworkName,
+		)
+
+		if resultNetworkCreate.Created {
+			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
+
+			isPro := false
+			byJwt := jwt.NewByJwt(
+				resultNetworkCreate.NetworkId,
+				resultNetworkCreate.UserId,
+				validatedNetworkName,
+				false,
+				isPro,
+			)
+			byJwtSigned := byJwt.Sign()
+			result := &NetworkCreateResult{
+				Seedphrase: &resultNetworkCreate.Seedphrase,
+				Network: &NetworkCreateResultNetwork{
+					ByJwt:       &byJwtSigned,
+					NetworkName: validatedNetworkName,
+					NetworkId:   resultNetworkCreate.NetworkId,
+					IsPro:       resultNetworkCreate.IsPro,
+				},
+			}
+			return result, nil
+		} else {
+			result := &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Message: "Account might already exist. Please start over.",
+				},
+			}
+			return result, nil
+		}
+	}
+
+	// email/SSO/wallet paths use the existing auth rate limit
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
 	if !allow {
 		return nil, maxUserAuthAttemptsError()
@@ -170,48 +227,7 @@ func NetworkCreate(
 		return result, nil
 	}
 
-	// create a guest network
-	if networkCreate.GuestMode {
-
-		resultNetworkCreate := networkCreateGuest(session.Ctx)
-
-		if resultNetworkCreate.Created {
-			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
-
-			// we should disable adding the guest network to name search?
-			// networkNameSearch.Add(session.Ctx, networkCreate.NetworkName, createdNetworkId, 0)
-
-			isPro := false
-			isGuest := true
-
-			byJwt := jwt.NewByJwt(
-				resultNetworkCreate.NetworkId,
-				resultNetworkCreate.UserId,
-				networkCreate.NetworkName,
-				isGuest,
-				isPro,
-			)
-			byJwtSigned := byJwt.Sign()
-			result := &NetworkCreateResult{
-				Network: &NetworkCreateResultNetwork{
-					ByJwt:       &byJwtSigned,
-					NetworkName: resultNetworkCreate.NetworkName,
-					NetworkId:   resultNetworkCreate.NetworkId,
-				},
-			}
-
-			return result, nil
-		} else {
-			result := &NetworkCreateResult{
-				Error: &NetworkCreateResultError{
-					Message: "An error occurred creating a guest network",
-				},
-			}
-			return result, nil
-		}
-	}
-
-	validatedNetworkName, error := validateNetworkName(networkCreate.NetworkName)
+	validatedNetworkName, error := ValidateNetworkName(networkCreate.NetworkName)
 
 	if error != nil {
 		result := &NetworkCreateResult{
@@ -483,6 +499,7 @@ type networkCreateResult struct {
 	NetworkId   server.Id
 	NetworkName string
 	UserId      server.Id
+	Seedphrase  string
 	IsPro       bool
 }
 
@@ -841,57 +858,53 @@ func networkCreateUserAuth(
 }
 
 /**
- * network create guest mode
+ * network create seedphrase
  */
-
-func networkCreateGuest(
+func networkCreateSeedphrase(
 	ctx context.Context,
+	networkCreate *NetworkCreateArgs,
+	validatedNetworkName string,
 ) networkCreateResult {
-
 	created := false
 	var createdNetworkId server.Id
-	var networkName string
 	var createdUserId server.Id
+	var seedphrase string
+	isPro := false
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		var err error
-
 		createdUserId = server.NewId()
 		createdNetworkId = server.NewId()
 
-		// remove dashes from the network name
-		networkName = fmt.Sprintf(
-			"g%s",
-			strings.ReplaceAll(server.NewId().String(), "-", ""),
-		)
-
-		_, err = tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_user
-				(user_id, user_name, auth_type)
-				VALUES ($1, $2, $3)
-			`,
-			createdUserId,
-			"guest",
-			AuthTypeGuest,
-		)
+		// generate seedphrase
+		entropy, err := bip39.NewEntropy(256)
+		server.Raise(err)
+		seedphrase, err = bip39.NewMnemonic(entropy)
 		server.Raise(err)
 
 		_, err = tx.Exec(
 			ctx,
-			`
-				INSERT INTO network
-				(network_id, network_name, admin_user_id)
-				VALUES ($1, $2, $3)
-			`,
-			createdNetworkId,
-			networkName,
-			createdUserId,
+			`INSERT INTO network_user (user_id, user_name, auth_type)
+			 VALUES ($1, $2, $3)`,
+			createdUserId, validatedNetworkName, AuthTypeSeedphrase,
+		)
+		server.Raise(err)
+
+		err = CreateSeedphraseAuthInTx(tx, ctx, createdUserId, seedphrase)
+		server.Raise(err)
+
+		_, err = tx.Exec(
+			ctx,
+			`INSERT INTO network (network_id, network_name, admin_user_id)
+			 VALUES ($1, $2, $3)`,
+			createdNetworkId, validatedNetworkName, createdUserId,
 		)
 		server.Raise(err)
 
 		CreateNetworkReferralCodeInTx(ctx, tx, createdNetworkId)
+
+		isPro = networkCreateRedeemBalanceCodeInTx(
+			networkCreate, createdNetworkId, ctx, tx,
+		)
 
 		created = true
 	})
@@ -899,8 +912,10 @@ func networkCreateGuest(
 	return networkCreateResult{
 		Created:     created,
 		NetworkId:   createdNetworkId,
-		NetworkName: networkName,
+		NetworkName: validatedNetworkName,
 		UserId:      createdUserId,
+		Seedphrase:  seedphrase,
+		IsPro:       isPro,
 	}
 }
 
@@ -978,7 +993,7 @@ func checkNetworkNameAvailability(
 
 	var existingNetworkId *server.Id
 
-	validatedNetworkName, validationErr := validateNetworkName(networkName)
+	validatedNetworkName, validationErr := ValidateNetworkName(networkName)
 	if validationErr != nil {
 		err = validationErr
 		return
@@ -1052,560 +1067,6 @@ func NetworkUpdate(
 	})
 
 	return networkCreateResult, nil
-}
-
-type UpgradeGuestResult struct {
-	Error                *UpgradeGuestError              `json:"error,omitempty"`
-	VerificationRequired *UpgradeGuestResultVerification `json:"verification_required,omitempty"`
-	Network              *UpgradeGuestNetwork            `json:"network,omitempty"`
-	UserAuth             *string                         `json:"user_auth,omitempty"`
-}
-
-type UpgradeGuestNetwork struct {
-	ByJwt *string `json:"by_jwt,omitempty"`
-}
-
-type UpgradeGuestResultVerification struct {
-	UserAuth string `json:"user_auth"`
-}
-
-type UpgradeGuestError struct {
-	Message string `json:"message"`
-}
-
-func UpgradeGuest(
-	upgradeGuest UpgradeGuestArgs,
-	session *session.ClientSession,
-) (*UpgradeGuestResult, error) {
-
-	userAuth, _ := NormalUserAuthV1(upgradeGuest.UserAuth)
-
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
-	if !allow {
-		return nil, maxUserAuthAttemptsError()
-	}
-
-	var result = &UpgradeGuestResult{}
-	networkName := strings.TrimSpace(upgradeGuest.NetworkName)
-
-	err := checkNetworkNameAvailability(networkName, session)
-	if err != nil {
-		result = &UpgradeGuestResult{
-			Error: &UpgradeGuestError{
-				Message: err.Error(),
-			},
-		}
-		return result, nil
-	}
-
-	// Social/wallet upgrades issue a durable JWT. Resolve the fresh
-	// entitlement before the update transaction so the lookup's PostgreSQL
-	// and Redis I/O cannot nest under an open transaction.
-	isPro := false
-	if (upgradeGuest.AuthJwt != nil && upgradeGuest.AuthJwtType != nil) ||
-		upgradeGuest.WalletAuth != nil {
-		isPro = IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
-	}
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-
-		if upgradeGuest.UserAuth != nil {
-
-			/**
-			 * Upgrade from guest from email + password
-			 */
-
-			if userAuth == nil {
-				result = &UpgradeGuestResult{
-					Error: &UpgradeGuestError{
-						Message: "Invalid email or phone number.",
-					},
-				}
-				return
-			}
-
-			/**
-			 * Validate the user does not exist
-			 */
-
-			var userId *server.Id
-
-			userCheck, err := tx.Query(
-				session.Ctx,
-				`
-					 SELECT user_id FROM network_user WHERE user_auth = $1
-				 `,
-				userAuth,
-			)
-			server.WithPgResult(userCheck, err, func() {
-				if userCheck.Next() {
-					server.Raise(userCheck.Scan(&userId))
-				}
-			})
-
-			if userId != nil {
-				result = &UpgradeGuestResult{
-					Error: &UpgradeGuestError{
-						Message: "User already exists",
-					},
-				}
-				return
-			}
-
-			/**
-			 * Handle password
-			 */
-
-			passwordSalt := createPasswordSalt()
-			passwordHash := computePasswordHashV1([]byte(*upgradeGuest.Password), passwordSalt)
-
-			/**
-			 * Update network user from guest
-			 */
-
-			server.RaisePgResult(tx.Exec(
-				session.Ctx,
-				`
-								UPDATE network_user
-								SET
-										auth_type = $2,
-										user_auth = $3,
-										password_hash = $4,
-										password_salt = $5
-
-								WHERE
-										user_id = $1
-						`,
-				session.ByJwt.UserId,
-				AuthTypePassword,
-				userAuth,
-				passwordHash,
-				passwordSalt,
-			))
-
-			// do we need to run auditNetworkCreate on the upgrade from guest -> normal account?
-
-			networkNameSearch().Add(session.Ctx, networkName, session.ByJwt.NetworkId, 0)
-
-			result = &UpgradeGuestResult{
-				VerificationRequired: &UpgradeGuestResultVerification{
-					UserAuth: *userAuth,
-				},
-			}
-
-		} else if upgradeGuest.AuthJwt != nil && upgradeGuest.AuthJwtType != nil {
-
-			/**
-			 * Upgrade from guest from social login
-			 */
-
-			authJwt, _ := ParseAuthJwt(*upgradeGuest.AuthJwt, AuthType(*upgradeGuest.AuthJwtType))
-
-			if authJwt != nil {
-
-				/**
-				 * Validate the user does not exist
-				 */
-				normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
-				var userId *server.Id
-
-				userCheck, err := tx.Query(
-					session.Ctx,
-					`
-					SELECT user_id FROM network_user WHERE user_auth = $1
-				`,
-					normalJwtUserAuth,
-				)
-				server.WithPgResult(userCheck, err, func() {
-					if userCheck.Next() {
-						server.Raise(userCheck.Scan(&userId))
-					}
-				})
-
-				if userId != nil {
-					result = &UpgradeGuestResult{
-						Error: &UpgradeGuestError{
-							Message: "User already exists",
-						},
-					}
-					return
-				}
-
-				/**
-				 * Update network user from guest
-				 */
-				server.RaisePgResult(tx.Exec(
-					session.Ctx,
-					`
-								UPDATE network_user
-								SET
-										auth_type = $2,
-										user_auth = $3,
-										auth_jwt = $4
-
-								WHERE
-										user_id = $1
-						`,
-					session.ByJwt.UserId,
-					upgradeGuest.AuthJwtType,
-					normalJwtUserAuth,
-					upgradeGuest.AuthJwt,
-				))
-
-				setUserAuthAttemptSuccessInTx(
-					session.Ctx,
-					tx,
-					userAuthAttemptId,
-					true,
-				)
-
-				isGuest := false
-
-				byJwt := jwt.NewByJwt(
-					session.ByJwt.NetworkId,
-					session.ByJwt.UserId,
-					networkName,
-					isGuest,
-					isPro,
-				)
-				byJwtSigned := byJwt.Sign()
-
-				result = &UpgradeGuestResult{
-					Network: &UpgradeGuestNetwork{
-						ByJwt: &byJwtSigned,
-					},
-					UserAuth: &normalJwtUserAuth,
-				}
-
-			}
-
-		} else if upgradeGuest.WalletAuth != nil {
-			/**
-			 * Upgrade from guest from wallet
-			 */
-
-			/**
-			 * verify the wallet signature (proof of key control) before binding the
-			 * wallet address to this account, matching NetworkCreate and handleLoginWallet
-			 */
-			isValid, err := VerifySignature(
-				upgradeGuest.WalletAuth.Blockchain,
-				upgradeGuest.WalletAuth.PublicKey,
-				upgradeGuest.WalletAuth.Message,
-				upgradeGuest.WalletAuth.Signature,
-			)
-			if err != nil || !isValid {
-				result = &UpgradeGuestResult{
-					Error: &UpgradeGuestError{
-						Message: "invalid wallet signature",
-					},
-				}
-				return
-			}
-
-			var userId *server.Id
-
-			userCheck, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT user_id FROM network_user WHERE wallet_address = $1
-				`,
-				upgradeGuest.WalletAuth.PublicKey,
-			)
-			server.WithPgResult(userCheck, err, func() {
-				if userCheck.Next() {
-					server.Raise(userCheck.Scan(&userId))
-				}
-			})
-
-			if userId != nil {
-				result = &UpgradeGuestResult{
-					Error: &UpgradeGuestError{
-						Message: "User already exists",
-					},
-				}
-				return
-			}
-
-			/**
-			 * Update network user from guest
-			 */
-			server.RaisePgResult(tx.Exec(
-				session.Ctx,
-				`
-								UPDATE network_user
-								SET
-										wallet_address = $2,
-										wallet_blockchain = $3,
-										auth_type = $4
-
-								WHERE
-										user_id = $1
-						`,
-				session.ByJwt.UserId,
-				upgradeGuest.WalletAuth.PublicKey,
-				AuthTypeSolana,
-				AuthTypeSolana,
-			))
-
-			setUserAuthAttemptSuccessInTx(
-				session.Ctx,
-				tx,
-				userAuthAttemptId,
-				true,
-			)
-
-			isGuest := false
-
-			byJwt := jwt.NewByJwt(
-				session.ByJwt.NetworkId,
-				session.ByJwt.UserId,
-				networkName,
-				isGuest,
-				isPro,
-			)
-			byJwtSigned := byJwt.Sign()
-
-			result = &UpgradeGuestResult{
-				Network: &UpgradeGuestNetwork{
-					ByJwt: &byJwtSigned,
-				},
-				// UserAuth: &normalJwtUserAuth,
-			}
-
-		}
-
-		/**
-		 * Update the network name
-		 */
-		server.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
-							UPDATE network
-							SET
-								network_name = $2
-
-							WHERE
-									network_id = $1
-					`,
-			session.ByJwt.NetworkId,
-			networkName,
-		))
-
-	})
-
-	return result, nil
-}
-
-/**
- * Upgrade guest with existing account
- */
-type UpgradeGuestExistingArgs struct {
-	UserAuth    *string         `json:"user_auth,omitempty"`
-	Password    *string         `json:"password,omitempty"`
-	AuthJwt     *string         `json:"auth_jwt,omitempty"`
-	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
-	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
-}
-
-type UpgradeGuestExistingError struct {
-	Message string `json:"message"`
-}
-
-type UpgradeGuestExistingResult struct {
-	Error                *UpgradeGuestExistingError                `json:"error,omitempty"`
-	VerificationRequired *UpgradeGuestExistingVerificationRequired `json:"verification_required,omitempty"`
-	Network              *UpgradeGuestExistingResultNetwork        `json:"network,omitempty"`
-	// Error                *AuthLoginWithPasswordResultError        `json:"error,omitempty"`
-}
-
-type UpgradeGuestExistingVerificationRequired struct {
-	UserAuth string `json:"user_auth"`
-}
-
-type UpgradeGuestExistingResultNetwork struct {
-	ByJwt *string `json:"by_jwt,omitempty"`
-	// NetworkName *string `json:"name,omitempty"`
-}
-
-func UpgradeFromGuestExisting(
-	upgradeGuestExisting UpgradeGuestExistingArgs,
-	session *session.ClientSession,
-) (*UpgradeGuestExistingResult, error) {
-
-	if upgradeGuestExisting.UserAuth != nil && upgradeGuestExisting.Password != nil {
-		/**
-		 * Upgrade from guest from email + password
-		 */
-
-		args := AuthLoginWithPasswordArgs{
-			UserAuth: *upgradeGuestExisting.UserAuth,
-			Password: *upgradeGuestExisting.Password,
-		}
-
-		loginResult, err := AuthLoginWithPassword(args, session)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Invalid login",
-				},
-			}, nil
-		}
-
-		if loginResult.Error != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: loginResult.Error.Message,
-				},
-			}, nil
-		}
-
-		if loginResult.Network.ByJwt == nil {
-
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Invalid network token",
-				},
-			}, nil
-		}
-
-		network, err := jwt.ParseByJwt(session.Ctx, *loginResult.Network.ByJwt)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Error parsing network token",
-				},
-			}, nil
-		}
-
-		err = markUpgradedNetworkId(network.NetworkId, session)
-		if err != nil {
-			return &UpgradeGuestExistingResult{
-				Error: &UpgradeGuestExistingError{
-					Message: "Error marking upgraded network id",
-				},
-			}, nil
-		}
-
-		result := &UpgradeGuestExistingResult{
-			Network: &UpgradeGuestExistingResultNetwork{
-				ByJwt: loginResult.Network.ByJwt,
-			},
-		}
-
-		if loginResult.VerificationRequired != nil {
-			result.VerificationRequired = &UpgradeGuestExistingVerificationRequired{
-				UserAuth: loginResult.VerificationRequired.UserAuth,
-			}
-		}
-
-		return result, nil
-
-	}
-
-	if upgradeGuestExisting.AuthJwt != nil && upgradeGuestExisting.AuthJwtType != nil {
-		/**
-		 * Upgrade from guest from social login
-		 */
-
-		args := AuthLoginArgs{
-			AuthJwt:     upgradeGuestExisting.AuthJwt,
-			AuthJwtType: upgradeGuestExisting.AuthJwtType,
-		}
-
-		return handleAuthLoginUpgrade(args, session)
-
-	}
-
-	if upgradeGuestExisting.WalletAuth != nil {
-
-		args := AuthLoginArgs{
-			WalletAuth: upgradeGuestExisting.WalletAuth,
-		}
-
-		return handleAuthLoginUpgrade(args, session)
-
-	}
-
-	return &UpgradeGuestExistingResult{
-		Error: &UpgradeGuestExistingError{
-			Message: "Invalid args",
-		},
-	}, nil
-
-}
-
-func handleAuthLoginUpgrade(
-	args AuthLoginArgs,
-	session *session.ClientSession,
-) (*UpgradeGuestExistingResult, error) {
-	loginResult, err := AuthLogin(args, session)
-	if err != nil {
-		return &UpgradeGuestExistingResult{
-			Error: &UpgradeGuestExistingError{
-				Message: "Invalid login",
-			},
-		}, nil
-	}
-
-	if loginResult.Error != nil {
-		return &UpgradeGuestExistingResult{
-			Error: &UpgradeGuestExistingError{
-				Message: loginResult.Error.Message,
-			},
-		}, nil
-	}
-
-	// in this case, we should navigate the user to the network creation view
-	if loginResult.Network == nil {
-		return &UpgradeGuestExistingResult{}, nil
-	}
-
-	network, err := jwt.ParseByJwt(session.Ctx, loginResult.Network.ByJwt)
-	if err != nil {
-		return &UpgradeGuestExistingResult{
-			Error: &UpgradeGuestExistingError{
-				Message: "Error parsing network token",
-			},
-		}, nil
-	}
-
-	err = markUpgradedNetworkId(network.NetworkId, session)
-	if err != nil {
-		return &UpgradeGuestExistingResult{
-			Error: &UpgradeGuestExistingError{
-				Message: "Error marking upgraded network id",
-			},
-		}, nil
-	}
-
-	return &UpgradeGuestExistingResult{
-		Network: &UpgradeGuestExistingResultNetwork{
-			ByJwt: &loginResult.Network.ByJwt,
-		},
-	}, nil
-}
-
-func markUpgradedNetworkId(
-	upgradedNetworkId server.Id,
-	session *session.ClientSession,
-) error {
-
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
-				UPDATE network
-				SET
-						guest_upgrade_network_id = $1
-				WHERE
-						network_id = $2
-			`,
-			upgradedNetworkId,
-			session.ByJwt.NetworkId,
-		))
-	})
-
-	return nil
 }
 
 type Network struct {

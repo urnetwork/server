@@ -6,6 +6,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
@@ -52,6 +53,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletNonces(clientSession, tx)
+		work.ScheduleRemoveExpiredBulkClientRemovalQuota(clientSession, tx)
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
@@ -170,6 +172,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		task.NewTaskTargetWithPost(
+			model.RemoveNetworkClientsTask,
+			model.RemoveNetworkClientsTaskPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.SweepOrphanContractData,
 			work.SweepOrphanContractDataPost,
 		),
@@ -235,6 +241,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredWalletNonces,
 			work.RemoveExpiredWalletNoncesPost,
 			"github.com/urnetwork/server/taskworker/work.RemoveExpiredWalletNonces",
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredBulkClientRemovalQuota,
+			work.RemoveExpiredBulkClientRemovalQuotaPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditNetworkEvents,

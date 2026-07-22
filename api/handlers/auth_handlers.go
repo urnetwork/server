@@ -241,3 +241,11 @@ func AuthRefreshToken(w http.ResponseWriter, r *http.Request) {
 	// router.WrapWithInputNoAuth(controller.AuthRefreshToken, w, r)
 	router.WrapRequireAuth(controller.RefreshToken, w, r)
 }
+
+func AuthAdd(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.AddAuth, w, r)
+}
+
+func AuthRemove(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.RemoveAuth, w, r)
+}

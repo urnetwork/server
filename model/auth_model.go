@@ -33,12 +33,13 @@ const VerifyCodeTimeout = 4 * time.Hour
 type AuthType = string
 
 const (
-	AuthTypePassword  AuthType = "password"
-	AuthTypeApple     AuthType = "apple"
-	AuthTypeGoogle    AuthType = "google"
-	AuthTypeBringYour AuthType = "bringyour"
-	AuthTypeGuest     AuthType = "guest"
-	AuthTypeSolana    AuthType = "solana"
+	AuthTypePassword   AuthType = "password"
+	AuthTypeApple      AuthType = "apple"
+	AuthTypeGoogle     AuthType = "google"
+	AuthTypeBringYour  AuthType = "bringyour"
+	AuthTypeGuest      AuthType = "guest"
+	AuthTypeSolana     AuthType = "solana"
+	AuthTypeSeedphrase AuthType = "seedphrase"
 )
 
 type WalletAuthArgs struct {
@@ -57,6 +58,7 @@ type AuthLoginArgs struct {
 	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
 	AuthJwt     *string         `json:"auth_jwt,omitempty"`
 	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
+	Seedphrase  *string         `json:"seedphrase,omitempty"`
 }
 
 type AuthLoginResult struct {
@@ -151,14 +153,40 @@ func AuthLogin(
 		}
 	} else if login.WalletAuth != nil {
 
-		return handleLoginWallet(
+		result, err := handleLoginWallet(
 			login.WalletAuth,
 			session.Ctx,
 		)
-
+		// Only wallet logins that resolve to an existing user (a JWT-bearing
+		// result) count as a successful attempt -- a "new wallet user"
+		// result still requires registration, matching how the SSO branch
+		// above only marks success once it returns a Network result.
+		if err == nil && result != nil && result.Network != nil {
+			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+		}
+		return result, err
+	} else if login.Seedphrase != nil && *login.Seedphrase != "" {
+		result, err := LoginWithSeedphrase(session.Ctx, *login.Seedphrase)
+		if err != nil {
+			return &AuthLoginResult{
+				Error: &AuthLoginResultError{
+					Message: err.Error(),
+				},
+			}, nil
+		}
+		SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+		return &AuthLoginResult{
+			Network: &AuthLoginResultNetwork{
+				ByJwt: result.ByJwt,
+			},
+		}, nil
 	}
 
-	return nil, errors.New("invalid login")
+	return &AuthLoginResult{
+		Error: &AuthLoginResultError{
+			Message: "Invalid login credentials.",
+		},
+	}, nil
 }
 
 /**

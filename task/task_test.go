@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/connect"
 
 	// "github.com/urnetwork/server/jwt"
@@ -459,5 +461,78 @@ func TestTaskLeaseNotShortenedByKeepalive(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatal("eval did not finish")
 		}
+	})
+}
+
+type Work2Args struct {
+	Tag string
+}
+
+type Work2Result struct{}
+
+func Work2(
+	work2 *Work2Args,
+	clientSession *session.ClientSession,
+) (*Work2Result, error) {
+	return &Work2Result{}, nil
+}
+
+// ScheduleTaskIfAbsent must atomically insert-or-detect-conflict on the
+// run_once key: a first call inserts and reports scheduled == true; a second
+// call with the SAME key while the first is still pending (unclaimed) must
+// report scheduled == false and must NOT touch the first call's persisted
+// args -- unlike plain ScheduleTask+RunOnce, whose ON CONFLICT DO UPDATE
+// silently merges only timing/priority into the existing row while leaving
+// (and thus never surfacing) the second call's args.
+func TestScheduleTaskIfAbsent(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
+
+		key := RunOnce("test_schedule_task_if_absent", server.NewId())
+
+		scheduled, firstTaskId := ScheduleTaskIfAbsent(
+			Work2,
+			&Work2Args{Tag: "first"},
+			clientSession,
+			key,
+		)
+		assert.Equal(t, scheduled, true)
+
+		// a second call with the same key, while the first is still pending,
+		// must be rejected -- not merged
+		scheduledAgain, _ := ScheduleTaskIfAbsent(
+			Work2,
+			&Work2Args{Tag: "second"},
+			clientSession,
+			key,
+		)
+		assert.Equal(t, scheduledAgain, false)
+
+		// the persisted task must still be the FIRST call's args; the
+		// second call's args must never have been written anywhere
+		tasks := GetTasks(ctx, firstTaskId)
+		task, ok := tasks[firstTaskId]
+		if !ok {
+			t.Fatal("first task not found")
+		}
+		var args Work2Args
+		if err := json.Unmarshal([]byte(task.ArgsJson), &args); err != nil {
+			t.Fatal(err)
+		}
+		assert.Equal(t, args.Tag, "first")
+
+		// once the pending row is gone (simulating the run finishing), the
+		// same key must be schedulable again
+		RemovePendingTask(ctx, firstTaskId)
+
+		scheduledAfterClear, _ := ScheduleTaskIfAbsent(
+			Work2,
+			&Work2Args{Tag: "third"},
+			clientSession,
+			key,
+		)
+		assert.Equal(t, scheduledAfterClear, true)
 	})
 }

@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
@@ -338,6 +340,1018 @@ func TestSetProvide(t *testing.T) {
 			ProvideModePublic: true,
 		})
 
+	})
+}
+
+// RemoveNetworkClients must accept a uuid[]-bound array of ids that don't
+// exist yet (nothing to match), and must not error or panic on the
+// []server.Id -> uuid[] cast.
+func TestRemoveNetworkClientsUUIDArrayBinding(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		// random ids with no matching rows
+		clientIds := []server.Id{server.NewId(), server.NewId(), server.NewId()}
+
+		args := &RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}
+
+		result, err := RemoveNetworkClients(args, sess)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result, nil)
+	})
+}
+
+// The empty-ids case must be a no-op that returns cleanly without opening a
+// transaction (an empty `ANY($1)` array matches nothing, but there's no
+// reason to pay for the round trip).
+func TestRemoveNetworkClientsEmptyIdsNoop(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		deviceId := server.NewId()
+		clientId := server.NewId()
+
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{},
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.NotEqual(t, result, nil)
+
+		// the existing client must be untouched
+		assert.NotEqual(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// The bulk path must actually deactivate the targeted clients (mirroring the
+// single-client RemoveNetworkClient behavior) while leaving other clients on
+// the same network alone.
+func TestRemoveNetworkClientsDeactivatesTargetedClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		deviceIdA := server.NewId()
+		clientIdA := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceIdA, clientIdA, "test-a", "test")
+
+		deviceIdB := server.NewId()
+		clientIdB := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceIdB, clientIdB, "test-b", "test")
+
+		deviceIdC := server.NewId()
+		clientIdC := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceIdC, clientIdC, "test-c", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		beforeCall := server.NowUtc()
+		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{clientIdA, clientIdB},
+		}, sess)
+		assert.Equal(t, err, nil)
+
+		// targeted clients are deactivated
+		assert.Equal(t, GetNetworkClient(ctx, clientIdA), nil)
+		assert.Equal(t, GetNetworkClient(ctx, clientIdB), nil)
+
+		// the untargeted client on the same network is untouched
+		assert.NotEqual(t, GetNetworkClient(ctx, clientIdC), nil)
+
+		// deactivate_time must be stamped, matching the single-client path,
+		// so the reap job (`COALESCE(deactivate_time, create_time)`) applies
+		// the grace period from the actual deactivation instead of falling
+		// back to create_time
+		var deactivateTime *time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT deactivate_time FROM network_client WHERE client_id = $1`,
+				clientIdA,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&deactivateTime))
+				}
+			})
+		})
+		if deactivateTime == nil {
+			t.Fatal("deactivate_time was not set")
+		}
+		if deactivateTime.Before(beforeCall) {
+			t.Fatal("deactivate_time predates the call")
+		}
+	})
+}
+
+// A request at or under the batch size must be applied synchronously: the
+// caller gets a definite "done" (Scheduled == false) and the clients are
+// already deactivated by the time the call returns.
+func TestRemoveNetworkClientsSmallRequestIsSynchronous(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{clientId},
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, false)
+
+		// already deactivated, not just enqueued
+		assert.Equal(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// A request over the batch size must be handed off to the background task
+// instead of run inline: the caller gets Scheduled == true and the clients
+// are NOT yet deactivated when the call returns (only the task is enqueued;
+// RemoveNetworkClientsTask is what actually applies it, tested separately
+// below).
+func TestRemoveNetworkClientsLargeRequestIsScheduled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		clientIds[0] = clientId
+		for i := 1; i < len(clientIds); i++ {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, true)
+		assert.Equal(t, result.AlreadyInProgress, false)
+
+		// not yet applied: this call only enqueued the background task
+		assert.NotEqual(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// A second large request for the same network, made while the first is
+// still pending, must be rejected outright (AlreadyInProgress == true, not
+// Scheduled) rather than silently merged into the first task -- merging
+// would drop the second call's client_ids, since ScheduleTask's run_once
+// conflict path only updates timing/priority, not args.
+func TestRemoveNetworkClientsRejectsDuplicateInProgress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		firstDeviceId := server.NewId()
+		firstClientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, firstDeviceId, firstClientId, "first", "test")
+
+		secondDeviceId := server.NewId()
+		secondClientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, secondDeviceId, secondClientId, "second", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		largeClientIds := func(first server.Id) []server.Id {
+			clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+			clientIds[0] = first
+			for i := 1; i < len(clientIds); i++ {
+				clientIds[i] = server.NewId()
+			}
+			return clientIds
+		}
+
+		firstResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: largeClientIds(firstClientId),
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, firstResult.Scheduled, true)
+		assert.Equal(t, firstResult.AlreadyInProgress, false)
+
+		// a second large request for the same network, while the first is
+		// still pending (unclaimed), must be rejected, not scheduled
+		secondResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: largeClientIds(secondClientId),
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, secondResult.Scheduled, false)
+		assert.Equal(t, secondResult.AlreadyInProgress, true)
+
+		// neither client is deactivated yet: the first task hasn't run
+		// (only enqueued), and the second call was never scheduled at all
+		assert.NotEqual(t, GetNetworkClient(ctx, firstClientId), nil)
+		assert.NotEqual(t, GetNetworkClient(ctx, secondClientId), nil)
+
+		// the rejected (AlreadyInProgress) second call must not have burned
+		// any of the current bucket's budget -- only the admitted first
+		// call's count should have been charged. Probe by reserving exactly
+		// the remainder of the current bucket's ceiling: this only lands in
+		// the CURRENT bucket if nothing beyond the first call's charge was
+		// recorded there.
+		_, bucketStart, err := ReserveBulkClientRemovalSlot(
+			ctx,
+			server.NewId(),
+			MaxBulkClientRemovalsPerBucket-len(largeClientIds(firstClientId)),
+		)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, bucketStart, bulkClientRemovalBucketStart(server.NowUtc()))
+	})
+}
+
+// A large request for a DIFFERENT network must not be blocked by an
+// in-progress run on another network: the run_once key is scoped per network.
+func TestRemoveNetworkClientsInProgressIsScopedPerNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkIdA := server.NewId()
+		networkIdB := server.NewId()
+
+		deviceIdA := server.NewId()
+		clientIdA := server.NewId()
+		Testing_CreateDevice(ctx, networkIdA, deviceIdA, clientIdA, "a", "test")
+
+		deviceIdB := server.NewId()
+		clientIdB := server.NewId()
+		Testing_CreateDevice(ctx, networkIdB, deviceIdB, clientIdB, "b", "test")
+
+		largeClientIds := func(first server.Id) []server.Id {
+			clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+			clientIds[0] = first
+			for i := 1; i < len(clientIds); i++ {
+				clientIds[i] = server.NewId()
+			}
+			return clientIds
+		}
+
+		sessA := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkIdA},
+		}
+		sessB := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkIdB},
+		}
+
+		resultA, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: largeClientIds(clientIdA),
+		}, sessA)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, resultA.Scheduled, true)
+
+		resultB, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: largeClientIds(clientIdB),
+		}, sessB)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, resultB.Scheduled, true)
+		assert.Equal(t, resultB.AlreadyInProgress, false)
+	})
+}
+
+// A request over the outer sanity cap must be rejected outright, before any
+// scheduling or database work -- this is a payload-size guard, not a
+// realistic operating limit (known real-world usage is far below it).
+func TestRemoveNetworkClientsRejectsOversizedRequest(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		// distinct ids are required here: RemoveNetworkClients deduplicates
+		// before checking the length cap, so identical (e.g. zero-value)
+		// ids would collapse to a single entry and never exercise the cap.
+		clientIds := make([]server.Id, MaxRemoveNetworkClientsCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.NotEqual(t, err, nil)
+	})
+}
+
+// End-to-end through a real task.TaskWorker (not calling RemoveNetworkClientsTask
+// directly): a request large enough to require more than one invocation
+// (RemoveNetworkClientsTaskBatchLimit batches) must fully deactivate every
+// client across the self-rescheduled chain; a duplicate large request for the
+// same network must be rejected while any part of the chain is still
+// in-flight; and once the whole chain completes, the run_once key must be
+// free again for a new request. This is the scenario the AlreadyInProgress
+// flag depends on, and it isn't exercised by calling RemoveNetworkClientsTask
+// directly (that only tests one invocation's batching, not the pending_task
+// lifecycle across a real claim/run/post/reschedule cycle).
+func TestRemoveNetworkClientsTaskLifecycleThroughRealWorker(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		// exceed one invocation's batch limit so the task must self-reschedule
+		// at least once
+		targetCount := RemoveNetworkClientsTaskBatchLimit*RemoveNetworkClientsBatchCount + 5000
+		var clientIds []server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					INSERT INTO network_client (client_id, network_id, active, create_time, auth_time)
+					SELECT gen_random_uuid(), $1, true, now(), now()
+					FROM generate_series(1, $2) g
+					RETURNING client_id
+				`,
+				networkId,
+				targetCount,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					server.Raise(result.Scan(&clientId))
+					clientIds = append(clientIds, clientId)
+				}
+			})
+		})
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, true)
+
+		// while the run is in flight, a second large request for the same
+		// network must be rejected, not merged or double-scheduled
+		dupResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds[:RemoveNetworkClientsBatchCount+1],
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, dupResult.Scheduled, false)
+		assert.Equal(t, dupResult.AlreadyInProgress, true)
+
+		taskWorker := task.NewTaskWorkerWithDefaults(ctx)
+		taskWorker.AddTargets(task.NewTaskTargetWithPost(RemoveNetworkClientsTask, RemoveNetworkClientsTaskPost))
+
+		// drive the worker until no pending work remains for this run; bounded
+		// so a stuck run fails the test instead of hanging it
+		for i := 0; i < 50; i++ {
+			finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := taskWorker.EvalTasks(10)
+			assert.Equal(t, err, nil)
+			if len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) == 0 &&
+				len(task.ListPendingTasks(ctx)) == 0 {
+				break
+			}
+		}
+		if 0 < len(task.ListPendingTasks(ctx)) {
+			t.Fatal("run did not complete within the bounded number of eval passes")
+		}
+
+		var remainingActive int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*) FROM network_client WHERE network_id = $1 AND active = true`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&remainingActive))
+				}
+			})
+		})
+		assert.Equal(t, remainingActive, 0)
+
+		// deactivate_time must be stamped across the whole async chain, not
+		// just the first invocation -- this is the only test exercising
+		// multiple RemoveNetworkClientsTask invocations, so it's the one
+		// that would catch a continuation batch losing the stamp
+		var missingDeactivateTime int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*) FROM network_client WHERE network_id = $1 AND active = false AND deactivate_time IS NULL`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&missingDeactivateTime))
+				}
+			})
+		})
+		assert.Equal(t, missingDeactivateTime, 0)
+
+		// the run_once key must be free again now that the full chain
+		// finished, so a new large request for this network succeeds
+		afterResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds[:RemoveNetworkClientsBatchCount+1],
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, afterResult.Scheduled, true)
+	})
+}
+
+// RemoveNetworkClientsTask (the background counterpart RemoveNetworkClients
+// hands large requests off to) must deactivate every targeted client across
+// multiple internal batches, and must not touch a client on a different
+// network that happens to fall in the same id range. Called directly here
+// (not through the task queue) to test its batching logic deterministically
+// without a running taskworker.
+func TestRemoveNetworkClientsTaskSpansMultipleBatches(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		otherNetworkId := server.NewId()
+
+		// seed more than 2x the batch size for the target network, plus one
+		// client on a different network, via a bulk insert (matches the
+		// generate_series seeding pattern used elsewhere in this package)
+		targetCount := 2*RemoveNetworkClientsBatchCount + 5000
+		var clientIds []server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					INSERT INTO network_client (client_id, network_id, active, create_time, auth_time)
+					SELECT gen_random_uuid(), $1, true, now(), now()
+					FROM generate_series(1, $2) g
+					RETURNING client_id
+				`,
+				networkId,
+				targetCount,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					server.Raise(result.Scan(&clientId))
+					clientIds = append(clientIds, clientId)
+				}
+			})
+		})
+
+		otherDeviceId := server.NewId()
+		otherClientId := server.NewId()
+		Testing_CreateDevice(ctx, otherNetworkId, otherDeviceId, otherClientId, "other", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		_, err := RemoveNetworkClientsTask(&RemoveNetworkClientsTaskArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+
+		var remainingActive int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*) FROM network_client WHERE network_id = $1 AND active = true`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&remainingActive))
+				}
+			})
+		})
+		assert.Equal(t, remainingActive, 0)
+
+		// a client on a different network is untouched
+		assert.NotEqual(t, GetNetworkClient(ctx, otherClientId), nil)
+	})
+}
+
+// If a task worker retries RemoveNetworkClientsTask (e.g. after a crash or a
+// MaxTime timeout mid-run), re-running it with the same args must be a safe
+// no-op the second time: `active = false` on an already-inactive row doesn't
+// error, and deactivate_time just advances rather than corrupting state.
+func TestRemoveNetworkClientsTaskIsIdempotentOnRetry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		args := &RemoveNetworkClientsTaskArgs{
+			ClientIds: []server.Id{clientId},
+		}
+
+		_, err := RemoveNetworkClientsTask(args, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, GetNetworkClient(ctx, clientId), nil)
+
+		// simulate a retry of the same task with the same args
+		_, err = RemoveNetworkClientsTask(args, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// RemoveNetworkClientsTask must fail loudly (not panic on a nil dereference
+// inside a MaintenanceTx) if it's ever run with a session that has no
+// ByJwt -- unreachable in the normal flow (always scheduled from an
+// authenticated handler), but the task can outlive the request that
+// scheduled it, so this guards against a corrupted/reconstructed session.
+func TestRemoveNetworkClientsTaskRejectsNilByJwt(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: nil,
+		}
+
+		_, err := RemoveNetworkClientsTask(&RemoveNetworkClientsTaskArgs{
+			ClientIds: []server.Id{server.NewId()},
+		}, sess)
+		assert.NotEqual(t, err, nil)
+	})
+}
+
+// A request of exactly RemoveNetworkClientsBatchCount ids must still take
+// the synchronous path (the boundary is "<=", not "<").
+func TestRemoveNetworkClientsExactlyAtBatchCountIsSynchronous(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount)
+		clientIds[0] = clientId
+		for i := 1; i < len(clientIds); i++ {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, false)
+
+		// already applied synchronously, not enqueued
+		assert.Equal(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// A request of exactly MaxRemoveNetworkClientsCount ids must be accepted
+// (the boundary is "> max is rejected", not ">="). This only exercises
+// scheduling (one INSERT), not actually running the task, since processing
+// 2M ids isn't practical inside a unit test.
+func TestRemoveNetworkClientsExactlyAtCapIsAccepted(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		// distinct ids are required here too: identical ids would dedup
+		// below the cap and this test would no longer be "exactly at cap".
+		clientIds := make([]server.Id, MaxRemoveNetworkClientsCount)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, true)
+	})
+}
+
+// The deployment-wide concurrency cap must reject a new network's async
+// bulk-delete once MaxConcurrentBulkClientRemovalRuns other networks already
+// have one pending. Occupying the cap via direct task scheduling (rather
+// than MaxConcurrentBulkClientRemovalRuns full RemoveNetworkClients calls)
+// keeps the test to the mechanism under test -- the pending_task count -- and
+// avoids needing real per-network client rows for slots that are never
+// actually drained here.
+func TestRemoveNetworkClientsRejectsWhenConcurrencyCapReached(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		for i := 0; i < MaxConcurrentBulkClientRemovalRuns; i++ {
+			occupyingNetworkId := server.NewId()
+			occupyingSess := &session.ClientSession{
+				Ctx:   ctx,
+				ByJwt: &jwt.ByJwt{NetworkId: occupyingNetworkId},
+			}
+			scheduled, _ := task.ScheduleTaskIfAbsent(
+				RemoveNetworkClientsTask,
+				&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+				occupyingSess,
+				runNetworkClientsTaskKey(occupyingNetworkId),
+			)
+			assert.Equal(t, scheduled, true)
+		}
+
+		networkId := server.NewId()
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, false)
+		assert.Equal(t, result.TooManyConcurrentRuns, true)
+
+		// a TooManyConcurrentRuns rejection must not have burned any budget
+		// for the rejected request's id count -- the reservation made just
+		// before the concurrency check must have been released, so the
+		// current bucket's whole ceiling is still available.
+		_, bucketStart, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, bucketStart, bulkClientRemovalBucketStart(server.NowUtc()))
+	})
+}
+
+// The concurrency cap must only gate work that actually goes through the
+// background task system -- a small request that fits the current hour's
+// budget runs synchronously and was never subject to it, even when the cap
+// is fully occupied by unrelated networks' background runs.
+func TestRemoveNetworkClientsSyncPathBypassesConcurrencyCap(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		for i := 0; i < MaxConcurrentBulkClientRemovalRuns; i++ {
+			occupyingNetworkId := server.NewId()
+			occupyingSess := &session.ClientSession{
+				Ctx:   ctx,
+				ByJwt: &jwt.ByJwt{NetworkId: occupyingNetworkId},
+			}
+			scheduled, _ := task.ScheduleTaskIfAbsent(
+				RemoveNetworkClientsTask,
+				&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+				occupyingSess,
+				runNetworkClientsTaskKey(occupyingNetworkId),
+			)
+			assert.Equal(t, scheduled, true)
+		}
+
+		networkId := server.NewId()
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{clientId},
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.TooManyConcurrentRuns, false)
+		assert.Equal(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// A request large enough to need the background task, whose reserved slot
+// is the current hour (room available now, not deferred), must report
+// ScheduledFor as the current bucket -- not just the deferred path.
+func TestRemoveNetworkClientsSetsScheduledForOnImmediateAsyncRun(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		currentBucket := bulkClientRemovalBucketStart(server.NowUtc())
+
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, true)
+		assert.NotEqual(t, result.ScheduledFor, nil)
+		assert.Equal(t, *result.ScheduledFor, currentBucket)
+	})
+}
+
+// The per-network single-flight lock must stay held for the whole
+// queued-and-waiting duration of a deferred request, not just while it's
+// actually running -- a second request for the same network arriving before
+// the first's deferred bucket time is reached must be AlreadyInProgress.
+// Unlike TestRemoveNetworkClientsCancelsReservationOnAlreadyInProgress
+// (which fakes an in-progress run via a directly-scheduled run_at=now
+// task), this drives the actual deferral path end to end: the first
+// request's task genuinely has a future run_at, so
+// CountAvailableByFunctionName correctly does not count it as "in flight",
+// yet the run_once key it holds must still block a second request for the
+// same network.
+func TestRemoveNetworkClientsLocksNetworkWhileDeferredRequestIsQueued(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// fill the current bucket so the next reservation defers to the
+		// next hour
+		_, _, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
+		assert.Equal(t, err, nil)
+
+		networkId := server.NewId()
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		firstResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, firstResult.Scheduled, true)
+		assert.NotEqual(t, firstResult.ScheduledFor, nil)
+		assert.NotEqual(t, *firstResult.ScheduledFor, bulkClientRemovalBucketStart(server.NowUtc()))
+
+		// the deferred task isn't runnable yet, so it doesn't count against
+		// the concurrency cap -- but it must still hold the run_once key
+		secondResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{server.NewId()},
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, secondResult.AlreadyInProgress, true)
+	})
+}
+
+// Deferred requests must actually be spread across their target hour, not
+// merely eligible to be (which the range check in
+// TestRemoveNetworkClientsQueuesSmallRequestWhenCurrentHourIsFull would pass
+// even if the jitter were removed and every request landed on the exact
+// hour boundary). Several distinct networks, all deferred to the same next
+// hour, must not all land on the identical instant.
+func TestRemoveNetworkClientsSpreadsDeferredRequestsAcrossTheHour(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// fill the current bucket so every request below defers to the
+		// next hour
+		_, _, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
+		assert.Equal(t, err, nil)
+
+		scheduledFors := map[time.Time]bool{}
+		for i := 0; i < 5; i++ {
+			sess := &session.ClientSession{
+				Ctx:   ctx,
+				ByJwt: &jwt.ByJwt{NetworkId: server.NewId()},
+			}
+			clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+			for j := range clientIds {
+				clientIds[j] = server.NewId()
+			}
+
+			result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+				ClientIds: clientIds,
+			}, sess)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, result.Scheduled, true)
+			scheduledFors[*result.ScheduledFor] = true
+		}
+
+		// with 5 independently jittered samples across a full hour, landing
+		// on the exact same instant every time is not a realistic outcome
+		// of a correctly-jittered scheduler -- this fails if jitter is
+		// removed (every sample would land on the same hour boundary)
+		assert.Equal(t, 1 < len(scheduledFors), true)
+	})
+}
+
+// A quota rejection on the async path must cancel the task it just
+// scheduled (the bucket has to be known before scheduling, since it becomes
+// the task's RunAt, so reservation always happens before the run_once
+// admission check, not after). Without the cancellation, the reservation
+// would sit charged against a bucket for a request that never actually ran,
+// eating into the shared budget for nothing.
+func TestRemoveNetworkClientsCancelsReservationOnAlreadyInProgress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		currentBucket := bulkClientRemovalBucketStart(server.NowUtc())
+
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		// occupy this network's run_once key directly, simulating a run
+		// already in progress
+		scheduled, _ := task.ScheduleTaskIfAbsent(
+			RemoveNetworkClientsTask,
+			&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+			sess,
+			runNetworkClientsTaskKey(networkId),
+		)
+		assert.Equal(t, scheduled, true)
+
+		// large enough to take the async path
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.AlreadyInProgress, true)
+
+		// the reservation made just before the run_once check must have
+		// been released -- the current bucket's full ceiling must still be
+		// available to a fresh request
+		_, bucketStart, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, bucketStart, currentBucket)
+	})
+}
+
+// RemoveNetworkClientsTaskPost, tested directly and in isolation (not
+// through a full task.TaskWorker run, which the slow real-worker lifecycle
+// test above already covers end-to-end): a non-empty RemainingClientIds must
+// result in exactly one new pending task, scheduled under the same run_once
+// key as the original request; an empty RemainingClientIds must schedule
+// nothing at all.
+func TestRemoveNetworkClientsTaskPostReschedulesRemainder(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+
+		sess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: networkId,
+			},
+		}
+
+		remainingClientIds := []server.Id{server.NewId(), server.NewId()}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			err := RemoveNetworkClientsTaskPost(
+				&RemoveNetworkClientsTaskArgs{ClientIds: remainingClientIds},
+				&RemoveNetworkClientsTaskResult{RemainingClientIds: remainingClientIds},
+				sess,
+				tx,
+			)
+			assert.Equal(t, err, nil)
+		})
+
+		// the reschedule must be blocked by the run_once key (same key the
+		// original request would have used), proving the continuation was
+		// scheduled under it
+		scheduledAgain, _ := task.ScheduleTaskIfAbsent(
+			RemoveNetworkClientsTask,
+			&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+			sess,
+			runNetworkClientsTaskKey(networkId),
+		)
+		assert.Equal(t, scheduledAgain, false)
+
+		// a DIFFERENT network's key must be unaffected
+		otherNetworkId := server.NewId()
+		otherSess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: otherNetworkId},
+		}
+		scheduledOther, _ := task.ScheduleTaskIfAbsent(
+			RemoveNetworkClientsTask,
+			&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+			otherSess,
+			runNetworkClientsTaskKey(otherNetworkId),
+		)
+		assert.Equal(t, scheduledOther, true)
+	})
+}
+
+// A caller must not be able to deactivate another network's clients by
+// passing their ids in the request body: `network_id = $2` in the query
+// must be enforced server-side from the session, not trusted from input.
+func TestRemoveNetworkClientsEnforcesNetworkScoping(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		victimNetworkId := server.NewId()
+		victimDeviceId := server.NewId()
+		victimClientId := server.NewId()
+		Testing_CreateDevice(ctx, victimNetworkId, victimDeviceId, victimClientId, "victim", "test")
+
+		attackerNetworkId := server.NewId()
+		attackerSess := &session.ClientSession{
+			Ctx: ctx,
+			ByJwt: &jwt.ByJwt{
+				NetworkId: attackerNetworkId,
+			},
+		}
+
+		_, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{victimClientId},
+		}, attackerSess)
+		assert.Equal(t, err, nil)
+
+		// the victim's client must still be active
+		assert.NotEqual(t, GetNetworkClient(ctx, victimClientId), nil)
 	})
 }
 

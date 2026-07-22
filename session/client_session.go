@@ -99,7 +99,7 @@ func (self *ClientSession) Auth(req *http.Request) error {
 					network.NetworkId,
 					network.UserId,
 					network.NetworkName,
-					false, // guest mode
+					false,
 					false, // pro mode - for api keys we don't need to thread this for now
 				)
 				glog.V(2).Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)

@@ -4332,6 +4332,55 @@ var migrations = []any{
         ON transfer_contract (destination_id) WHERE open
     `),
 
+	// seedphrase auth
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_user_auth_seedphrase (
+            user_id             uuid NOT NULL PRIMARY KEY,
+            seedphrase_lookup   bytea NOT NULL,
+            seedphrase_hash     bytea NOT NULL,
+            seedphrase_salt     bytea NOT NULL,
+            create_time         timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE UNIQUE INDEX IF NOT EXISTS network_user_auth_seedphrase_lookup
+            ON network_user_auth_seedphrase (seedphrase_lookup)
+    `),
+
+	// network name reclaim (1-day cooldown)
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_name_reclaim (
+            old_name         varchar(256) NOT NULL PRIMARY KEY,
+            cool_down_until  timestamp NOT NULL
+        )
+    `),
+
+	// network create rate limit (5 per IP per day)
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_create_attempt (
+            network_create_attempt_id uuid NOT NULL PRIMARY KEY,
+            client_address_hash       bytea NOT NULL,
+            create_time               timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_create_attempt_hash_time
+            ON network_create_attempt (client_address_hash, create_time)
+    `),
+
+	// Index for bulk client deactivation via `client_id = ANY($1) AND network_id = $2`.
+	// Both the synchronous batch path (RemoveNetworkClientsBatch, ≤10k ids) and the
+	// background task path (RemoveNetworkClientsTask, 200k ids per invocation) use
+	// this predicate. Without this index the query planner must scan for each batch;
+	// at 200k IDs across 20 batches that can cause long lock times on large tables.
+	// On the large existing network_client table this must be built manually with
+	// CREATE INDEX CONCURRENTLY out of band — the IF NOT EXISTS gate makes this
+	// migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_network_id_client_id
+        ON network_client (network_id, client_id)
+    `),
+
 	// Defuse the 2026-07-17 planner-stats landmine (monitor/SIGNALS.md 2.3/5.8): at
 	// steady state only ~10-50k of 530M rows have open=true (~6e-5), so the
 	// default ANALYZE sample (300 x 100 = 30k rows) can miss every one.
@@ -4384,5 +4433,57 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS network_client_top_level_contract_time
         ON network_client (contract_time) WHERE (active = true AND source_client_id IS NULL AND contract_time IS NOT NULL)
+    `),
+	// account-based (not IP-based) daily rate limits on sensitive account
+	// actions: add/remove auth method, change/claim network name, and
+	// generate/regenerate seedphrase. One shared table, keyed by (user_id,
+	// action), so each action gets its own independent daily counter.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_user_action_attempt (
+            network_user_action_attempt_id uuid NOT NULL PRIMARY KEY,
+            user_id                        uuid NOT NULL,
+            action                         varchar(64) NOT NULL,
+            create_time                    timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_user_action_attempt_user_action_time
+            ON network_user_action_attempt (user_id, action, create_time)
+    `),
+
+	// a single, deployment-wide ledger for the bulk client removal API
+	// (RemoveNetworkClients): each admitted request records how many client
+	// ids it covered, and CheckAndRecordBulkClientRemovalQuota sums this
+	// column over the trailing hour to enforce MaxBulkClientRemovalsPerHour.
+	// network_id is stored for observability only -- the limit itself is
+	// global, not scoped per network.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS bulk_client_removal_quota (
+            bulk_client_removal_quota_id uuid NOT NULL PRIMARY KEY,
+            network_id                   uuid NOT NULL,
+            client_count                 int NOT NULL,
+            create_time                  timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_create_time
+            ON bulk_client_removal_quota (create_time)
+    `),
+
+	// bulk_client_removal_quota moves from a rolling trailing-hour window to
+	// fixed, non-overlapping hourly buckets (UTC): ReserveBulkClientRemovalSlot
+	// reserves a row against a specific bucket_start (the current hour, or a
+	// future one if the current hour is full), instead of every row implicitly
+	// counting against whatever "now" happens to be when queried. create_time
+	// remains as an audit field (when the reservation was made), separate from
+	// bucket_start (which hour it counts toward). No rows exist yet in
+	// practice, so the NOT NULL default here is never relied on for real data.
+	newSqlMigration(`
+        ALTER TABLE bulk_client_removal_quota
+            ADD COLUMN IF NOT EXISTS bucket_start timestamp NOT NULL DEFAULT now()
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_bucket_start
+            ON bulk_client_removal_quota (bucket_start)
     `),
 }
