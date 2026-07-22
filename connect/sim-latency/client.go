@@ -51,6 +51,8 @@ type ClientDriver struct {
 
 	out     *bufio.Writer
 	outLock sync.Mutex
+	// every emitted CSV row, retained for the end-of-run summary (run.json)
+	rows []resultRow
 
 	active  sync.WaitGroup
 	seq     uint64
@@ -419,6 +421,26 @@ func (self *ClientDriver) writeCsvRow(startTime time.Time, client string, path s
 		float64(total)/float64(time.Millisecond),
 		bytesPerSecond,
 	)
+	self.rows = append(self.rows, resultRow{
+		tStartMs: startTime.UnixMilli(),
+		status:   status,
+		bytes:    bytes,
+		ttfbMs:   float64(ttfb) / float64(time.Millisecond),
+		totalMs:  float64(total) / float64(time.Millisecond),
+	})
+}
+
+// resultRows snapshots the rows recorded so far, for the run.json summary.
+func (self *ClientDriver) resultRows() []resultRow {
+	self.outLock.Lock()
+	defer self.outLock.Unlock()
+	return append([]resultRow{}, self.rows...)
+}
+
+// EstablishedCount is the number of warm clients that established a provider
+// path during Warmup.
+func (self *ClientDriver) EstablishedCount() int {
+	return len(self.clients)
 }
 
 func (self *ClientDriver) flush() {

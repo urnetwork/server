@@ -2164,6 +2164,30 @@ func ConnectNetworkClient(
 			connectTime,
 			connectTime.Add(-clientAuthTimeRefreshMinInterval),
 		))
+
+		// a child's connect is also evidence its top-level identity is alive:
+		// bump the parent's auth_time under the same throttle. A hosted proxy
+		// client's only platform footprint is its child clients — the proxy
+		// client id itself never opens a connect websocket — so without this
+		// the top-level idle deactivate (`RemoveDisconnectedNetworkClients`)
+		// marks an in-use proxy inactive 30 days after creation: its own row
+		// never auths, connects, or holds connection rows.
+		// a top-level connect (source_client_id IS NULL) matches zero rows.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE network_client AS parent
+				SET auth_time = $2
+				FROM network_client AS child
+				WHERE
+					child.client_id = $1 AND
+					parent.client_id = child.source_client_id AND
+					parent.auth_time < $3
+			`,
+			clientId,
+			connectTime,
+			connectTime.Add(-clientAuthTimeRefreshMinInterval),
+		))
 	})
 
 	return

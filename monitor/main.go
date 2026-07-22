@@ -79,6 +79,8 @@ Options:
 		pgVacuumProbe{},
 		pgStatsLandmineProbe{},
 		taskDurationProbe{},
+		// e2e encryption key publication (§15)
+		pgE2eKeyProbe{},
 		// taskworker drain / task-plane liveness (§12)
 		taskworkerDrainProbe{},
 		newRedisMemoryProbe(),

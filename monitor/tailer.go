@@ -103,6 +103,19 @@ var logClasses = []logClass{
 	{name: "taskworker-drain-gave-up", re: regexp.MustCompile(`\[taskworker\]drain gave up`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 12.1",
 		meaning: "a taskworker drain exceeded finish+cancel timeouts and the process was killed with tasks running — every in-flight claim is leased until its max time; check pg/task-lease-stranded and release stranded claims"},
+	// e2e encryption (post-quantum) sessions — SIGNALS.md §15. The client-side
+	// [tls]/[key] lines surface in server logs through the connect stacks the
+	// server itself hosts (the proxy service's devices; providers run with the
+	// e2e responder always on).
+	{name: "tls-key-mitm", re: regexp.MustCompile(`CONTRACT vs FETCHED peer client public key MISMATCH`),
+		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md 15.2",
+		meaning: "a session's contract-delivered peer identity key disagreed with the /key api — the platform is serving inconsistent keys (data bug) or something is substituting keys (possible MITM); compare the peer's client_tls_certificate/key rows against the contract path immediately"},
+	{name: "tls-key-rotate-refused", re: regexp.MustCompile(`peer client public key mismatch with prior commitment`),
+		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md 15.3",
+		meaning: "a peer presented a different identity key mid-session (rotation refused by design) — occasional lines are reinstalls racing old sessions; a sustained rate = client identity bug or key churn upstream"},
+	{name: "tls-cert-publish-invalid", re: regexp.MustCompile(`Invalid PEM in certificate chain|Invalid X\.509 certificate in chain`),
+		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md 15.3",
+		meaning: "EncryptedKey publications failing validation in SetEncryptedKey — a client build shipping malformed cert chains, or probing of the oob path; the error text carries the chain index"},
 }
 
 // errorShaped marks lines that count toward the novel class when no taxonomy

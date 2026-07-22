@@ -722,6 +722,8 @@ Tier-1 (warn):
 | client-buffers | redis | used_memory_clients | > 25% of used or > 2G |
 | clients-spike | redis | connected_clients step | +50% in 10 min |
 | pubsub-drops | logs | channel-is-full rate | > 10/min/service |
+| tls-key-mitm | logs | 15.2 identity cross-check mismatch class | any |
+| e2e-key-coverage | pg | 15.1 coverage vs trailing 24h median (armed ≥ 5%) | < 50% of median, 3 probes |
 | port-exhaustion | logs | cannot-assign rate | any burst > 100/min |
 | new-panic-frame | logs | unseen innermost app frame at rate | > 5/min |
 | phantom-nodes | redis | noaddr/:0 entries in CLUSTER NODES | > 0 for 1h |
@@ -1451,3 +1453,72 @@ are pushed by the standard stats pusher {env, service=proxy, block, host}.
   deploy-window burst of client-side connection resets that immediately
   reconnect is this mechanism working; sustained resets outside deploys
   are worth investigating (source flow state being lost somewhere).
+
+---
+
+## 15. E2E encryption (post-quantum) signals — E2EPQ1
+
+Context: clients can enable per-peer post-quantum e2e sessions (the "Post
+Quantum Encryption" toggle; opportunistic — a peer without support falls back
+to plaintext at that layer), and providers always enable the responder side.
+A provider running the e2e-enabled build publishes its TLS cert commitment on
+connect (oob `EncryptedKey` → `client_tls_certificate`, one row per client_id,
+`set_time` refreshed on publication; validated in
+`controller.SetEncryptedKey`). The platform cannot see inside sessions (by
+design). What it CAN see: key publications (pg), the unauthenticated
+`/key/<client_id>` cross-check api, and the client-side `[tls]`/`[key]` log
+lines of the connect stacks the server itself hosts — the proxy service's
+devices are the tailer's vantage point for §15.2/15.3.
+
+### 15.1 Key-publication coverage — the provider e2e rollout/health proxy
+```sql
+-- coverage among recently-connected clients (probe pg/e2e-key-publication)
+SELECT count(DISTINCT ncc.client_id) AS active,
+       count(DISTINCT ctc.client_id) AS covered
+FROM network_client_connection ncc
+LEFT JOIN client_tls_certificate ctc ON ctc.client_id = ncc.client_id
+WHERE ncc.connect_time >= now() - interval '1 hour';
+
+-- publication freshness (upserts in the last hour)
+SELECT count(*) FROM client_tls_certificate
+WHERE set_time >= now() - interval '1 hour';
+```
+- HEALTHY: coverage ratchets up with the fleet rollout, then holds (diurnal
+  wobble fine). Publications track the connect rate of updated providers.
+- BROKEN: coverage < 50% of its own trailing 24h median, sustained 3 probes
+  (the probe arms only once the median reaches 5%, so pre-rollout zeros are
+  quiet): providers stopped publishing — EncryptedKey oob regression, a
+  `tls-cert-publish-invalid` spike (bad client build), or a fleet rollback.
+- Action: correlate with deploys (§8) and `tls-cert-publish-invalid`; run
+  the freshness query; if fresh publications are healthy but coverage fell,
+  the active-client mix changed (old builds reconnecting) rather than the
+  publish path breaking.
+
+### 15.2 Identity-key cross-check mismatch — the MITM early-warning (page)
+Log class `tls-key-mitm`: `CONTRACT vs FETCHED peer client public key
+MISMATCH ...`. A session's contract-delivered peer key disagreed with the
+`/key/<client_id>` api (the out-of-band cross-check in the connect stack;
+today log-only — the contract key is still trusted).
+- HEALTHY: 0, always.
+- BROKEN: any line. Either the platform serves inconsistent keys between the
+  contract path and the key row (data bug) or something is substituting keys
+  (MITM attempt). Both demand immediate investigation.
+- Action: for the named peer id, compare the contract-attached key against
+  the stored client key / `client_tls_certificate` rows and recent
+  `set_time` churn; check §8 for a deploy that could have split the two
+  paths; treat as security-relevant until proven a data race.
+
+### 15.3 Session anomaly classes (warn)
+- `tls-key-rotate-refused` — `peer client public key mismatch with prior
+  commitment`: a peer presented a different identity key mid-session;
+  refused by design. Occasional lines = reinstalls racing old sessions;
+  a sustained rate = client identity bug or key churn upstream.
+- `tls-cert-publish-invalid` — `Invalid PEM in certificate chain` /
+  `Invalid X.509 certificate in chain` from `SetEncryptedKey`: publications
+  failing validation. A rate = a client build shipping malformed chains (or
+  probing of the oob path); the error text carries the chain index.
+
+Rollout note: hosted proxy providers begin publishing (and answering
+handshakes) once the server vendors the provider-side-enabled sdk; app
+providers as their updates land. Until then 15.1 sits at ~0 (probe unarmed)
+and 15.2/15.3 are silent.

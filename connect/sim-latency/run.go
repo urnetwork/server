@@ -10,9 +10,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +38,12 @@ type RunOptions struct {
 	// site listen address (providers egress here over loopback)
 	SiteListen string
 	Services   *ServicesConfig
+	// run.json side-car output ("" = none): the run identity + metric
+	// summaries the comparison tooling consumes
+	MetaPath string
+	// clear cross-run reliability state first, so this run is an
+	// independent replicate (see reset.go)
+	Reset bool
 }
 
 func Run(options *RunOptions) error {
@@ -48,9 +58,18 @@ func Run(options *RunOptions) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	runStats, err := newRunStats(options, config)
+	if err != nil {
+		return err
+	}
+
 	// bring the local database schema up to date (no-op once migrated)
 	logf("applying db migrations")
 	server.ApplyDbMigrations(ctx)
+
+	if options.Reset {
+		resetLocalState(ctx)
+	}
 
 	// install the site settings (ip_overrides + stats knobs) before anything
 	// geolocates a fake ip
@@ -153,10 +172,14 @@ func Run(options *RunOptions) error {
 	// so pool-setup time is not counted
 	driver := NewClientDriver(ctx, config, services.ApiUrl(), services.WsUrls(), site.Addr(), locationId, pool)
 	driver.Warmup()
+	runStats.ClientsPool = len(pool)
+	runStats.ClientsEstablished = driver.EstablishedCount()
 
 	// client driver, measured window
 	measureStart := server.NowUtc()
 	measureEnd := measureStart.Add(options.Duration)
+	runStats.MeasureStartMs = measureStart.UnixMilli()
+	runStats.MeasureEndMs = measureEnd.UnixMilli()
 	logf("MEASURE WINDOW: [%d, %d] unix-ms", measureStart.UnixMilli(), measureEnd.UnixMilli())
 	go server.HandleError(driver.Run)
 
@@ -169,7 +192,92 @@ func Run(options *RunOptions) error {
 	cancel()
 	// give in-flight crawls and stats flush a moment
 	time.Sleep(2 * time.Second)
+
+	// run.json side-car: identity + measured-window metric summaries, the
+	// unit the variance/compare tooling consumes
+	if options.MetaPath != "" {
+		summarizeRows(driver.resultRows(), runStats)
+		if err := writeRunStats(options.MetaPath, runStats); err != nil {
+			return err
+		}
+		logf("run summary written to %s (pass --meta to name it per run)", options.MetaPath)
+		logRunSummary(runStats)
+	}
 	return nil
+}
+
+// newRunStats seeds the run.json side-car with the run's identity — the
+// exact workload (providers.yml sha), build, host, and flags — so two
+// artifacts can be checked for comparability. The window, client counts,
+// and metrics are filled in as the run progresses.
+func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
+	configBytes, err := os.ReadFile(options.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	hostname, _ := os.Hostname()
+	revision, modified := buildFingerprint()
+	hosts := 0
+	if options.Services != nil {
+		hosts = options.Services.HostCount
+	}
+	return &RunStats{
+		Schema:        runStatsSchema,
+		Kind:          runStatsKind,
+		ConfigSha256:  fmt.Sprintf("%x", sha256.Sum256(configBytes)),
+		Seed:          config.Seed,
+		BuildRevision: revision,
+		BuildModified: modified,
+		Hostname:      hostname,
+		Os:            runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		NumCpu:        runtime.NumCPU(),
+		Flags: map[string]string{
+			"ramp":         options.Ramp.String(),
+			"prewarm":      options.Prewarm.String(),
+			"settle":       options.Settle.String(),
+			"duration":     options.Duration.String(),
+			"fleet_shards": intToStr(options.FleetShards),
+			"hosts":        intToStr(hosts),
+			"impair":       fmt.Sprintf("%t", impairEnabled),
+			"reset":        fmt.Sprintf("%t", options.Reset),
+		},
+	}, nil
+}
+
+// buildFingerprint returns the vcs revision baked into the binary (empty for
+// a non-vcs build).
+func buildFingerprint() (string, bool) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false
+	}
+	revision := ""
+	modified := false
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		}
+	}
+	return revision, modified
+}
+
+// logRunSummary logs the measured metrics to stderr (stdout carries only the
+// CSV).
+func logRunSummary(stats *RunStats) {
+	logf("measured: %d rows in window, %d failures", stats.RowsInWindow, stats.Failures)
+	for _, def := range metricDefs() {
+		if summary, ok := stats.Metrics[def.name]; ok {
+			mark := ""
+			if def.primary {
+				mark = " (primary)"
+			}
+			logf("  %s = %s ± %s%s", def.name, formatValue(summary.Value), formatValue(summary.BlockSe), mark)
+		}
+	}
 }
 
 // spawnFleetShards launches the fleet as N subprocesses, each connecting to
