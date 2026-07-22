@@ -1178,6 +1178,48 @@ func TestRemoveNetworkClientsLocksNetworkWhileDeferredRequestIsQueued(t *testing
 	})
 }
 
+// Deferred requests must actually be spread across their target hour, not
+// merely eligible to be (which the range check in
+// TestRemoveNetworkClientsQueuesSmallRequestWhenCurrentHourIsFull would pass
+// even if the jitter were removed and every request landed on the exact
+// hour boundary). Several distinct networks, all deferred to the same next
+// hour, must not all land on the identical instant.
+func TestRemoveNetworkClientsSpreadsDeferredRequestsAcrossTheHour(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// fill the current bucket so every request below defers to the
+		// next hour
+		_, _, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
+		assert.Equal(t, err, nil)
+
+		scheduledFors := map[time.Time]bool{}
+		for i := 0; i < 5; i++ {
+			sess := &session.ClientSession{
+				Ctx:   ctx,
+				ByJwt: &jwt.ByJwt{NetworkId: server.NewId()},
+			}
+			clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+			for j := range clientIds {
+				clientIds[j] = server.NewId()
+			}
+
+			result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+				ClientIds: clientIds,
+			}, sess)
+			assert.Equal(t, err, nil)
+			assert.Equal(t, result.Scheduled, true)
+			scheduledFors[*result.ScheduledFor] = true
+		}
+
+		// with 5 independently jittered samples across a full hour, landing
+		// on the exact same instant every time is not a realistic outcome
+		// of a correctly-jittered scheduler -- this fails if jitter is
+		// removed (every sample would land on the same hour boundary)
+		assert.Equal(t, 1 < len(scheduledFors), true)
+	})
+}
+
 // A quota rejection on the async path must cancel the task it just
 // scheduled (the bucket has to be known before scheduling, since it becomes
 // the task's RunAt, so reservation always happens before the run_once
