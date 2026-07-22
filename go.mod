@@ -1,6 +1,6 @@
 module github.com/urnetwork/server
 
-go 1.26.3
+go 1.26.5
 
 require (
 	github.com/ChainSafe/go-schnorrkel v1.1.0
@@ -121,6 +121,7 @@ require (
 	github.com/tinylib/msgp v1.6.1 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
+	github.com/urnetwork/goidenticons v0.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
@@ -130,10 +131,11 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
+	golang.org/x/image v0.44.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	src.agwa.name/tlshacks v0.0.3 // indirect
@@ -146,6 +148,8 @@ replace github.com/urnetwork/proxy => ../proxy
 replace github.com/urnetwork/sdk => ../sdk
 
 replace github.com/urnetwork/glog => ../glog
+
+replace github.com/urnetwork/goidenticons => ../goidenticons
 
 replace github.com/urnetwork/userwireguard => ../userwireguard
 

@@ -5,13 +5,20 @@ package main
 // client, LocalUserNat, and related latency-sensitive code. See README.md.
 //
 // Commands:
-//   init   sample the mixture and write providers.yml (locks a run's fleet)
-//   run    stand up the environment (services, fake site, provider fleet) and
-//          drive Poisson client load, printing per-request stats as CSV to
-//          stdout (only stats go to stdout; all logs go to stderr)
-//   fleet  run one provider fleet shard against an existing run's services
-//          (used internally by `run --fleet-shards`, also usable standalone
-//          to add providers from another machine)
+//   init      sample the mixture and write providers.yml (locks a run's fleet)
+//   run       stand up the environment (services, fake site, provider fleet)
+//             and drive Poisson client load, printing per-request stats as CSV
+//             to stdout (only stats go to stdout; all logs go to stderr) plus
+//             a run.json side-car (--meta)
+//   fleet     run one provider fleet shard against an existing run's services
+//             (used internally by `run --fleet-shards`, also usable standalone
+//             to add providers from another machine)
+//   analyze   summarize one run's metrics from its CSV + side-car
+//   baseline  measure the environment noise floor + its convergence
+//             (baseline.json), from existing artifacts (--runs) or by
+//             running n fresh replicates; the error term for compare
+//   compare   decide whether run set A is statistically better than B
+//   reset     clear cross-run reliability state so runs are independent
 
 import (
 	"fmt"
@@ -27,19 +34,30 @@ import (
 )
 
 func main() {
+	// the sdk redirects os.Stderr to os.Stdout at package init (the mobile
+	// convention: diagnostics to stdout). This tool is the opposite: stdout
+	// carries only measurement output (CSV/tables/json), logs go to stderr.
+	// Restore the real stderr before anything logs.
+	os.Stderr = os.NewFile(2, "/dev/stderr")
+
 	usage := `sim-latency: local latency/load simulation for the egress provider stack.
 
 Usage:
   sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>]
-  sim-latency run [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
+  sim-latency run [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>]
   sim-latency fleet --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>]
+  sim-latency analyze --run=<path> [--window=<w>] [--out=<path>] [--json]
+  sim-latency baseline --runs=<paths> [--alpha=<a>] [--out=<path>]
+  sim-latency baseline [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
+  sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
+  sim-latency reset
   sim-latency -h | --help
   sim-latency --version
 
 Options:
   -h --help              Show this screen.
   --version              Show version.
-  --out=<path>           providers.yml output path [default: providers.yml].
+  --out=<path>           Output path (init: providers.yml; analyze: run.json; variance: environment.json).
   --count=<n>            Number of providers [default: 100000].
   --clients=<n>          Client identity pool size [default: 4000].
   --rate=<m>             Mean client arrivals per minute [default: 1000].
@@ -53,6 +71,8 @@ Options:
   --test-timeout=<d>     Warm-up: synthetic speed-test trigger delay [default: 3s].
   --announce-timeout=<d>  Warm-up: connection register/test delay [default: 2s].
   --no-impair            Disable provider network impairment (clean baseline).
+  --reset                Clear cross-run reliability state (local pg + redis) before the run.
+  --meta=<path>          Run summary side-car (run.json) output [default: run.json].
   --duration=<d>         Measured window duration [default: 30m].
   --fleet-shards=<n>     Provider fleet subprocess count (0 = in-process) [default: 0].
   --site-listen=<addr>   Fake site listen address [default: 127.0.0.1:0].
@@ -60,7 +80,19 @@ Options:
   --api-port=<p>         Api listen port [default: 7640].
   --shard=<i/n>          Fleet shard index/count.
   --api-url=<url>        Api url (fleet).
-  --ws-urls=<urls>       Comma-separated exchange ws urls (fleet).`
+  --ws-urls=<urls>       Comma-separated exchange ws urls (fleet).
+  --run=<path>           A run artifact: results csv (with run.json side-car) or run.json.
+  --runs=<paths>         Comma-separated existing replicate artifacts (csv or run.json);
+                         without it, baseline measures --replicates fresh runs itself.
+  --replicates=<n>       Baseline replicate runs to measure [default: 5].
+  --out-dir=<dir>        Directory for measured replicate artifacts [default: baseline-runs].
+  --a=<paths>            Side A run artifact(s), comma-separated.
+  --b=<paths>            Side B run artifact(s), comma-separated.
+  --baseline=<path>      baseline.json noise floor written by sim-latency baseline.
+  --window=<w>           Measure window override "<startMs>,<endMs>" for a csv without run.json.
+  --alpha=<a>            Significance level stored with the baseline [default: 0.05].
+  --p=<a>                One-sided significance threshold [default: 0.05].
+  --json                 Machine-readable output.`
 
 	setDefaultEnv()
 
@@ -78,11 +110,33 @@ Options:
 	case optBool(opts, "fleet"):
 		requireLocalEnvironment("fleet")
 		runFleet(opts)
+	case optBool(opts, "analyze"):
+		runAnalyze(opts)
+	case optBool(opts, "baseline"):
+		// computing from existing artifacts is file-only; measuring fresh
+		// replicates stands up the full local environment
+		if optString(opts, "--runs", "") == "" {
+			requireLocalEnvironment("baseline")
+		}
+		runBaselineCmd(opts)
+	case optBool(opts, "compare"):
+		runCompare(opts)
+	case optBool(opts, "reset"):
+		requireLocalEnvironment("reset")
+		runReset()
 	}
 }
 
+// runReset clears the cross-run simulation state (standalone form of
+// `run --reset`).
+func runReset() {
+	ctx, cancel := signalContext()
+	defer cancel()
+	resetLocalState(ctx)
+}
+
 func runInit(opts docopt.Opts) {
-	out, _ := opts.String("--out")
+	out := optString(opts, "--out", "providers.yml")
 	count := optInt(opts, "--count", 100000)
 	clients := optInt(opts, "--clients", 4000)
 	rate := float64(optInt(opts, "--rate", 1000))
@@ -126,6 +180,8 @@ func runRun(opts docopt.Opts) {
 		FleetShards: optInt(opts, "--fleet-shards", 0),
 		SiteListen:  optString(opts, "--site-listen", "127.0.0.1:0"),
 		Services:    servicesConfig,
+		MetaPath:    optString(opts, "--meta", "run.json"),
+		Reset:       optBool(opts, "--reset"),
 	}
 	if err := Run(options); err != nil {
 		fatalf("run: %s", err)
@@ -180,11 +236,14 @@ func setDefaultEnv() {
 }
 
 // validateEnvironment prevents every command that can connect to or mutate
-// service state from running against a non-local environment. `init` is
-// intentionally excluded: it only writes the requested providers.yml file.
+// service state from running against a non-local environment. `init` and the
+// analysis commands (`analyze`, `compare`, `baseline --runs`) are
+// intentionally excluded: they only read and write local files. `baseline`
+// appears here for its measuring mode (no --runs), which runs full
+// replicates.
 func validateEnvironment(command string, env string) error {
 	switch command {
-	case "run", "fleet":
+	case "run", "fleet", "reset", "baseline":
 		if env != "local" {
 			return fmt.Errorf(
 				"sim-latency %s is local-only: refusing WARP_ENV=%q",

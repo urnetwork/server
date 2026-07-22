@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"net/netip"
 
 	"github.com/urnetwork/server"
@@ -18,7 +19,8 @@ func defaultMixture() []MixtureComponent {
 			Name: "residential-good", Weight: 0.55, UserType: "consumer",
 			LatencyMillis: Range{10, 40}, JitterMillis: Range{0, 5},
 			BandwidthMbps: Range{20, 150}, Loss: Range{0, 0.001},
-			UptimeSeconds: Range{1800, 14400}, DowntimeSeconds: Range{5, 60},
+			MaxConnections: Range{8, 32},
+			UptimeSeconds:  Range{1800, 14400}, DowntimeSeconds: Range{5, 60},
 			DegradedFraction:     Range{0, 0.1},
 			DegradedLatencyScale: Range{1.5, 3}, DegradedBandwidthScale: Range{0.3, 0.7}, DegradedLossAdd: Range{0, 0.01},
 		},
@@ -26,7 +28,8 @@ func defaultMixture() []MixtureComponent {
 			Name: "mobile-variable", Weight: 0.3, UserType: "consumer",
 			LatencyMillis: Range{40, 150}, JitterMillis: Range{5, 40},
 			BandwidthMbps: Range{2, 40}, Loss: Range{0.001, 0.02},
-			UptimeSeconds: Range{300, 3600}, DowntimeSeconds: Range{10, 120},
+			MaxConnections: Range{4, 12},
+			UptimeSeconds:  Range{300, 3600}, DowntimeSeconds: Range{10, 120},
 			DegradedFraction:     Range{0.1, 0.4},
 			DegradedLatencyScale: Range{2, 5}, DegradedBandwidthScale: Range{0.1, 0.5}, DegradedLossAdd: Range{0.01, 0.05},
 		},
@@ -34,7 +37,8 @@ func defaultMixture() []MixtureComponent {
 			Name: "hosting-fast", Weight: 0.15, UserType: "hosting",
 			LatencyMillis: Range{2, 20}, JitterMillis: Range{0, 3},
 			BandwidthMbps: Range{100, 1000}, Loss: Range{0, 0.0005},
-			UptimeSeconds: Range{7200, 86400}, DowntimeSeconds: Range{2, 20},
+			MaxConnections: Range{64, 256},
+			UptimeSeconds:  Range{7200, 86400}, DowntimeSeconds: Range{2, 20},
 			DegradedFraction:     Range{0, 0.05},
 			DegradedLatencyScale: Range{1.2, 2}, DegradedBandwidthScale: Range{0.5, 0.9}, DegradedLossAdd: Range{0, 0.002},
 		},
@@ -136,6 +140,7 @@ func generateFleet(config *Config) error {
 			JitterMillis:           component.JitterMillis.sample(r),
 			BandwidthBps:           int64(component.BandwidthMbps.sample(r) * 1e6 / 8),
 			Loss:                   component.Loss.sample(r),
+			MaxConnections:         int(math.Round(component.MaxConnections.sample(r))),
 			UptimeSeconds:          component.UptimeSeconds.sample(r),
 			DowntimeSeconds:        component.DowntimeSeconds.sample(r),
 			DegradedFraction:       component.DegradedFraction.sample(r),

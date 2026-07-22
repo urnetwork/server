@@ -518,7 +518,7 @@ func NewProxyDevice(
 	// device and, together with the connectBlockActionOverrides strip, makes a
 	// local route override impossible — defense in depth alongside the rpc-layer
 	// DisableHostedIncompatible guard installed by StartHostedRpc.
-	// It also hard-limits direct mode off (`MultiClientSettings.NeverAllowDirect`):
+	// It also hard-limits direct mode off (`MultiClientSettings.OverrideAllowDirect` = false):
 	// a direct connection would leak that the client is hosted, and where it is
 	// hosted, via the host addresses in the direct connection setup.
 	deviceLocalSettings.HostedIncompatible = true

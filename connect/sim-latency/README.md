@@ -30,15 +30,27 @@ is the fixed, reproducible measuring instrument.
 ## The metric
 
 A run is scored on the CSV rows inside the **measured window** (after ramp +
-settle; the boundary is logged to stderr as `MEASURE WINDOW: [start, end]`):
+settle; the boundary is logged to stderr as `MEASURE WINDOW: [start, end]` and
+recorded in the run.json side-car). The metric set (computed by
+`sim-latency analyze`, decided by `sim-latency compare`):
 
-- **primary: p95 total request time** (`total_ms`), lower is better
-- **secondary: p50 time-to-first-byte** (`ttfb_ms`)
+- **primary: `ttfb_p95_ms`** (tail time-to-first-byte, lower is better) and
+  **`throughput_p95_bytes_per_s`** (p95 of large-transfer throughput, higher
+  is better; transfers >= 256 KiB only, so it measures bandwidth rather than
+  latency)
+- **guard: `fail_rate`** — timing/throughput metrics count successes only, so
+  the failure rate is a non-inferiority gate: a build cannot win latency by
+  dropping hard requests
+- secondary (reported, not gating): `ttfb_p50_ms`, `total_p50_ms`,
+  `total_p95_ms`, `throughput_p05_bytes_per_s` (the struggling tail),
+  `throughput_p50_bytes_per_s`, `goodput_bytes_per_s`
 
 A standard run is a fixed `providers.yml` (which locks the fleet and all seeds),
 a fixed settle and duration, and the same server build except for the code under
 test. Because the fleet, site tree, client arrivals, and impairments are all
-seeded from `providers.yml`, two runs of the same file are directly comparable.
+seeded from `providers.yml`, two runs of the same file replay the identical
+workload — whether an observed difference is *real* is decided statistically
+(see "Comparing runs" below).
 
 ## System requirements
 
@@ -82,10 +94,13 @@ go build -o sim-latency .
 ./sim-latency init --count 2000 --clients 200 --rate 200 --seed 1 --out providers.yml
 
 # 2. run: brings up the environment, ramps the fleet, settles, then measures
-./sim-latency run --providers providers.yml > results.csv
-#    (per-request CSV on stdout; all logs on stderr)
+./sim-latency run --reset --providers providers.yml --meta results.run.json > results.csv
+#    (per-request CSV on stdout; all logs on stderr; --reset clears prior
+#     runs' reliability state; the run.json side-car carries the window +
+#     metric summaries)
 
-# 3. analyze results.csv — filter to the measured window logged on stderr
+# 3. summarize / compare (see "Comparing runs" below)
+./sim-latency analyze --run results.csv
 ```
 
 Or use the convenience wrapper that sets the local env:
@@ -154,6 +169,84 @@ t_start_ms,client,path,depth,status,bytes,ttfb_ms,total_ms,bytes_per_s
 - `bytes`, `ttfb_ms`, `total_ms`, `bytes_per_s` — size, time to first byte,
   total time, throughput.
 
+Alongside the CSV, `run` writes a **run.json side-car** (`--meta`, default
+`run.json` — name it per run, e.g. `--meta a.run.json` next to `a.csv` so the
+tools find it by convention). It records everything the statistical tooling
+needs beyond the rows: the measure window, providers.yml sha256 + seed, build
+revision, host, flags, warm-pool establishment count, and the per-metric
+summaries. `sim-latency analyze --run x.csv` recomputes the summaries from
+the rows (`--window <startMs>,<endMs>` substitutes for a missing side-car).
+
+Historical note: the sdk used to redirect stderr onto stdout at init (mobile
+logging convention), so older results files have log lines interleaved with
+CSV rows. That is fixed (the redirect is now mobile-only), and the CSV reader
+skips such lines in legacy files.
+
+## Comparing runs (is A really better than B?)
+
+Two runs of the same providers.yml replay the identical seeded workload, so
+any difference between runs of *unchanged* code is pure environment noise:
+goroutine scheduling, backing-store timing, warm-pool composition. Requests
+within a run are heavily autocorrelated (shared market state, 60s regime
+dwells, the shared warm pool), so per-request t-tests wildly overstate
+certainty — the honest unit of replication is the **run**. The tooling
+therefore measures the noise floor from baseline (A/A) replicates and tests
+observed A-vs-B differences against it (this is what baseline.json is for —
+it encapsulates the variance used to measure significance):
+
+```
+# 1. measure the baseline once per (config, duration, machine): k >= 5
+#    replicate runs of UNCHANGED code, each from a clean reset. One command:
+./sim-latency baseline --replicates 5 --providers providers.yml --out baseline.json
+#    (runs 5 sequential `run --reset` replicates into baseline-runs/, then
+#     computes; or compute from runs you already have:
+#     ./sim-latency baseline --runs aa1.csv,aa2.csv,aa3.csv,aa4.csv,aa5.csv)
+
+# 2. measure the candidate build (same providers.yml, same flags)
+./sim-latency run --reset --providers providers.yml --meta b.run.json > b.csv
+
+# 3. decide
+./sim-latency compare --a b.csv --b baseline-runs/baseline-1.csv --baseline baseline.json --p 0.05
+./sim-latency compare ... --json        # machine-readable verdict
+```
+
+baseline.json encapsulates, per metric, the between-run mean/sd/cv **and the
+convergence diagnostics**: `sd_by_replicates` (the sd estimated from the
+first 2..k replicates — has the estimate stabilized, or do you need more?),
+`sd_rel_error` (~1/sqrt(2(k−1)), the sampling uncertainty of the sd itself —
+±35% at k=5), and `min_detectable_delta_by_runs_per_side` (the smallest
+significant delta for a comparison with m = 1..n runs per side, shrinking as
+sqrt(1/m)). The command prints both convergence tables for the primary
+metrics.
+
+The test: for each metric, `t = (S_A − S_B) / (sd_env · sqrt(1/m_A + 1/m_B))`
+with `k − 1` degrees of freedom — "is the difference large relative to the
+difference between two runs of identical code?". With >= 2 runs per side a
+Welch t on the run-level values is also computed and the more conservative
+p-value wins. Multiple runs per side (`--a b1.csv,b2.csv`) shrink the
+detectable delta by `sqrt(m)`.
+
+The verdict at threshold `--p`: **A beats B iff some primary metric
+(`ttfb_p95_ms`, `throughput_p95_bytes_per_s`) is significantly better after
+Holm correction, and no guard metric (primaries + `fail_rate`) is
+significantly worse** at raw alpha. Other outcomes: `b_better`, `mixed`
+(significant effects in both directions), `indistinguishable` (nothing
+exceeds the noise floor — the printed *min detectable delta* shows what the
+test could even see, so under-powered is never confused with no-difference).
+
+Caveats the tooling enforces or warns about:
+
+- `compare` **errors** when A and B ran different providers.yml (different
+  workloads are not comparable), and **warns** when baseline.json was
+  measured on a different config, duration, or host, or when the warm client
+  pools differ by more than 5% (load per client confounds).
+- Without `--baseline` it falls back to within-run block-bootstrap SEs (60s
+  blocks), which cannot see between-run noise — flagged `optimistic`.
+- The baseline variance is only valid for runs launched from the same clean
+  state: use `--reset` (or `sim-latency reset`) before every measured run,
+  otherwise reliability history accumulates across runs and the market
+  itself drifts (see the gotchas below).
+
 ## providers.yml
 
 The locked ground truth. `init` writes the mixture definition plus one concrete
@@ -173,9 +266,37 @@ entry per provider. Edit the `providers.mixture` weights/ranges and the `site`,
   join to these by client id.
 
 Each `mixture` component is a weighted mode of the population with ranges for
-latency, jitter, bandwidth, loss, uptime/downtime (churn), and a degraded-regime
+latency, jitter, bandwidth, loss, **max_connections** (the concurrent
+connection cap, below), uptime/downtime (churn), and a degraded-regime
 fraction. A provider is assigned a component by weight, then its parameters are
 sampled from the ranges.
+
+### max_connections (provider ulimit)
+
+Each provider carries a sampled `max_connections`: the maximum simultaneous
+tunneled flows its egress NAT serves (`0` = unlimited, which is also the
+behavior for older providers.yml files that predate the field — re-run `init`
+to sample caps). It is enforced by the real `LocalUserNat` flow limits
+(`TcpBufferSettings.GlobalLimit` / `UdpBufferSettings.GlobalLimit`, plumbed
+through `sdk.SimProviderConfig.MaxConcurrentFlows`): a flow over the cap is
+admitted and the **idle-most established flow is lru-evicted**, which the
+victim sees as a reset/timeout. Idle keep-alive connections cull first (soft
+degradation), then active transfers fail — the NAT-table-realistic shape of
+capacity exhaustion.
+
+Like bandwidth, the cap is **hidden ground truth**: clients discover capacity
+only through failures and latency, so a strategy that routes all traffic to
+the single best provider saturates it and pays for it in the measured
+metrics. The default mixture caps hosting providers around 64–256 concurrent
+flows, residential 8–32, mobile 4–12.
+
+**Environment rule:** the flow-limit machinery in `connect` (the
+`LocalUserNat` buffer limits and their lru eviction) and the caps sampled in
+`providers.yml` are part of the fixed measurement environment, exactly like
+the impairment model — competition changes must not weaken or bypass them,
+even though `LocalUserNat` is otherwise open for optimization. (The client
+side is free to *react* however it likes — e.g. the multi-client's
+`WindowSizeSettings.Ulimit` source-count warning is a legitimate lever.)
 
 ## Scaling the fleet across processes
 
@@ -279,13 +400,11 @@ and disabled egress security (the fake site is on a private address).
 reliability tables accumulate across runs. Running twice against the same
 database without a reset mixes the runs' blocks and depresses provider weights
 (coveredBlockCount spans both runs while each provider was only up part of the
-time), which can empty the market. For a clean measurement, reset first:
-`TRUNCATE client_reliability, client_reliability_running,
-client_reliability_running_window, client_reliability_sync,
-network_client_location_reliability, client_connection_reliability_score,
-network_client_connection, network_client_location, network_client_latency,
-network_client_speed CASCADE;` and `FLUSHALL` redis. (`--prewarm` re-establishes
-scores each run, but stale rows still skew the reliability window.)
+time), which can empty the market. For a clean measurement pass `--reset` to
+`run` (or run `sim-latency reset` standalone): it truncates the reliability/
+connection tables and flushes redis. (`--prewarm` re-establishes scores each
+run, but stale rows still skew the reliability window — comparisons and A/A
+replicates should always start from a reset.)
 
 **Empty market / all `status=0`.** The market is empty — no provider passed the
 `FindProviders2` gates. With the default `--prewarm` this should not happen;

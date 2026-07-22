@@ -158,6 +158,7 @@ func (self *Fleet) newSimProvider(entry ProviderEntry, index int) (*simProvider,
 		ExtraHeaders:          extraHeaders,
 		DialContext:           dialContext,
 		DisableSecurityPolicy: true,
+		MaxConcurrentFlows:    entry.MaxConnections,
 		Log:                   connect.NewNoopLogger(),
 	})
 	// providers start offline; the control loop connects them across the ramp

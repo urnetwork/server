@@ -86,7 +86,7 @@ func TestConfigRoundTrip(t *testing.T) {
 }
 
 func TestMutatingCommandsRequireLocalEnvironment(t *testing.T) {
-	for _, command := range []string{"run", "fleet"} {
+	for _, command := range []string{"run", "fleet", "reset", "baseline"} {
 		if err := validateEnvironment(command, "local"); err != nil {
 			t.Fatalf("%s rejected local environment: %v", command, err)
 		}

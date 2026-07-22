@@ -44,6 +44,13 @@ type MixtureComponent struct {
 	BandwidthMbps Range `yaml:"bandwidth_mbps"`
 	// packet loss fraction (modeled as read-stall probability per chunk)
 	Loss Range `yaml:"loss"`
+	// concurrent connection cap (ulimit): the max simultaneous tunneled
+	// flows the provider's egress NAT serves. Over the cap the NAT admits
+	// the new flow and lru-evicts the idle-most established flow (which the
+	// victim sees as a reset). Hidden ground truth like bandwidth — clients
+	// discover capacity through failures, so routing all traffic to the
+	// single best provider is penalized. 0 = unlimited.
+	MaxConnections Range `yaml:"max_connections"`
 
 	// churn: mean up/down durations (seconds). A provider cycles connected for
 	// ~uptime then offline for ~downtime, driving the real reliability machinery.
@@ -126,6 +133,7 @@ type ProviderEntry struct {
 	JitterMillis           float64 `yaml:"jitter_ms"`
 	BandwidthBps           int64   `yaml:"bandwidth_bps"`
 	Loss                   float64 `yaml:"loss"`
+	MaxConnections         int     `yaml:"max_connections"`
 	UptimeSeconds          float64 `yaml:"uptime_s"`
 	DowntimeSeconds        float64 `yaml:"downtime_s"`
 	DegradedFraction       float64 `yaml:"degraded_fraction"`
