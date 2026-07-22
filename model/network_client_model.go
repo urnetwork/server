@@ -820,7 +820,20 @@ type RemoveNetworkClientsResult struct {
 	// progress, so this request's ids were NOT scheduled; the caller should
 	// wait for the in-progress run to finish and retry
 	AlreadyInProgress bool `json:"already_in_progress,omitempty"`
+	// true if the deployment-wide cap on concurrent background bulk-delete
+	// runs (MaxConcurrentBulkClientRemovalRuns) was already reached, so this
+	// request's ids were NOT scheduled; the caller should retry later
+	TooManyConcurrentRuns bool `json:"too_many_concurrent_runs,omitempty"`
 }
+
+// MaxConcurrentBulkClientRemovalRuns caps how many networks may have a
+// background bulk-delete run (RemoveNetworkClientsTask) in flight or queued
+// at the same time, across the whole deployment. Each network's own run is
+// already serialized by runNetworkClientsTaskKey; this adds a deployment-wide
+// ceiling so many networks triggering large bulk-deletes at once can't all
+// load the task queue/database simultaneously. This is a starting value, not
+// a measured hard limit -- tune it against real background-task headroom.
+const MaxConcurrentBulkClientRemovalRuns = 10
 
 // runNetworkClientsTaskKey is the run_once key scoping "one background
 // bulk-delete run per network at a time". It's shared between the initial
@@ -862,6 +875,10 @@ func RemoveNetworkClients(
 		return nil, fmt.Errorf("Too many client ids (max %d).", MaxRemoveNetworkClientsCount)
 	}
 
+	if err := CheckAndRecordBulkClientRemovalQuota(session.Ctx, session.ByJwt.NetworkId, len(clientIds)); err != nil {
+		return nil, err
+	}
+
 	if len(clientIds) <= RemoveNetworkClientsBatchCount {
 		_, err := RemoveNetworkClientsBatch(&RemoveNetworkClientsBatchArgs{
 			ClientIds: clientIds,
@@ -870,6 +887,18 @@ func RemoveNetworkClients(
 			return nil, err
 		}
 		return &RemoveNetworkClientsResult{}, nil
+	}
+
+	// deployment-wide concurrency cap, checked ahead of the per-network
+	// admission below. This count includes this network's own run if one is
+	// already in flight -- in that rare case, a network that is itself
+	// occupying one of the counted slots gets this generic "too many
+	// concurrent runs" signal here instead of the more specific
+	// AlreadyInProgress a few lines down. Both are the same instruction to
+	// the caller (retry later), so this is a deliberate simplification
+	// rather than tracking per-network exclusions.
+	if concurrentRuns := task.CountPendingByFunctionName(session.Ctx, RemoveNetworkClientsTask); MaxConcurrentBulkClientRemovalRuns <= concurrentRuns {
+		return &RemoveNetworkClientsResult{TooManyConcurrentRuns: true}, nil
 	}
 
 	// one background bulk-delete run per network at a time.

@@ -595,6 +595,29 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 	return taskIds
 }
 
+// CountPendingByFunctionName reports how many pending_task rows currently
+// target the given task function, across all run_once keys. Callers use this
+// to enforce a global concurrency cap on a specific background task type
+// (e.g. capping how many networks can have a bulk operation in flight at
+// once), independent of any single run_once key.
+func CountPendingByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) int {
+	functionName := NewTaskTarget(taskFunction).TargetFunctionName()
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COUNT(*) FROM pending_task WHERE function_name = $1`,
+			functionName,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count
+}
+
 func ListClaimedTasks(ctx context.Context) []server.Id {
 	taskIds := []server.Id{}
 

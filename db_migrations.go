@@ -4428,4 +4428,23 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS network_user_action_attempt_user_action_time
             ON network_user_action_attempt (user_id, action, create_time)
     `),
+
+	// a single, deployment-wide ledger for the bulk client removal API
+	// (RemoveNetworkClients): each admitted request records how many client
+	// ids it covered, and CheckAndRecordBulkClientRemovalQuota sums this
+	// column over the trailing hour to enforce MaxBulkClientRemovalsPerHour.
+	// network_id is stored for observability only -- the limit itself is
+	// global, not scoped per network.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS bulk_client_removal_quota (
+            bulk_client_removal_quota_id uuid NOT NULL PRIMARY KEY,
+            network_id                   uuid NOT NULL,
+            client_count                 int NOT NULL,
+            create_time                  timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_create_time
+            ON bulk_client_removal_quota (create_time)
+    `),
 }

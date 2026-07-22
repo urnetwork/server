@@ -990,6 +990,52 @@ func TestRemoveNetworkClientsExactlyAtCapIsAccepted(t *testing.T) {
 	})
 }
 
+// The deployment-wide concurrency cap must reject a new network's async
+// bulk-delete once MaxConcurrentBulkClientRemovalRuns other networks already
+// have one pending. Occupying the cap via direct task scheduling (rather
+// than MaxConcurrentBulkClientRemovalRuns full RemoveNetworkClients calls)
+// keeps the test to the mechanism under test -- the pending_task count -- and
+// avoids needing real per-network client rows for slots that are never
+// actually drained here.
+func TestRemoveNetworkClientsRejectsWhenConcurrencyCapReached(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		for i := 0; i < MaxConcurrentBulkClientRemovalRuns; i++ {
+			occupyingNetworkId := server.NewId()
+			occupyingSess := &session.ClientSession{
+				Ctx:   ctx,
+				ByJwt: &jwt.ByJwt{NetworkId: occupyingNetworkId},
+			}
+			scheduled, _ := task.ScheduleTaskIfAbsent(
+				RemoveNetworkClientsTask,
+				&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+				occupyingSess,
+				runNetworkClientsTaskKey(occupyingNetworkId),
+			)
+			assert.Equal(t, scheduled, true)
+		}
+
+		networkId := server.NewId()
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, false)
+		assert.Equal(t, result.TooManyConcurrentRuns, true)
+	})
+}
+
 // RemoveNetworkClientsTaskPost, tested directly and in isolation (not
 // through a full task.TaskWorker run, which the slow real-worker lifecycle
 // test above already covers end-to-end): a non-empty RemainingClientIds must
