@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	// "crypto/sha256"
 	"errors"
+	mathrand "math/rand"
 	// "net"
 	"net/netip"
 	// "regexp"
@@ -884,30 +885,14 @@ func RemoveNetworkClients(
 		return nil, fmt.Errorf("Too many client ids (max %d).", MaxRemoveNetworkClientsCount)
 	}
 
-	// deployment-wide concurrency cap, checked ahead of any reservation --
-	// it doesn't depend on which hourly bucket this request ends up in.
-	// CountAvailableByFunctionName only counts tasks whose run_at has
-	// already passed, so requests merely queued for a future hour (below)
-	// don't themselves count against this cap; only actually-running (or
-	// runnable-now) work does. This count includes this network's own run
-	// if one is already in flight -- in that rare case, a network that is
-	// itself occupying one of the counted slots gets this generic "too many
-	// concurrent runs" signal here instead of the more specific
-	// AlreadyInProgress a few lines down. Both are the same instruction to
-	// the caller (retry later), so this is a deliberate simplification
-	// rather than tracking per-network exclusions.
-	if concurrentRuns := task.CountAvailableByFunctionName(session.Ctx, RemoveNetworkClientsTask); MaxConcurrentBulkClientRemovalRuns <= concurrentRuns {
-		return &RemoveNetworkClientsResult{TooManyConcurrentRuns: true}, nil
-	}
-
 	// reserve this request's slot in the earliest hourly bucket with room --
 	// the current hour, or a later one if the current hour's budget is
 	// already spent. The bucket has to be known before the request can be
 	// admitted (either executed now or scheduled for later), so this always
 	// happens before that admission step, not after -- unlike a simple
-	// charge, a reservation that turns out to be unusable (network already
-	// has a run in progress, below) has to be explicitly released rather
-	// than just not made.
+	// charge, a reservation that turns out to be unusable (concurrency cap
+	// or an existing in-progress run, below) has to be explicitly released
+	// rather than just not made.
 	reservationId, bucketStart, err := ReserveBulkClientRemovalSlot(session.Ctx, session.ByJwt.NetworkId, len(clientIds))
 	if err != nil {
 		return nil, err
@@ -917,7 +902,8 @@ func RemoveNetworkClients(
 	if bucketStart.Equal(currentBucket) && len(clientIds) <= RemoveNetworkClientsBatchCount {
 		// small enough, and the current hour has room: run synchronously,
 		// same as always -- this path predates the reservation system and
-		// was never gated by the per-network run_once key either.
+		// was never gated by the per-network run_once key or the
+		// concurrency cap below either.
 		_, err := RemoveNetworkClientsBatch(&RemoveNetworkClientsBatchArgs{
 			ClientIds: clientIds,
 		}, session)
@@ -931,10 +917,44 @@ func RemoveNetworkClients(
 	// everything else goes through the background task -- either the
 	// request is large enough to need batching regardless of timing, or its
 	// reserved slot landed in a future hour and there's no way to make an
-	// HTTP caller wait that long synchronously. One background bulk-delete
-	// run per network at a time either way. ScheduleTaskInTxIfAbsent (unlike
-	// plain ScheduleTask+RunOnce) makes the "only if not already pending"
-	// check atomic with the insert -- a single
+	// HTTP caller wait that long synchronously.
+	//
+	// the deployment-wide concurrency cap is checked here, not before the
+	// reservation above -- it only needs to gate work that will actually
+	// touch the task system, not a small request that fit the current hour
+	// and ran synchronously above. CountAvailableByFunctionName only counts
+	// tasks whose run_at has already passed, so requests merely queued for
+	// a future hour don't themselves count against this cap; only
+	// actually-running (or runnable-now) work does. This count includes
+	// this network's own run if one is already in flight -- in that rare
+	// case, a network that is itself occupying one of the counted slots
+	// gets this generic "too many concurrent runs" signal here instead of
+	// the more specific AlreadyInProgress a few lines down. Both are the
+	// same instruction to the caller (retry later), so this is a deliberate
+	// simplification rather than tracking per-network exclusions.
+	if concurrentRuns := task.CountAvailableByFunctionName(session.Ctx, RemoveNetworkClientsTask); MaxConcurrentBulkClientRemovalRuns <= concurrentRuns {
+		CancelBulkClientRemovalReservation(session.Ctx, reservationId)
+		return &RemoveNetworkClientsResult{TooManyConcurrentRuns: true}, nil
+	}
+
+	// a request queued for a future hour gets its actual run time spread
+	// randomly across that hour, rather than firing at exactly the hour's
+	// top. CountAvailableByFunctionName above only ever sees currently-
+	// runnable work, so it can't tell how large the backlog already queued
+	// for a given future hour is; without this jitter, every request a
+	// sustained period of heavy bulk-delete traffic pushed into the same
+	// future bucket would become eligible at the identical instant,
+	// defeating the concurrency cap's purpose the moment that hour arrives.
+	// A request landing in the current hour still runs as close to
+	// immediately as before -- only deferred requests get spread out.
+	runAt := bucketStart
+	if currentBucket.Before(bucketStart) {
+		runAt = bucketStart.Add(time.Duration(mathrand.Int63n(int64(BulkClientRemovalBucketDuration))))
+	}
+
+	// one background bulk-delete run per network at a time.
+	// ScheduleTaskInTxIfAbsent (unlike plain ScheduleTask+RunOnce) makes the
+	// "only if not already pending" check atomic with the insert -- a single
 	// `INSERT ... ON CONFLICT (run_once_key) DO NOTHING`, reporting whether
 	// the row was actually inserted. This closes the race a naive
 	// check-then-act would have: with check-then-act, two near-simultaneous
@@ -955,7 +975,7 @@ func RemoveNetworkClients(
 		// (payouts, contract close) under multi-tenant load
 		task.Priority(task.TaskPrioritySlowest),
 		task.MaxTime(30*time.Minute),
-		task.RunAt(bucketStart),
+		task.RunAt(runAt),
 	)
 	if !scheduled {
 		// the reservation was made under this network's name, but it turns
@@ -965,7 +985,7 @@ func RemoveNetworkClients(
 		return &RemoveNetworkClientsResult{AlreadyInProgress: true}, nil
 	}
 
-	scheduledFor := bucketStart
+	scheduledFor := runAt
 	return &RemoveNetworkClientsResult{Scheduled: true, ScheduledFor: &scheduledFor}, nil
 }
 

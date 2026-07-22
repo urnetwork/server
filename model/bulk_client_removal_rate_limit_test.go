@@ -173,7 +173,13 @@ func TestRemoveNetworkClientsQueuesSmallRequestWhenCurrentHourIsFull(t *testing.
 		assert.Equal(t, err, nil)
 		assert.Equal(t, result.Scheduled, true)
 		assert.NotEqual(t, result.ScheduledFor, nil)
-		assert.Equal(t, *result.ScheduledFor, currentBucket.Add(BulkClientRemovalBucketDuration))
+
+		// deferred to the next hour, jittered somewhere within it -- not
+		// exactly the hour boundary, so check the range rather than an
+		// exact timestamp
+		nextBucket := currentBucket.Add(BulkClientRemovalBucketDuration)
+		assert.Equal(t, !result.ScheduledFor.Before(nextBucket), true)
+		assert.Equal(t, result.ScheduledFor.Before(nextBucket.Add(BulkClientRemovalBucketDuration)), true)
 
 		// not applied yet -- it's queued for the next hour, not run now
 		assert.NotEqual(t, GetNetworkClient(ctx, clientId), nil)

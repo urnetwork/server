@@ -1049,12 +1049,132 @@ func TestRemoveNetworkClientsRejectsWhenConcurrencyCapReached(t *testing.T) {
 		assert.Equal(t, result.TooManyConcurrentRuns, true)
 
 		// a TooManyConcurrentRuns rejection must not have burned any budget
-		// for the rejected request's id count -- the current bucket's whole
-		// ceiling must still be available (the concurrency cap is checked
-		// before any reservation is attempted).
+		// for the rejected request's id count -- the reservation made just
+		// before the concurrency check must have been released, so the
+		// current bucket's whole ceiling is still available.
 		_, bucketStart, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
 		assert.Equal(t, err, nil)
 		assert.Equal(t, bucketStart, bulkClientRemovalBucketStart(server.NowUtc()))
+	})
+}
+
+// The concurrency cap must only gate work that actually goes through the
+// background task system -- a small request that fits the current hour's
+// budget runs synchronously and was never subject to it, even when the cap
+// is fully occupied by unrelated networks' background runs.
+func TestRemoveNetworkClientsSyncPathBypassesConcurrencyCap(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		for i := 0; i < MaxConcurrentBulkClientRemovalRuns; i++ {
+			occupyingNetworkId := server.NewId()
+			occupyingSess := &session.ClientSession{
+				Ctx:   ctx,
+				ByJwt: &jwt.ByJwt{NetworkId: occupyingNetworkId},
+			}
+			scheduled, _ := task.ScheduleTaskIfAbsent(
+				RemoveNetworkClientsTask,
+				&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
+				occupyingSess,
+				runNetworkClientsTaskKey(occupyingNetworkId),
+			)
+			assert.Equal(t, scheduled, true)
+		}
+
+		networkId := server.NewId()
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test", "test")
+
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{clientId},
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.TooManyConcurrentRuns, false)
+		assert.Equal(t, GetNetworkClient(ctx, clientId), nil)
+	})
+}
+
+// A request large enough to need the background task, whose reserved slot
+// is the current hour (room available now, not deferred), must report
+// ScheduledFor as the current bucket -- not just the deferred path.
+func TestRemoveNetworkClientsSetsScheduledForOnImmediateAsyncRun(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		currentBucket := bulkClientRemovalBucketStart(server.NowUtc())
+
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.Scheduled, true)
+		assert.NotEqual(t, result.ScheduledFor, nil)
+		assert.Equal(t, *result.ScheduledFor, currentBucket)
+	})
+}
+
+// The per-network single-flight lock must stay held for the whole
+// queued-and-waiting duration of a deferred request, not just while it's
+// actually running -- a second request for the same network arriving before
+// the first's deferred bucket time is reached must be AlreadyInProgress.
+// Unlike TestRemoveNetworkClientsCancelsReservationOnAlreadyInProgress
+// (which fakes an in-progress run via a directly-scheduled run_at=now
+// task), this drives the actual deferral path end to end: the first
+// request's task genuinely has a future run_at, so
+// CountAvailableByFunctionName correctly does not count it as "in flight",
+// yet the run_once key it holds must still block a second request for the
+// same network.
+func TestRemoveNetworkClientsLocksNetworkWhileDeferredRequestIsQueued(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// fill the current bucket so the next reservation defers to the
+		// next hour
+		_, _, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
+		assert.Equal(t, err, nil)
+
+		networkId := server.NewId()
+		sess := &session.ClientSession{
+			Ctx:   ctx,
+			ByJwt: &jwt.ByJwt{NetworkId: networkId},
+		}
+
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		firstResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, firstResult.Scheduled, true)
+		assert.NotEqual(t, firstResult.ScheduledFor, nil)
+		assert.NotEqual(t, *firstResult.ScheduledFor, bulkClientRemovalBucketStart(server.NowUtc()))
+
+		// the deferred task isn't runnable yet, so it doesn't count against
+		// the concurrency cap -- but it must still hold the run_once key
+		secondResult, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: []server.Id{server.NewId()},
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, secondResult.AlreadyInProgress, true)
 	})
 }
 
