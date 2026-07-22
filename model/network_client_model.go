@@ -875,11 +875,19 @@ func RemoveNetworkClients(
 		return nil, fmt.Errorf("Too many client ids (max %d).", MaxRemoveNetworkClientsCount)
 	}
 
-	if err := CheckAndRecordBulkClientRemovalQuota(session.Ctx, session.ByJwt.NetworkId, len(clientIds)); err != nil {
-		return nil, err
-	}
-
+	// the global hourly quota is charged only for work that is actually
+	// going to run -- charging it ahead of the admission gates below would
+	// let a request rejected by AlreadyInProgress or TooManyConcurrentRuns
+	// burn shared budget for zero removals. Since AlreadyInProgress
+	// explicitly tells the caller to retry, charging on rejection would let
+	// one network's ordinary retries exhaust the whole deployment's hourly
+	// budget for everyone else.
 	if len(clientIds) <= RemoveNetworkClientsBatchCount {
+		// the sync path always runs once it reaches here, so charging
+		// immediately before it is equivalent to charging on admission.
+		if err := CheckAndRecordBulkClientRemovalQuota(session.Ctx, session.ByJwt.NetworkId, len(clientIds)); err != nil {
+			return nil, err
+		}
 		_, err := RemoveNetworkClientsBatch(&RemoveNetworkClientsBatchArgs{
 			ClientIds: clientIds,
 		}, session)
@@ -913,7 +921,7 @@ func RemoveNetworkClients(
 	// silently dropping the second call's client_ids while still reporting
 	// success. The atomic insert-or-detect-conflict here means a duplicate
 	// is always rejected outright, never silently swallowed.
-	scheduled, _ := task.ScheduleTaskIfAbsent(
+	scheduled, taskId := task.ScheduleTaskIfAbsent(
 		RemoveNetworkClientsTask,
 		&RemoveNetworkClientsTaskArgs{
 			ClientIds: clientIds,
@@ -927,6 +935,18 @@ func RemoveNetworkClients(
 	)
 	if !scheduled {
 		return &RemoveNetworkClientsResult{AlreadyInProgress: true}, nil
+	}
+
+	// only now is the request truly admitted (both gates above passed and
+	// the task row is inserted), so this is where the shared quota is
+	// charged. If the quota rejects, cancel the just-scheduled task rather
+	// than let it run uncounted -- this is the one case where "admitted"
+	// and "quota charged" can't be made a single atomic step, since the
+	// concurrency cap and run_once dedup both live inside the schedule
+	// call itself.
+	if err := CheckAndRecordBulkClientRemovalQuota(session.Ctx, session.ByJwt.NetworkId, len(clientIds)); err != nil {
+		task.RemovePendingTask(session.Ctx, taskId)
+		return nil, err
 	}
 
 	return &RemoveNetworkClientsResult{Scheduled: true}, nil
