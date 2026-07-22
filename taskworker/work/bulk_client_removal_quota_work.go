@@ -25,14 +25,17 @@ func ScheduleRemoveExpiredBulkClientRemovalQuota(clientSession *session.ClientSe
 }
 
 // RemoveExpiredBulkClientRemovalQuota reaps bulk_client_removal_quota rows
-// older than model.BulkClientRemovalWindow, which no longer contribute to
-// the trailing-window sum model.CheckAndRecordBulkClientRemovalQuota checks.
+// whose bucket is safely in the past. ReserveBulkClientRemovalSlot only ever
+// looks forward from the current hour, so a bucket older than the current
+// hour is already irrelevant to any future reservation -- the 2-day margin
+// here is just to keep a short audit trail, not because older rows are ever
+// consulted again.
 func RemoveExpiredBulkClientRemovalQuota(
 	_ *RemoveExpiredBulkClientRemovalQuotaArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveExpiredBulkClientRemovalQuotaResult, error) {
-	minTime := server.NowUtc().Add(-model.BulkClientRemovalWindow)
-	model.RemoveExpiredBulkClientRemovalQuota(clientSession.Ctx, minTime)
+	minBucketStart := server.NowUtc().Add(-48 * time.Hour)
+	model.RemoveExpiredBulkClientRemovalQuota(clientSession.Ctx, minBucketStart)
 	return &RemoveExpiredBulkClientRemovalQuotaResult{}, nil
 }
 

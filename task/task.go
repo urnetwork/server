@@ -595,19 +595,31 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 	return taskIds
 }
 
-// CountPendingByFunctionName reports how many pending_task rows currently
-// target the given task function, across all run_once keys. Callers use this
-// to enforce a global concurrency cap on a specific background task type
-// (e.g. capping how many networks can have a bulk operation in flight at
-// once), independent of any single run_once key.
-func CountPendingByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) int {
+// CountAvailableByFunctionName reports how many pending_task rows targeting
+// the given task function are currently available to run (run_at has
+// passed), across all run_once keys -- this excludes rows scheduled for a
+// future run_at, which are queued/waiting, not consuming any worker
+// capacity yet. Callers use this to enforce a global concurrency cap on a
+// specific background task type (e.g. capping how many networks can have a
+// bulk operation actually in flight at once), independent of any single
+// run_once key. Counting future-scheduled rows here would make a large
+// backlog of merely-queued work block admission of brand new requests, even
+// though nothing is actually running yet.
+func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) int {
 	functionName := NewTaskTarget(taskFunction).TargetFunctionName()
+	// computed in Go, not `now()` in SQL: run_at is a naive `timestamp`
+	// column holding UTC values, and comparing it against `now()`
+	// (timestamptz) would force a timezone-dependent cast on the session's
+	// TimeZone setting -- the same class of bug fixed in
+	// model/account_action_rate_limit.go and avoided in
+	// model.ReserveBulkClientRemovalSlot.
+	asOf := server.NowUtc()
 	count := 0
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT COUNT(*) FROM pending_task WHERE function_name = $1`,
-			functionName,
+			`SELECT COUNT(*) FROM pending_task WHERE function_name = $1 AND run_at <= $2`,
+			functionName, asOf,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {

@@ -592,16 +592,18 @@ func TestRemoveNetworkClientsRejectsDuplicateInProgress(t *testing.T) {
 		assert.NotEqual(t, GetNetworkClient(ctx, secondClientId), nil)
 
 		// the rejected (AlreadyInProgress) second call must not have burned
-		// any global quota -- only the admitted first call's count should
-		// have been charged. Probe by requesting exactly the remainder of
-		// the ceiling: this only succeeds if nothing beyond the first
-		// call's charge was recorded.
-		err = CheckAndRecordBulkClientRemovalQuota(
+		// any of the current bucket's budget -- only the admitted first
+		// call's count should have been charged. Probe by reserving exactly
+		// the remainder of the current bucket's ceiling: this only lands in
+		// the CURRENT bucket if nothing beyond the first call's charge was
+		// recorded there.
+		_, bucketStart, err := ReserveBulkClientRemovalSlot(
 			ctx,
 			server.NewId(),
-			MaxBulkClientRemovalsPerHour-len(largeClientIds(firstClientId)),
+			MaxBulkClientRemovalsPerBucket-len(largeClientIds(firstClientId)),
 		)
 		assert.Equal(t, err, nil)
+		assert.Equal(t, bucketStart, bulkClientRemovalBucketStart(server.NowUtc()))
 	})
 }
 
@@ -1046,53 +1048,35 @@ func TestRemoveNetworkClientsRejectsWhenConcurrencyCapReached(t *testing.T) {
 		assert.Equal(t, result.Scheduled, false)
 		assert.Equal(t, result.TooManyConcurrentRuns, true)
 
-		// a TooManyConcurrentRuns rejection must not have burned any global
-		// quota for the rejected request's id count -- the whole ceiling
-		// must still be available.
-		err = CheckAndRecordBulkClientRemovalQuota(ctx, server.NewId(), MaxBulkClientRemovalsPerHour)
+		// a TooManyConcurrentRuns rejection must not have burned any budget
+		// for the rejected request's id count -- the current bucket's whole
+		// ceiling must still be available (the concurrency cap is checked
+		// before any reservation is attempted).
+		_, bucketStart, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
 		assert.Equal(t, err, nil)
+		assert.Equal(t, bucketStart, bulkClientRemovalBucketStart(server.NowUtc()))
 	})
 }
 
 // A quota rejection on the async path must cancel the task it just
-// scheduled (the concurrency cap and run_once dedup only clear on the
-// schedule call itself, so quota can only be checked after that succeeds --
-// see the comment in RemoveNetworkClients). Without the cancellation, the
-// task would run uncounted against the quota it was supposed to be gated by,
-// and the network's run_once key would stay held by a "rejected" request.
-func TestRemoveNetworkClientsCancelsScheduledTaskOnQuotaRejection(t *testing.T) {
+// scheduled (the bucket has to be known before scheduling, since it becomes
+// the task's RunAt, so reservation always happens before the run_once
+// admission check, not after). Without the cancellation, the reservation
+// would sit charged against a bucket for a request that never actually ran,
+// eating into the shared budget for nothing.
+func TestRemoveNetworkClientsCancelsReservationOnAlreadyInProgress(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-
-		// spend all but a sliver of the global quota directly, so the
-		// upcoming real request is guaranteed to be quota-rejected
-		err := CheckAndRecordBulkClientRemovalQuota(ctx, server.NewId(), MaxBulkClientRemovalsPerHour-1)
-		assert.Equal(t, err, nil)
-
 		networkId := server.NewId()
+		currentBucket := bulkClientRemovalBucketStart(server.NowUtc())
+
 		sess := &session.ClientSession{
 			Ctx:   ctx,
 			ByJwt: &jwt.ByJwt{NetworkId: networkId},
 		}
 
-		// large enough to take the async path and exceed the 1-unit
-		// remaining quota, but well under the concurrency cap
-		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
-		for i := range clientIds {
-			clientIds[i] = server.NewId()
-		}
-
-		_, err = RemoveNetworkClients(&RemoveNetworkClientsArgs{
-			ClientIds: clientIds,
-		}, sess)
-		assert.NotEqual(t, err, nil)
-
-		// the task scheduled just before the quota check must have been
-		// cancelled -- nothing pending for this function at all
-		assert.Equal(t, task.CountPendingByFunctionName(ctx, RemoveNetworkClientsTask), 0)
-
-		// and the run_once key must be free again, so a later request for
-		// this same network isn't stuck behind the cancelled attempt
+		// occupy this network's run_once key directly, simulating a run
+		// already in progress
 		scheduled, _ := task.ScheduleTaskIfAbsent(
 			RemoveNetworkClientsTask,
 			&RemoveNetworkClientsTaskArgs{ClientIds: []server.Id{server.NewId()}},
@@ -1100,6 +1084,25 @@ func TestRemoveNetworkClientsCancelsScheduledTaskOnQuotaRejection(t *testing.T) 
 			runNetworkClientsTaskKey(networkId),
 		)
 		assert.Equal(t, scheduled, true)
+
+		// large enough to take the async path
+		clientIds := make([]server.Id, RemoveNetworkClientsBatchCount+1)
+		for i := range clientIds {
+			clientIds[i] = server.NewId()
+		}
+
+		result, err := RemoveNetworkClients(&RemoveNetworkClientsArgs{
+			ClientIds: clientIds,
+		}, sess)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, result.AlreadyInProgress, true)
+
+		// the reservation made just before the run_once check must have
+		// been released -- the current bucket's full ceiling must still be
+		// available to a fresh request
+		_, bucketStart, err := ReserveBulkClientRemovalSlot(ctx, server.NewId(), MaxBulkClientRemovalsPerBucket)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, bucketStart, currentBucket)
 	})
 }
 

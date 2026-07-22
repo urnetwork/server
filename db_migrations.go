@@ -4447,4 +4447,21 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_create_time
             ON bulk_client_removal_quota (create_time)
     `),
+
+	// bulk_client_removal_quota moves from a rolling trailing-hour window to
+	// fixed, non-overlapping hourly buckets (UTC): ReserveBulkClientRemovalSlot
+	// reserves a row against a specific bucket_start (the current hour, or a
+	// future one if the current hour is full), instead of every row implicitly
+	// counting against whatever "now" happens to be when queried. create_time
+	// remains as an audit field (when the reservation was made), separate from
+	// bucket_start (which hour it counts toward). No rows exist yet in
+	// practice, so the NOT NULL default here is never relied on for real data.
+	newSqlMigration(`
+        ALTER TABLE bulk_client_removal_quota
+            ADD COLUMN IF NOT EXISTS bucket_start timestamp NOT NULL DEFAULT now()
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_bucket_start
+            ON bulk_client_removal_quota (bucket_start)
+    `),
 }
