@@ -59,14 +59,22 @@ func countRecentAccountActionAttempts(
 	window time.Duration,
 ) int {
 	var count int
+	// the cutoff is computed here in Go, not via `now() - INTERVAL ...` in
+	// SQL: create_time is a naive `timestamp` column holding UTC wall-clock
+	// values (via server.NowUtc()), and `now()` returns `timestamptz`.
+	// Comparing the two forces Postgres to cast one side using the
+	// session's TimeZone setting -- on a non-UTC session that silently
+	// shifts the effective window by the zone offset. Passing an explicit
+	// UTC cutoff avoids any zone-dependent cast.
+	cutoff := server.NowUtc().Add(-window)
 	result, err := tx.Query(
 		ctx,
 		`
 		SELECT COUNT(*) FROM network_user_action_attempt
 		WHERE user_id = $1 AND action = $2
-		  AND now() - INTERVAL '1 seconds' * $3 <= create_time
+		  AND $3 <= create_time
 		`,
-		userId, action, int(window/time.Second),
+		userId, action, cutoff,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
@@ -88,15 +96,16 @@ func CheckAccountActionRateLimit(
 	window time.Duration,
 ) error {
 	var count int
+	cutoff := server.NowUtc().Add(-window)
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 			SELECT COUNT(*) FROM network_user_action_attempt
 			WHERE user_id = $1 AND action = $2
-			  AND now() - INTERVAL '1 seconds' * $3 <= create_time
+			  AND $3 <= create_time
 			`,
-			userId, action, int(window/time.Second),
+			userId, action, cutoff,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
