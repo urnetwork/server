@@ -1242,6 +1242,36 @@ func SetConnectionLocation(
 			}
 		})
 
+		// fix(beta): the free-tier ipinfo geo db resolves many IPs --
+		// datacenter, mobile, and VPN egress especially -- to country or
+		// region granularity only, with no city. network_client_location
+		// requires city_location_id and region_location_id NOT NULL, so a
+		// country-only location's NULL city/region made this INSERT panic
+		// inside server.Tx. That panic propagated out of the connection
+		// announce goroutine (connect/transport_announce.go), whose
+		// HandleError wrapper then cancelled the whole connection context --
+		// tearing down every country-only client's connect connection right
+		// after auth (the app itself included, whichever egress it resolved
+		// to), and, because the panic hit before the disconnect-cleanup
+		// defer was registered, orphaning the connection row as
+		// connected=true forever. Fall back to the coarsest available
+		// granularity so the columns are always non-null: a country-only
+		// location stores its country id for city/region too, which keeps
+		// the provider locatable at country level instead of crashing the
+		// connection. If even the country id is missing (location row absent
+		// or malformed), return a clean error so the caller's existing
+		// graceful retry path handles it -- never panic here.
+		if countryLocationId == nil {
+			returnErr = fmt.Errorf("Location %s has no country granularity.", locationId)
+			return
+		}
+		if cityLocationId == nil {
+			cityLocationId = countryLocationId
+		}
+		if regionLocationId == nil {
+			regionLocationId = countryLocationId
+		}
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

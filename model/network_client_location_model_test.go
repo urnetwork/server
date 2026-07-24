@@ -1198,3 +1198,62 @@ func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
 		connect.AssertEqual(t, len(res.Providers), n)
 	})
 }
+
+// SetConnectionLocation must not panic when the resolved location has no city
+// (country-only). network_client_location requires city_location_id and
+// region_location_id NOT NULL, but a country-granularity location row has them
+// NULL, so the insert panicked inside server.Tx. That panic propagated out of
+// the connection announce goroutine, whose HandleError wrapper cancelled the
+// connection context -- tearing down the client's connection right after auth,
+// and (because the panic hit before the disconnect-cleanup defer was
+// registered) orphaning the connection row as connected=true. This asserts a
+// country-only location is stored, falling back to country granularity, with
+// no panic and no error.
+func TestSetConnectionLocationToleratesCountryOnlyLocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// country-only location -- its row has NULL city_location_id and
+		// NULL region_location_id, exactly what crashed the insert before
+		country := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, country)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "0.0.0.1:0", handlerId)
+		connect.AssertEqual(t, err, nil)
+
+		// this call panicked before the fix; now it must succeed and store
+		// the connection at country granularity
+		err = SetConnectionLocation(ctx, connectionId, country.LocationId, &ConnectionLocationScores{})
+		connect.AssertEqual(t, err, nil)
+
+		var city, region, cty *server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			result, qerr := conn.Query(
+				ctx,
+				`SELECT city_location_id, region_location_id, country_location_id FROM network_client_location WHERE connection_id = $1`,
+				connectionId,
+			)
+			server.WithPgResult(result, qerr, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&city, &region, &cty))
+				}
+			})
+		})
+		if city == nil || region == nil || cty == nil {
+			t.Fatal("expected all three location ids to be set (falling back to country), got a nil")
+		}
+		// city and region fall back to the country id for a country-only location
+		connect.AssertEqual(t, *city, country.CountryLocationId)
+		connect.AssertEqual(t, *region, country.CountryLocationId)
+		connect.AssertEqual(t, *cty, country.CountryLocationId)
+	})
+}
