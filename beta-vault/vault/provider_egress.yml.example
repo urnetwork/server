@@ -3,4 +3,7 @@
 # header. Generate with: openssl rand -base64 32
 # If this file or key is absent, the ingest endpoint rejects every request
 # (fails closed, does not crash the api process).
+# The secret is read once, on the first request, and memoized for the life of
+# the process: after creating or rotating this file, restart the api for the
+# new value to take effect.
 ingest_secret: "replace-me"
