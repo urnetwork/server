@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,6 +130,147 @@ func TestSubmitProviderEgressLocationCityConfidentStoresCity(t *testing.T) {
 			t.Fatal("expected the resolved location row to exist")
 		}
 		assert.Equal(t, loc.LocationType, model.LocationTypeCity)
+	})
+}
+
+// An empty Country must be rejected, not silently stored: model.CreateLocation
+// dedupes country rows on (location_type, country_code), so an empty name
+// would create a canonical, permanently-blank row that every later lookup for
+// that country reuses forever.
+func TestSubmitProviderEgressLocationRejectsEmptyCountry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "us",
+			Country:          "   ", // blank after trimming
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc(),
+		})
+		if err == nil {
+			t.Fatal("an empty country must be rejected")
+		}
+		if model.GetProviderEgressLocation(ctx, clientId) != nil {
+			t.Fatal("rejected submission must not be stored")
+		}
+	})
+}
+
+// A city-confident submission with an empty City must be rejected rather than
+// silently falling back to country granularity: the same empty-canonical-row
+// corruption applies to city/region rows.
+func TestSubmitProviderEgressLocationRejectsEmptyCityWhenCityConfident(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "us",
+			Country:          "United States",
+			Region:           "Colorado",
+			City:             "",
+			CountryConfident: true,
+			CityConfident:    true,
+			ObservedAt:       server.NowUtc(),
+		})
+		if err == nil {
+			t.Fatal("a city-confident submission with an empty city must be rejected")
+		}
+		if model.GetProviderEgressLocation(ctx, clientId) != nil {
+			t.Fatal("rejected submission must not be stored")
+		}
+	})
+}
+
+// A city-confident submission with an empty Region must likewise be rejected:
+// the region row is created with the same dedupe-on-empty-name hazard.
+func TestSubmitProviderEgressLocationRejectsEmptyRegionWhenCityConfident(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "us",
+			Country:          "United States",
+			Region:           "",
+			City:             "Denver",
+			CountryConfident: true,
+			CityConfident:    true,
+			ObservedAt:       server.NowUtc(),
+		})
+		if err == nil {
+			t.Fatal("a city-confident submission with an empty region must be rejected")
+		}
+		if model.GetProviderEgressLocation(ctx, clientId) != nil {
+			t.Fatal("rejected submission must not be stored")
+		}
+	})
+}
+
+// An over-long Country must be rejected with a clear error instead of
+// panicking inside model.CreateLocation on a Postgres "value too long for
+// type character varying(128)" error.
+func TestSubmitProviderEgressLocationRejectsOverLongCountry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "us",
+			Country:          strings.Repeat("a", 129),
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc(),
+		})
+		if err == nil {
+			t.Fatal("an over-long country must be rejected")
+		}
+		if model.GetProviderEgressLocation(ctx, clientId) != nil {
+			t.Fatal("rejected submission must not be stored")
+		}
+	})
+}
+
+// An over-long Org must likewise be rejected rather than panicking inside
+// storage.
+func TestSubmitProviderEgressLocationRejectsOverLongOrg(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "us",
+			Country:          "United States",
+			Org:              strings.Repeat("a", 257),
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc(),
+		})
+		if err == nil {
+			t.Fatal("an over-long org must be rejected")
+		}
+		if model.GetProviderEgressLocation(ctx, clientId) != nil {
+			t.Fatal("rejected submission must not be stored")
+		}
 	})
 }
 

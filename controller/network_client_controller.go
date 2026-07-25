@@ -59,9 +59,11 @@ func SetConnectionLocation(
 ) error {
 	// a provider probed through its own egress is located from that probe, not
 	// from a lookup on its control-connection ip: the egress is where user
-	// traffic actually exits, and the probed value is cross-checked across
-	// several sources. see
-	// docs/superpowers/specs/2026-07-24-provider-egress-geolocation-design.md
+	// traffic actually exits, and an operator-run prober learns it by routing
+	// geolocation lookups through the provider itself and cross-checking them
+	// across several sources, then submits the result here. When a fresh
+	// probed entry exists we prefer it over the built-in mmdb lookup on the
+	// control ip. GetFreshProviderEgressLocationForConnection is
 	// a single query joining network_client_connection to
 	// provider_egress_location: this runs for every connection (provider or
 	// not) on the connect-announce path and inside a retry loop, so it must
@@ -84,12 +86,18 @@ func SetConnectionLocation(
 		}
 		// keep the ARIN org-vs-country foreign check on the probed path too,
 		// so a probed provider is ranked on equal terms with an equivalent
-		// unprobed one (net_type_foreign feeds the ranking columns). Compare
-		// against the probed country -- that's the country now being
-		// claimed. Any lookup failure just leaves NetTypeForeign at 0; it
-		// must never fail or panic this path.
+		// unprobed one (net_type_foreign feeds the ranking columns). Compute
+		// it exactly as the mmdb path does in GetLocationForIp: the ARIN org
+		// country of the control ip against the mmdb country of that SAME
+		// control ip -- not the probed country, which is a different
+		// question (whether probing changed the answer) and must not be
+		// silently folded into this ranking penalty. Any lookup failure
+		// just leaves NetTypeForeign at 0; it must never fail or panic this
+		// path.
 		if addr, err := netip.ParseAddr(clientIp); err == nil {
-			scores.NetTypeForeign = arinForeignScore(addr, egress.CountryCode)
+			if ipInfo, err := server.GetIpInfo(addr); err == nil {
+				scores.NetTypeForeign = arinForeignScore(addr, ipInfo.CountryCode)
+			}
 		}
 		err := model.SetConnectionLocation(ctx, connectionId, egress.LocationId, scores)
 		if err == nil {

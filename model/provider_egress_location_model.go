@@ -29,7 +29,10 @@ type ProviderEgressLocation struct {
 	UpdateTime    time.Time
 }
 
-// SetProviderEgressLocation upserts the probed location for a provider.
+// SetProviderEgressLocation upserts the probed location for a provider. The
+// upsert is monotonic in observed_at: a replayed or out-of-order submission
+// older than what is already stored is silently dropped rather than
+// clobbering a newer probe result.
 func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 	// country codes are stored/compared lowercased (see CreateLocation in
 	// network_client_location_model.go); the geolocation APIs that feed this
@@ -66,6 +69,7 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 				city_confident = $9,
 				observed_at = $10,
 				update_time = $11
+			WHERE provider_egress_location.observed_at < EXCLUDED.observed_at
 			`,
 			e.ClientId,
 			e.LocationId,
@@ -128,24 +132,6 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 	return e
 }
 
-// GetNetworkClientForConnection returns the client id for a connection, or nil.
-func GetNetworkClientForConnection(ctx context.Context, connectionId server.Id) *server.Id {
-	var clientId *server.Id
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`SELECT client_id FROM network_client_connection WHERE connection_id = $1`,
-			connectionId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&clientId))
-			}
-		})
-	})
-	return clientId
-}
-
 // GetFreshProviderEgressLocation is GetProviderEgressLocation, filtered to
 // entries probed within maxAge. The cutoff is computed in Go and bound as a
 // parameter: observed_at is a naive timestamp holding utc, and comparing it
@@ -169,10 +155,10 @@ func GetFreshProviderEgressLocation(
 // egress location for a connection in a single query, joining
 // network_client_connection to provider_egress_location on client_id. This
 // exists for the connect-announce hot path (SetConnectionLocation), which
-// previously spent two round trips per connection -- GetNetworkClientForConnection
-// then GetFreshProviderEgressLocation -- before ever reaching the mmdb
-// fallback; collapsing to one query matters on a path that runs for every
-// connection and inside a retry loop.
+// previously spent two round trips per connection -- resolving the client id
+// for the connection, then fetching its fresh egress location -- before ever
+// reaching the mmdb fallback; collapsing to one query matters on a path that
+// runs for every connection and inside a retry loop.
 //
 // As with GetFreshProviderEgressLocation, the maxAge cutoff is computed in Go
 // and compared in Go: observed_at is a naive timestamp holding utc, and

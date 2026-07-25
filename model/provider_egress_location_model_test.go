@@ -43,7 +43,9 @@ func TestProviderEgressLocationUpsertAndGet(t *testing.T) {
 		assert.Equal(t, got.Hosting, true)
 		assert.Equal(t, got.Proxy, false)
 
-		// upsert replaces
+		// upsert replaces, given a strictly newer observed_at: the upsert is
+		// monotonic (see TestProviderEgressLocationUpsertIgnoresOlderReplay below),
+		// so a second submission at the same observed_at would not win.
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId:    clientId,
 			LocationId:  country.LocationId,
@@ -51,12 +53,64 @@ func TestProviderEgressLocationUpsertAndGet(t *testing.T) {
 			ASN:         999,
 			Hosting:     false,
 			Proxy:       true,
-			ObservedAt:  now,
+			ObservedAt:  now.Add(time.Minute),
 		})
 		got = GetProviderEgressLocation(ctx, clientId)
 		assert.Equal(t, got.ASN, 999)
 		assert.Equal(t, got.Hosting, false)
 		assert.Equal(t, got.Proxy, true)
+	})
+}
+
+// The upsert is monotonic in observed_at: a replayed submission older than
+// what is already stored must not clobber the newer row.
+func TestProviderEgressLocationUpsertIgnoresOlderReplay(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		usCountry := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, usCountry)
+
+		jpCountry := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "Japan",
+			CountryCode:  "jp",
+		}
+		CreateLocation(ctx, jpCountry)
+
+		clientId := server.NewId()
+		newer := server.NowUtc()
+		older := newer.Add(-1 * time.Hour)
+
+		// the newer probe lands first
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:    clientId,
+			LocationId:  jpCountry.LocationId,
+			CountryCode: "jp",
+			ASN:         111,
+			ObservedAt:  newer,
+		})
+
+		// a stale/replayed older probe arrives afterward and must not win
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:    clientId,
+			LocationId:  usCountry.LocationId,
+			CountryCode: "us",
+			ASN:         222,
+			ObservedAt:  older,
+		})
+
+		got := GetProviderEgressLocation(ctx, clientId)
+		if got == nil {
+			t.Fatal("expected a stored egress location")
+		}
+		assert.Equal(t, got.CountryCode, "jp")
+		assert.Equal(t, got.ASN, 111)
+		assert.Equal(t, got.LocationId, jpCountry.LocationId)
 	})
 }
 

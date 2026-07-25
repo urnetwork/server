@@ -28,7 +28,7 @@ const maxProviderEgressLocationBody = 16 * 1024
 var operatorIngestSecret func() string = sync.OnceValue(readOperatorIngestSecret)
 
 // readOperatorIngestSecret reads the operator ingest secret from the vault
-// (beta-vault/vault/provider_egress.yml, key "ingest_secret"). It returns ""
+// resource "provider_egress.yml", key "ingest_secret". It returns ""
 // when the vault resource is absent, the key is absent, or the key is empty,
 // which makes the endpoint fail closed (every request is rejected) rather
 // than open. `SimpleResource`/`String` are the non-panicking lookups (unlike
@@ -50,8 +50,12 @@ func readOperatorIngestSecret() string {
 }
 
 // ProviderEgressLocationSubmit ingests a probed provider egress location from
-// the operator's prober. See
-// docs/superpowers/specs/2026-07-24-provider-egress-geolocation-design.md.
+// the operator's prober. The prober routes geolocation lookups through a
+// provider's own egress -- rather than relying on a lookup against the
+// provider's control-connection ip -- and submits the result here so the
+// server can prefer it over the built-in mmdb lookup. The route is
+// operator-to-server, authenticated by the shared secret above rather than a
+// network jwt.
 func ProviderEgressLocationSubmit(w http.ResponseWriter, r *http.Request) {
 	secret := operatorIngestSecret()
 	provided := r.Header.Get(operatorSecretHeader)
