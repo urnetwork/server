@@ -51,6 +51,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/auth/upgrade-guest-existing", handlers.UpgradeGuestExisting),
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
+		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
