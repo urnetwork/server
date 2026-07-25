@@ -55,21 +55,32 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 		connectionLocationScores.NetTypeVirtual = 1
 	}
 
-	arinInfo, err := server.GetArinInfo(addr)
-	if err == nil {
-		// if the org ownership does not match the ip country,
-		// we consider the use case of the ip to be virtual
-		foreign := false
-		for _, orgCountryCode := range arinInfo.OrgCountryCodes {
-			if orgCountryCode != ipInfo.CountryCode {
-				foreign = true
-				break
-			}
-		}
-		if foreign {
-			connectionLocationScores.NetTypeForeign = 1
-		}
-	}
+	connectionLocationScores.NetTypeForeign = arinForeignScore(addr, ipInfo.CountryCode)
 
 	return location, connectionLocationScores, nil
+}
+
+// arinForeignScore cross-checks the ARIN org registration country for addr
+// against countryCode, the country code being claimed for this connection
+// (the mmdb-resolved country on the ordinary path, or the probed egress
+// country on the provider-egress path). If the org's registered country
+// differs, the use case is considered foreign (VPN/proxy-like), matching the
+// heuristic previously inlined in GetLocationForIp.
+//
+// If the ARIN lookup fails, this returns 0 without error: it must never fail
+// or panic a caller on the connect-announce hot path over a missing/failed
+// foreign check.
+func arinForeignScore(addr netip.Addr, countryCode string) int {
+	arinInfo, err := server.GetArinInfo(addr)
+	if err != nil {
+		return 0
+	}
+	// if the org ownership does not match the claimed country,
+	// we consider the use case of the ip to be foreign
+	for _, orgCountryCode := range arinInfo.OrgCountryCodes {
+		if orgCountryCode != countryCode {
+			return 1
+		}
+	}
+	return 0
 }

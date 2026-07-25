@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"net/netip"
 	// "strings"
 	"time"
 
@@ -61,29 +62,41 @@ func SetConnectionLocation(
 	// traffic actually exits, and the probed value is cross-checked across
 	// several sources. see
 	// docs/superpowers/specs/2026-07-24-provider-egress-geolocation-design.md
-	if clientId := model.GetNetworkClientForConnection(ctx, connectionId); clientId != nil {
-		if egress := model.GetFreshProviderEgressLocation(
-			ctx,
-			*clientId,
-			model.ProviderEgressLocationMaxAge,
-		); egress != nil {
-			scores := &model.ConnectionLocationScores{}
-			if egress.Hosting {
-				scores.NetTypeHosting = 1
-			}
-			if egress.Proxy {
-				scores.NetTypePrivacy = 1
-			}
-			if egress.Mobile {
-				scores.NetTypeVirtual = 1
-			}
-			err := model.SetConnectionLocation(ctx, connectionId, egress.LocationId, scores)
-			if err == nil {
-				return nil
-			}
-			// fall through to the mmdb path on a storage error
-			glog.Infof("[ncc][%s]could not set probed egress location. err = %s\n", connectionId, err)
+	// a single query joining network_client_connection to
+	// provider_egress_location: this runs for every connection (provider or
+	// not) on the connect-announce path and inside a retry loop, so it must
+	// not cost the two round trips (client lookup, then egress lookup) the
+	// naive version would.
+	if egress := model.GetFreshProviderEgressLocationForConnection(
+		ctx,
+		connectionId,
+		model.ProviderEgressLocationMaxAge,
+	); egress != nil {
+		scores := &model.ConnectionLocationScores{}
+		if egress.Hosting {
+			scores.NetTypeHosting = 1
 		}
+		if egress.Proxy {
+			scores.NetTypePrivacy = 1
+		}
+		if egress.Mobile {
+			scores.NetTypeVirtual = 1
+		}
+		// keep the ARIN org-vs-country foreign check on the probed path too,
+		// so a probed provider is ranked on equal terms with an equivalent
+		// unprobed one (net_type_foreign feeds the ranking columns). Compare
+		// against the probed country -- that's the country now being
+		// claimed. Any lookup failure just leaves NetTypeForeign at 0; it
+		// must never fail or panic this path.
+		if addr, err := netip.ParseAddr(clientIp); err == nil {
+			scores.NetTypeForeign = arinForeignScore(addr, egress.CountryCode)
+		}
+		err := model.SetConnectionLocation(ctx, connectionId, egress.LocationId, scores)
+		if err == nil {
+			return nil
+		}
+		// fall through to the mmdb path on a storage error
+		glog.Infof("[ncc][%s]could not set probed egress location. err = %s\n", connectionId, err)
 	}
 
 	location, connectionLocationScores, err := GetLocationForIp(ctx, clientIp)

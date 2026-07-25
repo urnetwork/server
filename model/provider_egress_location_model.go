@@ -165,6 +165,74 @@ func GetFreshProviderEgressLocation(
 	return e
 }
 
+// GetFreshProviderEgressLocationForConnection resolves the probed provider
+// egress location for a connection in a single query, joining
+// network_client_connection to provider_egress_location on client_id. This
+// exists for the connect-announce hot path (SetConnectionLocation), which
+// previously spent two round trips per connection -- GetNetworkClientForConnection
+// then GetFreshProviderEgressLocation -- before ever reaching the mmdb
+// fallback; collapsing to one query matters on a path that runs for every
+// connection and inside a retry loop.
+//
+// As with GetFreshProviderEgressLocation, the maxAge cutoff is computed in Go
+// and compared in Go: observed_at is a naive timestamp holding utc, and
+// comparing it against sql now() would cast through the session timezone.
+func GetFreshProviderEgressLocationForConnection(
+	ctx context.Context,
+	connectionId server.Id,
+	maxAge time.Duration,
+) *ProviderEgressLocation {
+	var e *ProviderEgressLocation
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				pel.client_id,
+				pel.location_id,
+				pel.country_code,
+				pel.asn,
+				pel.org,
+				pel.hosting,
+				pel.proxy,
+				pel.mobile,
+				pel.city_confident,
+				pel.observed_at,
+				pel.update_time
+			FROM network_client_connection ncc
+			INNER JOIN provider_egress_location pel ON pel.client_id = ncc.client_id
+			WHERE ncc.connection_id = $1
+			`,
+			connectionId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				e = &ProviderEgressLocation{}
+				server.Raise(result.Scan(
+					&e.ClientId,
+					&e.LocationId,
+					&e.CountryCode,
+					&e.ASN,
+					&e.Org,
+					&e.Hosting,
+					&e.Proxy,
+					&e.Mobile,
+					&e.CityConfident,
+					&e.ObservedAt,
+					&e.UpdateTime,
+				))
+			}
+		})
+	})
+	if e == nil {
+		return nil
+	}
+	if e.ObservedAt.Before(server.NowUtc().Add(-maxAge)) {
+		return nil
+	}
+	return e
+}
+
 // GetLocation returns the canonical location row, or nil.
 //
 // Note: the location table also has a location_name column, but it holds the
