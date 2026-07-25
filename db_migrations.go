@@ -4385,4 +4385,30 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS network_client_top_level_contract_time
         ON network_client (contract_time) WHERE (active = true AND source_client_id IS NULL AND contract_time IS NOT NULL)
     `),
+
+	// provider egress locations: locations learned by probing a provider's own
+	// egress (see docs/superpowers/specs/2026-07-24-provider-egress-geolocation-design.md).
+	// Keyed by client_id, one row per provider, upserted by the operator's
+	// prober. location_id is the canonical country (or city, when the probe was
+	// city-confident) location row. observed_at is when the probe ran, and is
+	// what freshness is judged against.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_egress_location (
+            client_id      uuid NOT NULL PRIMARY KEY,
+            location_id    uuid NOT NULL,
+            country_code   varchar(2) NOT NULL,
+            asn            int NOT NULL DEFAULT 0,
+            org            varchar(256) NOT NULL DEFAULT '',
+            hosting        bool NOT NULL DEFAULT false,
+            proxy          bool NOT NULL DEFAULT false,
+            mobile         bool NOT NULL DEFAULT false,
+            city_confident bool NOT NULL DEFAULT false,
+            observed_at    timestamp NOT NULL,
+            update_time    timestamp NOT NULL
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_egress_location_observed_at
+            ON provider_egress_location (observed_at)
+    `),
 }
