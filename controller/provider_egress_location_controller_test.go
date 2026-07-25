@@ -42,6 +42,20 @@ func TestSubmitProviderEgressLocationCountryOnly(t *testing.T) {
 		assert.Equal(t, stored.ASN, 401486)
 		assert.Equal(t, stored.Hosting, true)
 		assert.Equal(t, stored.CityConfident, false)
+
+		// the resolved location must be the country-granular row, with no
+		// city/region association
+		loc := model.GetLocation(ctx, stored.LocationId)
+		if loc == nil {
+			t.Fatal("expected the resolved location row to exist")
+		}
+		assert.Equal(t, loc.LocationType, model.LocationTypeCountry)
+		if loc.CityLocationId != (server.Id{}) {
+			t.Fatal("a country-granularity row must not have a city association")
+		}
+		if loc.RegionLocationId != (server.Id{}) {
+			t.Fatal("a country-granularity row must not have a region association")
+		}
 	})
 }
 
