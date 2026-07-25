@@ -61,11 +61,14 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 }
 
 // arinForeignScore cross-checks the ARIN org registration country for addr
-// against countryCode, the country code being claimed for this connection
-// (the mmdb-resolved country on the ordinary path, or the probed egress
-// country on the provider-egress path). If the org's registered country
-// differs, the use case is considered foreign (VPN/proxy-like), matching the
-// heuristic previously inlined in GetLocationForIp.
+// against countryCode. Both the ordinary path (GetLocationForIp) and the
+// provider-egress path (SetConnectionLocation, in network_client_controller.go) pass the
+// mmdb-resolved country of addr here, not the probed egress country: this is
+// deliberate parity, so a probed and an unprobed provider on the same
+// control ip are scored on the same basis and probing does not, by itself,
+// change this ranking signal. If the org's registered country differs, the
+// use case is considered foreign (VPN/proxy-like), matching the heuristic
+// previously inlined in GetLocationForIp.
 //
 // If the ARIN lookup fails, this returns 0 without error: it must never fail
 // or panic a caller on the connect-announce hot path over a missing/failed

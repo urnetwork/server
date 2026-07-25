@@ -1242,9 +1242,9 @@ func SetConnectionLocation(
 			}
 		})
 
-		// fix(beta): the free-tier ipinfo geo db resolves many IPs --
-		// datacenter, mobile, and VPN egress especially -- to country or
-		// region granularity only, with no city. network_client_location
+		// geo databases vary in how deep their coverage goes: many IPs --
+		// datacenter, mobile, and VPN egress especially -- only resolve to
+		// country or region granularity, with no city. network_client_location
 		// requires city_location_id and region_location_id NOT NULL, so a
 		// country-only location's NULL city/region made this INSERT panic
 		// inside server.Tx. That panic propagated out of the connection

@@ -4400,7 +4400,7 @@ var migrations = []any{
             client_id      uuid NOT NULL PRIMARY KEY,
             location_id    uuid NOT NULL,
             country_code   varchar(2) NOT NULL,
-            asn            int NOT NULL DEFAULT 0,
+            asn            bigint NOT NULL DEFAULT 0,
             org            varchar(256) NOT NULL DEFAULT '',
             hosting        bool NOT NULL DEFAULT false,
             proxy          bool NOT NULL DEFAULT false,

@@ -292,3 +292,98 @@ func TestSubmitProviderEgressLocationRejectsStaleObservedAt(t *testing.T) {
 		}
 	})
 }
+
+// A far-future observed_at must be rejected, not just an old one: unchecked,
+// it would defeat the monotonic upsert (it always "wins"), read as fresh
+// forever, and outlive the taskworker sweep -- permanently pinning a
+// provider's location with no API-side recovery. See
+// MaxProviderEgressLocationSubmissionSkew.
+func TestSubmitProviderEgressLocationRejectsFutureObservedAt(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "jp",
+			Country:          "Japan",
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc().Add(10 * 365 * 24 * time.Hour),
+		})
+		if err == nil {
+			t.Fatal("a far-future observed_at must be rejected")
+		}
+		if model.GetProviderEgressLocation(ctx, clientId) != nil {
+			t.Fatal("rejected submission must not be stored")
+		}
+	})
+}
+
+// A submission within the allowed clock-skew window must still be accepted:
+// the future-timestamp rejection must not be so strict that ordinary clock
+// drift between the prober and server breaks legitimate submissions.
+func TestSubmitProviderEgressLocationAcceptsWithinSkewObservedAt(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		res, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "us",
+			Country:          "United States",
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc().Add(1 * time.Minute),
+		})
+		connect.AssertEqual(t, err, nil)
+		if res.LocationId == (server.Id{}) {
+			t.Fatal("expected a resolved location id")
+		}
+
+		stored := model.GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected the submission to be stored")
+		}
+	})
+}
+
+// A large 32-bit ASN (e.g. from the private-use range, common on
+// hosting/VPN infrastructure) must round-trip cleanly, not panic. The asn
+// column used to be `int` (Postgres int4, max ~2.147e9); ASNs are 32-bit
+// unsigned (max ~4.295e9), so a value above int4's range panicked deep in
+// pgx's arg encoding.
+func TestSubmitProviderEgressLocationAcceptsLargeAsn(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		const largeAsn = 4200000000
+
+		res, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "us",
+			Country:          "United States",
+			ASN:              largeAsn,
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc(),
+		})
+		connect.AssertEqual(t, err, nil)
+		if res.LocationId == (server.Id{}) {
+			t.Fatal("expected a resolved location id")
+		}
+
+		stored := model.GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected the submission to be stored")
+		}
+		connect.AssertEqual(t, stored.ASN, largeAsn)
+	})
+}

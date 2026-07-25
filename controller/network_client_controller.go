@@ -81,9 +81,17 @@ func SetConnectionLocation(
 		if egress.Proxy {
 			scores.NetTypePrivacy = 1
 		}
-		if egress.Mobile {
-			scores.NetTypeVirtual = 1
-		}
+		// egress.Mobile deliberately does NOT feed NetTypeVirtual: unlike
+		// Hosting/Proxy, Mobile has no mmdb-path equivalent (IpInfo has no
+		// Mobile concept; NetTypeVirtual is set from the ipinfo schema's
+		// is_satellite field only, see GetLocationForIp, and never from
+		// DB-IP). Deriving NetTypeVirtual from Mobile here would penalize a
+		// probed mobile provider's ranking with no equivalent penalty for an
+		// otherwise-identical unprobed one -- the opposite of the parity
+		// this feature is meant to preserve (see arinForeignScore's doc for
+		// the same parity reasoning applied to net_type_foreign). Mobile
+		// stays on the model/wire contract as metadata; it just does not
+		// feed the ranking score.
 		// keep the ARIN org-vs-country foreign check on the probed path too,
 		// so a probed provider is ranked on equal terms with an equivalent
 		// unprobed one (net_type_foreign feeds the ranking columns). Compute

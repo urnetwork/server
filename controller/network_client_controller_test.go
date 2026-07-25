@@ -273,7 +273,14 @@ func TestSetConnectionLocationProbedNetTypeForeignMatchesMmdbParity(t *testing.T
 }
 
 // A fresh probed location's Hosting/Proxy flags must map onto the stored
-// connection's net_type_hosting/net_type_privacy scores.
+// connection's net_type_hosting/net_type_privacy scores. Mobile must NOT map
+// onto net_type_virtual: Hosting/Proxy have direct mmdb-path equivalents
+// (ipInfo.Hosting/ipInfo.Privacy, see GetLocationForIp), but Mobile has none
+// (IpInfo has no Mobile concept at all, and NetTypeVirtual is only ever set
+// from the ipinfo schema's is_satellite field, never from DB-IP or from
+// anything Mobile-shaped) -- deriving NetTypeVirtual from Mobile would give
+// a probed mobile provider a ranking penalty an identical unprobed mobile
+// provider never takes, breaking the parity this feature promises.
 func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -299,6 +306,7 @@ func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 			CountryCode: "jp",
 			Hosting:     true,
 			Proxy:       true,
+			Mobile:      true,
 			ObservedAt:  server.NowUtc(),
 		})
 
@@ -307,19 +315,21 @@ func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 
 		var netTypeHosting int
 		var netTypePrivacy int
+		var netTypeVirtual int
 		server.Db(ctx, func(conn server.PgConn) {
 			result, qerr := conn.Query(
 				ctx,
-				`SELECT net_type_hosting, net_type_privacy FROM network_client_location WHERE connection_id = $1`,
+				`SELECT net_type_hosting, net_type_privacy, net_type_virtual FROM network_client_location WHERE connection_id = $1`,
 				connectionId,
 			)
 			server.WithPgResult(result, qerr, func() {
 				if result.Next() {
-					server.Raise(result.Scan(&netTypeHosting, &netTypePrivacy))
+					server.Raise(result.Scan(&netTypeHosting, &netTypePrivacy, &netTypeVirtual))
 				}
 			})
 		})
 		connect.AssertEqual(t, netTypeHosting, 1)
 		connect.AssertEqual(t, netTypePrivacy, 1)
+		connect.AssertEqual(t, netTypeVirtual, 0)
 	})
 }

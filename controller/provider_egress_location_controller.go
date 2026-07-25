@@ -14,6 +14,19 @@ import (
 // already older than this when it arrives. It bounds replay of an old probe.
 const MaxProviderEgressLocationSubmissionAge = 24 * time.Hour
 
+// MaxProviderEgressLocationSubmissionSkew rejects a submission whose
+// observed_at is further in the future than this. The prober and server
+// clocks should be roughly in sync, so a few minutes of allowance covers
+// ordinary clock drift without opening the door to a far-future timestamp.
+// Without this bound, a future observed_at would defeat every other
+// safeguard at once: it always wins the monotonic upsert in
+// model.SetProviderEgressLocation (so no later, legitimate probe can ever
+// overwrite it), it reads as "fresh" forever against
+// ProviderEgressLocationMaxAge, and it outlives the taskworker sweep in
+// RemoveExpiredProviderEgressLocations -- permanently pinning a provider to
+// whatever location was submitted, with no API-side recovery.
+const MaxProviderEgressLocationSubmissionSkew = 5 * time.Minute
+
 // maxLocationNameLen bounds country/city/region as submitted: these flow into
 // model.CreateLocation, whose location_name column is varchar(128). Rejecting
 // an over-long value here with a clear error is preferable to letting
@@ -65,6 +78,9 @@ func SubmitProviderEgressLocation(
 	}
 	if args.ObservedAt.Before(server.NowUtc().Add(-MaxProviderEgressLocationSubmissionAge)) {
 		return nil, fmt.Errorf("Submission is too old.")
+	}
+	if server.NowUtc().Add(MaxProviderEgressLocationSubmissionSkew).Before(args.ObservedAt) {
+		return nil, fmt.Errorf("Submission is too far in the future.")
 	}
 	if networkId := model.GetNetworkClientNetwork(ctx, args.ClientId); networkId == nil {
 		return nil, fmt.Errorf("Unknown client.")
