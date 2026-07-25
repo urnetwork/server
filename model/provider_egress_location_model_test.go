@@ -60,6 +60,38 @@ func TestProviderEgressLocationUpsertAndGet(t *testing.T) {
 	})
 }
 
+func TestProviderEgressLocationCountryCodeLowercased(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		country := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, country)
+
+		clientId := server.NewId()
+		// geolocation APIs return uppercase codes (e.g. "US"); the model must
+		// normalize to lowercase before storing, matching CreateLocation's
+		// established invariant that country codes are stored/compared lowercased.
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:    clientId,
+			LocationId:  country.LocationId,
+			CountryCode: "US",
+			ASN:         12345,
+			Org:         "TEST ORG",
+			ObservedAt:  server.NowUtc(),
+		})
+
+		got := GetProviderEgressLocation(ctx, clientId)
+		if got == nil {
+			t.Fatal("expected a stored egress location")
+		}
+		assert.Equal(t, got.CountryCode, "us")
+	})
+}
+
 func TestProviderEgressLocationFreshness(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

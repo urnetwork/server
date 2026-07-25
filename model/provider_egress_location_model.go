@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -30,6 +31,11 @@ type ProviderEgressLocation struct {
 
 // SetProviderEgressLocation upserts the probed location for a provider.
 func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
+	// country codes are stored/compared lowercased (see CreateLocation in
+	// network_client_location_model.go); the geolocation APIs that feed this
+	// return uppercase codes (e.g. "US"), so normalize before writing.
+	countryCode := strings.ToLower(e.CountryCode)
+
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -63,7 +69,7 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 			`,
 			e.ClientId,
 			e.LocationId,
-			e.CountryCode,
+			countryCode,
 			e.ASN,
 			e.Org,
 			e.Hosting,
