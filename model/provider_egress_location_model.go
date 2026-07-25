@@ -147,6 +147,61 @@ func GetFreshProviderEgressLocation(
 	return e
 }
 
+// GetLocation returns the canonical location row, or nil.
+//
+// Note: the location table also has a location_name column, but it holds the
+// name for whichever granularity that specific row represents (e.g. a city
+// row's own name), not a single name field on the Location struct. Location
+// instead splits City/Region/Country by joining sibling rows (see
+// IndexSearchLocationsInTx in network_client_location_model.go). This helper
+// only needs to resolve identity/type, so it selects the columns that map
+// directly onto Location's fields and leaves City/Region/Country empty.
+func GetLocation(ctx context.Context, locationId server.Id) *Location {
+	var loc *Location
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT location_id, location_type, city_location_id, region_location_id, country_location_id, country_code
+			FROM location
+			WHERE location_id = $1
+			`,
+			locationId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				loc = &Location{}
+				// city_location_id/region_location_id are only set once the
+				// row's hierarchy reaches that granularity (e.g. a country
+				// row has both NULL); server.Id.Scan errors on a nil source,
+				// so scan through nullable pointers as in
+				// IndexSearchLocationsInTx (network_client_location_model.go).
+				var cityLocationId *server.Id
+				var regionLocationId *server.Id
+				var countryLocationId *server.Id
+				server.Raise(result.Scan(
+					&loc.LocationId,
+					&loc.LocationType,
+					&cityLocationId,
+					&regionLocationId,
+					&countryLocationId,
+					&loc.CountryCode,
+				))
+				if cityLocationId != nil {
+					loc.CityLocationId = *cityLocationId
+				}
+				if regionLocationId != nil {
+					loc.RegionLocationId = *regionLocationId
+				}
+				if countryLocationId != nil {
+					loc.CountryLocationId = *countryLocationId
+				}
+			}
+		})
+	})
+	return loc
+}
+
 // RemoveExpiredProviderEgressLocations drops entries probed before
 // minObservedAt.
 func RemoveExpiredProviderEgressLocations(ctx context.Context, minObservedAt time.Time) {
