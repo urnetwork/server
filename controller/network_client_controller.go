@@ -56,6 +56,36 @@ func SetConnectionLocation(
 	connectionId server.Id,
 	clientIp string,
 ) error {
+	// a provider probed through its own egress is located from that probe, not
+	// from a lookup on its control-connection ip: the egress is where user
+	// traffic actually exits, and the probed value is cross-checked across
+	// several sources. see
+	// docs/superpowers/specs/2026-07-24-provider-egress-geolocation-design.md
+	if clientId := model.GetNetworkClientForConnection(ctx, connectionId); clientId != nil {
+		if egress := model.GetFreshProviderEgressLocation(
+			ctx,
+			*clientId,
+			model.ProviderEgressLocationMaxAge,
+		); egress != nil {
+			scores := &model.ConnectionLocationScores{}
+			if egress.Hosting {
+				scores.NetTypeHosting = 1
+			}
+			if egress.Proxy {
+				scores.NetTypePrivacy = 1
+			}
+			if egress.Mobile {
+				scores.NetTypeVirtual = 1
+			}
+			err := model.SetConnectionLocation(ctx, connectionId, egress.LocationId, scores)
+			if err == nil {
+				return nil
+			}
+			// fall through to the mmdb path on a storage error
+			glog.Infof("[ncc][%s]could not set probed egress location. err = %s\n", connectionId, err)
+		}
+	}
+
 	location, connectionLocationScores, err := GetLocationForIp(ctx, clientIp)
 	if err != nil {
 		// server.Logger().Printf("Get ip for location error: %s", err)

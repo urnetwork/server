@@ -128,6 +128,24 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 	return e
 }
 
+// GetNetworkClientForConnection returns the client id for a connection, or nil.
+func GetNetworkClientForConnection(ctx context.Context, connectionId server.Id) *server.Id {
+	var clientId *server.Id
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT client_id FROM network_client_connection WHERE connection_id = $1`,
+			connectionId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&clientId))
+			}
+		})
+	})
+	return clientId
+}
+
 // GetFreshProviderEgressLocation is GetProviderEgressLocation, filtered to
 // entries probed within maxAge. The cutoff is computed in Go and bound as a
 // parameter: observed_at is a naive timestamp holding utc, and comparing it
