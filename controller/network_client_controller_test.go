@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
-
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -31,7 +30,7 @@ func TestSetConnectionLocationPrefersEgressLocation(t *testing.T) {
 
 		handlerId := model.CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, "8.8.8.8:0", handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
 			ClientId:    clientId,
@@ -41,7 +40,7 @@ func TestSetConnectionLocationPrefersEgressLocation(t *testing.T) {
 		})
 
 		err = SetConnectionLocation(ctx, connectionId, "8.8.8.8")
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		var countryLocationId server.Id
 		server.Db(ctx, func(conn server.PgConn) {
@@ -56,7 +55,7 @@ func TestSetConnectionLocationPrefersEgressLocation(t *testing.T) {
 				}
 			})
 		})
-		assert.Equal(t, countryLocationId, probed.CountryLocationId)
+		connect.AssertEqual(t, countryLocationId, probed.CountryLocationId)
 	})
 }
 
@@ -71,11 +70,11 @@ func TestSetConnectionLocationFallsBackToMmdb(t *testing.T) {
 
 		handlerId := model.CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, "8.8.8.8:0", handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// no SetProviderEgressLocation call -> mmdb path
 		err = SetConnectionLocation(ctx, connectionId, "8.8.8.8")
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		var count int
 		server.Db(ctx, func(conn server.PgConn) {
@@ -90,7 +89,7 @@ func TestSetConnectionLocationFallsBackToMmdb(t *testing.T) {
 				}
 			})
 		})
-		assert.Equal(t, count, 1)
+		connect.AssertEqual(t, count, 1)
 	})
 }
 
@@ -106,7 +105,7 @@ func TestSetConnectionLocationStaleProbedFallsBackToMmdb(t *testing.T) {
 		// the mmdb location this ip actually resolves to; created up front so
 		// its canonical (deduped) location id is known for the assertion.
 		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		model.CreateLocation(ctx, mmdbLocation)
 
 		// a stale probed location, deliberately a different country than
@@ -125,7 +124,7 @@ func TestSetConnectionLocationStaleProbedFallsBackToMmdb(t *testing.T) {
 
 		handlerId := model.CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
 			ClientId:    clientId,
@@ -135,7 +134,7 @@ func TestSetConnectionLocationStaleProbedFallsBackToMmdb(t *testing.T) {
 		})
 
 		err = SetConnectionLocation(ctx, connectionId, clientIp)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		var countryLocationId server.Id
 		server.Db(ctx, func(conn server.PgConn) {
@@ -150,7 +149,7 @@ func TestSetConnectionLocationStaleProbedFallsBackToMmdb(t *testing.T) {
 				}
 			})
 		})
-		assert.Equal(t, countryLocationId, mmdbLocation.CountryLocationId)
+		connect.AssertEqual(t, countryLocationId, mmdbLocation.CountryLocationId)
 		if countryLocationId == probed.CountryLocationId {
 			t.Fatal("stale probed location must not be used")
 		}
@@ -169,7 +168,7 @@ func TestSetConnectionLocationProbedWriteErrorFallsBackToMmdb(t *testing.T) {
 		clientIp := "8.8.8.8"
 
 		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		model.CreateLocation(ctx, mmdbLocation)
 
 		networkId := server.NewId()
@@ -178,7 +177,7 @@ func TestSetConnectionLocationProbedWriteErrorFallsBackToMmdb(t *testing.T) {
 
 		handlerId := model.CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// a fresh probed entry pointing at a location id that was never
 		// created via CreateLocation -- the storage write in
@@ -191,7 +190,7 @@ func TestSetConnectionLocationProbedWriteErrorFallsBackToMmdb(t *testing.T) {
 		})
 
 		err = SetConnectionLocation(ctx, connectionId, clientIp)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		var countryLocationId server.Id
 		server.Db(ctx, func(conn server.PgConn) {
@@ -206,7 +205,7 @@ func TestSetConnectionLocationProbedWriteErrorFallsBackToMmdb(t *testing.T) {
 				}
 			})
 		})
-		assert.Equal(t, countryLocationId, mmdbLocation.CountryLocationId)
+		connect.AssertEqual(t, countryLocationId, mmdbLocation.CountryLocationId)
 	})
 }
 
@@ -242,7 +241,7 @@ func TestSetConnectionLocationProbedNetTypeForeignMatchesMmdbParity(t *testing.T
 
 		handlerId := model.CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		// probed country ("jp") deliberately differs from the control ip's
 		// mmdb country ("us" for 8.8.8.8).
@@ -254,7 +253,7 @@ func TestSetConnectionLocationProbedNetTypeForeignMatchesMmdbParity(t *testing.T
 		})
 
 		err = SetConnectionLocation(ctx, connectionId, clientIp)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		var netTypeForeign int
 		server.Db(ctx, func(conn server.PgConn) {
@@ -269,7 +268,7 @@ func TestSetConnectionLocationProbedNetTypeForeignMatchesMmdbParity(t *testing.T
 				}
 			})
 		})
-		assert.Equal(t, netTypeForeign, 0)
+		connect.AssertEqual(t, netTypeForeign, 0)
 	})
 }
 
@@ -292,7 +291,7 @@ func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 
 		handlerId := model.CreateNetworkClientHandler(ctx)
 		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, "8.8.8.8:0", handlerId)
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
 			ClientId:    clientId,
@@ -304,7 +303,7 @@ func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 		})
 
 		err = SetConnectionLocation(ctx, connectionId, "8.8.8.8")
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		var netTypeHosting int
 		var netTypePrivacy int
@@ -320,7 +319,7 @@ func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 				}
 			})
 		})
-		assert.Equal(t, netTypeHosting, 1)
-		assert.Equal(t, netTypePrivacy, 1)
+		connect.AssertEqual(t, netTypeHosting, 1)
+		connect.AssertEqual(t, netTypePrivacy, 1)
 	})
 }

@@ -6,8 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-playground/assert/v2"
-
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -30,7 +29,7 @@ func TestSubmitProviderEgressLocationCountryOnly(t *testing.T) {
 			CountryConfident: true,
 			ObservedAt:       server.NowUtc(),
 		})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 		if res.LocationId == (server.Id{}) {
 			t.Fatal("expected a resolved location id")
 		}
@@ -39,10 +38,10 @@ func TestSubmitProviderEgressLocationCountryOnly(t *testing.T) {
 		if stored == nil {
 			t.Fatal("expected the submission to be stored")
 		}
-		assert.Equal(t, stored.CountryCode, "us")
-		assert.Equal(t, stored.ASN, 401486)
-		assert.Equal(t, stored.Hosting, true)
-		assert.Equal(t, stored.CityConfident, false)
+		connect.AssertEqual(t, stored.CountryCode, "us")
+		connect.AssertEqual(t, stored.ASN, 401486)
+		connect.AssertEqual(t, stored.Hosting, true)
+		connect.AssertEqual(t, stored.CityConfident, false)
 
 		// the resolved location must be the country-granular row, with no
 		// city/region association
@@ -50,7 +49,7 @@ func TestSubmitProviderEgressLocationCountryOnly(t *testing.T) {
 		if loc == nil {
 			t.Fatal("expected the resolved location row to exist")
 		}
-		assert.Equal(t, loc.LocationType, model.LocationTypeCountry)
+		connect.AssertEqual(t, loc.LocationType, model.LocationTypeCountry)
 		if loc.CityLocationId != (server.Id{}) {
 			t.Fatal("a country-granularity row must not have a city association")
 		}
@@ -116,20 +115,20 @@ func TestSubmitProviderEgressLocationCityConfidentStoresCity(t *testing.T) {
 			CityConfident:    true,
 			ObservedAt:       server.NowUtc(),
 		})
-		assert.Equal(t, err, nil)
+		connect.AssertEqual(t, err, nil)
 
 		stored := model.GetProviderEgressLocation(ctx, clientId)
 		if stored == nil {
 			t.Fatal("expected the submission to be stored")
 		}
-		assert.Equal(t, stored.CityConfident, true)
+		connect.AssertEqual(t, stored.CityConfident, true)
 
 		// the resolved location must be the city-granular row
 		loc := model.GetLocation(ctx, stored.LocationId)
 		if loc == nil {
 			t.Fatal("expected the resolved location row to exist")
 		}
-		assert.Equal(t, loc.LocationType, model.LocationTypeCity)
+		connect.AssertEqual(t, loc.LocationType, model.LocationTypeCity)
 	})
 }
 
