@@ -1476,8 +1476,20 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
-	        	network_client_location_reliability.valid = true
+	        	network_client_location_reliability.valid = true AND
+	        	-- a provider that does not hold a Public provide key cannot
+	        	-- accept a contract from a client outside its own network, so
+	        	-- counting it advertises supply nobody can reach. GetProvideRelationship
+	        	-- returns ProvideModePublic for cross-network pairs, and the
+	        	-- destination must hold a key for exactly that mode.
+	        	EXISTS (
+	        		SELECT 1 FROM provide_key
+	        		WHERE
+	        			provide_key.client_id = network_client_location_reliability.client_id AND
+	        			provide_key.provide_mode = $1
+	        	)
 	        `,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -2407,8 +2419,23 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
-	        	network_client_location_reliability.valid = true
+	        	network_client_location_reliability.valid = true AND
+	        	-- a provider that does not hold a Public provide key cannot
+	        	-- accept a contract from a client outside its own network, so
+	        	-- counting it advertises supply nobody can reach. GetProvideRelationship
+	        	-- returns ProvideModePublic for cross-network pairs, and the
+	        	-- destination must hold a key for exactly that mode.
+	        	-- GetProviderLocations gates on loadLocationStables, populated
+	        	-- from here, so filtering UpdateClientLocations alone would
+	        	-- leave the symptom in place.
+	        	EXISTS (
+	        		SELECT 1 FROM provide_key
+	        		WHERE
+	        			provide_key.client_id = network_client_location_reliability.client_id AND
+	        			provide_key.provide_mode = $1
+	        	)
 	        `,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

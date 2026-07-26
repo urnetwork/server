@@ -1198,3 +1198,96 @@ func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
 		connect.AssertEqual(t, len(res.Providers), n)
 	})
 }
+
+func TestUpdateClientLocationsCountsOnlyPublicProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		handlerId := CreateNetworkClientHandler(ctx)
+
+		// connect a client and give it the provide modes supplied
+		connectOne := func(i int, modes map[ProvideMode][]byte) server.Id {
+			networkId := server.NewId()
+			clientId := server.NewId()
+			clientSession := session.Testing_CreateClientSession(
+				ctx,
+				jwt.NewByJwt(networkId, server.NewId(), fmt.Sprintf("network%d", i), false, false),
+			)
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, fmt.Sprintf("0.0.0.%d:0", i), handlerId)
+			connect.AssertEqual(t, err, nil)
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			connect.AssertEqual(t, err, nil)
+			if modes != nil {
+				SetProvide(ctx, clientId, modes)
+			}
+			// UpdateClientLocations joins client_connection_reliability_score,
+			// so every client needs a score row -- otherwise the join, not the
+			// provide-mode filter, is what excludes it
+			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+			connect.AssertEqual(t, err, nil)
+			AddClientReliabilityStats(
+				ctx,
+				networkId,
+				clientId,
+				clientAddressHash,
+				server.NowUtc(),
+				&ClientReliabilityStats{
+					ConnectionEstablishedCount: 1,
+					ProvideEnabledCount:        1,
+					ReceiveMessageCount:        1,
+					ReceiveByteCount:           1024,
+					SendMessageCount:           1,
+					SendByteCount:              1024,
+				},
+			)
+			return clientId
+		}
+
+		// serves strangers -- must be counted
+		connectOne(1, map[ProvideMode][]byte{
+			ProvideModePublic:  []byte("public-secret"),
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+		// own network only -- must NOT be counted, it cannot accept a
+		// contract from a user outside its network
+		connectOne(2, map[ProvideMode][]byte{
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+		// no provide key at all -- must NOT be counted
+		connectOne(3, nil)
+
+		UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+
+		err := UpdateClientLocations(ctx, time.Hour)
+		connect.AssertEqual(t, err, nil)
+
+		initialClientLocations, err := loadInitialClientLocations(ctx)
+		connect.AssertEqual(t, err, nil)
+		if initialClientLocations == nil {
+			t.Fatal("expected a populated client locations cache, got nil")
+		}
+
+		found := false
+		for _, clientLocation := range initialClientLocations.Locations {
+			if clientLocation.LocationId == city.CountryLocationId {
+				found = true
+				// exactly one of the three connected clients holds a Public
+				// key; counting the other two advertises supply no user can
+				// reach (39 advertised vs 2 reachable, observed on beta)
+				connect.AssertEqual(t, clientLocation.ClientCount, 1)
+			}
+		}
+		connect.AssertEqual(t, found, true)
+	})
+}
