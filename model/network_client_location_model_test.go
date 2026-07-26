@@ -705,6 +705,7 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 		locationStables, err := loadLocationStables(
 			ctx,
 			[]server.Id{city.LocationId, city.RegionLocationId, city.CountryLocationId},
+			false,
 			RankModeQuality,
 			usLocationId,
 		)
@@ -1196,5 +1197,102 @@ func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
 		}, callerSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(res.Providers), n)
+	})
+}
+
+// the prober enumerates locations through `GET /network/provider-locations` ->
+// `GetProviderLocations` -> `loadLocationStables`, and only then asks
+// `find-providers2` for the providers at each one. `force_minimum` on that
+// second call cannot recover a location the first call never listed, and the
+// read side hardcoded the `forceMinimum=false` filter key -- so a location
+// whose every provider fails the minimums gate was invisible, and those
+// providers could never be probed and so could never graduate probation.
+//
+// One connected+valid Public provider with no latency or speed samples, which
+// deterministically fails the strict minimums. The writer populates both key
+// families, so the same location must be absent under `forceMinimum=false`
+// (today's user-facing behaviour, unchanged) and present under `true`.
+func TestLoadLocationStablesHonoursForceMinimum(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		clientSession := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkId, userId, "a", false, false),
+		)
+
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "0.0.0.1:0", handlerId)
+		connect.AssertEqual(t, err, nil)
+
+		err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		connect.AssertEqual(t, err, nil)
+
+		// a provider a stranger can actually use, so the provide-mode filter is
+		// not what excludes it
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic:  []byte("public-secret"),
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+
+		// a lookback_index = 0 reliability score row, so the source query's join
+		// against `client_connection_reliability_score` is not what excludes it
+		// either. deliberately no `network_client_latency` / `network_client_speed`
+		// rows: the missing latency and speed tests are the only reason this
+		// provider fails the minimums.
+		clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+		connect.AssertEqual(t, err, nil)
+		AddClientReliabilityStats(
+			ctx,
+			networkId,
+			clientId,
+			clientAddressHash,
+			server.NowUtc(),
+			&ClientReliabilityStats{
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			},
+		)
+		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+
+		UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+
+		err = UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		locationIds := []server.Id{city.CountryLocationId}
+
+		// user-facing listing: the provider is below the bar, so the location
+		// has no entry at all -- a missing entry is how loadLocationStables says
+		// "no providers"
+		strict, err := loadLocationStables(ctx, locationIds, false, RankModeQuality, server.Id{})
+		connect.AssertEqual(t, err, nil)
+		_, ok := strict[city.CountryLocationId]
+		connect.AssertEqual(t, ok, false)
+
+		// operator census: the same location must be listed, otherwise its
+		// providers can never be reached
+		forced, err := loadLocationStables(ctx, locationIds, true, RankModeQuality, server.Id{})
+		connect.AssertEqual(t, err, nil)
+		_, ok = forced[city.CountryLocationId]
+		connect.AssertEqual(t, ok, true)
 	})
 }
