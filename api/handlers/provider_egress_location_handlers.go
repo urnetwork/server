@@ -94,6 +94,59 @@ func ProviderEgressLocationSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ProviderEgressLocationAttempt records that the operator's prober tried to
+// probe a provider, whether or not the try produced a location.
+//
+// The prober reports a *failure* here; a success is reported by
+// ProviderEgressLocationSubmit above, whose provider_egress_location row
+// already defers the provider for the full staleness window. Reporting a
+// success here as well is harmless -- the attempt backoff is far shorter than
+// that window -- but redundant.
+//
+// This exists because ProviderEgressLocationDue would otherwise be starved by
+// providers that can never be probed successfully: they never get an egress
+// row, so they sort to the head of the queue on every poll forever. See
+// model.GetProviderEgressLocationDue.
+//
+// Same auth as the two endpoints around it: operator-to-server, the shared
+// secret header rather than a network jwt, fail-closed when the vault resource
+// is missing.
+func ProviderEgressLocationAttempt(w http.ResponseWriter, r *http.Request) {
+	secret := operatorIngestSecret()
+	provided := r.Header.Get(operatorSecretHeader)
+	if secret == "" || provided == "" || !hmac.Equal([]byte(secret), []byte(provided)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxProviderEgressLocationBody+1))
+	if err != nil {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxProviderEgressLocationBody {
+		http.Error(w, "Request too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	var args controller.RecordProviderEgressProbeAttemptArgs
+	if err := json.Unmarshal(body, &args); err != nil {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	result, err := controller.RecordProviderEgressProbeAttempt(r.Context(), &args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		glog.Infof("[pegl]could not write response. err = %s\n", err)
+	}
+}
+
 const (
 	// defaultProviderEgressDueLimit is the batch size when the caller does not
 	// ask for one.
@@ -129,6 +182,12 @@ type ProviderEgressLocationDueResult struct {
 // actually due; observed_at already carries that information server-side, and
 // this exposes it.
 //
+// A provider is skipped if it has a fresh success *or* a recent attempt. The
+// second cutoff, ProviderEgressProbeAttemptBackoff, is much shorter than the
+// first: a provider that failed to probe should be retried within hours, but
+// must not be handed back on every poll, which is what would starve the rest of
+// the queue (see ProviderEgressLocationAttempt above).
+//
 // Same auth as ProviderEgressLocationSubmit above: operator-to-server, the
 // shared secret header rather than a network jwt, fail-closed when the vault
 // resource is missing.
@@ -152,13 +211,15 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 		limit = min(parsed, maxProviderEgressDueLimit)
 	}
 
-	// the cutoff is computed here and passed as an argument; observed_at is a
-	// naive timestamp holding utc, so comparing it to sql now() in the query
-	// would cast through the session timezone
-	minObservedAt := server.NowUtc().Add(-providerEgressDueAge)
+	// both cutoffs are computed here and passed as arguments; observed_at and
+	// attempt_at are naive timestamps holding utc, so comparing them to sql
+	// now() in the query would cast through the session timezone
+	now := server.NowUtc()
+	minObservedAt := now.Add(-providerEgressDueAge)
+	minAttemptAt := now.Add(-model.ProviderEgressProbeAttemptBackoff)
 
 	result := &ProviderEgressLocationDueResult{
-		ClientIds: model.GetProviderEgressLocationDue(r.Context(), minObservedAt, limit),
+		ClientIds: model.GetProviderEgressLocationDue(r.Context(), minObservedAt, minAttemptAt, limit),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

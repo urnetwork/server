@@ -13,6 +13,16 @@ import (
 // mmdb lookup on the observed control ip.
 const ProviderEgressLocationMaxAge = 7 * 24 * time.Hour
 
+// ProviderEgressProbeAttemptBackoff is how long a probe *attempt* defers a
+// provider from being offered up again, whether or not the attempt succeeded.
+//
+// It is much shorter than the staleness window a successful probe buys
+// (providerEgressDueAge in api/handlers, half ProviderEgressLocationMaxAge): a
+// provider that fails to probe should be retried periodically -- the fault may
+// be transient -- just not on every single poll, which is what starves the rest
+// of the queue.
+const ProviderEgressProbeAttemptBackoff = 6 * time.Hour
+
 // ProviderEgressLocation is a provider location learned by probing the
 // provider's own egress, rather than by looking up its control-connection ip.
 type ProviderEgressLocation struct {
@@ -84,6 +94,87 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 			server.NowUtc(),
 		))
 	})
+}
+
+// ProviderEgressProbeAttempt records that the prober tried a provider, whether
+// or not the try produced a location.
+//
+// A provider that has never been probed successfully has no
+// ProviderEgressLocation row at all, so an attempt cannot be recorded there --
+// see the provider_egress_probe_attempt migration for why that matters.
+// ProbeFailure is "" for a successful attempt, otherwise a short failure class
+// (`tunnel_failed`, `no_consensus`, ...).
+type ProviderEgressProbeAttempt struct {
+	ClientId     server.Id
+	AttemptAt    time.Time
+	ProbeFailure string
+	UpdateTime   time.Time
+}
+
+// SetProviderEgressProbeAttempt upserts the last probe attempt for a provider.
+//
+// Like SetProviderEgressLocation the upsert is monotonic in its timestamp: a
+// replayed or out-of-order report older than what is already stored is dropped
+// rather than moving the provider's last-attempt time backwards, which would
+// hand it back to the prober early.
+func SetProviderEgressProbeAttempt(ctx context.Context, a *ProviderEgressProbeAttempt) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO provider_egress_probe_attempt (
+				client_id,
+				attempt_at,
+				probe_failure,
+				update_time
+			)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (client_id) DO UPDATE
+			SET
+				attempt_at = $2,
+				probe_failure = $3,
+				update_time = $4
+			WHERE provider_egress_probe_attempt.attempt_at < EXCLUDED.attempt_at
+			`,
+			a.ClientId,
+			a.AttemptAt.UTC(),
+			a.ProbeFailure,
+			server.NowUtc(),
+		))
+	})
+}
+
+// GetProviderEgressProbeAttempt returns the last recorded probe attempt for a
+// provider, or nil.
+func GetProviderEgressProbeAttempt(ctx context.Context, clientId server.Id) *ProviderEgressProbeAttempt {
+	var a *ProviderEgressProbeAttempt
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				client_id,
+				attempt_at,
+				probe_failure,
+				update_time
+			FROM provider_egress_probe_attempt
+			WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				a = &ProviderEgressProbeAttempt{}
+				server.Raise(result.Scan(
+					&a.ClientId,
+					&a.AttemptAt,
+					&a.ProbeFailure,
+					&a.UpdateTime,
+				))
+			}
+		})
+	})
+	return a
 }
 
 // GetProviderEgressLocation returns the stored location for a provider, or nil.
@@ -275,15 +366,16 @@ func GetLocation(ctx context.Context, locationId server.Id) *Location {
 }
 
 // GetProviderEgressLocationDue returns the client ids of providers whose
-// egress location is due for a probe: their newest probe is older than
-// minObservedAt, or they have never been probed at all. Oldest first, so the
+// egress location is due for a probe: no fresh success (newest probe older than
+// minObservedAt, or never probed) *and* no recent attempt (last attempt older
+// than minAttemptAt, or never attempted). Oldest first, so the
 // longest-unprobed are handed out first, capped at limit.
 //
 // This is the durable replacement for the prober's in-memory ttl cache: the
 // schedule lives in the database, so a prober restart resumes where it left
 // off instead of re-probing everything.
 //
-// Two things about the shape of this query matter.
+// Three things about the shape of this query matter.
 //
 // First, candidates are sourced from the live provider population
 // (network_client_location_reliability, connected + valid) and the egress row
@@ -299,12 +391,26 @@ func GetLocation(ctx context.Context, locationId server.Id) *Location {
 // guaranteed failure. This is the same filter UpdateClientLocations and
 // UpdateClientScores apply (network_client_location_model.go).
 //
-// The cutoff is computed by the caller in Go and bound as a parameter:
-// observed_at is a naive `timestamp` holding utc, and comparing it against sql
-// now() would cast through the session timezone and silently skip a window.
+// Third, a recent *attempt* defers a provider the same way a recent success
+// does. Without that, a provider that connects and holds a Public provide key
+// but always fails to probe -- for any reason other than the missing Public key
+// screened for above -- never gets an egress row, so its observed_at stays
+// NULL, so it sorts ahead of every stale-but-refreshable provider on every
+// single poll, forever. Enough such providers to fill a batch and no healthy
+// provider is ever refreshed again, while this endpoint goes on returning a
+// full, plausible-looking batch. The in-memory ttl cache this replaced was
+// incidentally immune, because it marked a provider probed whether or not the
+// probe worked; moving the schedule server-side dropped that protection, and
+// provider_egress_probe_attempt is what restores it.
+//
+// Both cutoffs are computed by the caller in Go and bound as parameters:
+// observed_at and attempt_at are naive `timestamp` columns holding utc, and
+// comparing them against sql now() would cast through the session timezone and
+// silently skip a window.
 func GetProviderEgressLocationDue(
 	ctx context.Context,
 	minObservedAt time.Time,
+	minAttemptAt time.Time,
 	limit int,
 ) []server.Id {
 	clientIds := []server.Id{}
@@ -319,6 +425,9 @@ func GetProviderEgressLocationDue(
 			LEFT JOIN provider_egress_location ON
 				provider_egress_location.client_id = network_client_location_reliability.client_id
 
+			LEFT JOIN provider_egress_probe_attempt ON
+				provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id
+
 			WHERE
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
@@ -331,15 +440,26 @@ func GetProviderEgressLocationDue(
 				(
 					provider_egress_location.observed_at IS NULL OR
 					provider_egress_location.observed_at < $2
+				) AND
+				(
+					provider_egress_probe_attempt.attempt_at IS NULL OR
+					provider_egress_probe_attempt.attempt_at < $3
 				)
 
 			-- never-probed sorts ahead of merely stale: a missing observed_at
-			-- is infinitely old
-			ORDER BY provider_egress_location.observed_at ASC NULLS FIRST
-			LIMIT $3
+			-- is infinitely old. client_id breaks the tie so batch composition
+			-- is deterministic instead of plan-dependent -- otherwise the whole
+			-- never-probed population ties on NULL and which slice of it the
+			-- prober gets back under a limit is whatever order the executor
+			-- happened to produce.
+			ORDER BY
+				provider_egress_location.observed_at ASC NULLS FIRST,
+				network_client_location_reliability.client_id ASC
+			LIMIT $4
 			`,
 			ProvideModePublic,
 			minObservedAt.UTC(),
+			minAttemptAt.UTC(),
 			limit,
 		)
 		server.WithPgResult(result, err, func() {
@@ -361,6 +481,20 @@ func RemoveExpiredProviderEgressLocations(ctx context.Context, minObservedAt tim
 			ctx,
 			`DELETE FROM provider_egress_location WHERE observed_at < $1`,
 			minObservedAt.UTC(),
+		))
+	})
+}
+
+// RemoveExpiredProviderEgressProbeAttempts drops attempts older than
+// minAttemptAt. An attempt only carries information for as long as it defers
+// the provider (ProviderEgressProbeAttemptBackoff); past that the row is just
+// storage held for a client id that may no longer exist.
+func RemoveExpiredProviderEgressProbeAttempts(ctx context.Context, minAttemptAt time.Time) {
+	server.MaintenanceTx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`DELETE FROM provider_egress_probe_attempt WHERE attempt_at < $1`,
+			minAttemptAt.UTC(),
 		))
 	})
 }

@@ -4414,4 +4414,40 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS provider_egress_location_observed_at
             ON provider_egress_location (observed_at)
     `),
+
+	// provider egress probe attempts: when the prober last *tried* a provider,
+	// successful or not, and how the try failed.
+	//
+	// This cannot live on provider_egress_location, because the case it exists
+	// to handle is precisely a provider that has no row there. A provider that
+	// connects, holds a Public provide key and fails every probe (firewalled
+	// egress, dead upstream) never gets an egress row, so its observed_at stays
+	// NULL, so it sorts to the head of the due queue forever. Enough of them and
+	// every batch the prober asks for is the same set of permanently-dead
+	// providers, and no healthy provider's location is ever refreshed -- while
+	// the endpoint keeps returning a full, plausible-looking batch.
+	// GetProviderEgressLocationDue defers on a recent attempt as well as a fresh
+	// success, which needs somewhere to record the attempt.
+	//
+	// Pulled forward from the P2 verdict model
+	// (docs/superpowers/specs/2026-07-25-enforced-provider-geo-probing-design.md,
+	// probe_attempt_at / probe_failure) because the P1 schedule cannot function
+	// without it. Deliberately only the two columns the schedule reads, not the
+	// rest of that model.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_egress_probe_attempt (
+            client_id     uuid NOT NULL PRIMARY KEY,
+            attempt_at    timestamp NOT NULL,
+            probe_failure varchar(64) NOT NULL DEFAULT '',
+            update_time   timestamp NOT NULL
+        )
+    `),
+
+	// serves the sweep in RemoveExpiredProviderEgressProbeAttempts. The due
+	// query reaches this table by primary key through the left join, so it
+	// needs no index of its own.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_egress_probe_attempt_attempt_at
+            ON provider_egress_probe_attempt (attempt_at)
+    `),
 }

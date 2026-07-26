@@ -320,6 +320,216 @@ func TestProviderEgressLocationDueHonoursLimit(t *testing.T) {
 	})
 }
 
+// Every other due test in this file stands up never-probed providers, which
+// come back regardless of what cutoff the handler computes -- so nothing here
+// actually exercised providerEgressDueAge. This one does: a provider probed
+// just now must be held back, and one probed past the cutoff must come through.
+// Defeating the cutoff (dropping it, computing it in the wrong direction,
+// comparing against sql now() through the session timezone) fails this.
+func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+
+		ctx := context.Background()
+
+		city := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		model.CreateLocation(ctx, city)
+
+		fresh := server.NewId()
+		stale := server.NewId()
+		testing_connectDueProvider(t, ctx, fresh, city.LocationId, "0.0.0.1:0")
+		testing_connectDueProvider(t, ctx, stale, city.LocationId, "0.0.0.2:0")
+		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+
+		now := server.NowUtc()
+		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
+			ClientId: fresh, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now,
+		})
+		// comfortably past providerEgressDueAge, which is half
+		// model.ProviderEgressLocationMaxAge
+		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
+			ClientId: stale, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-providerEgressDueAge - time.Hour),
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/network/provider-egress-due?limit=100", nil)
+		req.Header.Set(operatorSecretHeader, secret)
+		w := httptest.NewRecorder()
+
+		ProviderEgressLocationDue(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+		}
+		var result ProviderEgressLocationDueResult
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatalf("decode body %q: %s", w.Body.String(), err)
+		}
+		if slices.Contains(result.ClientIds, fresh) {
+			t.Fatalf("client_ids = %v, must not contain the just-probed provider %s", result.ClientIds, fresh)
+		}
+		if !slices.Contains(result.ClientIds, stale) {
+			t.Fatalf("client_ids = %v, must contain the provider probed past the cutoff %s", result.ClientIds, stale)
+		}
+	})
+}
+
+func TestProviderEgressLocationAttemptRejectsMissingSecret(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"client_id": "019f8835-158d-6fd8-e9dd-fd0e4c6d6792",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/network/provider-egress-attempt", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	ProviderEgressLocationAttempt(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 when the operator secret header is absent", w.Code)
+	}
+}
+
+// The reject case with the vault *configured*, so the request gets past the
+// secret == "" fail-closed short-circuit and hmac.Equal is what rejects.
+func TestProviderEgressLocationAttemptRejectsAlteredSecret(t *testing.T) {
+	const secret = "correct-operator-secret-0123456789"
+	const wrongSecret = "correct-operator-secret-0123456780" // last char changed
+	defer withStubOperatorIngestSecret(secret)()
+
+	body, _ := json.Marshal(map[string]any{
+		"client_id": "019f8835-158d-6fd8-e9dd-fd0e4c6d6792",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/network/provider-egress-attempt", bytes.NewReader(body))
+	req.Header.Set(operatorSecretHeader, wrongSecret)
+	w := httptest.NewRecorder()
+
+	ProviderEgressLocationAttempt(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 when the operator secret is configured but the request's secret is wrong", w.Code)
+	}
+}
+
+// The whole point of the attempt endpoint, end to end over http: a provider
+// that has never been probed successfully is due; the prober reports that it
+// tried and failed; the provider stops being due. Without that, a provider
+// whose probes always fail sits at the head of the queue on every poll forever
+// (observed_at IS NULL sorts first) and starves every provider behind it.
+func TestProviderEgressLocationAttemptDefersProvider(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+
+		ctx := context.Background()
+
+		city := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		model.CreateLocation(ctx, city)
+
+		dead := server.NewId()
+		testing_connectDueProvider(t, ctx, dead, city.LocationId, "0.0.0.1:0")
+		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+
+		if !slices.Contains(due(t, secret), dead) {
+			t.Fatalf("the never-probed provider %s must be due before any attempt is reported", dead)
+		}
+
+		attemptBody, err := json.Marshal(controller.RecordProviderEgressProbeAttemptArgs{
+			ClientId:     dead,
+			ProbeFailure: "tunnel_failed",
+		})
+		if err != nil {
+			t.Fatalf("marshal attempt: %s", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/network/provider-egress-attempt", bytes.NewReader(attemptBody))
+		req.Header.Set(operatorSecretHeader, secret)
+		w := httptest.NewRecorder()
+
+		ProviderEgressLocationAttempt(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+		}
+
+		attempt := model.GetProviderEgressProbeAttempt(ctx, dead)
+		if attempt == nil {
+			t.Fatal("expected the attempt to be recorded")
+		}
+		if attempt.ProbeFailure != "tunnel_failed" {
+			t.Fatalf("probe_failure = %q, want %q", attempt.ProbeFailure, "tunnel_failed")
+		}
+
+		if slices.Contains(due(t, secret), dead) {
+			t.Fatalf("the provider %s must not be due again immediately after a failed attempt", dead)
+		}
+	})
+}
+
+// due drives the due endpoint over http and returns the batch.
+func due(t testing.TB, secret string) []server.Id {
+	req := httptest.NewRequest(http.MethodGet, "/network/provider-egress-due?limit=100", nil)
+	req.Header.Set(operatorSecretHeader, secret)
+	w := httptest.NewRecorder()
+
+	ProviderEgressLocationDue(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("due: status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	var result ProviderEgressLocationDueResult
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("due: decode body %q: %s", w.Body.String(), err)
+	}
+	return result.ClientIds
+}
+
+// An unknown client id must be rejected rather than writing an attempt row
+// keyed to a client that does not exist, which nothing would ever read.
+func TestProviderEgressLocationAttemptRejectsUnknownClient(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+
+		body, err := json.Marshal(controller.RecordProviderEgressProbeAttemptArgs{
+			ClientId:     server.NewId(),
+			ProbeFailure: "tunnel_failed",
+		})
+		if err != nil {
+			t.Fatalf("marshal attempt: %s", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/network/provider-egress-attempt", bytes.NewReader(body))
+		req.Header.Set(operatorSecretHeader, secret)
+		w := httptest.NewRecorder()
+
+		ProviderEgressLocationAttempt(w, req)
+
+		if w.Code == http.StatusUnauthorized {
+			t.Fatalf("status = %d, want the correct secret to clear auth (not 401)", w.Code)
+		}
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 for an unregistered client id; body = %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "Unknown client.") {
+			t.Fatalf("body = %q, want it to report the unknown client", w.Body.String())
+		}
+	})
+}
+
 // A limit that is not a positive integer is a caller bug. Silently clamping it
 // to 1 (or to the default) would answer a question the prober did not ask --
 // `limit=0` would come back as an empty list, indistinguishable from "nothing

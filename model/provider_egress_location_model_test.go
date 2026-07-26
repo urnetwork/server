@@ -220,6 +220,7 @@ func TestRemoveExpiredProviderEgressLocations(t *testing.T) {
 // The caller must run UpdateClientLocationReliabilities afterward -- that is
 // what rolls the live connection tables up into the
 // network_client_location_reliability row (connected + valid) the query reads.
+// It returns the connection id, so a caller can disconnect the provider again.
 func testing_connectProbeableProvider(
 	t testing.TB,
 	ctx context.Context,
@@ -227,7 +228,7 @@ func testing_connectProbeableProvider(
 	locationId server.Id,
 	clientAddress string,
 	provideMode ProvideMode,
-) {
+) server.Id {
 	Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "", "")
 
 	handlerId := CreateNetworkClientHandler(ctx)
@@ -243,6 +244,8 @@ func testing_connectProbeableProvider(
 	SetProvide(ctx, clientId, map[ProvideMode][]byte{
 		provideMode: []byte("provide-secret"),
 	})
+
+	return connectionId
 }
 
 // The prober asks the server what to probe next. The answer must be sourced
@@ -287,7 +290,9 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 		})
 		// `never` and `nonPublic` deliberately get no row at all
 
-		due := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), 100)
+		// no attempt rows exist in this test, so the attempt cutoff never
+		// excludes anything; freshness is the only variable
+		due := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), now, 100)
 
 		// a provider probed an hour ago must not be re-probed; one probed three
 		// days ago must be; one never probed must be
@@ -314,12 +319,227 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 		}
 
 		// limit is honoured
-		limited := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), 1)
+		limited := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), now, 1)
 		if len(limited) != 1 {
 			t.Fatalf("len(due) = %d for limit 1, want 1", len(limited))
 		}
 		if limited[0] != never {
 			t.Fatalf("due[0] = %s for limit 1, want the never-probed provider %s", limited[0], never)
+		}
+	})
+}
+
+// A provider that connects, holds a Public provide key and fails every probe
+// never gets a provider_egress_location row, so its observed_at stays NULL, so
+// it sorts ahead of every stale-but-refreshable provider -- forever, on every
+// poll. Enough of them to fill a batch and no healthy provider's location is
+// ever refreshed again, silently: the endpoint keeps returning a full,
+// plausible-looking batch of the same dead providers.
+//
+// A recent attempt must therefore defer a provider exactly as a fresh success
+// does. Deleting the attempt predicate from GetProviderEgressLocationDue must
+// fail this test.
+func TestGetProviderEgressLocationDueDefersRecentlyAttempted(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		// never probed successfully, and the prober just tried it and failed
+		dead := server.NewId()
+		// probed successfully three days ago, never attempted since: the
+		// provider that actually needs the next probe slot
+		healthyStale := server.NewId()
+
+		testing_connectProbeableProvider(t, ctx, dead, city.LocationId, "0.0.0.1:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, healthyStale, city.LocationId, "0.0.0.2:0", ProvideModePublic)
+
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: healthyStale, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-72 * time.Hour),
+		})
+		// `dead` deliberately gets no location row -- it has never succeeded --
+		// only a failed attempt seconds ago
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId:     dead,
+			AttemptAt:    now.Add(-5 * time.Second),
+			ProbeFailure: "tunnel_failed",
+		})
+
+		minObservedAt := now.Add(-24 * time.Hour)
+		minAttemptAt := now.Add(-ProviderEgressProbeAttemptBackoff)
+
+		due := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, 100)
+
+		if slices.Contains(due, dead) {
+			t.Fatalf("due = %v, must not contain the provider attempted seconds ago (%s)", due, dead)
+		}
+		if !slices.Contains(due, healthyStale) {
+			t.Fatalf("due = %v, must contain the stale-but-refreshable provider (%s)", due, healthyStale)
+		}
+
+		// the starvation itself: with a batch big enough for exactly one
+		// provider, the slot must go to the one that can actually be refreshed,
+		// not to the never-probed one that just failed. Without the attempt
+		// predicate `dead` wins this on observed_at IS NULL every single poll.
+		limited := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, 1)
+		if len(limited) != 1 {
+			t.Fatalf("len(due) = %d for limit 1, want 1", len(limited))
+		}
+		if limited[0] != healthyStale {
+			t.Fatalf("due[0] = %s for limit 1, want the refreshable provider %s, not the just-failed one %s", limited[0], healthyStale, dead)
+		}
+
+		// ... and the deferral is a backoff, not a ban: once the backoff has
+		// elapsed the same provider is offered again. The caller computes the
+		// cutoff as (wall clock - backoff), so a poll exactly one backoff period
+		// after the attempt computes `now`.
+		afterBackoff := GetProviderEgressLocationDue(ctx, minObservedAt, now, 100)
+		if !slices.Contains(afterBackoff, dead) {
+			t.Fatalf("due = %v, must contain the failed provider (%s) again once the attempt backoff has elapsed", afterBackoff, dead)
+		}
+	})
+}
+
+// Only live, routable providers are probeable. A provider that has gone offline
+// (connected = false) or that looks messed up from a routing perspective
+// (valid = false, a generated column: more than one address hash or location on
+// its live connections) must not be handed to the prober. Deleting either
+// predicate from GetProviderEgressLocationDue must fail this test.
+func TestGetProviderEgressLocationDueRequiresConnectedAndValid(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		good := server.NewId()
+		disconnected := server.NewId()
+		invalid := server.NewId()
+
+		testing_connectProbeableProvider(t, ctx, good, city.LocationId, "0.0.0.1:0", ProvideModePublic)
+		disconnectedConnectionId := testing_connectProbeableProvider(t, ctx, disconnected, city.LocationId, "0.0.0.2:0", ProvideModePublic)
+
+		// `invalid` holds two simultaneous connections from two different
+		// addresses, which makes client_address_hash_count = 2 and so the
+		// generated `valid` column false. The two addresses must be in
+		// different /29s: server.ClientIpHash buckets ipv4 to the /29 network,
+		// so e.g. 0.0.0.3 and 0.0.0.4 would hash the same and count as one.
+		testing_connectProbeableProvider(t, ctx, invalid, city.LocationId, "0.0.0.3:0", ProvideModePublic)
+		secondHandlerId := CreateNetworkClientHandler(ctx)
+		secondConnectionId, _, _, _, err := ConnectNetworkClient(ctx, invalid, "0.0.8.3:0", secondHandlerId)
+		if err != nil {
+			t.Fatalf("connect second address: %s", err)
+		}
+		if err := SetConnectionLocation(ctx, secondConnectionId, city.LocationId, &ConnectionLocationScores{}); err != nil {
+			t.Fatalf("set second connection location: %s", err)
+		}
+
+		// first roll-up: everything above is connected
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		// `disconnected` drops off, and a second roll-up flips its reliability
+		// row's connected to false (the row itself survives)
+		if err := DisconnectNetworkClient(ctx, disconnectedConnectionId); err != nil {
+			t.Fatalf("disconnect client: %s", err)
+		}
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), server.NowUtc())
+
+		due := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), now, 100)
+
+		if !slices.Contains(due, good) {
+			t.Fatalf("due = %v, must contain the connected, valid provider (%s)", due, good)
+		}
+		if slices.Contains(due, disconnected) {
+			t.Fatalf("due = %v, must not contain the disconnected provider (%s)", due, disconnected)
+		}
+		if slices.Contains(due, invalid) {
+			t.Fatalf("due = %v, must not contain the provider whose reliability row is not valid (%s)", due, invalid)
+		}
+	})
+}
+
+// The attempt upsert is monotonic in attempt_at, for the same reason the
+// location upsert is: a replayed or out-of-order report must not move the last
+// attempt backwards and hand the provider back to the prober early.
+func TestProviderEgressProbeAttemptUpsertIgnoresOlderReplay(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientId := server.NewId()
+		newer := server.NowUtc()
+		older := newer.Add(-time.Hour)
+
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: clientId, AttemptAt: newer, ProbeFailure: "no_consensus",
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: clientId, AttemptAt: older, ProbeFailure: "tunnel_failed",
+		})
+
+		got := GetProviderEgressProbeAttempt(ctx, clientId)
+		if got == nil {
+			t.Fatal("expected a stored probe attempt")
+		}
+		connect.AssertEqual(t, got.ProbeFailure, "no_consensus")
+		// postgres `timestamp` keeps microseconds, Go keeps nanoseconds, so
+		// compare with a tolerance rather than for equality
+		if delta := got.AttemptAt.Sub(newer); delta < -time.Millisecond || time.Millisecond < delta {
+			t.Fatalf("attempt_at = %s, want the newer attempt %s", got.AttemptAt, newer)
+		}
+
+		// a strictly newer report does win
+		newest := newer.Add(time.Minute)
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: clientId, AttemptAt: newest, ProbeFailure: "",
+		})
+		got = GetProviderEgressProbeAttempt(ctx, clientId)
+		connect.AssertEqual(t, got.ProbeFailure, "")
+
+		// absent
+		if GetProviderEgressProbeAttempt(ctx, server.NewId()) != nil {
+			t.Fatal("absent attempt must return nil")
+		}
+	})
+}
+
+func TestRemoveExpiredProviderEgressProbeAttempts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		keep := server.NewId()
+		drop := server.NewId()
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: keep, AttemptAt: server.NowUtc(),
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: drop, AttemptAt: server.NowUtc().Add(-30 * 24 * time.Hour),
+		})
+
+		RemoveExpiredProviderEgressProbeAttempts(ctx, server.NowUtc().Add(-24*time.Hour))
+
+		if GetProviderEgressProbeAttempt(ctx, keep) == nil {
+			t.Fatal("recent attempt must survive the sweep")
+		}
+		if GetProviderEgressProbeAttempt(ctx, drop) != nil {
+			t.Fatal("old attempt must be swept")
 		}
 	})
 }

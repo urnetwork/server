@@ -53,6 +53,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
+		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),

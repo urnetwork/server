@@ -33,8 +33,14 @@ func RemoveExpiredProviderEgressLocations(
 	_ *RemoveExpiredProviderEgressLocationsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveExpiredProviderEgressLocationsResult, error) {
-	minObservedAt := server.NowUtc().Add(-4 * model.ProviderEgressLocationMaxAge)
+	now := server.NowUtc()
+	minObservedAt := now.Add(-4 * model.ProviderEgressLocationMaxAge)
 	model.RemoveExpiredProviderEgressLocations(clientSession.Ctx, minObservedAt)
+	// probe attempts stop meaning anything once they no longer defer the
+	// provider; same reasoning as above, a looser multiple of the window that
+	// actually matters.
+	minAttemptAt := now.Add(-4 * model.ProviderEgressProbeAttemptBackoff)
+	model.RemoveExpiredProviderEgressProbeAttempts(clientSession.Ctx, minAttemptAt)
 	return &RemoveExpiredProviderEgressLocationsResult{}, nil
 }
 

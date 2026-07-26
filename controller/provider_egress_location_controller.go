@@ -159,3 +159,55 @@ func SubmitProviderEgressLocation(
 
 	return &SubmitProviderEgressLocationResult{LocationId: location.LocationId}, nil
 }
+
+// maxProbeFailureLen bounds the failure class as submitted:
+// provider_egress_probe_attempt.probe_failure is a varchar(64), and rejecting
+// an over-long value with a clear error beats letting the insert panic on a
+// Postgres "value too long" error and spin in the retry loop.
+const maxProbeFailureLen = 64
+
+type RecordProviderEgressProbeAttemptArgs struct {
+	ClientId server.Id `json:"client_id"`
+	// ProbeFailure is "" when the attempt succeeded, otherwise a short failure
+	// class (`contract_failed`, `tunnel_failed`, `no_consensus`, ...).
+	ProbeFailure string `json:"probe_failure,omitempty"`
+}
+
+type RecordProviderEgressProbeAttemptResult struct {
+	AttemptAt time.Time `json:"attempt_at"`
+}
+
+// RecordProviderEgressProbeAttempt records that the prober tried this provider.
+// A failed attempt defers the provider from the due queue for
+// ProviderEgressProbeAttemptBackoff, exactly as a successful probe defers it
+// for the (much longer) staleness window -- without this, a provider that
+// always fails to probe never gets a provider_egress_location row and so stays
+// permanently at the head of the queue, starving every other provider. See
+// model.GetProviderEgressLocationDue.
+//
+// The attempt is timestamped by the server, not the prober: the prober is
+// reporting something it just did, and a prober whose clock ran fast could
+// otherwise defer a provider far past the backoff window.
+func RecordProviderEgressProbeAttempt(
+	ctx context.Context,
+	args *RecordProviderEgressProbeAttemptArgs,
+) (*RecordProviderEgressProbeAttemptResult, error) {
+	if maxProbeFailureLen < len(args.ProbeFailure) {
+		return nil, fmt.Errorf("Probe failure class is too long.")
+	}
+	// same check as SubmitProviderEgressLocation: without it a typo'd or stale
+	// client id writes a row keyed to a client that does not exist, which
+	// nothing ever reads and only the sweep ever removes.
+	if networkId := model.GetNetworkClientNetwork(ctx, args.ClientId); networkId == nil {
+		return nil, fmt.Errorf("Unknown client.")
+	}
+
+	attemptAt := server.NowUtc()
+	model.SetProviderEgressProbeAttempt(ctx, &model.ProviderEgressProbeAttempt{
+		ClientId:     args.ClientId,
+		AttemptAt:    attemptAt,
+		ProbeFailure: args.ProbeFailure,
+	})
+
+	return &RecordProviderEgressProbeAttemptResult{AttemptAt: attemptAt}, nil
+}
