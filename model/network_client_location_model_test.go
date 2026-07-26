@@ -1292,18 +1292,24 @@ func TestUpdateClientLocationsCountsOnlyPublicProviders(t *testing.T) {
 	})
 }
 
-// `UpdateClientScores` carries the same "can this provider serve a stranger"
-// filter as `UpdateClientLocations`, and it matters on a different path:
-// the per-location source query fills the per-location client scores, which
-// become the `clientScoreLocation*` redis keys, which `loadLocationStables`
-// reads and `GetProviderLocations` gates on. A location whose only providers
-// are network-only must therefore not be stable at all.
+// `UpdateClientScores` writes two things, and the provide-mode rule differs
+// between them.
+//
+// The `ClientFilter` -- read by `loadLocationStables`, which
+// `GetProviderLocations` gates the public `Stable` flag on -- counts only
+// providers a stranger can reach, the same rule as the provider count in
+// `UpdateClientLocations`. A location whose only supply is network-only is not
+// stable and reports no providers at all.
+//
+// The sampled candidate pool is wider: it also carries `ProvideModeNetwork`
+// providers, which are real usable supply for sources in their own network.
+// `FindProviders2` filters those per request (see
+// TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork); the pool
+// itself is shared by every caller and cannot make that decision.
 //
 // Two connected+valid providers with identical latency/speed data in two
 // different countries, differing ONLY in whether they hold a Public provide
-// key. Removing the `EXISTS (... provide_mode = ...)` clause from the
-// per-location source query makes the network-only provider's country stable
-// and puts its client score in the cache, and this test goes red.
+// key.
 func TestUpdateClientScoresCountsOnlyPublicProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1378,7 +1384,8 @@ func TestUpdateClientScoresCountsOnlyPublicProviders(t *testing.T) {
 		_, ok = locationStables[networkOnlyCity.CountryLocationId]
 		connect.AssertEqual(t, ok, false)
 
-		// and the same at the client-score level FindProviders2 consumes
+		// the pool FindProviders2 consumes carries both, each tagged with
+		// whether a caller outside its network may use it
 		clientScores, err := loadClientScores(
 			true,
 			RankModeQuality,
@@ -1392,26 +1399,33 @@ func TestUpdateClientScoresCountsOnlyPublicProviders(t *testing.T) {
 			100,
 		)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(clientScores), 1)
-		_, ok = clientScores[publicClientId]
+		connect.AssertEqual(t, len(clientScores), 2)
+		publicClientScore, ok := clientScores[publicClientId]
 		connect.AssertEqual(t, ok, true)
-		_, ok = clientScores[networkOnlyClientId]
-		connect.AssertEqual(t, ok, false)
+		connect.AssertEqual(t, publicClientScore.NetworkOnly, false)
+		networkOnlyClientScore, ok := clientScores[networkOnlyClientId]
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, networkOnlyClientScore.NetworkOnly, true)
 	})
 }
 
-// the location *group* source query in `UpdateClientScores` needs the same
-// filter as the per-location one. It fills `locationGroupClientScores` ->
-// the `clientScoreLocationGroup*` redis keys -> `loadClientScores` ->
-// `FindProviders2` whenever the spec carries a `LocationGroupId`. Unfiltered,
-// a user who selects a promoted group (e.g. "Strong Privacy Laws") is handed
-// providers that cannot accept their contract, and `CreateContract` rejects
-// them with `NoPermission`.
+// the location *group* source query in `UpdateClientScores` follows the same
+// Public-or-Network rule as the per-location one. It fills
+// `locationGroupClientScores` -> the `clientScoreLocationGroup*` redis keys ->
+// `loadClientScores` -> `FindProviders2` whenever the spec carries a
+// `LocationGroupId`, so a user who selects a promoted group (e.g. "Strong
+// Privacy Laws") has to be filtered by the same request-time network check as
+// a user who selects a plain location -- and the group cache has to carry the
+// flag that check reads.
+//
+// Dropping either `provide_mode` from the group query's `EXISTS` breaks this:
+// without Network the group's own-network supply disappears, and without
+// Public nothing is reachable at all. Dropping the `EXISTS` entirely would let
+// in modes `CreateContract` can never accept.
 //
 // Same two providers, differing only in the Public provide key, each in its
-// own location group. Removing the `EXISTS` clause from the group query puts
-// the network-only provider in its group's cache and this test goes red.
-func TestUpdateClientScoresGroupCountsOnlyPublicProviders(t *testing.T) {
+// own location group.
+func TestUpdateClientScoresGroupCarriesNetworkProvidersTagged(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -1506,24 +1520,13 @@ func TestUpdateClientScoresGroupCountsOnlyPublicProviders(t *testing.T) {
 			100,
 		)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(clientScores), 1)
-		_, ok := clientScores[publicClientId]
+		connect.AssertEqual(t, len(clientScores), 2)
+		publicClientScore, ok := clientScores[publicClientId]
 		connect.AssertEqual(t, ok, true)
-		_, ok = clientScores[networkOnlyClientId]
-		connect.AssertEqual(t, ok, false)
-
-		// the network-only group on its own exports nothing
-		networkOnlyGroupClientScores, err := loadClientScores(
-			true,
-			RankModeQuality,
-			ctx,
-			map[server.Id]bool{},
-			map[server.Id]bool{networkOnlyGroup.LocationGroupId: true},
-			server.Id{},
-			100,
-		)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(networkOnlyGroupClientScores), 0)
+		connect.AssertEqual(t, publicClientScore.NetworkOnly, false)
+		networkOnlyClientScore, ok := clientScores[networkOnlyClientId]
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, networkOnlyClientScore.NetworkOnly, true)
 	})
 }
 
@@ -1603,4 +1606,301 @@ func connectPublicAndNetworkOnlyProviders(
 		ProvideModeNetwork: []byte("network-secret"),
 	})
 	return
+}
+
+// A client whose geo lookup resolved no city and no region is stored with
+// city_location_id = region_location_id = country_location_id -- the coarsest
+// granularity available is written into all three columns. Both fan-out loops
+// then walked city, region and country unconditionally, so one such client
+// added 3 to its own country: `/network/provider-locations` advertised three
+// times the supply that exists, and the inflation is worst exactly where geo
+// resolution is coarsest (datacenter, mobile and VPN egress).
+//
+// The second half of this test is the guard on the fix: a genuinely
+// city-granular client must still roll up into its region and its country. A
+// dedupe keyed on the client alone rather than on (client, location) would
+// silently stop city clients counting toward their country, which is a far
+// worse regression than the one being fixed.
+func TestUpdateClientLocationsCountsEachClientOncePerLocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		countryOnlyCity, city := createCountryOnlyAndCityProviders(ctx, t)
+
+		err := UpdateClientLocations(ctx, time.Hour)
+		connect.AssertEqual(t, err, nil)
+
+		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{
+			countryOnlyCity.CountryLocationId: true,
+			city.CityLocationId:               true,
+			city.RegionLocationId:             true,
+			city.CountryLocationId:            true,
+		})
+		connect.AssertEqual(t, err, nil)
+
+		countOf := func(locationId server.Id) int {
+			clientLocation, ok := clientLocations[locationId]
+			if !ok {
+				t.Fatalf("expected a cached client location for %s", locationId)
+			}
+			return clientLocation.ClientCount
+		}
+
+		// one client, counted once -- not once per city/region/country column
+		connect.AssertEqual(t, countOf(countryOnlyCity.CountryLocationId), 1)
+
+		// and the roll-up for a real city client is untouched
+		connect.AssertEqual(t, countOf(city.CityLocationId), 1)
+		connect.AssertEqual(t, countOf(city.RegionLocationId), 1)
+		connect.AssertEqual(t, countOf(city.CountryLocationId), 1)
+	})
+}
+
+// The same shape for `UpdateClientScores`: a country-only provider must appear
+// once in its country's candidate pool, and a city-granular provider must still
+// appear in its city's, its region's and its country's pools.
+func TestUpdateClientScoresCountsEachClientOncePerLocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		countryOnlyCity, city := createCountryOnlyAndCityProviders(ctx, t)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		poolSizeAt := func(locationId server.Id) int {
+			clientScores, err := loadClientScores(
+				true,
+				RankModeQuality,
+				ctx,
+				map[server.Id]bool{locationId: true},
+				map[server.Id]bool{},
+				server.Id{},
+				100,
+			)
+			connect.AssertEqual(t, err, nil)
+			return len(clientScores)
+		}
+
+		connect.AssertEqual(t, poolSizeAt(countryOnlyCity.CountryLocationId), 1)
+
+		// the city provider still rolls up to every granularity
+		connect.AssertEqual(t, poolSizeAt(city.CityLocationId), 1)
+		connect.AssertEqual(t, poolSizeAt(city.RegionLocationId), 1)
+		connect.AssertEqual(t, poolSizeAt(city.CountryLocationId), 1)
+	})
+}
+
+// connects two Public providers in two different countries and rolls the
+// reliability table forward:
+//
+//   - one whose `network_client_location` row has all three location columns
+//     collapsed to its country id, which is what a country-granularity geo
+//     lookup produces (`SetConnectionLocation` writes the coarsest available id
+//     into the NOT NULL city/region columns), and
+//   - one at genuine city granularity, with three distinct ids.
+//
+// The collapse is applied with a direct UPDATE rather than by handing
+// `SetConnectionLocation` a country-only `location` row, so the fixture depends
+// only on the shape of the stored row and not on which branch's fallback
+// produced it.
+func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
+	countryOnlyCity *Location,
+	city *Location,
+) {
+	countryOnlyCity = &Location{
+		LocationType: LocationTypeCity,
+		City:         "Toronto",
+		Region:       "Ontario",
+		Country:      "Canada",
+		CountryCode:  "ca",
+	}
+	CreateLocation(ctx, countryOnlyCity)
+
+	city = &Location{
+		LocationType: LocationTypeCity,
+		City:         "Palo Alto",
+		Region:       "California",
+		Country:      "United States",
+		CountryCode:  "us",
+	}
+	CreateLocation(ctx, city)
+
+	handlerId := CreateNetworkClientHandler(ctx)
+	connectPublicProvider := func(location *Location, ip string) server.Id {
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, ip, handlerId)
+		connect.AssertEqual(t, err, nil)
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		connect.AssertEqual(t, err, nil)
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic: []byte("public-secret"),
+		})
+
+		// UpdateClientScores joins client_connection_reliability_score, so
+		// every provider needs a score row or the join, not the logic under
+		// test, is what excludes it. The address hash is shared across the
+		// fixture on purpose: validity is derived from
+		// network_client_connection, not from these stats.
+		AddClientReliabilityStats(
+			ctx,
+			networkId,
+			clientId,
+			[32]byte{},
+			server.NowUtc(),
+			&ClientReliabilityStats{
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			},
+		)
+		return clientId
+	}
+
+	countryOnlyClientId := connectPublicProvider(countryOnlyCity, "0.0.0.1:0")
+	connectPublicProvider(city, "0.0.0.2:0")
+
+	// collapse the first provider to country granularity
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_client_location
+			SET
+				city_location_id = $2,
+				region_location_id = $2
+			WHERE client_id = $1
+			`,
+			countryOnlyClientId,
+			countryOnlyCity.CountryLocationId,
+		))
+	})
+
+	UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+	UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+	return
+}
+
+// `UpdateClientLocations` counts only providers holding a Public provide key,
+// because that count is shown to everyone and a stranger genuinely cannot use a
+// `Network`-only provider. The candidate pool is a different question: a
+// `Network`-only provider serves sources inside its own network today (via
+// `CreateContractNoEscrow`) and is discoverable to them. Restricting the pool
+// to Public would make those providers invisible to the very users they exist
+// for -- a live regression for anyone running providers for their own
+// organisation.
+//
+// So the pool carries both, and eligibility is decided per request against the
+// caller's network. All four cases:
+//
+//	                       same-network caller   other-network caller
+//	Public provider        returned              returned
+//	Network-only provider  returned              NOT returned
+//
+// This has to be a request-time filter, not a cache-time one: the client-score
+// redis entries are keyed by (forceMinimum, rankMode, locationId,
+// callerLocationId) and are not network-scoped, so one cached set is shared by
+// callers from every network.
+func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		handlerId := CreateNetworkClientHandler(ctx)
+
+		connectProvider := func(networkId server.Id, ip string, modes map[ProvideMode][]byte) server.Id {
+			clientId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, ip, handlerId)
+			connect.AssertEqual(t, err, nil)
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			connect.AssertEqual(t, err, nil)
+			SetProvide(ctx, clientId, modes)
+
+			// upstream joins client_connection_reliability_score with an INNER
+			// JOIN, so a provider with no reliability row never reaches the
+			// pool at all. Give every provider one so this test asserts the
+			// provide-mode rule and nothing else.
+			AddClientReliabilityStats(
+				ctx,
+				networkId,
+				clientId,
+				[32]byte{},
+				server.NowUtc(),
+				&ClientReliabilityStats{
+					ConnectionEstablishedCount: 1,
+					ProvideEnabledCount:        1,
+					ReceiveMessageCount:        1,
+					ReceiveByteCount:           1024,
+					SendMessageCount:           1,
+					SendByteCount:              1024,
+				},
+			)
+			return clientId
+		}
+
+		publicNetworkId := server.NewId()
+		publicClientId := connectProvider(publicNetworkId, "0.0.0.1:0", map[ProvideMode][]byte{
+			ProvideModePublic:  []byte("public-secret"),
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+
+		networkOnlyNetworkId := server.NewId()
+		networkOnlyClientId := connectProvider(networkOnlyNetworkId, "0.0.0.2:0", map[ProvideMode][]byte{
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+
+		UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		findFrom := func(networkId server.Id, name string) map[server.Id]bool {
+			clientSession := session.Testing_CreateClientSession(
+				ctx,
+				jwt.NewByJwt(networkId, server.NewId(), name, false, false),
+			)
+			res, err := FindProviders2(
+				&FindProviders2Args{
+					Specs: []*ProviderSpec{
+						{LocationId: &city.LocationId},
+					},
+					Count:        100,
+					ForceMinimum: true,
+				},
+				clientSession,
+			)
+			connect.AssertEqual(t, err, nil)
+			found := map[server.Id]bool{}
+			for _, provider := range res.Providers {
+				found[provider.ClientId] = true
+			}
+			return found
+		}
+
+		// the network-only provider's own network sees both
+		sameNetwork := findFrom(networkOnlyNetworkId, "same-network")
+		connect.AssertEqual(t, sameNetwork[publicClientId], true)
+		connect.AssertEqual(t, sameNetwork[networkOnlyClientId], true)
+
+		// a stranger sees only the Public one. handing them the network-only
+		// provider would produce a `CreateContract` NoPermission rejection.
+		otherNetwork := findFrom(server.NewId(), "other-network")
+		connect.AssertEqual(t, otherNetwork[publicClientId], true)
+		connect.AssertEqual(t, otherNetwork[networkOnlyClientId], false)
+	})
 }
