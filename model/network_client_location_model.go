@@ -1477,11 +1477,18 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
 	        	network_client_location_reliability.valid = true AND
-	        	-- a provider that does not hold a Public provide key cannot
-	        	-- accept a contract from a client outside its own network, so
-	        	-- counting it advertises supply nobody can reach. GetProvideRelationship
-	        	-- returns ProvideModePublic for cross-network pairs, and the
-	        	-- destination must hold a key for exactly that mode.
+	        	-- count only providers that can serve a stranger.
+	        	-- GetProvideRelationship returns ProvideModePublic for a
+	        	-- cross-network pair, so a Public provide key is what makes a
+	        	-- provider generally reachable; without one it advertises
+	        	-- supply nobody outside its own network can use.
+	        	-- This is deliberately narrower than what CreateContract will
+	        	-- ultimately accept: resolveNonCompanionProvideMode
+	        	-- (controller/connect_controller.go) also lets a Stream-only
+	        	-- destination settle a cross-network contract as a *companion*
+	        	-- stream, for backward compatibility with old clients. A
+	        	-- companion-only destination is a return path, not general
+	        	-- provider supply, so excluding it here is intended.
 	        	EXISTS (
 	        		SELECT 1 FROM provide_key
 	        		WHERE
@@ -2420,11 +2427,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
 	        	network_client_location_reliability.valid = true AND
-	        	-- a provider that does not hold a Public provide key cannot
-	        	-- accept a contract from a client outside its own network, so
-	        	-- counting it advertises supply nobody can reach. GetProvideRelationship
-	        	-- returns ProvideModePublic for cross-network pairs, and the
-	        	-- destination must hold a key for exactly that mode.
+	        	-- count only providers that can serve a stranger; see the
+	        	-- matching comment in UpdateClientLocations above for why a
+	        	-- Public provide key is the rule and why the Stream companion
+	        	-- fallback is deliberately not honoured here.
 	        	-- GetProviderLocations gates on loadLocationStables, populated
 	        	-- from here, so filtering UpdateClientLocations alone would
 	        	-- leave the symptom in place.
@@ -2499,8 +2505,22 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 	            WHERE
 	            	network_client_location_reliability.connected = true AND
-	            	network_client_location_reliability.valid = true
+	            	network_client_location_reliability.valid = true AND
+	            	-- same rule as the per-location query above. This one fills
+	            	-- locationGroupClientScores -> the clientScoreLocationGroup*
+	            	-- redis keys -> loadClientScores -> FindProviders2 whenever a
+	            	-- spec carries a LocationGroupId, so leaving it unfiltered
+	            	-- means a user who picks a promoted group (e.g. "Strong
+	            	-- Privacy Laws") still gets providers that cannot accept
+	            	-- their contract and CreateContract rejects with NoPermission.
+	            	EXISTS (
+	            		SELECT 1 FROM provide_key
+	            		WHERE
+	            			provide_key.client_id = network_client_location_reliability.client_id AND
+	            			provide_key.provide_mode = $1
+	            	)
 	        `,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
