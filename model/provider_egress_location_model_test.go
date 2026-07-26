@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -209,6 +210,116 @@ func TestRemoveExpiredProviderEgressLocations(t *testing.T) {
 		}
 		if GetProviderEgressLocation(ctx, drop) != nil {
 			t.Fatal("old entry must be swept")
+		}
+	})
+}
+
+// testing_connectProbeableProvider stands up the minimum a client needs to
+// look like a live provider to the due-selection query: a device, a live
+// connection with a resolved location, and a provide key of the given mode.
+// The caller must run UpdateClientLocationReliabilities afterward -- that is
+// what rolls the live connection tables up into the
+// network_client_location_reliability row (connected + valid) the query reads.
+func testing_connectProbeableProvider(
+	t testing.TB,
+	ctx context.Context,
+	clientId server.Id,
+	locationId server.Id,
+	clientAddress string,
+	provideMode ProvideMode,
+) {
+	Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "", "")
+
+	handlerId := CreateNetworkClientHandler(ctx)
+	connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+	if err != nil {
+		t.Fatalf("connect client: %s", err)
+	}
+
+	if err := SetConnectionLocation(ctx, connectionId, locationId, &ConnectionLocationScores{}); err != nil {
+		t.Fatalf("set connection location: %s", err)
+	}
+
+	SetProvide(ctx, clientId, map[ProvideMode][]byte{
+		provideMode: []byte("provide-secret"),
+	})
+}
+
+// The prober asks the server what to probe next. The answer must be sourced
+// from the live provider population and not from provider_egress_location,
+// because the dominant case -- a provider that has never been probed at all --
+// has no row there.
+func TestGetProviderEgressLocationDue(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		fresh := server.NewId()
+		stale := server.NewId()
+		never := server.NewId()
+		// a provider that cannot serve a stranger is unprobeable: the tunnel
+		// contract would be refused, so it must never be offered to the prober
+		nonPublic := server.NewId()
+
+		testing_connectProbeableProvider(t, ctx, fresh, city.LocationId, "0.0.0.1:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, stale, city.LocationId, "0.0.0.2:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, never, city.LocationId, "0.0.0.3:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, nonPublic, city.LocationId, "0.0.0.4:0", ProvideModeNetwork)
+
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: fresh, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-1 * time.Hour),
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: stale, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-72 * time.Hour),
+		})
+		// `never` and `nonPublic` deliberately get no row at all
+
+		due := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), 100)
+
+		// a provider probed an hour ago must not be re-probed; one probed three
+		// days ago must be; one never probed must be
+		if slices.Contains(due, fresh) {
+			t.Fatalf("due = %v, must not contain the provider probed an hour ago (%s)", due, fresh)
+		}
+		if !slices.Contains(due, stale) {
+			t.Fatalf("due = %v, must contain the provider probed three days ago (%s)", due, stale)
+		}
+		if !slices.Contains(due, never) {
+			t.Fatalf("due = %v, must contain the never-probed provider (%s)", due, never)
+		}
+		// unprobeable regardless of freshness
+		if slices.Contains(due, nonPublic) {
+			t.Fatalf("due = %v, must not contain the provider without a Public provide key (%s)", due, nonPublic)
+		}
+
+		// oldest first, so the longest-unprobed are probed first: the
+		// never-probed provider sorts ahead of the three-days-stale one
+		neverIndex := slices.Index(due, never)
+		staleIndex := slices.Index(due, stale)
+		if staleIndex < neverIndex {
+			t.Fatalf("never-probed provider at %d must sort before the stale one at %d", neverIndex, staleIndex)
+		}
+
+		// limit is honoured
+		limited := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), 1)
+		if len(limited) != 1 {
+			t.Fatalf("len(due) = %d for limit 1, want 1", len(limited))
+		}
+		if limited[0] != never {
+			t.Fatalf("due[0] = %s for limit 1, want the never-probed provider %s", limited[0], never)
 		}
 	})
 }

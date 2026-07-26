@@ -274,6 +274,85 @@ func GetLocation(ctx context.Context, locationId server.Id) *Location {
 	return loc
 }
 
+// GetProviderEgressLocationDue returns the client ids of providers whose
+// egress location is due for a probe: their newest probe is older than
+// minObservedAt, or they have never been probed at all. Oldest first, so the
+// longest-unprobed are handed out first, capped at limit.
+//
+// This is the durable replacement for the prober's in-memory ttl cache: the
+// schedule lives in the database, so a prober restart resumes where it left
+// off instead of re-probing everything.
+//
+// Two things about the shape of this query matter.
+//
+// First, candidates are sourced from the live provider population
+// (network_client_location_reliability, connected + valid) and the egress row
+// is LEFT JOINed on. The dominant case by far is a provider that has *never*
+// been probed and therefore has no provider_egress_location row at all;
+// selecting from provider_egress_location would return exactly the providers
+// that least need probing and none of the ones that most do.
+//
+// Second, only providers holding a Public provide key are returned. Probing
+// tunnels through the provider itself, which means opening a contract from
+// outside the provider's own network -- something a provider without a Public
+// key refuses. Offering one to the prober would burn a probe slot on a
+// guaranteed failure. This is the same filter UpdateClientLocations and
+// UpdateClientScores apply (network_client_location_model.go).
+//
+// The cutoff is computed by the caller in Go and bound as a parameter:
+// observed_at is a naive `timestamp` holding utc, and comparing it against sql
+// now() would cast through the session timezone and silently skip a window.
+func GetProviderEgressLocationDue(
+	ctx context.Context,
+	minObservedAt time.Time,
+	limit int,
+) []server.Id {
+	clientIds := []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				network_client_location_reliability.client_id
+			FROM network_client_location_reliability
+
+			LEFT JOIN provider_egress_location ON
+				provider_egress_location.client_id = network_client_location_reliability.client_id
+
+			WHERE
+				network_client_location_reliability.connected = true AND
+				network_client_location_reliability.valid = true AND
+				EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE
+						provide_key.client_id = network_client_location_reliability.client_id AND
+						provide_key.provide_mode = $1
+				) AND
+				(
+					provider_egress_location.observed_at IS NULL OR
+					provider_egress_location.observed_at < $2
+				)
+
+			-- never-probed sorts ahead of merely stale: a missing observed_at
+			-- is infinitely old
+			ORDER BY provider_egress_location.observed_at ASC NULLS FIRST
+			LIMIT $3
+			`,
+			ProvideModePublic,
+			minObservedAt.UTC(),
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				server.Raise(result.Scan(&clientId))
+				clientIds = append(clientIds, clientId)
+			}
+		})
+	})
+	return clientIds
+}
+
 // RemoveExpiredProviderEgressLocations drops entries probed before
 // minObservedAt.
 func RemoveExpiredProviderEgressLocations(ctx context.Context, minObservedAt time.Time) {

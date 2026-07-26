@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 // operatorSecretHeader carries the operator ingest secret. This endpoint is
@@ -84,6 +86,79 @@ func ProviderEgressLocationSubmit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		glog.Infof("[pegl]could not write response. err = %s\n", err)
+	}
+}
+
+const (
+	// defaultProviderEgressDueLimit is the batch size when the caller does not
+	// ask for one.
+	defaultProviderEgressDueLimit = 100
+	// maxProviderEgressDueLimit bounds the batch size regardless of what the
+	// caller asks for, so one request cannot ask the database for the entire
+	// provider population.
+	maxProviderEgressDueLimit = 500
+)
+
+// providerEgressDueAge is how stale a stored probe must be before its provider
+// is offered up for re-probing. It is deliberately shorter than
+// model.ProviderEgressLocationMaxAge -- the age past which a stored location
+// stops being trusted at all. If the two were equal, every location would lapse
+// to the mmdb fallback at the exact moment it became due and stay lapsed until
+// the prober worked its way around to it; at half the max age the prober has a
+// full max-age/2 window to refresh a location before it expires.
+const providerEgressDueAge = model.ProviderEgressLocationMaxAge / 2
+
+// ProviderEgressLocationDueResult is the response body of
+// ProviderEgressLocationDue.
+type ProviderEgressLocationDueResult struct {
+	ClientIds []server.Id `json:"client_ids"`
+}
+
+// ProviderEgressLocationDue tells the operator's prober which providers to
+// probe next: those whose egress location has gone stale, and those that have
+// never been probed at all, oldest first.
+//
+// This moves the probe schedule from the prober's memory into the database.
+// The prober used to decide what to probe from an in-memory ttl cache, so a
+// restart re-probed the whole population and nothing durable recorded what was
+// actually due; observed_at already carries that information server-side, and
+// this exposes it.
+//
+// Same auth as ProviderEgressLocationSubmit above: operator-to-server, the
+// shared secret header rather than a network jwt, fail-closed when the vault
+// resource is missing.
+func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
+	secret := operatorIngestSecret()
+	provided := r.Header.Get(operatorSecretHeader)
+	if secret == "" || provided == "" || !hmac.Equal([]byte(secret), []byte(provided)) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	limit := defaultProviderEgressDueLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			// not clamped up to 1: `limit=0` would come back as an empty list,
+			// which the prober cannot distinguish from "nothing is due"
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		limit = min(parsed, maxProviderEgressDueLimit)
+	}
+
+	// the cutoff is computed here and passed as an argument; observed_at is a
+	// naive timestamp holding utc, so comparing it to sql now() in the query
+	// would cast through the session timezone
+	minObservedAt := server.NowUtc().Add(-providerEgressDueAge)
+
+	result := &ProviderEgressLocationDueResult{
+		ClientIds: model.GetProviderEgressLocationDue(r.Context(), minObservedAt, limit),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
