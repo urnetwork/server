@@ -65,8 +65,12 @@ EnvironmentFile=/etc/urnetwork/prober.env
 # THE CONFINEMENT. Everything below this line is the point of the unit.
 # ---------------------------------------------------------------------------
 # Deny all IP traffic, then allow back exactly the operator's own platform and
-# loopback. Enforced by the kernel through systemd's cgroup BPF filter: a
-# connection to anything not listed fails with EPERM at connect() time.
+# loopback. Enforced by the kernel through systemd's cgroup BPF filter, which
+# DROPS the packet rather than rejecting it: a connection to anything not
+# listed hangs until its own deadline instead of failing fast. That is what a
+# deny rule looks like from inside, and the self-check counts a dial timeout as
+# blocked -- but it means the check costs one --confinement-timeout per address
+# at startup (6 addresses x 3s = ~18s observed), not one in total.
 IPAddressDeny=any
 
 # Loopback. Required so the process can talk to the local DNS stub resolver
@@ -151,8 +155,14 @@ There are two ways to resolve this, and this unit takes the first:
    service, so it performs the upstream query on the prober's behalf and the
    prober's own egress stays denied. The self-check then resolves
    `ip.pn`, `free.freeipapi.com` and `ipinfo.io`, tries to connect to each
-   address, gets `EPERM` from the BPF filter, and starts. That is the healthy
-   case, and it needs no hand-maintained list of geolocation addresses.
+   address, has every packet dropped by the BPF filter until the dial
+   deadline expires, and starts. That is the healthy case, and it needs no
+   hand-maintained list of geolocation addresses:
+
+   ```
+   egress-prober: confinement self-check: 3 geolocation host(s) -> 6 address(es): 134.119.216.174:443 [2606:4700:3037::6815:5e88]:443 ... 34.117.59.81:443
+   egress-prober: confinement self-check passed: 6 address(es) tested, none directly reachable
+   ```
 
    If your resolver is *not* on loopback (`/etc/resolv.conf` points at
    `192.0.2.53`, say), add that address to `IPAddressAllow` as well — a DNS
@@ -229,7 +239,9 @@ own settings but a harmless command:
 sudo systemd-run --uid=nobody \
   -p IPAddressDeny=any -p IPAddressAllow=localhost \
   --wait --pty /bin/sh -c 'curl -sS --max-time 5 https://ipinfo.io/ip; echo rc=$?'
-# expect a connect failure (rc != 0), not an address
+# expect a connect failure, not an address:
+#   curl: (28) Connection timed out after 5002 milliseconds
+#   rc=28
 ```
 
 If that prints an address, the filter is not being applied on this host and the
