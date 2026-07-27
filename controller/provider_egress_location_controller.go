@@ -126,23 +126,53 @@ func SubmitProviderEgressLocation(
 		}
 	}
 
-	// resolve to a canonical location row. city granularity only when the
-	// probe agreed on a city; otherwise country.
-	location := &model.Location{
-		LocationType: model.LocationTypeCountry,
-		Country:      country,
-		CountryCode:  countryCode,
-	}
+	// resolve to a location row. City granularity only when the probe agreed
+	// on a city AND that city already exists in the location table.
+	//
+	// The probe MUST NOT define new cities or regions. model.CreateLocation
+	// dedupes a city on its exact location_name, so an unrecognised spelling
+	// does not fail -- it silently inserts a new permanent row into the shared
+	// `location` table and adds it to the search index. The three free
+	// geolocation sources the prober reaches consensus over demonstrably
+	// disagree on spelling ("Frankfurt am Main (Innenstadt I)" vs "Frankfurt am
+	// Main" for the same host, observed), and the consensus keeps the winning
+	// source's original display string -- so "Frankfurt am Main", "Frankfurt Am
+	// Main" and "Frankfurt/Main" would each become their own row. Those rows
+	// survive a code revert and there is no cleanup path.
+	//
+	// model.MatchExistingLocation therefore matches only, never creates,
+	// case-insensitively and ignoring punctuation/whitespace so the ordinary
+	// variants land on the row that is already there. When it does not resolve,
+	// this submission falls back to country granularity: country is the
+	// granularity this design treats as trustworthy anyway, and losing city
+	// precision for one probe is strictly better than permanently polluting a
+	// table shared with the provider list and the location search.
+	var location *model.Location
 	if args.CityConfident {
+		location = model.MatchExistingLocation(ctx, countryCode, region, city)
+	}
+
+	// city_confident records the granularity of the row actually stored, not
+	// what the probe claimed. The schema's documented invariant is that
+	// location_id is a city row exactly when city_confident is set (see the
+	// provider_egress_location migration), and a city-confident probe whose
+	// city did not resolve is stored at country granularity.
+	cityConfident := location != nil
+
+	if location == nil {
+		// country granularity. This still goes through CreateLocation: a
+		// country row is keyed on country_code, so a variant *name* can never
+		// produce a second row for the same country the way a variant city name
+		// can -- the pollution this guards against is not reachable here. The
+		// country row is also the whole point of the fallback, so a probe from
+		// a country not yet in the table must not be dropped.
 		location = &model.Location{
-			LocationType: model.LocationTypeCity,
-			City:         city,
-			Region:       region,
+			LocationType: model.LocationTypeCountry,
 			Country:      country,
 			CountryCode:  countryCode,
 		}
+		model.CreateLocation(ctx, location)
 	}
-	model.CreateLocation(ctx, location)
 
 	model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
 		ClientId:      args.ClientId,
@@ -153,7 +183,7 @@ func SubmitProviderEgressLocation(
 		Hosting:       args.Hosting,
 		Proxy:         args.Proxy,
 		Mobile:        args.Mobile,
-		CityConfident: args.CityConfident,
+		CityConfident: cityConfident,
 		ObservedAt:    args.ObservedAt,
 	})
 
