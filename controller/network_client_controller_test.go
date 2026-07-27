@@ -333,3 +333,86 @@ func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 		connect.AssertEqual(t, netTypeVirtual, 0)
 	})
 }
+
+// A failing probed-egress lookup must not propagate out of
+// SetConnectionLocation, and the connection must still be located via mmdb.
+//
+// model.GetFreshProviderEgressLocationForConnection goes through server.Db,
+// which re-panics any postgres error that is neither transient nor a
+// connection error (see isTransientError / isConnectionError in db.go).
+// undefined_table (42P01) is exactly such an error, and it is not a
+// hypothetical one: provider_egress_location is a new table in this change,
+// so rolling the binary before running `bringyourctl db migrate` makes every
+// single connection announce hit it.
+//
+// That matters far more than a failed lookup, because SetConnectionLocation is
+// called from ConnectNetworkClient *before* connect's disconnect-cleanup defer
+// is registered (connect/transport_announce.go): an escaping panic tears the
+// connection down and orphans its network_client_connection row as
+// connected = true. This project has already lost ~30k rows to that exact
+// deploy-ordering mistake once.
+//
+// The failure is injected for real -- the table is dropped, so the query
+// genuinely raises 42P01 out of the pgx driver -- rather than asserted against
+// a mock, because the thing under test is what server.Db does with a real
+// postgres error, not what the call site does with a fabricated one.
+func TestSetConnectionLocationEgressLookupErrorFallsBackToMmdb(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientIp := "8.8.8.8"
+
+		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
+		connect.AssertEqual(t, err, nil)
+		model.CreateLocation(ctx, mmdbLocation)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		handlerId := model.CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
+		connect.AssertEqual(t, err, nil)
+
+		// a fresh probed entry exists, so the lookup is definitely reached --
+		// then the table it reads is dropped out from under it, which is the
+		// state a deploy-before-migrate leaves the binary in.
+		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
+			ClientId:    clientId,
+			LocationId:  mmdbLocation.LocationId,
+			CountryCode: "jp",
+			ObservedAt:  server.NowUtc(),
+		})
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DROP TABLE provider_egress_location`))
+		})
+
+		// the panic is caught here rather than left to kill the test binary,
+		// so a regression reports as this test failing with the reason
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("the probed egress lookup must not panic out of SetConnectionLocation; it reached the caller as: %v", r)
+				}
+			}()
+			err = SetConnectionLocation(ctx, connectionId, clientIp)
+		}()
+		connect.AssertEqual(t, err, nil)
+
+		// and the mmdb path still produced a location for the connection
+		var countryLocationId server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			result, qerr := conn.Query(
+				ctx,
+				`SELECT country_location_id FROM network_client_location WHERE connection_id = $1`,
+				connectionId,
+			)
+			server.WithPgResult(result, qerr, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&countryLocationId))
+				}
+			})
+		})
+		connect.AssertEqual(t, countryLocationId, mmdbLocation.CountryLocationId)
+	})
+}
