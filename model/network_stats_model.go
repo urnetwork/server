@@ -71,9 +71,19 @@ func GetBlockUsersSnapshot(ctx context.Context, block int) (int64, bool) {
 }
 
 // CountProviderCountries returns the number of countries with a connected,
-// valid provider — the same population the public providers map draws from.
+// valid provider holding a Public provide key — the same population the public
+// providers map and /network/provider-locations draw from.
 // The (connected, valid, country_location_id) index covers the scan; joining
 // location dedupes any non-canonical country location rows by country code.
+//
+// The Public-only predicate is the same one UpdateClientLocations applies
+// (network_client_location_model.go). This is a public stat, so it must answer
+// the same question the public provider list does: how many countries a
+// stranger can actually pick a provider in. GetProvideRelationship returns
+// ProvideModePublic for a cross-network pair, so only a Public provide key
+// makes a provider generally reachable — a ProvideModeNetwork provider is
+// usable only inside its own network and is effectively private. Counting
+// those here would report countries with no pickable supply at all.
 func CountProviderCountries(ctx context.Context) int64 {
 	var count int64
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
@@ -86,8 +96,15 @@ func CountProviderCountries(ctx context.Context) int64 {
                     location.location_id = network_client_location_reliability.country_location_id
                 WHERE
                     network_client_location_reliability.connected = true AND
-                    network_client_location_reliability.valid = true
+                    network_client_location_reliability.valid = true AND
+                    EXISTS (
+                        SELECT 1 FROM provide_key
+                        WHERE
+                            provide_key.client_id = network_client_location_reliability.client_id AND
+                            provide_key.provide_mode = $1
+                    )
             `,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
