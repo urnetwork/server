@@ -125,10 +125,27 @@ func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProvider
 
 				WHERE
 					network_client_location_reliability.connected = true AND
-					network_client_location_reliability.valid = true
+					network_client_location_reliability.valid = true AND
+					-- same Public-only rule as UpdateClientLocations
+					-- (network_client_location_model.go): this map is public,
+					-- so it must count only providers a stranger can actually
+					-- reach. GetProvideRelationship returns ProvideModePublic
+					-- for a cross-network pair, so a Public provide key is
+					-- what makes a provider generally reachable; a
+					-- ProvideModeNetwork provider is real supply only to its
+					-- own network and is effectively private. Without this the
+					-- map reports more providers than /network/provider-locations
+					-- will let anyone pick from.
+					EXISTS (
+						SELECT 1 FROM provide_key
+						WHERE
+							provide_key.client_id = network_client_location_reliability.client_id AND
+							provide_key.provide_mode = $1
+					)
 
 				GROUP BY location.country_code, location.location_name
 			`,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
