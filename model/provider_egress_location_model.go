@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/urnetwork/server"
 )
@@ -272,6 +273,252 @@ func GetLocation(ctx context.Context, locationId server.Id) *Location {
 		})
 	})
 	return loc
+}
+
+// normalizeLocationName folds a location name to a comparison key: lowercased,
+// with every rune that is not a letter or a digit dropped. So
+// "Frankfurt am Main", "Frankfurt Am Main" and "FRANKFURT AM MAIN" all fold to
+// "frankfurtammain" and match the one row that already exists.
+//
+// This is deliberately a comparison key only -- it is never stored, and never
+// used to build a location_name. It exists so a trivial spelling variant from a
+// geolocation source resolves to the existing row instead of being treated as a
+// different place.
+//
+// Punctuation is dropped rather than mapped to a space because the disagreement
+// is over whether the separator exists at all ("Washington, D.C." vs
+// "Washington DC"). Note this deliberately does not fold "Frankfurt/Main" onto
+// "Frankfurt am Main": dropping the separator gives "frankfurtmain" !=
+// "frankfurtammain", so that one falls back to country granularity rather than
+// matching the wrong row. Falling back is the safe outcome; guessing is not.
+// Stdlib only, by design -- a transliteration/fuzzy-match dependency is a large
+// amount of new behaviour to take on for an ingest path whose failure mode is
+// already "use the country".
+func normalizeLocationName(name string) string {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range strings.ToLower(name) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// matchLocationNameInTx returns the location_id of the row in `candidates`
+// whose location_name matches `name`, preferring an exact match and falling
+// back to a normalized one (see normalizeLocationName), or nil for no match.
+// Candidates must already be ordered deterministically by the caller so that
+// two rows folding to the same key always resolve the same way.
+func matchLocationName(name string, candidateIds []server.Id, candidateNames []string) *server.Id {
+	for i, candidateName := range candidateNames {
+		if candidateName == name {
+			return &candidateIds[i]
+		}
+	}
+	normalized := normalizeLocationName(name)
+	if normalized == "" {
+		// nothing comparable survives folding (e.g. a name of only
+		// punctuation); an empty key would match any other such row
+		return nil
+	}
+	for i, candidateName := range candidateNames {
+		if normalizeLocationName(candidateName) == normalized {
+			return &candidateIds[i]
+		}
+	}
+	return nil
+}
+
+// MatchExistingLocation resolves (countryCode, region, city) against location
+// rows that ALREADY EXIST and returns the city-granular row, or nil if any
+// level of the hierarchy does not resolve. It never inserts anything.
+//
+// This is the resolver the provider egress ingest path uses instead of
+// CreateLocation. CreateLocation deduplicates a city on its exact
+// location_name, so an unrecognised spelling does not fail -- it silently
+// creates a new, permanent row in the shared `location` table and indexes it
+// for search. A geolocation probe has no business defining the world's cities:
+// the three free sources the prober reaches consensus over demonstrably
+// disagree on spelling (we observed "Frankfurt am Main (Innenstadt I)" against
+// "Frankfurt am Main" for one host), and the consensus stores the winning
+// source's original display string. Each variant would become its own row,
+// those rows outlive a code revert, and there is no cleanup path.
+//
+// Matching is case-insensitive and ignores punctuation and whitespace
+// differences, so the ordinary variants resolve to the row that is already
+// there. When nothing resolves the caller falls back to country granularity --
+// see SubmitProviderEgressLocation. Falling back loses precision for one
+// submission; creating a row corrupts shared data permanently.
+//
+// Each level tries an exact, fully-indexed match first (the common case: the
+// winning source usually spells it the way the mmdb import did) and only scans
+// the level's candidates when that misses.
+func MatchExistingLocation(
+	ctx context.Context,
+	countryCode string,
+	region string,
+	city string,
+) *Location {
+	countryCode = strings.ToLower(strings.TrimSpace(countryCode))
+	region = strings.TrimSpace(region)
+	city = strings.TrimSpace(city)
+	if countryCode == "" || region == "" || city == "" {
+		return nil
+	}
+
+	var match *Location
+	server.Db(ctx, func(conn server.PgConn) {
+		// country: keyed on country_code alone, exactly as CreateLocation
+		// dedupes it, so there is no name to match here
+		var countryLocationId server.Id
+		var countryName string
+		found := false
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT location_id, location_name
+			FROM location
+			WHERE location_type = $1 AND country_code = $2
+			ORDER BY location_id
+			LIMIT 1
+			`,
+			LocationTypeCountry,
+			countryCode,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&countryLocationId, &countryName))
+				found = true
+			}
+		})
+		if !found {
+			return
+		}
+
+		// region, within that country
+		regionLocationId := matchChildLocation(
+			ctx,
+			conn,
+			LocationTypeRegion,
+			countryCode,
+			region,
+			`
+			SELECT location_id, location_name
+			FROM location
+			WHERE
+				location_type = $1 AND
+				country_code = $2 AND
+				location_name = $3 AND
+				country_location_id = $4
+			`,
+			`
+			SELECT location_id, location_name
+			FROM location
+			WHERE
+				location_type = $1 AND
+				country_code = $2 AND
+				country_location_id = $3
+			ORDER BY location_id
+			`,
+			[]any{countryLocationId},
+		)
+		if regionLocationId == nil {
+			return
+		}
+
+		// city, within that region
+		cityLocationId := matchChildLocation(
+			ctx,
+			conn,
+			LocationTypeCity,
+			countryCode,
+			city,
+			`
+			SELECT location_id, location_name
+			FROM location
+			WHERE
+				location_type = $1 AND
+				country_code = $2 AND
+				location_name = $3 AND
+				region_location_id = $4 AND
+				country_location_id = $5
+			`,
+			`
+			SELECT location_id, location_name
+			FROM location
+			WHERE
+				location_type = $1 AND
+				country_code = $2 AND
+				region_location_id = $3 AND
+				country_location_id = $4
+			ORDER BY location_id
+			`,
+			[]any{*regionLocationId, countryLocationId},
+		)
+		if cityLocationId == nil {
+			return
+		}
+
+		match = &Location{
+			LocationType:      LocationTypeCity,
+			City:              city,
+			Region:            region,
+			Country:           countryName,
+			CountryCode:       countryCode,
+			LocationId:        *cityLocationId,
+			CityLocationId:    *cityLocationId,
+			RegionLocationId:  *regionLocationId,
+			CountryLocationId: countryLocationId,
+		}
+	})
+	return match
+}
+
+// matchChildLocation runs the exact-match query first and only falls back to
+// scanning the level's candidates when it misses. `parents` are the parent
+// location ids the two queries scope on: the exact query binds them after
+// (location_type, country_code, name), the candidate query after
+// (location_type, country_code).
+func matchChildLocation(
+	ctx context.Context,
+	conn server.PgConn,
+	locationType LocationType,
+	countryCode string,
+	name string,
+	exactSql string,
+	candidatesSql string,
+	parents []any,
+) *server.Id {
+	exactArgs := append([]any{locationType, countryCode, name}, parents...)
+	var exactId *server.Id
+	result, err := conn.Query(ctx, exactSql, exactArgs...)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var locationId server.Id
+			var locationName string
+			server.Raise(result.Scan(&locationId, &locationName))
+			exactId = &locationId
+		}
+	})
+	if exactId != nil {
+		return exactId
+	}
+
+	candidateArgs := append([]any{locationType, countryCode}, parents...)
+	candidateIds := []server.Id{}
+	candidateNames := []string{}
+	result, err = conn.Query(ctx, candidatesSql, candidateArgs...)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var locationId server.Id
+			var locationName string
+			server.Raise(result.Scan(&locationId, &locationName))
+			candidateIds = append(candidateIds, locationId)
+			candidateNames = append(candidateNames, locationName)
+		}
+	})
+	return matchLocationName(name, candidateIds, candidateNames)
 }
 
 // RemoveExpiredProviderEgressLocations drops entries probed before
