@@ -141,8 +141,10 @@ func SubmitProviderEgressLocation(
 	// survive a code revert and there is no cleanup path.
 	//
 	// model.MatchExistingLocation therefore matches only, never creates,
-	// case-insensitively and ignoring punctuation/whitespace so the ordinary
-	// variants land on the row that is already there. When it does not resolve,
+	// case-insensitively and ignoring punctuation/whitespace/accents and
+	// parenthesised district qualifiers, so the ordinary variants -- the
+	// "(Innenstadt I)" case above included -- land on the row that is already
+	// there. When it does not resolve,
 	// this submission falls back to country granularity: country is the
 	// granularity this design treats as trustworthy anyway, and losing city
 	// precision for one probe is strictly better than permanently polluting a

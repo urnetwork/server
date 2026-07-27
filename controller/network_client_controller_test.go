@@ -333,3 +333,211 @@ func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
 		connect.AssertEqual(t, netTypeVirtual, 0)
 	})
 }
+
+// testing_connectionLocationIds reads back the granularity actually stored for
+// a connection.
+func testing_connectionLocationIds(ctx context.Context, connectionId server.Id) (
+	cityLocationId server.Id,
+	regionLocationId server.Id,
+	countryLocationId server.Id,
+) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, qerr := conn.Query(
+			ctx,
+			`
+			SELECT city_location_id, region_location_id, country_location_id
+			FROM network_client_location
+			WHERE connection_id = $1
+			`,
+			connectionId,
+		)
+		server.WithPgResult(result, qerr, func() {
+			if result.Next() {
+				server.Raise(result.Scan(
+					&cityLocationId,
+					&regionLocationId,
+					&countryLocationId,
+				))
+			}
+		})
+	})
+	return
+}
+
+// A probe must never make a provider LESS locatable than leaving it unprobed
+// would have.
+//
+// SubmitProviderEgressLocation stores country granularity whenever the probed
+// city does not match a location row that already exists, which is the common
+// case -- cities are not seeded, so the match pool is only what organic traffic
+// created. If that country row then overwrote the mmdb city row unconditionally,
+// the provider would fall out of every city filter: probed providers would be
+// harder to find than unprobed ones, which is the exact opposite of the point.
+//
+// mmdb resolves 24.48.0.1 to Montreal, Quebec, CA at city granularity. A
+// country-only probe agreeing that the provider is in CA adds nothing, so the
+// mmdb city has to survive.
+func TestSetConnectionLocationProbedCountryDoesNotCoarsenMmdbCity(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientIp := "24.48.0.1"
+
+		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
+		connect.AssertEqual(t, err, nil)
+		// the fixture is only meaningful if mmdb really has a city here
+		connect.AssertEqual(t, mmdbLocation.LocationType, model.LocationTypeCity)
+		model.CreateLocation(ctx, mmdbLocation)
+
+		// the probed location: the same country, but only the country --
+		// exactly what an unmatched city name falls back to
+		probed := &model.Location{
+			LocationType: model.LocationTypeCountry,
+			Country:      "Canada",
+			CountryCode:  "ca",
+		}
+		model.CreateLocation(ctx, probed)
+		connect.AssertEqual(t, probed.LocationId, mmdbLocation.CountryLocationId)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		handlerId := model.CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
+		connect.AssertEqual(t, err, nil)
+
+		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
+			ClientId:      clientId,
+			LocationId:    probed.LocationId,
+			CountryCode:   "ca",
+			CityConfident: false,
+			ObservedAt:    server.NowUtc(),
+		})
+
+		err = SetConnectionLocation(ctx, connectionId, clientIp)
+		connect.AssertEqual(t, err, nil)
+
+		cityLocationId, regionLocationId, countryLocationId := testing_connectionLocationIds(ctx, connectionId)
+		if cityLocationId != mmdbLocation.CityLocationId {
+			t.Errorf(
+				"city_location_id = %s, want the mmdb city %s: a country-only probe must not coarsen a connection the mmdb already placed in a city",
+				cityLocationId,
+				mmdbLocation.CityLocationId,
+			)
+		}
+		connect.AssertEqual(t, regionLocationId, mmdbLocation.RegionLocationId)
+		connect.AssertEqual(t, countryLocationId, mmdbLocation.CountryLocationId)
+		// and the collapse this guards against, stated directly
+		if cityLocationId == countryLocationId {
+			t.Errorf("city/region/country all collapsed to %s; the provider is no longer in any city filter", countryLocationId)
+		}
+	})
+}
+
+// The other half of the rule: country-level CORRECTION still wins. When the
+// probe says the egress is in a different country than the control ip's mmdb
+// city, that city is a city in the wrong country -- it is not more precise, it
+// is precisely wrong -- so the probed country replaces it. This is the whole
+// reason the feature exists and must not be lost to the anti-coarsening rule
+// above.
+func TestSetConnectionLocationProbedCountryCorrectsMmdbCityInAnotherCountry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientIp := "24.48.0.1"
+
+		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, mmdbLocation.LocationType, model.LocationTypeCity)
+		connect.AssertEqual(t, mmdbLocation.CountryCode, "ca")
+		model.CreateLocation(ctx, mmdbLocation)
+
+		probed := &model.Location{
+			LocationType: model.LocationTypeCountry,
+			Country:      "Japan",
+			CountryCode:  "jp",
+		}
+		model.CreateLocation(ctx, probed)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		handlerId := model.CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
+		connect.AssertEqual(t, err, nil)
+
+		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
+			ClientId:      clientId,
+			LocationId:    probed.LocationId,
+			CountryCode:   "jp",
+			CityConfident: false,
+			ObservedAt:    server.NowUtc(),
+		})
+
+		err = SetConnectionLocation(ctx, connectionId, clientIp)
+		connect.AssertEqual(t, err, nil)
+
+		_, _, countryLocationId := testing_connectionLocationIds(ctx, connectionId)
+		if countryLocationId != probed.CountryLocationId {
+			t.Errorf(
+				"country_location_id = %s, want the probed country %s: a probe that disagrees with mmdb about the country must still correct it",
+				countryLocationId,
+				probed.CountryLocationId,
+			)
+		}
+		if countryLocationId == mmdbLocation.CountryLocationId {
+			t.Errorf("kept the mmdb country %s; the provider is still advertised in the wrong country", mmdbLocation.CountryLocationId)
+		}
+	})
+}
+
+// A city-confident probe is at least as precise as anything mmdb has and is
+// better evidence, so it wins outright -- including against an mmdb city in
+// another country. Nothing is coarsened, so the anti-coarsening rule does not
+// apply.
+func TestSetConnectionLocationProbedCityWinsOverMmdbCity(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientIp := "24.48.0.1"
+
+		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, mmdbLocation.LocationType, model.LocationTypeCity)
+		model.CreateLocation(ctx, mmdbLocation)
+
+		probed := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Tokyo",
+			Region:       "Tokyo",
+			Country:      "Japan",
+			CountryCode:  "jp",
+		}
+		model.CreateLocation(ctx, probed)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		handlerId := model.CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
+		connect.AssertEqual(t, err, nil)
+
+		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
+			ClientId:      clientId,
+			LocationId:    probed.LocationId,
+			CountryCode:   "jp",
+			CityConfident: true,
+			ObservedAt:    server.NowUtc(),
+		})
+
+		err = SetConnectionLocation(ctx, connectionId, clientIp)
+		connect.AssertEqual(t, err, nil)
+
+		cityLocationId, _, countryLocationId := testing_connectionLocationIds(ctx, connectionId)
+		connect.AssertEqual(t, cityLocationId, probed.CityLocationId)
+		connect.AssertEqual(t, countryLocationId, probed.CountryLocationId)
+	})
+}

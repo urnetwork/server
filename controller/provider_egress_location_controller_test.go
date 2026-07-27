@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -494,10 +495,17 @@ func TestSubmitProviderEgressLocationUnknownCityDoesNotCreateALocation(t *testin
 	})
 }
 
-// The variants that matter are trivial: the same city spelled with different
-// case, punctuation or spacing. Those must resolve to the row that is already
-// there -- discarding them to country would throw away real precision for no
-// reason, and creating a row for each is the bug this guards against.
+// The variants that matter are the ones the geolocation sources actually
+// produce for one place: different case, punctuation or spacing, and -- the
+// case this feature was built for -- a parenthesised district qualifier
+// ("Frankfurt am Main (Innenstadt I)"). Those must resolve to the row that is
+// already there; discarding them to country throws away real precision, and
+// creating a row for each is the bug this guards against.
+//
+// An earlier revision of this list only contained foldings the implementation
+// already handled, so it could not fail. The qualifier case below fails against
+// a matcher that only drops punctuation, which is what makes this test worth
+// running. Diacritics -- the other class that failed -- have their own test.
 func TestSubmitProviderEgressLocationMatchesCitySpellingVariant(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -524,8 +532,17 @@ func TestSubmitProviderEgressLocationMatchesCitySpellingVariant(t *testing.T) {
 			{"hesse", "FRANKFURT AM MAIN"}, // case, both levels
 			{"Hesse", "Frankfurt-am-Main"}, // punctuation
 			{"Hesse", " Frankfurt am Main "},
+			// the observed disagreement that motivated matching at all: one
+			// source appends the district. Dropping "(" and ")" as punctuation
+			// is not enough -- the qualifier's letters stay in the key -- so
+			// this misses unless the qualifier itself is stripped.
+			{"Hesse", "Frankfurt am Main (Innenstadt I)"},
+			{"Hesse", "Frankfurt am Main (Innenstadt I) "},
+			// qualifier on the region too
+			{"Hesse (Regierungsbezirk Darmstadt)", "Frankfurt am Main"},
 		}
 		for _, variant := range variants {
+			label := fmt.Sprintf("%q/%q", variant.region, variant.city)
 			clientId := server.NewId()
 			model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 
@@ -543,18 +560,185 @@ func TestSubmitProviderEgressLocationMatchesCitySpellingVariant(t *testing.T) {
 
 			stored := model.GetProviderEgressLocation(ctx, clientId)
 			if stored == nil {
-				t.Fatalf("%q: expected the submission to be stored", variant.city)
+				t.Fatalf("%s: expected the submission to be stored", label)
 			}
 			if stored.LocationId != frankfurt.LocationId {
-				t.Errorf("%q resolved to %s, want the existing Frankfurt row %s", variant.city, stored.LocationId, frankfurt.LocationId)
+				t.Errorf("%s resolved to %s, want the existing Frankfurt row %s", label, stored.LocationId, frankfurt.LocationId)
 			}
 			if !stored.CityConfident {
-				t.Errorf("%q: city_confident must stay set when the city resolved", variant.city)
+				t.Errorf("%s: city_confident must stay set when the city resolved", label)
 			}
 		}
 
 		if after := testing_countLocations(ctx); after != before {
 			t.Errorf("location row count went from %d to %d; spelling variants must reuse the existing row, not add new ones", before, after)
+		}
+	})
+}
+
+// Diacritics are the largest single class of spelling disagreement between the
+// geolocation sources: one emits the local spelling ("São Paulo", "Zürich",
+// "Kraków"), another an ASCII transliteration ("Sao Paulo", "Zurich",
+// "Krakow"), and the mmdb import that seeded the existing rows picked one of
+// the two per city with no way to know which. Every one of these missed before
+// the NFD fold and fell back to country -- and, per
+// TestSetConnectionLocationProbedCountryDoesNotCoarsenMmdbCity, a fallback on a
+// provider the mmdb already placed in a city used to be an outright
+// discoverability regression.
+//
+// Both directions are exercised, because which side carries the accent depends
+// on how the existing row happened to be seeded.
+func TestSubmitProviderEgressLocationMatchesAccentedCityVariant(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+
+		// existing rows, seeded the way the mmdb import would have: some
+		// accented, some already transliterated
+		saoPaulo := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "São Paulo",
+			Region:       "São Paulo",
+			Country:      "Brazil",
+			CountryCode:  "br",
+		}
+		model.CreateLocation(ctx, saoPaulo)
+
+		zurich := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Zürich",
+			Region:       "Zürich",
+			Country:      "Switzerland",
+			CountryCode:  "ch",
+		}
+		model.CreateLocation(ctx, zurich)
+
+		// seeded WITHOUT the accent, so the probe is the side carrying it
+		krakow := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Krakow",
+			Region:       "Lesser Poland",
+			Country:      "Poland",
+			CountryCode:  "pl",
+		}
+		model.CreateLocation(ctx, krakow)
+
+		before := testing_countLocations(ctx)
+
+		variants := []struct {
+			countryCode string
+			country     string
+			region      string
+			city        string
+			want        *model.Location
+		}{
+			// accent dropped by the probing source
+			{"BR", "Brazil", "Sao Paulo", "Sao Paulo", saoPaulo},
+			{"CH", "Switzerland", "Zurich", "Zurich", zurich},
+			// accent present in the probe, absent from the stored row
+			{"PL", "Poland", "Lesser Poland", "Kraków", krakow},
+			// accent on one level only
+			{"BR", "Brazil", "São Paulo", "Sao Paulo", saoPaulo},
+			// accent plus the other foldings at once
+			{"CH", "Switzerland", "zurich", " ZURICH ", zurich},
+		}
+		for _, variant := range variants {
+			label := fmt.Sprintf("%q/%q", variant.region, variant.city)
+			clientId := server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+			_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+				ClientId:         clientId,
+				CountryCode:      variant.countryCode,
+				Country:          variant.country,
+				Region:           variant.region,
+				City:             variant.city,
+				CountryConfident: true,
+				CityConfident:    true,
+				ObservedAt:       server.NowUtc(),
+			})
+			connect.AssertEqual(t, err, nil)
+
+			stored := model.GetProviderEgressLocation(ctx, clientId)
+			if stored == nil {
+				t.Fatalf("%s: expected the submission to be stored", label)
+			}
+			if stored.LocationId != variant.want.LocationId {
+				t.Errorf("%s resolved to %s, want the existing row %s", label, stored.LocationId, variant.want.LocationId)
+			}
+			if !stored.CityConfident {
+				t.Errorf("%s: city_confident must stay set when the city resolved", label)
+			}
+		}
+
+		if after := testing_countLocations(ctx); after != before {
+			t.Errorf("location row count went from %d to %d; accented variants must reuse the existing row, not add new ones", before, after)
+		}
+	})
+}
+
+// The qualifier-stripping pass is the only one that can pick the wrong row, so
+// it must decline rather than guess. Two same-region rows that differ ONLY in
+// their parenthesised qualifier both reduce to the same key; a probe carrying a
+// third qualifier matches neither exactly and must fall back to country instead
+// of silently landing on whichever row the candidate ordering put first.
+func TestSubmitProviderEgressLocationAmbiguousQualifierFallsBackToCountry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		springfieldIl := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Springfield (IL)",
+			Region:       "Midwest",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		model.CreateLocation(ctx, springfieldIl)
+
+		springfieldMa := &model.Location{
+			LocationType: model.LocationTypeCity,
+			City:         "Springfield (MA)",
+			Region:       "Midwest",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		model.CreateLocation(ctx, springfieldMa)
+
+		before := testing_countLocations(ctx)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "US",
+			Country:          "United States",
+			Region:           "Midwest",
+			City:             "Springfield (OH)",
+			CountryConfident: true,
+			CityConfident:    true,
+			ObservedAt:       server.NowUtc(),
+		})
+		connect.AssertEqual(t, err, nil)
+
+		stored := model.GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected the submission to be stored")
+		}
+		if stored.CityConfident {
+			t.Errorf("an ambiguous qualifier must not resolve to a city; got city_confident with location %s", stored.LocationId)
+		}
+		if stored.LocationId == springfieldIl.LocationId || stored.LocationId == springfieldMa.LocationId {
+			t.Errorf("guessed a Springfield (%s) instead of falling back to country", stored.LocationId)
+		}
+		// the country fallback goes through CreateLocation, but the US country
+		// row already exists (the two Springfield fixtures created it), and
+		// CreateLocation dedupes a country on country_code -- so declining to
+		// guess must add no rows at all, least of all a third Springfield
+		if after := testing_countLocations(ctx); after != before {
+			t.Errorf("location row count went from %d to %d; the fallback must reuse the existing country row and never create a city", before, after)
 		}
 	})
 }

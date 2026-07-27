@@ -6,6 +6,8 @@ import (
 	"time"
 	"unicode"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/urnetwork/server"
 )
 
@@ -367,14 +369,33 @@ func GetLocation(ctx context.Context, locationId server.Id) *Location {
 }
 
 // normalizeLocationName folds a location name to a comparison key: lowercased,
-// with every rune that is not a letter or a digit dropped. So
+// accent-stripped, with every rune that is not a letter or a digit dropped. So
 // "Frankfurt am Main", "Frankfurt Am Main" and "FRANKFURT AM MAIN" all fold to
-// "frankfurtammain" and match the one row that already exists.
+// "frankfurtammain", and "São Paulo", "Zürich" and "Kraków" fold to the same
+// keys as "Sao Paulo", "Zurich" and "Krakow".
 //
 // This is deliberately a comparison key only -- it is never stored, and never
 // used to build a location_name. It exists so a trivial spelling variant from a
 // geolocation source resolves to the existing row instead of being treated as a
 // different place.
+//
+// Diacritics are the single biggest source of these variants: the free
+// geolocation sources disagree over whether to emit the local spelling or an
+// ASCII transliteration for the same city, and the mmdb import that seeded most
+// existing rows made its own choice. Folding is done with an NFD decomposition
+// followed by dropping the combining marks (unicode.Mn), which covers the whole
+// accent class at once -- a hand-rolled é->e table would have to enumerate the
+// world's diacritics and would silently keep missing the ones it forgot.
+//
+// golang.org/x/text is already a dependency of this module, so this costs no
+// new supply-chain surface. (An earlier revision of this function was
+// stdlib-only by mistake: that constraint belongs to the prober repo's
+// `geolocate` package, not to the server.)
+//
+// Letters that carry a stroke rather than a combining mark -- ł, ø, đ -- do not
+// decompose and therefore still do not fold onto l/o/d. Those fall back to
+// country granularity, which is the safe outcome; the alternative is the
+// transliteration table this function deliberately avoids.
 //
 // Punctuation is dropped rather than mapped to a space because the disagreement
 // is over whether the separator exists at all ("Washington, D.C." vs
@@ -382,13 +403,18 @@ func GetLocation(ctx context.Context, locationId server.Id) *Location {
 // "Frankfurt am Main": dropping the separator gives "frankfurtmain" !=
 // "frankfurtammain", so that one falls back to country granularity rather than
 // matching the wrong row. Falling back is the safe outcome; guessing is not.
-// Stdlib only, by design -- a transliteration/fuzzy-match dependency is a large
-// amount of new behaviour to take on for an ingest path whose failure mode is
-// already "use the country".
 func normalizeLocationName(name string) string {
+	// NFD splits a precomposed letter ("ü") into its base letter plus a
+	// combining mark ("u" + U+0308). The mark is category Mn, which is neither
+	// a letter nor a digit, so the filter below drops it; the explicit Mn skip
+	// is there to say so rather than to leave it to a category coincidence.
+	decomposed := norm.NFD.String(strings.ToLower(name))
 	var b strings.Builder
-	b.Grow(len(name))
-	for _, r := range strings.ToLower(name) {
+	b.Grow(len(decomposed))
+	for _, r := range decomposed {
+		if unicode.Is(unicode.Mn, r) {
+			continue
+		}
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			b.WriteRune(r)
 		}
@@ -396,11 +422,59 @@ func normalizeLocationName(name string) string {
 	return b.String()
 }
 
-// matchLocationNameInTx returns the location_id of the row in `candidates`
-// whose location_name matches `name`, preferring an exact match and falling
-// back to a normalized one (see normalizeLocationName), or nil for no match.
-// Candidates must already be ordered deterministically by the caller so that
-// two rows folding to the same key always resolve the same way.
+// stripParentheticals removes every parenthesised span from name, so
+// "Frankfurt am Main (Innenstadt I)" becomes "Frankfurt am Main ". Nesting is
+// tracked, and an unclosed "(" swallows the rest of the string -- a qualifier
+// that was truncated by a length limit is still a qualifier.
+//
+// This is only ever applied to a comparison key, never to anything stored.
+func stripParentheticals(name string) string {
+	if !strings.ContainsRune(name, '(') {
+		return name
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	depth := 0
+	for _, r := range name {
+		switch r {
+		case '(':
+			depth += 1
+		case ')':
+			if 0 < depth {
+				depth -= 1
+			}
+		default:
+			if depth == 0 {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
+}
+
+// matchLocationName returns the location_id of the row in `candidates` whose
+// location_name matches `name`, or nil for no match. Candidates must already be
+// ordered deterministically by the caller so that two rows folding to the same
+// key always resolve the same way.
+//
+// Three passes, narrowest first:
+//
+//  1. exact string equality -- the common case, since the winning source usually
+//     spells it the way the mmdb import did;
+//  2. the normalized fold (see normalizeLocationName): case, punctuation,
+//     whitespace and accents;
+//  3. the normalized fold with parenthesised qualifiers stripped from BOTH
+//     sides. This is the case that motivated the whole feature: one source
+//     reports "Frankfurt am Main (Innenstadt I)" -- a district qualifier -- for
+//     a host another source calls "Frankfurt am Main". Pass 2 cannot see
+//     through that, because dropping the parentheses as punctuation leaves the
+//     qualifier's letters in the key.
+//
+// Pass 3 is the only pass that can plausibly match the wrong row -- two
+// same-region rows "Springfield (IL)" and "Springfield (MA)" both reduce to
+// "springfield" -- so it requires the stripped key to identify exactly ONE
+// candidate and returns nil on any ambiguity. Falling back to country
+// granularity is the safe outcome; guessing is not.
 func matchLocationName(name string, candidateIds []server.Id, candidateNames []string) *server.Id {
 	for i, candidateName := range candidateNames {
 		if candidateName == name {
@@ -418,7 +492,22 @@ func matchLocationName(name string, candidateIds []server.Id, candidateNames []s
 			return &candidateIds[i]
 		}
 	}
-	return nil
+
+	base := normalizeLocationName(stripParentheticals(name))
+	if base == "" {
+		// the name was nothing but a qualifier
+		return nil
+	}
+	var unique *server.Id
+	for i, candidateName := range candidateNames {
+		if normalizeLocationName(stripParentheticals(candidateName)) == base {
+			if unique != nil {
+				return nil
+			}
+			unique = &candidateIds[i]
+		}
+	}
+	return unique
 }
 
 // MatchExistingLocation resolves (countryCode, region, city) against location
@@ -436,9 +525,11 @@ func matchLocationName(name string, candidateIds []server.Id, candidateNames []s
 // source's original display string. Each variant would become its own row,
 // those rows outlive a code revert, and there is no cleanup path.
 //
-// Matching is case-insensitive and ignores punctuation and whitespace
-// differences, so the ordinary variants resolve to the row that is already
-// there. When nothing resolves the caller falls back to country granularity --
+// Matching is case-insensitive and ignores punctuation, whitespace, accents and
+// parenthesised district qualifiers (see matchLocationName), so the ordinary
+// variants resolve to the row that is already there -- including the
+// "Frankfurt am Main (Innenstadt I)" case above, which is what this exists for.
+// When nothing resolves the caller falls back to country granularity --
 // see SubmitProviderEgressLocation. Falling back loses precision for one
 // submission; creating a row corrupts shared data permanently.
 //
