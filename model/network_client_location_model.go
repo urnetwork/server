@@ -1449,11 +1449,21 @@ func initialClientLocationsKey() string {
 // returns the given ids with nils dropped and duplicates removed, preserving
 // order.
 //
-// A client's city/region/country location ids are not guaranteed to differ: a
-// country-only geo resolution stores the country id in all three columns (see
-// SetConnectionLocation), and a region-only one stores it in two. Anything that
-// fans a client out across the three columns has to treat them as a set, or the
-// client is counted once per column instead of once per location it is in.
+// A client's city/region/country location ids are not guaranteed to differ
+// wherever the geo write path falls back to the coarsest granularity available
+// rather than writing a NULL into the NOT NULL city/region columns: a
+// country-only resolution then stores the country id in all three columns, and
+// a region-only one stores it in two. Anything that fans a client out across
+// the three columns has to treat them as a set, or the client is counted once
+// per column instead of once per location it is in.
+//
+// Scope, stated plainly because it is easy to overclaim: this is a FORWARD
+// GUARD on main, not a live fix. SetConnectionLocation on main has no
+// country-only fallback -- it passes the NULL through and the insert raises --
+// so no row with city = region = country is written today and this helper
+// changes no current number. It becomes load-bearing when the country fallback
+// lands with PR #407, which carries its own copy; the two are kept identical so
+// they cannot drift.
 func distinctIds(ids ...*server.Id) []server.Id {
 	distinct := make([]server.Id, 0, len(ids))
 	for _, id := range ids {
@@ -1541,13 +1551,15 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 				))
 
 				// count each client at most once per distinct location id. A
-				// client whose geo lookup resolved neither a city nor a region
-				// is stored with city = region = country (see
-				// SetConnectionLocation's country fallback), so incrementing
-				// all three unconditionally counted that one client three
-				// times in its own country. Distinct ids -- a real
-				// city-granular client -- still roll up into their region and
-				// country exactly as before.
+				// client stored with city = region = country -- which is what a
+				// country-only geo resolution produces once SetConnectionLocation
+				// falls back to the coarsest available granularity -- would
+				// otherwise be counted three times in its own country.
+				// Distinct ids -- a real city-granular client -- still roll up
+				// into their region and country exactly as before.
+				//
+				// Forward guard, not a live fix on main: that fallback is not
+				// on main yet. See distinctIds for the full scope note.
 				for _, locationId := range distinctIds(
 					&cityLocationId,
 					&regionLocationId,

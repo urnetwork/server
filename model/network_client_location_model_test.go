@@ -1610,11 +1610,18 @@ func connectPublicAndNetworkOnlyProviders(
 
 // A client whose geo lookup resolved no city and no region is stored with
 // city_location_id = region_location_id = country_location_id -- the coarsest
-// granularity available is written into all three columns. Both fan-out loops
-// then walked city, region and country unconditionally, so one such client
-// added 3 to its own country: `/network/provider-locations` advertised three
-// times the supply that exists, and the inflation is worst exactly where geo
-// resolution is coarsest (datacenter, mobile and VPN egress).
+// granularity available written into all three columns. Both fan-out loops
+// walked city, region and country unconditionally, so one such client would add
+// 3 to its own country: `/network/provider-locations` advertising three times
+// the supply that exists, worst exactly where geo resolution is coarsest
+// (datacenter, mobile and VPN egress).
+//
+// Stated in the conditional deliberately. On main that row cannot be written
+// yet: `SetConnectionLocation` has no country-only fallback and raises on the
+// NULL city instead, so this is a forward guard rather than a live fix. The
+// fallback arrives with PR #407. The fixture builds the collapsed row with a
+// direct UPDATE for exactly that reason -- it depends only on the shape of the
+// stored row, not on a write path that can produce it today.
 //
 // The second half of this test is the guard on the fix: a genuinely
 // city-granular client must still roll up into its region and its country. A
@@ -1625,7 +1632,7 @@ func TestUpdateClientLocationsCountsEachClientOncePerLocation(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		countryOnlyCity, city := createCountryOnlyAndCityProviders(ctx, t)
+		countryOnlyCity, city, _, _ := createCountryOnlyAndCityProviders(ctx, t)
 
 		err := UpdateClientLocations(ctx, time.Hour)
 		connect.AssertEqual(t, err, nil)
@@ -1656,19 +1663,30 @@ func TestUpdateClientLocationsCountsEachClientOncePerLocation(t *testing.T) {
 	})
 }
 
-// The same shape for `UpdateClientScores`: a country-only provider must appear
-// once in its country's candidate pool, and a city-granular provider must still
-// appear in its city's, its region's and its country's pools.
-func TestUpdateClientScoresCountsEachClientOncePerLocation(t *testing.T) {
+// The `UpdateClientScores` half of the fan-out. This deliberately does NOT
+// assert "counted once": the per-location and per-group accumulators are maps
+// keyed by client id, so a repeated client is absorbed whether or not the loop
+// dedupes, and an earlier version of this test asserting a pool size of 1 for
+// the country-only provider returned 1 both before and after the dedupe. It
+// could not fail, so it was not testing anything.
+//
+// What the code here CAN get wrong is the shape of the dedupe. Keying it on the
+// client rather than on (client, location) -- the tempting simplification, since
+// the map already absorbs repeats -- would stop a city-granular provider
+// appearing in its region's and its country's pools, silently emptying every
+// coarse-grained search. So the assertions are on membership at each
+// granularity, by client id rather than by count, which also catches a provider
+// leaking into another country's pool.
+func TestUpdateClientScoresRollsCityProviderUpToRegionAndCountry(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		countryOnlyCity, city := createCountryOnlyAndCityProviders(ctx, t)
+		countryOnlyCity, city, countryOnlyClientId, cityClientId := createCountryOnlyAndCityProviders(ctx, t)
 
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
 
-		poolSizeAt := func(locationId server.Id) int {
+		poolAt := func(locationId server.Id) map[server.Id]*ClientScore {
 			clientScores, err := loadClientScores(
 				true,
 				RankModeQuality,
@@ -1679,15 +1697,26 @@ func TestUpdateClientScoresCountsEachClientOncePerLocation(t *testing.T) {
 				100,
 			)
 			connect.AssertEqual(t, err, nil)
-			return len(clientScores)
+			return clientScores
+		}
+		assertPoolIs := func(label string, locationId server.Id, wantClientId server.Id) {
+			clientScores := poolAt(locationId)
+			if _, ok := clientScores[wantClientId]; !ok {
+				t.Errorf("%s pool is missing provider %s", label, wantClientId)
+			}
+			if len(clientScores) != 1 {
+				t.Errorf("%s pool holds %d clients, want only %s", label, len(clientScores), wantClientId)
+			}
 		}
 
-		connect.AssertEqual(t, poolSizeAt(countryOnlyCity.CountryLocationId), 1)
+		// the city provider must reach every granularity above it
+		assertPoolIs("city", city.CityLocationId, cityClientId)
+		assertPoolIs("region", city.RegionLocationId, cityClientId)
+		assertPoolIs("country", city.CountryLocationId, cityClientId)
 
-		// the city provider still rolls up to every granularity
-		connect.AssertEqual(t, poolSizeAt(city.CityLocationId), 1)
-		connect.AssertEqual(t, poolSizeAt(city.RegionLocationId), 1)
-		connect.AssertEqual(t, poolSizeAt(city.CountryLocationId), 1)
+		// and the country-only provider stays in its own country, not the
+		// city provider's
+		assertPoolIs("country-only country", countryOnlyCity.CountryLocationId, countryOnlyClientId)
 	})
 }
 
@@ -1707,6 +1736,8 @@ func TestUpdateClientScoresCountsEachClientOncePerLocation(t *testing.T) {
 func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
 	countryOnlyCity *Location,
 	city *Location,
+	countryOnlyClientId server.Id,
+	cityClientId server.Id,
 ) {
 	countryOnlyCity = &Location{
 		LocationType: LocationTypeCity,
@@ -1762,8 +1793,8 @@ func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
 		return clientId
 	}
 
-	countryOnlyClientId := connectPublicProvider(countryOnlyCity, "0.0.0.1:0")
-	connectPublicProvider(city, "0.0.0.2:0")
+	countryOnlyClientId = connectPublicProvider(countryOnlyCity, "0.0.0.1:0")
+	cityClientId = connectPublicProvider(city, "0.0.0.2:0")
 
 	// collapse the first provider to country granularity
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -1903,4 +1934,254 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 		connect.AssertEqual(t, otherNetwork[publicClientId], true)
 		connect.AssertEqual(t, otherNetwork[networkOnlyClientId], false)
 	})
+}
+
+// The pool predicate in `UpdateClientScores` is the whole reason this work
+// exists, and until now nothing failed when it was deleted.
+//
+// Both source queries carry `EXISTS (... provide_mode IN (Public, Network))`.
+// Deleting either one refills the candidate pool with the entire consumer
+// fleet, because **every** client registers `ProvideMode_Stream` on connect
+// (`connect/transfer_contract_manager.go`) whether or not it provides anything.
+// Those clients cannot settle a contract -- `resolveNonCompanionProvideMode`
+// can resolve a Stream-only destination as a companion, but that dead-ends at
+// `CreateCompanionTransferEscrow`, which needs a pre-existing reverse origin
+// contract and so can never bootstrap a session. That is the
+// 39-providers-advertised-against-2-usable failure this filter fixes.
+//
+// The existing provide-mode tests do not catch a deletion: their fixtures are
+// Public and Network-only, both of which the predicate admits, so removing it
+// changes nothing they look at. These build the populations that would flood
+// back in -- a Stream-only client and a keyless one -- and assert the pool
+// still holds exactly the provider that can serve a contract.
+//
+// connectProvidersOfEveryProvideMode puts four providers in one location:
+// Public, Network-only, Stream-only, and keyless. The first two belong in the
+// pool (Network-only is filtered per request by `FindProviders2`); the last two
+// never do.
+func connectProvidersOfEveryProvideMode(ctx context.Context, t testing.TB, location *Location) (
+	publicClientId server.Id,
+	networkOnlyClientId server.Id,
+	streamOnlyClientId server.Id,
+	keylessClientId server.Id,
+) {
+	handlerId := CreateNetworkClientHandler(ctx)
+
+	connectProvider := func(i int, modes map[ProvideMode][]byte) server.Id {
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(
+			ctx,
+			clientId,
+			fmt.Sprintf("0.0.0.%d:0", i),
+			handlerId,
+		)
+		connect.AssertEqual(t, err, nil)
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		connect.AssertEqual(t, err, nil)
+		if modes != nil {
+			SetProvide(ctx, clientId, modes)
+		}
+
+		// a reliability score row for every client. The per-location query
+		// joins client_connection_reliability_score, so without one the join --
+		// not the provide-mode predicate under test -- is what decides who is
+		// in the pool.
+		AddClientReliabilityStats(
+			ctx,
+			networkId,
+			clientId,
+			clientAddressHash,
+			server.NowUtc(),
+			&ClientReliabilityStats{
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			},
+		)
+
+		// identical latency and speed samples for every client, so all four
+		// clear the strict minimums and the provide mode is the only thing
+		// that can separate them
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_client_latency (connection_id, latency_ms, sample_count) VALUES ($1, $2, $3)`,
+				connectionId, 30, 1,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count) VALUES ($1, $2, $3)`,
+				connectionId, 100*1024*1024, 1,
+			))
+		})
+		return clientId
+	}
+
+	publicClientId = connectProvider(1, map[ProvideMode][]byte{
+		ProvideModePublic:  []byte("public-secret"),
+		ProvideModeNetwork: []byte("network-secret"),
+	})
+	networkOnlyClientId = connectProvider(2, map[ProvideMode][]byte{
+		ProvideModeNetwork: []byte("network-secret"),
+	})
+	// the population the deleted predicate would readmit: every consumer
+	// client registers Stream on connect, and Stream alone can never settle a
+	// contract
+	streamOnlyClientId = connectProvider(3, map[ProvideMode][]byte{
+		ProvideModeStream: []byte("stream-secret"),
+	})
+	keylessClientId = connectProvider(4, nil)
+
+	UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+	UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+	return
+}
+
+// The per-location source query. Fails against a deletion of its
+// `WHERE EXISTS`, which is what leaves the pool full of Stream-only consumers.
+func TestUpdateClientScoresPoolExcludesStreamOnlyAndKeylessProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		publicClientId, networkOnlyClientId, streamOnlyClientId, keylessClientId :=
+			connectProvidersOfEveryProvideMode(ctx, t, city)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores, err := loadClientScores(
+			true,
+			RankModeQuality,
+			ctx,
+			map[server.Id]bool{city.LocationId: true},
+			map[server.Id]bool{},
+			server.Id{},
+			100,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		assertPoolAdmitsOnlyContractableProviders(
+			t,
+			clientScores,
+			publicClientId,
+			networkOnlyClientId,
+			streamOnlyClientId,
+			keylessClientId,
+		)
+	})
+}
+
+// The location-*group* source query, which is a separate statement with its own
+// copy of the predicate and its own redis keys
+// (`clientScoreLocationGroup*` -> `loadClientScores` -> `FindProviders2`
+// whenever the spec carries a `LocationGroupId`). A user who picks a promoted
+// group must get the same pool a user who picks a plain location gets; deleting
+// this query's `WHERE EXISTS` alone leaves the per-location test above green.
+//
+// Only group ids are passed to `loadClientScores`, so this reads the group
+// cache and nothing else.
+func TestUpdateClientScoresGroupPoolExcludesStreamOnlyAndKeylessProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		group := &LocationGroup{
+			Name:     "Test Group Provide Modes",
+			Promoted: true,
+			MemberLocationIds: []server.Id{
+				city.CityLocationId,
+				city.RegionLocationId,
+				city.CountryLocationId,
+			},
+		}
+		CreateLocationGroup(ctx, group)
+
+		publicClientId, networkOnlyClientId, streamOnlyClientId, keylessClientId :=
+			connectProvidersOfEveryProvideMode(ctx, t, city)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores, err := loadClientScores(
+			true,
+			RankModeQuality,
+			ctx,
+			map[server.Id]bool{},
+			map[server.Id]bool{group.LocationGroupId: true},
+			server.Id{},
+			100,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		assertPoolAdmitsOnlyContractableProviders(
+			t,
+			clientScores,
+			publicClientId,
+			networkOnlyClientId,
+			streamOnlyClientId,
+			keylessClientId,
+		)
+	})
+}
+
+// Errorf rather than Fatalf throughout, so one run reports every provider the
+// pool got wrong instead of stopping at the first.
+func assertPoolAdmitsOnlyContractableProviders(
+	t testing.TB,
+	clientScores map[server.Id]*ClientScore,
+	publicClientId server.Id,
+	networkOnlyClientId server.Id,
+	streamOnlyClientId server.Id,
+	keylessClientId server.Id,
+) {
+	if _, ok := clientScores[streamOnlyClientId]; ok {
+		t.Errorf(
+			"Stream-only client %s is in the candidate pool; every consumer client registers ProvideMode_Stream, so this is the whole consumer fleet advertised as supply",
+			streamOnlyClientId,
+		)
+	}
+	if _, ok := clientScores[keylessClientId]; ok {
+		t.Errorf("client %s holds no provide key at all and is in the candidate pool", keylessClientId)
+	}
+
+	// and the providers that CAN settle a contract are still there -- a filter
+	// that excluded them would "pass" the assertions above for the wrong reason
+	publicClientScore, ok := clientScores[publicClientId]
+	if !ok {
+		t.Errorf("Public client %s is missing from the candidate pool", publicClientId)
+	} else if publicClientScore.NetworkOnly {
+		t.Errorf("Public client %s is tagged network-only", publicClientId)
+	}
+	networkOnlyClientScore, ok := clientScores[networkOnlyClientId]
+	if !ok {
+		t.Errorf("Network-only client %s is missing from the candidate pool; it serves its own network today", networkOnlyClientId)
+	} else if !networkOnlyClientScore.NetworkOnly {
+		t.Errorf("Network-only client %s is not tagged network-only, so FindProviders2 would hand it to strangers", networkOnlyClientId)
+	}
+
+	if len(clientScores) != 2 {
+		t.Errorf("candidate pool holds %d clients, want exactly the 2 that can settle a contract", len(clientScores))
+	}
 }
