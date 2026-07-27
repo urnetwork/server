@@ -1257,3 +1257,181 @@ func TestSetConnectionLocationToleratesCountryOnlyLocation(t *testing.T) {
 		connect.AssertEqual(t, *cty, country.CountryLocationId)
 	})
 }
+
+// A client whose geo lookup resolved neither a city nor a region is stored with
+// city_location_id = region_location_id = country_location_id --
+// SetConnectionLocation's country fallback (added by this same change) writes
+// the coarsest available id into the NOT NULL city/region columns. Walking the
+// three columns unconditionally then counted that one client three times in its
+// own country, inflating the displayed provider count by up to 3x exactly where
+// geo resolution is coarsest: datacenter, mobile and VPN egress.
+//
+// The second half of the assertion is the important one: a genuinely
+// city-granular client must still roll up into its region and its country. A
+// dedupe keyed on the client alone rather than on (client, location) would
+// silently stop city clients counting toward their country, which is a far
+// worse regression than the one being fixed.
+func TestUpdateClientLocationsCountsEachClientOncePerLocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		countryOnlyCity, city := createCountryOnlyAndCityProviders(ctx, t)
+
+		err := UpdateClientLocations(ctx, time.Hour)
+		connect.AssertEqual(t, err, nil)
+
+		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{
+			countryOnlyCity.CountryLocationId: true,
+			city.CityLocationId:               true,
+			city.RegionLocationId:             true,
+			city.CountryLocationId:            true,
+		})
+		connect.AssertEqual(t, err, nil)
+
+		countOf := func(locationId server.Id) int {
+			clientLocation, ok := clientLocations[locationId]
+			if !ok {
+				t.Fatalf("expected a cached client location for %s", locationId)
+			}
+			return clientLocation.ClientCount
+		}
+
+		// one client, counted once -- not once per city/region/country column
+		connect.AssertEqual(t, countOf(countryOnlyCity.CountryLocationId), 1)
+
+		// and the roll-up for a real city client is untouched
+		connect.AssertEqual(t, countOf(city.CityLocationId), 1)
+		connect.AssertEqual(t, countOf(city.RegionLocationId), 1)
+		connect.AssertEqual(t, countOf(city.CountryLocationId), 1)
+	})
+}
+
+// The same shape for `UpdateClientScores`: a country-only provider must appear
+// once in its country's candidate pool, and a city-granular provider must still
+// appear in its city's, its region's and its country's pools.
+func TestUpdateClientScoresCountsEachClientOncePerLocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		countryOnlyCity, city := createCountryOnlyAndCityProviders(ctx, t)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		poolSizeAt := func(locationId server.Id) int {
+			clientScores, err := loadClientScores(
+				true,
+				RankModeQuality,
+				ctx,
+				map[server.Id]bool{locationId: true},
+				map[server.Id]bool{},
+				server.Id{},
+				100,
+			)
+			connect.AssertEqual(t, err, nil)
+			return len(clientScores)
+		}
+
+		connect.AssertEqual(t, poolSizeAt(countryOnlyCity.CountryLocationId), 1)
+
+		// the city provider still rolls up to every granularity
+		connect.AssertEqual(t, poolSizeAt(city.CityLocationId), 1)
+		connect.AssertEqual(t, poolSizeAt(city.RegionLocationId), 1)
+		connect.AssertEqual(t, poolSizeAt(city.CountryLocationId), 1)
+	})
+}
+
+// connects two providers in two different countries and rolls the reliability
+// table forward:
+//
+//   - one whose `network_client_location` row has all three location columns
+//     collapsed to its country id, which is what a country-granularity geo
+//     lookup produces (`SetConnectionLocation` writes the coarsest available id
+//     into the NOT NULL city/region columns), and
+//   - one at genuine city granularity, with three distinct ids.
+//
+// The collapse is applied with a direct UPDATE rather than by handing
+// `SetConnectionLocation` a country-only `location` row, so the fixture depends
+// only on the shape of the stored row and not on which branch's fallback
+// produced it.
+func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
+	countryOnlyCity *Location,
+	city *Location,
+) {
+	countryOnlyCity = &Location{
+		LocationType: LocationTypeCity,
+		City:         "Toronto",
+		Region:       "Ontario",
+		Country:      "Canada",
+		CountryCode:  "ca",
+	}
+	CreateLocation(ctx, countryOnlyCity)
+
+	city = &Location{
+		LocationType: LocationTypeCity,
+		City:         "Palo Alto",
+		Region:       "California",
+		Country:      "United States",
+		CountryCode:  "us",
+	}
+	CreateLocation(ctx, city)
+
+	handlerId := CreateNetworkClientHandler(ctx)
+	connectPublicProvider := func(location *Location, ip string) server.Id {
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, ip, handlerId)
+		connect.AssertEqual(t, err, nil)
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		connect.AssertEqual(t, err, nil)
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic: []byte("public-secret"),
+		})
+
+		// UpdateClientScores joins client_connection_reliability_score, so
+		// every provider needs a score row or the join, not the logic under
+		// test, is what excludes it. The address hash is shared across the
+		// fixture on purpose: validity is derived from
+		// network_client_connection, not from these stats.
+		AddClientReliabilityStats(
+			ctx,
+			networkId,
+			clientId,
+			[32]byte{},
+			server.NowUtc(),
+			&ClientReliabilityStats{
+				ConnectionEstablishedCount: 1,
+				ProvideEnabledCount:        1,
+				ReceiveMessageCount:        1,
+				ReceiveByteCount:           1024,
+				SendMessageCount:           1,
+				SendByteCount:              1024,
+			},
+		)
+		return clientId
+	}
+
+	countryOnlyClientId := connectPublicProvider(countryOnlyCity, "0.0.0.1:0")
+	connectPublicProvider(city, "0.0.0.2:0")
+
+	// collapse the first provider to country granularity
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_client_location
+			SET
+				city_location_id = $2,
+				region_location_id = $2
+			WHERE client_id = $1
+			`,
+			countryOnlyClientId,
+			countryOnlyCity.CountryLocationId,
+		))
+	})
+
+	UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+	UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+	return
+}

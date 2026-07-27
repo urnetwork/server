@@ -1476,6 +1476,28 @@ func initialClientLocationsKey() string {
 	return fmt.Sprintf("{cl}i")
 }
 
+// distinctIds returns the given ids with nils dropped and duplicates removed,
+// preserving order.
+//
+// A client's city/region/country location ids are not guaranteed to differ: a
+// country-only geo resolution stores the country id in all three columns (see
+// SetConnectionLocation's country fallback), and a region-only one stores it in
+// two. Anything that fans a client out across the three columns has to treat
+// them as a set, or the client is counted once per column instead of once per
+// location it is actually in.
+func distinctIds(ids ...*server.Id) []server.Id {
+	distinct := make([]server.Id, 0, len(ids))
+	for _, id := range ids {
+		if id == nil {
+			continue
+		}
+		if !slices.Contains(distinct, *id) {
+			distinct = append(distinct, *id)
+		}
+	}
+	return distinct
+}
+
 func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
 	topCitiesPerRegion := 20
 	topCitiesPerCountry := 10
@@ -1520,9 +1542,23 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 					&countryLocationId,
 				))
 
-				locationClientCounts[cityLocationId] += 1
-				locationClientCounts[regionLocationId] += 1
-				locationClientCounts[countryLocationId] += 1
+				// count each client at most once per distinct location id. A
+				// client whose geo lookup resolved neither a city nor a region
+				// is stored with city = region = country (see
+				// SetConnectionLocation's country fallback, added by this same
+				// change), so incrementing all three unconditionally counted
+				// that one client three times in its own country -- inflating
+				// the displayed provider count by up to 3x exactly where geo
+				// resolution is coarsest: datacenter, mobile and VPN egress.
+				// Distinct ids -- a real city-granular client -- still roll up
+				// into their region and country exactly as before.
+				for _, locationId := range distinctIds(
+					&cityLocationId,
+					&regionLocationId,
+					&countryLocationId,
+				) {
+					locationClientCounts[locationId] += 1
+				}
 			}
 		})
 
@@ -2444,26 +2480,25 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			for result.Next() {
 				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId := loadClientScore(result)
 
-				clientScores, ok := locationClientScores[*cityLocationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[*cityLocationId] = clientScores
+				// once per distinct location id: a country-only client stores
+				// its country id in all three columns (see
+				// SetConnectionLocation's country fallback), and a client
+				// belongs in a location's pool once. The per-location map is
+				// keyed by client id so a repeat is already absorbed, but going
+				// through the set makes the intent explicit and keeps this loop
+				// in step with the counting loop in UpdateClientLocations.
+				for _, locationId := range distinctIds(
+					cityLocationId,
+					regionLocationId,
+					countryLocationId,
+				) {
+					clientScores, ok := locationClientScores[locationId]
+					if !ok {
+						clientScores = map[server.Id]*ClientScore{}
+						locationClientScores[locationId] = clientScores
+					}
+					addClientScore(lookbackClientScore, clientScores)
 				}
-				addClientScore(lookbackClientScore, clientScores)
-
-				clientScores, ok = locationClientScores[*regionLocationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[*regionLocationId] = clientScores
-				}
-				addClientScore(lookbackClientScore, clientScores)
-
-				clientScores, ok = locationClientScores[*countryLocationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[*countryLocationId] = clientScores
-				}
-				addClientScore(lookbackClientScore, clientScores)
 			}
 		})
 
@@ -2509,29 +2544,19 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			for result.Next() {
 				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId := loadClientScore(result)
 
-				if cityLocationGroupId != nil {
-					clientScores, ok := locationGroupClientScores[*cityLocationGroupId]
+				// once per distinct group id. The three location columns can be
+				// the same id (a country-only client, see
+				// SetConnectionLocation's country fallback), in which case all
+				// three group joins resolve to the same membership rows.
+				for _, locationGroupId := range distinctIds(
+					cityLocationGroupId,
+					regionLocationGroupId,
+					countryLocationGroupId,
+				) {
+					clientScores, ok := locationGroupClientScores[locationGroupId]
 					if !ok {
 						clientScores = map[server.Id]*ClientScore{}
-						locationGroupClientScores[*cityLocationGroupId] = clientScores
-					}
-					addClientScore(lookbackClientScore, clientScores)
-				}
-
-				if regionLocationGroupId != nil {
-					clientScores, ok := locationGroupClientScores[*regionLocationGroupId]
-					if !ok {
-						clientScores = map[server.Id]*ClientScore{}
-						locationGroupClientScores[*regionLocationGroupId] = clientScores
-					}
-					addClientScore(lookbackClientScore, clientScores)
-				}
-
-				if countryLocationGroupId != nil {
-					clientScores, ok := locationGroupClientScores[*countryLocationGroupId]
-					if !ok {
-						clientScores = map[server.Id]*ClientScore{}
-						locationGroupClientScores[*countryLocationGroupId] = clientScores
+						locationGroupClientScores[locationGroupId] = clientScores
 					}
 					addClientScore(lookbackClientScore, clientScores)
 				}
