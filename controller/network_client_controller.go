@@ -52,6 +52,36 @@ func ConnectNetworkClient(
 // FIXME the client ip should be in memory only, never persisted
 // FIXME consider using dbip+a latency test for quality metrics
 
+// freshProviderEgressLocationForConnection is
+// model.GetFreshProviderEgressLocationForConnection made non-fatal: on any
+// failure it logs and returns nil, which the caller reads as "no probed
+// location" and falls through to the mmdb lookup.
+//
+// See the block comment in SetConnectionLocation for why nothing here may be
+// allowed to panic out.
+func freshProviderEgressLocationForConnection(
+	ctx context.Context,
+	connectionId server.Id,
+) *model.ProviderEgressLocation {
+	return server.HandleError1(
+		func() *model.ProviderEgressLocation {
+			return model.GetFreshProviderEgressLocationForConnection(
+				ctx,
+				connectionId,
+				model.ProviderEgressLocationMaxAge,
+			)
+		},
+		func(err error) *model.ProviderEgressLocation {
+			glog.Infof(
+				"[ncc][%s]probed egress location lookup failed, using mmdb. err = %s\n",
+				connectionId,
+				err,
+			)
+			return nil
+		},
+	)
+}
+
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
@@ -80,10 +110,31 @@ func SetConnectionLocation(
 	// not) on the connect-announce path and inside a retry loop, so it must
 	// not cost the two round trips (client lookup, then egress lookup) the
 	// naive version would.
-	if egress := model.GetFreshProviderEgressLocationForConnection(
+	//
+	// The lookup is non-fatal by construction. model.Db raises non-transient,
+	// non-connection postgres errors as a panic (see isTransientError /
+	// isConnectionError in db.go), and this call sits on
+	// ConnectNetworkClient's path *before* connect's disconnect-cleanup defer
+	// is registered (connect/transport_announce.go) -- so an escaping panic
+	// does not just fail the location lookup, it tears the connection down and
+	// leaves its network_client_connection row orphaned as connected = true.
+	//
+	// The concrete hazard is deploy ordering. provider_egress_location is a
+	// new table in this change; roll the binary before running
+	// `bringyourctl db migrate` and every announce hits undefined_table
+	// (42P01), which is neither transient nor a connection error, and every
+	// connection in that window orphans. That exact failure mode has already
+	// cost this project ~30k orphaned rows once, and deploy ordering is not
+	// something a test suite catches.
+	//
+	// So: swallow ANY failure here and fall through to the mmdb path.
+	// Deliberately not narrowed to transient errors -- the whole point is that
+	// an unmigrated or otherwise unhappy database must not be able to break
+	// connections. The probed location is an optimisation over mmdb, never a
+	// requirement, so mmdb is the correct answer whenever it is unavailable.
+	if egress := freshProviderEgressLocationForConnection(
 		ctx,
 		connectionId,
-		model.ProviderEgressLocationMaxAge,
 	); egress != nil && probedLocationPreferred(egress, location) {
 		scores := &model.ConnectionLocationScores{}
 		if egress.Hosting {
