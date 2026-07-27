@@ -695,18 +695,19 @@ func GetProviderEgressLocationDue(
 ) []server.Id {
 	clientIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
+		// pass 1: never probed. Ordered by client_id alone -- every row in this
+		// group has no observed_at, so the ORDER BY's leading key is constant
+		// across it and the tie-break is the whole ordering.
+		//
+		// `limit` is passed through as given rather than clamped, so a
+		// nonsensical limit fails exactly as the single-statement version did
+		// (LIMIT 0 returns nothing; a negative limit is an error).
 		result, err := conn.Query(
 			ctx,
 			`
 			SELECT
 				network_client_location_reliability.client_id
 			FROM network_client_location_reliability
-
-			LEFT JOIN provider_egress_location ON
-				provider_egress_location.client_id = network_client_location_reliability.client_id
-
-			LEFT JOIN provider_egress_probe_attempt ON
-				provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id
 
 			WHERE
 				network_client_location_reliability.connected = true AND
@@ -717,28 +718,22 @@ func GetProviderEgressLocationDue(
 						provide_key.client_id = network_client_location_reliability.client_id AND
 						provide_key.provide_mode = $1
 				) AND
-				(
-					provider_egress_location.observed_at IS NULL OR
-					provider_egress_location.observed_at < $2
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_location
+					WHERE
+						provider_egress_location.client_id = network_client_location_reliability.client_id
 				) AND
-				(
-					provider_egress_probe_attempt.attempt_at IS NULL OR
-					provider_egress_probe_attempt.attempt_at < $3
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_probe_attempt
+					WHERE
+						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
+						$2 <= provider_egress_probe_attempt.attempt_at
 				)
 
-			-- never-probed sorts ahead of merely stale: a missing observed_at
-			-- is infinitely old. client_id breaks the tie so batch composition
-			-- is deterministic instead of plan-dependent -- otherwise the whole
-			-- never-probed population ties on NULL and which slice of it the
-			-- prober gets back under a limit is whatever order the executor
-			-- happened to produce.
-			ORDER BY
-				provider_egress_location.observed_at ASC NULLS FIRST,
-				network_client_location_reliability.client_id ASC
-			LIMIT $4
+			ORDER BY network_client_location_reliability.client_id ASC
+			LIMIT $3
 			`,
 			ProvideModePublic,
-			minObservedAt.UTC(),
 			minAttemptAt.UTC(),
 			limit,
 		)
@@ -746,6 +741,77 @@ func GetProviderEgressLocationDue(
 			for result.Next() {
 				var clientId server.Id
 				server.Raise(result.Scan(&clientId))
+				clientIds = append(clientIds, clientId)
+			}
+		})
+
+		remaining := limit - len(clientIds)
+		if remaining <= 0 {
+			// the batch is full from never-probed providers alone, which is the
+			// steady state until the population has been swept once. The
+			// single-statement version would have returned exactly these rows
+			// too: they all sort ahead of anything with an observed_at.
+			return
+		}
+
+		// pass 2: stale but probed. Driven from provider_egress_location, so
+		// observed_at is a real column of the driving table and the ORDER BY is
+		// an ordered index scan rather than a sort.
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT
+				provider_egress_location.client_id
+			FROM provider_egress_location
+
+			INNER JOIN network_client_location_reliability ON
+				network_client_location_reliability.client_id = provider_egress_location.client_id
+
+			WHERE
+				provider_egress_location.observed_at < $2 AND
+				network_client_location_reliability.connected = true AND
+				network_client_location_reliability.valid = true AND
+				EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE
+						provide_key.client_id = provider_egress_location.client_id AND
+						provide_key.provide_mode = $1
+				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_probe_attempt
+					WHERE
+						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
+						$3 <= provider_egress_probe_attempt.attempt_at
+				)
+
+			-- oldest probe first, client_id breaking the tie, so batch
+			-- composition is deterministic instead of plan-dependent
+			ORDER BY
+				provider_egress_location.observed_at ASC,
+				provider_egress_location.client_id ASC
+			LIMIT $4
+			`,
+			ProvideModePublic,
+			minObservedAt.UTC(),
+			minAttemptAt.UTC(),
+			remaining,
+		)
+		server.WithPgResult(result, err, func() {
+			// the two passes are separate statements and so separate snapshots.
+			// A provider that gains its first provider_egress_location row
+			// between them would be never-probed to pass 1 and stale to pass 2;
+			// the single-statement version could not do that, so screen it out
+			// rather than hand the prober the same client twice.
+			seen := map[server.Id]bool{}
+			for _, clientId := range clientIds {
+				seen[clientId] = true
+			}
+			for result.Next() {
+				var clientId server.Id
+				server.Raise(result.Scan(&clientId))
+				if seen[clientId] {
+					continue
+				}
 				clientIds = append(clientIds, clientId)
 			}
 		})

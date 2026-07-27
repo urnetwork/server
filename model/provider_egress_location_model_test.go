@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -540,6 +541,126 @@ func TestRemoveExpiredProviderEgressProbeAttempts(t *testing.T) {
 		}
 		if GetProviderEgressProbeAttempt(ctx, drop) != nil {
 			t.Fatal("old attempt must be swept")
+		}
+	})
+}
+
+// GetProviderEgressLocationDue is served by two statements -- never-probed
+// first, then stale-but-probed only when the first came up short -- because the
+// single-statement form sorts on observed_at from an outer-joined table, which
+// cannot use an index and becomes a full scan plus an unindexable sort at 100k
+// providers.
+//
+// The split is only safe if the concatenation is row-for-row what one statement
+// returned, at every limit. That is what this asserts: it builds one population
+// covering every eligibility case and then walks the limit from 0 past the end,
+// requiring each result to be exactly the prefix of the full ordering. Limit 3
+// is the seam (pass one exactly fills the batch) and limit 4 is the first that
+// crosses into pass two.
+func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		// three never-probed providers: the dominant group, and the reason the
+		// ordering is NULLS FIRST
+		never := []server.Id{server.NewId(), server.NewId(), server.NewId()}
+		// two stale ones, at different ages -- the older must be handed out first
+		staleOlder := server.NewId()
+		staleNewer := server.NewId()
+		// probed an hour ago: not due
+		fresh := server.NewId()
+		// never probed, but attempted seconds ago: deferred by the backoff, and
+		// the case that would otherwise starve the queue
+		attempted := server.NewId()
+		// probed long ago AND attempted seconds ago. This one is only screened
+		// by the backoff predicate on the stale-but-probed pass -- the
+		// never-probed pass never sees it, because it has an egress row. Drop
+		// that predicate and it reappears in the batch.
+		staleAttempted := server.NewId()
+		// no Public provide key: unprobeable at any freshness
+		nonPublic := server.NewId()
+
+		address := 0
+		connectProvider := func(clientId server.Id, provideMode ProvideMode) {
+			address += 1
+			testing_connectProbeableProvider(
+				t, ctx, clientId, city.LocationId,
+				fmt.Sprintf("0.0.%d.1:0", address), provideMode,
+			)
+		}
+		for _, clientId := range never {
+			connectProvider(clientId, ProvideModePublic)
+		}
+		connectProvider(staleOlder, ProvideModePublic)
+		connectProvider(staleNewer, ProvideModePublic)
+		connectProvider(fresh, ProvideModePublic)
+		connectProvider(attempted, ProvideModePublic)
+		connectProvider(staleAttempted, ProvideModePublic)
+		connectProvider(nonPublic, ProvideModeNetwork)
+
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: staleOlder, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-100 * time.Hour),
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: staleNewer, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-50 * time.Hour),
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: fresh, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-1 * time.Hour),
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: staleAttempted, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-200 * time.Hour),
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: attempted, AttemptAt: now.Add(-5 * time.Second),
+			ProbeFailure: "tunnel_failed",
+		})
+		// oldest observed_at of all, so it would sort to the head of the
+		// stale group if the backoff did not exclude it
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: staleAttempted, AttemptAt: now.Add(-5 * time.Second),
+			ProbeFailure: "tunnel_failed",
+		})
+
+		minObservedAt := now.Add(-24 * time.Hour)
+		minAttemptAt := now.Add(-ProviderEgressProbeAttemptBackoff)
+
+		// the never-probed group ties on a missing observed_at, so client_id
+		// alone orders it -- and postgres orders uuid by bytes, which is what
+		// server.Id.Cmp does
+		expected := slices.Clone(never)
+		slices.SortFunc(expected, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		// ... then the probed group, oldest probe first
+		expected = append(expected, staleOlder, staleNewer)
+
+		due := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, 100)
+		if !slices.Equal(due, expected) {
+			t.Fatalf("due = %v, want %v (never-probed by client_id, then stale oldest-first; fresh/attempted/stale-attempted/non-public excluded)", due, expected)
+		}
+
+		// every limit must return exactly the prefix of that ordering. limit 3
+		// is the pass-one/pass-two seam; 4 is the first to cross it.
+		for limit := 0; limit <= len(expected)+2; limit += 1 {
+			want := expected[:min(limit, len(expected))]
+			got := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, limit)
+			if !slices.Equal(got, want) {
+				t.Errorf("limit %d: due = %v, want %v", limit, got, want)
+			}
 		}
 	})
 }

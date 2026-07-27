@@ -4450,4 +4450,31 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS provider_egress_probe_attempt_attempt_at
             ON provider_egress_probe_attempt (attempt_at)
     `),
+
+	// serves the stale-but-probed pass of GetProviderEgressLocationDue, which
+	// drives from provider_egress_location with `observed_at < $n ORDER BY
+	// observed_at, client_id LIMIT $m`. With client_id in the index the
+	// predicate and the whole ORDER BY -- tie-break included -- are one ordered
+	// index scan that stops when the batch is full: no sort, and no heap visit
+	// to resolve the tie. The pre-existing (observed_at) index alone leaves the
+	// client_id tie-break to a sort.
+	//
+	// The other pass (never-probed) needs no new index: it is an anti-join over
+	// network_client_location_reliability ordered by client_id, which the
+	// existing (valid, connected, client_id) index already serves as an ordered
+	// scan, and both anti-joins plus the provide_key EXISTS are primary-key
+	// probes.
+	//
+	// This supersedes provider_egress_location_observed_at, which is now a
+	// prefix of it -- including for the RemoveExpiredProviderEgressLocations
+	// sweep. The redundant index is left in place deliberately: dropping it is a
+	// separate decision with its own (small) risk, and this migration is meant
+	// to be purely additive.
+	//
+	// Appended, never inserted: migrations here apply by slice index, so
+	// editing or reordering an already-applied entry corrupts live databases.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_egress_location_observed_at_client_id
+            ON provider_egress_location (observed_at, client_id)
+    `),
 }
