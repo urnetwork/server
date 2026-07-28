@@ -131,6 +131,11 @@ func ApplyAccountPointsBatchInTx(
 }
 
 func FetchAccountPoints(ctx context.Context, networkId server.Id) (accountPoints []AccountPoint) {
+	// non-nil for the same reason as GetLeaderboard: a nil slice becomes JSON
+	// `null`, which the gomobile binding turns into a nil pointer and the
+	// android client crashes on. Feeds both `network_points` and its
+	// `account_points` alias.
+	accountPoints = []AccountPoint{}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
