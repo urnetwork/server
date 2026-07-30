@@ -4526,4 +4526,38 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS provider_bandwidth_window_end
             ON provider_bandwidth (window_end)
     `),
+
+	// The deployment-wide byte budget for active bandwidth probing: one row per
+	// admitted reservation, counting against a fixed hourly bucket. See
+	// ReserveProviderBandwidthSlot for why active probe bytes need a spend
+	// limit at all -- they are real, paid contract traffic on any deployment
+	// where payouts are planned, regardless of the balance code used.
+	//
+	// byte_count is bigint, not int: a single bucket's budget is measured in
+	// hundreds of megabytes, so an int would overflow well inside the range
+	// this ledger has to sum over a day. client_id is stored for observability
+	// only -- the limit itself is global, not scoped per provider, so nothing
+	// reads this column to make an admission decision.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS on every
+	// statement makes a re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_bandwidth_quota (
+            provider_bandwidth_quota_id uuid NOT NULL PRIMARY KEY,
+            client_id                   uuid NOT NULL,
+            byte_count                  bigint NOT NULL,
+            bucket_start                timestamp NOT NULL,
+            create_time                 timestamp NOT NULL
+        )
+    `),
+
+	// every read of this table is a range over the lookahead window
+	// (`$1 <= bucket_start AND bucket_start < $2`), and the reaper deletes by
+	// the same column, so bucket_start is the only index it needs.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_bandwidth_quota_bucket_start
+            ON provider_bandwidth_quota (bucket_start)
+    `),
 }
