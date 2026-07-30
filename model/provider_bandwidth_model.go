@@ -118,3 +118,48 @@ func ComputePassiveProviderBandwidth(
 		WindowEnd:   *maxCloseTime,
 	}, nil
 }
+
+// StoreProviderBandwidth records a provider's current throughput figure,
+// whatever produced it. The row is keyed on client_id, so a new measurement
+// replaces the previous one: this is the current figure a consumer reads, not a
+// history (see the provider_bandwidth migration).
+//
+// Both sources write through here, tagged by bw.Source, so nothing downstream
+// has to know whether a figure came from settled traffic or an active sample.
+// The figure is advisory -- storing one must never gate provider selection.
+func StoreProviderBandwidth(ctx context.Context, bw *ProviderBandwidth) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO provider_bandwidth (
+				client_id,
+				bytes_per_second,
+				source,
+				sample_byte_count,
+				window_start,
+				window_end,
+				update_time
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (client_id) DO UPDATE
+			SET
+				bytes_per_second = $2,
+				source = $3,
+				sample_byte_count = $4,
+				window_start = $5,
+				window_end = $6,
+				update_time = $7
+			`,
+			bw.ClientId,
+			bw.BytesPerSecond,
+			bw.Source,
+			bw.SampleByteCount,
+			// window_start/window_end are naive timestamp columns holding utc,
+			// as everywhere else in this schema
+			bw.WindowStart.UTC(),
+			bw.WindowEnd.UTC(),
+			server.NowUtc(),
+		))
+	})
+}

@@ -26,8 +26,27 @@ const ProviderEgressLocationMaxAge = 7 * 24 * time.Hour
 // of the queue.
 const ProviderEgressProbeAttemptBackoff = 6 * time.Hour
 
+// the verdict/assurance values a provider_egress_location row can hold. These
+// mirror the column defaults, and are what an unjudged submission is normalized
+// to on write -- see SetProviderEgressLocation.
+const (
+	// ProviderEgressVerdictUnverified is the default: no judgement recorded.
+	// Every row written before the ingest path computed verdicts reads as this.
+	ProviderEgressVerdictUnverified = "unverified"
+	// ProviderEgressAssuranceDirect means the probe reached the provider over a
+	// single tunnel from the prober. It is the only assurance in use; multi-hop
+	// is P3's concern.
+	ProviderEgressAssuranceDirect = "direct"
+)
+
 // ProviderEgressLocation is a provider location learned by probing the
 // provider's own egress, rather than by looking up its control-connection ip.
+//
+// Verdict/VerdictReason/Assurance carry the recorded judgement for the probe
+// that produced this location. They are advisory: nothing in provider selection
+// or scoring reads them. An empty Verdict or Assurance is normalized to the
+// column default on write, so a caller that does not compute a judgement stores
+// an unjudged direct probe rather than an empty string.
 type ProviderEgressLocation struct {
 	ClientId      server.Id
 	LocationId    server.Id
@@ -39,6 +58,9 @@ type ProviderEgressLocation struct {
 	Mobile        bool
 	CityConfident bool
 	ObservedAt    time.Time
+	Verdict       string
+	VerdictReason string
+	Assurance     string
 	UpdateTime    time.Time
 }
 
@@ -51,6 +73,21 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 	// network_client_location_model.go); the geolocation APIs that feed this
 	// return uppercase codes (e.g. "US"), so normalize before writing.
 	countryCode := strings.ToLower(e.CountryCode)
+
+	// the verdict columns are NOT NULL with defaults, and this INSERT names
+	// every column explicitly -- which bypasses those defaults. A caller that
+	// computes no judgement would otherwise store '' rather than 'unverified'
+	// and '' rather than 'direct', so normalize here the way countryCode is
+	// normalized above. VerdictReason has no default value to fall back to: ""
+	// means "no reason", which is exactly the column default.
+	verdict := e.Verdict
+	if verdict == "" {
+		verdict = ProviderEgressVerdictUnverified
+	}
+	assurance := e.Assurance
+	if assurance == "" {
+		assurance = ProviderEgressAssuranceDirect
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -67,9 +104,12 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 				mobile,
 				city_confident,
 				observed_at,
+				verdict,
+				verdict_reason,
+				assurance,
 				update_time
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 			ON CONFLICT (client_id) DO UPDATE
 			SET
 				location_id = $2,
@@ -81,7 +121,10 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 				mobile = $8,
 				city_confident = $9,
 				observed_at = $10,
-				update_time = $11
+				verdict = $11,
+				verdict_reason = $12,
+				assurance = $13,
+				update_time = $14
 			WHERE provider_egress_location.observed_at < EXCLUDED.observed_at
 			`,
 			e.ClientId,
@@ -94,6 +137,9 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 			e.Mobile,
 			e.CityConfident,
 			e.ObservedAt.UTC(),
+			verdict,
+			e.VerdictReason,
+			assurance,
 			server.NowUtc(),
 		))
 	})
@@ -198,6 +244,9 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 				mobile,
 				city_confident,
 				observed_at,
+				verdict,
+				verdict_reason,
+				assurance,
 				update_time
 			FROM provider_egress_location
 			WHERE client_id = $1
@@ -218,6 +267,9 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 					&e.Mobile,
 					&e.CityConfident,
 					&e.ObservedAt,
+					&e.Verdict,
+					&e.VerdictReason,
+					&e.Assurance,
 					&e.UpdateTime,
 				))
 			}
@@ -278,6 +330,9 @@ func GetFreshProviderEgressLocationForConnection(
 				pel.mobile,
 				pel.city_confident,
 				pel.observed_at,
+				pel.verdict,
+				pel.verdict_reason,
+				pel.assurance,
 				pel.update_time
 			FROM network_client_connection ncc
 			INNER JOIN provider_egress_location pel ON pel.client_id = ncc.client_id
@@ -299,6 +354,9 @@ func GetFreshProviderEgressLocationForConnection(
 					&e.Mobile,
 					&e.CityConfident,
 					&e.ObservedAt,
+					&e.Verdict,
+					&e.VerdictReason,
+					&e.Assurance,
 					&e.UpdateTime,
 				))
 			}

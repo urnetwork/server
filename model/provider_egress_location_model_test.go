@@ -664,3 +664,84 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 		}
 	})
 }
+
+// TestProviderEgressLocationHasVerdictColumns asserts the three verdict columns
+// exist. They are additive with safe defaults, so no existing reader or row is
+// affected -- but nothing can record a verdict until they are there.
+func TestProviderEgressLocationHasVerdictColumns(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		for _, col := range []string{"verdict", "verdict_reason", "assurance"} {
+			var exists bool
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_name = 'provider_egress_location' AND column_name = $1
+					)
+					`,
+					col,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&exists))
+					}
+				})
+			})
+			if !exists {
+				t.Errorf("provider_egress_location missing column %q", col)
+			}
+		}
+	})
+}
+
+// TestProviderEgressLocationVerdictDefaults pins the write path's normalization.
+// SetProviderEgressLocation names every column explicitly, which bypasses the
+// column defaults, so a caller that computes no judgement -- every caller until
+// the ingest path does -- must still store unverified/direct, not the empty
+// string.
+func TestProviderEgressLocationVerdictDefaults(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientId := server.NewId()
+		observedAt := server.NowUtc()
+
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:    clientId,
+			LocationId:  server.NewId(),
+			CountryCode: "es",
+			ObservedAt:  observedAt,
+		})
+
+		stored := GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected a stored egress location")
+		}
+		connect.AssertEqual(t, stored.Verdict, ProviderEgressVerdictUnverified)
+		connect.AssertEqual(t, stored.VerdictReason, "")
+		connect.AssertEqual(t, stored.Assurance, ProviderEgressAssuranceDirect)
+
+		// an explicit judgement is stored verbatim
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:      clientId,
+			LocationId:    server.NewId(),
+			CountryCode:   "de",
+			ObservedAt:    observedAt.Add(time.Hour),
+			Verdict:       "suspect",
+			VerdictReason: "unstable",
+			Assurance:     ProviderEgressAssuranceDirect,
+		})
+
+		stored = GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected a stored egress location")
+		}
+		connect.AssertEqual(t, stored.Verdict, "suspect")
+		connect.AssertEqual(t, stored.VerdictReason, "unstable")
+		connect.AssertEqual(t, stored.Assurance, ProviderEgressAssuranceDirect)
+	})
+}

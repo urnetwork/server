@@ -183,3 +183,116 @@ func testingCreateSettledContract(
 
 	return contractId
 }
+
+// TestProviderBandwidthTableExists asserts the schema shape the storage path
+// depends on, separately from the storage path itself: a missing table here is a
+// migration that was never appended, not a bug in StoreProviderBandwidth.
+func TestProviderBandwidthTableExists(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		var exists bool
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT to_regclass('provider_bandwidth') IS NOT NULL`)
+			connect.AssertEqual(t, err, nil)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&exists))
+				}
+			})
+		})
+		if !exists {
+			t.Fatal("provider_bandwidth table does not exist")
+		}
+	})
+}
+
+// TestStoreProviderBandwidthUpsertsOneRowPerProvider covers the round trip and
+// the primary-key overwrite: a second measurement for the same provider replaces
+// the first rather than accumulating history.
+func TestStoreProviderBandwidthUpsertsOneRowPerProvider(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientId := server.NewId()
+		windowStart := server.NowUtc().Add(-2 * time.Hour)
+		windowEnd := server.NowUtc().Add(-1 * time.Hour)
+
+		StoreProviderBandwidth(ctx, &ProviderBandwidth{
+			ClientId:        clientId,
+			BytesPerSecond:  1024 * 1024,
+			Source:          ProviderBandwidthSourcePassive,
+			SampleByteCount: ByteCount(32 * 1024 * 1024),
+			WindowStart:     windowStart,
+			WindowEnd:       windowEnd,
+		})
+
+		rowCount, stored := testingReadProviderBandwidth(ctx, clientId)
+		connect.AssertEqual(t, rowCount, 1)
+		connect.AssertEqual(t, stored.BytesPerSecond, float64(1024*1024))
+		connect.AssertEqual(t, stored.Source, ProviderBandwidthSourcePassive)
+		connect.AssertEqual(t, stored.SampleByteCount, ByteCount(32*1024*1024))
+		connect.AssertEqual(t, stored.WindowStart.UTC().Unix(), windowStart.Unix())
+		connect.AssertEqual(t, stored.WindowEnd.UTC().Unix(), windowEnd.Unix())
+
+		// a later measurement from the other source replaces it in place
+		activeWindowStart := server.NowUtc().Add(-1 * time.Minute)
+		activeWindowEnd := server.NowUtc()
+		StoreProviderBandwidth(ctx, &ProviderBandwidth{
+			ClientId:        clientId,
+			BytesPerSecond:  4 * 1024 * 1024,
+			Source:          ProviderBandwidthSourceActive,
+			SampleByteCount: ByteCount(8 * 1024 * 1024),
+			WindowStart:     activeWindowStart,
+			WindowEnd:       activeWindowEnd,
+		})
+
+		rowCount, stored = testingReadProviderBandwidth(ctx, clientId)
+		connect.AssertEqual(t, rowCount, 1)
+		connect.AssertEqual(t, stored.BytesPerSecond, float64(4*1024*1024))
+		connect.AssertEqual(t, stored.Source, ProviderBandwidthSourceActive)
+		connect.AssertEqual(t, stored.SampleByteCount, ByteCount(8*1024*1024))
+		connect.AssertEqual(t, stored.WindowEnd.UTC().Unix(), activeWindowEnd.Unix())
+	})
+}
+
+// testingReadProviderBandwidth reads the stored row back with sql, so the test
+// asserts what is actually in the table rather than trusting a model reader that
+// StoreProviderBandwidth's own writer would share.
+func testingReadProviderBandwidth(
+	ctx context.Context,
+	clientId server.Id,
+) (rowCount int, bw *ProviderBandwidth) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				client_id,
+				bytes_per_second,
+				source,
+				sample_byte_count,
+				window_start,
+				window_end
+			FROM provider_bandwidth
+			WHERE client_id = $1
+			`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				rowCount += 1
+				bw = &ProviderBandwidth{}
+				server.Raise(result.Scan(
+					&bw.ClientId,
+					&bw.BytesPerSecond,
+					&bw.Source,
+					&bw.SampleByteCount,
+					&bw.WindowStart,
+					&bw.WindowEnd,
+				))
+			}
+		})
+	})
+	return rowCount, bw
+}
