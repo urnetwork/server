@@ -698,3 +698,28 @@ func providerBandwidthQuotaFor(ctx context.Context, clientId server.Id) (count i
 	})
 	return count, byteCount
 }
+
+// TestProviderBandwidthTestClampFitsInsideOneProbesReservation guards the one
+// invariant that ties the download endpoint to the byte budget now that they
+// are no longer the same number.
+//
+// A probe is not one request any more: it is bandwidth.StreamCount parallel
+// streams, because a single TCP flow cannot exceed (connect's 1 MiB window /
+// RTT) and the single-stream probe was measuring that ceiling rather than the
+// provider. So maxProviderBandwidthTestBytes bounds ONE STREAM and
+// model.MaxProviderBandwidthBytesPerProbe bounds the whole probe.
+//
+// They may drift apart, but only in one direction. If a single request could
+// be served larger than a whole probe reserves, one request could spend more
+// budget than was ever admitted for it -- the reservation would be a number
+// the deployment routinely exceeds, which is worse than having no budget at
+// all.
+func TestProviderBandwidthTestClampFitsInsideOneProbesReservation(t *testing.T) {
+	if model.MaxProviderBandwidthBytesPerProbe < int64(maxProviderBandwidthTestBytes) {
+		t.Fatalf(
+			"the download endpoint serves up to %d bytes in ONE request but a probe only reserves %d in total: "+
+				"a single request could transfer more than the byte budget admitted for the whole probe",
+			maxProviderBandwidthTestBytes, model.MaxProviderBandwidthBytesPerProbe,
+		)
+	}
+}

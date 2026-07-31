@@ -15,12 +15,22 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// maxProviderBandwidthTestBytes bounds a single download. Without a clamp the
+// maxProviderBandwidthTestBytes bounds a single REQUEST. Without a clamp the
 // endpoint is an open-ended resource commitment per request: a caller could
 // ask for gigabytes and hold a connection (and the egress bytes that go with
-// it) for as long as it liked. 5 MB matches the spec's per-probe sizing and
-// the per-probe figure the byte budget reserves against
-// (model.MaxProviderBandwidthBytesPerProbe).
+// it) for as long as it liked.
+//
+// This is no longer the same thing as the per-probe figure. One probe is
+// 8 parallel streams -- it has to be parallel, because a single TCP flow
+// cannot exceed (connect's 1 MiB window / RTT) and the single-stream probe
+// measured that ceiling rather than the provider -- so one probe is 8 requests
+// of 2 MiB each, and the aggregate is bounded by the RESERVATION
+// (model.MaxProviderBandwidthBytesPerProbe, 16 MiB), not by this clamp.
+//
+// The invariant to keep: the prober's per-stream byte count
+// (bandwidth.StreamBytes, 2 MiB) must stay at or below this value. If it ever
+// exceeds it, the endpoint silently truncates each stream and the probe
+// transfers less than it reserved, understating every provider it measures.
 const maxProviderBandwidthTestBytes = 5 * 1024 * 1024
 
 // defaultProviderBandwidthTestBytes is used when `bytes` is absent, malformed,

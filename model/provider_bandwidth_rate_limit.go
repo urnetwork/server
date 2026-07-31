@@ -50,14 +50,32 @@ const MaxProviderBandwidthLookaheadBuckets = 24
 // production data once active probing has run for a week.
 const MaxActiveBandwidthProbesPerBucket = 40
 
-// One active probe downloads 5 MB (the spec's per-probe figure), so the
-// hourly budget is 40 probes x 5 MB = 200 MB/hour, and the daily cap is
-// 24 x 200 MB = 4.8 GB worst case -- the ceiling only reached if every bucket
-// in the lookahead window fills.
+// MaxProviderBandwidthBytesPerProbe is what ONE reservation admits, and it
+// must equal what one measurement actually transfers -- a budget that
+// under-counts is worse than no budget, because it reports a spend ceiling the
+// deployment is quietly exceeding.
+//
+// A measurement is 8 parallel streams of 2 MiB = 16 MiB, per target. It is
+// parallel because it has to be: a single TCP flow cannot exceed (send window
+// / RTT), connect's MaxWindowSize is scaledPow2WindowSize(mib(1), ...), and
+// the single-stream probe therefore measured 1 MiB / RTT for every provider on
+// the fleet rather than the provider. Eleven of twelve beta providers came
+// back with a bandwidth-delay product of ~1 MiB -- exactly one window -- and a
+// provider independently measured at 79 MB/s on its own host reported
+// 4.8 MB/s through the tunnel. N flows get N windows; the prober's
+// bandwidth.MaxSampleBytes is the other half of this figure and the two must
+// be changed together.
+//
+// So the hourly budget is 40 probes x 16 MiB = 640 MiB/hour, and the daily cap
+// is 24 x 640 MiB = 15 GiB worst case -- the ceiling only reached if every
+// bucket in the lookahead window fills. Note that a probe reserves per TARGET
+// and there are two targets measured separately, so 40 reservations is 20
+// providers per hour, not 40. That is unchanged by this commit and is a
+// property of MaxActiveBandwidthProbesPerBucket, which is left alone here.
 //
 // Explicitly int64: a byte budget is not a row count, and callers pass an
 // int64 byteCount.
-const MaxProviderBandwidthBytesPerProbe int64 = 5 * 1024 * 1024
+const MaxProviderBandwidthBytesPerProbe int64 = 16 * 1024 * 1024
 const MaxProviderBandwidthBytesPerBucket int64 = MaxActiveBandwidthProbesPerBucket * MaxProviderBandwidthBytesPerProbe
 const MaxProviderBandwidthBytesPerDay int64 = MaxProviderBandwidthLookaheadBuckets * MaxProviderBandwidthBytesPerBucket
 
