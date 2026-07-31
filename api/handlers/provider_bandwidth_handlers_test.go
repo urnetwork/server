@@ -159,6 +159,7 @@ func assertContentLengthMatchesBody(t *testing.T, w *httptest.ResponseRecorder) 
 func TestProviderBandwidthResultRejectsMissingSecret(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"client_id":         "019f8835-158d-6fd8-e9dd-fd0e4c6d6792",
+		"source":            model.ProviderBandwidthSourceActiveOperator,
 		"bytes_per_second":  1000000.0,
 		"sample_byte_count": 5242880,
 	})
@@ -179,6 +180,7 @@ func TestProviderBandwidthResultRejectsWrongSecret(t *testing.T) {
 
 	body, _ := json.Marshal(map[string]any{
 		"client_id":         "019f8835-158d-6fd8-e9dd-fd0e4c6d6792",
+		"source":            model.ProviderBandwidthSourceActiveOperator,
 		"bytes_per_second":  1000000.0,
 		"sample_byte_count": 5242880,
 	})
@@ -218,6 +220,7 @@ func TestProviderBandwidthResultRejectsNonPositiveMeasurement(t *testing.T) {
 			clientId := server.NewId()
 			body, _ := json.Marshal(map[string]any{
 				"client_id":         clientId,
+				"source":            model.ProviderBandwidthSourceActiveOperator,
 				"bytes_per_second":  c.bytesPerSecond,
 				"sample_byte_count": c.sampleByteCount,
 			})
@@ -240,7 +243,8 @@ func TestProviderBandwidthResultRejectsNonPositiveMeasurement(t *testing.T) {
 // TestProviderBandwidthResultStoresAnActiveMeasurement is the accept-path test
 // with teeth: it reads provider_bandwidth back with raw SQL, so a handler that
 // authenticates correctly but never calls model.StoreProviderBandwidth fails
-// here -- as would an unconditional 401.
+// here -- as would an unconditional 401. Both active targets are covered,
+// because the source now decides which row is written.
 func TestProviderBandwidthResultStoresAnActiveMeasurement(t *testing.T) {
 	t.Setenv("WARP_ENV", "local")
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -248,56 +252,187 @@ func TestProviderBandwidthResultStoresAnActiveMeasurement(t *testing.T) {
 		defer withStubOperatorIngestSecret(secret)()
 
 		ctx := context.Background()
-		clientId := server.NewId()
-		const bytesPerSecond = 1234567.5
-		const sampleByteCount int64 = 3 * 1024 * 1024
 
-		body, _ := json.Marshal(map[string]any{
-			"client_id":         clientId,
-			"bytes_per_second":  bytesPerSecond,
-			"sample_byte_count": sampleByteCount,
-		})
-		req := httptest.NewRequest(http.MethodPost, "/network/provider-bandwidth-result", bytes.NewReader(body))
-		req.Header.Set(operatorSecretHeader, secret)
-		w := httptest.NewRecorder()
-
-		ProviderBandwidthResult(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200 for a valid submission; body = %s", w.Code, w.Body.String())
+		cases := []struct {
+			name   string
+			source string
+		}{
+			{"operator target", model.ProviderBandwidthSourceActiveOperator},
+			{"cdn target", model.ProviderBandwidthSourceActiveCDN},
 		}
+		for _, c := range cases {
+			clientId := server.NewId()
+			const bytesPerSecond = 1234567.5
+			const sampleByteCount int64 = 3 * 1024 * 1024
 
-		var gotSource string
-		var gotBytesPerSecond float64
-		var gotSampleByteCount int64
-		var found bool
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`SELECT source, bytes_per_second, sample_byte_count FROM provider_bandwidth WHERE client_id = $1`,
-				clientId,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					found = true
-					server.Raise(result.Scan(&gotSource, &gotBytesPerSecond, &gotSampleByteCount))
-				}
+			body, _ := json.Marshal(map[string]any{
+				"client_id":         clientId,
+				"source":            c.source,
+				"bytes_per_second":  bytesPerSecond,
+				"sample_byte_count": sampleByteCount,
 			})
-		})
+			req := httptest.NewRequest(http.MethodPost, "/network/provider-bandwidth-result", bytes.NewReader(body))
+			req.Header.Set(operatorSecretHeader, secret)
+			w := httptest.NewRecorder()
 
-		if !found {
-			t.Fatal("no provider_bandwidth row for the submitted client; the handler never stored the measurement")
-		}
-		if gotSource != model.ProviderBandwidthSourceActive {
-			t.Fatalf("source = %q, want %q", gotSource, model.ProviderBandwidthSourceActive)
-		}
-		if gotBytesPerSecond != bytesPerSecond {
-			t.Fatalf("bytes_per_second = %f, want the submitted %f", gotBytesPerSecond, bytesPerSecond)
-		}
-		if gotSampleByteCount != sampleByteCount {
-			t.Fatalf("sample_byte_count = %d, want the submitted %d", gotSampleByteCount, sampleByteCount)
+			ProviderBandwidthResult(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s: status = %d, want 200 for a valid submission; body = %s", c.name, w.Code, w.Body.String())
+			}
+
+			stored := readProviderBandwidthBySource(ctx, clientId)
+			row, ok := stored[c.source]
+			if !ok {
+				t.Fatalf("%s: no provider_bandwidth row under source %q; the handler never stored the measurement", c.name, c.source)
+			}
+			if row.bytesPerSecond != bytesPerSecond {
+				t.Fatalf("%s: bytes_per_second = %f, want the submitted %f", c.name, row.bytesPerSecond, bytesPerSecond)
+			}
+			if row.sampleByteCount != sampleByteCount {
+				t.Fatalf("%s: sample_byte_count = %d, want the submitted %d", c.name, row.sampleByteCount, sampleByteCount)
+			}
 		}
 	})
+}
+
+// TestProviderBandwidthResultRejectsUnknownSource: the source is part of the
+// storage key, so it is validated rather than merely stored.
+//
+// An unrecognised value is not a harmless label -- it creates a row under a tag
+// nothing will ever read or replace, while the submitter goes on looking like
+// it is working. "passive" is refused for a sharper reason: that figure is
+// derived server-side from bytes the provider has already been paid to carry,
+// which is precisely what makes it ungameable, and accepting a submitted one
+// would let this endpoint overwrite the derived figure with an asserted one.
+func TestProviderBandwidthResultRejectsUnknownSource(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+
+		ctx := context.Background()
+
+		cases := []struct {
+			name   string
+			source any
+		}{
+			{"absent", nil},
+			{"empty", ""},
+			{"the pre-split active tag", "active"},
+			{"a typo", "active-cnd"},
+			{"wrong case", "ACTIVE-CDN"},
+			{"server-derived passive", model.ProviderBandwidthSourcePassive},
+		}
+		for _, c := range cases {
+			clientId := server.NewId()
+			payload := map[string]any{
+				"client_id":         clientId,
+				"bytes_per_second":  1234567.5,
+				"sample_byte_count": 3 * 1024 * 1024,
+			}
+			if c.source != nil {
+				payload["source"] = c.source
+			}
+			body, _ := json.Marshal(payload)
+			req := httptest.NewRequest(http.MethodPost, "/network/provider-bandwidth-result", bytes.NewReader(body))
+			req.Header.Set(operatorSecretHeader, secret)
+			w := httptest.NewRecorder()
+
+			ProviderBandwidthResult(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%s (source=%v): status = %d, want 400; body = %s", c.name, c.source, w.Code, w.Body.String())
+			}
+			if count := countProviderBandwidthRows(ctx, clientId); count != 0 {
+				t.Fatalf("%s (source=%v): %d provider_bandwidth rows written, want the submission rejected before storage", c.name, c.source, count)
+			}
+		}
+	})
+}
+
+// TestProviderBandwidthResultStoresTheTwoTargetsSeparately is the end-to-end
+// form of the property the second target exists for: two submissions for ONE
+// provider, one per target, must land in two rows carrying two figures.
+//
+// Against the old client_id-only key the second submission overwrote the
+// first, so a provider prioritising the operator's own path while starving the
+// public internet looked identical to one that was simply fast -- the exact
+// divergence this is here to expose.
+func TestProviderBandwidthResultStoresTheTwoTargetsSeparately(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+
+		ctx := context.Background()
+		clientId := server.NewId()
+
+		submitted := map[string]float64{
+			model.ProviderBandwidthSourceActiveOperator: 12_000_000,
+			model.ProviderBandwidthSourceActiveCDN:      3_000_000,
+		}
+		for source, bytesPerSecond := range submitted {
+			body, _ := json.Marshal(map[string]any{
+				"client_id":         clientId,
+				"source":            source,
+				"bytes_per_second":  bytesPerSecond,
+				"sample_byte_count": 5 * 1024 * 1024,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/network/provider-bandwidth-result", bytes.NewReader(body))
+			req.Header.Set(operatorSecretHeader, secret)
+			w := httptest.NewRecorder()
+
+			ProviderBandwidthResult(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("source %q: status = %d, want 200; body = %s", source, w.Code, w.Body.String())
+			}
+		}
+
+		stored := readProviderBandwidthBySource(ctx, clientId)
+		if len(stored) != 2 {
+			t.Fatalf("%d provider_bandwidth rows for one provider, want 2 (one per target) -- the two targets are overwriting each other", len(stored))
+		}
+		for source, want := range submitted {
+			row, ok := stored[source]
+			if !ok {
+				t.Fatalf("no row under source %q", source)
+			}
+			if row.bytesPerSecond != want {
+				t.Errorf("source %q stored %.0f B/s, want the submitted %.0f -- the figures are not being kept apart (an averaged pair would read %.0f)",
+					source, row.bytesPerSecond, want, (submitted[model.ProviderBandwidthSourceActiveOperator]+submitted[model.ProviderBandwidthSourceActiveCDN])/2)
+			}
+		}
+	})
+}
+
+type storedProviderBandwidth struct {
+	bytesPerSecond  float64
+	sampleByteCount int64
+}
+
+// readProviderBandwidthBySource reads the rows back with raw SQL, keyed by
+// source, so the assertions are against the table rather than against the
+// writer that produced it.
+func readProviderBandwidthBySource(ctx context.Context, clientId server.Id) map[string]storedProviderBandwidth {
+	bySource := map[string]storedProviderBandwidth{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT source, bytes_per_second, sample_byte_count FROM provider_bandwidth WHERE client_id = $1`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var source string
+				var row storedProviderBandwidth
+				server.Raise(result.Scan(&source, &row.bytesPerSecond, &row.sampleByteCount))
+				bySource[source] = row
+			}
+		})
+	})
+	return bySource
 }
 
 // TestProviderBandwidthPostsRejectMissingClientId: an absent client_id
@@ -308,6 +443,7 @@ func TestProviderBandwidthPostsRejectMissingClientId(t *testing.T) {
 	defer withStubOperatorIngestSecret(secret)()
 
 	resultBody, _ := json.Marshal(map[string]any{
+		"source":            model.ProviderBandwidthSourceActiveOperator,
 		"bytes_per_second":  1000000.0,
 		"sample_byte_count": 5242880,
 	})

@@ -7,16 +7,62 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// bandwidth sources. A stored figure is tagged with the source that produced
-// it so consumers never have to know which one did.
+// The bandwidth sources. A stored figure is tagged with the source that
+// produced it, and the row is keyed on (client_id, source), so every source
+// keeps its own figure and none overwrites another.
+//
+// Adding a further active target later needs a constant here and nothing else
+// -- no migration, no new column. That generality is why the source is a key
+// column rather than a set of per-target columns.
 const (
 	// ProviderBandwidthSourcePassive is derived from already-settled contract
-	// bytes: zero additional cost, and it cannot be gamed selectively.
+	// bytes: zero additional cost, and it cannot be gamed selectively. It is
+	// computed server-side by ComputePassiveProviderBandwidth and is the one
+	// source no prober may submit -- see IsSubmittableProviderBandwidthSource.
 	ProviderBandwidthSourcePassive = "passive"
-	// ProviderBandwidthSourceActive is a sampled download over the provider's
-	// tunnel, used only where passive history does not exist yet.
-	ProviderBandwidthSourceActive = "active"
+	// ProviderBandwidthSourceActiveOperator is a sampled download from the
+	// operator's own endpoint, over the provider's tunnel.
+	ProviderBandwidthSourceActiveOperator = "active-operator"
+	// ProviderBandwidthSourceActiveCDN is the same sample taken against a
+	// public CDN over the same tunnel.
+	//
+	// The two active figures are stored separately and must never be averaged
+	// into one. A provider that prioritises the operator's own path while
+	// starving the internet at large is invisible in a combined number and
+	// obvious in a pair -- which is the entire reason a second target exists.
+	ProviderBandwidthSourceActiveCDN = "active-cdn"
 )
+
+// IsProviderBandwidthSource reports whether source is one this deployment
+// knows. Storage is keyed on the source, so an unrecognised value is not a
+// harmless label: it silently creates a row nothing will ever read or replace.
+func IsProviderBandwidthSource(source string) bool {
+	switch source {
+	case ProviderBandwidthSourcePassive,
+		ProviderBandwidthSourceActiveOperator,
+		ProviderBandwidthSourceActiveCDN:
+		return true
+	}
+	return false
+}
+
+// IsSubmittableProviderBandwidthSource reports whether source may arrive from
+// outside, over the result endpoint.
+//
+// It is the active subset, deliberately: "passive" is derived server-side from
+// bytes a provider has already been paid to carry, which is exactly what makes
+// it ungameable. Accepting a submitted "passive" row would let the submitter
+// overwrite that derived figure with an asserted one -- through an endpoint
+// whose secret now travels over a provider-controlled path -- and destroy the
+// one bandwidth signal in the system that cannot be gamed selectively.
+func IsSubmittableProviderBandwidthSource(source string) bool {
+	switch source {
+	case ProviderBandwidthSourceActiveOperator,
+		ProviderBandwidthSourceActiveCDN:
+		return true
+	}
+	return false
+}
 
 // ProviderBandwidth is one throughput figure for a provider. It is advisory:
 // nothing may gate provider selection on it.
@@ -119,12 +165,20 @@ func ComputePassiveProviderBandwidth(
 	}, nil
 }
 
-// StoreProviderBandwidth records a provider's current throughput figure,
-// whatever produced it. The row is keyed on client_id, so a new measurement
-// replaces the previous one: this is the current figure a consumer reads, not a
-// history (see the provider_bandwidth migration).
+// StoreProviderBandwidth records a provider's current throughput figure for
+// one source. The row is keyed on (client_id, source), so a new measurement
+// replaces the previous one FROM THE SAME SOURCE and leaves the other sources
+// alone: this is the current figure per source a consumer reads, not a history
+// (see the provider_bandwidth migrations).
 //
-// Both sources write through here, tagged by bw.Source, so nothing downstream
+// The source is part of the key rather than a plain column, and that is what
+// makes two active targets possible at all: keyed on client_id alone, the
+// operator and cdn measurements for one provider would overwrite each other on
+// every pass and the divergence between them -- the entire reason there is a
+// second target -- would never be visible. Averaging them into one row would
+// destroy the same signal more quietly.
+//
+// Every source writes through here, tagged by bw.Source, so nothing downstream
 // has to know whether a figure came from settled traffic or an active sample.
 // The figure is advisory -- storing one must never gate provider selection.
 func StoreProviderBandwidth(ctx context.Context, bw *ProviderBandwidth) {
@@ -142,10 +196,9 @@ func StoreProviderBandwidth(ctx context.Context, bw *ProviderBandwidth) {
 				update_time
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (client_id) DO UPDATE
+			ON CONFLICT (client_id, source) DO UPDATE
 			SET
 				bytes_per_second = $2,
-				source = $3,
 				sample_byte_count = $4,
 				window_start = $5,
 				window_end = $6,

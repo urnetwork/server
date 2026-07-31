@@ -4507,6 +4507,10 @@ var migrations = []any{
 	// (mirrors provider_egress_location's own shape). This is a ranking input,
 	// not a history: keeping every sample would grow without bound for a value
 	// only ever read as "the current figure".
+	//
+	// SUPERSEDED: a later migration in this file re-keys the table on
+	// (client_id, source) so each source keeps its own current figure. The
+	// statement below is left exactly as applied -- see that migration for why.
 	newSqlMigration(`
         CREATE TABLE IF NOT EXISTS provider_bandwidth (
             client_id          uuid NOT NULL PRIMARY KEY,
@@ -4559,5 +4563,35 @@ var migrations = []any{
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS provider_bandwidth_quota_bucket_start
             ON provider_bandwidth_quota (bucket_start)
+    `),
+
+	// Re-key provider_bandwidth on (client_id, source).
+	//
+	// The active probe measures two independent targets per provider -- the
+	// operator's own download endpoint and a public CDN -- and the two figures
+	// are the point: a provider that prioritises one path and not the other is
+	// invisible in a single number and obvious in a pair. Keyed on client_id
+	// alone the two overwrite each other on every pass, so only one target can
+	// be stored at all. Averaging them into the one row would lose the same
+	// signal more quietly.
+	//
+	// The source becomes part of the key rather than each target getting its
+	// own columns, because a further target then needs no migration at all:
+	// 'passive', 'active-operator' and 'active-cdn' are three rows in the same
+	// shape, and a fourth would be a fourth row.
+	//
+	// No backfill: provider_bandwidth is empty on every deployment (nothing has
+	// written to it yet -- the active prober is the first writer and ships with
+	// this change), so re-keying cannot orphan or collide with an existing row.
+	//
+	// Appended, never inserted: migrations apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. DROP CONSTRAINT IF EXISTS
+	// paired with the ADD makes the whole statement idempotent -- a re-run
+	// drops whatever primary key is present and re-adds this one.
+	newSqlMigration(`
+        ALTER TABLE provider_bandwidth
+            DROP CONSTRAINT IF EXISTS provider_bandwidth_pkey,
+            ADD CONSTRAINT provider_bandwidth_pkey PRIMARY KEY (client_id, source)
     `),
 }

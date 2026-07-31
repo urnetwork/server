@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/hmac"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -123,9 +124,14 @@ func ProviderBandwidthTest(w http.ResponseWriter, r *http.Request) {
 // SubmitProviderBandwidthArgs is an active bandwidth measurement taken by the
 // prober over a provider's tunnel.
 type SubmitProviderBandwidthArgs struct {
-	ClientId        server.Id `json:"client_id"`
-	BytesPerSecond  float64   `json:"bytes_per_second"`
-	SampleByteCount int64     `json:"sample_byte_count"`
+	ClientId server.Id `json:"client_id"`
+	// Source names which target produced this figure
+	// (model.ProviderBandwidthSourceActiveOperator or ...ActiveCDN). It is
+	// part of the storage key, so it is what keeps the two targets' figures in
+	// separate rows instead of overwriting each other.
+	Source          string  `json:"source"`
+	BytesPerSecond  float64 `json:"bytes_per_second"`
+	SampleByteCount int64   `json:"sample_byte_count"`
 }
 
 // ProviderBandwidthResult stores an active bandwidth measurement. An active
@@ -135,6 +141,16 @@ type SubmitProviderBandwidthArgs struct {
 // A non-positive rate or sample size is not a usable measurement, and storing
 // one would overwrite a real figure with a meaningless one -- so those are
 // rejected before anything is written.
+//
+// The source is validated against the known ACTIVE set rather than merely
+// stored. Two distinct failures are being closed off. An unrecognised source
+// is not a harmless label: the row is keyed on (client_id, source), so it
+// creates a row nothing will ever read or replace, and a prober with a typo'd
+// tag would look like it was working while writing to a tag no consumer knows.
+// And "passive" is refused specifically: that figure is derived server-side
+// from bytes the provider has already been paid to carry, which is exactly
+// what makes it ungameable, so accepting a submitted one would let this
+// endpoint overwrite the derived figure with an asserted one.
 func ProviderBandwidthResult(w http.ResponseWriter, r *http.Request) {
 	if !authorizeOperator(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -158,12 +174,20 @@ func ProviderBandwidthResult(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sample_byte_count must be positive.", http.StatusBadRequest)
 		return
 	}
+	if !model.IsSubmittableProviderBandwidthSource(args.Source) {
+		http.Error(w, fmt.Sprintf(
+			"source must be one of %s, %s.",
+			model.ProviderBandwidthSourceActiveOperator,
+			model.ProviderBandwidthSourceActiveCDN,
+		), http.StatusBadRequest)
+		return
+	}
 
 	now := server.NowUtc()
 	model.StoreProviderBandwidth(r.Context(), &model.ProviderBandwidth{
 		ClientId:        args.ClientId,
 		BytesPerSecond:  args.BytesPerSecond,
-		Source:          model.ProviderBandwidthSourceActive,
+		Source:          args.Source,
 		SampleByteCount: args.SampleByteCount,
 		WindowStart:     now,
 		WindowEnd:       now,

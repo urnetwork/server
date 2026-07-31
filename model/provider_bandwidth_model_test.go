@@ -207,10 +207,10 @@ func TestProviderBandwidthTableExists(t *testing.T) {
 	})
 }
 
-// TestStoreProviderBandwidthUpsertsOneRowPerProvider covers the round trip and
-// the primary-key overwrite: a second measurement for the same provider replaces
+// TestStoreProviderBandwidthUpsertsOneRowPerSource covers the round trip and
+// the primary-key overwrite: a second measurement from the SAME source replaces
 // the first rather than accumulating history.
-func TestStoreProviderBandwidthUpsertsOneRowPerProvider(t *testing.T) {
+func TestStoreProviderBandwidthUpsertsOneRowPerSource(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -227,42 +227,100 @@ func TestStoreProviderBandwidthUpsertsOneRowPerProvider(t *testing.T) {
 			WindowEnd:       windowEnd,
 		})
 
-		rowCount, stored := testingReadProviderBandwidth(ctx, clientId)
-		connect.AssertEqual(t, rowCount, 1)
-		connect.AssertEqual(t, stored.BytesPerSecond, float64(1024*1024))
-		connect.AssertEqual(t, stored.Source, ProviderBandwidthSourcePassive)
-		connect.AssertEqual(t, stored.SampleByteCount, ByteCount(32*1024*1024))
-		connect.AssertEqual(t, stored.WindowStart.UTC().Unix(), windowStart.Unix())
-		connect.AssertEqual(t, stored.WindowEnd.UTC().Unix(), windowEnd.Unix())
+		stored := testingReadProviderBandwidth(ctx, clientId)
+		connect.AssertEqual(t, len(stored), 1)
+		passive := stored[ProviderBandwidthSourcePassive]
+		connect.AssertEqual(t, passive.BytesPerSecond, float64(1024*1024))
+		connect.AssertEqual(t, passive.SampleByteCount, ByteCount(32*1024*1024))
+		connect.AssertEqual(t, passive.WindowStart.UTC().Unix(), windowStart.Unix())
+		connect.AssertEqual(t, passive.WindowEnd.UTC().Unix(), windowEnd.Unix())
 
-		// a later measurement from the other source replaces it in place
-		activeWindowStart := server.NowUtc().Add(-1 * time.Minute)
-		activeWindowEnd := server.NowUtc()
+		// a later measurement from the SAME source replaces it in place
+		laterWindowStart := server.NowUtc().Add(-1 * time.Minute)
+		laterWindowEnd := server.NowUtc()
 		StoreProviderBandwidth(ctx, &ProviderBandwidth{
 			ClientId:        clientId,
 			BytesPerSecond:  4 * 1024 * 1024,
-			Source:          ProviderBandwidthSourceActive,
+			Source:          ProviderBandwidthSourcePassive,
 			SampleByteCount: ByteCount(8 * 1024 * 1024),
-			WindowStart:     activeWindowStart,
-			WindowEnd:       activeWindowEnd,
+			WindowStart:     laterWindowStart,
+			WindowEnd:       laterWindowEnd,
 		})
 
-		rowCount, stored = testingReadProviderBandwidth(ctx, clientId)
-		connect.AssertEqual(t, rowCount, 1)
-		connect.AssertEqual(t, stored.BytesPerSecond, float64(4*1024*1024))
-		connect.AssertEqual(t, stored.Source, ProviderBandwidthSourceActive)
-		connect.AssertEqual(t, stored.SampleByteCount, ByteCount(8*1024*1024))
-		connect.AssertEqual(t, stored.WindowEnd.UTC().Unix(), activeWindowEnd.Unix())
+		stored = testingReadProviderBandwidth(ctx, clientId)
+		connect.AssertEqual(t, len(stored), 1)
+		passive = stored[ProviderBandwidthSourcePassive]
+		connect.AssertEqual(t, passive.BytesPerSecond, float64(4*1024*1024))
+		connect.AssertEqual(t, passive.SampleByteCount, ByteCount(8*1024*1024))
+		connect.AssertEqual(t, passive.WindowEnd.UTC().Unix(), laterWindowEnd.Unix())
 	})
 }
 
-// testingReadProviderBandwidth reads the stored row back with sql, so the test
-// asserts what is actually in the table rather than trusting a model reader that
-// StoreProviderBandwidth's own writer would share.
+// TestStoreProviderBandwidthKeepsEverySourceSeparate is the property the whole
+// two-target design rests on: the operator and cdn measurements for ONE
+// provider are stored as two rows carrying two figures, and neither overwrites
+// the other or the passive figure.
+//
+// Keyed on client_id alone -- as this table was before the (client_id, source)
+// migration -- the second measurement of every pass would silently replace the
+// first, so only one target could ever be stored and the divergence between
+// them, which is the only reason a second target exists, would be
+// unobservable.
+func TestStoreProviderBandwidthKeepsEverySourceSeparate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientId := server.NewId()
+		now := server.NowUtc()
+
+		figures := map[string]float64{
+			ProviderBandwidthSourcePassive:        1 * 1024 * 1024,
+			ProviderBandwidthSourceActiveOperator: 12 * 1024 * 1024,
+			ProviderBandwidthSourceActiveCDN:      3 * 1024 * 1024,
+		}
+		for source, bytesPerSecond := range figures {
+			StoreProviderBandwidth(ctx, &ProviderBandwidth{
+				ClientId:        clientId,
+				BytesPerSecond:  bytesPerSecond,
+				Source:          source,
+				SampleByteCount: ByteCount(5 * 1024 * 1024),
+				WindowStart:     now,
+				WindowEnd:       now,
+			})
+		}
+
+		stored := testingReadProviderBandwidth(ctx, clientId)
+		if len(stored) != len(figures) {
+			t.Fatalf("%d rows stored for one provider, want %d (one per source) -- the sources are overwriting each other", len(stored), len(figures))
+		}
+		for source, want := range figures {
+			row, ok := stored[source]
+			if !ok {
+				t.Fatalf("no row for source %q", source)
+			}
+			if row.BytesPerSecond != want {
+				t.Errorf("source %q stored %.0f B/s, want %.0f -- the figures are not being kept apart",
+					source, row.BytesPerSecond, want)
+			}
+		}
+
+		// specifically: the two active targets diverge, and both divergent
+		// figures survive. An averaged pair would leave both at 7.5 MB/s.
+		operator := stored[ProviderBandwidthSourceActiveOperator].BytesPerSecond
+		cdn := stored[ProviderBandwidthSourceActiveCDN].BytesPerSecond
+		if operator == cdn {
+			t.Errorf("both active targets stored %.0f B/s; a provider prioritising one path is invisible once they collapse to one figure", operator)
+		}
+	})
+}
+
+// testingReadProviderBandwidth reads the stored rows back with sql, keyed by
+// source, so the test asserts what is actually in the table rather than
+// trusting a model reader that StoreProviderBandwidth's own writer would share.
 func testingReadProviderBandwidth(
 	ctx context.Context,
 	clientId server.Id,
-) (rowCount int, bw *ProviderBandwidth) {
+) map[string]*ProviderBandwidth {
+	bySource := map[string]*ProviderBandwidth{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -281,8 +339,7 @@ func testingReadProviderBandwidth(
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				rowCount += 1
-				bw = &ProviderBandwidth{}
+				bw := &ProviderBandwidth{}
 				server.Raise(result.Scan(
 					&bw.ClientId,
 					&bw.BytesPerSecond,
@@ -291,8 +348,9 @@ func testingReadProviderBandwidth(
 					&bw.WindowStart,
 					&bw.WindowEnd,
 				))
+				bySource[bw.Source] = bw
 			}
 		})
 	})
-	return rowCount, bw
+	return bySource
 }
