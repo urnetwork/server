@@ -4640,4 +4640,66 @@ var migrations = []any{
             PRIMARY KEY (client_id)
         )
     `),
+
+	// Blackhole verdicts reported by real clients: one row per report, per
+	// provider, per reporting network. A client that removes a provider for
+	// carrying nothing (see connect's detectBlackhole) says so here.
+	//
+	// APPEND-ONLY ON PURPOSE. A reporter may say anything as often as it likes;
+	// the cap is on what a reporter can COUNT FOR -- at most one verdict per
+	// reporter network per provider per aggregation window -- and it is applied
+	// at read time, in ProviderClientVerdictQuorumMet, never on the write path.
+	// Capping the writes instead would make the table lie about what was
+	// actually reported, and would put a rate-limit decision in front of the
+	// one signal that says a provider is dead.
+	//
+	// reporter_network_id comes from the authenticated session and never from
+	// the request body. It is the entire basis of the quorum: distinct networks
+	// are what a griefer has to buy, and a body-supplied reporter id would cost
+	// nothing at all.
+	//
+	// A met quorum only REPRIORITISES the provider for probing -- it never
+	// demotes, excludes, or touches filter sets, scores, PassesMinimums or
+	// find-providers2. See ProviderClientVerdictQuorumMet for why the trigger
+	// (client verdicts) and the punishment (the prober) are separated.
+	//
+	// syn_sent/syn_received are accepted and validated by the endpoint but
+	// deliberately not columns here: aggregation keys on receive_ack_count
+	// alone, and a column nothing reads is a column that drifts.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS makes a
+	// re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_client_verdict (
+            provider_client_id  uuid NOT NULL,
+            reporter_network_id uuid NOT NULL,
+            reason              text NOT NULL,
+            send_ack_count      bigint NOT NULL,
+            send_ack_bytes      bigint NOT NULL,
+            receive_ack_count   bigint NOT NULL,
+            receive_ack_bytes   bigint NOT NULL,
+            window_seconds      int NOT NULL,
+            create_time         timestamp NOT NULL,
+
+            PRIMARY KEY (provider_client_id, reporter_network_id, create_time)
+        )
+    `),
+
+	// serves the window read (GetProviderClientVerdictsInWindow), which is
+	// `provider_client_id = $1 AND $2 <= create_time ORDER BY create_time`.
+	// The primary key's leading column alone would find the provider's rows and
+	// then filter and sort every verdict ever written about it -- and this table
+	// is append-only and unbounded per reporter, so that set only grows. With
+	// create_time second the window is an ordered range scan that stops at the
+	// scan limit.
+	//
+	// reporter_network_id is deliberately not in the index: the read does not
+	// filter on it, and the one-verdict-per-reporter cap is applied in Go, not
+	// by the database.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_client_verdict_provider_create_time
+            ON provider_client_verdict (provider_client_id, create_time)
+    `),
 }

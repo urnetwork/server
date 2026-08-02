@@ -66,6 +66,13 @@ func Routes() []*router.Route {
 		// opened. Until this existed the result was a log line and nothing
 		// else.
 		router.NewRoute("POST", "/network/provider-egress-health", handlers.ProviderEgressHealthResult),
+		// client-to-server, and the only route in this group that is NOT
+		// operator-secret authed: a real client network reporting that a
+		// provider carried nothing. The reporting network is taken from the
+		// session jwt, never from the body, because the quorum counts distinct
+		// networks. A met quorum only brings the provider's next probe
+		// forward -- see model.ProviderClientVerdictQuorumMet.
+		router.NewRoute("POST", "/network/provider-verdict", handlers.ProviderClientVerdictSubmit),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
