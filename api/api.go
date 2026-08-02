@@ -54,6 +54,13 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
+		// operator-to-server, same operator secret: the certificate pins this
+		// server observed DIRECTLY for the geolocation source hosts. The
+		// prober fetches them here instead of carrying a compile-time
+		// constant, and refuses to probe at all if it cannot get a complete
+		// set -- probing unpinned would let the provider under test forge its
+		// own location, which is the thing the probe exists to catch.
+		router.NewRoute("GET", "/network/geolocation-source-pins", handlers.GeolocationSourcePins),
 		// operator-to-server, gated by the same operator secret as the egress
 		// location ingest above: the active bandwidth probe's download target,
 		// its result submission, and the byte-budget reservation the prober
