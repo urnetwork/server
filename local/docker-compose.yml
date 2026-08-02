@@ -87,11 +87,37 @@ services:
     networks: [urnetwork-local]
     ports:
       - "${LOCAL_BIND_IP:-10.213.0.1}:${REDIS_PORT:-6379}:6379"
+    # The full sim-latency evaluation can legitimately need more than Redis's
+    # image-default ~10k file descriptors while 100k providers announce and
+    # the client pool warms. Raising the process limit is cheap until those
+    # connections are actually used, and keeps the local load environment from
+    # turning its fd ceiling into measured simulator variance.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # These are network-namespace settings, so the host values managed by
+    # run-local.sh do not automatically raise the queues inside the container.
+    sysctls:
+      net.core.somaxconn: "65535"
+      net.ipv4.tcp_max_syn_backlog: "65535"
     # No password, single node (cluster: false in vault/local/redis.yml). The
-    # tests only use logical db 10 and FlushDB, so persistence is pointless
-    # here -- disable RDB + AOF to keep the container fast and stateless.
+    # full 100k-provider simulation moves large score/sample pipelines through
+    # Redis while tens of thousands of sockets are active. I/O threads keep
+    # parsing and socket writes from blocking the command thread long enough
+    # for the simulator's 8s path-establishment attempts to time out.
+    # Persistence is pointless here -- disable RDB + AOF to keep this local
+    # environment fast and stateless.
     command:
       - redis-server
+      - --io-threads
+      - "8"
+      - --io-threads-do-reads
+      - "yes"
+      - --maxclients
+      - "32768"
+      - --tcp-backlog
+      - "65535"
       - --save
       - ""
       - --appendonly
