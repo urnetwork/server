@@ -8,6 +8,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/probeverdict"
 )
 
 // MaxProviderEgressLocationSubmissionAge rejects a submission whose probe is
@@ -56,6 +57,45 @@ type SubmitProviderEgressLocationArgs struct {
 
 type SubmitProviderEgressLocationResult struct {
 	LocationId server.Id `json:"location_id"`
+}
+
+// providerEgressVerdict marshals a submission, and the row it is about to
+// replace, into probeverdict's Input. It is the only place the two are joined;
+// the rules themselves live in the probeverdict package and are not restated
+// here.
+//
+// previous is the row currently stored for this provider, or nil when the
+// provider has never been probed successfully. A nil previous leaves
+// PreviousCountryCode empty, which probeverdict reads as "no history to
+// contradict" -- a first probe is judged on its consensus alone.
+//
+// Note what is NOT passed: the mmdb country for the provider's control ip. A
+// probed country that disagrees with mmdb is the finding this project exists to
+// produce, never a fault, and probeverdict.Input structurally has no field for
+// it. Do not add one.
+func providerEgressVerdict(
+	args *SubmitProviderEgressLocationArgs,
+	previous *model.ProviderEgressLocation,
+) probeverdict.Verdict {
+	in := probeverdict.Input{
+		CountryConfident: args.CountryConfident,
+		// stored country codes are lowercased (see
+		// model.SetProviderEgressLocation), so normalize the submitted one the
+		// same way before comparing it against the stored history -- otherwise
+		// a prober sending "US" against a stored "us" reads as a country change
+		// and every second probe would be suspect.
+		CountryCode: strings.ToLower(strings.TrimSpace(args.CountryCode)),
+		// the server's clock, not the prober's: the age of the stored history
+		// is a server-side judgement, and args.ObservedAt is attacker-adjacent
+		// input. Its skew is already bounded, but the bound is a rejection
+		// rule, not a licence to measure history against it.
+		Now: server.NowUtc(),
+	}
+	if previous != nil {
+		in.PreviousCountryCode = previous.CountryCode
+		in.PreviousObservedAt = previous.ObservedAt
+	}
+	return probeverdict.Evaluate(in)
 }
 
 // SubmitProviderEgressLocation records a probed egress location for a provider.
@@ -176,6 +216,20 @@ func SubmitProviderEgressLocation(
 		model.CreateLocation(ctx, location)
 	}
 
+	// judge the submission against the history it is about to replace. This is
+	// the only call site probeverdict has and the only place a verdict is
+	// computed: every geolocation submission already funnels through here, so
+	// verdicts fall out of the existing probe cadence with no separate
+	// scheduler and no separate endpoint. Before this, every row in the table
+	// read the column default `unverified` -- the absence of a judgement, which
+	// is indistinguishable from a judgement of "could not verify".
+	//
+	// The read is the only one: SetProviderEgressLocation below is an upsert,
+	// so the previous row has to be fetched before it is overwritten, and the
+	// verdict is the only thing that needs it.
+	previous := model.GetProviderEgressLocation(ctx, args.ClientId)
+	verdict := providerEgressVerdict(args, previous)
+
 	model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
 		ClientId:      args.ClientId,
 		LocationId:    location.LocationId,
@@ -187,6 +241,10 @@ func SubmitProviderEgressLocation(
 		Mobile:        args.Mobile,
 		CityConfident: cityConfident,
 		ObservedAt:    args.ObservedAt,
+		Verdict:       verdict.State,
+		VerdictReason: verdict.Reason,
+		// assurance stays at the model default (`direct`): this probe reached
+		// the provider over a single tunnel from the prober. Multi-hop is P3.
 	})
 
 	return &SubmitProviderEgressLocationResult{LocationId: location.LocationId}, nil

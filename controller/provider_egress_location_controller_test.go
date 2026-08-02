@@ -742,3 +742,185 @@ func TestSubmitProviderEgressLocationAmbiguousQualifierFallsBackToCountry(t *tes
 		}
 	})
 }
+
+// The verdict tests below cover the wiring of the probeverdict package into
+// this ingest path. probeverdict itself is table-tested in its own package;
+// what is asserted here is that a submission actually reaches it and that its
+// answer reaches the stored row -- before this wiring every row in production
+// read the column default, `unverified`, which is the absence of a judgement
+// rather than a judgement.
+
+// A clean, consensus-backed submission with no conflicting history must store
+// `verified`, not the `unverified` column default.
+func TestSubmitProviderEgressLocationVerdictVerified(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "US",
+			Country:          "United States",
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc(),
+		})
+		connect.AssertEqual(t, err, nil)
+
+		stored := model.GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected the submission to be stored")
+		}
+		if stored.Verdict != "verified" {
+			t.Errorf("verdict = %q, want %q: a consensus-backed submission with no conflicting history is verified", stored.Verdict, "verified")
+		}
+		connect.AssertEqual(t, stored.VerdictReason, "")
+		// assurance is unrelated to the verdict and stays at its default
+		connect.AssertEqual(t, stored.Assurance, model.ProviderEgressAssuranceDirect)
+	})
+}
+
+// A country flip-flop inside probeverdict's instability window must store
+// `suspect` with the `unstable` reason.
+//
+// The two submissions go backwards in time rather than forwards:
+// MaxProviderEgressLocationSubmissionSkew rejects an observed_at more than five
+// minutes in the future, so the earlier probe is placed two hours ago and the
+// later one now. That keeps both inside the 24h submission-age bound, satisfies
+// the monotonic observed_at upsert, and puts the gap well inside the
+// instability window.
+func TestSubmitProviderEgressLocationVerdictSuspectOnCountryFlipFlop(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		_, err := SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "US",
+			Country:          "United States",
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc().Add(-2 * time.Hour),
+		})
+		connect.AssertEqual(t, err, nil)
+
+		first := model.GetProviderEgressLocation(ctx, clientId)
+		if first == nil {
+			t.Fatal("expected the first submission to be stored")
+		}
+		if first.Verdict != "verified" {
+			t.Fatalf("first verdict = %q, want %q; the fixture is only meaningful if the flip is a change", first.Verdict, "verified")
+		}
+
+		// the same provider now probes from a different country
+		_, err = SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "JP",
+			Country:          "Japan",
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc(),
+		})
+		connect.AssertEqual(t, err, nil)
+
+		stored := model.GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected the second submission to be stored")
+		}
+		connect.AssertEqual(t, stored.CountryCode, "jp")
+		if stored.Verdict != "suspect" {
+			t.Errorf("verdict = %q, want %q: a country change inside the instability window is a flip-flop", stored.Verdict, "suspect")
+		}
+		if stored.VerdictReason != "unstable" {
+			t.Errorf("verdict_reason = %q, want %q", stored.VerdictReason, "unstable")
+		}
+	})
+}
+
+// Absence of consensus is `unverified`/`no_consensus`. This is asserted against
+// the marshalling helper rather than end-to-end because
+// SubmitProviderEgressLocation rejects a submission that is not
+// country-confident before anything is written (see
+// TestSubmitProviderEgressLocationRejectsNotCountryConfident), so no row can
+// ever be stored for one. The regression this guards against is the wiring
+// hardcoding CountryConfident instead of passing the submission's own value
+// through.
+func TestSubmitProviderEgressLocationVerdictNoConsensus(t *testing.T) {
+	verdict := providerEgressVerdict(&SubmitProviderEgressLocationArgs{
+		ClientId:         server.NewId(),
+		CountryCode:      "us",
+		CountryConfident: false,
+		ObservedAt:       server.NowUtc(),
+	}, nil)
+	if verdict.State != "unverified" {
+		t.Errorf("state = %q, want %q", verdict.State, "unverified")
+	}
+	if verdict.Reason != "no_consensus" {
+		t.Errorf("reason = %q, want %q", verdict.Reason, "no_consensus")
+	}
+}
+
+// The property this whole project exists for: a probed country that disagrees
+// with what the free mmdb says about the provider's control ip is NOT
+// suspicious. That divergence is the finding, not the fault -- a provider whose
+// control connection looks Canadian while its egress is demonstrably Japanese
+// is exactly the case probing was built to surface, and flagging it would
+// invert the feature.
+//
+// probeverdict makes the omission structural: Input has no mmdb field at all,
+// so there is no argument to toggle. The property is therefore asserted
+// end-to-end -- give the client a connection from an ip the mmdb places in
+// Canada, submit a stable, consensus-backed probe that says Japan, and require
+// `verified`.
+func TestSubmitProviderEgressLocationVerdictMmdbDivergenceIsNotSuspect(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientIp := "24.48.0.1"
+
+		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
+		connect.AssertEqual(t, err, nil)
+		// the fixture is only meaningful if mmdb disagrees with the probe below
+		connect.AssertEqual(t, mmdbLocation.CountryCode, "ca")
+		model.CreateLocation(ctx, mmdbLocation)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		handlerId := model.CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
+		connect.AssertEqual(t, err, nil)
+		err = SetConnectionLocation(ctx, connectionId, clientIp)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = SubmitProviderEgressLocation(ctx, &SubmitProviderEgressLocationArgs{
+			ClientId:         clientId,
+			CountryCode:      "JP",
+			Country:          "Japan",
+			CountryConfident: true,
+			ObservedAt:       server.NowUtc(),
+		})
+		connect.AssertEqual(t, err, nil)
+
+		stored := model.GetProviderEgressLocation(ctx, clientId)
+		if stored == nil {
+			t.Fatal("expected the submission to be stored")
+		}
+		connect.AssertEqual(t, stored.CountryCode, "jp")
+		if stored.Verdict != "verified" {
+			t.Errorf(
+				"verdict = %q, want %q: the probed country (jp) differing from the mmdb country (%s) is the point of probing and must never be suspicious on its own",
+				stored.Verdict,
+				"verified",
+				mmdbLocation.CountryCode,
+			)
+		}
+		if stored.VerdictReason != "" {
+			t.Errorf("verdict_reason = %q, want empty", stored.VerdictReason)
+		}
+	})
+}
