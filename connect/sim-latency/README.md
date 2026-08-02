@@ -35,15 +35,21 @@ recorded in the run.json side-car). The metric set (computed by
 `sim-latency analyze`, decided by `sim-latency compare`):
 
 - **primary: `ttfb_p95_ms`** (tail time-to-first-byte, lower is better) and
-  **`throughput_p95_bytes_per_s`** (p95 of large-transfer throughput, higher
-  is better; transfers >= 256 KiB only, so it measures bandwidth rather than
-  latency)
-- **guard: `fail_rate`** — timing/throughput metrics count successes only, so
-  the failure rate is a non-inferiority gate: a build cannot win latency by
-  dropping hard requests
+  **`throughput_p50_bytes_per_s`** (median large-transfer throughput, higher
+  is better; transfers >= 1 MiB only — the site's download tier (2–6 MiB
+  pages), sized so transfer time dominates ttfb and `bytes/total` honestly
+  measures sustained bandwidth rather than connection-setup luck)
+- **guards: `fail_rate` and `throughput_p05_bytes_per_s`** — non-inferiority
+  gates. Timing/throughput metrics count successes only, so the failure rate
+  stops a build winning latency by dropping hard requests; the struggling-
+  tail throughput stops a build raising the median by starving the slowest
+  flows (and at ~2% A/A CV it detects small degradations)
 - secondary (reported, not gating): `ttfb_p50_ms`, `total_p50_ms`,
   `total_p95_ms`, `throughput_p05_bytes_per_s` (the struggling tail),
-  `throughput_p50_bytes_per_s`, `goodput_bytes_per_s`
+  `throughput_p95_bytes_per_s` (the fast tail — reported only: per-flow
+  throughput is ceilinged by the tunnel data path far below provider lane
+  rates, so the fast tail is a run-level regime lottery that measures at
+  26–47% A/A CV, undecidable as a verdict), `goodput_bytes_per_s`
 
 A standard run is a fixed `providers.yml` (which locks the fleet and all seeds),
 a fixed settle and duration, and the same server build except for the code under
@@ -54,8 +60,10 @@ workload — whether an observed difference is *real* is decided statistically
 
 ## System requirements
 
-The official scale — **~100,000 providers, ~1,000 clients/min** — targets a
-big-memory Linux box:
+**The official evaluation environment is [eval-48](#the-eval-48-evaluation-environment),
+sized to fit a 48 GB machine.** The full-scale configuration —
+**~100,000 providers, ~1,000 clients/min** — remains available for stress
+runs and targets a big-memory Linux box:
 
 - **Linux** (the ephemeral-port and fd limits below are Linux-tuned). macOS
   works for small dev runs but cannot source enough connections for full scale.
@@ -71,6 +79,125 @@ big-memory Linux box:
   give postgres headroom.
 
 For development, start at `--count 2000 --hosts 2` on a laptop and scale up.
+
+## The eval-48 evaluation environment
+
+The competition's standard environment is **eval-48**: a reduced configuration
+sized so the whole stack — the run process, fleet shards, and the local
+postgres + redis — fits a **48 GB** machine with several-fold headroom. The
+sizing is deliberate: an environment near its machine's memory or CPU limits
+measures its own scheduling and paging noise, which fattens the between-run
+variance and raises the smallest improvement a submission can prove. eval-48
+trades scale realism for a stable instrument.
+
+The environment is defined — and pinned — by `eval-48.sh`. The current
+revision is **eval-48b** (2026-07-31), which reshaped the throughput
+distribution so `throughput_p95` is a decidable signal (the eval-48a
+revision measured it at 47% A/A CV — a per-run warm-up lottery over a
+handful of golden hosting lanes; see the noise-floor section):
+
+- **fleet**: 2,000 providers, mixture v2, **seed 48** — residential 45%,
+  mobile 25%, and a continuous fast upper band holding 30% of the
+  population: business-fiber 15% (50–250 Mbps, caps 24–64) bridging into a
+  narrowed hosting tier 15% (200–600 Mbps, caps tightened to 32–96 so tail
+  load spreads across many lanes)
+- **site**: two-tier page bodies — web tier 4–512 KiB, download tier 2–6 MiB
+  on 25% of pages (the throughput sample; for seed 48 the tree has 37 pages,
+  7 of them download-tier, 33 MB full-crawl weight)
+- **clients**: 200-identity warm pool, 80 mean arrivals/min (rebalanced for
+  the heavier crawls)
+- **run shape**: 30 m measured window, `--fleet-shards 4`, warm-up defaults
+  (ramp 1 m, prewarm 13 h, settle 1 m, hosts 4, pipeline-interval 10 s)
+- every measured run starts from `--reset`
+- **canonical fleet file**: `eval-48g/providers-eval48b.yml`, regenerated
+  bit-identically from the seed; sha256
+  `7851a0d0c0d2c80c4c28f0ecd752305f11a87087cf16d7056ad5ea8f027dfd26`.
+  `compare` refuses to compare runs whose config sha differs, so every
+  machine evaluates the identical workload.
+
+```
+./eval-48.sh init             # generate + sha-verify the canonical providers file
+./eval-48.sh run > my.csv     # one standard evaluation run (~36 min wall)
+./eval-48.sh campaign 24      # sequential A/A replicates for 24 h → eval-48g/runs/
+./eval-48.sh baseline         # noise floor + convergence from the campaign runs
+```
+
+`campaign` is the long-form of `baseline --replicates`: the same sequential
+independent `run --reset` replicates, but time-bounded and failure-tolerant
+(one failed replicate is logged and skipped; a wedged replicate is killed by
+a 55 m watchdog; three consecutive failures abort as an environment outage),
+with the stack's memory sampled to `eval-48g/campaign-rss.csv` by
+`sample-rss.sh`.
+
+**An evaluation run requires an idle machine.** This is a hard requirement,
+not hygiene: machine on AC with the lid open
+(`caffeinate -i ./eval-48.sh campaign 12`), `server/local/run-local.sh` up
+for the whole campaign, and nothing else heavy on the box. **Pause Time
+Machine during campaigns** (`tmutil stopbackup`; better, exclude the Docker
+VM disk image with `sudo tmutil addexclusion` — its constant churn makes
+backups run for hours), or backup + Spotlight disk contention starves
+postgres dials exactly when the 2,000-provider fleet connects
+("postgres unreachable under the connected fleet"). External CPU
+pressure does not add mild noise — it breaks runs in obvious ways (measured
+2026-07-30 under a Spotlight/Mail indexing storm: fail_rate blowing out
+2–3×, a mid-run market collapse to 100% failures, and a warm-up wedged for
+2h — while quiet-box runs sat in a tight band). Treat any run whose
+fail_rate or row count departs the baseline band as contaminated and
+exclude it; the corruption is always glaring, never subtle.
+
+Measured footprint (M1 Max MacBook Pro, 10 cores, 2026-07-30 campaign): sim
+processes peak **~24 GB** during the measured window, postgres ~0.5 GB,
+redis ~0.2 GB, Docker host overhead ~1 GB — roughly **26 GB total** against
+the 48 GB budget. The sim also holds ~8 k established sockets with the
+kernel mbuf 2 KB-cluster pool near its cap (~336 MB) — the source of the
+occasional transient ramp-time `ENOBUFS`, which recovers and does not
+affect the measured window. A standard run is ~36 min wall (~6 min warm-up
++ 30 m window), ~60–110 k measured requests, all 200 clients establishing.
+
+### Measured noise floor (2026-07-31, k=4 preliminary, revision eval-48b)
+
+`eval-48g/baseline.json`, from the 4 clean A/A validation replicates (the
+k≈15 extension campaign was consumed by a Time Machine/Spotlight storm —
+contaminated replicates fail loudly and were excluded). Preliminary: at k=4
+the sd estimate carries ±41% sampling error and df=3 makes the thresholds
+conservative; top-up replicates on an idle host accumulate into
+`eval-48g/runs/` and tighten every line.
+
+| metric | role | mean ± sd | cv | min Δ, 1 run/side | 3 runs/side |
+|---|---|---|---|---|---|
+| `ttfb_p95_ms` | primary | 1670 ± 82 ms | 4.9% | 273 ms (~16%) | 158 ms (~9%) |
+| `throughput_p50_bytes_per_s` | primary | 137.4 k ± 9.9 k | 7.2% | 32.9 k (~24%) | 19.0 k (~14%) |
+| `throughput_p05_bytes_per_s` | guard | 48.6 k ± 1.1 k | 2.2% | 3.5 k (~7%) | 2.0 k (~4%) |
+| `fail_rate` | guard | 0.22% ± 0.02 pp | 9.9% | 0.074 pp | 0.043 pp |
+
+(`throughput_p95` reports at 26.5% CV — the reason it is no longer a
+primary.) The per-run series and thresholds are plotted in the
+"eval-48b baseline stability" artifact.
+
+### Measured noise floor (2026-07-30, k=12 clean replicates, revision eval-48a)
+
+**Superseded by eval-48b** — the mixture, site tier, arrival rate, and
+throughput gate changed, so this floor (archived as
+`eval-48g/baseline-eval48a.json`, runs in `eval-48g/runs-eval48a/`) applies
+only to eval-48a-sha runs; the eval-48b floor is being re-measured. From 12
+clean A/A replicates spanning 8 h (2 contended runs excluded; no significant
+drift in any metric across the span):
+
+| metric | mean ± sd | cv | min Δ, 1 run/side | 3 runs/side |
+|---|---|---|---|---|
+| `ttfb_p95_ms` (primary) | 2329 ± 114 ms | 4.9% | 289 ms (~12%) | 167 ms (~7%) |
+| `throughput_p50_bytes_per_s` | 142.5 k ± 5.7 k | 4.0% | 14.5 k (~10%) | ~6% |
+| `throughput_p95_bytes_per_s` (primary) | 1.41 M ± 0.66 M | **47%** | 1.68 M (~120%) | ~70% |
+| `fail_rate` (guard) | 3.9% ± 0.5 pp | 14% | 1.4 pp | 0.8 pp |
+
+`ttfb_p95` is a strong primary in eval-48. `throughput_p95` is effectively
+undecidable: its per-request distribution is bimodal (a bulk mode plus a
+thin ~2–7 % fast mode from high-bandwidth hosting lanes whose share
+crystallizes per run during warm-up), and the p95 sits exactly on the
+boundary between the modes, so it inherits the run-to-run fast-share
+lottery. The stable candidates for a bandwidth verdict are
+`throughput_p50` or a mid-tail/trimmed statistic; changing the primary set
+is a rules decision recorded in `compare.go`/`metricDefs`.
 
 ## Prerequisites
 
@@ -227,9 +354,9 @@ p-value wins. Multiple runs per side (`--a b1.csv,b2.csv`) shrink the
 detectable delta by `sqrt(m)`.
 
 The verdict at threshold `--p`: **A beats B iff some primary metric
-(`ttfb_p95_ms`, `throughput_p95_bytes_per_s`) is significantly better after
-Holm correction, and no guard metric (primaries + `fail_rate`) is
-significantly worse** at raw alpha. Other outcomes: `b_better`, `mixed`
+(`ttfb_p95_ms`, `throughput_p50_bytes_per_s`) is significantly better after
+Holm correction, and no guard metric (primaries + `fail_rate` +
+`throughput_p05_bytes_per_s`) is significantly worse** at raw alpha. Other outcomes: `b_better`, `mixed`
 (significant effects in both directions), `indistinguishable` (nothing
 exceeds the noise floor — the printed *min detectable delta* shows what the
 test could even see, so under-powered is never confused with no-difference).
@@ -258,7 +385,9 @@ entry per provider. Edit the `providers.mixture` weights/ranges and the `site`,
   here, matched from the testing subnets by the server's `ip_overrides` hook.
 - `subnets` — provider and client testing subnets (RFC 2544 `198.18.0.0/15` for
   providers). Each provider/client presents a unique address from these.
-- `site` — the loading tree: `mean_depth` (K), `branching`, body size range.
+- `site` — the loading tree: `mean_depth` (K), `branching`, and the two body
+  size tiers (web `min/max_body_bytes`; download `large_fraction` +
+  `large_min/max_body_bytes`, the pages the throughput metrics sample).
 - `clients` — `pool_size`, `mean_per_minute` (M), balance, connections per crawl.
 - `providers` — `count`, network grouping, and the `mixture`.
 - `fleet` — the generated per-provider entries (ip, ids, user type, sampled
@@ -287,8 +416,8 @@ capacity exhaustion.
 Like bandwidth, the cap is **hidden ground truth**: clients discover capacity
 only through failures and latency, so a strategy that routes all traffic to
 the single best provider saturates it and pays for it in the measured
-metrics. The default mixture caps hosting providers around 64–256 concurrent
-flows, residential 8–32, mobile 4–12.
+metrics. The default mixture caps hosting providers around 32–96 concurrent
+flows, business 24–64, residential 8–32, mobile 4–12.
 
 **Environment rule:** the flow-limit machinery in `connect` (the
 `LocalUserNat` buffer limits and their lru eviction) and the caps sampled in

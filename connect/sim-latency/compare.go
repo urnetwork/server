@@ -22,7 +22,8 @@ package main
 //
 // Verdict rule: A beats B at level p iff some primary metric (ttfb_p95,
 // throughput_p95) is significantly better after Holm correction, and no
-// guard metric (the primaries + fail_rate) is significantly worse at raw
+// guard metric (the primaries + fail_rate + throughput_p05) is
+// significantly worse at raw
 // alpha. fail_rate guards the success-only timing metrics: a build cannot
 // win latency by dropping hard requests.
 

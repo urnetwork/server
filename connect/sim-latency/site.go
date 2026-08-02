@@ -94,8 +94,19 @@ func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// two-tier body sizes: most pages are web-sized; a seeded fraction are
+	// download-sized (the large tier the throughput metrics measure). The
+	// tier draw precedes the size draw, so a page's size stays deterministic
+	// from (seed, path); with LargeFraction 0 no tier draw happens and the
+	// sequence matches the pre-tier behavior.
 	bodySize := self.site.MinBodyBytes
-	if self.site.MaxBodyBytes > self.site.MinBodyBytes {
+	if 0 < self.site.LargeFraction && 0 < self.site.LargeMinBodyBytes &&
+		pageRng.float64() < self.site.LargeFraction {
+		bodySize = self.site.LargeMinBodyBytes
+		if self.site.LargeMaxBodyBytes > self.site.LargeMinBodyBytes {
+			bodySize += pageRng.intn(self.site.LargeMaxBodyBytes - self.site.LargeMinBodyBytes)
+		}
+	} else if self.site.MaxBodyBytes > self.site.MinBodyBytes {
 		bodySize += pageRng.intn(self.site.MaxBodyBytes - self.site.MinBodyBytes)
 	}
 
