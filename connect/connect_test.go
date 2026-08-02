@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -1219,16 +1220,24 @@ func testConnect(
 	}
 	fmt.Printf("[transport mode]%s\n", config.transportMode)
 
+	type SimpleMessage struct {
+		messageIndex uint32
+		messageCount uint32
+	}
 	type Message struct {
 		sourceId    connect.Id
-		frames      []*protocol.Frame
+		messages    []SimpleMessage
 		provideMode protocol.ProvideMode
 	}
 
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
-	receiveTimeout := 900 * time.Second
+	// Sequence state intentionally remains alive for the whole stress case, but
+	// a missing receive/ack is a failed test and must not pause the package for
+	// that entire lifetime. Keep those two bounds independent.
+	sequenceStateTimeout := 900 * time.Second
+	progressTimeout := 60 * time.Second
 
 	// larger values test the send queue and receive queue sizes
 	var messageContentSizes []ByteCount
@@ -1281,6 +1290,12 @@ func testConnect(
 	service := "connect"
 	block := "test"
 
+	type testServerEndpoint struct {
+		h1Port  int
+		h3Port  int
+		dnsPort int
+	}
+
 	// The handshake's TLS server flight is one `EncryptedControl{Handshake}`
 	// Pack, ~2 KiB protobuf-wrapped. A framer with `MaxMessageLen` below that
 	// closes the transport mid-handshake, and SendSequence's resend of the
@@ -1304,11 +1319,15 @@ func testConnect(
 
 	// FIXME server quic tls to create a temp cert
 	// FIXME client tls to trust self signed cert
-	createServer := func(exchange *Exchange, port int) *http.Server {
+	createServer := func(
+		exchange *Exchange,
+		h3PacketConn net.PacketConn,
+		dnsPacketConn net.PacketConn,
+	) (*http.Server, *ConnectHandler) {
 		settings := DefaultConnectHandlerSettings()
 		// settings.EnableTlsSelfSign = true
-		settings.ListenH3Port = port + 443
-		settings.ListenDnsPort = port + 53
+		settings.ListenH3Port = 0
+		settings.ListenDnsPort = 0
 		settings.EnableProxyProtocol = false
 		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		settings.TransportTlsSettings.EnableSelfSign = true
@@ -1317,35 +1336,67 @@ func testConnect(
 		// settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 1000
 		settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
 		// settings.MaximumExchangeMessageByteCount = 2 * int(messageContentSizes[len(messageContentSizes)-1])
-		connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, settings)
-
-		fmt.Printf("create server :%d (:%d :%d)\n", port, settings.ListenH3Port, settings.ListenDnsPort)
+		connectHandler := NewConnectHandlerWithPacketConns(
+			ctx,
+			server.NewId(),
+			exchange,
+			settings,
+			ConnectHandlerPacketConns{
+				H3:  h3PacketConn,
+				Dns: dnsPacketConn,
+			},
+		)
 
 		routes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
 			router.NewRoute("GET", "/", connectHandler.Connect),
 		}
 
-		addr := fmt.Sprintf(":%d", port)
 		routerHandler := router.NewRouter(ctx, routes)
 
 		server := &http.Server{
-			Addr:    addr,
 			Handler: routerHandler,
 		}
-		return server
+		return server, connectHandler
 	}
 
-	hostPorts := map[string]int{}
+	hostEndpoints := map[string]testServerEndpoint{}
 	exchanges := map[string]*Exchange{}
 	servers := map[string]*http.Server{}
+	connectHandlers := []*ConnectHandler{}
 	for i := 0; i < 10; i += 1 {
 		host := fmt.Sprintf("host%d", i)
-		port := 8080 + i
-		hostPorts[host] = port
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("connect listener %d: %v", i, err)
+		}
+		h1Port := listener.Addr().(*net.TCPAddr).Port
 
+		h3PacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("h3 listener %d: %v", i, err)
+		}
+		h3Port := h3PacketConn.LocalAddr().(*net.UDPAddr).Port
+
+		dnsPacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			h3PacketConn.Close()
+			t.Fatalf("dns listener %d: %v", i, err)
+		}
+		dnsPort := dnsPacketConn.LocalAddr().(*net.UDPAddr).Port
+		hostEndpoints[host] = testServerEndpoint{
+			h1Port:  h1Port,
+			h3Port:  h3Port,
+			dnsPort: dnsPort,
+		}
+
+		exchangeListener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("exchange listener %d: %v", i, err)
+		}
+		exchangePort := exchangeListener.Addr().(*net.TCPAddr).Port
 		hostToServicePorts := map[int]int{
-			9000 + i: 9000 + i,
+			exchangePort: exchangePort,
 		}
 
 		settings := DefaultExchangeSettings()
@@ -1370,23 +1421,47 @@ func testConnect(
 			settings.ForwardEnforceActiveContracts = false
 		}
 
-		exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, settings)
+		exchange := NewExchangeWithListeners(
+			ctx,
+			host,
+			service,
+			block,
+			hostToServicePorts,
+			routes,
+			settings,
+			map[int]net.Listener{exchangePort: exchangeListener},
+		)
 		exchanges[host] = exchange
 
-		server := createServer(exchange, port)
+		server, connectHandler := createServer(
+			exchange,
+			h3PacketConn,
+			dnsPacketConn,
+		)
 		servers[host] = server
+		connectHandlers = append(connectHandlers, connectHandler)
 		defer server.Close()
-		go server.ListenAndServe()
+		go server.Serve(listener)
 	}
 
-	select {
-	case <-time.After(2 * time.Second):
-	}
+	defer func() {
+		for _, connectHandler := range connectHandlers {
+			connectHandler.Close()
+		}
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		for _, connectHandler := range connectHandlers {
+			if !connectHandler.WaitForIdle(closeCtx) {
+				t.Errorf("connect handlers did not finish during teardown")
+				return
+			}
+		}
+	}()
 
-	randServer := func() (string, int) {
-		ports := slices.Collect(maps.Values(hostPorts))
-		port := ports[mathrand.Intn(len(ports))]
-		return fmt.Sprintf("ws://127.0.0.1:%d", port), port
+	randServer := func() (string, testServerEndpoint) {
+		endpoints := slices.Collect(maps.Values(hostEndpoints))
+		endpoint := endpoints[mathrand.Intn(len(endpoints))]
+		return fmt.Sprintf("ws://127.0.0.1:%d", endpoint.h1Port), endpoint
 	}
 
 	maxMessageContentSize := ByteCount(0)
@@ -1406,9 +1481,9 @@ func testConnect(
 	clientSettingsA := connect.DefaultClientSettings()
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckBufferSize = 0
-	clientSettingsA.SendBufferSettings.AckTimeout = receiveTimeout
+	clientSettingsA.SendBufferSettings.AckTimeout = sequenceStateTimeout
 	clientSettingsA.SendBufferSettings.MinResendInterval = minResendInterval
-	clientSettingsA.ReceiveBufferSettings.GapTimeout = receiveTimeout
+	clientSettingsA.ReceiveBufferSettings.GapTimeout = sequenceStateTimeout
 	clientSettingsA.ReceiveBufferSettings.SequenceBufferSize = 0
 	// ack per received message instead of coalescing. The production default
 	// coalesces acks over a 10ms window; this test sets MinResendInterval=10ms
@@ -1424,7 +1499,7 @@ func testConnect(
 	clientSettingsA.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsA.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
 	clientSettingsA.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
-	clientSettingsA.ReceiveBufferSettings.IdleTimeout = receiveTimeout
+	clientSettingsA.ReceiveBufferSettings.IdleTimeout = sequenceStateTimeout
 	clientSettingsA.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsA.ControlPingTimeout = 30 * time.Second
 	clientSettingsA.DefaultTransferOpts.ForceStream = config.forceStream
@@ -1450,9 +1525,9 @@ func testConnect(
 	clientSettingsB := connect.DefaultClientSettings()
 	clientSettingsB.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckBufferSize = 0
-	clientSettingsB.SendBufferSettings.AckTimeout = receiveTimeout
+	clientSettingsB.SendBufferSettings.AckTimeout = sequenceStateTimeout
 	clientSettingsB.SendBufferSettings.MinResendInterval = minResendInterval
-	clientSettingsB.ReceiveBufferSettings.GapTimeout = receiveTimeout
+	clientSettingsB.ReceiveBufferSettings.GapTimeout = sequenceStateTimeout
 	clientSettingsB.ReceiveBufferSettings.SequenceBufferSize = 0
 	// ack per received message instead of coalescing (see clientSettingsA)
 	clientSettingsB.ReceiveBufferSettings.AckCompressTimeout = 0
@@ -1464,7 +1539,7 @@ func testConnect(
 	clientSettingsB.SendBufferSettings.ContractFillFraction = standardContractFillFraction
 	clientSettingsB.ContractManagerSettings.StandardContractTransferByteCount = standardContractTransferByteCount
 	clientSettingsB.SendBufferSettings.IdleTimeout = sequenceIdleTimeout
-	clientSettingsB.ReceiveBufferSettings.IdleTimeout = receiveTimeout
+	clientSettingsB.ReceiveBufferSettings.IdleTimeout = sequenceStateTimeout
 	clientSettingsB.ForwardBufferSettings.IdleTimeout = sequenceIdleTimeout
 	clientSettingsB.ControlPingTimeout = 30 * time.Second
 	clientSettingsB.DefaultTransferOpts.ForceStream = config.forceStream
@@ -1524,6 +1599,23 @@ func testConnect(
 	receiveA := make(chan *Message, 16384)
 	receiveB := make(chan *Message, 16384)
 
+	decodeSimpleMessages := func(frames []*protocol.Frame) []SimpleMessage {
+		messages := make([]SimpleMessage, 0, len(frames))
+		for _, frame := range frames {
+			message, err := connect.FromFrame(frame)
+			if err != nil {
+				panic(err)
+			}
+			if simpleMessage, ok := message.(*protocol.SimpleMessage); ok {
+				messages = append(messages, SimpleMessage{
+					messageIndex: simpleMessage.MessageIndex,
+					messageCount: simpleMessage.MessageCount,
+				})
+			}
+		}
+		return messages
+	}
+
 	// printReceive := func(clientName string, frames []*protocol.Frame) {
 	// 	for _, frame := range frames {
 	// 		simpleMessage := connect.RequireFromFrame(frame).(*protocol.SimpleMessage)
@@ -1540,7 +1632,7 @@ func testConnect(
 		select {
 		case receiveA <- &Message{
 			sourceId:    source.SourceId,
-			frames:      frames,
+			messages:    decodeSimpleMessages(frames),
 			provideMode: peer.ProvideMode,
 		}:
 		default:
@@ -1553,7 +1645,7 @@ func testConnect(
 		select {
 		case receiveB <- &Message{
 			sourceId:    source.SourceId,
-			frames:      frames,
+			messages:    decodeSimpleMessages(frames),
 			provideMode: peer.ProvideMode,
 		}:
 		default:
@@ -1582,11 +1674,11 @@ func testConnect(
 
 	transportAs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		host, port := randServer()
+		host, endpoint := randServer()
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.QuicTlsConfig.InsecureSkipVerify = true
-		settings.H3Port = port + 443
-		settings.DnsPort = port + 53
+		settings.H3Port = endpoint.h3Port
+		settings.DnsPort = endpoint.dnsPort
 		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		transportA := connect.NewPlatformTransportWithTargetMode(
 			ctx,
@@ -1618,11 +1710,11 @@ func testConnect(
 
 	transportBs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
-		host, port := randServer()
+		host, endpoint := randServer()
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.QuicTlsConfig.InsecureSkipVerify = true
-		settings.H3Port = port + 443
-		settings.DnsPort = port + 53
+		settings.H3Port = endpoint.h3Port
+		settings.DnsPort = endpoint.dnsPort
 		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		transportB := connect.NewPlatformTransportWithTargetMode(
 			ctx,
@@ -1816,11 +1908,11 @@ func testConnect(
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport a\n")
-						host, port := randServer()
+						host, endpoint := randServer()
 						settings := connect.DefaultPlatformTransportSettings()
 						settings.QuicTlsConfig.InsecureSkipVerify = true
-						settings.H3Port = port + 443
-						settings.DnsPort = port + 53
+						settings.H3Port = endpoint.h3Port
+						settings.DnsPort = endpoint.dnsPort
 						settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 						transportA := connect.NewPlatformTransportWithTargetMode(
 							ctx,
@@ -1910,23 +2002,16 @@ func testConnect(
 						// messagesToB = append(messagesToB, message)
 
 						// check in order
-						for _, frame := range message.frames {
-							m, err := connect.FromFrame(frame)
-							if err != nil {
-								panic(err)
-							}
-							switch v := m.(type) {
-							case *protocol.SimpleMessage:
-								if 0 < v.MessageCount {
-									connect.AssertEqual(t, uint32(burstSize), v.MessageCount)
-									connect.AssertEqual(t, uint32(i), v.MessageIndex)
-									i += 1
-								} else {
-									nackBCount += 1
-								}
+						for _, message := range message.messages {
+							if 0 < message.messageCount {
+								connect.AssertEqual(t, uint32(burstSize), message.messageCount)
+								connect.AssertEqual(t, uint32(i), message.messageIndex)
+								i += 1
+							} else {
+								nackBCount += 1
 							}
 						}
-					case <-time.After(receiveTimeout):
+					case <-time.After(progressTimeout):
 						// printAllStacks()
 						panic(errors.New("Timeout."))
 					}
@@ -1942,18 +2027,11 @@ func testConnect(
 						// messagesToB = append(messagesToB, message)
 
 						// check in order
-						for _, frame := range message.frames {
-							m, err := connect.FromFrame(frame)
-							if err != nil {
-								panic(err)
-							}
-							switch v := m.(type) {
-							case *protocol.SimpleMessage:
-								if 0 < v.MessageCount {
-									t.Fatal("Unexpected ack message.")
-								} else {
-									nackBCount += 1
-								}
+						for _, message := range message.messages {
+							if 0 < message.messageCount {
+								t.Fatal("Unexpected ack message.")
+							} else {
+								nackBCount += 1
 							}
 						}
 					case <-time.After(timeout):
@@ -1967,7 +2045,7 @@ func testConnect(
 					select {
 					case err := <-ackA:
 						connect.AssertEqual(t, err, nil)
-					case <-time.After(receiveTimeout):
+					case <-time.After(progressTimeout):
 						// printAllStacks()
 						panic(errors.New("Timeout."))
 					}
@@ -2008,11 +2086,11 @@ func testConnect(
 					}
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport b\n")
-						host, port := randServer()
+						host, endpoint := randServer()
 						settings := connect.DefaultPlatformTransportSettings()
 						settings.QuicTlsConfig.InsecureSkipVerify = true
-						settings.H3Port = port + 443
-						settings.DnsPort = port + 53
+						settings.H3Port = endpoint.h3Port
+						settings.DnsPort = endpoint.dnsPort
 						settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 						transportB := connect.NewPlatformTransportWithTargetMode(
 							ctx,
@@ -2116,23 +2194,16 @@ func testConnect(
 						// messagesToB = append(messagesToB, message)
 
 						// check in order
-						for _, frame := range message.frames {
-							m, err := connect.FromFrame(frame)
-							if err != nil {
-								panic(err)
-							}
-							switch v := m.(type) {
-							case *protocol.SimpleMessage:
-								if 0 < v.MessageCount {
-									connect.AssertEqual(t, uint32(burstSize), v.MessageCount)
-									connect.AssertEqual(t, uint32(i), v.MessageIndex)
-									i += 1
-								} else {
-									nackACount += 1
-								}
+						for _, message := range message.messages {
+							if 0 < message.messageCount {
+								connect.AssertEqual(t, uint32(burstSize), message.messageCount)
+								connect.AssertEqual(t, uint32(i), message.messageIndex)
+								i += 1
+							} else {
+								nackACount += 1
 							}
 						}
-					case <-time.After(receiveTimeout):
+					case <-time.After(progressTimeout):
 						// printAllStacks()
 						panic(errors.New("Timeout."))
 					}
@@ -2148,18 +2219,11 @@ func testConnect(
 						// messagesToB = append(messagesToB, message)
 
 						// check in order
-						for _, frame := range message.frames {
-							m, err := connect.FromFrame(frame)
-							if err != nil {
-								panic(err)
-							}
-							switch v := m.(type) {
-							case *protocol.SimpleMessage:
-								if 0 < v.MessageCount {
-									t.Fatal("Unexpected ack message.")
-								} else {
-									nackACount += 1
-								}
+						for _, message := range message.messages {
+							if 0 < message.messageCount {
+								t.Fatal("Unexpected ack message.")
+							} else {
+								nackACount += 1
 							}
 						}
 					case <-time.After(timeout):
@@ -2173,7 +2237,7 @@ func testConnect(
 					select {
 					case err := <-ackB:
 						connect.AssertEqual(t, err, nil)
-					case <-time.After(receiveTimeout):
+					case <-time.After(progressTimeout):
 						// printAllStacks()
 						panic(errors.New("Timeout."))
 					}

@@ -36,7 +36,7 @@ func TestExchangeStreamP2pPeerTraffic(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8099, 9019)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{

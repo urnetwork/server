@@ -45,7 +45,7 @@ func TestProxyDeviceRpcHostedIncompatibleNoop(t *testing.T) {
 		opts.enableDeviceRpc = true
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
 		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
 		connect.AssertEqual(t, err, nil)

@@ -39,10 +39,10 @@ func TestProxyDeviceRpcEndpoint(t *testing.T) {
 		opts.enableDeviceRpc = true
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
 		// ---- the real proxy api TLS listener route + auth --------------------
-		// dial the actual api listener (InternalApiPort, TLS), not the plain test
+		// dial the actual api TLS listener, not the plain test
 		// endpoint, so the production route and per-proxy SNI TLS are exercised.
 		tlsDialer := &websocket.Dialer{
 			// the api listener presents a self-signed cert (as the https leg test
@@ -53,7 +53,7 @@ func TestProxyDeviceRpcEndpoint(t *testing.T) {
 		apiDial := func(query string, header http.Header) (*websocket.Conn, *http.Response, error) {
 			u := url.URL{
 				Scheme:   "wss",
-				Host:     fmt.Sprintf("127.0.0.1:%d", InternalApiPort),
+				Host:     fmt.Sprintf("127.0.0.1:%d", h.apiPort),
 				Path:     "/device-rpc",
 				RawQuery: query,
 			}
@@ -154,7 +154,7 @@ func TestProxyDeviceRpcSessionIdle(t *testing.T) {
 		opts.enableDeviceRpc = true
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
 		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
 		connect.AssertEqual(t, err, nil)

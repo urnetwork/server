@@ -61,12 +61,6 @@ import (
 )
 
 const (
-	mcWsPort0       = 7630
-	mcWsPort1       = 7631
-	mcApiPort       = 7640
-	mcExchangePort0 = 7730
-	mcExchangePort1 = 7731
-
 	mcPingPongCount  = 300
 	mcPingPongWarmup = 20
 	mcBlastDuration  = 6 * time.Second
@@ -89,13 +83,6 @@ const (
 	mcDownloadPayloadByteCount = 1400
 	// pace in 64 KiB chunks with a 1ms sleep: ~62 MiB/s
 	mcDownloadPaceChunkByteCount = 64 * 1024
-
-	// tcp stream test ports (distinct from the udp test so both can run)
-	mcTcpWsPort0       = 7650
-	mcTcpWsPort1       = 7651
-	mcTcpApiPort       = 7660
-	mcTcpExchangePort0 = 7750
-	mcTcpExchangePort1 = 7751
 
 	mcTcpStreamByteCount = 100 * 1024 * 1024
 	// minimum acceptable max tcp goodput. Set low for now; raise as the stack
@@ -134,7 +121,7 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 
 	fmt.Printf("[mctcp]go=%s cpus=%d gomaxprocs=%d\n", runtime.Version(), runtime.NumCPU(), runtime.GOMAXPROCS(0))
 
-	stack, cleanup := setupMcStack(ctx, "mctcp", mcTcpWsPort0, mcTcpWsPort1, mcTcpApiPort, mcTcpExchangePort0, mcTcpExchangePort1)
+	stack, cleanup := setupMcStack(ctx, "mctcp")
 	defer cleanup()
 
 	// ---- real tcp echo server (os sockets) -----------------------------------
@@ -413,7 +400,23 @@ type mcStack struct {
 	waitFor           func(timeout time.Duration, what string, condition func() bool)
 }
 
-func setupMcStack(ctx context.Context, label string, wsPort0, wsPort1, apiPort, exchangePort0, exchangePort1 int) (*mcStack, func()) {
+func setupMcStack(ctx context.Context, label string) (*mcStack, func()) {
+	listenTcp := func() net.Listener {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			panic(err)
+		}
+		return listener
+	}
+	wsListener0 := listenTcp()
+	wsListener1 := listenTcp()
+	apiListener := listenTcp()
+	exchangeListener0 := listenTcp()
+	exchangeListener1 := listenTcp()
+	wsPort0 := wsListener0.Addr().(*net.TCPAddr).Port
+	wsPort1 := wsListener1.Addr().(*net.TCPAddr).Port
+	apiPort := apiListener.Addr().(*net.TCPAddr).Port
+
 	service := "connect"
 	block := "test"
 	routes := map[string]string{
@@ -422,23 +425,40 @@ func setupMcStack(ctx context.Context, label string, wsPort0, wsPort1, apiPort, 
 	}
 
 	hostConfigs := []struct {
-		host         string
-		wsPort       int
-		exchangePort int
+		host             string
+		wsPort           int
+		exchangePort     int
+		listener         net.Listener
+		exchangeListener net.Listener
 	}{
-		{label + "0", wsPort0, exchangePort0},
-		{label + "1", wsPort1, exchangePort1},
+		{
+			label + "0",
+			wsPort0,
+			exchangeListener0.Addr().(*net.TCPAddr).Port,
+			wsListener0,
+			exchangeListener0,
+		},
+		{
+			label + "1",
+			wsPort1,
+			exchangeListener1.Addr().(*net.TCPAddr).Port,
+			wsListener1,
+			exchangeListener1,
+		},
 	}
 
 	exchanges := []*connectserver.Exchange{}
+	connectHandlers := []*connectserver.ConnectHandler{}
 	httpServers := []*http.Server{}
 	for _, hostConfig := range hostConfigs {
 		settings := connectserver.DefaultExchangeSettings()
 		settings.ConnectionAnnounceTimeout = 0
 		settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
 		settings.ConnectionTestConfig = connectserver.V0TestConfig()
+		settings.ListenH3Port = 0
+		settings.ListenDnsPort = 0
 
-		exchange := connectserver.NewExchange(
+		exchange := connectserver.NewExchangeWithListeners(
 			ctx,
 			hostConfig.host,
 			service,
@@ -446,28 +466,28 @@ func setupMcStack(ctx context.Context, label string, wsPort0, wsPort1, apiPort, 
 			map[int]int{hostConfig.exchangePort: hostConfig.exchangePort},
 			routes,
 			settings,
+			map[int]net.Listener{hostConfig.exchangePort: hostConfig.exchangeListener},
 		)
 		exchanges = append(exchanges, exchange)
 
 		connectHandler := connectserver.NewConnectHandler(ctx, server.NewId(), exchange, &settings.ConnectHandlerSettings)
+		connectHandlers = append(connectHandlers, connectHandler)
 		connectRoutes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
 			router.NewRoute("GET", "/", connectHandler.Connect),
 		}
 		httpServer := &http.Server{
-			Addr:    fmt.Sprintf("127.0.0.1:%d", hostConfig.wsPort),
 			Handler: router.NewRouter(ctx, connectRoutes),
 		}
 		httpServers = append(httpServers, httpServer)
-		go httpServer.ListenAndServe()
+		go httpServer.Serve(hostConfig.listener)
 	}
 
 	apiServer := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", apiPort),
 		Handler: router.NewRouter(ctx, api.Routes()),
 	}
 	httpServers = append(httpServers, apiServer)
-	go apiServer.ListenAndServe()
+	go apiServer.Serve(apiListener)
 
 	waitFor := func(timeout time.Duration, what string, condition func() bool) {
 		deadline := time.Now().Add(timeout)
@@ -581,11 +601,21 @@ func setupMcStack(ctx context.Context, label string, wsPort0, wsPort1, apiPort, 
 		providerLocalNat.Close()
 		providerTransport.Close()
 		providerClient.Close()
+		for _, connectHandler := range connectHandlers {
+			connectHandler.Close()
+		}
 		for _, httpServer := range httpServers {
 			httpServer.Close()
 		}
 		for _, exchange := range exchanges {
 			exchange.Close()
+		}
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		for _, connectHandler := range connectHandlers {
+			if !connectHandler.WaitForIdle(closeCtx) {
+				panic("connect handlers did not finish during perf teardown")
+			}
 		}
 	}
 
@@ -612,7 +642,7 @@ func testConnectMultiClientPerformance(t testing.TB) {
 
 	fmt.Printf("[mcperf]go=%s cpus=%d gomaxprocs=%d\n", runtime.Version(), runtime.NumCPU(), runtime.GOMAXPROCS(0))
 
-	stack, cleanup := setupMcStack(ctx, "mcperf", mcWsPort0, mcWsPort1, mcApiPort, mcExchangePort0, mcExchangePort1)
+	stack, cleanup := setupMcStack(ctx, "mcperf")
 	defer cleanup()
 	apiUrl := stack.apiUrl
 	devicePlatformUrl := stack.devicePlatformUrl

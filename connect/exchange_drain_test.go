@@ -41,7 +41,7 @@ func TestExchangeDrainTrackA(t *testing.T) {
 			"host0",
 			"test",
 			"test",
-			map[int]int{5080: 5080},
+			map[int]int{},
 			map[string]string{"host0": "127.0.0.1"},
 			settings,
 		)

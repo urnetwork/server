@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	mathrand "math/rand"
 	"strconv"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	quic "github.com/quic-go/quic-go"
@@ -121,6 +122,22 @@ type ConnectHandler struct {
 
 	transportTls          *server.TransportTls
 	serviceTransitionTime time.Time
+	h3PacketConn          net.PacketConn
+	dnsPacketConn         net.PacketConn
+
+	activeLock  sync.Mutex
+	activeCount int
+	activeZero  chan struct{}
+	closing     bool
+}
+
+// ConnectHandlerPacketConns contains already-bound packet sockets for the QUIC
+// transports. The handler owns and closes every non-nil socket. Tests and
+// embedded servers use these to retain an OS-assigned port continuously
+// through startup instead of releasing a probe socket before rebinding it.
+type ConnectHandlerPacketConns struct {
+	H3  net.PacketConn
+	Dns net.PacketConn
 }
 
 func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exchange *Exchange) *ConnectHandler {
@@ -128,7 +145,34 @@ func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exc
 }
 
 func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
+	return NewConnectHandlerWithPacketConns(
+		ctx,
+		handlerId,
+		exchange,
+		settings,
+		ConnectHandlerPacketConns{},
+	)
+}
+
+func NewConnectHandlerWithPacketConns(
+	ctx context.Context,
+	handlerId server.Id,
+	exchange *Exchange,
+	settings *ConnectHandlerSettings,
+	packetConns ConnectHandlerPacketConns,
+) *ConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
+	activeZero := make(chan struct{})
+	activeCount := 0
+	if connectHandlerPacketEndpointEnabled(settings.ListenH3Port, packetConns.H3) {
+		activeCount += 1
+	}
+	if connectHandlerPacketEndpointEnabled(settings.ListenDnsPort, packetConns.Dns) {
+		activeCount += 1
+	}
+	if activeCount == 0 {
+		close(activeZero)
+	}
 
 	transportTls, err := server.NewTransportTlsFromConfig(settings.TransportTlsSettings)
 	if err != nil {
@@ -158,6 +202,10 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 		settings:              settings,
 		transportTls:          transportTls,
 		serviceTransitionTime: time.Now().Add(2 * exchange.settings.DrainAllTimeout),
+		h3PacketConn:          packetConns.H3,
+		dnsPacketConn:         packetConns.Dns,
+		activeCount:           activeCount,
+		activeZero:            activeZero,
 	}
 
 	go server.HandleError(h.run, cancel)
@@ -167,12 +215,19 @@ func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Excha
 
 func (self *ConnectHandler) run() {
 	defer self.cancel()
+	defer self.markClosing()
 
-	if server.HasPort(self.settings.ListenH3Port) {
-		go server.HandleError(self.runH3, self.cancel)
+	if connectHandlerPacketEndpointEnabled(self.settings.ListenH3Port, self.h3PacketConn) {
+		go func() {
+			defer self.endHandle()
+			server.HandleError(self.runH3, self.cancel)
+		}()
 	}
-	if server.HasPort(self.settings.ListenDnsPort) {
-		go server.HandleError(self.runH3Dns, self.cancel)
+	if connectHandlerPacketEndpointEnabled(self.settings.ListenDnsPort, self.dnsPacketConn) {
+		go func() {
+			defer self.endHandle()
+			server.HandleError(self.runH3Dns, self.cancel)
+		}()
 	}
 
 	select {
@@ -180,7 +235,83 @@ func (self *ConnectHandler) run() {
 	}
 }
 
+func connectHandlerPortEnabled(port int) bool {
+	return 0 < port && server.HasPort(port)
+}
+
+func connectHandlerPacketEndpointEnabled(port int, packetConn net.PacketConn) bool {
+	return packetConn != nil || connectHandlerPortEnabled(port)
+}
+
+func (self *ConnectHandler) beginHandle() bool {
+	self.activeLock.Lock()
+	defer self.activeLock.Unlock()
+
+	if self.closing || self.ctx.Err() != nil {
+		return false
+	}
+	if self.activeCount == 0 {
+		self.activeZero = make(chan struct{})
+	}
+	self.activeCount += 1
+	return true
+}
+
+func (self *ConnectHandler) endHandle() {
+	self.activeLock.Lock()
+	defer self.activeLock.Unlock()
+
+	self.activeCount -= 1
+	if self.activeCount < 0 {
+		panic("connect handler active count became negative")
+	}
+	if self.activeCount == 0 {
+		close(self.activeZero)
+	}
+}
+
+func (self *ConnectHandler) startHandle(do func()) bool {
+	if !self.beginHandle() {
+		return false
+	}
+	go func() {
+		defer self.endHandle()
+		server.HandleError(do)
+	}()
+	return true
+}
+
+func (self *ConnectHandler) markClosing() {
+	self.activeLock.Lock()
+	defer self.activeLock.Unlock()
+	self.closing = true
+}
+
+func (self *ConnectHandler) Close() {
+	self.markClosing()
+	self.cancel()
+}
+
+func (self *ConnectHandler) WaitForIdle(ctx context.Context) bool {
+	self.activeLock.Lock()
+	activeZero := self.activeZero
+	self.activeLock.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-activeZero:
+		return true
+	}
+}
+
 func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+	if !self.beginHandle() {
+		http.Error(w, "connect handler closed", http.StatusServiceUnavailable)
+		return
+	}
+	defer self.endHandle()
+
 	// a draining service refuses new connections, so a redialing client fails
 	// fast and lands on a sibling service via the lb (CONNECTDRAIN2.md §3.3)
 	if self.exchange.settings.EnableDrainCoordination && self.exchange.IsDraining() {
@@ -692,6 +823,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 func (self *ConnectHandler) runH3() {
 	self.listenQuic(
 		self.settings.ListenH3Port,
+		self.h3PacketConn,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
 			if self.settings.EnableProxyProtocol {
 				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
@@ -704,6 +836,7 @@ func (self *ConnectHandler) runH3() {
 func (self *ConnectHandler) runH3Dns() {
 	self.listenQuic(
 		self.settings.ListenDnsPort,
+		self.dnsPacketConn,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
 			if self.settings.EnableProxyProtocol {
 				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
@@ -721,7 +854,11 @@ func (self *ConnectHandler) runH3Dns() {
 	)
 }
 
-func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketConn) (net.PacketConn, error)) {
+func (self *ConnectHandler) listenQuic(
+	port int,
+	preboundPacketConn net.PacketConn,
+	connTransform func(net.PacketConn) (net.PacketConn, error),
+) {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 
 	defer handleCancel()
@@ -745,35 +882,32 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
 	}
 
-	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
-	// listenIp := net.ParseIP(listenIpv4)
-	// if listenIp == nil {
-	// 	return
-	// }
+	serverConn := preboundPacketConn
+	listenAddress := ""
+	if serverConn == nil {
+		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
+		listenAddress = net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort))
 
+		reusePort := false
+		listenConfig := net.ListenConfig{}
+		if reusePort {
+			listenConfig.Control = server.SoReusePort
+		}
+
+		var err error
+		serverConn, err = listenConfig.ListenPacket(
+			handleCtx,
+			"udp",
+			listenAddress,
+		)
+		if err != nil {
+			return
+		}
+	} else {
+		listenAddress = serverConn.LocalAddr().String()
+	}
 	if glog.V(2) {
-		glog.Infof("[c]h3 listen %s:%d\n", listenIpv4, listenPort)
-	}
-
-	// serverAddr := &net.UDPAddr{
-	// 	IP:   listenIp,
-	// 	Port: listenPort,
-	// }
-
-	reusePort := false
-
-	listenConfig := net.ListenConfig{}
-	if reusePort {
-		listenConfig.Control = server.SoReusePort
-	}
-
-	serverConn, err := listenConfig.ListenPacket(
-		handleCtx,
-		"udp",
-		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-	)
-	if err != nil {
-		return
+		glog.Infof("[c]h3 listen %s\n", listenAddress)
 	}
 	defer serverConn.Close()
 	packetConn, err := connTransform(serverConn)
@@ -781,34 +915,42 @@ func (self *ConnectHandler) listenQuic(port int, connTransform func(net.PacketCo
 		return
 	}
 	defer packetConn.Close()
-	listener, err := (&quic.Transport{
+	quicTransport := &quic.Transport{
 		Conn: packetConn,
 		// createdConn: true,
 		// isSingleUse: true,
-	}).ListenEarly(tlsConfig, quicConfig)
+	}
+	listener, err := quicTransport.ListenEarly(tlsConfig, quicConfig)
+	if err != nil {
+		glog.Infof("[c]h3 listen %s err = %s\n", listenAddress, err)
+		return
+	}
 	defer listener.Close()
 
 	for {
 		if glog.V(2) {
-			glog.Infof("[c]h3 wait to accept connection %s:%d\n", listenIpv4, listenPort)
+			glog.Infof("[c]h3 wait to accept connection %s\n", listenAddress)
 		}
 		conn, err := listener.Accept(handleCtx)
 		if err != nil {
-			glog.Infof("[c]h3 accept connection %s:%d err = %s\n", listenIpv4, listenPort, err)
+			glog.Infof("[c]h3 accept connection %s err = %s\n", listenAddress, err)
 			return
 		}
 
-		glog.Infof("[c]h3 accept connection %s:%d\n", listenIpv4, listenPort)
-		go server.HandleError(func() {
+		glog.Infof("[c]h3 accept connection %s\n", listenAddress)
+		if !self.startHandle(func() {
 			defer conn.CloseWithError(0, "")
 
 			err := self.connectQuic(conn)
 			if err != nil {
-				glog.Infof("[c]h3 connection exited %s:%d err = %s\n", listenIpv4, listenPort, err)
+				glog.Infof("[c]h3 connection exited %s err = %s\n", listenAddress, err)
 			} else {
-				glog.Infof("[c]h3 connection exited %s:%d\n", listenIpv4, listenPort)
+				glog.Infof("[c]h3 connection exited %s\n", listenAddress)
 			}
-		})
+		}) {
+			conn.CloseWithError(0, "")
+			return
+		}
 	}
 }
 

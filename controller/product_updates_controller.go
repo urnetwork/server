@@ -2,13 +2,12 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
-	// "time"
-	"encoding/base64"
 
 	"github.com/urnetwork/glog"
 
@@ -52,18 +51,25 @@ var productUpdatesListId = sync.OnceValue(func() int {
 	return brevo.RequireInt("brevo", "list_ids", "network_users")
 })
 
+// brevoApiBaseUrl is replaceable only by hermetic protocol tests.
+var brevoApiBaseUrl = "https://api.brevo.com/v3"
+
+// brevoApiUrl joins an endpoint to the configurable base used by hermetic
+// protocol tests. Production never mutates brevoApiBaseUrl.
+func brevoApiUrl(path string) string {
+	return strings.TrimRight(brevoApiBaseUrl, "/") + "/" + strings.TrimLeft(path, "/")
+}
+
 func brevoHeader(header http.Header) {
 	header.Add("api-key", brevoApiKey())
 }
 
 func maskEmail(userEmail string) string {
-	parts := strings.SplitN(userEmail, "@", 2)
-	user := parts[0]
-	host := parts[1]
-
-	maskedUser := server.MaskValue(user)
-
-	return fmt.Sprintf("%s@%s", maskedUser, host)
+	user, host, ok := strings.Cut(userEmail, "@")
+	if !ok {
+		return server.MaskValue(userEmail)
+	}
+	return fmt.Sprintf("%s@%s", server.MaskValue(user), host)
 }
 
 /*
@@ -159,8 +165,18 @@ type BrevoContactResult struct {
 	Message string `json:"message"`
 }
 
+// brevoResponseJsonObject accepts the empty success body used by delete
+// endpoints while still surfacing malformed non-empty JSON.
+func brevoResponseJsonObject[R any](response *http.Response, responseBodyBytes []byte) (R, error) {
+	if len(responseBodyBytes) == 0 && 200 <= response.StatusCode && response.StatusCode < 300 {
+		var empty R
+		return empty, nil
+	}
+	return server.ResponseJsonObject[R](response, responseBodyBytes)
+}
+
 func BrevoAddContact(ctx context.Context, userEmail string) error {
-	url := "https://api.brevo.com/v3/contacts"
+	url := brevoApiUrl("contacts")
 	/*
 			{
 		  "updateEnabled": false,
@@ -175,44 +191,45 @@ func BrevoAddContact(ctx context.Context, userEmail string) error {
 		url,
 		args,
 		brevoHeader,
-		server.ResponseJsonObject,
+		brevoResponseJsonObject[BrevoContactResult],
 	)
-	if status != nil {
-		if 200 <= status.Code && status.Code < 300 {
-			return nil
-		}
-		if r.Code == "duplicate_parameter" {
-			// "Unable to create contact, email is already associated with another Contact"
-			return nil
-		}
-	}
 	if err != nil {
 		return err
 	}
+	if status == nil {
+		return fmt.Errorf("Could not add contact (missing response status)")
+	}
+	if 200 <= status.Code && status.Code < 300 {
+		return nil
+	}
+	if r.Code == "duplicate_parameter" {
+		// "Unable to create contact, email is already associated with another Contact"
+		return nil
+	}
 	return fmt.Errorf("Could not add contact (%s)", status.Status)
-
 }
 
 func BrevoRemoveContact(ctx context.Context, userEmail string) error {
-	url := fmt.Sprintf("https://api.brevo.com/v3/contacts/%s?identifierType=email_id", userEmail)
+	url := fmt.Sprintf("%s?identifierType=email_id", brevoApiUrl("contacts/"+userEmail))
 
 	status, r, err := server.HttpDeleteWithStatus[BrevoContactResult](
 		ctx,
 		url,
 		brevoHeader,
-		server.ResponseJsonObject,
+		brevoResponseJsonObject[BrevoContactResult],
 	)
-	if status != nil {
-		if 200 <= status.Code && status.Code < 300 {
-			return nil
-		}
-		if r.Code == "document_not_found" {
-			// contact already gone
-			return nil
-		}
-	}
 	if err != nil {
 		return err
+	}
+	if status == nil {
+		return fmt.Errorf("Could not remove contact (missing response status)")
+	}
+	if 200 <= status.Code && status.Code < 300 {
+		return nil
+	}
+	if r.Code == "document_not_found" {
+		// contact already gone
+		return nil
 	}
 	return fmt.Errorf("Could not remove contact (%s)", status.Status)
 }
@@ -223,7 +240,7 @@ func BrevoAddToList(ctx context.Context, userEmail string, listId int) error {
 		return err
 	}
 
-	url := fmt.Sprintf("https://api.brevo.com/v3/contacts/lists/%d/contacts/add", listId)
+	url := brevoApiUrl(fmt.Sprintf("contacts/lists/%d/contacts/add", listId))
 
 	args := &BrevoListArgs{
 		Emails: []string{userEmail},
@@ -233,29 +250,33 @@ func BrevoAddToList(ctx context.Context, userEmail string, listId int) error {
 		url,
 		args,
 		brevoHeader,
-		server.ResponseJsonObject,
+		brevoResponseJsonObject[BrevoListResult],
 	)
-	if status != nil {
-		if 200 <= status.Code && status.Code < 300 {
-			if slices.Contains(r.Contacts.Success, userEmail) {
-				return nil
-			}
-			return fmt.Errorf("Success list did not contain user email.")
-		}
-		if r.Code == "invalid_parameter" {
-			// "Contact already in list and/or does not exist"
-			// given the contact is already created, it must be already in the list
-			return nil
-		}
-	}
 	if err != nil {
 		return err
+	}
+	if status == nil {
+		return fmt.Errorf("Could not add contact to list (missing response status)")
+	}
+	if 200 <= status.Code && status.Code < 300 {
+		if r.Contacts == nil {
+			return fmt.Errorf("Success response did not contain contacts.")
+		}
+		if slices.Contains(r.Contacts.Success, userEmail) {
+			return nil
+		}
+		return fmt.Errorf("Success list did not contain user email.")
+	}
+	if r.Code == "invalid_parameter" {
+		// "Contact already in list and/or does not exist"
+		// given the contact is already created, it must be already in the list
+		return nil
 	}
 	return fmt.Errorf("Could not add contact to list (%s)", status.Status)
 }
 
 func BrevoRemoveFromList(ctx context.Context, userEmail string, listId int) error {
-	url := fmt.Sprintf("https://api.brevo.com/v3/contacts/lists/%d/contacts/remove", listId)
+	url := brevoApiUrl(fmt.Sprintf("contacts/lists/%d/contacts/remove", listId))
 
 	args := &BrevoListArgs{
 		Emails: []string{userEmail},
@@ -265,23 +286,27 @@ func BrevoRemoveFromList(ctx context.Context, userEmail string, listId int) erro
 		url,
 		args,
 		brevoHeader,
-		server.ResponseJsonObject,
+		brevoResponseJsonObject[BrevoListResult],
 	)
-	if status != nil {
-		if 200 <= status.Code && status.Code < 300 {
-			if slices.Contains(r.Contacts.Success, userEmail) {
-				return nil
-			}
-			return fmt.Errorf("Success list did not contain user email.")
-		}
-		if r.Code == "invalid_parameter" {
-			// "Contact already removed from list and/or does not exist"
-			// either the contact doesn't exist or doesn't exist in the list is success
-			return nil
-		}
-	}
 	if err != nil {
 		return err
+	}
+	if status == nil {
+		return fmt.Errorf("Could not remove contact from list (missing response status)")
+	}
+	if 200 <= status.Code && status.Code < 300 {
+		if r.Contacts == nil {
+			return fmt.Errorf("Success response did not contain contacts.")
+		}
+		if slices.Contains(r.Contacts.Success, userEmail) {
+			return nil
+		}
+		return fmt.Errorf("Success list did not contain user email.")
+	}
+	if r.Code == "invalid_parameter" {
+		// "Contact already removed from list and/or does not exist"
+		// either the contact doesn't exist or doesn't exist in the list is success
+		return nil
 	}
 	return fmt.Errorf("Could not remove contact from list (%s)", status.Status)
 }

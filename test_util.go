@@ -10,11 +10,14 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 
 	_ "net/http/pprof" // Import for side effects
 
+	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/glog"
 )
 
@@ -27,6 +30,197 @@ var pprofServer = sync.OnceFunc(func() {
 	}()
 	// e.g. `go tool pprof http://127.0.0.1:6060/debug/pprof/profile`
 })
+
+const (
+	testRedisLeaseCoordinatorDb = 0
+	testRedisLeaseTtl           = 15 * time.Minute
+	testRedisLeaseWait          = 25 * time.Millisecond
+)
+
+type testRedisDbLease struct {
+	client      *redis.Client
+	db          int
+	key         string
+	token       string
+	renewCancel context.CancelFunc
+	renewDone   chan struct{}
+	renewLock   sync.Mutex
+	renewErr    error
+}
+
+func testRedisDbCandidates(databaseCount int, reservedDb int, offset int) []int {
+	if databaseCount <= 1 {
+		return nil
+	}
+
+	candidateCount := databaseCount - 1
+	start := offset % candidateCount
+	if start < 0 {
+		start += candidateCount
+	}
+
+	candidates := make([]int, 0, candidateCount)
+	for i := 0; i < candidateCount; i += 1 {
+		db := 1 + (start+i)%candidateCount
+		if db != reservedDb {
+			candidates = append(candidates, db)
+		}
+	}
+	return candidates
+}
+
+func acquireTestRedisDbLease(
+	ctx context.Context,
+	authority string,
+	password string,
+	reservedDb int,
+	token string,
+	offset int,
+	ttl time.Duration,
+) *testRedisDbLease {
+	client := redis.NewClient(&redis.Options{
+		Addr:         authority,
+		Password:     password,
+		DB:           testRedisLeaseCoordinatorDb,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	})
+
+	config, err := client.ConfigGet(ctx, "databases").Result()
+	if err != nil {
+		client.Close()
+		panic(fmt.Errorf("read redis logical database count: %w", err))
+	}
+	databaseCount, err := strconv.Atoi(config["databases"])
+	if err != nil {
+		client.Close()
+		panic(fmt.Errorf("parse redis logical database count %q: %w", config["databases"], err))
+	}
+	candidates := testRedisDbCandidates(databaseCount, reservedDb, offset)
+	if len(candidates) == 0 {
+		client.Close()
+		panic(fmt.Errorf(
+			"redis has no test database besides coordinator db %d and reserved db %d",
+			testRedisLeaseCoordinatorDb,
+			reservedDb,
+		))
+	}
+
+	for {
+		for _, db := range candidates {
+			key := fmt.Sprintf("urnetwork:server-test:redis-db-lease:%d", db)
+			acquired, err := client.SetNX(ctx, key, token, ttl).Result()
+			if err != nil {
+				client.Close()
+				panic(fmt.Errorf("lease redis test db %d: %w", db, err))
+			}
+			if acquired {
+				lease := &testRedisDbLease{
+					client: client,
+					db:     db,
+					key:    key,
+					token:  token,
+				}
+				lease.startRenewal(ttl)
+				return lease
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			client.Close()
+			panic(fmt.Errorf("wait for redis test database lease: %w", ctx.Err()))
+		case <-time.After(testRedisLeaseWait):
+		}
+	}
+}
+
+func testRedisLeaseRenewInterval(ttl time.Duration) time.Duration {
+	return max(time.Millisecond, ttl/3)
+}
+
+func (self *testRedisDbLease) startRenewal(ttl time.Duration) {
+	renewCtx, renewCancel := context.WithCancel(context.Background())
+	self.renewCancel = renewCancel
+	self.renewDone = make(chan struct{})
+
+	go func() {
+		defer close(self.renewDone)
+
+		const renewIfOwned = `
+			if redis.call("get", KEYS[1]) == ARGV[1] then
+				return redis.call("pexpire", KEYS[1], ARGV[2])
+			end
+			return 0
+		`
+		ticker := time.NewTicker(testRedisLeaseRenewInterval(ttl))
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				renewed, err := self.client.Eval(
+					renewCtx,
+					renewIfOwned,
+					[]string{self.key},
+					self.token,
+					max(int64(1), ttl.Milliseconds()),
+				).Int64()
+				if err != nil {
+					if renewCtx.Err() != nil {
+						return
+					}
+					self.setRenewError(fmt.Errorf("renew redis test db %d lease: %w", self.db, err))
+					return
+				}
+				if renewed != 1 {
+					self.setRenewError(fmt.Errorf("lost redis test db %d lease while test was active", self.db))
+					return
+				}
+			}
+		}
+	}()
+}
+
+func (self *testRedisDbLease) setRenewError(err error) {
+	self.renewLock.Lock()
+	defer self.renewLock.Unlock()
+	self.renewErr = err
+}
+
+func (self *testRedisDbLease) renewalError() error {
+	self.renewLock.Lock()
+	defer self.renewLock.Unlock()
+	return self.renewErr
+}
+
+func (self *testRedisDbLease) release(ctx context.Context) {
+	self.renewCancel()
+	<-self.renewDone
+
+	const releaseIfOwned = `
+		if redis.call("get", KEYS[1]) == ARGV[1] then
+			return redis.call("del", KEYS[1])
+		end
+		return 0
+	`
+	released, releaseErr := self.client.Eval(
+		ctx,
+		releaseIfOwned,
+		[]string{self.key},
+		self.token,
+	).Int64()
+	closeErr := self.client.Close()
+	Raise(self.renewalError())
+	Raise(releaseErr)
+	if released != 1 {
+		panic(fmt.Errorf("redis test db %d lease was not owned during release", self.db))
+	}
+	Raise(closeErr)
+}
 
 type TestEnv struct {
 	ApplyDbMigrations bool
@@ -60,6 +254,7 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 		// recorded locally instead of failing the real *testing.T (see retryTB).
 		tb := &retryTB{TB: t}
 		var panicValue any
+		var panicStack []byte
 
 		// Run each attempt in its own goroutine: tb.Fatal/FailNow (and assert.*,
 		// which call FailNow) end a failed attempt with runtime.Goexit, which
@@ -74,6 +269,7 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 				// so the final attempt can re-raise it on the test goroutine.
 				if r := recover(); r != nil {
 					panicValue = r
+					panicStack = debug.Stack()
 					tb.Fail()
 				}
 			}()
@@ -95,7 +291,17 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 			}
 			return
 		}
-		glog.Infof("[flaky]test failed iteration[%d/%d] err = %v", i+1, n, panicValue)
+		if panicValue == nil {
+			glog.Infof("[flaky]test failed iteration[%d/%d] err = %v", i+1, n, panicValue)
+		} else {
+			glog.Infof(
+				"[flaky]test failed iteration[%d/%d] err = %v\n%s",
+				i+1,
+				n,
+				panicValue,
+				panicStack,
+			)
+		}
 		if i+1 < n {
 			select {
 			case <-time.After(self.RerunTimeout):
@@ -105,7 +311,7 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 		// Out of reruns: surface the failure on the test goroutine so the real
 		// *testing.T fails (re-raising the original panic if there was one).
 		if panicValue != nil {
-			panic(panicValue)
+			t.Fatalf("panic after %d attempts: %v\n%s", n, panicValue, panicStack)
 		}
 		t.FailNow()
 	}
@@ -197,18 +403,40 @@ func (self *TestEnv) setup() func() {
 	ctx := context.Background()
 
 	pg := Vault.RequireSimpleResource("pg.yml").Parse()
-	redis := Vault.RequireSimpleResource("redis.yml").Parse()
+	redisResource := Vault.RequireSimpleResource("redis.yml")
+	redisAuthority := redisResource.RequireString("authority")
+	redisPassword := redisResource.RequireString("password")
+	redisDb := redisResource.RequireInt("db")
+	if redisResource.RequireBool("cluster") {
+		panic(fmt.Errorf("local tests require logical redis databases, not a redis cluster"))
+	}
 
 	bytes := make([]byte, 16)
 	_, err := rand.Read(bytes)
 	Raise(err)
+	token := fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(bytes))
 	testPgDbName := fmt.Sprintf(
 		"test_%d_%s",
 		NowUtc().UnixMilli(),
 		hex.EncodeToString(bytes),
 	)
 
-	testRedisDb := 10
+	testRedisLease := acquireTestRedisDbLease(
+		ctx,
+		redisAuthority,
+		redisPassword,
+		redisDb,
+		token,
+		int(bytes[0]),
+		testRedisLeaseTtl,
+	)
+	setupSucceeded := false
+	defer func() {
+		if !setupSucceeded {
+			testRedisLease.release(ctx)
+		}
+	}()
+	testRedisDb := testRedisLease.db
 
 	Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
@@ -254,8 +482,8 @@ authority: "%s"
 password: "%s"
 db: %d
 cluster: %t`,
-			redis["authority"],
-			redis["password"],
+			redisAuthority,
+			redisPassword,
 			testRedisDb,
 			false,
 		)),
@@ -287,7 +515,10 @@ cluster: %t`,
 		Testing_EnableKeyspaceNotifications(ctx)
 	}()
 
+	setupSucceeded = true
 	return func() {
+		defer testRedisLease.release(ctx)
+
 		Reset()
 
 		Redis(ctx, func(client RedisClient) {

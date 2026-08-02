@@ -1,13 +1,12 @@
+//go:build unix
+
 package connect
 
 import (
 	"context"
-	"github.com/urnetwork/connect"
-	"net"
-
-	// "net/netip"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"time"
 
 	"testing"
+
+	"github.com/urnetwork/connect"
 )
 
 // FIXME add counting quic stream through nginx
@@ -26,10 +27,20 @@ func DISABLE_TestPpNginxUdp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	testDir, err := os.MkdirTemp("", "")
+	upstreamConn, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP: net.ParseIP("127.0.0.1"),
+	})
 	connect.AssertEqual(t, err, nil)
+	upstreamPort := upstreamConn.LocalAddr().(*net.UDPAddr).Port
 
-	nginxConfig := `
+	frontReservation, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP: net.ParseIP("127.0.0.1"),
+	})
+	connect.AssertEqual(t, err, nil)
+	frontPort := frontReservation.LocalAddr().(*net.UDPAddr).Port
+	connect.AssertEqual(t, frontReservation.Close(), nil)
+
+	nginxConfig := fmt.Sprintf(`
 worker_processes auto;
 events {
     worker_connections 8192;
@@ -43,19 +54,19 @@ stream {
     proxy_timeout 30s;
 
     upstream test {
-        server 127.0.0.1:5556;
+        server 127.0.0.1:%d;
 
         random two least_conn;
     }
 
     server {
-        listen 127.0.0.1:5555 udp;
+        listen 127.0.0.1:%d udp;
 
         proxy_pass test;
     }
-}`
-	configPath := filepath.Join(testDir, "nginx.conf")
-	os.WriteFile(configPath, []byte(nginxConfig), 0700)
+}`, upstreamPort, frontPort)
+	configPath := filepath.Join(t.TempDir(), "nginx.conf")
+	connect.AssertEqual(t, os.WriteFile(configPath, []byte(nginxConfig), 0700), nil)
 	fmt.Printf("config %s\n", configPath)
 
 	nginxCmd := exec.Command("nginx", "-c", configPath)
@@ -89,19 +100,13 @@ stream {
 
 	conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
 		IP:   net.ParseIP("127.0.0.1"),
-		Port: 5555,
+		Port: frontPort,
 	})
 	connect.AssertEqual(t, err, nil)
 	defer conn.Close()
 	realAddr := conn.LocalAddr().(*net.UDPAddr)
 
-	listener_, err := net.ListenUDP("udp", &net.UDPAddr{
-		IP:   net.ParseIP("127.0.0.1"),
-		Port: 5556,
-	})
-	connect.AssertEqual(t, err, nil)
-
-	listener := NewPpPacketConn(listener_, DefaultWarpPpSettings())
+	listener := NewPpPacketConn(upstreamConn, DefaultWarpPpSettings())
 	defer listener.Close()
 	go func() {
 		defer cancel()
@@ -231,10 +236,20 @@ func TestPpNginxTcp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	testDir, err := os.MkdirTemp("", "")
+	upstreamListener, err := net.ListenTCP("tcp4", &net.TCPAddr{
+		IP: net.ParseIP("127.0.0.1"),
+	})
 	connect.AssertEqual(t, err, nil)
+	upstreamPort := upstreamListener.Addr().(*net.TCPAddr).Port
 
-	nginxConfig := `
+	frontReservation, err := net.ListenTCP("tcp4", &net.TCPAddr{
+		IP: net.ParseIP("127.0.0.1"),
+	})
+	connect.AssertEqual(t, err, nil)
+	frontPort := frontReservation.Addr().(*net.TCPAddr).Port
+	connect.AssertEqual(t, frontReservation.Close(), nil)
+
+	nginxConfig := fmt.Sprintf(`
 worker_processes auto;
 events {
     worker_connections 8192;
@@ -248,19 +263,19 @@ stream {
     proxy_timeout 30s;
 
     upstream test {
-        server 127.0.0.1:5556;
+        server 127.0.0.1:%d;
 
         random two least_conn;
     }
 
     server {
-        listen 127.0.0.1:5555;
+        listen 127.0.0.1:%d;
 
         proxy_pass test;
     }
-}`
-	configPath := filepath.Join(testDir, "nginx.conf")
-	os.WriteFile(configPath, []byte(nginxConfig), 0700)
+}`, upstreamPort, frontPort)
+	configPath := filepath.Join(t.TempDir(), "nginx.conf")
+	connect.AssertEqual(t, os.WriteFile(configPath, []byte(nginxConfig), 0700), nil)
 	fmt.Printf("config %s\n", configPath)
 
 	nginxCmd := exec.Command("nginx", "-c", configPath)
@@ -276,12 +291,6 @@ stream {
 		fmt.Printf("NGINX done\n")
 	}()
 
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(2 * time.Second):
-	}
-
 	packetSize := 1500
 
 	sendPattern := make([]byte, packetSize)
@@ -292,21 +301,28 @@ stream {
 	var serverReadCount atomic.Uint64
 	var clientReadCount atomic.Uint64
 
-	conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{
-		IP:   net.ParseIP("127.0.0.1"),
-		Port: 5555,
-	})
-	connect.AssertEqual(t, err, nil)
+	var conn *net.TCPConn
+	dialDeadline := time.Now().Add(10 * time.Second)
+	for conn == nil && time.Now().Before(dialDeadline) {
+		conn, err = net.DialTCP("tcp4", nil, &net.TCPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: frontPort,
+		})
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				t.Fatalf("nginx exited before accepting connections: %v", err)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	if conn == nil {
+		t.Fatalf("nginx did not accept connections before deadline: %v", err)
+	}
 	defer conn.Close()
 	realAddr := conn.LocalAddr().(*net.TCPAddr)
 
-	listener_, err := net.ListenTCP("tcp", &net.TCPAddr{
-		IP:   net.ParseIP("127.0.0.1"),
-		Port: 5556,
-	})
-	connect.AssertEqual(t, err, nil)
-
-	listener := NewPpServerConn(listener_, DefaultWarpPpSettings())
+	listener := NewPpServerConn(upstreamListener, DefaultWarpPpSettings())
 	defer listener.Close()
 	go func() {
 		defer cancel()

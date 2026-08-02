@@ -24,13 +24,12 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyWgHandoffFastReconnect\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		// the handoff store is keyed by (host, block)
 		proxyHost := fmt.Sprintf("wghandoff%d", time.Now().UnixNano()%1000000)
@@ -42,7 +41,7 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 		// a long-lived wg client + netstack that survive the server restart
 		wgCtx, wgCancel := context.WithCancel(h.ctx)
 		defer wgCancel()
-		transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig)
+		transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig, h.wgPort)
 		defer closeWgClient()
 
 		// establish the session and confirm traffic
@@ -70,7 +69,7 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 		fmt.Printf("[progress]restarting wg server\n")
 		h.wgCancel()
 		waitFor(t, 15*time.Second, "wg port release", func() bool {
-			pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", InternalWgPort))
+			pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", h.wgPort))
 			if err != nil {
 				return false
 			}
