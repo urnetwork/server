@@ -61,6 +61,11 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/network/provider-bandwidth-test", handlers.ProviderBandwidthTest),
 		router.NewRoute("POST", "/network/provider-bandwidth-result", handlers.ProviderBandwidthResult),
 		router.NewRoute("POST", "/network/provider-bandwidth-reserve", handlers.ProviderBandwidthReserve),
+		// operator-to-server, same operator secret again: the egress-health
+		// run the prober takes over the tunnel the geolocation probe already
+		// opened. Until this existed the result was a log line and nothing
+		// else.
+		router.NewRoute("POST", "/network/provider-egress-health", handlers.ProviderEgressHealthResult),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),

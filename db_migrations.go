@@ -4594,4 +4594,50 @@ var migrations = []any{
             DROP CONSTRAINT IF EXISTS provider_bandwidth_pkey,
             ADD CONSTRAINT provider_bandwidth_pkey PRIMARY KEY (client_id, source)
     `),
+
+	// The latest egress-health run per provider: does this provider actually
+	// carry traffic to the real internet, across several independent classes
+	// of destination. The prober has computed this every pass since P2 and
+	// only ever logged it, so the signal rolls off with the container logs.
+	//
+	// Keyed on client_id alone, so a run replaces the previous one -- the
+	// current picture per provider, not a history, exactly as
+	// provider_egress_location behaves. Trending, if it is ever wanted,
+	// belongs in a separate partitioned append table rather than a second key
+	// column here.
+	//
+	// class_results is jsonb rather than a column per class because the class
+	// set is the prober's, not the schema's: adding a destination class must
+	// not need a migration, and the per-class tally is read as a diagnostic
+	// document ("dns=4/4 cdn=0/5 site=12/12" separates a datacenter-refusal
+	// from a blackhole) rather than filtered or aggregated on in sql.
+	//
+	// reputation_ok/reputation_total and reputation_failed_names are stored
+	// SEPARATELY from ok_count/total_count and must never be folded into them.
+	// The reputation class measures whether big vendors treat the exit ip as a
+	// datacenter address; nearly every honest hosted provider fails most of it
+	// because it IS hosted. Summing it into the health figure would score a
+	// provider that carried every byte it was asked for as partly broken. The
+	// ingest endpoint rejects a 'reputation' key inside class_results for the
+	// same reason.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS makes a
+	// re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_egress_health (
+            client_id               uuid NOT NULL,
+            measured_at             timestamp NOT NULL,
+            ok_count                int NOT NULL,
+            total_count             int NOT NULL,
+            class_results           jsonb NOT NULL,
+            reputation_ok           int NOT NULL,
+            reputation_total        int NOT NULL,
+            failed_names            text NOT NULL DEFAULT '',
+            reputation_failed_names text NOT NULL DEFAULT '',
+
+            PRIMARY KEY (client_id)
+        )
+    `),
 }
