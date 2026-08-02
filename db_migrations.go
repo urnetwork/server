@@ -4702,4 +4702,42 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS provider_client_verdict_provider_create_time
             ON provider_client_verdict (provider_client_id, create_time)
     `),
+
+	// the certificate pins this server has OBSERVED for the geolocation source
+	// hosts, by connecting to each host directly -- on the server's own
+	// network, no provider in the path -- and validating the chain under full
+	// WebPKI. See model.GeolocationSourcePin for why a direct, verified
+	// observation is the only thing that may ever write this table: a pin
+	// learned through a provider tunnel would let the provider under test teach
+	// the server its own forged certificate.
+	//
+	// One row per host, upserted: this is the current observation, not a
+	// history. A rotation is recorded in the refresh job's log line (old and
+	// new values), which is what was missing when the hardcoded pins went stale
+	// and silently took every source out of the consensus set.
+	//
+	// Both spki columns are NOT NULL and never written empty. An empty pin is
+	// not "no constraint", it is a pin that matches nothing, so a half-observed
+	// row would fail the prober closed for that host just as surely as a wrong
+	// one. The observation job leaves the previous row untouched rather than
+	// writing a partial one.
+	//
+	// No secondary index: the primary key on host serves both access paths --
+	// the per-host upsert, and the unqualified read of every row (three rows,
+	// one per source host).
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS makes a
+	// re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS geolocation_source_pin (
+            host              text NOT NULL,
+            leaf_spki         text NOT NULL,
+            intermediate_spki text NOT NULL,
+            observed_at       timestamp NOT NULL,
+
+            PRIMARY KEY (host)
+        )
+    `),
 }

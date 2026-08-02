@@ -53,6 +53,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletNonces(clientSession, tx)
 		work.ScheduleRemoveExpiredProviderEgressLocations(clientSession, tx)
+		work.ScheduleRefreshGeolocationSourcePins(clientSession, tx)
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
@@ -240,6 +241,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredProviderEgressLocations,
 			work.RemoveExpiredProviderEgressLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RefreshGeolocationSourcePins,
+			work.RefreshGeolocationSourcePinsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditNetworkEvents,
