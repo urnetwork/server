@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -11,15 +12,17 @@ import (
 )
 
 type NetworkUser struct {
-	UserId        server.Id               `json:"user_id"`
-	UserAuth      *string                 `json:"user_auth,omitempty"`
-	Verified      bool                    `json:"verified"`
-	AuthType      string                  `json:"auth_type"`
-	NetworkName   string                  `json:"network_name"`
-	WalletAddress *string                 `json:"wallet_address,omitempty"`
-	UserAuths     []NetworkUserUserAuth   `json:"user_auths,omitempty"`
-	SsoAuths      []NetworkUserSsoAuth    `json:"sso_auths,omitempty"`
-	WalletAuths   []NetworkUserWalletAuth `json:"wallet_auths,omitempty"`
+	UserId           server.Id                    `json:"user_id"`
+	UserAuth         *string                      `json:"user_auth,omitempty"`
+	Verified         bool                         `json:"verified"`
+	AuthType         string                       `json:"auth_type"`
+	NetworkName      string                       `json:"network_name"`
+	WalletAddress    *string                      `json:"wallet_address,omitempty"`
+	UserAuths        []NetworkUserUserAuth        `json:"user_auths,omitempty"`
+	SsoAuths         []NetworkUserSsoAuth         `json:"sso_auths,omitempty"`
+	WalletAuths      []NetworkUserWalletAuth      `json:"wallet_auths,omitempty"`
+	SeedphraseAuths  []NetworkUserSeedphraseAuth  `json:"seedphrase_auths,omitempty"`
+	AuthTypes        []string                     `json:"auth_types"`
 }
 
 type NetworkUserUserAuth struct {
@@ -40,6 +43,11 @@ type NetworkUserWalletAuth struct {
 	UserId        *server.Id `json:"user_id,omitempty"`
 	WalletAddress *string    `json:"wallet_address,omitempty"`
 	Blockchain    string     `json:"blockchain"`
+}
+
+type NetworkUserSeedphraseAuth struct {
+	Seedphrase string    `json:"-"`
+	CreateTime time.Time `json:"create_time"`
 }
 
 func GetNetworkUser(
@@ -111,6 +119,29 @@ func GetNetworkUser(
 		server.Raise(err)
 		networkUser.WalletAuths = walletAuths
 
+		/**
+		 * Get seedphrase auths for the user
+		 */
+		seedphraseAuths, err := getSeedphraseAuths(ctx, userId)
+		server.Raise(err)
+		networkUser.SeedphraseAuths = seedphraseAuths
+
+		/**
+		 * Build composite auth_types list
+		 */
+		for _, a := range userAuths {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+		}
+		for _, a := range ssoAuths {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+		}
+		if len(walletAuths) > 0 {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, "solana")
+		}
+		if len(seedphraseAuths) > 0 {
+			networkUser.AuthTypes = append(networkUser.AuthTypes, "seedphrase")
+		}
+
 	})
 
 	return networkUser
@@ -139,7 +170,26 @@ type AddAuthMethodError struct {
 func AddAuth(
 	authArgs AddAuthMethod,
 	session *session.ClientSession,
-) (*AddAuthMethodResult, error) {
+) (result *AddAuthMethodResult, resultErr error) {
+	if err := CheckAccountActionRateLimit(
+		session.Ctx,
+		session.ByJwt.UserId,
+		AccountActionAddAuth,
+		AccountActionAddAuthDailyLimit,
+		AccountActionDailyWindow,
+	); err != nil {
+		return &AddAuthMethodResult{
+			Error: &AddAuthMethodError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
+	defer func() {
+		if resultErr == nil && result != nil && result.Error == nil {
+			RecordAccountActionAttempt(session.Ctx, session.ByJwt.UserId, AccountActionAddAuth)
+		}
+	}()
 
 	if authArgs.UserAuth != nil && authArgs.Password != nil {
 		/**
@@ -159,7 +209,7 @@ func AddAuth(
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(*authArgs.Password), passwordSalt)
 
-		addUserAuth(
+		err := addUserAuth(
 			&AddUserAuthArgs{
 				UserId:       session.ByJwt.UserId,
 				UserAuth:     authArgs.UserAuth,
@@ -168,6 +218,13 @@ func AddAuth(
 			},
 			session.Ctx,
 		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: err.Error(),
+				},
+			}, nil
+		}
 
 		return &AddAuthMethodResult{}, nil
 	} else if authArgs.AuthJwt != nil && authArgs.AuthJwtType != nil {
@@ -191,7 +248,7 @@ func AddAuth(
 			}, nil
 		}
 
-		addSsoAuth(
+		err = addSsoAuth(
 			&AddSsoAuthArgs{
 				ParsedAuthJwt: *parsedAuthJwt,
 				AuthJwtType:   SsoAuthType(*authArgs.AuthJwtType),
@@ -200,17 +257,31 @@ func AddAuth(
 			},
 			session.Ctx,
 		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: err.Error(),
+				},
+			}, nil
+		}
 
 		return &AddAuthMethodResult{}, nil
 	} else if authArgs.WalletAuth != nil {
 		// user is adding a wallet auth method
-		addWalletAuth(
+		err := addWalletAuth(
 			&AddWalletAuthArgs{
 				WalletAuth: authArgs.WalletAuth,
 				UserId:     session.ByJwt.UserId,
 			},
 			session.Ctx,
 		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: err.Error(),
+				},
+			}, nil
+		}
 		return &AddAuthMethodResult{}, nil
 	}
 
@@ -663,6 +734,40 @@ func addWalletAuth(
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
+		// Check for an existing binding of this wallet to a different user
+		// before attempting the INSERT below, mirroring the
+		// validateUserAuthAvailability pre-check addUserAuthInTx does for
+		// email/phone auth. A raw unique-constraint violation from the
+		// INSERT would abort this transaction; server.Tx's default retry
+		// options blindly retry the subsequent failed COMMIT for up to 60s
+		// regardless of whether the underlying cause is actually
+		// retryable, so on the ordinary (non-racing) "wallet already taken"
+		// path this would otherwise stall the request for up to a minute
+		// with no error ever reaching the client instead of failing fast.
+		var conflictUserId *server.Id
+		result, queryErr := tx.Query(
+			ctx,
+			`
+				SELECT user_id FROM network_user_auth_wallet
+				WHERE wallet_address = $1 AND blockchain = $2
+			`,
+			walletAuth.PublicKey,
+			walletAuth.Blockchain,
+		)
+		if queryErr != nil {
+			err = queryErr
+			return
+		}
+		server.WithPgResult(result, queryErr, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&conflictUserId))
+			}
+		})
+		if conflictUserId != nil && *conflictUserId != addWalletAuth.UserId {
+			err = errors.New("This wallet is already linked to another account.")
+			return
+		}
+
 		_, dbErr := tx.Exec(
 			ctx,
 			`
@@ -690,6 +795,43 @@ func addWalletAuth(
 			)
 
 			err = dbErr
+			return
+		}
+
+		// Mirror onto network_user's top-level wallet columns, symmetric
+		// with RemoveAuth's solana branch which clears them. Without this,
+		// a remove-then-re-add cycle leaves wallet_address/wallet_blockchain
+		// nil even though network_user_auth_wallet has the wallet bound.
+		//
+		// network_user.wallet_address has a global (not per-user) unique
+		// index, so this can legitimately conflict -- e.g. a legacy account
+		// whose network_user.wallet_address was set before
+		// network_user_auth_wallet existed and was never cleared. Handle
+		// that the same way the INSERT above does (return a clean error)
+		// instead of panicking, which would otherwise surface as an
+		// uncaught 500 after server.Tx's transient-error retry loop burns
+		// up to a minute on a permanent constraint violation.
+		_, dbErr = tx.Exec(
+			ctx,
+			`UPDATE network_user
+			 SET wallet_address = $2, wallet_blockchain = $3
+			 WHERE user_id = $1`,
+			addWalletAuth.UserId,
+			walletAuth.PublicKey,
+			walletAuth.Blockchain,
+		)
+		if dbErr != nil {
+
+			glog.Infof(
+				"Error mirroring wallet auth onto network_user: %s user_id=%s wallet_address=%s blockchain=%s",
+				dbErr.Error(),
+				addWalletAuth.UserId,
+				walletAuth.PublicKey,
+				walletAuth.Blockchain,
+			)
+
+			err = dbErr
+			return
 		}
 	})
 
@@ -734,6 +876,44 @@ func getWalletAuths(
 	})
 
 	return walletAuths, nil
+}
+
+func getSeedphraseAuths(
+	ctx context.Context,
+	userId server.Id,
+) ([]NetworkUserSeedphraseAuth, error) {
+
+	var seedphraseAuths []NetworkUserSeedphraseAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				create_time
+			FROM network_user_auth_seedphrase
+			WHERE user_id = $1
+		`,
+			userId,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				sa := NetworkUserSeedphraseAuth{}
+				server.Raise(result.Scan(
+					&sa.CreateTime,
+				))
+				seedphraseAuths = append(seedphraseAuths, sa)
+			}
+		})
+
+	})
+
+	return seedphraseAuths, nil
 }
 
 func getWalletAuthsByAddress(
@@ -1164,4 +1344,159 @@ func MigrateNetworkUserChildAuths(
 		}
 
 	})
+}
+
+// HasAnyAuthMethod reports whether userId has at least one bound
+// password/phone, SSO, wallet, or seedphrase auth method.
+//
+// This exists because neither the JWT's GuestMode claim nor
+// network_user.auth_type reliably reflect whether a legacy guest account
+// (auth_type = 'guest', now silently treated as a normal account since guest
+// signup was retired) has since added a real auth method via AddAuth:
+// RefreshToken re-signs guest JWTs with GuestMode=false unconditionally, and
+// AddAuth never updates network_user.auth_type when adding a guest's first
+// real method. A live count across the auth tables is the only accurate
+// signal, and it self-heals the moment a guest adds a method -- no refresh
+// or auth_type backfill required.
+func HasAnyAuthMethod(ctx context.Context, userId server.Id) bool {
+	var count int
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_auth_password WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_sso WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_wallet WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1
+			) AS auth_counts`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return 0 < count
+}
+
+func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
+	if err := CheckAccountActionRateLimit(
+		ctx,
+		userId,
+		AccountActionRemoveAuth,
+		AccountActionRemoveAuthDailyLimit,
+		AccountActionDailyWindow,
+	); err != nil {
+		return err
+	}
+
+	var validationErr error
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// Lock the user row for the duration of this tx so a concurrent
+		// RemoveAuth call blocks (and retries via server.Tx's serialization
+		// handling) instead of both calls reading the same stale auth-method
+		// count and both committing, which can leave the account with zero
+		// remaining auth methods.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT 1 FROM network_user WHERE user_id = $1 FOR UPDATE`,
+			userId,
+		))
+
+		currentCount := 0
+		countResult, err := tx.Query(
+			ctx,
+			`SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_auth_password WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_sso WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_wallet WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1
+			) AS auth_counts`,
+			userId,
+		)
+		server.WithPgResult(countResult, err, func() {
+			if countResult.Next() {
+				server.Raise(countResult.Scan(&currentCount))
+			}
+		})
+		if currentCount <= 1 {
+			validationErr = fmt.Errorf("cannot remove your last auth method")
+			return
+		}
+
+		switch authType {
+		case "email", "phone":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_password
+				 WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			))
+		case "apple", "google":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_sso
+				 WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			))
+		case "solana":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_wallet
+				 WHERE user_id = $1`,
+				userId,
+			))
+			// Clear wallet fields on network_user so the wallet
+			// can be reused to create a fresh account
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_user
+				 SET wallet_address = NULL, wallet_blockchain = NULL
+				 WHERE user_id = $1`,
+				userId,
+			))
+		case "seedphrase":
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_seedphrase
+				 WHERE user_id = $1`,
+				userId,
+			))
+		default:
+			validationErr = fmt.Errorf("unknown auth type: %s", authType)
+			return
+		}
+
+		// Update network_user.auth_type to match what's actually left.
+		// The app reads this field to show available sign-in methods,
+		// so it must reflect reality after removal.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE network_user
+			 SET auth_type = COALESCE(
+				 (SELECT auth_type FROM network_user_auth_password  WHERE user_id = $1 LIMIT 1),
+				 (SELECT 'apple'   FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'apple'  LIMIT 1),
+				 (SELECT 'google'  FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'google' LIMIT 1),
+				 (SELECT 'solana'  FROM network_user_auth_wallet    WHERE user_id = $1 LIMIT 1),
+				 (SELECT 'seedphrase' FROM network_user_auth_seedphrase WHERE user_id = $1 LIMIT 1),
+				 auth_type
+			 )
+			 WHERE user_id = $1`,
+			userId,
+		))
+	})
+
+	if validationErr == nil {
+		RecordAccountActionAttempt(ctx, userId, AccountActionRemoveAuth)
+	}
+
+	return validationErr
 }

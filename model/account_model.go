@@ -222,6 +222,15 @@ func RemoveNetwork(
 					`,
 					userId,
 				)
+
+				// (cascade) delete network_user_auth_seedphrase
+				batch.Queue(
+					`
+						DELETE FROM network_user_auth_seedphrase
+						WHERE user_id = $1
+					`,
+					userId,
+				)
 			}
 		})
 

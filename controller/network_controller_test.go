@@ -41,7 +41,6 @@ func TestNetworkCreate(t *testing.T) {
 			Password:     &password,
 			NetworkName:  "foobar",
 			Terms:        true,
-			GuestMode:    false,
 			ReferralCode: &referralCode.ReferralCode,
 		}
 		result, err := NetworkCreate(networkCreate, session)
@@ -102,7 +101,6 @@ func TestNetworkCreateWithProfanity(t *testing.T) {
 			Password:     &password,
 			NetworkName:  "shitty", // must be at least 6 characters
 			Terms:        true,
-			GuestMode:    false,
 			ReferralCode: &referralCode,
 		}
 		result, err := NetworkCreate(networkCreate, session)
@@ -213,7 +211,6 @@ func TestNetworkCreateWithBalanceCodeSuccess(t *testing.T) {
 			Password:    &password,
 			NetworkName: "foobar",
 			Terms:       true,
-			GuestMode:   false,
 			BalanceCode: &balanceCode.Secret,
 		}
 

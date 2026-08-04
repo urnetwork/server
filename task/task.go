@@ -165,13 +165,23 @@ func ScheduleTask[T any, R any](
 	return
 }
 
-func ScheduleTaskInTx[T any, R any](
-	tx server.PgTx,
+type preparedTask struct {
+	taskId         server.Id
+	functionName   string
+	argsJson       []byte
+	byJwtJson      *string
+	runAt          time.Time
+	runOnceKey     *string
+	priority       TaskPriority
+	maxTimeSeconds int
+}
+
+func prepareTask[T any, R any](
 	taskFunction TaskFunction[T, R],
 	args T,
 	clientSession *session.ClientSession,
 	opts ...any,
-) (taskId server.Id) {
+) preparedTask {
 	taskTarget := NewTaskTarget(taskFunction)
 
 	argsJson, err := json.Marshal(args)
@@ -226,11 +236,29 @@ func ScheduleTaskInTx[T any, R any](
 		runOnceKey_ := runOnce.String()
 		runOnceKey = &runOnceKey_
 	}
-	maxTimeSeconds := int(runMaxTime.MaxTime / time.Second)
+
+	return preparedTask{
+		taskId:         server.NewId(),
+		functionName:   taskTarget.TargetFunctionName(),
+		argsJson:       argsJson,
+		byJwtJson:      byJwtJson,
+		runAt:          runAt.At.UTC(),
+		runOnceKey:     runOnceKey,
+		priority:       runPriority.Priority,
+		maxTimeSeconds: int(runMaxTime.MaxTime / time.Second),
+	}
+}
+
+func ScheduleTaskInTx[T any, R any](
+	tx server.PgTx,
+	taskFunction TaskFunction[T, R],
+	args T,
+	clientSession *session.ClientSession,
+	opts ...any,
+) (taskId server.Id) {
+	p := prepareTask(taskFunction, args, clientSession, opts...)
 
 	claimTime := time.Time{}
-
-	taskId = server.NewId()
 
 	server.RaisePgResult(tx.Exec(
 		clientSession.Ctx,
@@ -253,17 +281,94 @@ func ScheduleTaskInTx[T any, R any](
 				run_priority = LEAST(pending_task.run_priority, $8),
 				run_max_time_seconds = GREATEST(pending_task.run_max_time_seconds, $9)
 		`,
-		taskId,
-		taskTarget.TargetFunctionName(),
-		argsJson,
+		p.taskId,
+		p.functionName,
+		p.argsJson,
 		clientSession.ClientAddress,
-		byJwtJson,
-		runAt.At.UTC(),
-		runOnceKey,
-		runPriority.Priority,
-		maxTimeSeconds,
+		p.byJwtJson,
+		p.runAt,
+		p.runOnceKey,
+		p.priority,
+		p.maxTimeSeconds,
 		claimTime,
 	))
+	return p.taskId
+}
+
+// ScheduleTaskInTxIfAbsent is like ScheduleTaskInTx but for callers that need
+// an atomic "only schedule if not already pending under this key" guarantee,
+// instead of RunOnce's merge-on-conflict semantics. RunOnce's
+// `ON CONFLICT (run_once_key) DO UPDATE` only merges run_at/run_priority/
+// run_max_time_seconds into an existing pending row -- crucially not
+// args_json -- so if two different calls share a run_once key while the
+// first is still pending, scheduling both would silently drop the second
+// call's args while still reporting success. This does a single
+// `INSERT ... ON CONFLICT (run_once_key) DO NOTHING` and reports via
+// `scheduled` whether the row was actually inserted, so the caller can
+// reject a duplicate outright -- atomically, in one round trip -- instead of
+// a separate check-then-act that can itself race. runOnce is required (not
+// optional via opts) since the whole point is a key-scoped guarantee.
+func ScheduleTaskInTxIfAbsent[T any, R any](
+	tx server.PgTx,
+	taskFunction TaskFunction[T, R],
+	args T,
+	clientSession *session.ClientSession,
+	runOnce *RunOnceOption,
+	opts ...any,
+) (scheduled bool, taskId server.Id) {
+	if runOnce == nil {
+		panic("ScheduleTaskInTxIfAbsent requires a non-nil runOnce key")
+	}
+	p := prepareTask(taskFunction, args, clientSession, append(opts, runOnce)...)
+
+	claimTime := time.Time{}
+
+	tag := server.RaisePgResult(tx.Exec(
+		clientSession.Ctx,
+		`
+			INSERT INTO pending_task (
+				task_id,
+		        function_name,
+		        args_json,
+		        client_address,
+		        client_by_jwt_json,
+		        run_at,
+		        run_once_key,
+		        run_priority,
+		        run_max_time_seconds,
+		        claim_time,
+		        release_time
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+			ON CONFLICT (run_once_key) DO NOTHING
+		`,
+		p.taskId,
+		p.functionName,
+		p.argsJson,
+		clientSession.ClientAddress,
+		p.byJwtJson,
+		p.runAt,
+		p.runOnceKey,
+		p.priority,
+		p.maxTimeSeconds,
+		claimTime,
+	))
+	scheduled = 0 < tag.RowsAffected()
+	if !scheduled {
+		return scheduled, server.Id{}
+	}
+	return scheduled, p.taskId
+}
+
+func ScheduleTaskIfAbsent[T any, R any](
+	taskFunction TaskFunction[T, R],
+	args T,
+	clientSession *session.ClientSession,
+	runOnce *RunOnceOption,
+	opts ...any,
+) (scheduled bool, taskId server.Id) {
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		scheduled, taskId = ScheduleTaskInTxIfAbsent[T, R](tx, taskFunction, args, clientSession, runOnce, opts...)
+	})
 	return
 }
 
@@ -488,6 +593,41 @@ func ListRescheduledTasks(ctx context.Context) []server.Id {
 	})
 
 	return taskIds
+}
+
+// CountAvailableByFunctionName reports how many pending_task rows targeting
+// the given task function are currently available to run (run_at has
+// passed), across all run_once keys -- this excludes rows scheduled for a
+// future run_at, which are queued/waiting, not consuming any worker
+// capacity yet. Callers use this to enforce a global concurrency cap on a
+// specific background task type (e.g. capping how many networks can have a
+// bulk operation actually in flight at once), independent of any single
+// run_once key. Counting future-scheduled rows here would make a large
+// backlog of merely-queued work block admission of brand new requests, even
+// though nothing is actually running yet.
+func CountAvailableByFunctionName[T any, R any](ctx context.Context, taskFunction TaskFunction[T, R]) int {
+	functionName := NewTaskTarget(taskFunction).TargetFunctionName()
+	// computed in Go, not `now()` in SQL: run_at is a naive `timestamp`
+	// column holding UTC values, and comparing it against `now()`
+	// (timestamptz) would force a timezone-dependent cast on the session's
+	// TimeZone setting -- the same class of bug fixed in
+	// model/account_action_rate_limit.go and avoided in
+	// model.ReserveBulkClientRemovalSlot.
+	asOf := server.NowUtc()
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COUNT(*) FROM pending_task WHERE function_name = $1 AND run_at <= $2`,
+			functionName, asOf,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count
 }
 
 func ListClaimedTasks(ctx context.Context) []server.Id {
