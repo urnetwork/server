@@ -133,7 +133,7 @@ func TestProviderClientVerdictRejectsBadBodies(t *testing.T) {
 		reporter := server.NewId()
 
 		cases := []struct {
-			name  string
+			name   string
 			mutate func(body map[string]any)
 		}{
 			{
