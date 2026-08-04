@@ -2998,11 +2998,11 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	self.UpdateActivity()
 	self.controlLimiter.delay()
 
-	err := self.residentController.HandleControlFrames(frames)
-	if err == nil {
-		if glog.V(1) {
-			glog.Infof("[rr]control error = %s\n", err)
-		}
+	// control errors are rare and load-bearing (e.g. a rejected CloseContract
+	// leaks an open contract): always log them. The previous inverted check
+	// (err == nil) logged nil on success and swallowed every real error.
+	if err := self.residentController.HandleControlFrames(frames); err != nil {
+		glog.Infof("[rr]control error = %s\n", err)
 	}
 }
 

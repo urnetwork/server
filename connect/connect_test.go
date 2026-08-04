@@ -2364,25 +2364,46 @@ func testConnect(
 	)
 
 	// these contracts were queued in the contract manager
-	// and should be partially closed by the source
-	contractIdPartialClosePartiesAToB := model.GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
-	contractIdPartialClosePartiesBToA := model.GetOpenContractIdsWithPartialClose(ctx, clientIdB, clientIdA)
+	// and should be partially closed by the source.
+	// The source's close-contract control messages land asynchronously (with
+	// retries under chaos transport churn), so a fixed settle can race a close
+	// that is still in flight — poll until every remaining partial close is a
+	// tolerated party (checkpoint/source, closed here) or the other side's
+	// close completes the contract. A close that never lands still fails at
+	// the deadline.
+	var contractIdPartialClosePartiesAToB map[server.Id]model.ContractParty
+	var contractIdPartialClosePartiesBToA map[server.Id]model.ContractParty
+	partialCloseDeadline := time.Now().Add(30 * time.Second)
+	for {
+		contractIdPartialClosePartiesAToB = model.GetOpenContractIdsWithPartialClose(ctx, clientIdA, clientIdB)
+		contractIdPartialClosePartiesBToA = model.GetOpenContractIdsWithPartialClose(ctx, clientIdB, clientIdA)
 
-	// note ContractPartySource is for contracts that were queued up and never used
-	for contractId, party := range contractIdPartialClosePartiesAToB {
-		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
-			model.CloseContract(ctx, contractId, clientIdB, 0, false)
-			delete(contractIdPartialClosePartiesAToB, contractId)
-		} else {
-			fmt.Printf("A->B PARTY: %s\n", party)
+		// note ContractPartySource is for contracts that were queued up and never used
+		for contractId, party := range contractIdPartialClosePartiesAToB {
+			if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
+				model.CloseContract(ctx, contractId, clientIdB, 0, false)
+				delete(contractIdPartialClosePartiesAToB, contractId)
+			} else {
+				fmt.Printf("A->B PARTY: %s %s\n", contractId, party)
+			}
 		}
-	}
-	for contractId, party := range contractIdPartialClosePartiesBToA {
-		if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
-			model.CloseContract(ctx, contractId, clientIdA, 0, false)
-			delete(contractIdPartialClosePartiesBToA, contractId)
-		} else {
-			fmt.Printf("B->A PARTY: %s\n", party)
+		for contractId, party := range contractIdPartialClosePartiesBToA {
+			if party == model.ContractPartyCheckpoint || party == model.ContractPartySource {
+				model.CloseContract(ctx, contractId, clientIdA, 0, false)
+				delete(contractIdPartialClosePartiesBToA, contractId)
+			} else {
+				fmt.Printf("B->A PARTY: %s %s\n", contractId, party)
+			}
+		}
+
+		if len(contractIdPartialClosePartiesAToB) == 0 && len(contractIdPartialClosePartiesBToA) == 0 {
+			break
+		}
+		if partialCloseDeadline.Before(time.Now()) {
+			break
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 

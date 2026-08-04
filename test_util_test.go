@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/connect"
 )
@@ -149,6 +152,194 @@ func TestRedisDatabaseLeaseRenewsWhileOwnerIsActive(t *testing.T) {
 	if ttl <= 0 {
 		t.Fatalf("renewed lease ttl = %s; want positive", ttl)
 	}
+}
+
+// testRedisLeaseConfig reads the coordinator connection settings the same way
+// acquireTestRedisDbLease's callers do.
+func testRedisLeaseConfig() (authority string, password string, reservedDb int) {
+	redisResource := Vault.RequireSimpleResource("redis.yml")
+	return redisResource.RequireString("authority"),
+		redisResource.RequireString("password"),
+		redisResource.RequireInt("db")
+}
+
+func testRedisLeaseToken() string {
+	return strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
+
+// TestRedisDatabaseLeaseReleaseSurvivesRetriedRelease simulates the release
+// script executing server-side while its response is lost on a broken
+// connection: go-redis then retries the script, and the retry must read the
+// released marker as success instead of misreporting the lease as not owned.
+func TestRedisDatabaseLeaseReleaseSurvivesRetriedRelease(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authority, password, reservedDb := testRedisLeaseConfig()
+	lease := acquireTestRedisDbLease(
+		ctx,
+		authority,
+		password,
+		reservedDb,
+		testRedisLeaseToken(),
+		0,
+		time.Minute,
+	)
+
+	first, err := lease.client.Eval(
+		ctx,
+		testRedisLeaseReleaseScript,
+		[]string{lease.key, lease.releasedKey},
+		lease.token,
+		testRedisLeaseReleasedMarkerTtl.Milliseconds(),
+	).Int64()
+	if err != nil {
+		t.Fatalf("first release attempt: %v", err)
+	}
+	if first != 1 {
+		t.Fatalf("first release attempt = %d; want 1", first)
+	}
+
+	// the retried release must not panic
+	lease.release(context.Background())
+}
+
+// TestRedisDatabaseLeaseAcquireClaimsOwnTokenAfterLostSetResponse simulates a
+// SET NX that the server applied while the client's response was lost: the
+// retried SET NX reports not-acquired even though the key holds this process's
+// token, and acquisition must claim the lease instead of skipping the db.
+func TestRedisDatabaseLeaseAcquireClaimsOwnTokenAfterLostSetResponse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	authority, password, reservedDb := testRedisLeaseConfig()
+	token := testRedisLeaseToken()
+
+	client := redis.NewClient(&redis.Options{
+		Addr:     authority,
+		Password: password,
+		DB:       testRedisLeaseCoordinatorDb,
+	})
+	defer client.Close()
+
+	config, err := client.ConfigGet(ctx, "databases").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	databaseCount, err := strconv.Atoi(config["databases"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// write the lost-response state into the first free candidate db
+	preOwnedDb := -1
+	for _, db := range testRedisDbCandidates(databaseCount, reservedDb, 0) {
+		key := fmt.Sprintf("urnetwork:server-test:redis-db-lease:%d", db)
+		acquired, err := client.SetNX(ctx, key, token, time.Minute).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if acquired {
+			preOwnedDb = db
+			break
+		}
+	}
+	if preOwnedDb < 0 {
+		t.Fatal("no free redis test db to stage the lost-response state")
+	}
+
+	// an offset of preOwnedDb-1 makes preOwnedDb the first candidate scanned
+	lease := acquireTestRedisDbLease(
+		ctx,
+		authority,
+		password,
+		reservedDb,
+		token,
+		preOwnedDb-1,
+		time.Minute,
+	)
+	defer lease.release(context.Background())
+
+	if lease.db != preOwnedDb {
+		t.Fatalf("acquire leased db %d; want it to claim its own token on db %d", lease.db, preOwnedDb)
+	}
+}
+
+// TestRedisDatabaseLeaseReleaseDetectsForeignOwner: a lease key rewritten by
+// another owner must fail release with the foreign-owner diagnostic.
+func TestRedisDatabaseLeaseReleaseDetectsForeignOwner(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authority, password, reservedDb := testRedisLeaseConfig()
+	lease := acquireTestRedisDbLease(
+		ctx,
+		authority,
+		password,
+		reservedDb,
+		testRedisLeaseToken(),
+		0,
+		time.Minute,
+	)
+
+	err := lease.client.Set(ctx, lease.key, "foreign-token", time.Minute).Err()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		r := recover()
+		// release closes lease.client before panicking; clean the stomped
+		// key with a fresh client so the db frees up for concurrent runs
+		cleanup := redis.NewClient(&redis.Options{
+			Addr:     authority,
+			Password: password,
+			DB:       testRedisLeaseCoordinatorDb,
+		})
+		cleanup.Del(context.Background(), lease.key)
+		cleanup.Close()
+		if r == nil {
+			t.Fatal("expected release to panic for a foreign-owned lease")
+		}
+		if !strings.Contains(fmt.Sprint(r), "owned by another process") {
+			t.Fatalf("expected foreign-owner diagnostic, got: %v", r)
+		}
+	}()
+	lease.release(context.Background())
+}
+
+// TestRedisDatabaseLeaseReleaseDetectsMissingKey: a lease key that vanished
+// entirely (flush, expiry) must still fail release with the not-owned
+// diagnostic.
+func TestRedisDatabaseLeaseReleaseDetectsMissingKey(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	authority, password, reservedDb := testRedisLeaseConfig()
+	lease := acquireTestRedisDbLease(
+		ctx,
+		authority,
+		password,
+		reservedDb,
+		testRedisLeaseToken(),
+		0,
+		time.Minute,
+	)
+
+	if err := lease.client.Del(ctx, lease.key).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected release to panic for a missing lease key")
+		}
+		if !strings.Contains(fmt.Sprint(r), "was not owned during release") {
+			t.Fatalf("expected not-owned diagnostic, got: %v", r)
+		}
+	}()
+	lease.release(context.Background())
 }
 
 func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {

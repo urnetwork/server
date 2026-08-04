@@ -176,7 +176,10 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 			totals = testingReadClientReliabilityTotals(ctx, clientIdA, startBlock, endBlock)
 			// the markers are consumed once the clients have redialed
 			markersConsumed := !model.HasDrainExcuse(ctx, clientIdA) && !model.HasDrainExcuse(ctx, clientIdB)
-			if anyExcused && markersConsumed {
+			// wait for every asserted condition, not just the excuse ones:
+			// clientA's valid-rollup row can land a beat after clientB's excuse,
+			// and breaking before it exists races the anyValid assert below
+			if anyExcused && markersConsumed && totals.anyValid {
 				break
 			}
 			if endTime.Before(time.Now()) {

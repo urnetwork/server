@@ -2776,7 +2776,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 					}
 				}
 			})
-		}, wg.Done)
+			// the deferred wg.Done above covers both return and panic (the
+			// closure's defers run before HandleError's recover), so wg.Done
+			// must not also be a rescue handler — the pair double-counted on
+			// the panic path and crashed the process with a negative
+			// WaitGroup counter inside the recovery (2026-08-02).
+		})
 	}
 
 	wg.Wait()

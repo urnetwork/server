@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -146,58 +149,42 @@ func TestAccountWallet(t *testing.T) {
 	})
 }
 
+// TestSeekerNFTVerification covers the holder predicates against recorded
+// Helius responses (testdata/*.json, captured from mainnet.helius-rpc.com).
+//
+// These assertions used to run against the LIVE Helius RPC with hardcoded
+// wallet keys, which made the suite bet on three things at once: the API being
+// reachable and un-throttled, its indexer returning complete results on every
+// call, and a stranger's wallet never transferring its NFT. It burned 4 of its
+// 5 retry attempts in one full-suite run; the recorded response proves the
+// wallet still held the NFT, so the failure was an incomplete API result — the
+// parser was never wrong. Fixtures keep the predicate coverage (the part this
+// package owns) and drop the coin flip. Re-record with a capture harness
+// against the same four wallets if the API shape changes.
 func TestSeekerNFTVerification(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-
-		ctx := context.Background()
-
-		sagaHolderPublicKey := "FhWtLQZ7Fefy6Mp7Yp9CnFgQjfw6N4a3Y8r5qw888DkB"
-		seekerPreorderHolderPublicKey := "JBSmKmcTMRSM7mmLZd2do6PMpd9eAtKgKC9a4UtYwLuE"
-		seekerGenesisHolderPublicKey := "CwrNT8btVQNbb2ob1k81sV652wdmJB6CgWTVBNT5GJjC"
-		nonHolderPublicKey := "D8e7nNaqdkMymmD3uNLp1KB2Y9K7PUdYYXrRXauvn94N"
-
-		/**
-		 * Verify Saga NFT Holder
-		 */
-		result, err := heliusSearchAssetsSaga(ctx, sagaHolderPublicKey)
+	loadAssets := func(name string) []HeliusAsset {
+		assetBytes, err := os.ReadFile(filepath.Join("testdata", name+".json"))
 		connect.AssertEqual(t, err, nil)
-		isHolder := isSagaNftHolder(result.Result.Items)
-		connect.AssertEqual(t, isHolder, true)
+		var assets []HeliusAsset
+		connect.AssertEqual(t, json.Unmarshal(assetBytes, &assets), nil)
+		return assets
+	}
 
-		/**
-		 * Verify non Saga NFT Holder
-		 */
-		result, err = heliusSearchAssetsSaga(ctx, nonHolderPublicKey)
-		connect.AssertEqual(t, err, nil)
-		isHolder = isSagaNftHolder(result.Result.Items)
-		connect.AssertEqual(t, isHolder, false)
+	// saga: collection grouping identifies the holder
+	connect.AssertEqual(t, isSagaNftHolder(loadAssets("saga_holder_saga")), true)
+	connect.AssertEqual(t, isSagaNftHolder(loadAssets("non_holder")), false)
 
-		/**
-		 * Verify Seeker Preorder NFT Holder
-		 */
-		items, err := heliusSearchAssets(ctx, seekerPreorderHolderPublicKey)
-		connect.AssertEqual(t, err, nil)
+	// seeker preorder: the asset id appears among the wallet's assets. The
+	// recorded wallet holds thousands; the fixture keeps the match surrounded
+	// by non-matching assets so a scan bug cannot pass by position.
+	connect.AssertEqual(t, isSeekerNftHolder(loadAssets("seeker_preorder_holder")), true)
 
-		isHolder = isSeekerNftHolder(items)
-		connect.AssertEqual(t, isHolder, true)
+	// seeker genesis: token-2022 metadata pointer (authority + metadata
+	// address), not an id match
+	connect.AssertEqual(t, isSeekerNftHolder(loadAssets("seeker_genesis_holder")), true)
 
-		/**
-		 * Verify Seeker Genesis Holder
-		 */
-		items, err = heliusSearchAssets(ctx, seekerGenesisHolderPublicKey)
-		connect.AssertEqual(t, err, nil)
-
-		isHolder = isSeekerNftHolder(items)
-		connect.AssertEqual(t, isHolder, true)
-
-		/**
-		 * Verify non Seeker Preorder or Genesis NFT Holder
-		 */
-
-		items, err = heliusSearchAssets(ctx, nonHolderPublicKey)
-		connect.AssertEqual(t, err, nil)
-		isHolder = isSeekerNftHolder(result.Result.Items)
-		connect.AssertEqual(t, isHolder, false)
-
-	})
+	// neither preorder nor genesis
+	connect.AssertEqual(t, isSeekerNftHolder(loadAssets("non_holder")), false)
+	// saga holding alone does not make a seeker holder
+	connect.AssertEqual(t, isSeekerNftHolder(loadAssets("saga_holder")), false)
 }

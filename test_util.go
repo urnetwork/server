@@ -32,15 +32,39 @@ var pprofServer = sync.OnceFunc(func() {
 })
 
 const (
-	testRedisLeaseCoordinatorDb = 0
-	testRedisLeaseTtl           = 15 * time.Minute
-	testRedisLeaseWait          = 25 * time.Millisecond
+	testRedisLeaseCoordinatorDb     = 0
+	testRedisLeaseTtl               = 15 * time.Minute
+	testRedisLeaseWait              = 25 * time.Millisecond
+	testRedisLeaseReleasedMarkerTtl = time.Minute
 )
+
+// The coordinator client auto-retries a command whose response was lost on a
+// broken connection (go-redis MaxRetries), so the release script must be
+// idempotent: the first executed-but-unacknowledged attempt deletes the lease
+// key and leaves a released marker (KEYS[2], expiring), and the retried
+// attempt reports success through the marker instead of misreading its own
+// deletion as a lost lease. 1 = released, 2 = already released by this token,
+// -1 = another token owns the lease, 0 = lease key gone.
+const testRedisLeaseReleaseScript = `
+	if redis.call("get", KEYS[1]) == ARGV[1] then
+		redis.call("del", KEYS[1])
+		redis.call("set", KEYS[2], "1", "px", ARGV[2])
+		return 1
+	end
+	if redis.call("get", KEYS[2]) == "1" then
+		return 2
+	end
+	if redis.call("exists", KEYS[1]) == 1 then
+		return -1
+	end
+	return 0
+`
 
 type testRedisDbLease struct {
 	client      *redis.Client
 	db          int
 	key         string
+	releasedKey string
 	token       string
 	renewCancel context.CancelFunc
 	renewDone   chan struct{}
@@ -115,12 +139,20 @@ func acquireTestRedisDbLease(
 				client.Close()
 				panic(fmt.Errorf("lease redis test db %d: %w", db, err))
 			}
+			if !acquired {
+				// A lost SET response that go-redis retried internally reports
+				// not-acquired while the key already holds this process's
+				// token. Nothing else can write this token, so claim the lease.
+				current, getErr := client.Get(ctx, key).Result()
+				acquired = getErr == nil && current == token
+			}
 			if acquired {
 				lease := &testRedisDbLease{
-					client: client,
-					db:     db,
-					key:    key,
-					token:  token,
+					client:      client,
+					db:          db,
+					key:         key,
+					releasedKey: fmt.Sprintf("urnetwork:server-test:redis-db-lease-released:%s", token),
+					token:       token,
 				}
 				lease.startRenewal(ttl)
 				return lease
@@ -201,22 +233,21 @@ func (self *testRedisDbLease) release(ctx context.Context) {
 	self.renewCancel()
 	<-self.renewDone
 
-	const releaseIfOwned = `
-		if redis.call("get", KEYS[1]) == ARGV[1] then
-			return redis.call("del", KEYS[1])
-		end
-		return 0
-	`
 	released, releaseErr := self.client.Eval(
 		ctx,
-		releaseIfOwned,
-		[]string{self.key},
+		testRedisLeaseReleaseScript,
+		[]string{self.key, self.releasedKey},
 		self.token,
+		testRedisLeaseReleasedMarkerTtl.Milliseconds(),
 	).Int64()
 	closeErr := self.client.Close()
 	Raise(self.renewalError())
 	Raise(releaseErr)
-	if released != 1 {
+	switch released {
+	case 1, 2:
+	case -1:
+		panic(fmt.Errorf("redis test db %d lease was owned by another process during release", self.db))
+	default:
 		panic(fmt.Errorf("redis test db %d lease was not owned during release", self.db))
 	}
 	Raise(closeErr)
@@ -292,7 +323,7 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 			return
 		}
 		if panicValue == nil {
-			glog.Infof("[flaky]test failed iteration[%d/%d] err = %v", i+1, n, panicValue)
+			glog.Infof("[flaky]test failed iteration[%d/%d] (assertion failure, see test log)", i+1, n)
 		} else {
 			glog.Infof(
 				"[flaky]test failed iteration[%d/%d] err = %v\n%s",

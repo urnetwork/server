@@ -693,20 +693,49 @@ func TestNetworkPeerListenerNoConnectionGrowth(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		clientsInfo := func(field string) int {
-			count := -1
+		// INFO clients counters are server-wide: they count every process
+		// sharing this redis (concurrent test runs, the sim-latency fleet),
+		// so asserting on them false-fails whenever anything else is
+		// connected. Parse CLIENT LIST instead and count only connections
+		// SELECTed onto this env's leased db — the invariants stay
+		// process-local. A connection is a subscriber if any of its
+		// sub=/psub=/ssub= counts is nonzero (flags=P misses RESP3
+		// subscribers).
+		leasedDb := fmt.Sprintf("%d", server.RedisDb())
+		clientCounts := func() (connected int, subscribers int) {
 			server.Redis(ctx, func(r server.RedisClient) {
-				info, err := r.Info(ctx, "clients").Result()
+				list, err := r.ClientList(ctx).Result()
 				connect.AssertEqual(t, err, nil)
-				for _, line := range strings.Split(info, "\n") {
-					if strings.HasPrefix(line, field+":") {
-						fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, field+":")), "%d", &count)
+				for _, line := range strings.Split(list, "\n") {
+					db := ""
+					subscriptions := 0
+					for _, field := range strings.Fields(line) {
+						if v, ok := strings.CutPrefix(field, "db="); ok {
+							db = v
+						}
+						for _, subField := range []string{"sub=", "psub=", "ssub="} {
+							if v, ok := strings.CutPrefix(field, subField); ok {
+								n := 0
+								fmt.Sscanf(v, "%d", &n)
+								subscriptions += n
+							}
+						}
+					}
+					if db != leasedDb {
+						continue
+					}
+					connected += 1
+					if 0 < subscriptions {
+						subscribers += 1
 					}
 				}
 			})
-			return count
+			return
 		}
-		connectedClients := func() int { return clientsInfo("connected_clients") }
+		connectedClients := func() int {
+			connected, _ := clientCounts()
+			return connected
+		}
 
 		baseline := connectedClients()
 
@@ -736,9 +765,9 @@ func TestNetworkPeerListenerNoConnectionGrowth(t *testing.T) {
 		}
 
 		// the defining v2 invariant, literally: ZERO pubsub subscriptions
-		// exist while listeners run (v1 held one per listener)
-		if n := clientsInfo("pubsub_clients"); n != 0 {
-			t.Fatalf("pubsub_clients = %d, want 0 — a subscription-based listener path is back (v1 regression)", n)
+		// from this env exist while listeners run (v1 held one per listener)
+		if _, subscribers := clientCounts(); subscribers != 0 {
+			t.Fatalf("subscriber connections on the test db = %d, want 0 — a subscription-based listener path is back (v1 regression)", subscribers)
 		}
 
 		// every listener synced its one peer

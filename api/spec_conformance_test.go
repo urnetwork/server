@@ -168,7 +168,7 @@ func registry() []specEndpoint {
 // present as routes; TestSpecRoutesImplemented covers that.)
 func skips() map[string]string {
 	return map[string]string{
-		"GET /my-ip-info":                      "response is an unexported handler-local struct (handlers.response)",
+		"GET /my-ip-info":                      "spec MyIPInfoResult includes landmarks[], served by whereami rather than this api",
 		"GET /device/share-code/{code}/qr.png": "image/png response, no JSON schema",
 		"GET /device/adopt-code/{code}/qr.png": "image/png response, no JSON schema",
 	}
