@@ -14,7 +14,7 @@ import (
 // # This list has a counterpart in another repository
 //
 // Its counterpart is `geolocate/sources.go` in the operator-proxy repo
-// (github.com/urnetwork/urnetwork-operator-proxy), whose `sources` table is the
+// (github.com/urnetwork/operator-proxy), whose `sources` table is the
 // authority on which endpoints are actually queried; `geolocate.SourceHosts()`
 // derives the host set from it. The two CANNOT be linked in code: the prober is
 // a separate Go module in a separate repository, and it depends on this server

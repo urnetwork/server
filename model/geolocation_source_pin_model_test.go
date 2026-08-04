@@ -103,8 +103,13 @@ var sourceUrlPattern = regexp.MustCompile(`URL:\s*"https://([^/"]+)`)
 // runtime and fails closed: the prober treats a source host with no served pin
 // as a hard error and refuses to probe.
 func TestGeolocationSourceHostsMatchProberSourcesWhenCheckedOutAlongside(t *testing.T) {
+	// Both directory names are accepted: a checkout cloned from
+	// github.com/urnetwork/operator-proxy lands in `operator-proxy`, while
+	// older checkouts predating the move sit in `urnetwork-operator-proxy`.
+	// URNETWORK_OPERATOR_PROXY overrides both for any other layout.
 	candidates := []string{
 		os.Getenv("URNETWORK_OPERATOR_PROXY"),
+		filepath.Join("..", "..", "operator-proxy"),
 		filepath.Join("..", "..", "urnetwork-operator-proxy"),
 	}
 

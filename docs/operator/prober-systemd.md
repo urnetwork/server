@@ -21,14 +21,14 @@ filter applies to the service's cgroup regardless of the user it runs as.
   logs `Failed to add IP address ... ignoring` and **the address rules do
   nothing**. See [Verifying it is actually enforced](#verifying-it-is-actually-enforced).
 - The `egress-prober` binary from
-  `https://github.com/Ryanmello07/urnetwork-operator-proxy` at
+  `https://github.com/urnetwork/operator-proxy` at
   `/usr/local/bin/egress-prober`:
 
   ```bash
-  git clone https://github.com/Ryanmello07/urnetwork-operator-proxy.git
+  git clone https://github.com/urnetwork/operator-proxy.git
   git clone https://github.com/urnetwork/connect.git       # ../connect replace
   git clone https://github.com/urnetwork/glog.git          # ../glog replace
-  cd urnetwork-operator-proxy
+  cd operator-proxy
   CGO_ENABLED=0 go build -trimpath -o /usr/local/bin/egress-prober ./cmd/egress-prober
   ```
 
