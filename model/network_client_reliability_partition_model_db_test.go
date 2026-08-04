@@ -27,6 +27,7 @@ func TestClientReliabilityPartitionMigrate(t *testing.T) {
 			ReceiveMessageCount:        1,
 			ConnectionEstablishedCount: 1,
 			ProvideEnabledCount:        1,
+			ConnectionExcusedNewCount:  7,
 		}
 
 		countRows := func() (count int64) {
@@ -79,19 +80,25 @@ func TestClientReliabilityPartitionMigrate(t *testing.T) {
 		AddClientReliabilityStats(ctx, networkId, clientId, clientAddressHash, now, stats)
 		connect.AssertEqual(t, countRows(), int64(2))
 		var receiveMessageCount int64
+		var connectionExcusedNewCount int64
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
 				ctx,
-				`SELECT receive_message_count FROM client_reliability WHERE block_number = $1`,
+				`
+					SELECT receive_message_count, connection_excused_new_count
+					FROM client_reliability
+					WHERE block_number = $1
+					`,
 				reliabilityBlockNumber(now),
 			)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
-					server.Raise(result.Scan(&receiveMessageCount))
+					server.Raise(result.Scan(&receiveMessageCount, &connectionExcusedNewCount))
 				}
 			})
 		})
 		connect.AssertEqual(t, receiveMessageCount, int64(2))
+		connect.AssertEqual(t, connectionExcusedNewCount, int64(14))
 
 		// the score window computation runs against the partitioned table
 		UpdateNetworkReliabilityWindow(ctx, now.Add(-1*time.Hour), now, false)
@@ -119,6 +126,26 @@ func TestClientReliabilityPartitionMigrate(t *testing.T) {
 		// finalize again is a no-op
 		err = FinalizeClientReliabilityPartitionMigration(ctx, t.Logf)
 		connect.AssertEqual(t, err, nil)
+	})
+}
+
+// A resumable staging table created by an older binary must not be reused after
+// the canonical table gains a column: completed copy chunks would otherwise
+// retain the new column's default rather than its source value.
+func TestClientReliabilityPartitionRejectsStaleStagingSchema(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		createClientReliabilityStagingTable(ctx)
+
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(
+				ctx,
+				`ALTER TABLE client_reliability ADD COLUMN future_counter bigint NOT NULL DEFAULT 0`,
+			))
+		}, server.OptReadWrite())
+
+		_, err := clientReliabilityCopyColumnList(ctx)
+		connect.AssertNotEqual(t, err, nil)
 	})
 }
 

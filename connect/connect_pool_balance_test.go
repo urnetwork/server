@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -56,7 +57,6 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 		service = "connect"
 		block   = "test"
 		host    = "host0"
-		port    = 8080
 
 		messageContentSize = ByteCount(1024)
 		warmupMessages     = 8
@@ -83,12 +83,31 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 	exchangeSettings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 	exchangeSettings.ForwardEnforceActiveContracts = false
 
-	hostToServicePorts := map[int]int{9000: 9000}
-	exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, exchangeSettings)
+	exchangeListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("exchange listener: %v", err)
+	}
+	exchangePort := exchangeListener.Addr().(*net.TCPAddr).Port
+	hostToServicePorts := map[int]int{exchangePort: exchangePort}
+	exchange := NewExchangeWithListeners(
+		ctx,
+		host,
+		service,
+		block,
+		hostToServicePorts,
+		routes,
+		exchangeSettings,
+		map[int]net.Listener{exchangePort: exchangeListener},
+	)
 
+	httpListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("connect listener: %v", err)
+	}
+	port := httpListener.Addr().(*net.TCPAddr).Port
 	handlerSettings := DefaultConnectHandlerSettings()
-	handlerSettings.ListenH3Port = port + 443
-	handlerSettings.ListenDnsPort = port + 53
+	handlerSettings.ListenH3Port = 0
+	handlerSettings.ListenDnsPort = 0
 	handlerSettings.EnableProxyProtocol = false
 	handlerSettings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 	handlerSettings.TransportTlsSettings.EnableSelfSign = true
@@ -102,13 +121,9 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 		router.NewRoute("GET", "/", connectHandler.Connect),
 	}
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
 		Handler: router.NewRouter(ctx, httpRoutes),
 	}
-	go httpServer.ListenAndServe()
-	select {
-	case <-time.After(2 * time.Second):
-	}
+	go httpServer.Serve(httpListener)
 
 	// --- two clients, no-contract peers (avoids balance-code / provide-mode setup;
 	// the relay forward path is exercised the same way) ---
@@ -173,8 +188,8 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 		}
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.QuicTlsConfig.InsecureSkipVerify = true
-		settings.H3Port = port + 443
-		settings.DnsPort = port + 53
+		settings.H3Port = 0
+		settings.DnsPort = 0
 		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
 		return connect.NewPlatformTransportWithTargetMode(
 			ctx,
@@ -249,7 +264,13 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 	transportB.Close()
 	httpServer.Close()
 	exchange.Close()
+	connectHandler.Close()
 	cancel()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if !connectHandler.WaitForIdle(closeCtx) {
+		t.Errorf("connect handlers did not finish during teardown")
+	}
+	closeCancel()
 
 	finalGoroutines, finalPool := relaySampleStable()
 	t.Logf("post-teardown: goroutines=%d pool-outstanding=%d", finalGoroutines, finalPool)

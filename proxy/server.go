@@ -46,6 +46,10 @@ const InternalWgPort = 8084
 
 func DefaultProxySettings() *ProxySettings {
 	return &ProxySettings{
+		SocksPort:                InternalSocksPort,
+		HttpPort:                 InternalHttpPort,
+		HttpsPort:                InternalHttpsPort,
+		WgPort:                   InternalWgPort,
 		ProxyReadTimeout:         30 * time.Second,
 		ProxyWriteTimeout:        15 * time.Second,
 		ProxyIdleTimeout:         5 * time.Minute,
@@ -82,6 +86,15 @@ func DefaultProxySettings() *ProxySettings {
 }
 
 type ProxySettings struct {
+	// Ingress ports are settings instead of constructor-local constants so
+	// independent instances (including tests and overlapping local
+	// environments) can bind disjoint sockets. Production defaults retain the
+	// established service ports above.
+	SocksPort int
+	HttpPort  int
+	HttpsPort int
+	WgPort    int
+
 	ProxyReadTimeout         time.Duration
 	ProxyWriteTimeout        time.Duration
 	ProxyIdleTimeout         time.Duration
@@ -283,7 +296,7 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 func (self *socks5Server) run() {
 	defer self.cancel()
 
-	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalSocksPort)
+	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.SocksPort)
 
 	go server.HandleError(func() {
 		defer self.cancel()
@@ -428,7 +441,7 @@ func (self *httpServer) run() {
 
 	// listen http
 	func() {
-		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalHttpPort)
+		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.HttpPort)
 
 		go server.HandleError(func() {
 			defer self.cancel()
@@ -458,7 +471,7 @@ func (self *httpServer) run() {
 
 	// listen https
 	func() {
-		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalHttpsPort)
+		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.HttpsPort)
 
 		go server.HandleError(func() {
 			defer self.cancel()
@@ -564,7 +577,7 @@ func NewWgServer(
 func (self *wgServer) run() {
 	defer self.cancel()
 
-	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(InternalWgPort)
+	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.WgPort)
 
 	err := self.wgProxy.ListenAndServe(listenIpv4, listenIpv6, listenPort)
 	if err != nil {

@@ -23,8 +23,8 @@ package proxy
 // Unlike TestProxy these tests do not touch the real internet: the provider
 // egresses to a local TLS target server, with the security policies disabled
 // (the production policies filter loopback destinations for public provide
-// relationships). The target ports are kept below 11000 so return traffic
-// passes the device ingress policy's high-source-port filter.
+// relationships). Each target binds an OS-assigned loopback port, so the tests
+// can coexist with a running local environment and other package processes.
 
 import (
 	"context"
@@ -49,12 +49,6 @@ import (
 const (
 	testMib = model.ByteCount(1024 * 1024)
 
-	// per-test local target ports (< 11000, see the package comment)
-	testTargetPortChurn      = 8980
-	testTargetPortExhaustion = 8981
-	testTargetPortMirror     = 8982
-	testTargetPortReap       = 8983
-
 	// cap granted contracts at a small size so moderate transfer volumes force
 	// many contract creations (churn)
 	testSmallContractByteCount = 4 * testMib
@@ -76,7 +70,7 @@ func withSmallContracts() (restore func()) {
 // startLocalTarget starts a TLS http server on 127.0.0.1:port that serves
 // `GET /data?bytes=N` (N pseudo-random-ish bytes) and `POST /upload`
 // (discards the body and echoes the byte count).
-func startLocalTarget(t testing.TB, port int) (baseUrl string, closeTarget func()) {
+func startLocalTarget(t testing.TB) (baseUrl string, closeTarget func()) {
 	chunk := make([]byte, 32*1024)
 	for i := range chunk {
 		chunk[i] = byte(i)
@@ -99,9 +93,9 @@ func startLocalTarget(t testing.TB, port int) (baseUrl string, closeTarget func(
 		fmt.Fprintf(w, "%d", n)
 	})
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("target: listen %d: %v", port, err)
+		t.Fatalf("target: listen: %v", err)
 	}
 	target := httptest.NewUnstartedServer(mux)
 	target.Listener.Close()
@@ -115,10 +109,10 @@ func startLocalTarget(t testing.TB, port int) (baseUrl string, closeTarget func(
 // the local target presents an httptest self-signed cert
 var testTargetTlsConfig = &tls.Config{InsecureSkipVerify: true}
 
-func newSocksProxyClient(t testing.TB, signedProxyId string, timeout time.Duration) *http.Client {
+func newSocksProxyClient(t testing.TB, signedProxyId string, port int, timeout time.Duration) *http.Client {
 	dialer, err := xproxy.SOCKS5(
 		"tcp",
-		fmt.Sprintf("127.0.0.1:%d", InternalSocksPort),
+		fmt.Sprintf("127.0.0.1:%d", port),
 		&xproxy.Auth{User: signedProxyId, Password: "x"},
 		xproxy.Direct,
 	)
@@ -138,8 +132,8 @@ func newSocksProxyClient(t testing.TB, signedProxyId string, timeout time.Durati
 	}
 }
 
-func newHttpProxyClient(t testing.TB, signedProxyId string, timeout time.Duration) *http.Client {
-	proxyUrl, err := url.Parse(fmt.Sprintf("http://%s:x@127.0.0.1:%d", signedProxyId, InternalHttpPort))
+func newHttpProxyClient(t testing.TB, signedProxyId string, port int, timeout time.Duration) *http.Client {
+	proxyUrl, err := url.Parse(fmt.Sprintf("http://%s:x@127.0.0.1:%d", signedProxyId, port))
 	if err != nil {
 		t.Fatalf("http: parse proxy url: %v", err)
 	}
@@ -352,15 +346,15 @@ func TestProxyContractChurnLoad(t *testing.T) {
 		opts := defaultProxyTestOptions()
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
-		targetUrl, closeTarget := startLocalTarget(t, testTargetPortChurn)
+		targetUrl, closeTarget := startLocalTarget(t)
 		defer closeTarget()
 
 		ctx := h.ctx
 
 		// make sure the path works before applying load
-		warmClient := newSocksProxyClient(t, h.signedProxyId, 60*time.Second)
+		warmClient := newSocksProxyClient(t, h.signedProxyId, h.socksPort, 60*time.Second)
 		requireFetchData(t, "warmup", warmClient, targetUrl, 64*1024, 120*time.Second)
 		fmt.Printf("[progress]warmup ok\n")
 
@@ -376,9 +370,9 @@ func TestProxyContractChurnLoad(t *testing.T) {
 				defer wg.Done()
 				var client *http.Client
 				if w%2 == 0 {
-					client = newSocksProxyClient(t, h.signedProxyId, 60*time.Second)
+					client = newSocksProxyClient(t, h.signedProxyId, h.socksPort, 60*time.Second)
 				} else {
-					client = newHttpProxyClient(t, h.signedProxyId, 60*time.Second)
+					client = newHttpProxyClient(t, h.signedProxyId, h.httpPort, 60*time.Second)
 				}
 				defer client.CloseIdleConnections()
 				for round := 0; round < roundCount; round += 1 {
@@ -498,14 +492,14 @@ func TestProxyContractBalanceExhaustionRecovery(t *testing.T) {
 		// small enough to exhaust quickly with 4MiB downloads
 		opts.pdInitialBalance = 48 * testMib
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
-		targetUrl, closeTarget := startLocalTarget(t, testTargetPortExhaustion)
+		targetUrl, closeTarget := startLocalTarget(t)
 		defer closeTarget()
 
 		ctx := h.ctx
 
-		client := newSocksProxyClient(t, h.signedProxyId, 15*time.Second)
+		client := newSocksProxyClient(t, h.signedProxyId, h.socksPort, 15*time.Second)
 		defer client.CloseIdleConnections()
 		requireFetchData(t, "warmup", client, targetUrl, 64*1024, 120*time.Second)
 
@@ -570,14 +564,14 @@ func TestProxyContractRedisMirrorLoss(t *testing.T) {
 		opts := defaultProxyTestOptions()
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
-		targetUrl, closeTarget := startLocalTarget(t, testTargetPortMirror)
+		targetUrl, closeTarget := startLocalTarget(t)
 		defer closeTarget()
 
 		ctx := h.ctx
 
-		client := newSocksProxyClient(t, h.signedProxyId, 60*time.Second)
+		client := newSocksProxyClient(t, h.signedProxyId, h.socksPort, 60*time.Second)
 		defer client.CloseIdleConnections()
 		requireFetchData(t, "warmup", client, targetUrl, 1*testMib, 120*time.Second)
 		fmt.Printf("[progress]warmup ok\n")
@@ -616,14 +610,14 @@ func TestProxyClientReapSurvival(t *testing.T) {
 		opts := defaultProxyTestOptions()
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
-		targetUrl, closeTarget := startLocalTarget(t, testTargetPortReap)
+		targetUrl, closeTarget := startLocalTarget(t)
 		defer closeTarget()
 
 		ctx := h.ctx
 
-		client := newSocksProxyClient(t, h.signedProxyId, 60*time.Second)
+		client := newSocksProxyClient(t, h.signedProxyId, h.socksPort, 60*time.Second)
 		defer client.CloseIdleConnections()
 		requireFetchData(t, "warmup", client, targetUrl, 1*testMib, 120*time.Second)
 

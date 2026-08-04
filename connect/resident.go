@@ -415,6 +415,10 @@ type Exchange struct {
 	routes             map[string]string
 
 	settings *ExchangeSettings
+	// Optional already-bound sockets keyed by service port. Tests use these to
+	// eliminate release-to-rebind races and cross-process SO_REUSEPORT
+	// interference. The Exchange owns and closes every supplied listener.
+	servicePortListeners map[int]net.Listener
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
@@ -451,20 +455,59 @@ func NewExchange(
 	routes map[string]string,
 	settings *ExchangeSettings,
 ) *Exchange {
+	return newExchange(ctx, host, service, block, hostToServicePorts, routes, settings, nil)
+}
+
+// NewExchangeWithListeners is equivalent to NewExchange, but uses the
+// already-bound listener for each matching service port. It lets an in-process
+// server retain an OS-assigned port continuously through startup.
+func NewExchangeWithListeners(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+	settings *ExchangeSettings,
+	servicePortListeners map[int]net.Listener,
+) *Exchange {
+	return newExchange(
+		ctx,
+		host,
+		service,
+		block,
+		hostToServicePorts,
+		routes,
+		settings,
+		maps.Clone(servicePortListeners),
+	)
+}
+
+func newExchange(
+	ctx context.Context,
+	host string,
+	service string,
+	block string,
+	hostToServicePorts map[int]int,
+	routes map[string]string,
+	settings *ExchangeSettings,
+	servicePortListeners map[int]net.Listener,
+) *Exchange {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	exchange := &Exchange{
-		ctx:                cancelCtx,
-		cancel:             cancel,
-		host:               host,
-		service:            service,
-		block:              block,
-		hostToServicePorts: hostToServicePorts,
-		routes:             routes,
-		settings:           settings,
-		residents:          map[server.Id]*Resident{},
-		connections:        map[server.Id]map[server.Id]context.CancelFunc{},
-		drainedClients:     map[server.Id]struct{}{},
+		ctx:                  cancelCtx,
+		cancel:               cancel,
+		host:                 host,
+		service:              service,
+		block:                block,
+		hostToServicePorts:   hostToServicePorts,
+		routes:               routes,
+		settings:             settings,
+		servicePortListeners: servicePortListeners,
+		residents:            map[server.Id]*Resident{},
+		connections:          map[server.Id]map[server.Id]context.CancelFunc{},
+		drainedClients:       map[server.Id]struct{}{},
 	}
 
 	if settings.KeyEventDelivery.Enabled {
@@ -745,20 +788,24 @@ func (self *Exchange) Run() {
 func (self *Exchange) serveExchangeConnection(port int) {
 	defer self.cancel()
 
-	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
+	serverSocket := self.servicePortListeners[port]
+	if serverSocket == nil {
+		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
-	listenConfig := net.ListenConfig{
-		Control: server.SoReusePort,
-	}
+		listenConfig := net.ListenConfig{
+			Control: server.SoReusePort,
+		}
 
-	// leave host part empty to listen on all available interfaces
-	serverSocket, err := listenConfig.Listen(
-		self.ctx,
-		"tcp",
-		fmt.Sprintf("%s:%d", listenIpv4, listenPort),
-	)
-	if err != nil {
-		return
+		var err error
+		// leave host part empty to listen on all available interfaces
+		serverSocket, err = listenConfig.Listen(
+			self.ctx,
+			"tcp",
+			fmt.Sprintf("%s:%d", listenIpv4, listenPort),
+		)
+		if err != nil {
+			return
+		}
 	}
 	defer serverSocket.Close()
 
@@ -2951,11 +2998,11 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	self.UpdateActivity()
 	self.controlLimiter.delay()
 
-	err := self.residentController.HandleControlFrames(frames)
-	if err == nil {
-		if glog.V(1) {
-			glog.Infof("[rr]control error = %s\n", err)
-		}
+	// control errors are rare and load-bearing (e.g. a rejected CloseContract
+	// leaks an open contract): always log them. The previous inverted check
+	// (err == nil) logged nil on success and swallowed every real error.
+	if err := self.residentController.HandleControlFrames(frames); err != nil {
+		glog.Infof("[rr]control error = %s\n", err)
 	}
 }
 

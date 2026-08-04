@@ -84,7 +84,7 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 		// as a new connection and consumes the excuse marker
 		drainAllTimeout := 3 * time.Second
 
-		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, 8103, 9023,
+		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t,
 			func(exchangeSettings *ExchangeSettings) {
 				exchangeSettings.EnableDrainExcuse = true
 				// the clients must be able to redial this same service
@@ -176,7 +176,10 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 			totals = testingReadClientReliabilityTotals(ctx, clientIdA, startBlock, endBlock)
 			// the markers are consumed once the clients have redialed
 			markersConsumed := !model.HasDrainExcuse(ctx, clientIdA) && !model.HasDrainExcuse(ctx, clientIdB)
-			if anyExcused && markersConsumed {
+			// wait for every asserted condition, not just the excuse ones:
+			// clientA's valid-rollup row can land a beat after clientB's excuse,
+			// and breaking before it exists races the anyValid assert below
+			if anyExcused && markersConsumed && totals.anyValid {
 				break
 			}
 			if endTime.Before(time.Now()) {
@@ -244,6 +247,10 @@ func newTestLb(t testing.TB, lbPort int, backendPort int) *testLb {
 
 func (self *testLb) setBackendPort(backendPort int) {
 	self.backendPort.Store(int64(backendPort))
+}
+
+func (self *testLb) port() int {
+	return self.listener.Addr().(*net.TCPAddr).Port
 }
 
 func (self *testLb) Close() {
@@ -402,12 +409,12 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 			handlerSettings.ConnectionAnnounceSettings.SyncConnectionTimeout = 200 * time.Millisecond
 		}
 
-		env1 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, 8104, 9024, mutateExchangeSettings, mutateHandlerSettings)
+		env1 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, mutateExchangeSettings, mutateHandlerSettings)
 		defer env1.Close()
-		env2 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, 8105, 9025, mutateExchangeSettings, mutateHandlerSettings)
+		env2 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, mutateExchangeSettings, mutateHandlerSettings)
 		defer env2.Close()
 
-		lb := newTestLb(t, 8106, 8104)
+		lb := newTestLb(t, 0, env1.port)
 		defer lb.Close()
 
 		// the clients belong to env1's network; either exchange can host them
@@ -427,9 +434,9 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 
 		startBlock := testingReliabilityBlockNumber(server.NowUtc()) - 1
 
-		mtA := newMigratingTransport(ctx, clientA, byClientJwtA, server.NewId(), 8106, 8104+443, 8104+53)
+		mtA := newMigratingTransport(ctx, clientA, byClientJwtA, server.NewId(), lb.port(), 0, 0)
 		defer mtA.Close()
-		mtB := newMigratingTransport(ctx, clientB, byClientJwtB, server.NewId(), 8106, 8104+443, 8104+53)
+		mtB := newMigratingTransport(ctx, clientB, byClientJwtB, server.NewId(), lb.port(), 0, 0)
 		defer mtB.Close()
 
 		// public provide: the reliability stats (and so the excuse recording)
@@ -504,7 +511,7 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 
 		// take env1 out of rotation, then drain it: the broadcast asks the
 		// clients to migrate; new dials land on env2
-		lb.setBackendPort(8105)
+		lb.setBackendPort(env2.port)
 		drainDone := make(chan time.Duration, 1)
 		go func() {
 			drainStartTime := time.Now()

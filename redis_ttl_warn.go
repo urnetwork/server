@@ -33,7 +33,10 @@ import (
 	"github.com/urnetwork/glog"
 )
 
-const redisTtlWarnLimit = 120 * 24 * time.Hour
+const (
+	redisTtlWarnLimit          = 120 * 24 * time.Hour
+	netEscrowRedisTtlWarnLimit = 400 * 24 * time.Hour
+)
 
 type redisTtlWarnHook struct{}
 
@@ -104,8 +107,9 @@ func redisCommandTtlWarning(args []any, now time.Time) string {
 		}
 	}
 
-	limitSeconds := int64(redisTtlWarnLimit / time.Second)
-	limitMs := int64(redisTtlWarnLimit / time.Millisecond)
+	warnLimit := redisTtlWarnLimitForKey(redisFirstKey(args))
+	limitSeconds := int64(warnLimit / time.Second)
+	limitMs := int64(warnLimit / time.Millisecond)
 	nowSeconds := now.Unix()
 	nowMs := now.UnixMilli()
 
@@ -115,7 +119,7 @@ func redisCommandTtlWarning(args []any, now time.Time) string {
 		}
 		return fmt.Sprintf(
 			"%q key=%q ttl %d%s exceeds %s — likely a unit conversion issue",
-			name, redisFirstKey(args), value, unit, redisTtlWarnLimit,
+			name, redisFirstKey(args), value, unit, warnLimit,
 		)
 	}
 
@@ -159,6 +163,17 @@ func redisCommandTtlWarning(args []any, now time.Time) string {
 		}
 	}
 	return ""
+}
+
+func redisTtlWarnLimitForKey(key string) time.Duration {
+	// Net-escrow counters intentionally expire at the backing balance's end
+	// time plus 30 days. Annual balances therefore live for up to 395 days;
+	// retain a narrow exception while still catching nanosecond-as-second
+	// leaks and unexpectedly multi-year counters.
+	if strings.HasPrefix(key, "{escrow_") && strings.HasSuffix(key, "}net") {
+		return netEscrowRedisTtlWarnLimit
+	}
+	return redisTtlWarnLimit
 }
 
 func redisFirstKey(args []any) string {

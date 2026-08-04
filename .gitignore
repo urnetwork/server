@@ -17,6 +17,7 @@ connect/connect.test
 connect/profile
 cli/proxy/proxy
 main
+connect/sim-latency/sim-latency
 
 temp/*
 

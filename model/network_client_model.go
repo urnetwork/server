@@ -379,6 +379,43 @@ func AuthNetworkClient(
 				})
 			}
 
+			// device_name/device_spec are written once at device creation, so a
+			// device that first registered before a client fix (e.g. with a raw
+			// model code like "SM-S928U1" instead of "Galaxy S24 Ultra", or the
+			// legacy "New device" default) would keep the stale value forever.
+			// Refresh them from the reused device's latest auth. Guarded so it is
+			// safe on every re-auth (including the window clients, which send the
+			// same values): the spec is only rewritten when it actually changed,
+			// and the name is migrated ONLY from empty / the legacy "New device"
+			// default — a user's explicit rename (any other value) is never
+			// clobbered. Empty incoming values are ignored.
+			if authClient.DeviceSpec != "" {
+				server.RaisePgResult(tx.Exec(
+					session.Ctx,
+					`
+						UPDATE device
+						SET device_spec = $2
+						WHERE device_id = $1 AND device_spec IS DISTINCT FROM $2
+					`,
+					deviceId,
+					authClient.DeviceSpec,
+				))
+			}
+			if authClient.Description != "" {
+				server.RaisePgResult(tx.Exec(
+					session.Ctx,
+					`
+						UPDATE device
+						SET device_name = $2
+						WHERE device_id = $1
+							AND coalesce(device_name, '') IN ('', 'New device')
+							AND device_name IS DISTINCT FROM $2
+					`,
+					deviceId,
+					authClient.Description,
+				))
+			}
+
 			server.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`

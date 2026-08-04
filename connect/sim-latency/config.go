@@ -86,9 +86,17 @@ type SiteConfig struct {
 	MeanDepth float64 `yaml:"mean_depth"`
 	// mean child links per page
 	Branching float64 `yaml:"branching"`
-	// response body size range (bytes), sampled per page
+	// web-tier response body size range (bytes), sampled per page
 	MinBodyBytes int `yaml:"min_body_bytes"`
 	MaxBodyBytes int `yaml:"max_body_bytes"`
+	// download tier: the seeded fraction of pages whose body is drawn from
+	// the large range instead (0/absent = no large tier, the pre-eval-48b
+	// behavior). Large pages are what the throughput metrics measure
+	// (results.go throughputMinBytes) — sized so transfer time dominates
+	// ttfb and bytes/total honestly approximates lane bandwidth.
+	LargeFraction     float64 `yaml:"large_fraction,omitempty"`
+	LargeMinBodyBytes int     `yaml:"large_min_body_bytes,omitempty"`
+	LargeMaxBodyBytes int     `yaml:"large_max_body_bytes,omitempty"`
 }
 
 // ClientsConfig shapes the client load.

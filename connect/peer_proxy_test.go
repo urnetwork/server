@@ -33,7 +33,7 @@ func TestExchangeProxyPeerHidden(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8095, 9015)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		// a regular top-level client — the control: it must be a visible peer

@@ -54,7 +54,11 @@ func TestWgServerSyncProxyClients(t *testing.T) {
 
 		wgCtx, wgCancel := context.WithCancel(ctx)
 		defer wgCancel()
-		wg := NewWgServer(wgCtx, wgCancel, proxyDeviceManager, DefaultProxySettings())
+		ports, releasePorts := reserveProxyTestPorts(t)
+		settings := DefaultProxySettings()
+		settings.WgPort = ports.wg
+		releasePorts()
+		wg := NewWgServer(wgCtx, wgCancel, proxyDeviceManager, settings)
 
 		proxyClientA := newTestProxyClient(t, netip.MustParseAddr("10.10.0.1"))
 		proxyClientB := newTestProxyClient(t, netip.MustParseAddr("10.10.0.2"))

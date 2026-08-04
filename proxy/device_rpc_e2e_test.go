@@ -61,7 +61,7 @@ func TestProxyDeviceRpcE2E(t *testing.T) {
 		opts.enableDeviceRpc = true
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
-		defer h.cancel()
+		defer h.close(t)
 
 		// build a DeviceRemote as a browser would: connect directly to the
 		// proxy host's device rpc endpoint, authenticating with the device's

@@ -35,7 +35,14 @@ const runStatsKind = "sim-latency-run"
 
 // throughput quantiles only count transfers at least this large, so they
 // reflect sustained transfer rate rather than time-to-first-byte
-const throughputMinBytes = 256 * 1024
+// the throughput metrics sample only the site's download tier (>= 1 MiB;
+// large pages are 2–6 MiB, web pages cap at 512 KiB, so the gate is
+// unambiguous). At these sizes transfer time dominates ttfb, so bytes/total
+// approximates lane bandwidth instead of connection-setup luck — with the
+// old 256 KiB gate on 0.25–1 MiB pages, a ~0.4 s ttfb inside `total` capped
+// most rows near 1.3 MB/s regardless of lane speed, and the fast tail was
+// owned by whichever requests dodged setup (the eval-48a thr_p95 lottery).
+const throughputMinBytes = 1024 * 1024
 
 // resultRow is one parsed CSV row (the fields the metrics need).
 type resultRow struct {
@@ -174,9 +181,9 @@ func totalQuantileMetric(name string, q float64) metricDef {
 	}
 }
 
-func throughputQuantileMetric(name string, q float64, primary bool) metricDef {
+func throughputQuantileMetric(name string, q float64, primary bool, guard bool) metricDef {
 	return metricDef{
-		name: name, lowerBetter: false, primary: primary, guard: primary,
+		name: name, lowerBetter: false, primary: primary, guard: primary || guard,
 		compute: func(rows []resultRow, windowSeconds float64) (float64, int, bool) {
 			return quantileOf(throughputValues(rows), q)
 		},
@@ -208,9 +215,20 @@ func metricDefs() []metricDef {
 		ttfbQuantileMetric("ttfb_p95_ms", 0.95, true),
 		totalQuantileMetric("total_p50_ms", 0.50),
 		totalQuantileMetric("total_p95_ms", 0.95),
-		throughputQuantileMetric("throughput_p05_bytes_per_s", 0.05, false),
-		throughputQuantileMetric("throughput_p50_bytes_per_s", 0.50, false),
-		throughputQuantileMetric("throughput_p95_bytes_per_s", 0.95, true),
+		// the struggling tail guards the p50 primary (2026-07-31): a build
+		// must not raise the median by starving the slowest flows. It is
+		// also the sharpest metric measured (~2% A/A CV), so the guard
+		// detects small degradations.
+		throughputQuantileMetric("throughput_p05_bytes_per_s", 0.05, false, true),
+		// the bandwidth primary is the median (2026-07-31, eval-48b): large
+		// transfers are 2-6 MiB so p50 is an honest sustained-rate sample,
+		// and it measures at ~7% A/A CV. The p95 fast tail stays reported
+		// but non-gating — per-flow throughput is ceilinged by the tunnel
+		// data path far below lane rates, so the tail is a run-level regime
+		// lottery (26-47% CV across environment revisions), undecidable as
+		// a verdict.
+		throughputQuantileMetric("throughput_p50_bytes_per_s", 0.50, true, false),
+		throughputQuantileMetric("throughput_p95_bytes_per_s", 0.95, false, false),
 		{
 			name: "goodput_bytes_per_s", lowerBetter: false,
 			compute: func(rows []resultRow, windowSeconds float64) (float64, int, bool) {

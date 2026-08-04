@@ -74,13 +74,12 @@ func TestProxyPrewarm(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyPrewarm\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		// the "old instance" records the client active on this (host, block)
 		proxyHost := fmt.Sprintf("prewarmtest%d", time.Now().UnixNano()%1000000)

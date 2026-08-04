@@ -69,10 +69,7 @@ import (
 )
 
 const (
-	testConnectClientPort  = 7200
 	testConnectServicePort = 7300
-	testApiPort            = 7400
-	testDeviceRpcPort      = 7500
 
 	testTargetUrl = "https://api.bringyour.com/hello"
 
@@ -140,7 +137,88 @@ type proxyTestHarness struct {
 	platformUrl   string
 	networkSpace  *sdk.NetworkSpace
 	// ws url of the device rpc endpoint the DeviceRemote connects to
-	deviceRpcUrl string
+	deviceRpcUrl  string
+	connectServer *connectserver.ConnectHandler
+
+	socksPort int
+	httpPort  int
+	httpsPort int
+	apiPort   int
+	wgPort    int
+
+	closeOnce sync.Once
+}
+
+func (self *proxyTestHarness) close(t testing.TB) {
+	self.closeOnce.Do(func() {
+		// Stop admission first. Connect's deferred rate-limit decrement uses
+		// Redis intentionally, so every admitted handler must finish before
+		// DefaultTestEnv closes this test's Redis pool.
+		self.connectServer.Close()
+		self.cancel()
+
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if !self.connectServer.WaitForIdle(closeCtx) {
+			t.Errorf("connect handlers did not finish during harness teardown")
+		}
+	})
+}
+
+type proxyTestPorts struct {
+	socks int
+	http  int
+	https int
+	api   int
+	wg    int
+}
+
+func reserveProxyTestPorts(t testing.TB) (*proxyTestPorts, func()) {
+	var reservations []io.Closer
+	reserveTcp := func() int {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve tcp test port: %v", err)
+		}
+		reservations = append(reservations, listener)
+		return listener.Addr().(*net.TCPAddr).Port
+	}
+	reserveUdp := func() int {
+		packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve udp test port: %v", err)
+		}
+		reservations = append(reservations, packetConn)
+		return packetConn.LocalAddr().(*net.UDPAddr).Port
+	}
+	ports := &proxyTestPorts{
+		socks: reserveTcp(),
+		http:  reserveTcp(),
+		https: reserveTcp(),
+		api:   reserveTcp(),
+		wg:    reserveUdp(),
+	}
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			for _, reservation := range reservations {
+				reservation.Close()
+			}
+		})
+	}
+	return ports, release
+}
+
+func listenProxyTestTcp(t testing.TB) net.Listener {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on dynamic test port: %v", err)
+	}
+	return listener
+}
+
+func proxyTestTcpPort(listener net.Listener) int {
+	return listener.Addr().(*net.TCPAddr).Port
 }
 
 func setProxyTestEnv() {
@@ -167,25 +245,6 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestHarness {
 	setProxyTestEnv()
 
-	// the proxy servers bind fixed ports; when several tests in this package
-	// each run their own setup sequentially in one process, wait for the
-	// previous teardown to release them
-	waitFor(t, 15*time.Second, "proxy ports released", func() bool {
-		for _, port := range []int{InternalSocksPort, InternalHttpPort, InternalHttpsPort, InternalApiPort} {
-			l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-			if err != nil {
-				return false
-			}
-			l.Close()
-		}
-		pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", InternalWgPort))
-		if err != nil {
-			return false
-		}
-		pc.Close()
-		return true
-	})
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// ---- local connect server (plain ws, in-process) -------------------------
@@ -200,24 +259,30 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 
 	connectHandlerSettings := connectserver.DefaultConnectHandlerSettings()
 	connectHandlerSettings.ConnectionAnnounceTimeout = 0
+	// This harness drives the H1 websocket endpoint. Do not also bind the
+	// production H3 and DNS ports; a running local environment owns them.
+	connectHandlerSettings.ListenH3Port = 0
+	connectHandlerSettings.ListenDnsPort = 0
 	connectHandler := connectserver.NewConnectHandler(ctx, server.NewId(), exchange, connectHandlerSettings)
 
 	connectRoutes := []*router.Route{
 		router.NewRoute("GET", "/status", router.WarpStatus),
 		router.NewRoute("GET", "/", connectHandler.Connect),
 	}
+	connectListener := listenProxyTestTcp(t)
+	connectClientPort := proxyTestTcpPort(connectListener)
 	connectHttp := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", testConnectClientPort),
 		Handler: router.NewRouter(ctx, connectRoutes),
 	}
-	go connectHttp.ListenAndServe()
+	go connectHttp.Serve(connectListener)
 
 	// ---- local api server (plain http, full route set, in-process) -----------
+	apiListener := listenProxyTestTcp(t)
+	testApiPort := proxyTestTcpPort(apiListener)
 	apiHttp := &http.Server{
-		Addr:    fmt.Sprintf("127.0.0.1:%d", testApiPort),
 		Handler: router.NewRouter(ctx, api.Routes()),
 	}
-	go apiHttp.ListenAndServe()
+	go apiHttp.Serve(apiListener)
 
 	go func() {
 		<-ctx.Done()
@@ -237,7 +302,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 	networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
 		ctx,
 		fmt.Sprintf("http://127.0.0.1:%d", testApiPort),
-		fmt.Sprintf("ws://127.0.0.1:%d", testConnectClientPort),
+		fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort),
 		connectSettings,
 	)
 
@@ -257,7 +322,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		Client(providerDeviceId, providerClientId).Sign()
 
 	apiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
-	platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", testConnectClientPort)
+	platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
 
 	// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
 	// embedded source devices that reach providers via the multi-client
@@ -370,6 +435,11 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 
 	// ---- the real proxy servers (socks/http/https/wg/api) --------------------
 	proxySettings := DefaultProxySettings()
+	testPorts, releaseTestPorts := reserveProxyTestPorts(t)
+	proxySettings.SocksPort = testPorts.socks
+	proxySettings.HttpPort = testPorts.http
+	proxySettings.HttpsPort = testPorts.https
+	proxySettings.WgPort = testPorts.wg
 
 	transportTls := server.NewTransportTls(
 		map[string]bool{},
@@ -396,13 +466,14 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		// DeviceRemote connects here directly with the signed proxy id — no
 		// resident or proxy_host indirection.
 		deviceRpc := NewDeviceRpcHandler(proxyDeviceManager, proxySettings)
+		deviceRpcListener := listenProxyTestTcp(t)
+		testDeviceRpcPort := proxyTestTcpPort(deviceRpcListener)
 		deviceRpcHttp := &http.Server{
-			Addr: fmt.Sprintf("127.0.0.1:%d", testDeviceRpcPort),
 			Handler: router.NewRouter(ctx, []*router.Route{
 				router.NewRoute("GET", "/device-rpc", deviceRpc.ServeHTTP),
 			}),
 		}
-		go deviceRpcHttp.ListenAndServe()
+		go deviceRpcHttp.Serve(deviceRpcListener)
 		go func() {
 			<-ctx.Done()
 			deviceRpcHttp.Close()
@@ -410,11 +481,12 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		deviceRpcUrl = fmt.Sprintf("ws://127.0.0.1:%d", testDeviceRpcPort)
 	}
 
+	releaseTestPorts()
 	socks5 := NewSocks5Server(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
 	httpS := NewHttpServer(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
 	wgCtx, wgCancel := context.WithCancel(ctx)
 	wg := NewWgServer(wgCtx, wgCancel, proxyDeviceManager, proxySettings)
-	NewApiServer(ctx, cancel, proxyDeviceManager, transportTls, nil, InternalApiPort, proxySettings)
+	NewApiServer(ctx, cancel, proxyDeviceManager, transportTls, nil, testPorts.api, proxySettings)
 
 	// give the proxy listeners a moment to bind
 	select {
@@ -461,6 +533,12 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		platformUrl:        platformUrl,
 		networkSpace:       networkSpace,
 		deviceRpcUrl:       deviceRpcUrl,
+		connectServer:      connectHandler,
+		socksPort:          testPorts.socks,
+		httpPort:           testPorts.http,
+		httpsPort:          testPorts.https,
+		apiPort:            testPorts.api,
+		wgPort:             testPorts.wg,
 	}
 }
 
@@ -520,14 +598,14 @@ func TestProxy(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// The proxy servers bind fixed ports (8080-8084), which cannot be rebound on
-	// a rerun in the same process, so disable reruns and set up exactly once.
+	// The full external-path sequence is intentionally expensive, so set up
+	// exactly once and perform its repetitions within that setup.
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxy\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		// run the full leg sequence repeatedly within one setup to flush out
 		// intermittent failures (e.g. return-path / contract races). The shared
@@ -554,18 +632,17 @@ func TestProxyWgRestartReconnect(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyWgRestartReconnect\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		// a long-lived wg client + netstack that survive the server restart
 		wgCtx, wgCancel := context.WithCancel(h.ctx)
 		defer wgCancel()
-		transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig)
+		transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig, h.wgPort)
 		defer closeWgClient()
 
 		// establish the session and confirm traffic
@@ -575,7 +652,7 @@ func TestProxyWgRestartReconnect(t *testing.T) {
 		fmt.Printf("[progress]restarting wg server\n")
 		h.wgCancel()
 		waitFor(t, 15*time.Second, "wg port release", func() bool {
-			pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", InternalWgPort))
+			pc, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", h.wgPort))
 			if err != nil {
 				return false
 			}
@@ -616,13 +693,12 @@ func TestProxyIdleDeviceRecreate(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyIdleDeviceRecreate\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		// the device opened during setup, reachable for the proxy id
 		pd1, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
@@ -691,13 +767,12 @@ func TestProxyDeadDeviceRecreate(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyDeadDeviceRecreate\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		pd1, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
 		if err != nil {
@@ -754,7 +829,7 @@ func waitFor(t testing.TB, timeout time.Duration, desc string, cond func() bool)
 // testProxyHttp drives the http proxy (CONNECT to an https target).
 func testProxyHttp(t testing.TB, h *proxyTestHarness) {
 	fmt.Printf("[progress]http leg\n")
-	proxyUrl, err := url.Parse(fmt.Sprintf("http://%s:x@127.0.0.1:%d", h.signedProxyId, InternalHttpPort))
+	proxyUrl, err := url.Parse(fmt.Sprintf("http://%s:x@127.0.0.1:%d", h.signedProxyId, h.httpPort))
 	if err != nil {
 		t.Fatalf("http: parse proxy url: %v", err)
 	}
@@ -767,7 +842,7 @@ func testProxyHttp(t testing.TB, h *proxyTestHarness) {
 // testProxyHttps drives the https proxy (the proxy connection itself is TLS).
 func testProxyHttps(t testing.TB, h *proxyTestHarness) {
 	fmt.Printf("[progress]https leg\n")
-	proxyUrl, err := url.Parse(fmt.Sprintf("https://%s:x@127.0.0.1:%d", h.signedProxyId, InternalHttpsPort))
+	proxyUrl, err := url.Parse(fmt.Sprintf("https://%s:x@127.0.0.1:%d", h.signedProxyId, h.httpsPort))
 	if err != nil {
 		t.Fatalf("https: parse proxy url: %v", err)
 	}
@@ -785,7 +860,7 @@ func testProxySocks(t testing.TB, h *proxyTestHarness) {
 	fmt.Printf("[progress]socks leg\n")
 	dialer, err := xproxy.SOCKS5(
 		"tcp",
-		fmt.Sprintf("127.0.0.1:%d", InternalSocksPort),
+		fmt.Sprintf("127.0.0.1:%d", h.socksPort),
 		&xproxy.Auth{User: h.signedProxyId, Password: "x"},
 		xproxy.Direct,
 	)
@@ -812,7 +887,7 @@ func testProxyWireguard(t testing.TB, h *proxyTestHarness) {
 	wgCtx, wgCancel := context.WithCancel(h.ctx)
 	defer wgCancel()
 
-	transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig)
+	transport, closeWgClient := startWgClient(t, wgCtx, h.proxyClient.WgConfig, h.wgPort)
 	// close synchronously at leg end: each leg connects as the same peer (same
 	// key/ip), and a lingering previous client device would flap the server
 	// peer's endpoint into the next leg
@@ -824,7 +899,7 @@ func testProxyWireguard(t testing.TB, h *proxyTestHarness) {
 // netstack bound to the client's tunnel address, returning an http transport
 // that dials through the tunnel and a close function for the client device
 // (also invoked if ctx is canceled first).
-func startWgClient(t testing.TB, ctx context.Context, wgConfig *model.WgConfig) (*http.Transport, func()) {
+func startWgClient(t testing.TB, ctx context.Context, wgConfig *model.WgConfig, wgPort int) (*http.Transport, func()) {
 	if wgConfig == nil {
 		t.Fatalf("wg: proxy client has no wg config")
 	}
@@ -865,7 +940,7 @@ func startWgClient(t testing.TB, ctx context.Context, wgConfig *model.WgConfig) 
 				PublicKey: serverPublic,
 				Endpoint: &net.UDPAddr{
 					IP:   net.IPv4(127, 0, 0, 1),
-					Port: InternalWgPort,
+					Port: wgPort,
 				},
 				ReplaceAllowedIPs: true,
 				AllowedIPs: []net.IPNet{

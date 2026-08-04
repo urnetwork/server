@@ -5,6 +5,7 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -680,6 +681,160 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		case <-time.After(1 * time.Second):
 		}
 		assert.Equal(t, len(c2.Connected()), 1)
+	})
+}
+
+// TestNetworkPeerListenerNoConnectionGrowth guards the PEERS2 property whose
+// absence caused the 2026-07-15 outage: the poll listeners must NOT open a
+// standing connection per listener (v1 held one pubsub subscription each,
+// O(clients) connections that melted the cluster). Many listeners share the
+// pool; connected_clients stays ~pool-sized, and idle polls (no registry
+// change) deliver no events.
+func TestNetworkPeerListenerNoConnectionGrowth(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// INFO clients counters are server-wide: they count every process
+		// sharing this redis (concurrent test runs, the sim-latency fleet),
+		// so asserting on them false-fails whenever anything else is
+		// connected. Parse CLIENT LIST instead and count only connections
+		// SELECTed onto this env's leased db — the invariants stay
+		// process-local. A connection is a subscriber if any of its
+		// sub=/psub=/ssub= counts is nonzero (flags=P misses RESP3
+		// subscribers).
+		leasedDb := fmt.Sprintf("%d", server.RedisDb())
+		clientCounts := func() (connected int, subscribers int) {
+			server.Redis(ctx, func(r server.RedisClient) {
+				list, err := r.ClientList(ctx).Result()
+				assert.Equal(t, err, nil)
+				for _, line := range strings.Split(list, "\n") {
+					db := ""
+					subscriptions := 0
+					for _, field := range strings.Fields(line) {
+						if v, ok := strings.CutPrefix(field, "db="); ok {
+							db = v
+						}
+						for _, subField := range []string{"sub=", "psub=", "ssub="} {
+							if v, ok := strings.CutPrefix(field, subField); ok {
+								n := 0
+								fmt.Sscanf(v, "%d", &n)
+								subscriptions += n
+							}
+						}
+					}
+					if db != leasedDb {
+						continue
+					}
+					connected += 1
+					if 0 < subscriptions {
+						subscribers += 1
+					}
+				}
+			})
+			return
+		}
+		connectedClients := func() int {
+			connected, _ := clientCounts()
+			return connected
+		}
+
+		baseline := connectedClients()
+
+		// stand up many listeners on distinct networks, each with one peer
+		const listenerCount = 40
+		accumulators := make([]*testNetworkPeerAccumulator, listenerCount)
+		for i := range listenerCount {
+			networkId := server.NewId()
+			AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: server.NewId()}, server.NewId(), 60*time.Second)
+			c := newTestNetworkPeerAccumulator()
+			accumulators[i] = c
+			listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+			defer listener.Close()
+		}
+
+		// let every listener poll many times (2s / 200ms = ~10 ticks each)
+		select {
+		case <-time.After(2 * time.Second):
+		}
+
+		// connections did NOT grow ~1 per listener. The pool cap (test config
+		// max_connections=16) plus a small margin is the ceiling regardless of
+		// listener count — v1 would have added ~40 subscription connections.
+		grown := connectedClients() - baseline
+		if grown >= listenerCount/2 {
+			t.Fatalf("connected_clients grew by %d for %d listeners — listeners are not sharing the pool (v1 regression?)", grown, listenerCount)
+		}
+
+		// the defining v2 invariant, literally: ZERO pubsub subscriptions
+		// from this env exist while listeners run (v1 held one per listener)
+		if _, subscribers := clientCounts(); subscribers != 0 {
+			t.Fatalf("subscriber connections on the test db = %d, want 0 — a subscription-based listener path is back (v1 regression)", subscribers)
+		}
+
+		// every listener synced its one peer
+		for i, c := range accumulators {
+			if len(c.Connected()) != 1 {
+				t.Fatalf("listener %d saw %d peers, want 1", i, len(c.Connected()))
+			}
+			// idle polls (no registry change after the initial sync) do not
+			// deliver per tick: only the initial reset + the 1/5 insurance
+			// full-reads (~2-3 over 2s), never one event per poll tick (~10)
+			if n := c.EventCount(); n > 6 {
+				t.Fatalf("listener %d delivered %d events for a static registry — polls are over-delivering", i, n)
+			}
+		}
+	})
+}
+
+// TestNetworkPeerListenerSurvivesRedisError guards the dead-listener fix: a
+// redis error inside a poll must be contained to that tick (logged, backed
+// off), never kill the listener. 2026-07-15: a panic in the listener run
+// goroutine killed it permanently and the client silently stopped receiving
+// peer updates.
+func TestNetworkPeerListenerSurvivesRedisError(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		networkId := server.NewId()
+		clientId1 := server.NewId()
+
+		c := newTestNetworkPeerAccumulator()
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		defer listener.Close()
+
+		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId1}, server.NewId(), 60*time.Second)
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		assert.Equal(t, len(c.Connected()), 1)
+
+		// corrupt the version counter to a non-integer: every poll's
+		// GetNetworkPeerEventId now panics on the Int64 parse
+		server.Redis(ctx, func(r server.RedisClient) {
+			assert.Equal(t, r.Set(ctx, networkPeerEventIdKey(networkId), "not-a-number", 0).Err(), nil)
+		})
+
+		// the listener rides several failing polls without dying
+		select {
+		case <-time.After(2 * time.Second):
+		}
+
+		// recover: drop the corrupt counter (a legitimate reset). The next
+		// poll reads a missing (0) counter, mismatches its synced value, and
+		// resyncs from the intact registry — proving the listener survived the
+		// error window and still delivers.
+		clientId2 := server.NewId()
+		server.Redis(ctx, func(r server.RedisClient) {
+			assert.Equal(t, r.Del(ctx, networkPeerEventIdKey(networkId)).Err(), nil)
+		})
+		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId2}, server.NewId(), 60*time.Second)
+
+		select {
+		case <-time.After(3 * time.Second):
+		}
+		assert.Equal(t, len(c.Connected()), 2)
 	})
 }
 

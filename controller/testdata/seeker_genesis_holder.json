@@ -1,0 +1,34 @@
+[
+ {
+  "id": "GZAaAHHdc4MStPoAuujPKxVBX6Dde2EyUcmaAG4o7XC3",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "CFLrsWTz2YuSutSrdphgA4S7TqCqthkPEnACqArrtDRX"
+   }
+  ]
+ },
+ {
+  "id": "Ddzy3zEuXQQFxwvo3amSevdxvXHUsehh2QSVumXbn75h",
+  "grouping": [],
+  "mint_extensions": {
+   "metadata_pointer": {
+    "authority": "GT2zuHVaZQYZSyQMgJPLzvkmyztfyXg2NJunqFp4p3A4",
+    "metadata_address": "GT22s89nU4iWFkNXj1Bw6uYhJJWDRPpShHt4Bk8f99Te"
+   }
+  }
+ },
+ {
+  "id": "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3",
+  "grouping": []
+ },
+ {
+  "id": "DFKGR9TatmbdpSXfwJ8jFDU91gRwqJ4pDBgdPC5b82b",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "9MUuiC1RXVSciiUJxMV1cEpupzer1vEngAfUtECgtrFv"
+   }
+  ]
+ }
+]

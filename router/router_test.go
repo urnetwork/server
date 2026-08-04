@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -101,14 +101,25 @@ func TestRouterBasic(t *testing.T) {
 			NewRoute("POST", "/inputclient", InputClient),
 		}
 
-		port := 8080
-
 		routerHandler := NewRouter(ctx, routes)
-		go http.ListenAndServe(fmt.Sprintf(":%d", port), routerHandler)
-
-		select {
-		case <-time.After(time.Second):
+		listener, listenErr := net.Listen("tcp4", "127.0.0.1:0")
+		if listenErr != nil {
+			t.Fatalf("listen: %v", listenErr)
 		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		httpServer := &http.Server{Handler: routerHandler}
+		serveDone := make(chan error, 1)
+		go func() {
+			serveDone <- httpServer.Serve(listener)
+		}()
+		defer func() {
+			if err := httpServer.Close(); err != nil {
+				t.Errorf("close router server: %v", err)
+			}
+			if err := <-serveDone; err != nil && err != http.ErrServerClosed {
+				t.Errorf("serve router server: %v", err)
+			}
+		}()
 
 		networkId := server.NewId()
 		userId := server.NewId()

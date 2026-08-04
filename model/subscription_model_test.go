@@ -71,6 +71,22 @@ func TestNanoCents(t *testing.T) {
 	})
 }
 
+// planPassThroughPayments plans payments under a zero-subsidy copy of the env
+// config. These ledger tests assert payouts equal the contract revenue share
+// exactly; the local config keeps time-window subsidy accruals enabled
+// (subsidy.yml), and a subsidy landing in the plan shows up as an excess
+// proportional to the test's wall-clock runtime.
+func planPassThroughPayments(ctx context.Context) (*PaymentPlan, error) {
+	subsidyConfig := *EnvSubsidyConfig()
+	// MinPayoutUsd is a floor inside the planner's max(), so it must be
+	// zeroed too or it becomes the whole subsidy
+	subsidyConfig.MinPayoutUsd = 0
+	subsidyConfig.UsdPerActiveUser = 0
+	subsidyConfig.SubscriptionNetRevenueFraction = 0
+	subsidyConfig.ReliabilitySubsidyPerPayoutUsd = 0
+	return PlanPaymentsWithConfig(ctx, &subsidyConfig)
+}
+
 func TestEscrow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -205,7 +221,7 @@ func TestEscrow(t *testing.T) {
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan, err := PlanPayments(ctx)
+		paymentPlan, err := planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
 		connect.AssertEqual(t, paymentPlan.WithheldNetworkIds, []server.Id{destinationNetworkId})
@@ -234,7 +250,7 @@ func TestEscrow(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{destinationNetworkId})
 
@@ -284,7 +300,7 @@ func TestEscrow(t *testing.T) {
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
 
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{destinationNetworkId})
 
@@ -314,7 +330,7 @@ func TestEscrow(t *testing.T) {
 		}
 
 		// there shoud be no more payments
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
 	})
@@ -466,7 +482,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan, err := PlanPayments(ctx)
+		paymentPlan, err := planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
 		connect.AssertEqual(t, paymentPlan.WithheldNetworkIds, []server.Id{sourceNetworkId})
@@ -498,7 +514,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{sourceNetworkId})
 
@@ -565,7 +581,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		}
 		connect.AssertEqual(t, netBalanceByteCount, netTransferByteCount)
 
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{sourceNetworkId})
 
@@ -597,7 +613,7 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		// }
 
 		// there shoud be no more payments
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
 	})

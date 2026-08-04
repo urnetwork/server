@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -192,40 +193,73 @@ func ConnectControlFrames(
 ) ([]*protocol.Frame, error) {
 	netOutFrames := []*protocol.Frame{}
 
+	// Control frames in one pack are independent operations: the send side
+	// coalesces queued control messages (e.g. a burst of CloseContract syncs)
+	// into one pack, and the transfer layer acks the pack on delivery, so a
+	// frame skipped here is never retried by the sender. Aborting the batch on
+	// the first error therefore silently discarded every later operation — one
+	// benign duplicate close (e.g. "already closed" from a resent sync) leaked
+	// the remaining contracts' closes until the straggler reaper. Process every
+	// frame and report the joined errors.
+	var errs []error
+
 	for _, frame := range frames {
 		message, err := connect.FromFrame(frame)
 		if err != nil {
-			return netOutFrames, err
+			errs = append(errs, err)
+			continue
 		}
 
 		var outFrames []*protocol.Frame
 		err = nil
 
-		switch v := message.(type) {
-		case *protocol.CreateContract:
-			outFrames, err = CreateContract(ctx, clientId, v, contractManagerSettings)
-		case *protocol.CloseContract:
-			err = CloseContract(ctx, clientId, v)
-		case *protocol.Provide:
-			err = Provide(ctx, clientId, v)
-		case *protocol.EncryptedKey:
-			err = SetEncryptedKey(ctx, clientId, v)
-		case *protocol.ClientKey:
-			err = SetClientKey(ctx, clientId, v)
+		// The model layer raises db failures as panics (server.Raise). Two
+		// classes reach here:
+		// - a teardown race (this resident's ctx canceled mid-frame): the
+		//   frame must stay UN-acked so the sender's resend re-applies it
+		//   against a healthy resident — re-panic, which fails the delivery
+		//   before its ack (see ReceiveSequence.flushDeliver ownership).
+		// - a live-ctx failure that survived the db layer's own transient
+		//   retries: treat as this frame's error so one poison frame cannot
+		//   kill its batch siblings or resend-loop forever, and so it is
+		//   REPORTED (observed: silent bulk destination-party contract leaks
+		//   under chaos churn before this was surfaced).
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if ctx.Err() != nil {
+						panic(r)
+					}
+					err = fmt.Errorf("control frame %T panicked: %v", message, r)
+				}
+			}()
+			switch v := message.(type) {
+			case *protocol.CreateContract:
+				outFrames, err = CreateContract(ctx, clientId, v, contractManagerSettings)
+			case *protocol.CloseContract:
+				err = CloseContract(ctx, clientId, v)
+			case *protocol.Provide:
+				err = Provide(ctx, clientId, v)
+			case *protocol.EncryptedKey:
+				err = SetEncryptedKey(ctx, clientId, v)
+			case *protocol.ClientKey:
+				err = SetClientKey(ctx, clientId, v)
 
-		default:
-			err = fmt.Errorf("Cannot handle oob control message: %T", message)
-		}
+			default:
+				err = fmt.Errorf("Cannot handle oob control message: %T", message)
+			}
+		}()
 
 		if err != nil {
-			return netOutFrames, err
+			errs = append(errs, err)
+			continue
 		}
 		if 0 < len(outFrames) {
 			netOutFrames = append(netOutFrames, outFrames...)
 		}
 	}
 
-	return netOutFrames, nil
+	return netOutFrames, errors.Join(errs...)
 }
 
 func GetProvideModes(ctx context.Context, destinationId server.Id) map[model.ProvideMode]bool {

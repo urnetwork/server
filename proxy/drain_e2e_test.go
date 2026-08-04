@@ -31,18 +31,17 @@ func TestProxyDrainGraceful(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyDrainGraceful\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		// ---- establish a socks tunnel with a live keep-alive TLS session ----
 		dialer, err := xproxy.SOCKS5(
 			"tcp",
-			fmt.Sprintf("127.0.0.1:%d", InternalSocksPort),
+			fmt.Sprintf("127.0.0.1:%d", h.socksPort),
 			&xproxy.Auth{User: h.signedProxyId, Password: "x"},
 			xproxy.Direct,
 		)
@@ -118,11 +117,11 @@ func TestProxyDrainGraceful(t *testing.T) {
 		h.httpS.Drain()
 
 		// new connections are refused: the listeners are closed
-		if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", InternalSocksPort), 500*time.Millisecond); err == nil {
+		if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", h.socksPort), 500*time.Millisecond); err == nil {
 			c.Close()
 			t.Fatalf("socks dial after drain must be refused")
 		}
-		if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", InternalHttpsPort), 500*time.Millisecond); err == nil {
+		if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", h.httpsPort), 500*time.Millisecond); err == nil {
 			c.Close()
 			t.Fatalf("https dial after drain must be refused")
 		}

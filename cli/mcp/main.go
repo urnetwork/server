@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"flag"
+	"net"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/mcp"
+	"github.com/urnetwork/server/router"
 )
 
 const DrainTimeout = 60 * time.Second
@@ -69,7 +74,20 @@ func main() {
 		*port,
 	)
 
-	if err := runServer(ctx, *port); err != nil {
+	routes := mcp.Routes()
+
+	listenIpv4, _, listenPort := server.RequireListenIpPort(*port)
+
+	reusePort := false
+
+	err := server.HttpListenAndServeWithReusePort(
+		ctx,
+		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
+		router.NewRouter(ctx, routes),
+		reusePort,
+		mcp.HttpServerOptions(),
+	)
+	if err != nil {
 		glog.Fatalf("[mcp]Server failed: %v", err)
 	}
 	glog.Infof("[mcp]close\n")
