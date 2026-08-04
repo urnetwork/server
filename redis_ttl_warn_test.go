@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -55,4 +56,26 @@ func TestRedisCommandTtlWarning(t *testing.T) {
 	limitSeconds := int64(redisTtlWarnLimit / time.Second)
 	connect.AssertEqual(t, warns("expire", "k", limitSeconds), false)
 	connect.AssertEqual(t, warns("expire", "k", limitSeconds+1), true)
+}
+
+func TestRedisCommandTtlWarningAllowsAnnualNetEscrowExpiry(t *testing.T) {
+	now := time.Now()
+	key := fmt.Sprintf("{escrow_%s}net", NewId())
+	warning := redisCommandTtlWarning(
+		[]any{"expireat", key, now.Add(395 * 24 * time.Hour).Unix()},
+		now,
+	)
+
+	connect.AssertEqual(t, warning, "")
+}
+
+func TestRedisCommandTtlWarningRejectsMultiYearNetEscrowExpiry(t *testing.T) {
+	now := time.Now()
+	key := fmt.Sprintf("{escrow_%s}net", NewId())
+	warning := redisCommandTtlWarning(
+		[]any{"expireat", key, now.Add(401 * 24 * time.Hour).Unix()},
+		now,
+	)
+
+	connect.AssertNotEqual(t, warning, "")
 }

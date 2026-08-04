@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -96,24 +97,108 @@ const reliabilitySwapTailMaxBlocks = int64(120)
 // the maintenance pool and is dropped after the swap.
 const reliabilityCopyProgressTable = "client_reliability_copy_progress"
 
-const clientReliabilityColumnList = `
-    block_number,
-    client_address_hash,
-    network_id,
-    client_id,
-    connection_new_count,
-    connection_established_count,
-    provide_enabled_count,
-    provide_changed_count,
-    receive_message_count,
-    receive_byte_count,
-    send_message_count,
-    send_byte_count,
-    valid`
-
 // matches only partitions this code created; anything else attached to the
 // parent is left alone by the drop pass
 var clientReliabilityPartitionNamePattern = regexp.MustCompile(`^client_reliability_p([0-9]{8})$`)
+
+// clientReliabilityColumn is the catalog-derived shape of one migration
+// column. The shape is compared before a resumable copy can continue.
+type clientReliabilityColumn struct {
+	quotedName        string
+	typeName          string
+	notNull           bool
+	generated         string
+	defaultExpression string
+}
+
+// readClientReliabilityColumns returns the complete, ordered user-column
+// schema. The partition cutover must copy every source column: a hand-maintained
+// subset silently became stale when connection_excused_new_count was added.
+func readClientReliabilityColumns(ctx context.Context, table string) []clientReliabilityColumn {
+	columns := []clientReliabilityColumn{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				quote_ident(a.attname),
+				format_type(a.atttypid, a.atttypmod),
+				a.attnotnull,
+				a.attgenerated::text,
+				COALESCE(pg_get_expr(d.adbin, d.adrelid), '')
+			FROM pg_attribute a
+			LEFT JOIN pg_attrdef d
+				ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+			WHERE
+				a.attrelid = to_regclass($1) AND
+				a.attnum > 0 AND
+				NOT a.attisdropped
+			ORDER BY a.attnum
+			`,
+			"public."+table,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var column clientReliabilityColumn
+				server.Raise(result.Scan(
+					&column.quotedName,
+					&column.typeName,
+					&column.notNull,
+					&column.generated,
+					&column.defaultExpression,
+				))
+				columns = append(columns, column)
+			}
+		})
+	})
+	return columns
+}
+
+// clientReliabilityCopyColumnList verifies that an existing resumable staging
+// table still has the exact source schema, then derives the INSERT/SELECT list
+// from that schema. If a deploy adds a source column after a partial migration,
+// resuming old progress would skip already-copied values for that column; fail
+// explicitly instead of accepting silent data loss.
+func clientReliabilityCopyColumnList(ctx context.Context) (string, error) {
+	sourceColumns := readClientReliabilityColumns(ctx, clientReliabilityTable)
+	stagingColumns := readClientReliabilityColumns(ctx, clientReliabilityStagingTable)
+	if len(sourceColumns) == 0 {
+		return "", fmt.Errorf("%s has no columns", clientReliabilityTable)
+	}
+	if !slices.Equal(sourceColumns, stagingColumns) {
+		return "", fmt.Errorf(
+			"%s schema differs from %s; drop %s and %s, then rerun the migration",
+			clientReliabilityStagingTable,
+			clientReliabilityTable,
+			clientReliabilityStagingTable,
+			reliabilityCopyProgressTable,
+		)
+	}
+	columnNames := make([]string, 0, len(sourceColumns))
+	for _, column := range sourceColumns {
+		columnNames = append(columnNames, column.quotedName)
+	}
+	return strings.Join(columnNames, ", "), nil
+}
+
+// createClientReliabilityStagingTable clones the canonical live column schema
+// so later counter additions cannot be omitted from the partitioned replacement.
+// Indexes are deliberately excluded: the primary key is required for idempotent
+// copy, while the large secondary index is built once after the bulk load.
+func createClientReliabilityStagingTable(ctx context.Context) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
+			`
+			CREATE TABLE %s (
+				LIKE %s INCLUDING DEFAULTS INCLUDING GENERATED,
+				PRIMARY KEY (block_number, client_address_hash, client_id)
+			) PARTITION BY RANGE (block_number)
+			`,
+			clientReliabilityStagingTable,
+			clientReliabilityTable,
+		)))
+	})
+}
 
 func reliabilityPartitionDay(blockNumber int64) int64 {
 	return blockNumber / reliabilityBlocksPerDay
@@ -342,6 +427,7 @@ func copyClientReliabilityParallel(
 	minBlockNumber int64,
 	maxBlockNumber int64,
 	parallelism int,
+	columnList string,
 	logf func(string, ...any),
 ) error {
 	done := loadClientReliabilityDoneChunks(ctx, minBlockNumber, maxBlockNumber)
@@ -368,8 +454,8 @@ func copyClientReliabilityParallel(
 		ON CONFLICT DO NOTHING
 		`,
 		clientReliabilityStagingTable,
-		clientReliabilityColumnList,
-		clientReliabilityColumnList,
+		columnList,
+		columnList,
 		clientReliabilityTable,
 	)
 	progressSql := fmt.Sprintf(`INSERT INTO %s (chunk_lo) VALUES ($1) ON CONFLICT DO NOTHING`, reliabilityCopyProgressTable)
@@ -457,7 +543,12 @@ func copyClientReliabilityParallel(
 // This is one large transaction (bounded by max_wal_size + checkpointing, no
 // replica); it is not resumable mid-INSERT, but re-running re-scans and skips
 // duplicates via ON CONFLICT, so it is idempotent.
-func copyClientReliabilityOneshot(ctx context.Context, cutoffBlock int64, logf func(string, ...any)) (copiedThrough int64) {
+func copyClientReliabilityOneshot(
+	ctx context.Context,
+	cutoffBlock int64,
+	columnList string,
+	logf func(string, ...any),
+) (copiedThrough int64) {
 	// ON CONFLICT DO NOTHING (needed only to skip rows a prior partial run
 	// already copied) is parallel-restricted in Postgres — it forces a serial
 	// INSERT. When the staging table is empty (the common case: a fresh copy,
@@ -487,8 +578,8 @@ func copyClientReliabilityOneshot(ctx context.Context, cutoffBlock int64, logf f
 				%s
 				`,
 				clientReliabilityStagingTable,
-				clientReliabilityColumnList,
-				clientReliabilityColumnList,
+				columnList,
+				columnList,
 				clientReliabilityTable,
 				onConflict,
 			),
@@ -647,36 +738,12 @@ func MigrateClientReliabilityToPartitions(
 	}
 
 	if !stagingExists {
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
-				`
-				CREATE TABLE %s (
-				    block_number bigint NOT NULL,
-				    client_address_hash bytea NOT NULL,
-				    network_id uuid NOT NULL,
-				    client_id uuid NOT NULL,
-				    connection_new_count bigint NOT NULL DEFAULT 0,
-				    connection_established_count bigint NOT NULL DEFAULT 0,
-				    provide_enabled_count bigint NOT NULL DEFAULT 0,
-				    provide_changed_count bigint NOT NULL DEFAULT 0,
-				    receive_message_count bigint NOT NULL DEFAULT 0,
-				    receive_byte_count bigint NOT NULL DEFAULT 0,
-				    send_message_count bigint NOT NULL DEFAULT 0,
-				    send_byte_count bigint NOT NULL DEFAULT 0,
-				    valid bool,
-
-				    PRIMARY KEY (block_number, client_address_hash, client_id)
-				) PARTITION BY RANGE (block_number)
-				`,
-				clientReliabilityStagingTable,
-			)))
-			// The secondary index (valid, block_number, client_address_hash) —
-			// which the score queries' valid_counts subquery streams off in index
-			// order — is built AFTER the bulk copy (deferred), not here: a sorted
-			// one-shot build is far cheaper than maintaining it row-by-row across
-			// the whole copy. See buildClientReliabilitySecondaryIndex.
-		})
+		createClientReliabilityStagingTable(ctx)
 		logf("created staging partitioned table %s (secondary index deferred)", clientReliabilityStagingTable)
+	}
+	columnList, err := clientReliabilityCopyColumnList(ctx)
+	if err != nil {
+		return err
 	}
 
 	createdCount := 0
@@ -692,7 +759,7 @@ func MigrateClientReliabilityToPartitions(
 		// One-shot: a single sequential-scan INSERT of the whole retained range,
 		// needing no source index. Use after DROP CONSTRAINT has freed the source
 		// PK in a disk emergency. Drain offline => static source, no live tail.
-		copiedThrough = copyClientReliabilityOneshot(ctx, cutoffBlock, logf)
+		copiedThrough = copyClientReliabilityOneshot(ctx, cutoffBlock, columnList, logf)
 	} else {
 		// Parallel bulk copy into the staging partitions, chasing the drain
 		// high-water mark until the remaining tail is small. Everything at or below
@@ -710,7 +777,7 @@ func MigrateClientReliabilityToPartitions(
 				if mark+1-copiedThrough <= reliabilitySwapTailMaxBlocks {
 					break
 				}
-				if err := copyClientReliabilityParallel(ctx, cutoffBlock, mark+1, parallelism, logf); err != nil {
+				if err := copyClientReliabilityParallel(ctx, cutoffBlock, mark+1, parallelism, columnList, logf); err != nil {
 					return err
 				}
 				copiedThrough = mark + 1
@@ -720,7 +787,7 @@ func MigrateClientReliabilityToPartitions(
 			// present range in parallel; the locked tail below is then empty.
 			logf("no drain high-water mark: copying the full present range (idle/small table)")
 			if maxBlock, ok := maxClientReliabilitySourceBlock(ctx); ok && cutoffBlock <= maxBlock {
-				if err := copyClientReliabilityParallel(ctx, cutoffBlock, maxBlock+1, parallelism, logf); err != nil {
+				if err := copyClientReliabilityParallel(ctx, cutoffBlock, maxBlock+1, parallelism, columnList, logf); err != nil {
 					return err
 				}
 				copiedThrough = maxBlock + 1
@@ -739,7 +806,7 @@ func MigrateClientReliabilityToPartitions(
 		if IsClientReliabilityPartitioned(ctx) {
 			break
 		}
-		err := attemptClientReliabilityPartitionSwap(ctx, copiedThrough)
+		err := attemptClientReliabilityPartitionSwap(ctx, copiedThrough, columnList)
 		if err == nil {
 			break
 		}
@@ -792,7 +859,7 @@ func MigrateClientReliabilityToPartitions(
 // >= tailFrom, then rename the plain table aside and the staging table into
 // place (with its pk constraint and secondary index taking the canonical
 // names). Returns rather than panics so the caller can retry lock timeouts.
-func attemptClientReliabilityPartitionSwap(ctx context.Context, tailFrom int64) (err error) {
+func attemptClientReliabilityPartitionSwap(ctx context.Context, tailFrom int64, columnList string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if e, ok := r.(error); ok {
@@ -850,10 +917,10 @@ func attemptClientReliabilityPartitionSwap(ctx context.Context, tailFrom int64) 
 				FROM %s
 				WHERE block_number >= $1
 				ON CONFLICT DO NOTHING
-				`,
+					`,
 				clientReliabilityStagingTable,
-				clientReliabilityColumnList,
-				clientReliabilityColumnList,
+				columnList,
+				columnList,
 				clientReliabilityTable,
 			),
 			tailFrom,

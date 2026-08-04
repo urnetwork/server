@@ -48,9 +48,17 @@ func (self *windowIdentityStore) StoreWindowClientIdentities(identities []*conne
 }
 
 func (self *windowIdentityStore) LoadWindowClientIdentities() []*connect.WindowClientIdentity {
+	return self.LoadWindowClientIdentitiesContext(self.ctx)
+}
+
+// LoadWindowClientIdentitiesContext lets multi-client's optional restoration
+// deadline cancel the Redis command itself. The legacy method above retains
+// compatibility for callers that do not provide a narrower maintenance
+// context.
+func (self *windowIdentityStore) LoadWindowClientIdentitiesContext(ctx context.Context) []*connect.WindowClientIdentity {
 	var modelIdentities []*model.ProxyWindowClientIdentity
 	if r := server.HandleError(func() {
-		modelIdentities = model.GetProxyWindowIdentities(self.ctx, self.proxyId)
+		modelIdentities = model.GetProxyWindowIdentities(ctx, self.proxyId)
 	}); r != nil {
 		glog.Infof("[pd][%s]window identity load err=%v\n", self.proxyId, r)
 		return nil

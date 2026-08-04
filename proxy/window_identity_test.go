@@ -20,13 +20,12 @@ func TestProxyWindowIdentityReuse(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// see TestProxy: fixed ports cannot be rebound on a rerun in the same process
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		fmt.Printf("[progress]start TestProxyWindowIdentityReuse\n")
 		h := setupProxyTest(t)
-		defer h.cancel()
+		defer h.close(t)
 
 		// the device is ready (setup warmed it), so its window has formed and
 		// the identity snapshot is persisted. The window may run more than

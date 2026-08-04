@@ -1,0 +1,9 @@
+# build + run artifacts
+sim-latency
+eval-48g/
+.sim-site/
+baseline-runs/
+baseline*.json
+run.json
+*.csv
+providers.yml

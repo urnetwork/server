@@ -6,15 +6,17 @@
 # It:
 #   1. reads the postgres/redis credentials + ports from vault/local/{pg,redis}.yml
 #      (the single source of truth),
-#   2. adds a dedicated loopback-alias IP (LOCAL_HOST_IP, default 10.213.0.1) to
+#   2. on Linux, temporarily widens the ephemeral TCP port range and listen
+#      queues for full-scale local load simulations,
+#   3. adds a dedicated loopback-alias IP (LOCAL_HOST_IP, default 10.213.0.1) to
 #      the loopback interface -- deliberately NOT 127.0.0.1 (see SAFETY below),
-#   3. points  local-pg.bringyour.com / local-redis.bringyour.com  at that IP in
+#   4. points  local-pg.bringyour.com / local-redis.bringyour.com  at that IP in
 #      /etc/hosts for as long as this script runs,
-#   4. starts postgres + redis on a dedicated docker network, publishing their
+#   5. starts postgres + redis on a dedicated docker network, publishing their
 #      ports on LOCAL_HOST_IP,
-#   5. blocks in the foreground streaming container logs, and
-#   6. on exit (Ctrl-C or otherwise) restores /etc/hosts, stops the containers,
-#      and removes the loopback alias.
+#   6. blocks in the foreground streaming container logs, and
+#   7. on exit (Ctrl-C or otherwise) restores the port range and /etc/hosts,
+#      stops the containers, and removes the loopback alias.
 #
 # SAFETY: the local hostnames must never resolve to 127.0.0.1. Tests create and
 # DROP databases, and a tunnel to a real (prod) database commonly listens on
@@ -27,9 +29,10 @@
 # (test.sh already exports WARP_ENV=local and the BRINGYOUR_*_HOSTNAME vars that
 # match the /etc/hosts aliases below.)
 #
-# Editing /etc/hosts and the loopback interface needs root, so the script uses
-# `sudo` for just those operations (docker itself runs as you); you'll be
-# prompted for your password once.
+# Editing /etc/hosts and the loopback interface needs root. On Linux the script
+# also runs Docker through `sudo` because access to the daemon socket is commonly
+# root-only; Docker Desktop on macOS continues to run as the current user.
+# You'll be prompted for your password once.
 #
 # Flags:
 #   --fresh      wipe the postgres data volume first (forces DB re-init)
@@ -41,7 +44,7 @@ set -euo pipefail
 die() { printf 'run-local.sh: %s\n' "$*" >&2; exit 1; }
 log() { printf '\033[1;34m[run-local]\033[0m %s\n' "$*"; }
 
-usage() { sed -n '2,46p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'; }
+usage() { sed -n '2,/^$/p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
 FRESH=0
 KEEP_UP=0
@@ -60,6 +63,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 SERVER_DIR="$(cd -- "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 URNETWORK_HOME="$(cd -- "$SERVER_DIR/.." >/dev/null 2>&1 && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+OS="$(uname -s)"
 
 WARP_ENV="${WARP_ENV:-local}"
 # Prefer explicit warp overrides, else $WARP_HOME/vault, else the repo layout.
@@ -131,11 +135,27 @@ export POSTGRES_SUPERUSER_PASSWORD="${POSTGRES_SUPERUSER_PASSWORD:-postgres}"
 # --- docker / compose plumbing ----------------------------------------------
 
 command -v docker >/dev/null 2>&1 || die "docker not found on PATH"
-docker info >/dev/null 2>&1 || die "the docker daemon is not running"
-if docker compose version >/dev/null 2>&1; then
-  DC=(docker compose)
+DOCKER=(docker)
+COMPOSE_ENV_VARS="APP_DB_USER,APP_DB_PASSWORD,APP_DB_NAME,POSTGRES_PORT,REDIS_PORT,LOCAL_BIND_IP,LOCAL_DOCKER_SUBNET,POSTGRES_SUPERUSER_PASSWORD"
+if [[ "$OS" == Linux ]]; then
+  DOCKER=(sudo docker)
+fi
+
+"${DOCKER[@]}" info >/dev/null || die "the docker daemon is not running or is not accessible"
+if "${DOCKER[@]}" compose version >/dev/null 2>&1; then
+  if [[ "$OS" == Linux ]]; then
+    # sudo normally strips the values exported above, but Compose needs them
+    # while interpolating docker-compose.yml. Preserve only that narrow set.
+    DC=(sudo "--preserve-env=$COMPOSE_ENV_VARS" docker compose)
+  else
+    DC=(docker compose)
+  fi
 elif command -v docker-compose >/dev/null 2>&1; then
-  DC=(docker-compose)
+  if [[ "$OS" == Linux ]]; then
+    DC=(sudo "--preserve-env=$COMPOSE_ENV_VARS" docker-compose)
+  else
+    DC=(docker-compose)
+  fi
 else
   die "neither 'docker compose' nor 'docker-compose' is available"
 fi
@@ -147,7 +167,7 @@ REDIS_CONTAINER=urnetwork-local-redis
 wait_healthy() { # wait_healthy CONTAINER TIMEOUT_SECONDS
   local c="$1" timeout="$2" i=0 status
   while :; do
-    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$c" 2>/dev/null || echo missing)"
+    status="$("${DOCKER[@]}" inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$c" 2>/dev/null || echo missing)"
     [[ "$status" == healthy ]] && return 0
     i=$((i + 1))
     [[ "$i" -ge "$timeout" ]] && { log "$c did not become healthy (last status: $status)"; return 1; }
@@ -174,9 +194,187 @@ verify_reachable() { # confirm the dedicated address actually serves the DBs
   return 1
 }
 
+# --- Linux ephemeral ports (full-scale loopback load) -----------------------
+
+# A connection is identified by its local/remote address+port tuple. The Linux
+# default range (commonly 32768-60999) contains only 28,232 source ports, but a
+# full sim-latency run can hold 30,000 Redis connections to one destination.
+# Widen the range while the local environment is active, then restore exactly
+# what was present when the script started.
+EPHEMERAL_PORT_LOW="${LOCAL_EPHEMERAL_PORT_LOW:-10240}"
+EPHEMERAL_PORT_HIGH="${LOCAL_EPHEMERAL_PORT_HIGH:-65535}"
+[[ "$EPHEMERAL_PORT_LOW" =~ ^[0-9]+$ ]] ||
+  die "LOCAL_EPHEMERAL_PORT_LOW must be an integer"
+[[ "$EPHEMERAL_PORT_HIGH" =~ ^[0-9]+$ ]] ||
+  die "LOCAL_EPHEMERAL_PORT_HIGH must be an integer"
+(( EPHEMERAL_PORT_LOW >= 1024 && EPHEMERAL_PORT_LOW < EPHEMERAL_PORT_HIGH && EPHEMERAL_PORT_HIGH <= 65535 )) ||
+  die "invalid ephemeral port range: $EPHEMERAL_PORT_LOW $EPHEMERAL_PORT_HIGH"
+
+EPHEMERAL_RANGE_ORIGINAL=""
+EPHEMERAL_RANGE_APPLIED=""
+EPHEMERAL_RANGE_CHANGED=0
+
+configure_ephemeral_range() {
+  [[ "$OS" == Linux ]] || return 0
+  local current_low current_high
+  read -r current_low current_high < /proc/sys/net/ipv4/ip_local_port_range
+  if (( current_low <= EPHEMERAL_PORT_LOW && EPHEMERAL_PORT_HIGH <= current_high )); then
+    log "ephemeral TCP range already sufficient: $current_low $current_high"
+    return 0
+  fi
+  EPHEMERAL_RANGE_ORIGINAL="$current_low $current_high"
+  EPHEMERAL_RANGE_APPLIED="$EPHEMERAL_PORT_LOW $EPHEMERAL_PORT_HIGH"
+  sudo sysctl -q -w "net.ipv4.ip_local_port_range=$EPHEMERAL_RANGE_APPLIED"
+  EPHEMERAL_RANGE_CHANGED=1
+  read -r current_low current_high < /proc/sys/net/ipv4/ip_local_port_range
+  [[ "$current_low $current_high" == "$EPHEMERAL_RANGE_APPLIED" ]] ||
+    die "failed to set ephemeral TCP range to $EPHEMERAL_RANGE_APPLIED"
+  log "widened ephemeral TCP range: $EPHEMERAL_RANGE_ORIGINAL -> $EPHEMERAL_RANGE_APPLIED"
+}
+
+restore_ephemeral_range() {
+  [[ "$EPHEMERAL_RANGE_CHANGED" == 1 ]] || return 0
+  local current_low current_high
+  read -r current_low current_high < /proc/sys/net/ipv4/ip_local_port_range
+  if [[ "$current_low $current_high" != "$EPHEMERAL_RANGE_APPLIED" ]]; then
+    log "warning: ephemeral TCP range changed externally; leaving $current_low $current_high in place"
+    return 0
+  fi
+  sudo sysctl -q -w "net.ipv4.ip_local_port_range=$EPHEMERAL_RANGE_ORIGINAL"
+}
+
+# A burst of tens of thousands of simulator connections can also overflow the
+# kernel's default 4,096-entry accept/SYN queues before Redis has a chance to
+# accept them. Match the Redis tcp-backlog configured in docker-compose.yml.
+TCP_LISTEN_BACKLOG="${LOCAL_TCP_LISTEN_BACKLOG:-65535}"
+NETDEV_MAX_BACKLOG="${LOCAL_NETDEV_MAX_BACKLOG:-65535}"
+NF_CONNTRACK_MAX="${LOCAL_NF_CONNTRACK_MAX:-1048576}"
+[[ "$TCP_LISTEN_BACKLOG" =~ ^[0-9]+$ ]] ||
+  die "LOCAL_TCP_LISTEN_BACKLOG must be an integer"
+(( TCP_LISTEN_BACKLOG >= 4096 && TCP_LISTEN_BACKLOG <= 65535 )) ||
+  die "invalid LOCAL_TCP_LISTEN_BACKLOG: $TCP_LISTEN_BACKLOG"
+[[ "$NETDEV_MAX_BACKLOG" =~ ^[0-9]+$ ]] ||
+  die "LOCAL_NETDEV_MAX_BACKLOG must be an integer"
+(( NETDEV_MAX_BACKLOG >= 1000 && NETDEV_MAX_BACKLOG <= 1048576 )) ||
+  die "invalid LOCAL_NETDEV_MAX_BACKLOG: $NETDEV_MAX_BACKLOG"
+[[ "$NF_CONNTRACK_MAX" =~ ^[0-9]+$ ]] ||
+  die "LOCAL_NF_CONNTRACK_MAX must be an integer"
+(( NF_CONNTRACK_MAX >= 262144 && NF_CONNTRACK_MAX <= 8388608 )) ||
+  die "invalid LOCAL_NF_CONNTRACK_MAX: $NF_CONNTRACK_MAX"
+
+SOMAXCONN_ORIGINAL=""
+SOMAXCONN_APPLIED=""
+SOMAXCONN_CHANGED=0
+SYN_BACKLOG_ORIGINAL=""
+SYN_BACKLOG_APPLIED=""
+SYN_BACKLOG_CHANGED=0
+NETDEV_BACKLOG_ORIGINAL=""
+NETDEV_BACKLOG_APPLIED=""
+NETDEV_BACKLOG_CHANGED=0
+CONNTRACK_MAX_ORIGINAL=""
+CONNTRACK_MAX_APPLIED=""
+CONNTRACK_MAX_CHANGED=0
+
+configure_tcp_backlogs() {
+  [[ "$OS" == Linux ]] || return 0
+  local current
+
+  current="$(sysctl -n net.core.somaxconn)"
+  if (( current < TCP_LISTEN_BACKLOG )); then
+    SOMAXCONN_ORIGINAL="$current"
+    SOMAXCONN_APPLIED="$TCP_LISTEN_BACKLOG"
+    sudo sysctl -q -w "net.core.somaxconn=$SOMAXCONN_APPLIED"
+    SOMAXCONN_CHANGED=1
+    [[ "$(sysctl -n net.core.somaxconn)" == "$SOMAXCONN_APPLIED" ]] ||
+      die "failed to set net.core.somaxconn to $SOMAXCONN_APPLIED"
+    log "raised TCP accept queue: $SOMAXCONN_ORIGINAL -> $SOMAXCONN_APPLIED"
+  else
+    log "TCP accept queue already sufficient: $current"
+  fi
+
+  current="$(sysctl -n net.ipv4.tcp_max_syn_backlog)"
+  if (( current < TCP_LISTEN_BACKLOG )); then
+    SYN_BACKLOG_ORIGINAL="$current"
+    SYN_BACKLOG_APPLIED="$TCP_LISTEN_BACKLOG"
+    sudo sysctl -q -w "net.ipv4.tcp_max_syn_backlog=$SYN_BACKLOG_APPLIED"
+    SYN_BACKLOG_CHANGED=1
+    [[ "$(sysctl -n net.ipv4.tcp_max_syn_backlog)" == "$SYN_BACKLOG_APPLIED" ]] ||
+      die "failed to set net.ipv4.tcp_max_syn_backlog to $SYN_BACKLOG_APPLIED"
+    log "raised TCP SYN queue: $SYN_BACKLOG_ORIGINAL -> $SYN_BACKLOG_APPLIED"
+  else
+    log "TCP SYN queue already sufficient: $current"
+  fi
+
+  current="$(sysctl -n net.core.netdev_max_backlog)"
+  if (( current < NETDEV_MAX_BACKLOG )); then
+    NETDEV_BACKLOG_ORIGINAL="$current"
+    NETDEV_BACKLOG_APPLIED="$NETDEV_MAX_BACKLOG"
+    sudo sysctl -q -w "net.core.netdev_max_backlog=$NETDEV_BACKLOG_APPLIED"
+    NETDEV_BACKLOG_CHANGED=1
+    [[ "$(sysctl -n net.core.netdev_max_backlog)" == "$NETDEV_BACKLOG_APPLIED" ]] ||
+      die "failed to set net.core.netdev_max_backlog to $NETDEV_BACKLOG_APPLIED"
+    log "raised network device backlog: $NETDEV_BACKLOG_ORIGINAL -> $NETDEV_BACKLOG_APPLIED"
+  else
+    log "network device backlog already sufficient: $current"
+  fi
+
+  current="$(sysctl -n net.netfilter.nf_conntrack_max)"
+  if (( current < NF_CONNTRACK_MAX )); then
+    CONNTRACK_MAX_ORIGINAL="$current"
+    CONNTRACK_MAX_APPLIED="$NF_CONNTRACK_MAX"
+    sudo sysctl -q -w "net.netfilter.nf_conntrack_max=$CONNTRACK_MAX_APPLIED"
+    CONNTRACK_MAX_CHANGED=1
+    [[ "$(sysctl -n net.netfilter.nf_conntrack_max)" == "$CONNTRACK_MAX_APPLIED" ]] ||
+      die "failed to set net.netfilter.nf_conntrack_max to $CONNTRACK_MAX_APPLIED"
+    log "raised conntrack capacity: $CONNTRACK_MAX_ORIGINAL -> $CONNTRACK_MAX_APPLIED"
+  else
+    log "conntrack capacity already sufficient: $current"
+  fi
+}
+
+restore_tcp_backlogs() {
+  local current count
+  if [[ "$CONNTRACK_MAX_CHANGED" == 1 ]]; then
+    current="$(sysctl -n net.netfilter.nf_conntrack_max)"
+    if [[ "$current" == "$CONNTRACK_MAX_APPLIED" ]]; then
+      count="$(sysctl -n net.netfilter.nf_conntrack_count)"
+      if (( count <= CONNTRACK_MAX_ORIGINAL )); then
+        sudo sysctl -q -w "net.netfilter.nf_conntrack_max=$CONNTRACK_MAX_ORIGINAL"
+      else
+        log "warning: conntrack still holds $count entries; leaving capacity $current in place"
+      fi
+    else
+      log "warning: conntrack capacity changed externally; leaving $current in place"
+    fi
+  fi
+  if [[ "$NETDEV_BACKLOG_CHANGED" == 1 ]]; then
+    current="$(sysctl -n net.core.netdev_max_backlog)"
+    if [[ "$current" == "$NETDEV_BACKLOG_APPLIED" ]]; then
+      sudo sysctl -q -w "net.core.netdev_max_backlog=$NETDEV_BACKLOG_ORIGINAL"
+    else
+      log "warning: network device backlog changed externally; leaving $current in place"
+    fi
+  fi
+  if [[ "$SYN_BACKLOG_CHANGED" == 1 ]]; then
+    current="$(sysctl -n net.ipv4.tcp_max_syn_backlog)"
+    if [[ "$current" == "$SYN_BACKLOG_APPLIED" ]]; then
+      sudo sysctl -q -w "net.ipv4.tcp_max_syn_backlog=$SYN_BACKLOG_ORIGINAL"
+    else
+      log "warning: TCP SYN queue changed externally; leaving $current in place"
+    fi
+  fi
+  if [[ "$SOMAXCONN_CHANGED" == 1 ]]; then
+    current="$(sysctl -n net.core.somaxconn)"
+    if [[ "$current" == "$SOMAXCONN_APPLIED" ]]; then
+      sudo sysctl -q -w "net.core.somaxconn=$SOMAXCONN_ORIGINAL"
+    else
+      log "warning: TCP accept queue changed externally; leaving $current in place"
+    fi
+  fi
+}
+
 # --- loopback alias (host reachability, cross-platform) ----------------------
 
-OS="$(uname -s)"
 loopback_alias() { # loopback_alias add|del
   case "$OS" in
     Darwin)
@@ -267,6 +465,14 @@ cleanup() {
     log "removing loopback alias $LOCAL_HOST_IP"
     loopback_alias del || true
   fi
+  if [[ "$EPHEMERAL_RANGE_CHANGED" == 1 ]]; then
+    log "restoring ephemeral TCP range $EPHEMERAL_RANGE_ORIGINAL"
+    restore_ephemeral_range || log "warning: failed to restore ephemeral TCP range $EPHEMERAL_RANGE_ORIGINAL"
+  fi
+  if [[ "$CONNTRACK_MAX_CHANGED" == 1 || "$NETDEV_BACKLOG_CHANGED" == 1 || "$SYN_BACKLOG_CHANGED" == 1 || "$SOMAXCONN_CHANGED" == 1 ]]; then
+    log "restoring Linux network queue and conntrack limits"
+    restore_tcp_backlogs || log "warning: failed to restore Linux network queue/conntrack limits"
+  fi
   [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
   rm -f "$HOSTS_BACKUP"
 }
@@ -282,10 +488,13 @@ log "redis:    $REDIS_HOST -> $LOCAL_HOST_IP:$REDIS_PORT"
 
 # Prime sudo up front and keep the credential warm so the edits (and the
 # restore-on-exit) don't block waiting for a password.
-log "requesting sudo (needed only for /etc/hosts and the loopback alias)"
-sudo -v || die "sudo is required to edit $HOSTS_FILE and the loopback interface"
+log "requesting sudo (needed for Docker on Linux, /etc/hosts, host networking, and the loopback alias)"
+sudo -v || die "sudo is required for Docker on Linux, $HOSTS_FILE, host networking, and the loopback interface"
 ( while kill -0 "$MAIN_PID" 2>/dev/null; do sudo -n true 2>/dev/null || exit; sleep 30; done ) &
 SUDO_KEEPALIVE_PID=$!
+
+configure_ephemeral_range
+configure_tcp_backlogs
 
 if [[ "$FRESH" == 1 ]]; then
   log "wiping existing volumes (--fresh)"
@@ -322,6 +531,9 @@ cat <<INFO
     redis     ${REDIS_HOST}:${REDIS_PORT}  ->  ${LOCAL_HOST_IP}:${REDIS_PORT}
 
   Addresses resolve to ${LOCAL_HOST_IP} (a dedicated loopback alias, never 127.0.0.1).
+  Linux ephemeral TCP range: $(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || echo "platform default")
+  Linux TCP accept/SYN queues: $(sysctl -n net.core.somaxconn 2>/dev/null || echo "platform default") / $(sysctl -n net.ipv4.tcp_max_syn_backlog 2>/dev/null || echo "platform default")
+  Linux netdev backlog / conntrack max: $(sysctl -n net.core.netdev_max_backlog 2>/dev/null || echo "platform default") / $(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo "platform default")
 
   Run tests from another terminal (server/):  ./test.sh -run TestName
   Stop everything: press Ctrl-C here (restores ${HOSTS_FILE} and removes the alias).

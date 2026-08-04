@@ -3,6 +3,7 @@ package connect
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -27,21 +28,22 @@ type peerDiscoveryEnv struct {
 
 	port        int
 	exchange    *Exchange
+	handler     *ConnectHandler
 	httpServer  *http.Server
 	networkId   server.Id
 	userId      server.Id
 	userSession *session.ClientSession
 }
 
-func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB, port int, servicePort int) *peerDiscoveryEnv {
-	return testing_newPeerDiscoveryEnvWithSettings(ctx, t, port, servicePort, nil)
+func testing_newPeerDiscoveryEnv(ctx context.Context, t testing.TB) *peerDiscoveryEnv {
+	return testing_newPeerDiscoveryEnvWithSettings(ctx, t, nil)
 }
 
-func testing_newPeerDiscoveryEnvWithSettings(ctx context.Context, t testing.TB, port int, servicePort int, mutateExchangeSettings func(*ExchangeSettings)) *peerDiscoveryEnv {
-	return testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, port, servicePort, mutateExchangeSettings, nil)
+func testing_newPeerDiscoveryEnvWithSettings(ctx context.Context, t testing.TB, mutateExchangeSettings func(*ExchangeSettings)) *peerDiscoveryEnv {
+	return testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, mutateExchangeSettings, nil)
 }
 
-func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.TB, port int, servicePort int, mutateExchangeSettings func(*ExchangeSettings), mutateHandlerSettings func(*ConnectHandlerSettings)) *peerDiscoveryEnv {
+func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.TB, mutateExchangeSettings func(*ExchangeSettings), mutateHandlerSettings func(*ConnectHandlerSettings)) *peerDiscoveryEnv {
 	os.Setenv("WARP_SERVICE", "test")
 	os.Setenv("WARP_BLOCK", "test")
 
@@ -66,12 +68,31 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 	if mutateExchangeSettings != nil {
 		mutateExchangeSettings(exchangeSettings)
 	}
+	exchangeListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("peer discovery exchange listener: %v", err)
+	}
+	servicePort := exchangeListener.Addr().(*net.TCPAddr).Port
 	hostToServicePorts := map[int]int{servicePort: servicePort}
-	exchange := NewExchange(ctx, host, service, block, hostToServicePorts, routes, exchangeSettings)
+	exchange := NewExchangeWithListeners(
+		ctx,
+		host,
+		service,
+		block,
+		hostToServicePorts,
+		routes,
+		exchangeSettings,
+		map[int]net.Listener{servicePort: exchangeListener},
+	)
 
+	httpListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("peer discovery listener: %v", err)
+	}
+	port := httpListener.Addr().(*net.TCPAddr).Port
 	handlerSettings := DefaultConnectHandlerSettings()
-	handlerSettings.ListenH3Port = port + 443
-	handlerSettings.ListenDnsPort = port + 53
+	handlerSettings.ListenH3Port = 0
+	handlerSettings.ListenDnsPort = 0
 	handlerSettings.EnableProxyProtocol = false
 	handlerSettings.TransportTlsSettings.EnableSelfSign = true
 	handlerSettings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
@@ -98,20 +119,18 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 		router.NewRoute("GET", "/", connectHandler.Connect),
 	}
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
 		Handler: router.NewRouter(ctx, httpRoutes),
 	}
-	go server.HandleError1(httpServer.ListenAndServe)
-	select {
-	case <-time.After(2 * time.Second):
-	}
+	go server.HandleError1(func() error {
+		return httpServer.Serve(httpListener)
+	})
 
 	networkId := server.NewId()
 	userId := server.NewId()
 	model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("peerdiscovery-%s", networkId), userId)
 	// fund the network so escrowed contracts (e.g. the companion Stream
 	// fallback to a provide-off peer) can settle
-	err := model.AddBasicTransferBalance(
+	err = model.AddBasicTransferBalance(
 		ctx,
 		networkId,
 		model.ByteCount(1024*1024*1024*1024),
@@ -129,6 +148,7 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 		ctx:         ctx,
 		port:        port,
 		exchange:    exchange,
+		handler:     connectHandler,
 		httpServer:  httpServer,
 		networkId:   networkId,
 		userId:      userId,
@@ -139,6 +159,12 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 func (self *peerDiscoveryEnv) Close() {
 	self.httpServer.Close()
 	self.exchange.Close()
+	self.handler.Close()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	if !self.handler.WaitForIdle(closeCtx) {
+		self.t.Errorf("peer discovery handlers did not finish during teardown")
+	}
 }
 
 func (self *peerDiscoveryEnv) authClient(args *model.AuthNetworkClientArgs) (server.Id, string) {
@@ -170,8 +196,8 @@ func (self *peerDiscoveryEnv) newTransport(byClientJwt string, instanceId server
 	}
 	settings := connect.DefaultPlatformTransportSettings()
 	settings.QuicTlsConfig.InsecureSkipVerify = true
-	settings.H3Port = self.port + 443
-	settings.DnsPort = self.port + 53
+	settings.H3Port = 0
+	settings.DnsPort = 0
 	return connect.NewPlatformTransportWithTargetMode(
 		self.ctx,
 		connect.NewClientStrategyWithDefaults(self.ctx),
@@ -283,7 +309,7 @@ func TestExchangePeerDiscovery(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8090, 9010)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
@@ -413,7 +439,7 @@ func TestExchangePeerDiscoveryProvideChanges(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8091, 9011)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
@@ -540,7 +566,7 @@ func TestExchangePeerDiscoveryResidentReplacement(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8092, 9012)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
@@ -624,7 +650,7 @@ func TestExchangePeerDiscoveryDerivativeClient(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8093, 9013)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
@@ -691,7 +717,7 @@ func TestExchangePeerDiscoveryLargeNetwork(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8094, 9014)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		// more peers than one update frame carries
@@ -759,7 +785,7 @@ func TestExchangePeerDiscoveryLateJoinReconnect(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8095, 9015)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
@@ -833,7 +859,7 @@ func TestExchangePeerDiscoveryNetworkIsolation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t, 8096, 9016)
+		env := testing_newPeerDiscoveryEnv(ctx, t)
 		defer env.Close()
 
 		// a second network on the same exchange
@@ -939,7 +965,7 @@ func TestExchangePeerDiscoveryKeyEvents(t *testing.T) {
 
 		server.Testing_EnableKeyspaceNotifications(ctx)
 
-		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, 8097, 9017, func(settings *ExchangeSettings) {
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, func(settings *ExchangeSettings) {
 			settings.KeyEventDelivery.Enabled = true
 			// far outside the test window: delivery must come from key events
 			settings.KeyEventDelivery.CorrectivePollInterval = 10 * time.Minute
@@ -1020,7 +1046,7 @@ func TestExchangePeerDiscoveryKeyEventDropRepair(t *testing.T) {
 
 		server.Testing_EnableKeyspaceNotifications(ctx)
 
-		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, 8098, 9018, func(settings *ExchangeSettings) {
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, func(settings *ExchangeSettings) {
 			settings.KeyEventDelivery.Enabled = true
 			// short corrective so the repair lands inside the test window;
 			// still far above the event path's latency, so the live-delivery

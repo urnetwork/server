@@ -2,6 +2,7 @@ package api
 
 import (
 	"github.com/urnetwork/server/api/handlers"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 )
 
@@ -10,8 +11,13 @@ import (
 // It is shared by the apicli command and by integration tests that serve the
 // api in-process (e.g. the proxy integration test), so both exercise the exact
 // same handler set.
+//
+// The oauth authorization server routes (IDP.md) are served here too. Their
+// issuer is a separate hostname, which the load balancer routes to this
+// service; the routes themselves are path-matched, so they answer on either
+// host. The issuer published in the discovery documents is what clients use.
 func Routes() []*router.Route {
-	return []*router.Route{
+	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
 		router.NewRoute("GET", "/terms.txt", router.Txt),
 		router.NewRoute("GET", "/vdp.txt", router.Txt),
@@ -172,4 +178,6 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/updates/brevo", handlers.BrevoWebhook),
 		router.NewRoute("POST", "/log/([^/]+)/upload", handlers.LogUpload),
 	}
+
+	return append(routes, oauth.Routes()...)
 }

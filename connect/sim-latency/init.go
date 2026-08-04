@@ -10,13 +10,20 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// defaultMixture is a plausible provider population: mostly good residential,
-// a variable mobile mode, and a fast hosting tail. Users edit the mixture in
-// providers.yml and re-run init to re-sample.
+// defaultMixture is the competition's provider population (v2, 2026-07-31):
+// a residential bulk, a variable mobile mode, and a continuous fast upper
+// band — business fiber bridging into a narrowed hosting range — holding 30%
+// of the population. The upper band is deliberately dense and capped tighter
+// so the fast tail of per-request throughput samples many lanes (a stable
+// p95) instead of a handful of golden hosting lanes: with the v1 mixture
+// (hosting 100–1000 Mbps at weight 0.15, caps 64–256) the p95 sat on a thin
+// tail whose mass was a per-run warm-up lottery, measuring at 47% CV between
+// identical runs (see README "Measured noise floor"). Users edit the mixture
+// in providers.yml and re-run init to re-sample.
 func defaultMixture() []MixtureComponent {
 	return []MixtureComponent{
 		{
-			Name: "residential-good", Weight: 0.55, UserType: "consumer",
+			Name: "residential-good", Weight: 0.45, UserType: "consumer",
 			LatencyMillis: Range{10, 40}, JitterMillis: Range{0, 5},
 			BandwidthMbps: Range{20, 150}, Loss: Range{0, 0.001},
 			MaxConnections: Range{8, 32},
@@ -25,7 +32,7 @@ func defaultMixture() []MixtureComponent {
 			DegradedLatencyScale: Range{1.5, 3}, DegradedBandwidthScale: Range{0.3, 0.7}, DegradedLossAdd: Range{0, 0.01},
 		},
 		{
-			Name: "mobile-variable", Weight: 0.3, UserType: "consumer",
+			Name: "mobile-variable", Weight: 0.25, UserType: "consumer",
 			LatencyMillis: Range{40, 150}, JitterMillis: Range{5, 40},
 			BandwidthMbps: Range{2, 40}, Loss: Range{0.001, 0.02},
 			MaxConnections: Range{4, 12},
@@ -34,10 +41,19 @@ func defaultMixture() []MixtureComponent {
 			DegradedLatencyScale: Range{2, 5}, DegradedBandwidthScale: Range{0.1, 0.5}, DegradedLossAdd: Range{0.01, 0.05},
 		},
 		{
+			Name: "business-fiber", Weight: 0.15, UserType: "business",
+			LatencyMillis: Range{5, 25}, JitterMillis: Range{0, 4},
+			BandwidthMbps: Range{50, 250}, Loss: Range{0, 0.001},
+			MaxConnections: Range{24, 64},
+			UptimeSeconds:  Range{3600, 28800}, DowntimeSeconds: Range{5, 60},
+			DegradedFraction:     Range{0, 0.08},
+			DegradedLatencyScale: Range{1.3, 2.5}, DegradedBandwidthScale: Range{0.4, 0.8}, DegradedLossAdd: Range{0, 0.005},
+		},
+		{
 			Name: "hosting-fast", Weight: 0.15, UserType: "hosting",
 			LatencyMillis: Range{2, 20}, JitterMillis: Range{0, 3},
-			BandwidthMbps: Range{100, 1000}, Loss: Range{0, 0.0005},
-			MaxConnections: Range{64, 256},
+			BandwidthMbps: Range{200, 600}, Loss: Range{0, 0.0005},
+			MaxConnections: Range{32, 96},
 			UptimeSeconds:  Range{7200, 86400}, DowntimeSeconds: Range{2, 20},
 			DegradedFraction:     Range{0, 0.05},
 			DegradedLatencyScale: Range{1.2, 2}, DegradedBandwidthScale: Range{0.5, 0.9}, DegradedLossAdd: Range{0, 0.002},
@@ -59,7 +75,15 @@ func defaultConfig(seed int64, providerCount int, clientPoolSize int, meanPerMin
 		},
 		Site: SiteConfig{
 			MeanDepth: 4, Branching: 3,
-			MinBodyBytes: 4 * 1024, MaxBodyBytes: 1024 * 1024,
+			// web tier: most pages. download tier: the large pages the
+			// throughput metrics measure (>= results.go throughputMinBytes),
+			// sized so transfer time dominates ttfb and bytes/total honestly
+			// approximates lane bandwidth. The 512 KiB..2 MiB gap keeps the
+			// gate unambiguous.
+			MinBodyBytes: 4 * 1024, MaxBodyBytes: 512 * 1024,
+			LargeFraction:     0.25,
+			LargeMinBodyBytes: 2 * 1024 * 1024,
+			LargeMaxBodyBytes: 6 * 1024 * 1024,
 		},
 		Clients: ClientsConfig{
 			PoolSize:            clientPoolSize,

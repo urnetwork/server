@@ -1,0 +1,228 @@
+[
+ {
+  "id": "JECLa65zUfueKrHdwKU7RbazgTyNJT5kw9dcbU4fqeGy",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "3dMmK638wC3q7ae5Dh4o4qH4HFaNcjTHzNbChV827PyA"
+   }
+  ]
+ },
+ {
+  "id": "JEARL8GYcXbrdGb5WF1bLmbHpWWKke97X3wz6BAzH7n6",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "9gcPECZKFiTseW1mNdCebcaiFuo6JVoL7Au5HBSiux6"
+   }
+  ]
+ },
+ {
+  "id": "JE6xuNpV9VCH5xbi8ZPaTu1n9arq22Smcpr1QNyWogpT",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "4jbgZWa6qWKTabuyexgXqgFxtJMwyLpuLjZZpimibquH"
+   }
+  ]
+ },
+ {
+  "id": "JE2jSUJ2wkKHw25QR5Cu1HY5wAXxZX2ZjGyHQiCBboHg",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "EXdXD1d61Jupeas5QrxUAWFej5GPo1g6ZAoXmWn653dT"
+   }
+  ]
+ },
+ {
+  "id": "JDr6Q3DXoe3rZbSCbUv8hq9QhoAgDpx8oyN1erhk8SNb",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "BVAdpV4zKQuaMiH6XHK5Ye7JD3TVmDSuo3xCXj3s7TjR"
+   }
+  ]
+ },
+ {
+  "id": "JDp6Bgh3zzdpPdVbYcZQeEQonKFoskHbEi1fkK8G9j7R",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "BoRKkxKPoAt7LcyVRPa9ZZT5MztkJuc4PiGrUXAgDHPH"
+   }
+  ]
+ },
+ {
+  "id": "JDmw4f6rmEnc37KpsnE59FsZAQr1PVAjYG9Bu2jxQGtL",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "28z9hXf39xLPikQH6aU5JaFzBJjjUFQyJkysgP8PmDsh"
+   }
+  ]
+ },
+ {
+  "id": "JDdDSFot2D4R8SZBuXbpCVmmHYdnyDApVa1SpfVwQM79",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "Cdt69coAeaxve1HkLZbwt5vYNko2Dt8cDkTMcNFeYDso"
+   }
+  ]
+ },
+ {
+  "id": "JDd1KEFnwKZvHmAEg64oR3qNEwWT7goa8KkB7LvZWT1c",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "6YzmUEkSjhbA8ihuwjQEu4ovZswaHWYX82foiti6uFt5"
+   }
+  ]
+ },
+ {
+  "id": "JDZW7BcgYfzsEVRrmvD2BjquRfWmHuUW73qnSkuXpYLC",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "6YzmUEkSjhbA8ihuwjQEu4ovZswaHWYX82foiti6uFt5"
+   }
+  ]
+ },
+ {
+  "id": "JDVmKBSrWHXYwdN4kdyfvM5aqHvDwcGt1NiwvyGLQrNE",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "A2WrxT738Q84NW9rVb7gzURkiFnrhVuWGFyCJzaEfJGc"
+   }
+  ]
+ },
+ {
+  "id": "JD8L1thzZaZ51SYqTk1BBAzJ5Q9Bu9MZEMB6zh8WXVeb",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "B8evCuxYBQpetm45c69Du2i8Wac3NJ5VJq1YQJQHgUVP"
+   }
+  ]
+ },
+ {
+  "id": "2DMMamkkxQ6zDMBtkFp8KH7FoWzBMBA1CGTYwom4QH6Z",
+  "grouping": [],
+  "mint_extensions": {
+   "metadata_pointer": {
+    "authority": "GRR6BquJZYWgUqWpNJekBZHDHgxVQ56iZ2P2nWjDFRSn",
+    "metadata_address": "2DMMamkkxQ6zDMBtkFp8KH7FoWzBMBA1CGTYwom4QH6Z"
+   }
+  }
+ },
+ {
+  "id": "JCqN2W3hdfhH9qH8rt7QxzB4CigHGz3Qmcsudpe6steo",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "8Cke3ZzMYEqcxQjF8dMuS9P6QRuDWqtPsZUhdE46J1GC"
+   }
+  ]
+ },
+ {
+  "id": "JCedStTgX4Yy5PfVg5HyKg7bjdqJDGVQ52wsWCLeu45H",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "ChMwmXgL2RdbBFQisrY24SHuRPeyq48Lvf3Zg1rkSrwb"
+   }
+  ]
+ },
+ {
+  "id": "JCeUjGJswzNUWdvEtH3yJTkNjkwGBmYJHuM9ocZuzxL5",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "EiZHKMrCF3yYGWAaGUVaxRyPAojre2PdurZqwDCXGCxr"
+   }
+  ]
+ },
+ {
+  "id": "JCSsQPSoJRtctGQrdD4zi1PyTbRyLsQRa7Rz5kMjtxtz",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "HP2WqVmkdxyWt8vwzsgVmfq2k8qExv2HpfmNzmdwD33s"
+   }
+  ]
+ },
+ {
+  "id": "JCM8iA59JvHo46MJEPWegAtGaWycWvgohuhoB4AYdagb",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "FYd4bE7RboHbt32ynswqTzgUmBpk7PUgh7LZVByEhSV7"
+   }
+  ]
+ },
+ {
+  "id": "JCJK2GrM3WckFP6bMcvF2YrRV42DRjnzrXZKzP1zT7UY",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "E42rTpThtDmD3jkEf344CJH2aCpooDuUzTh9pLzu7GbM"
+   }
+  ]
+ },
+ {
+  "id": "JCHForfFMpJyqU9uJNwYNcoXmizN4mFkPqQbeBcbz17p",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "CPksPf2gRp8Cx4w4n51EbSZHiS66knkw22dAzFr3KXfK"
+   }
+  ]
+ },
+ {
+  "id": "JC6VjaN7Y6Vbr82vVzBnZMfWiJspApP2g2Rbwsy6VJCa",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "Cdt69coAeaxve1HkLZbwt5vYNko2Dt8cDkTMcNFeYDso"
+   }
+  ]
+ },
+ {
+  "id": "JBxuTLdo3SyNgxzvaTjHZvbh8tfMuULdGnp3w5N9fTSj",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "AMSNskm2RZqPXCZ6P2z6JLyHWMQF6pQ8RA8Q6x42Xufq"
+   }
+  ]
+ },
+ {
+  "id": "JBo97vDpei3x5xwf3McCxVEL97kPKptaWp6iccXr41Hp",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "GEF2BVqxZ2DTUwd2TUnVccXWWF8BtwoBuySbmFPKkgyE"
+   }
+  ]
+ },
+ {
+  "id": "JBnJCg61nC8djspUsL5cfgQErQE9JRYRXhpxVffiXQyL",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "77TxEXFdjojpizJUiBH1jXLszinDAMJ8RqnKCqhGKwcZ"
+   }
+  ]
+ },
+ {
+  "id": "JBhuy8ZwYHRnBT8EERsA62SoSu3BVdGLU8AjUVB3WysF",
+  "grouping": [
+   {
+    "group_key": "collection",
+    "group_value": "ENGMuxcbFMWrt3ZfQRT8VdvQKTsqhCoemMmd51zXjxrb"
+   }
+  ]
+ }
+]

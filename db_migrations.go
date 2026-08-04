@@ -4740,4 +4740,124 @@ var migrations = []any{
             PRIMARY KEY (host)
         )
     `),
+
+	// oauth 2.1 / openid connect authorization server (IDP.md).
+	//
+	// A registered client. `client_id` is a client id metadata document url
+	// (an https url, the preferred mechanism) for cimd clients, and an opaque
+	// generated id for dynamic registration and pre-registered clients.
+	// cimd clients are cached rows refreshed from their document; the
+	// `metadata_expire_time` is when the cached copy goes stale.
+	newSqlMigration(`
+        CREATE TABLE oauth_client (
+            client_id varchar(1024) NOT NULL,
+            client_type varchar(16) NOT NULL,
+            client_name varchar(256) NULL,
+            client_uri varchar(1024) NULL,
+            logo_uri varchar(1024) NULL,
+            application_type varchar(16) NOT NULL DEFAULT 'web',
+            redirect_uris_json text NOT NULL,
+            scope varchar(1024) NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            update_time timestamp NOT NULL DEFAULT now(),
+            metadata_expire_time timestamp NULL,
+
+            PRIMARY KEY (client_id)
+        )
+    `),
+
+	// Single use authorization codes. Every value the token exchange must
+	// check back against is bound here at mint time: the pkce challenge, the
+	// redirect uri, the resource (rfc 8707), the granted scope, and the user
+	// and network the consent was for. `redeem_time` makes the single use
+	// rule enforceable -- a second redemption is detectable rather than
+	// silently allowed, which per oauth 2.1 means the code was leaked.
+	newSqlMigration(`
+        CREATE TABLE oauth_authorization_code (
+            code_hash bytea NOT NULL,
+            client_id varchar(1024) NOT NULL,
+            user_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            redirect_uri varchar(1024) NOT NULL,
+            code_challenge varchar(128) NOT NULL,
+            code_challenge_method varchar(8) NOT NULL,
+            resource varchar(1024) NOT NULL,
+            scope varchar(1024) NOT NULL,
+            nonce varchar(256) NULL,
+            principal varchar(256) NULL,
+            roles_json text NULL,
+            auth_time timestamp NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            expire_time timestamp NOT NULL,
+            redeem_time timestamp NULL,
+
+            PRIMARY KEY (code_hash)
+        )
+    `),
+
+	// the reaper sweeps expired codes; redeemed codes are kept until expiry so
+	// a replay is still detectable rather than looking like an unknown code
+	newSqlMigration(`
+        CREATE INDEX oauth_authorization_code_expire_time
+        ON oauth_authorization_code (expire_time)
+    `),
+
+	// Opaque refresh tokens, stored hashed: the raw value exists only in the
+	// response to the client. `family_id` ties a rotation chain together --
+	// each use issues a new token in the same family and retires the old one.
+	// Presenting a retired token is treated as theft and revokes the whole
+	// family, which is why retired rows are kept until they expire instead of
+	// being deleted.
+	newSqlMigration(`
+        CREATE TABLE oauth_refresh_token (
+            token_hash bytea NOT NULL,
+            family_id uuid NOT NULL,
+            client_id varchar(1024) NOT NULL,
+            user_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            resource varchar(1024) NOT NULL,
+            scope varchar(1024) NOT NULL,
+            principal varchar(256) NULL,
+            roles_json text NULL,
+            auth_time timestamp NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            expire_time timestamp NOT NULL,
+            rotate_time timestamp NULL,
+            revoke_time timestamp NULL,
+
+            PRIMARY KEY (token_hash)
+        )
+    `),
+
+	// revoking a family on reuse detection, and listing a user's grants
+	newSqlMigration(`
+        CREATE INDEX oauth_refresh_token_family_id
+        ON oauth_refresh_token (family_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX oauth_refresh_token_user_id_client_id
+        ON oauth_refresh_token (user_id, client_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX oauth_refresh_token_expire_time
+        ON oauth_refresh_token (expire_time)
+    `),
+
+	// Remembered consent, so re-authorizing for scopes the user already
+	// approved does not re-prompt. A request for any scope outside
+	// `scope` prompts again; approving replaces the row with the union.
+	newSqlMigration(`
+        CREATE TABLE oauth_consent (
+            user_id uuid NOT NULL,
+            client_id varchar(1024) NOT NULL,
+            network_id uuid NOT NULL,
+            scope varchar(1024) NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (user_id, client_id)
+        )
+    `),
 }

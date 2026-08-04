@@ -506,6 +506,13 @@ func NewProxyDevice(
 	deviceLocalSettings := sdk.DefaultDeviceLocalSettings()
 	// embedded devices must be silent: this host runs thousands of clients
 	deviceLocalSettings.DisableLogging = true
+	// per hosted device memory target. Hosted devices never provide
+	// (AllowProvider is forced off by NewPlatformDeviceLocal, and
+	// HostedIncompatible below), so the sdk folds the provider share into
+	// the client share: 32 MB lands as ~3.2 MB dns + ~28.8 MB client
+	// transfer. Bounds each hosted device independently; the process message
+	// pools are sized separately (sdk.SetMemoryLimit).
+	deviceLocalSettings.MemoryTargetByteCount = 32 * 1024 * 1024
 	// persist the window client identities so a recreated device (deploy
 	// restart) reuses them against the same providers, keeping established
 	// inner flows resumable (PROXYDRAIN1.md §3.5)
