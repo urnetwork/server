@@ -23,6 +23,12 @@ func GetLeaderboard(
 	earners, err := model.GetLeaderboard(session.Ctx)
 	if err != nil {
 		return &model.LeaderboardResult{
+			// Earners must be non-nil even on the error path: the client
+			// deserialises the whole result before reading Error, and a nil
+			// slice here marshals as `null`, which crashes the android client
+			// exactly as an empty leaderboard did. A transient query error must
+			// not take the app down.
+			Earners: []model.Earner{},
 			Error: &model.TopEarnersError{
 				Message: err.Error(),
 			},

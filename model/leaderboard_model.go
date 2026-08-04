@@ -28,6 +28,11 @@ type TopEarnersError struct {
  * Gets an ordered list of the top earners
  */
 func GetLeaderboard(ctx context.Context) (earners []Earner, queryErr error) {
+	// must be non-nil: a nil slice marshals as JSON `null`, and the gomobile
+	// sdk binds this field as a pointer, so `null` becomes a nil object that
+	// the android client dereferences inside a jni callback -- the NPE cannot
+	// cross jni and ART aborts the whole process. An empty leaderboard is `[]`.
+	earners = []Earner{}
 
 	// stats read: tolerates replica delay
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
