@@ -228,6 +228,27 @@ func NewUnorderedTransferPair(a server.Id, b server.Id) TransferPair {
 // missing counter reads as zero (fail-open, more available balance) and the
 // reconcile task re-derives the true value from postgres
 // (see `ReconcileNetEscrow`).
+// netEscrowMirrorTimeout bounds a detached mirror update so a wedged redis
+// cannot retain the goroutine.
+const netEscrowMirrorTimeout = 30 * time.Second
+
+// netEscrowMirrorCtx detaches a net escrow mirror update from the caller's
+// request context.
+//
+// By the time a mirror update runs, its reservation (or settlement) is already
+// committed in postgres, so the update is not optional work the caller may
+// cancel — it is the second half of a write that has already happened. Binding
+// it to the caller meant a client that disconnected in that window silently
+// lost it: the redis call fails with a non-retryable context error, the post
+// goroutine's HandleError swallows the panic, and the counter is permanently
+// wrong. A lost increment drives the counter negative and over-reports
+// available balance; a lost decrement inflates it and hides balance until a
+// reconcile (the "insufficient balance" lockup). Values are preserved; only
+// cancellation is dropped.
+func netEscrowMirrorCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), netEscrowMirrorTimeout)
+}
+
 func netEscrowKey(balanceId server.Id) string {
 	return fmt.Sprintf("{escrow_%s}net", balanceId)
 }
@@ -614,6 +635,34 @@ func reconcileNetEscrowBatch(
 	return
 }
 
+// reportNegativeNetEscrow reports a net escrow counter that a decrement drove
+// below zero. The counter mirrors postgres-durable reservations, so a negative
+// value is always a defect: bytes were released that were never reserved (a
+// lost create mirror, or a reservation released twice). It over-reports
+// available balance until a reconcile resets it, so it is logged
+// unconditionally with the contract and balance that revealed it — the
+// decrementing site is the only place with both the delta and the result.
+func reportNegativeNetEscrow(
+	decrCmds map[server.Id]*redis.IntCmd,
+	contractId server.Id,
+	site string,
+) {
+	for balanceId, cmd := range decrCmds {
+		if cmd == nil {
+			continue
+		}
+		if netEscrow, err := cmd.Result(); err == nil && netEscrow < 0 {
+			glog.Errorf(
+				"[netescrow]negative counter after %s: balance=%s contract=%s result=%d\n",
+				site,
+				balanceId,
+				contractId,
+				netEscrow,
+			)
+		}
+	}
+}
+
 // releaseNetEscrowForContract returns a quarantined contract's reserved bytes to
 // its balances by decrementing the redis net escrow counters. The caller must
 // have just claimed the contract (`outcome IS NULL` -> settled) so the
@@ -643,18 +692,24 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 	if len(escrowed) == 0 {
 		return
 	}
-	server.Redis(ctx, func(r server.RedisClient) {
+	// the quarantine claim is committed; the mirror must follow even if the
+	// caller has gone away (see netEscrowMirrorCtx)
+	mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
+	defer mirrorCancel()
+	server.Redis(mirrorCtx, func(r server.RedisClient) {
+		decrCmds := map[server.Id]*redis.IntCmd{}
 		// per-balance hash tags (different slots): plain pipeline auto-routes
-		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 			for balanceId, byteCount := range escrowed {
 				key := netEscrowKey(balanceId)
-				pipe.DecrBy(ctx, key, byteCount)
+				decrCmds[balanceId] = pipe.DecrBy(mirrorCtx, key, byteCount)
 				// a decr that recreates a missing key must not leave it
 				// without a ttl; nx never shortens the end-time deadline
-				pipe.ExpireNX(ctx, key, netEscrowFallbackTtl)
+				pipe.ExpireNX(mirrorCtx, key, netEscrowFallbackTtl)
 			}
 			return nil
 		})
+		reportNegativeNetEscrow(decrCmds, contractId, "quarantine release")
 	})
 }
 
@@ -1112,16 +1167,20 @@ func createTransferEscrowInTx(
 	})
 
 	posts = append(posts, func() any {
-		server.Redis(ctx, func(r server.RedisClient) {
+		// the reservation is committed; the mirror must follow even if the
+		// caller has gone away (see netEscrowMirrorCtx)
+		mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
+		defer mirrorCancel()
+		server.Redis(mirrorCtx, func(r server.RedisClient) {
 			// per-balance hash tags (different slots): plain pipeline auto-routes
-			r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 				for balanceId, escrow := range balanceEscrows {
 					key := netEscrowKey(balanceId)
-					pipe.IncrBy(ctx, key, escrow.balanceByteCount)
+					pipe.IncrBy(mirrorCtx, key, escrow.balanceByteCount)
 					// the counter is only meaningful while the balance is
 					// active; pin the ttl to the balance end time plus slack
 					// (non-nx, so it also corrects a shorter fallback ttl)
-					pipe.ExpireAt(ctx, key, escrow.endTime.Add(netEscrowEndTimeSlack))
+					pipe.ExpireAt(mirrorCtx, key, escrow.endTime.Add(netEscrowEndTimeSlack))
 				}
 				return nil
 			})
@@ -2074,19 +2133,25 @@ func settleEscrowInTx(
 		})
 
 		posts = append(posts, func() any {
-			server.Redis(ctx, func(r server.RedisClient) {
+			// the settlement is committed; the mirror must follow even if the
+			// caller has gone away (see netEscrowMirrorCtx)
+			mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
+			defer mirrorCancel()
+			server.Redis(mirrorCtx, func(r server.RedisClient) {
+				decrCmds := map[server.Id]*redis.IntCmd{}
 				// per-balance hash tags (different slots): plain pipeline auto-routes
-				r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 					for balanceId, sweepPayout := range sweepPayouts {
 						key := netEscrowKey(balanceId)
-						pipe.DecrBy(ctx, key, sweepPayout.escrowBalanceByteCount)
+						decrCmds[balanceId] = pipe.DecrBy(mirrorCtx, key, sweepPayout.escrowBalanceByteCount)
 						// a decr that recreates a missing key must not leave
 						// it without a ttl; nx never shortens the end-time
 						// deadline
-						pipe.ExpireNX(ctx, key, netEscrowFallbackTtl)
+						pipe.ExpireNX(mirrorCtx, key, netEscrowFallbackTtl)
 					}
 					return nil
 				})
+				reportNegativeNetEscrow(decrCmds, contractId, "settle")
 			})
 			return nil
 		})

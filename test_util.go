@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -469,6 +470,8 @@ func (self *TestEnv) setup() func() {
 	}()
 	testRedisDb := testRedisLease.db
 
+	reapOrphanedTestPgDbs(ctx)
+
 	Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
 			ctx,
@@ -577,4 +580,82 @@ cluster: %t`,
 			Raise(err)
 		}, OptReadWrite())
 	}
+}
+
+// testPgDbOrphanAge is how old an abandoned test database must be before the
+// reaper drops it. A TestEnv's database lives for one test, so this is orders
+// of magnitude longer than any live database's lifetime — a running suite is
+// never touched even when a single package runs for hours.
+const testPgDbOrphanAge = 2 * time.Hour
+
+var reapOrphanedTestPgDbsOnce sync.Once
+
+// reapOrphanedTestPgDbs drops test databases left behind by test processes
+// that died before teardown.
+//
+// Teardown drops its own database, but a process killed mid-run (SIGKILL, an
+// interrupted suite, a harness panic) never reaches it, and nothing else ever
+// cleans up: 87 orphans had accumulated over a month. They are not inert.
+// Every CREATE DATABASE copies a template and scans pg_database, so setup gets
+// slower as they pile up — a cross-process setup that normally takes ~1.2s was
+// observed taking ~30s, which is what broke the lease-separation test's
+// rendezvous.
+//
+// Age comes from the UnixMilli stamp the name already carries, so no catalog
+// timestamp is needed. Runs once per test binary. Failures are ignored: a drop
+// losing a race with another process's live database (or its own teardown) is
+// expected and must never fail the run that happened to sweep.
+func reapOrphanedTestPgDbs(ctx context.Context) {
+	reapOrphanedTestPgDbsOnce.Do(func() {
+		HandleError(func() {
+			cutoff := NowUtc().Add(-testPgDbOrphanAge).UnixMilli()
+			orphans := []string{}
+			Db(ctx, func(conn PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT datname
+					FROM pg_database
+					WHERE datname LIKE 'test\_%'
+					`,
+				)
+				WithPgResult(result, err, func() {
+					for result.Next() {
+						var datname string
+						Raise(result.Scan(&datname))
+						parts := strings.Split(datname, "_")
+						if len(parts) < 2 {
+							continue
+						}
+						millis, err := strconv.ParseInt(parts[1], 10, 64)
+						if err != nil {
+							continue
+						}
+						if millis < cutoff {
+							orphans = append(orphans, datname)
+						}
+					}
+				})
+			})
+			for _, datname := range orphans {
+				func() {
+					defer func() {
+						// a live database, or one being dropped by its own
+						// teardown right now, is not this sweep's problem
+						recover()
+					}()
+					Db(ctx, func(conn PgConn) {
+						_, err := conn.Exec(
+							ctx,
+							fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, datname),
+						)
+						Raise(err)
+					}, OptReadWrite())
+				}()
+			}
+			if 0 < len(orphans) {
+				glog.Infof("[test]reaped %d orphaned test databases\n", len(orphans))
+			}
+		})
+	})
 }

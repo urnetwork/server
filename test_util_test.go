@@ -359,7 +359,16 @@ func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		deadline := time.Now().Add(10 * time.Second)
+		// The peer has to finish a whole TestEnv setup (redis lease + pg
+		// database creation) before it can write its marker, and that cost is
+		// not bounded by anything this test controls: it is ~1.2s idle but was
+		// observed at ~30s during a loaded -race suite against a pg carrying
+		// abandoned test databases. This budget only has to be longer than a
+		// pathological setup — the parent still bounds the test overall — so
+		// keep it generous. A tight budget here fails the run for being slow,
+		// which says nothing about lease separation.
+		started := time.Now()
+		deadline := started.Add(90 * time.Second)
 		for {
 			first, firstErr := os.ReadFile(filepath.Join(dir, "first"))
 			second, secondErr := os.ReadFile(filepath.Join(dir, "second"))
@@ -371,7 +380,8 @@ func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {
 			}
 			if deadline.Before(time.Now()) {
 				t.Fatalf(
-					"timed out waiting for both lease markers: first=%v second=%v",
+					"timed out after %s waiting for both lease markers: first=%v second=%v",
+					time.Since(started),
 					firstErr,
 					secondErr,
 				)

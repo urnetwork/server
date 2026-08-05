@@ -97,6 +97,14 @@ type proxyTestOptions struct {
 	// the e2e can drive it over ws (the way server/connect exposes its handler
 	// for tests). Used by the device rpc e2e.
 	enableDeviceRpc bool
+	// when true, stand up only what the device rpc CONTROL plane needs: no live
+	// provider client (transport, egress NAT, provide registration) and no wait
+	// for the proxy device to reach a usable egress path. For tests of rpc
+	// behavior that is decided before any data flows — e.g. the sync-time
+	// version and instance guards, which reject before applying state — so they
+	// do not depend on real outbound internet or a provider rendezvous the
+	// behavior under test never touches.
+	controlPlaneOnly bool
 }
 
 func defaultProxyTestOptions() *proxyTestOptions {
@@ -306,7 +314,13 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		connectSettings,
 	)
 
+	apiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
+	platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
+
 	// ---- a local provider (sdk.DeviceLocal in provide mode) ------------------
+	// The provider's network/device rows always exist, so the proxy device's
+	// InitialDeviceState.Location resolves. The live provider client (transport,
+	// egress NAT, provide registration) is what a control-plane-only test skips.
 	providerNetworkId := server.NewId()
 	providerUserId := server.NewId()
 	providerNetworkName := fmt.Sprintf("provider-%s", providerNetworkId)
@@ -318,71 +332,70 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 	model.Testing_CreateDevice(ctx, providerNetworkId, providerDeviceId, providerClientId, "provider", "provider")
 	redeemBalance(t, ctx, providerNetworkId, opts.providerInitialBalance)
 
-	providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
-		Client(providerDeviceId, providerClientId).Sign()
+	if !opts.controlPlaneOnly {
+		providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
+			Client(providerDeviceId, providerClientId).Sign()
 
-	apiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
-	platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
+		// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
+		// embedded source devices that reach providers via the multi-client
+		// generator). A real provider needs its own client + platform transport +
+		// egress NAT, so build it directly from connect primitives.
+		providerStrategySettings := connect.DefaultClientStrategySettings()
+		providerStrategySettings.EnableResilient = false
+		providerClientStrategy := connect.NewClientStrategy(ctx, providerStrategySettings)
 
-	// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
-	// embedded source devices that reach providers via the multi-client
-	// generator). A real provider needs its own client + platform transport +
-	// egress NAT, so build it directly from connect primitives.
-	providerStrategySettings := connect.DefaultClientStrategySettings()
-	providerStrategySettings.EnableResilient = false
-	providerClientStrategy := connect.NewClientStrategy(ctx, providerStrategySettings)
+		providerOob := connect.NewApiOutOfBandControl(ctx, providerClientStrategy, providerByJwt, apiUrl)
+		providerClient := connect.NewClient(ctx, connect.Id(providerClientId), providerOob, connect.DefaultClientSettings())
+		go func() {
+			<-ctx.Done()
+			providerClient.Close()
+		}()
 
-	providerOob := connect.NewApiOutOfBandControl(ctx, providerClientStrategy, providerByJwt, apiUrl)
-	providerClient := connect.NewClient(ctx, connect.Id(providerClientId), providerOob, connect.DefaultClientSettings())
-	go func() {
-		<-ctx.Done()
-		providerClient.Close()
-	}()
+		providerAuth := &connect.ClientAuth{
+			ByJwt:      providerByJwt,
+			InstanceId: connect.Id(providerInstanceId),
+			AppVersion: server.RequireVersion(),
+		}
+		providerTransport := connect.NewPlatformTransportWithDefaults(
+			providerClient.Ctx(),
+			providerClientStrategy,
+			providerClient.RouteManager(),
+			platformUrl,
+			providerAuth,
+		)
+		go func() {
+			<-ctx.Done()
+			providerTransport.Close()
+		}()
 
-	providerAuth := &connect.ClientAuth{
-		ByJwt:      providerByJwt,
-		InstanceId: connect.Id(providerInstanceId),
-		AppVersion: server.RequireVersion(),
+		// egress to the real internet via a user-space NAT
+		providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
+		providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
+		if opts.disableSecurityPolicies {
+			providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		}
+		providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
+		go func() {
+			<-ctx.Done()
+			providerRemoteNat.Close()
+			providerLocalUserNat.Close()
+		}()
+
+		// provide public, with return-traffic stream so the source can open both the
+		// forward and companion contracts
+		providerClient.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Public:  true,
+			protocol.ProvideMode_Network: true,
+		})
+
+		// wait for the provider's provide to register on the platform before the
+		// proxy device tries to open contracts to it
+		waitFor(t, 30*time.Second, "provider provide registered", func() bool {
+			modes, err := model.GetProvideModes(ctx, providerClientId)
+			return err == nil && len(modes) > 0
+		})
+		fmt.Printf("[progress]provider provide registered\n")
 	}
-	providerTransport := connect.NewPlatformTransportWithDefaults(
-		providerClient.Ctx(),
-		providerClientStrategy,
-		providerClient.RouteManager(),
-		platformUrl,
-		providerAuth,
-	)
-	go func() {
-		<-ctx.Done()
-		providerTransport.Close()
-	}()
-
-	// egress to the real internet via a user-space NAT
-	providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
-	providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
-	if opts.disableSecurityPolicies {
-		providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
-	}
-	providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
-	go func() {
-		<-ctx.Done()
-		providerRemoteNat.Close()
-		providerLocalUserNat.Close()
-	}()
-
-	// provide public, with return-traffic stream so the source can open both the
-	// forward and companion contracts
-	providerClient.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{
-		protocol.ProvideMode_Public:  true,
-		protocol.ProvideMode_Network: true,
-	})
-
-	// wait for the provider's provide to register on the platform before the
-	// proxy device tries to open contracts to it
-	waitFor(t, 30*time.Second, "provider provide registered", func() bool {
-		modes, err := model.GetProvideModes(ctx, providerClientId)
-		return err == nil && len(modes) > 0
-	})
-	fmt.Printf("[progress]provider provide registered\n")
 
 	// ---- the proxy device's network/device/client + balance ------------------
 	pdNetworkId := server.NewId()
@@ -500,15 +513,20 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 	}
 
 	// warm up the proxy device: open it and wait until it has a usable path to
-	// the provider before we start driving traffic through it.
+	// the provider before we start driving traffic through it. A
+	// control-plane-only test has no live provider, so it opens the device (the
+	// hosted DeviceLocal and its rpc listener exist as soon as it is created)
+	// but never waits for a usable egress path.
 	pd, err := proxyDeviceManager.OpenProxyDevice(proxyId)
 	if err != nil {
 		t.Fatalf("open proxy device: %v", err)
 	}
-	if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
-		t.Fatalf("proxy device did not become ready (provider not reachable)")
+	if !opts.controlPlaneOnly {
+		if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
+			t.Fatalf("proxy device did not become ready (provider not reachable)")
+		}
+		fmt.Printf("[progress]proxy device ready\n")
 	}
-	fmt.Printf("[progress]proxy device ready\n")
 
 	return &proxyTestHarness{
 		ctx:                ctx,

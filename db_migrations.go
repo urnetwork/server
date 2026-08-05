@@ -4607,4 +4607,13 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_bucket_start
             ON bulk_client_removal_quota (bucket_start)
     `),
+
+	// city point coordinates from the ip mmdb, written by `CreateLocation`.
+	// NULL means unknown (rows created before this column existed, or created
+	// without coordinates); `FindProviders2` omits city_coordinates for those.
+	newSqlMigration(`
+        ALTER TABLE location
+            ADD COLUMN latitude double precision NULL,
+            ADD COLUMN longitude double precision NULL
+    `),
 }
