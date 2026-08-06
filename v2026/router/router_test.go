@@ -1,0 +1,289 @@
+package router
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"testing"
+
+	"github.com/urnetwork/connect/v2026"
+
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/jwt"
+	"github.com/urnetwork/server/v2026/model"
+	"github.com/urnetwork/server/v2026/session"
+)
+
+func TestRouterBasic(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		NoAuth := func(w http.ResponseWriter, r *http.Request) {
+			impl := func(clientSession *session.ClientSession) (map[string]any, error) {
+				if clientSession.ByJwt != nil {
+					return nil, errors.New("Contains auth.")
+				}
+				return map[string]any{}, nil
+			}
+			WrapNoAuth(impl, w, r)
+		}
+
+		Auth := func(w http.ResponseWriter, r *http.Request) {
+			impl := func(clientSession *session.ClientSession) (map[string]any, error) {
+				if clientSession.ByJwt == nil {
+					return nil, errors.New("Missing auth.")
+				}
+
+				if clientSession.ByJwt.GuestMode {
+					return nil, errors.New("Guest Mode not allowed")
+				}
+
+				return map[string]any{}, nil
+			}
+			WrapRequireAuth(impl, w, r)
+		}
+
+		Client := func(w http.ResponseWriter, r *http.Request) {
+			impl := func(clientSession *session.ClientSession) (map[string]any, error) {
+				if clientSession.ByJwt == nil {
+					return nil, errors.New("Missing auth.")
+				}
+				if clientSession.ByJwt.ClientId == nil {
+					return nil, errors.New("Missing client.")
+				}
+				return map[string]any{}, nil
+			}
+			WrapRequireClient(impl, w, r)
+		}
+
+		InputNoAuth := func(w http.ResponseWriter, r *http.Request) {
+			impl := func(input map[string]any, clientSession *session.ClientSession) (map[string]any, error) {
+				if clientSession.ByJwt != nil {
+					return nil, errors.New("Contains auth.")
+				}
+				return map[string]any{}, nil
+			}
+			WrapWithInputNoAuth(impl, w, r)
+		}
+
+		InputAuth := func(w http.ResponseWriter, r *http.Request) {
+			impl := func(input map[string]any, clientSession *session.ClientSession) (map[string]any, error) {
+				if clientSession.ByJwt == nil {
+					return nil, errors.New("Missing auth.")
+				}
+				return map[string]any{}, nil
+			}
+			WrapWithInputRequireAuth(impl, w, r)
+		}
+
+		InputClient := func(w http.ResponseWriter, r *http.Request) {
+			impl := func(input map[string]any, clientSession *session.ClientSession) (map[string]any, error) {
+				if clientSession.ByJwt == nil {
+					return nil, errors.New("Missing auth.")
+				}
+				if clientSession.ByJwt.ClientId == nil {
+					return nil, errors.New("Missing client.")
+				}
+				return map[string]any{}, nil
+			}
+			WrapWithInputRequireClient(impl, w, r)
+		}
+
+		routes := []*Route{
+			NewRoute("GET", "/noauth", NoAuth),
+			NewRoute("GET", "/auth", Auth),
+			NewRoute("GET", "/client", Client),
+			NewRoute("POST", "/inputnoauth", InputNoAuth),
+			NewRoute("POST", "/inputauth", InputAuth),
+			NewRoute("POST", "/inputclient", InputClient),
+		}
+
+		routerHandler := NewRouter(ctx, routes)
+		listener, listenErr := net.Listen("tcp4", "127.0.0.1:0")
+		if listenErr != nil {
+			t.Fatalf("listen: %v", listenErr)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		httpServer := &http.Server{Handler: routerHandler}
+		serveDone := make(chan error, 1)
+		go func() {
+			serveDone <- httpServer.Serve(listener)
+		}()
+		defer func() {
+			if err := httpServer.Close(); err != nil {
+				t.Errorf("close router server: %v", err)
+			}
+			if err := <-serveDone; err != nil && err != http.ErrServerClosed {
+				t.Errorf("serve router server: %v", err)
+			}
+		}()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		byJwt := jwt.NewByJwt(
+			networkId,
+			userId,
+			"test",
+			false, // guest mode false
+			false, // pro is false
+		)
+		auth := func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
+		}
+
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		byClientJwt := byJwt.Client(deviceId, clientId)
+		authClient := func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", byClientJwt.Sign()))
+		}
+
+		var err error
+
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
+			server.NoCustomHeaders,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/noauth", port),
+			auth,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
+			server.NoCustomHeaders,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertNotEqual(t, err, nil)
+
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/client", port),
+			authClient,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/client", port),
+			auth,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertNotEqual(t, err, nil)
+
+		_, err = server.HttpPost(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/inputnoauth", port),
+			map[string]any{},
+			server.NoCustomHeaders,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = server.HttpPost(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/inputnoauth", port),
+			map[string]any{},
+			auth,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = server.HttpPost(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
+			map[string]any{},
+			auth,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = server.HttpPost(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/inputauth", port),
+			map[string]any{},
+			server.NoCustomHeaders,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertNotEqual(t, err, nil)
+
+		_, err = server.HttpPost(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/inputclient", port),
+			map[string]any{},
+			authClient,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		_, err = server.HttpPost(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/inputclient", port),
+			map[string]any{},
+			auth,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertNotEqual(t, err, nil)
+
+		// for API key auth testing
+		apiNetworkId := server.NewId()
+		apiUserId := server.NewId()
+		model.Testing_CreateNetwork(ctx, apiNetworkId, "apitestnetwork", apiUserId)
+
+		apiClientId := server.NewId()
+		apiSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: apiNetworkId,
+			ClientId:  &apiClientId,
+		})
+
+		key, err := model.CreateApiKey(&model.CreateApiKeyArgs{Name: "testkey"}, apiSession)
+		connect.AssertEqual(t, err, nil)
+
+		authApiKey := func(header http.Header) {
+			header.Add("Authorization", fmt.Sprintf("Bearer %s", key.ApiKey))
+		}
+
+		// valid API key should succeed on auth-required routes
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		// API keys have no ClientId, so /client should fail
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/client", port),
+			authApiKey,
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertNotEqual(t, err, nil)
+
+		// invalid API key should fail
+		invalidKey := "invalidKey"
+		_, err = server.HttpGet(
+			ctx,
+			fmt.Sprintf("http://127.0.0.1:%d/auth", port),
+			func(header http.Header) {
+				header.Add("Authorization", fmt.Sprintf("Bearer %s", invalidKey))
+			},
+			server.HttpResponseRequireStatusOk(server.ResponseJsonObject[map[string]any]),
+		)
+		connect.AssertNotEqual(t, err, nil)
+
+	})
+}
