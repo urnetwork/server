@@ -26,6 +26,54 @@ type testNetworkPeerAccumulator struct {
 	markers   map[server.Id]*NetworkPeer
 }
 
+// startTestNetworkPeerKeyEventFeed subscribes to the leased redis db's
+// keyspace notifications for per-peer keys and feeds them to the listener,
+// mirroring the exchange's key-event subscriber
+// (connect/key_event_subscriber.go): `expire` (a heartbeat ttl refresh) is
+// ignored; `set`/`del`/`expired` become listener deltas. This is what puts a
+// model-level listener into key-event mode — the mode whose contract is
+// "event ids are monotonic with no gaps, so the listener never resets after
+// the initial subscribe".
+func startTestNetworkPeerKeyEventFeed(t testing.TB, ctx context.Context, listener *NetworkPeerListener) func() {
+	messages, done, unsub, err := server.SubscribeKeyEvents(
+		ctx,
+		time.Minute,
+		NetworkPeerKeyEventPattern(server.RedisDb()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the exchange full-reads on listener registration ("every registration
+	// full-reads" — key_event_subscriber.run): the registration snapshot is
+	// what delivers the initial Reset in key-event mode, not a poll tick
+	eventId, peers := GetNetworkPeers(ctx, listener.networkId)
+	listener.ApplySnapshot(PrepareNetworkPeerSnapshot(eventId, peers))
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case message, ok := <-messages:
+				if !ok {
+					return
+				}
+				if message.Payload == "expire" {
+					continue
+				}
+				if _, clientId, ok := ParseNetworkPeerKeyEvent(message.Channel); ok {
+					switch message.Payload {
+					case "set", "del", "expired":
+						listener.Delta(clientId, message.Payload)
+					}
+				}
+			}
+		}
+	}()
+	return unsub
+}
+
 func newTestNetworkPeerAccumulator() *testNetworkPeerAccumulator {
 	return &testNetworkPeerAccumulator{
 		connected: map[server.Id]*NetworkPeer{},
@@ -105,8 +153,23 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		ttl := 60 * time.Second
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		// key-event mode uses a LONG corrective poll (the deltas fed below carry
+		// the changes; the poll is insurance). A short poll here races the
+		// millisecond window between a registry mutation and its keyspace
+		// event's arrival: the poll full-reads newer state than the deltas
+		// have applied and legitimately resets — failing this test's no-reset
+		// assertion for a reason production key-event mode does not have.
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 5*time.Second, 1000)
 		defer listener.Close()
+
+		// Feed per-peer key events the way the exchange's process-wide
+		// subscriber does (connect/key_event_subscriber.go dispatch): without
+		// a delta feed the listener runs in pure corrective-poll mode, whose
+		// DOCUMENTED behavior is a Reset on every counter move — the
+		// no-reset assertion at the end of this test is a property of
+		// key-event mode, not of the bare poller.
+		stopFeed := startTestNetworkPeerKeyEventFeed(t, ctx, listener)
+		defer stopFeed()
 
 		// the listener syncs an empty reset on subscribe
 		select {
@@ -397,11 +460,16 @@ func TestNetworkPeerProfile(t *testing.T) {
 		// a derivative client never resolves peers enabled
 		assert.Equal(t, peersEnabled, false)
 
-		// a guest session cannot assign roles or principal
+		// a guest session cannot assign roles or principal. "Guest" means
+		// live account state with no auth methods (HasAnyAuthMethod), so the
+		// fixture is a genuinely bare user — this test's own user has auth
+		// methods and would (correctly) be allowed.
+		guestNetworkId := server.NewId()
+		guestUserId := server.NewId()
+		Testing_CreateLegacyGuestNetwork(ctx, guestNetworkId, guestUserId)
 		guestSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-			NetworkId: networkId,
-			UserId:    userId,
-			GuestMode: false,
+			NetworkId: guestNetworkId,
+			UserId:    guestUserId,
 		})
 		authClientResult, err = AuthNetworkClient(
 			&AuthNetworkClientArgs{
@@ -1031,6 +1099,13 @@ func TestNetworkPeerTopLevelClientLimit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+
+		// the top-level hard cap lives behind the concurrent-clients rollout
+		// gate (see AuthNetworkClient: "Provisioning must never be refused
+		// while dark"), so the cap under test only exists with enforcement on.
+		// The gate this enables counts CONNECTED clients and this test only
+		// provisions, so no other limit engages.
+		defer Testing_SetEnforceConcurrentClients(true)()
 
 		networkId := server.NewId()
 		userId := server.NewId()

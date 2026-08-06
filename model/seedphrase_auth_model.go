@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strings"
 
 	bip39 "github.com/tyler-smith/go-bip39"
@@ -155,10 +156,32 @@ func GenerateSeedphrase(ctx context.Context, userId server.Id) (string, error) {
 		return "", err
 	}
 
+	// The user_id primary key makes a second generate a unique violation.
+	// That case must come back as an ERROR, not a panic: the controller
+	// pre-checks HasSeedphraseAuth, but the check-then-insert races with a
+	// concurrent generate for the same user, and the losing request must
+	// produce the same clean result as the pre-check
+	// ("already exists") rather than a 500. Check inside the tx: a SELECT
+	// keeps the tx healthy for the early return, where reading the insert's
+	// unique-violation error would leave the tx aborted and fail the commit.
+	alreadyExists := false
 	server.Tx(ctx, func(tx server.PgTx) {
-		err = CreateSeedphraseAuthInTx(tx, ctx, userId, seedphrase)
-		server.Raise(err)
+		result, err := tx.Query(
+			ctx,
+			`SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1 FOR UPDATE`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			alreadyExists = result.Next()
+		})
+		if alreadyExists {
+			return
+		}
+		server.Raise(CreateSeedphraseAuthInTx(tx, ctx, userId, seedphrase))
 	})
+	if alreadyExists {
+		return "", fmt.Errorf("seedphrase auth already exists for user")
+	}
 
 	return seedphrase, nil
 }

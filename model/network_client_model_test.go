@@ -751,13 +751,21 @@ func TestRemoveNetworkClientsTaskLifecycleThroughRealWorker(t *testing.T) {
 		taskWorker.AddTargets(task.NewTaskTargetWithPost(RemoveNetworkClientsTask, RemoveNetworkClientsTaskPost))
 
 		// drive the worker until no pending work remains for this run; bounded
-		// so a stuck run fails the test instead of hanging it
+		// so a stuck run fails the test instead of hanging it. A pass that
+		// finds nothing runnable while work is still pending WAITS before the
+		// next pass: a task's available_block is quantized to the second
+		// AFTER its run_at (1 + epoch(run_at), see the pending_task
+		// migration), so a just-scheduled continuation is takeable only at
+		// the next whole-second boundary — a busy-spin here burns every pass
+		// before the continuation ever becomes available.
 		for i := 0; i < 50; i++ {
 			finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := taskWorker.EvalTasks(10)
 			assert.Equal(t, err, nil)
-			if len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) == 0 &&
-				len(task.ListPendingTasks(ctx)) == 0 {
-				break
+			if len(finishedTaskIds)+len(rescheduledTaskIds)+len(postRescheduledTaskIds) == 0 {
+				if len(task.ListPendingTasks(ctx)) == 0 {
+					break
+				}
+				time.Sleep(250 * time.Millisecond)
 			}
 		}
 		if 0 < len(task.ListPendingTasks(ctx)) {

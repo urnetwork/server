@@ -12,17 +12,17 @@ import (
 )
 
 type NetworkUser struct {
-	UserId           server.Id                    `json:"user_id"`
-	UserAuth         *string                      `json:"user_auth,omitempty"`
-	Verified         bool                         `json:"verified"`
-	AuthType         string                       `json:"auth_type"`
-	NetworkName      string                       `json:"network_name"`
-	WalletAddress    *string                      `json:"wallet_address,omitempty"`
-	UserAuths        []NetworkUserUserAuth        `json:"user_auths,omitempty"`
-	SsoAuths         []NetworkUserSsoAuth         `json:"sso_auths,omitempty"`
-	WalletAuths      []NetworkUserWalletAuth      `json:"wallet_auths,omitempty"`
-	SeedphraseAuths  []NetworkUserSeedphraseAuth  `json:"seedphrase_auths,omitempty"`
-	AuthTypes        []string                     `json:"auth_types"`
+	UserId          server.Id                   `json:"user_id"`
+	UserAuth        *string                     `json:"user_auth,omitempty"`
+	Verified        bool                        `json:"verified"`
+	AuthType        string                      `json:"auth_type"`
+	NetworkName     string                      `json:"network_name"`
+	WalletAddress   *string                     `json:"wallet_address,omitempty"`
+	UserAuths       []NetworkUserUserAuth       `json:"user_auths,omitempty"`
+	SsoAuths        []NetworkUserSsoAuth        `json:"sso_auths,omitempty"`
+	WalletAuths     []NetworkUserWalletAuth     `json:"wallet_auths,omitempty"`
+	SeedphraseAuths []NetworkUserSeedphraseAuth `json:"seedphrase_auths,omitempty"`
+	AuthTypes       []string                    `json:"auth_types"`
 }
 
 type NetworkUserUserAuth struct {
