@@ -513,6 +513,16 @@ func CreateContract(
 	return []*protocol.Frame{frame}, nil
 }
 
+// CompanionOriginWaitTimeout bounds how long a companion contract request
+// waits for its origin contract to appear before the miss is answered as
+// terminal. The race window is milliseconds (see the retry loop's comment);
+// the bound only exists so a genuinely one-sided request cannot hold the
+// control frame open indefinitely.
+const CompanionOriginWaitTimeout = 3 * time.Second
+
+// CompanionOriginWaitPollTimeout is the poll interval inside that wait.
+const CompanionOriginWaitPollTimeout = 100 * time.Millisecond
+
 func nextContract(
 	ctx context.Context,
 	clientId server.Id,
@@ -653,15 +663,48 @@ func newContract(
 			}
 		}
 	} else if companionContract {
-		escrow, err := model.CreateCompanionTransferEscrow(
-			ctx,
-			sourceNetworkId,
-			sourceId,
-			destinationNetworkId,
-			destinationId,
-			contractTransferByteCount,
-			contractManagerSettings.OriginContractLinger,
-		)
+		// A companion request that beats its origin contract is an ordering
+		// race, not a refusal: at cold start both peers bring sessions up
+		// simultaneously and the encryption control carrier asks for its
+		// companion contract at session setup, frequently milliseconds before
+		// the peer's origin lands. The client cannot tell this apart from a
+		// real failure (every cause reaches it as InsufficientBalance), so
+		// answering the race with an error sent the client into its blind
+		// 30s CreateContractTimeout retry loop — a full sequence starve per
+		// occurrence (~12 per test-suite run), the residual behind the
+		// chaos-family first-attempt timeouts and the multiclient
+		// dead-on-arrival window clients. Waiting out the race here costs
+		// sub-second latency in the worst observed case (origins land within
+		// ~111-661ms of the losing request) and nothing when the origin
+		// already exists.
+		var escrow *model.TransferEscrow
+		var err error
+		deadline := time.Now().Add(CompanionOriginWaitTimeout)
+		for {
+			escrow, err = model.CreateCompanionTransferEscrow(
+				ctx,
+				sourceNetworkId,
+				sourceId,
+				destinationNetworkId,
+				destinationId,
+				contractTransferByteCount,
+				contractManagerSettings.OriginContractLinger,
+			)
+			if !errors.Is(err, model.ErrMissingCompanionOrigin) {
+				break
+			}
+			if deadline.Before(time.Now()) {
+				// genuinely no origin (a one-sided companion request):
+				// answer the terminal cause as before
+				break
+			}
+			select {
+			case <-ctx.Done():
+				returnErr = ctx.Err()
+				return
+			case <-time.After(CompanionOriginWaitPollTimeout):
+			}
+		}
 		if err != nil {
 			returnErr = err
 			return

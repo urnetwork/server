@@ -1291,6 +1291,19 @@ func CreateCompanionContract(
 	return
 }
 
+// ErrMissingCompanionOrigin: a companion contract request arrived before any
+// open origin contract in the opposite direction exists. At cold start this
+// is an ORDERING RACE, not a terminal condition: both sides bring their
+// sessions up simultaneously and the encryption control carrier requests its
+// companion contract at session setup, frequently beating the peer's origin
+// creation by milliseconds. The controller retries this case briefly (see
+// nextContract) because the client cannot: every contract failure reaches the
+// client collapsed into InsufficientBalance, and the client's blind
+// CreateContractTimeout retry loop turned this race into a 30s sequence
+// starve (observed 12 times per full test-suite run; also the mechanism that
+// manufactured dead-on-arrival multiclient window clients).
+var ErrMissingCompanionOrigin = fmt.Errorf("Missing origin contract for companion.")
+
 func CreateCompanionTransferEscrow(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -1361,7 +1374,7 @@ func CreateCompanionTransferEscrow(
 		})
 
 		if companionContractId == nil {
-			returnErr = fmt.Errorf("Missing origin contract for companion.")
+			returnErr = ErrMissingCompanionOrigin
 			return
 		}
 
