@@ -119,9 +119,31 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 				}
 			case string:
 				// country code
+				//
+				// The name MUST be resolved here. This branch used to build a
+				// `&Location{LocationType: LocationTypeCountry, CountryCode: v}`
+				// with no `Country` at all, and `CreateLocation` writes
+				// `location_name` from `Country` -- so every country reachable
+				// only through a location group (i.e. every code below that
+				// iso-country-list.yml does not name) was inserted with an empty
+				// name. That single omission produced 161 blank-named country
+				// rows on the live beta deployment.
+				countryCode := strings.ToLower(v)
+				country, ok := resolveCountryName(countryCode)
+				if !ok {
+					// deliberately fatal: the member lists below are hardcoded
+					// country codes, so an unresolvable one is a typo in this
+					// file, not a data condition to tolerate.
+					panic(fmt.Errorf(
+						"location group \"%s\" member \"%s\" is not a known country code",
+						name,
+						v,
+					))
+				}
 				location := &Location{
 					LocationType: LocationTypeCountry,
-					CountryCode:  v,
+					Country:      country,
+					CountryCode:  countryCode,
 				}
 				CreateLocation(ctx, location)
 				memberLocationIds = append(memberLocationIds, location.LocationId)
@@ -747,6 +769,47 @@ func (self *Location) CityLocation() (*Location, error) {
 	}
 }
 
+// resolveCountryName resolves the display name of an ISO-3166-1 alpha-2
+// country code.
+//
+// The order matters. The deployment's own `iso-country-list.yml` wins wherever
+// it has an entry, because some deployments deliberately use their own naming
+// ("South Korea", not "Korea, Republic of"). The built-in ISO table is the
+// fallback for the codes that file omits -- which on the live beta deployment
+// is 191 of the 249 assigned codes.
+//
+// The fallback lives in Go rather than in config on purpose:
+// `iso-country-list.yml` is a per-deployment vault resource and only one
+// deployment's copy is in this repo, so a config-only fix would repair that one
+// deployment and leave every other one inserting blank names.
+//
+// ok is false when the code is in neither, which means it is not a country.
+// Callers must NOT substitute the code for the name -- a location row named
+// "cn" is the same bug wearing a different hat, just quieter.
+func resolveCountryName(countryCode string) (string, bool) {
+	code := strings.ToLower(countryCode)
+	if len(code) != 2 {
+		return "", false
+	}
+
+	// unlike `AddDefaultLocations`, this does not *require* the config
+	// resource: `CreateLocation` is also a runtime path, and a deployment
+	// without the file must fall through to the Go table rather than panic.
+	if resource, err := server.Config.SimpleResource("iso-country-list.yml"); err == nil {
+		// the file is keyed by upper case code (`AE: United Arab Emirates`)
+		for configCode, configName := range resource.Parse() {
+			if !strings.EqualFold(configCode, code) {
+				continue
+			}
+			if name, ok := configName.(string); ok && name != "" {
+				return name, true
+			}
+		}
+	}
+
+	return ISOCountryName(code)
+}
+
 func CreateLocation(ctx context.Context, location *Location) {
 	var countryCode string
 	if location.CountryCode != "" {
@@ -757,6 +820,52 @@ func CreateLocation(ctx context.Context, location *Location) {
 	}
 	if 2 < len(countryCode) {
 		countryCode = countryCode[0:2]
+	}
+
+	// No location row may be inserted with an empty `location_name`. Each
+	// insert below writes the name straight from the field the row is named
+	// after -- `Country`, `Region`, `City` -- so an empty field is an empty
+	// name, and the `location_full_name` built from it comes out shaped like
+	// ", hk". Both were observed on the live beta deployment.
+	//
+	// A country with no name is resolved from its code. Everything else
+	// resolves to its nearest NAMED ancestor rather than erroring, because the
+	// unnamed-region case is reached on the connect-announce hot path: mmdb
+	// returns no subdivision for the subdivision-less countries (hk, sg, mc,
+	// va, ...), `GuessLocationType` still classifies those as a city because
+	// the city is set, and refusing the whole location there would turn a
+	// cosmetically-bad row into a failed connection for every client in those
+	// countries. Degrading loses city precision for them; it does not lose the
+	// connection, and it never writes a blank name.
+	if location.Country == "" {
+		country, ok := resolveCountryName(countryCode)
+		if !ok {
+			// not a country. There is no ancestor to fall back to, and
+			// inventing a name (or reusing the code as one) is what made this
+			// class of bug invisible in the first place.
+			glog.Errorf(
+				"[loc]refusing to create a location: \"%s\" is not a known country code.\n",
+				countryCode,
+			)
+			server.Raise(fmt.Errorf("Unknown country code \"%s\".", countryCode))
+		}
+		location.Country = country
+	}
+	if location.LocationType == LocationTypeCity && location.City == "" {
+		glog.Infof(
+			"[loc]unnamed city in \"%s\"; resolving at region granularity.\n",
+			countryCode,
+		)
+		location.LocationType = LocationTypeRegion
+	}
+	if location.LocationType != LocationTypeCountry && location.Region == "" {
+		// a city row is keyed under a region row, so a city whose region has no
+		// name cannot be created either
+		glog.Infof(
+			"[loc]unnamed region in \"%s\"; resolving at country granularity.\n",
+			countryCode,
+		)
+		location.LocationType = LocationTypeCountry
 	}
 
 	// country
