@@ -295,6 +295,41 @@ func TestCreateLocationUnnamedRegionCreatesNoRow(t *testing.T) {
 	})
 }
 
+// TestCreateLocationUnknownLocationTypeCreatesNoRow closes the last route to a
+// blank name: `LocationType` is what selects which insert runs, so a value that
+// is none of the three (the zero value included, from a `Location` built without
+// the field) falls through every early return and reaches the city insert with
+// an empty `City`.
+func TestCreateLocationUnknownLocationTypeCreatesNoRow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		for _, locationType := range []LocationType{"", "continent", "planet"} {
+			raised := func() (raised bool) {
+				defer func() {
+					if err := recover(); err != nil {
+						raised = true
+					}
+				}()
+				location := &Location{
+					LocationType: locationType,
+					Region:       "Testland",
+					CountryCode:  "us",
+				}
+				CreateLocation(ctx, location)
+				return
+			}()
+
+			if !raised {
+				t.Fatalf("location type \"%s\" was accepted", locationType)
+			}
+		}
+
+		connect.AssertEqual(t, blankNamedLocationCount(ctx, t), 0)
+		connect.AssertEqual(t, locationCount(ctx, t, "us"), 0)
+	})
+}
+
 // TestAddDefaultLocationsHasNoBlankNames is the regression gate for the
 // function that produced all 161 blank rows: every hardcoded location-group
 // member goes through the fixed `case string` branch here.

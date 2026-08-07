@@ -837,6 +837,20 @@ func CreateLocation(ctx context.Context, location *Location) {
 	// cosmetically-bad row into a failed connection for every client in those
 	// countries. Degrading loses city precision for them; it does not lose the
 	// connection, and it never writes a blank name.
+	switch location.LocationType {
+	case LocationTypeCountry, LocationTypeRegion, LocationTypeCity:
+	default:
+		// the inserts below are selected by `LocationType`, and an unrecognized
+		// one (including the zero value, from a `Location` built without the
+		// field) falls through every early return and lands on the city insert
+		// with whatever the caller left empty. That is a blank name by another
+		// route, so it is refused here rather than resolved.
+		glog.Errorf(
+			"[loc]refusing to create a location: \"%s\" is not a known location type.\n",
+			location.LocationType,
+		)
+		server.Raise(fmt.Errorf("Unknown location type \"%s\".", location.LocationType))
+	}
 	if location.Country == "" {
 		country, ok := resolveCountryName(countryCode)
 		if !ok {
