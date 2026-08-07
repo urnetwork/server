@@ -30,14 +30,15 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const sealVersion = 1
+const sealVersion = 2
 
 // domain separation from the proxy id signature that shares the vault secret
-const sealKeyLabel = "urnetwork-mcp-seal-v1"
+const sealKeyLabel = "urnetwork-mcp-seal-v2"
 
 const (
 	sealLabelCookies      = "cookies"
 	sealLabelContinuation = "continuation"
+	sealLabelProxy        = "proxy"
 )
 
 var errSealExpired = errors.New("sealed state expired")
@@ -72,7 +73,10 @@ type sealedEnvelope struct {
 }
 
 // Encrypts v into an opaque string bound to label and valid for ttl.
-func seal(label string, v any, ttl time.Duration) (string, error) {
+func seal(label string, binding string, v any, ttl time.Duration) (string, error) {
+	if binding == "" {
+		return "", errors.New("sealed state identity binding is required")
+	}
 	payload, err := json.Marshal(v)
 	if err != nil {
 		return "", err
@@ -95,14 +99,17 @@ func seal(label string, v any, ttl time.Duration) (string, error) {
 	}
 
 	// the nonce prefixes the ciphertext so unseal can split it back out
-	sealed := aead.Seal(nonce, nonce, envelopeJson, []byte(label))
+	sealed := aead.Seal(nonce, nonce, envelopeJson, sealAdditionalData(label, binding))
 	return base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
 // Decrypts a blob produced by seal into v. The label must match the one it was
 // sealed under, and an expired blob is rejected with errSealExpired so callers
 // can distinguish "stale, start over" from "corrupt or forged".
-func unseal(label string, sealedStr string, v any) error {
+func unseal(label string, binding string, sealedStr string, v any) error {
+	if binding == "" {
+		return errors.New("sealed state identity binding is required")
+	}
 	sealed, err := base64.RawURLEncoding.DecodeString(sealedStr)
 	if err != nil {
 		return err
@@ -114,7 +121,7 @@ func unseal(label string, sealedStr string, v any) error {
 	}
 
 	nonce := sealed[:aead.NonceSize()]
-	envelopeJson, err := aead.Open(nil, nonce, sealed[aead.NonceSize():], []byte(label))
+	envelopeJson, err := aead.Open(nil, nonce, sealed[aead.NonceSize():], sealAdditionalData(label, binding))
 	if err != nil {
 		return err
 	}
@@ -137,4 +144,8 @@ func unseal(label string, sealedStr string, v any) error {
 	}
 
 	return json.Unmarshal(envelope.Payload, v)
+}
+
+func sealAdditionalData(label string, binding string) []byte {
+	return []byte(fmt.Sprintf("%d\x00%s\x00%s", sealVersion, label, binding))
 }

@@ -37,8 +37,8 @@ import (
 // the integration test can point at a loopback web server through a plain http
 // proxy; production leaves them at their defaults.
 var (
-	fetchUsePlainHttpProxy   = false
-	fetchAllowPrivateTargets = false
+	fetchUsePlainHttpProxy = false
+	fetchCallBudget        = 20 * time.Second
 	// when set, the proxy ingress is reached at this host:port instead of the
 	// one recorded on the proxy client row. The row names the configured proxy
 	// host, which in an integration test is not the ephemeral local ingress.
@@ -46,10 +46,6 @@ var (
 )
 
 const (
-	// wall clock for one call, comfortably inside the server write timeout so
-	// the response is always delivered rather than cut
-	fetchCallBudget = 20 * time.Second
-
 	fetchMaxRedirects        = 5
 	fetchMaxIdleConns        = 32
 	fetchIdleConnTimeout     = 30 * time.Second
@@ -60,7 +56,12 @@ const (
 	fetchDefaultMaxResources     = 8
 	fetchMaxResources            = 32
 	fetchDefaultMaxResourceBytes = 512 * 1024
+	fetchMaxResourceBytes        = 2 * 1024 * 1024
+	fetchMaxEmbeddedBytes        = 8 * 1024 * 1024
 	fetchMaxBodyBytes            = 4 * 1024 * 1024
+	fetchMaxRequestBodyBytes     = 1024 * 1024
+	fetchMaxHeaderBytes          = 32 * 1024
+	fetchMaxHeaders              = 64
 
 	// sealed state outlives a normal agent session without being indefinite
 	fetchSealTtl = 6 * time.Hour
@@ -131,11 +132,12 @@ type FetchResult struct {
 
 // Sealed state carrying resources that did not fit in the call budget.
 type fetchContinuation struct {
-	SignedProxyId string        `json:"p"`
-	PageUrl       string        `json:"u"`
-	Pending       []*pendingRef `json:"r"`
-	Include       string        `json:"i"`
-	MaxBytes      int           `json:"b"`
+	SignedProxyId    string        `json:"p"`
+	PageUrl          string        `json:"u"`
+	CredentialOrigin string        `json:"o"`
+	Pending          []*pendingRef `json:"r"`
+	Include          string        `json:"i"`
+	MaxBytes         int           `json:"b"`
 }
 
 type pendingRef struct {
@@ -173,6 +175,22 @@ func fetchTool(
 		return fetchErrorResult(MsgFetchUnauthenticated), nil, nil
 	}
 	defer clientSession.Cancel()
+	binding, err := tokenStateBinding(ctx)
+	if err != nil {
+		return fetchErrorResult(MsgFetchUnauthenticated), nil, nil
+	}
+
+	budgetCtx, cancelBudget := context.WithTimeout(clientSession.Ctx, fetchCallBudget)
+	defer cancelBudget()
+	releaseFetch, err := defaultFetchConcurrencyLimiter.acquire(budgetCtx, binding)
+	if err != nil {
+		return fetchErrorResult("Too many concurrent fetch calls for this identity. Retry shortly."), nil, nil
+	}
+	defer releaseFetch()
+
+	if err := validateFetchRequestMetadata(args); err != nil {
+		return fetchErrorResult(err.Error()), nil, nil
+	}
 
 	if args.Payment != "" {
 		if err := settleFetchPayment(clientSession, args.Payment); err != nil {
@@ -181,13 +199,10 @@ func fetchTool(
 		}
 	}
 
-	budgetCtx, cancelBudget := context.WithTimeout(clientSession.Ctx, fetchCallBudget)
-	defer cancelBudget()
-
 	var continuation *fetchContinuation
 	if args.Continuation != "" {
 		continuation = &fetchContinuation{}
-		if err := unseal(sealLabelContinuation, args.Continuation, continuation); err != nil {
+		if err := unseal(sealLabelContinuation, binding, args.Continuation, continuation); err != nil {
 			return fetchErrorResult(
 				"The continuation is expired or invalid. Start the page again with url.",
 			), nil, nil
@@ -210,7 +225,7 @@ func fetchTool(
 		}
 	}
 
-	proxy, upgrade, err := acquireProxy(clientSession, args.SignedProxyId, args.Location)
+	proxy, upgrade, err := acquireProxy(clientSession, binding, args.SignedProxyId, args.Location)
 	if err != nil {
 		glog.Infof("[mcp]fetch acquire proxy error = %s\n", err)
 		return fetchErrorResult(err.Error()), nil, nil
@@ -219,7 +234,7 @@ func fetchTool(
 		return fetchUpgradeResult(upgrade)
 	}
 
-	jar, err := newCookieJar(args.Cookies)
+	jar, err := newCookieJar(binding, args.Cookies)
 	if err != nil {
 		return fetchErrorResult("The cookies value is expired or invalid. Retry without it."), nil, nil
 	}
@@ -228,8 +243,6 @@ func fetchTool(
 	if err != nil {
 		return fetchErrorResult(err.Error()), nil, nil
 	}
-	httpClient.Jar = jar
-
 	out := &FetchResult{
 		SignedProxyId: proxy.signedProxyId,
 		Location:      proxy.location,
@@ -241,6 +254,8 @@ func fetchTool(
 	includeResources := args.IncludeResources
 	maxResourceBytes := args.MaxResourceBytes
 	var pending []*pendingRef
+	var credentialOrigin *url.URL
+	var pageOrigin *url.URL
 
 	if continuation != nil {
 		// resuming: the page is already delivered, only resources remain
@@ -248,6 +263,18 @@ func fetchTool(
 		includeResources = continuation.Include
 		maxResourceBytes = continuation.MaxBytes
 		pending = continuation.Pending
+		credentialOrigin, err = url.Parse(continuation.CredentialOrigin)
+		if err != nil || credentialOrigin.Scheme == "" || credentialOrigin.Host == "" {
+			return fetchErrorResult("The continuation is expired or invalid. Start the page again with url."), nil, nil
+		}
+		pageOrigin, err = url.Parse(continuation.PageUrl)
+		if err != nil || pageOrigin.Scheme == "" || pageOrigin.Host == "" {
+			return fetchErrorResult("The continuation is expired or invalid. Start the page again with url."), nil, nil
+		}
+		httpClient.Jar = &originScopedCookieJar{jar: jar, sendOrigin: pageOrigin}
+		if fetchMaxResources < len(pending) {
+			pending = pending[:fetchMaxResources]
+		}
 	} else {
 		pageUrl, err := url.Parse(strings.TrimSpace(args.Url))
 		if err != nil {
@@ -257,13 +284,26 @@ func fetchTool(
 			return fetchErrorResult(err.Error()), nil, nil
 		}
 
-		page, err := fetchOne(budgetCtx, httpClient, args.Method, pageUrl, args.Headers, args.Body, fetchMaxBodyBytes)
+		credentialOrigin = pageUrl
+		httpClient.Jar = &originScopedCookieJar{jar: jar, sendOrigin: credentialOrigin}
+		page, err := fetchOne(
+			budgetCtx,
+			httpClient,
+			args.Method,
+			pageUrl,
+			pageUrl,
+			args.Headers,
+			args.Body,
+			fetchMaxBodyBytes,
+		)
 		if err != nil {
 			glog.Infof("[mcp]fetch %s error = %s\n", displayHost(pageUrl), err)
 			return fetchErrorResult(fmt.Sprintf("The request failed: %s", err)), nil, nil
 		}
 
 		origins[originKey(page.finalUrl)] = page.finalUrl
+		pageOrigin = page.finalUrl
+		httpClient.Jar = &originScopedCookieJar{jar: jar, sendOrigin: pageOrigin}
 		out.Status = page.status
 		out.FinalUrl = page.finalUrl.String()
 		out.ContentType = page.contentType
@@ -288,6 +328,7 @@ func fetchTool(
 			}
 		}
 	}
+	origins[originKey(pageOrigin)] = pageOrigin
 
 	if includeResources == "" {
 		includeResources = includeResourcesLinks
@@ -295,10 +336,14 @@ func fetchTool(
 	if maxResourceBytes <= 0 {
 		maxResourceBytes = fetchDefaultMaxResourceBytes
 	}
+	if fetchMaxResourceBytes < maxResourceBytes {
+		maxResourceBytes = fetchMaxResourceBytes
+	}
 
 	// resources are embedded until the budget runs out; whatever is left is
 	// handed back as a continuation rather than dropped silently
 	remaining := []*pendingRef{}
+	embeddedBytes := 0
 	for i, ref := range pending {
 		refUrl, err := url.Parse(ref.Url)
 		if err != nil {
@@ -310,7 +355,22 @@ func fetchTool(
 			break
 		}
 
-		resource, err := fetchOne(budgetCtx, httpClient, http.MethodGet, refUrl, args.Headers, "", maxResourceBytes+1)
+		remainingEmbeddedBytes := fetchMaxEmbeddedBytes - embeddedBytes
+		if remainingEmbeddedBytes <= 0 {
+			remaining = append(remaining, pending[i:]...)
+			break
+		}
+		resourceByteLimit := min(maxResourceBytes, remainingEmbeddedBytes)
+		resource, err := fetchOne(
+			budgetCtx,
+			httpClient,
+			http.MethodGet,
+			refUrl,
+			credentialOrigin,
+			args.Headers,
+			"",
+			resourceByteLimit,
+		)
 		if err != nil {
 			out.Resources = append(out.Resources, &FetchResourceEntry{
 				Url:      ref.Url,
@@ -320,9 +380,11 @@ func fetchTool(
 			})
 			continue
 		}
-		origins[originKey(resource.finalUrl)] = resource.finalUrl
+		if sameFetchOrigin(pageOrigin, resource.finalUrl) {
+			origins[originKey(resource.finalUrl)] = resource.finalUrl
+		}
 
-		if maxResourceBytes < len(resource.body) {
+		if resource.truncated {
 			// too large to embed; the caller can still load it directly
 			out.Resources = append(out.Resources, &FetchResourceEntry{
 				Url:         ref.Url,
@@ -332,6 +394,10 @@ func fetchTool(
 				Embedded:    false,
 			})
 			contents = append(contents, resourceLink(refUrl, ref.Kind, resource.contentType, len(resource.body)))
+			if resourceByteLimit < maxResourceBytes {
+				remaining = append(remaining, pending[i+1:]...)
+				break
+			}
 			continue
 		}
 
@@ -343,6 +409,7 @@ func fetchTool(
 			Embedded:    true,
 		})
 		contents = append(contents, resourceContent(resource.finalUrl, resource.contentType, resource.body))
+		embeddedBytes += len(resource.body)
 	}
 
 	// anything not embedded is still reported, as a link
@@ -360,19 +427,20 @@ func fetchTool(
 	}
 
 	if includeResources == includeResourcesEmbed && 0 < len(remaining) {
-		sealedContinuation, err := seal(sealLabelContinuation, &fetchContinuation{
-			SignedProxyId: proxy.signedProxyId,
-			PageUrl:       out.FinalUrl,
-			Pending:       remaining,
-			Include:       includeResources,
-			MaxBytes:      maxResourceBytes,
+		sealedContinuation, err := seal(sealLabelContinuation, binding, &fetchContinuation{
+			SignedProxyId:    proxy.signedProxyId,
+			PageUrl:          out.FinalUrl,
+			CredentialOrigin: credentialOrigin.String(),
+			Pending:          remaining,
+			Include:          includeResources,
+			MaxBytes:         maxResourceBytes,
 		}, fetchSealTtl)
 		if err == nil {
 			out.Continuation = sealedContinuation
 		}
 	}
 
-	if sealedCookies, err := sealCookieJar(jar, origins); err == nil {
+	if sealedCookies, err := sealCookieJar(binding, jar, origins); err == nil {
 		out.Cookies = sealedCookies
 	}
 
@@ -398,6 +466,7 @@ func fetchOne(
 	httpClient *http.Client,
 	method string,
 	fetchUrl *url.URL,
+	credentialOrigin *url.URL,
 	headers map[string]string,
 	body string,
 	maxBytes int,
@@ -415,13 +484,7 @@ func fetchOne(
 	if err != nil {
 		return nil, err
 	}
-	for name, value := range headers {
-		// the egress identity is ours to set, not the caller's
-		if strings.EqualFold(name, "Proxy-Authorization") || strings.EqualFold(name, "Host") {
-			continue
-		}
-		request.Header.Set(name, value)
-	}
+	request.Header = scopedFetchHeaders(credentialOrigin, fetchUrl, headers)
 	if request.Header.Get("User-Agent") == "" {
 		request.Header.Set("User-Agent", fetchUserAgent)
 	}
@@ -519,11 +582,11 @@ func mediaType(contentType string) string {
 }
 
 func originKey(u *url.URL) string {
-	return fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+	return canonicalFetchOrigin(u)
 }
 
 // Rehydrates the sealed jar into a net/http cookie jar.
-func newCookieJar(sealedCookies string) (http.CookieJar, error) {
+func newCookieJar(binding string, sealedCookies string) (http.CookieJar, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
@@ -533,7 +596,7 @@ func newCookieJar(sealedCookies string) (http.CookieJar, error) {
 	}
 
 	state := &cookieJarState{}
-	if err := unseal(sealLabelCookies, sealedCookies, state); err != nil {
+	if err := unseal(sealLabelCookies, binding, sealedCookies, state); err != nil {
 		return nil, err
 	}
 
@@ -559,7 +622,7 @@ func newCookieJar(sealedCookies string) (http.CookieJar, error) {
 // Captures the jar for every origin the call touched. The jar is keyed by
 // origin rather than replayed verbatim, which loses cross-subdomain scoping
 // but keeps the sealed blob small and predictable.
-func sealCookieJar(jar http.CookieJar, origins map[string]*url.URL) (string, error) {
+func sealCookieJar(binding string, jar http.CookieJar, origins map[string]*url.URL) (string, error) {
 	state := &cookieJarState{Origins: map[string][]*storedCookie{}}
 
 	for origin, originUrl := range origins {
@@ -580,7 +643,7 @@ func sealCookieJar(jar http.CookieJar, origins map[string]*url.URL) (string, err
 	if len(state.Origins) == 0 {
 		return "", nil
 	}
-	return seal(sealLabelCookies, state, fetchSealTtl)
+	return seal(sealLabelCookies, binding, state, fetchSealTtl)
 }
 
 // The threading protocol, restated against the values actually produced. This

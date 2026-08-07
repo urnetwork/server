@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"testing"
+	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
@@ -37,6 +38,84 @@ func TestByJwtLegacy(t *testing.T) {
 		connect.AssertEqual(t, byJwt.NetworkName, parsedByJwt.NetworkName)
 		connect.AssertEqual(t, byJwt.Pro, parsedByJwt.Pro)
 	})
+}
+
+func TestByJwtRegisteredClaimsAreEnforced(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		newClaims := func() *ByJwt {
+			return NewByJwt(server.NewId(), server.NewId(), "test", false, false)
+		}
+
+		tests := []struct {
+			name   string
+			mutate func(*ByJwt)
+		}{
+			{
+				name: "expired",
+				mutate: func(claims *ByJwt) {
+					claims.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Minute))
+				},
+			},
+			{
+				name: "future not before",
+				mutate: func(claims *ByJwt) {
+					claims.NotBefore = gojwt.NewNumericDate(server.NowUtc().Add(time.Hour))
+				},
+			},
+			{
+				name: "wrong issuer",
+				mutate: func(claims *ByJwt) {
+					claims.Issuer = "attacker"
+				},
+			},
+			{
+				name: "wrong audience",
+				mutate: func(claims *ByJwt) {
+					claims.Audience = gojwt.ClaimStrings{"attacker"}
+				},
+			},
+			{
+				name: "subject mismatch",
+				mutate: func(claims *ByJwt) {
+					claims.Subject = server.NewId().String()
+				},
+			},
+			{
+				name: "missing expiration",
+				mutate: func(claims *ByJwt) {
+					claims.ExpiresAt = nil
+				},
+			},
+		}
+
+		for _, test := range tests {
+			claims := newClaims()
+			test.mutate(claims)
+			_, err := ParseByJwt(ctx, claims.Sign())
+			if err == nil {
+				t.Fatalf("invalid registered claims were accepted: %s", test.name)
+			}
+		}
+
+		claims := newClaims()
+		_, err := ParseByJwtForAudience(ctx, claims.Sign(), ByJwtAudienceConnect)
+		connect.AssertEqual(t, err, nil)
+		_, err = ParseByJwtForAudience(ctx, claims.Sign(), "urnetwork:other")
+		connect.AssertEqual(t, err != nil, true)
+
+		hmacToken := gojwt.NewWithClaims(gojwt.SigningMethodHS256, newClaims())
+		hmacSigned, err := hmacToken.SignedString([]byte("attacker"))
+		connect.AssertEqual(t, err, nil)
+		_, err = ParseByJwt(ctx, hmacSigned)
+		connect.AssertEqual(t, err != nil, true)
+	})
+}
+
+func TestByJwtLifetimeIsOneDay(t *testing.T) {
+	claims := NewByJwt(server.NewId(), server.NewId(), "test", false, false)
+	lifetime := claims.ExpiresAt.Time.Sub(claims.IssuedAt.Time)
+	connect.AssertEqual(t, lifetime, 24*time.Hour)
 }
 
 // TestByJwtKid covers the `kid` key-selection behavior: a freshly signed token

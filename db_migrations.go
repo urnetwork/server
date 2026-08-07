@@ -4616,4 +4616,33 @@ var migrations = []any{
             ADD COLUMN latitude double precision NULL,
             ADD COLUMN longitude double precision NULL
     `),
+
+	// Account-wide JWT revocation watermark. Password resets advance this
+	// timestamp; API/connect reject credentials created before it.
+	newSqlMigration(`
+		ALTER TABLE network_user
+			ADD COLUMN credential_change_time timestamp NOT NULL DEFAULT 'epoch'
+	`),
+
+	// App Store notification UUIDs and entitlement-bearing transactions are
+	// separate ledgers: several notification types can legitimately reference
+	// one transaction, while each transaction may grant entitlement only once.
+	newSqlMigration(`
+		CREATE TABLE apple_notification (
+			notification_uuid uuid NOT NULL PRIMARY KEY,
+			notification_type varchar(64) NOT NULL,
+			subtype varchar(64) NOT NULL,
+			signed_date timestamp NOT NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE apple_subscription_transaction (
+			transaction_id varchar(128) NOT NULL PRIMARY KEY,
+			notification_uuid uuid NOT NULL UNIQUE,
+			network_id uuid NOT NULL,
+			product_id varchar(128) NOT NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
 }

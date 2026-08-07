@@ -139,7 +139,7 @@ func ErrorJsonWithCustomNoStack(err any, custom map[string]any) string {
 		"error": fmt.Sprintf("%T=%s", err, err),
 	}
 	for key, value := range custom {
-		obj[key] = value
+		obj[key] = SafeLogValue(value)
 	}
 	errorJson, _ := json.Marshal(obj)
 	return string(errorJson)

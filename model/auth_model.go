@@ -1230,6 +1230,18 @@ func AuthPasswordSet(
 			`,
 			userAuthResetId,
 		))
+
+		// A password reset is an account-wide credential rotation. Any API or
+		// connect JWT created before this timestamp is rejected immediately.
+		server.RaisePgResult(tx.Exec(
+			session.Ctx,
+			`
+				UPDATE network_user
+				SET credential_change_time = now()
+				WHERE user_id = $1
+			`,
+			userId,
+		))
 	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)

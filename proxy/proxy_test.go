@@ -26,15 +26,18 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -635,6 +638,52 @@ func TestProxy(t *testing.T) {
 			testProxySocks(t, h)
 			testProxyHttps(t, h)
 			testProxyWireguard(t, h)
+		}
+	})
+}
+
+func TestProxyNonPublicTargetTimesOut(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		h := setupProxyTest(t)
+		defer h.close(t)
+
+		var targetReached atomic.Bool
+		targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			targetReached.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer targetServer.Close()
+
+		proxyUrl, err := url.Parse(fmt.Sprintf("http://%s:x@127.0.0.1:%d", h.signedProxyId, h.httpPort))
+		if err != nil {
+			t.Fatalf("parse proxy url: %v", err)
+		}
+		client := &http.Client{
+			Transport: &http.Transport{Proxy: http.ProxyURL(proxyUrl)},
+			Timeout:   1 * time.Second,
+		}
+		defer client.CloseIdleConnections()
+
+		startTime := time.Now()
+		response, err := client.Get(targetServer.URL)
+		if response != nil {
+			response.Body.Close()
+			t.Fatalf("non-public target returned status %d", response.StatusCode)
+		}
+		var netError net.Error
+		if !errors.As(err, &netError) || !netError.Timeout() {
+			t.Fatalf("expected connect timeout for non-public target, got %v", err)
+		}
+		if time.Since(startTime) < 750*time.Millisecond {
+			t.Fatalf("non-public target failed before the connect timeout: %v", err)
+		}
+		if targetReached.Load() {
+			t.Fatalf("non-public target was reached through the proxy")
 		}
 	})
 }

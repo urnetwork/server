@@ -110,8 +110,11 @@ func (self *ClientSession) Auth(req *http.Request) error {
 				// to validate the jwt, parse it, which tests the signing key.
 				// this will fail if the signature is invalid.
 
-				byJwt, err := jwt.ParseByJwt(self.Ctx, authStr)
+				byJwt, err := jwt.ParseByJwtForAudience(self.Ctx, authStr, jwt.ByJwtAudienceApi)
 				if err != nil {
+					return err
+				}
+				if err := jwt.ValidateByJwtState(self.Ctx, byJwt, false); err != nil {
 					return err
 				}
 				glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)

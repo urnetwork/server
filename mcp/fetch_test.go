@@ -5,7 +5,12 @@ package mcp
 // The end to end path is covered by the stack test.
 
 import (
+	"context"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +20,7 @@ import (
 
 func TestSealRoundTrip(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		binding := "test-identity"
 		state := &cookieJarState{
 			Origins: map[string][]*storedCookie{
 				"https://example.com": {
@@ -23,36 +29,41 @@ func TestSealRoundTrip(t *testing.T) {
 			},
 		}
 
-		sealed, err := seal(sealLabelCookies, state, fetchSealTtl)
+		sealed, err := seal(sealLabelCookies, binding, state, fetchSealTtl)
 		connect.AssertEqual(t, err, nil)
 		// the caller must not be able to read or edit the jar
 		connect.AssertEqual(t, sealed == "", false)
 
 		out := &cookieJarState{}
-		err = unseal(sealLabelCookies, sealed, out)
+		err = unseal(sealLabelCookies, binding, sealed, out)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(out.Origins), 1)
 		connect.AssertEqual(t, out.Origins["https://example.com"][0].Value, "abc123")
 
 		// a jar must not be usable as a continuation
 		continuation := &fetchContinuation{}
-		err = unseal(sealLabelContinuation, sealed, continuation)
+		err = unseal(sealLabelContinuation, binding, sealed, continuation)
+		connect.AssertEqual(t, err != nil, true)
+
+		// state from one token identity cannot be replayed by another
+		err = unseal(sealLabelCookies, "other-identity", sealed, out)
 		connect.AssertEqual(t, err != nil, true)
 
 		// tampering must not authenticate
 		tampered := sealed[:len(sealed)-1] + "A"
-		err = unseal(sealLabelCookies, tampered, out)
+		err = unseal(sealLabelCookies, binding, tampered, out)
 		connect.AssertEqual(t, err != nil, true)
 	})
 }
 
 func TestSealExpires(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		sealed, err := seal(sealLabelContinuation, &fetchContinuation{PageUrl: "https://example.com"}, -1*time.Second)
+		binding := "test-identity"
+		sealed, err := seal(sealLabelContinuation, binding, &fetchContinuation{PageUrl: "https://example.com"}, -1*time.Second)
 		connect.AssertEqual(t, err, nil)
 
 		out := &fetchContinuation{}
-		err = unseal(sealLabelContinuation, sealed, out)
+		err = unseal(sealLabelContinuation, binding, sealed, out)
 		connect.AssertEqual(t, err, errSealExpired)
 	})
 }
@@ -127,11 +138,7 @@ func TestValidateFetchUrl(t *testing.T) {
 	refused := []string{
 		"ftp://example.com/f",
 		"file:///etc/passwd",
-		"http://127.0.0.1:8080/",
-		"https://10.1.2.3/",
-		"http://192.168.1.1/",
-		"http://169.254.169.254/latest/meta-data/",
-		"https://[::1]/",
+		"https://user:password@example.com/",
 	}
 
 	for _, rawUrl := range allowed {
@@ -151,17 +158,124 @@ func TestValidateFetchUrl(t *testing.T) {
 	}
 }
 
-func TestValidateFetchUrlAllowsPrivateWhenEnabled(t *testing.T) {
-	// the stack test runs its web server on loopback, so the check is
-	// switchable; confirm the switch actually governs it
-	fetchAllowPrivateTargets = true
-	defer func() {
-		fetchAllowPrivateTargets = false
-	}()
+func TestValidateFetchUrlLeavesAddressPolicyToConnect(t *testing.T) {
+	for _, rawUrl := range []string{
+		"http://127.0.0.1:8080/",
+		"https://10.1.2.3/",
+		"http://169.254.169.254/latest/meta-data/",
+		"https://[::1]/",
+	} {
+		fetchUrl, err := url.Parse(rawUrl)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, validateFetchUrl(fetchUrl), nil)
+	}
+}
 
-	fetchUrl, err := url.Parse("http://127.0.0.1:8080/")
+func TestFetchRequestMetadataIsBounded(t *testing.T) {
+	connect.AssertEqual(t, validateFetchRequestMetadata(FetchArgs{
+		Body: strings.Repeat("a", fetchMaxRequestBodyBytes+1),
+	}) != nil, true)
+	connect.AssertEqual(t, validateFetchRequestMetadata(FetchArgs{
+		Headers: map[string]string{"Connection": "keep-alive"},
+	}) != nil, true)
+	connect.AssertEqual(t, validateFetchRequestMetadata(FetchArgs{
+		Headers: map[string]string{"X-Test": "one\r\ntwo"},
+	}) != nil, true)
+}
+
+func TestFetchHeadersStayOnCredentialOrigin(t *testing.T) {
+	credentialOrigin, _ := url.Parse("https://example.com/start")
+	sameOrigin, _ := url.Parse("https://EXAMPLE.com:443/resource")
+	otherOrigin, _ := url.Parse("https://cdn.example.com/resource")
+	headers := map[string]string{
+		"Authorization": "Bearer secret",
+		"Cookie":        "session=secret",
+		"X-Api-Key":     "secret",
+		"Accept":        "image/png",
+		"User-Agent":    "test-agent",
+	}
+
+	sameOriginHeaders := scopedFetchHeaders(credentialOrigin, sameOrigin, headers)
+	connect.AssertEqual(t, sameOriginHeaders.Get("Authorization"), "Bearer secret")
+	connect.AssertEqual(t, sameOriginHeaders.Get("X-Api-Key"), "secret")
+
+	otherOriginHeaders := scopedFetchHeaders(credentialOrigin, otherOrigin, headers)
+	connect.AssertEqual(t, otherOriginHeaders.Get("Authorization"), "")
+	connect.AssertEqual(t, otherOriginHeaders.Get("Cookie"), "")
+	connect.AssertEqual(t, otherOriginHeaders.Get("X-Api-Key"), "")
+	connect.AssertEqual(t, otherOriginHeaders.Get("Accept"), "image/png")
+	connect.AssertEqual(t, otherOriginHeaders.Get("User-Agent"), "test-agent")
+}
+
+func TestFetchRedirectStripsCrossOriginCredentials(t *testing.T) {
+	original, _ := http.NewRequest(http.MethodGet, "https://example.com/start", nil)
+	redirected, _ := http.NewRequest(http.MethodGet, "https://other.example/path", nil)
+	redirected.Header.Set("Authorization", "Bearer secret")
+	redirected.Header.Set("X-Api-Key", "secret")
+	redirected.Header.Set("Accept", "application/json")
+
+	connect.AssertEqual(t, validateFetchRedirect(redirected, []*http.Request{original}), nil)
+	connect.AssertEqual(t, redirected.Header.Get("Authorization"), "")
+	connect.AssertEqual(t, redirected.Header.Get("X-Api-Key"), "")
+	connect.AssertEqual(t, redirected.Header.Get("Accept"), "application/json")
+
+	bodyRedirect, _ := http.NewRequest(http.MethodPost, "https://other.example/path", strings.NewReader("secret"))
+	connect.AssertEqual(t, validateFetchRedirect(bodyRedirect, []*http.Request{original}) != nil, true)
+}
+
+func TestFetchCookiesStayOnPageOrigin(t *testing.T) {
+	jar, err := cookiejar.New(nil)
 	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, validateFetchUrl(fetchUrl), nil)
+	pageOrigin, _ := url.Parse("https://example.com/page")
+	otherOrigin, _ := url.Parse("https://other.example/page")
+	jar.SetCookies(pageOrigin, []*http.Cookie{{Name: "page", Value: "secret"}})
+	jar.SetCookies(otherOrigin, []*http.Cookie{{Name: "other", Value: "secret"}})
+
+	scopedJar := &originScopedCookieJar{jar: jar, sendOrigin: pageOrigin}
+	connect.AssertEqual(t, len(scopedJar.Cookies(pageOrigin)), 1)
+	connect.AssertEqual(t, len(scopedJar.Cookies(otherOrigin)), 0)
+}
+
+func TestFetchOneCapsResponseBody(t *testing.T) {
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(strings.Repeat("x", 1024)))
+	}))
+	defer testServer.Close()
+
+	fetchUrl, _ := url.Parse(testServer.URL)
+	response, err := fetchOne(
+		context.Background(),
+		testServer.Client(),
+		http.MethodGet,
+		fetchUrl,
+		fetchUrl,
+		nil,
+		"",
+		32,
+	)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, len(response.body), 32)
+	connect.AssertEqual(t, response.truncated, true)
+}
+
+func TestFetchConcurrencyIsLimitedPerIdentity(t *testing.T) {
+	limiter := newFetchConcurrencyLimiter()
+	releaseOne, err := limiter.acquire(context.Background(), "identity-one")
+	connect.AssertEqual(t, err, nil)
+	defer releaseOne()
+	releaseTwo, err := limiter.acquire(context.Background(), "identity-one")
+	connect.AssertEqual(t, err, nil)
+	defer releaseTwo()
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancelWait()
+	_, err = limiter.acquire(waitCtx, "identity-one")
+	connect.AssertEqual(t, err != nil, true)
+
+	otherRelease, err := limiter.acquire(context.Background(), "identity-two")
+	connect.AssertEqual(t, err, nil)
+	otherRelease()
 }
 
 func TestFetchNextStepDescribesThreading(t *testing.T) {

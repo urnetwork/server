@@ -1415,6 +1415,75 @@ func TestAccountIsPro(t *testing.T) {
 	})
 }
 
+// TestGetActiveSubscriptionRenewalMarkets pins the multi-store case: one network
+// can be billed by two stores at once (subscribe on an iPhone, subscribe again
+// on the web), and each is cancelled only where it was bought. The single-value
+// HasSubscriptionRenewal collapses that set with MIN(market) and can name just
+// one of them, so the other stays invisible -- and keeps charging.
+func TestGetActiveSubscriptionRenewalMarkets(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "a", userId)
+
+		now := server.NowUtc()
+		renewal := func(market SubscriptionMarket, startOffsetDays int, endOffsetDays int) {
+			day := 24 * time.Hour
+			err := AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
+				NetworkId:          networkId,
+				SubscriptionType:   SubscriptionTypeSupporter,
+				StartTime:          now.Add(time.Duration(startOffsetDays) * day),
+				EndTime:            now.Add(time.Duration(endOffsetDays) * day),
+				NetRevenue:         NanoCents(0),
+				SubscriptionMarket: market,
+			})
+			connect.AssertEqual(t, err, nil)
+		}
+
+		connect.AssertEqual(
+			t,
+			GetActiveSubscriptionRenewalMarkets(ctx, networkId, SubscriptionTypeSupporter),
+			[]SubscriptionMarket{},
+		)
+
+		// two live subscriptions, two unrelated payment systems, both charging
+		renewal(SubscriptionMarketApple, -10, 20)
+		renewal(SubscriptionMarketStripe, -3, 27)
+		// a second overlapping apple row -- renewing accumulates rows, but there
+		// is still exactly ONE apple subscription to go and cancel
+		renewal(SubscriptionMarketApple, -9, 21)
+		// lapsed: nothing left to cancel, so it must not be offered
+		renewal(SubscriptionMarketGoogle, -60, -30)
+
+		markets := GetActiveSubscriptionRenewalMarkets(ctx, networkId, SubscriptionTypeSupporter)
+		connect.AssertEqual(t, markets, []SubscriptionMarket{
+			SubscriptionMarketApple,
+			SubscriptionMarketStripe,
+		})
+
+		// the single-value api is unchanged for the shipped clients that read it:
+		// still active, still naming one of the live markets
+		active, market := HasSubscriptionRenewal(ctx, networkId, SubscriptionTypeSupporter)
+		connect.AssertEqual(t, active, true)
+		connect.AssertNotEqual(t, market, nil)
+		connect.AssertEqual(t, slices.Contains(markets, *market), true)
+
+		// a renewal with no market recorded (the column postdates the table) is
+		// still a live subscription; the unknown rows collapse to one entry
+		renewal("", -5, 25)
+		renewal("", -4, 26)
+		markets = GetActiveSubscriptionRenewalMarkets(ctx, networkId, SubscriptionTypeSupporter)
+		connect.AssertEqual(t, markets, []SubscriptionMarket{
+			"",
+			SubscriptionMarketApple,
+			SubscriptionMarketStripe,
+		})
+	})
+}
+
 // FIXME a subsidy test where N clients pay each other
 // FIXME each client uses a different amount of data, but sends to peer clients following the same offset distribution as the others
 // FIXME the end result is that everyone should be paid the same, even though they get different amounts of data

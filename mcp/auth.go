@@ -18,6 +18,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"time"
@@ -163,6 +165,27 @@ func tokenHasScope(ctx context.Context, scope string) bool {
 		return false
 	}
 	return oauth.HasScope(tokenInfo.Scopes, scope)
+}
+
+// Stable, non-secret identity binding for caller-threaded state. The digest
+// keeps raw subject/client identifiers out of AEAD additional-data traces.
+func tokenStateBinding(ctx context.Context) (string, error) {
+	tokenInfo := auth.TokenInfoFromContext(ctx)
+	if tokenInfo == nil || tokenInfo.UserID == "" {
+		return "", fmt.Errorf("no access token identity")
+	}
+	networkId, _ := tokenInfo.Extra["network_id"].(server.Id)
+	clientId, _ := tokenInfo.Extra["client_id"].(string)
+	if networkId == (server.Id{}) || clientId == "" || McpResource == "" {
+		return "", fmt.Errorf("access token identity is incomplete")
+	}
+	return identityStateBinding(tokenInfo.UserID, networkId, clientId, McpResource), nil
+}
+
+func identityStateBinding(userId string, networkId server.Id, clientId string, resource string) string {
+	binding := fmt.Sprintf("v1\x00%s\x00%s\x00%s\x00%s", userId, networkId, clientId, resource)
+	digest := sha256.Sum256([]byte(binding))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 // The tool result for a token that authenticated but lacks the scope this tool

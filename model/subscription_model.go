@@ -3272,6 +3272,56 @@ func HasSubscriptionRenewal(
 	return active, market
 }
 
+// GetActiveSubscriptionRenewalMarkets returns every market that is currently
+// billing the network for subscriptionType, one entry per market.
+//
+// A network can hold concurrent renewals in more than one market -- the same
+// person subscribing on an iPhone and again on the web is billed twice, by two
+// unrelated payment systems, each of which must be cancelled where it lives.
+// HasSubscriptionRenewal collapses that set with MIN(market) and can only ever
+// name one of them, which leaves the other silently charging; use this when the
+// caller has to show or act on all of them.
+//
+// Several sequential renewal rows in one market are one subscription to cancel,
+// so the set is deduped by market. Market is nullable (it predates the column)
+// and older rows also wrote the empty string, so both are normalized to "" and
+// share a single "unknown store" entry. Ordered for a stable result, with the
+// unknown entry first.
+func GetActiveSubscriptionRenewalMarkets(
+	ctx context.Context,
+	networkId server.Id,
+	subscriptionType SubscriptionType,
+) []SubscriptionMarket {
+	markets := []SubscriptionMarket{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT DISTINCT
+				COALESCE(market, '') AS market
+			FROM subscription_renewal
+			WHERE
+				network_id = $1
+				AND subscription_type = $2
+				AND start_time <= $3
+				AND $3 < end_time
+			ORDER BY market
+			`,
+			networkId,
+			subscriptionType,
+			server.NowUtc(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var market SubscriptionMarket
+				server.Raise(result.Scan(&market))
+				markets = append(markets, market)
+			}
+		})
+	})
+	return markets
+}
+
 // IsPro reports whether a network currently holds the Pro entitlement.
 //
 // This is a thin wrapper for the many existing callers that hold a *server.Id;

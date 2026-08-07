@@ -85,13 +85,15 @@ type fetchTestStack struct {
 	cancel context.CancelFunc
 
 	// basic-auth username at the proxy ingress (empty password)
-	signedProxyId string
-	proxyClient   *model.ProxyClient
+	signedProxyId    string
+	mcpSignedProxyId string
+	proxyClient      *model.ProxyClient
 
 	// base url of the local web server, reachable through the provider egress
 	webUrl string
 
 	pdNetworkId       server.Id
+	pdUserId          server.Id
 	pdClientId        server.Id
 	providerNetworkId server.Id
 	providerClientId  server.Id
@@ -108,6 +110,10 @@ type fetchTestStack struct {
 	webServer          *httptest.Server
 
 	closeOnce sync.Once
+}
+
+type fetchTestStackOptions struct {
+	disableSecurityPolicies bool
 }
 
 // Tears down the stack. Admission is stopped before the root ctx is canceled:
@@ -364,6 +370,12 @@ img { image-rendering: pixelated; }
 // Wires up the full local environment and returns the stack. It must be called
 // inside DefaultTestEnv().Run (db + redis + migrations ready).
 func setupFetchTestStack(t testing.TB) *fetchTestStack {
+	return setupFetchTestStackWithOptions(t, &fetchTestStackOptions{
+		disableSecurityPolicies: true,
+	})
+}
+
+func setupFetchTestStackWithOptions(t testing.TB, options *fetchTestStackOptions) *fetchTestStack {
 	setFetchTestEnv()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -486,7 +498,9 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	// inspection, so the policy is disabled here.
 	providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
 	providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
-	providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	if options.disableSecurityPolicies {
+		providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	}
 	providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
 	go func() {
 		<-ctx.Done()
@@ -516,7 +530,7 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	pdClientId := server.NewId()
 
 	model.Testing_CreateNetwork(ctx, pdNetworkId, pdNetworkName, pdUserId)
-	model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "proxydevice")
+	model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "mcp")
 	fetchTestRedeemBalance(t, ctx, pdNetworkId, fetchTestInitialBalance)
 
 	// the proxy device connects "by location" pinned directly to the provider
@@ -571,7 +585,9 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	// device drops its own egress to the loopback web server
 	pdmSettings := proxy.DefaultProxyDeviceManagerSettings()
 	pdmSettings.NetworkSpace = networkSpace
-	pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	if options.disableSecurityPolicies {
+		pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	}
 	proxyDeviceManager := proxy.NewProxyDeviceManager(ctx, pdmSettings)
 	go func() {
 		<-ctx.Done()
@@ -595,15 +611,45 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
 		t.Fatalf("proxy device did not become ready (provider not reachable)")
 	}
+	proxyOwner := model.GetNetworkClient(ctx, proxyDeviceConfig.ClientId)
+	if proxyOwner == nil {
+		t.Fatalf("mcp proxy owner client %s does not exist", proxyDeviceConfig.ClientId)
+	}
+	if proxyOwner.NetworkId != pdNetworkId {
+		t.Fatalf(
+			"mcp proxy fixture owner network=%s device_spec=%q, want network=%s",
+			proxyOwner.NetworkId,
+			proxyOwner.DeviceSpec,
+			pdNetworkId,
+		)
+	}
+
+	mcpBinding := identityStateBinding(
+		pdUserId.String(),
+		pdNetworkId,
+		fetchTestOAuthClientId,
+		McpResource,
+	)
+	mcpSignedProxyId, err := seal(
+		sealLabelProxy,
+		mcpBinding,
+		&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+		fetchSealTtl,
+	)
+	if err != nil {
+		t.Fatalf("seal mcp proxy handle: %v", err)
+	}
 
 	return &fetchTestStack{
 		t:                  t,
 		ctx:                ctx,
 		cancel:             cancel,
 		signedProxyId:      proxyClient.AuthToken,
+		mcpSignedProxyId:   mcpSignedProxyId,
 		proxyClient:        proxyClient,
 		webUrl:             webServer.URL,
 		pdNetworkId:        pdNetworkId,
+		pdUserId:           pdUserId,
 		pdClientId:         pdClientId,
 		providerNetworkId:  providerNetworkId,
 		providerClientId:   providerClientId,

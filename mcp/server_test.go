@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,20 @@ func startTestServer(t testing.TB) (string, func()) {
 	}
 
 	return fmt.Sprintf("http://%s", listener.Addr().String()), cleanup
+}
+
+func TestMcpRequestBodyLimit(t *testing.T) {
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/",
+		strings.NewReader(strings.Repeat("x", int(mcpMaxRequestBodyBytes)+1)),
+	)
+	recorder := httptest.NewRecorder()
+
+	newMcpHandlerFunc(newMcpServer()).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusRequestEntityTooLarge)
+	}
 }
 
 // A network and an access token for it, carrying the given scopes.
