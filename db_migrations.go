@@ -4860,4 +4860,353 @@ var migrations = []any{
             PRIMARY KEY (user_id, client_id)
         )
     `),
+
+	// Backfill every location row that was created with a blank
+	// `location_name`, then forbid the state structurally.
+	//
+	// The rows come from `AddDefaultLocations`' location-group member path,
+	// which built a `Location` with only a `CountryCode` and no `Country`;
+	// `CreateLocation` wrote `location_name` straight from that empty field. On
+	// the live beta deployment that is 161 country rows and 2 region rows (`hk`,
+	// `sg`) -- 163 of 565. The creating path is fixed in the two commits before
+	// this one; this is the data those commits arrived too late to prevent.
+	//
+	// The 249-entry mapping below is GENERATED from `model.ISOCountryName` --
+	// the same table `CreateLocation` now resolves through -- by probing all 676
+	// two-letter codes and emitting the ones it answers for. A migration cannot
+	// call Go, and 249 hand-typed names is exactly how a wrong one gets in, so
+	// the SQL is machine-derived from the Go table rather than transcribed
+	// alongside it. It is the full ISO table, not just the 161 codes beta
+	// happens to hold, so the same migration repairs any deployment.
+	//
+	// Order matters twice, and neither order is cosmetic:
+	//
+	//  1. The backfill must precede the CHECK. Adding the constraint first fails
+	//     the migration on the 163 rows it exists to prevent.
+	//  2. The city `location_full_name` repair must precede the region rename,
+	//     because it selects its rows by the region still being blank. Renaming
+	//     first would leave the cities holding ", ," forever.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. The temp table is
+	// ON COMMIT DROP and the constraint is dropped-if-exists before being added,
+	// so a re-run -- or a duplicated merge resolution -- is a no-op.
+	newSqlMigration(`
+        CREATE TEMP TABLE iso_country_name_backfill (
+            country_code char(2) PRIMARY KEY,
+            country_name varchar(128) NOT NULL
+        ) ON COMMIT DROP;
+
+        INSERT INTO iso_country_name_backfill (country_code, country_name) VALUES
+            ('ad', 'Andorra'),
+            ('ae', 'United Arab Emirates'),
+            ('af', 'Afghanistan'),
+            ('ag', 'Antigua and Barbuda'),
+            ('ai', 'Anguilla'),
+            ('al', 'Albania'),
+            ('am', 'Armenia'),
+            ('ao', 'Angola'),
+            ('aq', 'Antarctica'),
+            ('ar', 'Argentina'),
+            ('as', 'American Samoa'),
+            ('at', 'Austria'),
+            ('au', 'Australia'),
+            ('aw', 'Aruba'),
+            ('ax', 'Åland Islands'),
+            ('az', 'Azerbaijan'),
+            ('ba', 'Bosnia and Herzegovina'),
+            ('bb', 'Barbados'),
+            ('bd', 'Bangladesh'),
+            ('be', 'Belgium'),
+            ('bf', 'Burkina Faso'),
+            ('bg', 'Bulgaria'),
+            ('bh', 'Bahrain'),
+            ('bi', 'Burundi'),
+            ('bj', 'Benin'),
+            ('bl', 'Saint Barthélemy'),
+            ('bm', 'Bermuda'),
+            ('bn', 'Brunei Darussalam'),
+            ('bo', 'Bolivia'),
+            ('bq', 'Bonaire, Sint Eustatius and Saba'),
+            ('br', 'Brazil'),
+            ('bs', 'Bahamas'),
+            ('bt', 'Bhutan'),
+            ('bv', 'Bouvet Island'),
+            ('bw', 'Botswana'),
+            ('by', 'Belarus'),
+            ('bz', 'Belize'),
+            ('ca', 'Canada'),
+            ('cc', 'Cocos (Keeling) Islands'),
+            ('cd', 'Congo, The Democratic Republic of the'),
+            ('cf', 'Central African Republic'),
+            ('cg', 'Congo'),
+            ('ch', 'Switzerland'),
+            ('ci', 'Côte d''Ivoire'),
+            ('ck', 'Cook Islands'),
+            ('cl', 'Chile'),
+            ('cm', 'Cameroon'),
+            ('cn', 'China'),
+            ('co', 'Colombia'),
+            ('cr', 'Costa Rica'),
+            ('cu', 'Cuba'),
+            ('cv', 'Cabo Verde'),
+            ('cw', 'Curaçao'),
+            ('cx', 'Christmas Island'),
+            ('cy', 'Cyprus'),
+            ('cz', 'Czechia'),
+            ('de', 'Germany'),
+            ('dj', 'Djibouti'),
+            ('dk', 'Denmark'),
+            ('dm', 'Dominica'),
+            ('do', 'Dominican Republic'),
+            ('dz', 'Algeria'),
+            ('ec', 'Ecuador'),
+            ('ee', 'Estonia'),
+            ('eg', 'Egypt'),
+            ('eh', 'Western Sahara'),
+            ('er', 'Eritrea'),
+            ('es', 'Spain'),
+            ('et', 'Ethiopia'),
+            ('fi', 'Finland'),
+            ('fj', 'Fiji'),
+            ('fk', 'Falkland Islands (Malvinas)'),
+            ('fm', 'Micronesia, Federated States of'),
+            ('fo', 'Faroe Islands'),
+            ('fr', 'France'),
+            ('ga', 'Gabon'),
+            ('gb', 'United Kingdom'),
+            ('gd', 'Grenada'),
+            ('ge', 'Georgia'),
+            ('gf', 'French Guiana'),
+            ('gg', 'Guernsey'),
+            ('gh', 'Ghana'),
+            ('gi', 'Gibraltar'),
+            ('gl', 'Greenland'),
+            ('gm', 'Gambia'),
+            ('gn', 'Guinea'),
+            ('gp', 'Guadeloupe'),
+            ('gq', 'Equatorial Guinea'),
+            ('gr', 'Greece'),
+            ('gs', 'South Georgia and the South Sandwich Islands'),
+            ('gt', 'Guatemala'),
+            ('gu', 'Guam'),
+            ('gw', 'Guinea-Bissau'),
+            ('gy', 'Guyana'),
+            ('hk', 'Hong Kong'),
+            ('hm', 'Heard Island and McDonald Islands'),
+            ('hn', 'Honduras'),
+            ('hr', 'Croatia'),
+            ('ht', 'Haiti'),
+            ('hu', 'Hungary'),
+            ('id', 'Indonesia'),
+            ('ie', 'Ireland'),
+            ('il', 'Israel'),
+            ('im', 'Isle of Man'),
+            ('in', 'India'),
+            ('io', 'British Indian Ocean Territory'),
+            ('iq', 'Iraq'),
+            ('ir', 'Iran'),
+            ('is', 'Iceland'),
+            ('it', 'Italy'),
+            ('je', 'Jersey'),
+            ('jm', 'Jamaica'),
+            ('jo', 'Jordan'),
+            ('jp', 'Japan'),
+            ('ke', 'Kenya'),
+            ('kg', 'Kyrgyzstan'),
+            ('kh', 'Cambodia'),
+            ('ki', 'Kiribati'),
+            ('km', 'Comoros'),
+            ('kn', 'Saint Kitts and Nevis'),
+            ('kp', 'North Korea'),
+            ('kr', 'South Korea'),
+            ('kw', 'Kuwait'),
+            ('ky', 'Cayman Islands'),
+            ('kz', 'Kazakhstan'),
+            ('la', 'Laos'),
+            ('lb', 'Lebanon'),
+            ('lc', 'Saint Lucia'),
+            ('li', 'Liechtenstein'),
+            ('lk', 'Sri Lanka'),
+            ('lr', 'Liberia'),
+            ('ls', 'Lesotho'),
+            ('lt', 'Lithuania'),
+            ('lu', 'Luxembourg'),
+            ('lv', 'Latvia'),
+            ('ly', 'Libya'),
+            ('ma', 'Morocco'),
+            ('mc', 'Monaco'),
+            ('md', 'Moldova'),
+            ('me', 'Montenegro'),
+            ('mf', 'Saint Martin (French part)'),
+            ('mg', 'Madagascar'),
+            ('mh', 'Marshall Islands'),
+            ('mk', 'North Macedonia'),
+            ('ml', 'Mali'),
+            ('mm', 'Myanmar'),
+            ('mn', 'Mongolia'),
+            ('mo', 'Macao'),
+            ('mp', 'Northern Mariana Islands'),
+            ('mq', 'Martinique'),
+            ('mr', 'Mauritania'),
+            ('ms', 'Montserrat'),
+            ('mt', 'Malta'),
+            ('mu', 'Mauritius'),
+            ('mv', 'Maldives'),
+            ('mw', 'Malawi'),
+            ('mx', 'Mexico'),
+            ('my', 'Malaysia'),
+            ('mz', 'Mozambique'),
+            ('na', 'Namibia'),
+            ('nc', 'New Caledonia'),
+            ('ne', 'Niger'),
+            ('nf', 'Norfolk Island'),
+            ('ng', 'Nigeria'),
+            ('ni', 'Nicaragua'),
+            ('nl', 'Netherlands'),
+            ('no', 'Norway'),
+            ('np', 'Nepal'),
+            ('nr', 'Nauru'),
+            ('nu', 'Niue'),
+            ('nz', 'New Zealand'),
+            ('om', 'Oman'),
+            ('pa', 'Panama'),
+            ('pe', 'Peru'),
+            ('pf', 'French Polynesia'),
+            ('pg', 'Papua New Guinea'),
+            ('ph', 'Philippines'),
+            ('pk', 'Pakistan'),
+            ('pl', 'Poland'),
+            ('pm', 'Saint Pierre and Miquelon'),
+            ('pn', 'Pitcairn'),
+            ('pr', 'Puerto Rico'),
+            ('ps', 'Palestine, State of'),
+            ('pt', 'Portugal'),
+            ('pw', 'Palau'),
+            ('py', 'Paraguay'),
+            ('qa', 'Qatar'),
+            ('re', 'Réunion'),
+            ('ro', 'Romania'),
+            ('rs', 'Serbia'),
+            ('ru', 'Russian Federation'),
+            ('rw', 'Rwanda'),
+            ('sa', 'Saudi Arabia'),
+            ('sb', 'Solomon Islands'),
+            ('sc', 'Seychelles'),
+            ('sd', 'Sudan'),
+            ('se', 'Sweden'),
+            ('sg', 'Singapore'),
+            ('sh', 'Saint Helena, Ascension and Tristan da Cunha'),
+            ('si', 'Slovenia'),
+            ('sj', 'Svalbard and Jan Mayen'),
+            ('sk', 'Slovakia'),
+            ('sl', 'Sierra Leone'),
+            ('sm', 'San Marino'),
+            ('sn', 'Senegal'),
+            ('so', 'Somalia'),
+            ('sr', 'Suriname'),
+            ('ss', 'South Sudan'),
+            ('st', 'Sao Tome and Principe'),
+            ('sv', 'El Salvador'),
+            ('sx', 'Sint Maarten (Dutch part)'),
+            ('sy', 'Syria'),
+            ('sz', 'Eswatini'),
+            ('tc', 'Turks and Caicos Islands'),
+            ('td', 'Chad'),
+            ('tf', 'French Southern Territories'),
+            ('tg', 'Togo'),
+            ('th', 'Thailand'),
+            ('tj', 'Tajikistan'),
+            ('tk', 'Tokelau'),
+            ('tl', 'Timor-Leste'),
+            ('tm', 'Turkmenistan'),
+            ('tn', 'Tunisia'),
+            ('to', 'Tonga'),
+            ('tr', 'Türkiye'),
+            ('tt', 'Trinidad and Tobago'),
+            ('tv', 'Tuvalu'),
+            ('tw', 'Taiwan'),
+            ('tz', 'Tanzania'),
+            ('ua', 'Ukraine'),
+            ('ug', 'Uganda'),
+            ('um', 'United States Minor Outlying Islands'),
+            ('us', 'United States'),
+            ('uy', 'Uruguay'),
+            ('uz', 'Uzbekistan'),
+            ('va', 'Holy See (Vatican City State)'),
+            ('vc', 'Saint Vincent and the Grenadines'),
+            ('ve', 'Venezuela'),
+            ('vg', 'Virgin Islands, British'),
+            ('vi', 'Virgin Islands, U.S.'),
+            ('vn', 'Vietnam'),
+            ('vu', 'Vanuatu'),
+            ('wf', 'Wallis and Futuna'),
+            ('ws', 'Samoa'),
+            ('ye', 'Yemen'),
+            ('yt', 'Mayotte'),
+            ('za', 'South Africa'),
+            ('zm', 'Zambia'),
+            ('zw', 'Zimbabwe');
+
+        -- The city rows under a blank region are not themselves blank, but their
+        -- location_full_name carries the empty region through the same
+        -- composition -- "Hong Kong, , hk". Repaired to the shape the city INSERT
+        -- writes, city, region, code, using the name the region is about to get.
+        -- This runs FIRST: after the rename the region is no longer blank and this
+        -- statement would match nothing.
+        UPDATE location AS city
+        SET location_full_name =
+            city.location_name || ', ' || iso.country_name || ', ' || city.country_code
+        FROM location AS region
+        JOIN iso_country_name_backfill AS iso
+            ON iso.country_code = region.country_code
+        WHERE
+            city.location_type = 'city' AND
+            city.region_location_id = region.location_id AND
+            region.location_type = 'region' AND
+            region.location_name = '';
+
+        -- The 2 blank region rows are RENAMED, not deleted: each has a city child
+        -- pointing at it through region_location_id (Hong Kong under hk,
+        -- Singapore under sg), so dropping them would orphan a live city. They
+        -- exist because the geolocation database returns no subdivision for a
+        -- subdivision-less country, so the region was created with an empty name;
+        -- the only fact such a row carries is "the whole of this country", which is
+        -- why it is named after its country rather than after a subdivision that
+        -- was never in the source data. location_full_name is composed the way
+        -- the region INSERT composes it, name, code.
+        UPDATE location AS region
+        SET
+            location_name = iso.country_name,
+            location_full_name = iso.country_name || ', ' || region.country_code
+        FROM iso_country_name_backfill AS iso
+        WHERE
+            region.location_type = 'region' AND
+            region.location_name = '' AND
+            iso.country_code = region.country_code;
+
+        -- The 161 country rows. location_full_name is deliberately NOT touched:
+        -- the country INSERT writes the bare country code into it, so these rows
+        -- already hold exactly what a correctly-named country row holds. Only the
+        -- name was ever missing.
+        UPDATE location AS country
+        SET location_name = iso.country_name
+        FROM iso_country_name_backfill AS iso
+        WHERE
+            country.location_type = 'country' AND
+            country.location_name = '' AND
+            iso.country_code = country.country_code;
+
+        DROP TABLE iso_country_name_backfill;
+
+        -- The structural backstop. A blank name is never a real location, so it is
+        -- rejected by the database rather than depending on every future caller
+        -- remembering to resolve one.
+        ALTER TABLE location DROP CONSTRAINT IF EXISTS location_name_not_blank;
+
+        ALTER TABLE location
+            ADD CONSTRAINT location_name_not_blank
+            CHECK (location_name <> '')
+    `),
 }
