@@ -3481,3 +3481,45 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
 	})
 }
+
+// TestFindProviders2ClientIdBypassesHealthGate pins a deliberate exception to
+// the health/location gate: a spec.ClientId entry is appended straight to the
+// result (see the `if spec.ClientId != nil` branch in FindProviders2) without
+// ever touching loadClientScores or PassesMinimums. An explicit client id is
+// a caller's deliberate choice -- e.g. reconnecting to a known provider -- so
+// the public-list gate that excludes measured-unhealthy providers elsewhere
+// must not apply here. Nothing tested this before; if the bypass were ever
+// folded into the gated path, this test would start failing because the
+// provider marked comprehensively unhealthy below would be dropped from the
+// result instead of being returned.
+func TestFindProviders2ClientIdBypassesHealthGate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		countryId := server.NewId()
+		unhealthy := server.NewId()
+
+		Testing_CreateProviderAtLocation(ctx, networkId, unhealthy, countryId, "US")
+		// measured comprehensively dead, so the gate excludes it everywhere else
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: unhealthy, OKCount: 0, Total: 131, MeasuredAt: server.NowUtc(),
+		})
+
+		clientSession := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkId, server.NewId(), "test", false, false),
+		)
+
+		result, err := FindProviders2(&FindProviders2Args{
+			Specs: []*ProviderSpec{{ClientId: &unhealthy}},
+			Count: 1,
+		}, clientSession)
+		assert.Equal(t, err, nil)
+
+		// an explicit client id is a deliberate choice by the caller, so the
+		// public-list health gate must not apply to it
+		assert.Equal(t, len(result.Providers), 1)
+		assert.Equal(t, result.Providers[0].ClientId, unhealthy)
+	})
+}
