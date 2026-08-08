@@ -278,6 +278,43 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 	return e
 }
 
+// GetAllProviderEgressCountryCodes reads every provider's latest observed
+// egress country in one query, for callers that need to check many providers
+// in a single pass. Mirrors GetAllProviderEgressHealthCounts: the counting
+// loop in UpdateClientLocations runs over the whole provider population, so a
+// per-provider query there would be one round trip per provider.
+//
+// Codes are lowercased so callers can compare directly against
+// location.country_code without normalising at each site.
+//
+// A provider with no observed location is ABSENT from the map rather than
+// present with an empty string. Callers use the two-value lookup and treat
+// absence as "not verified", which fails closed.
+func GetAllProviderEgressCountryCodes(ctx context.Context) map[server.Id]string {
+	countryCodes := map[server.Id]string{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT client_id, country_code
+			FROM provider_egress_location
+			WHERE country_code IS NOT NULL AND country_code != ''
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var countryCode string
+				server.Raise(result.Scan(&clientId, &countryCode))
+				countryCodes[clientId] = strings.ToLower(countryCode)
+			}
+		})
+	})
+
+	return countryCodes
+}
+
 // GetFreshProviderEgressLocation is GetProviderEgressLocation, filtered to
 // entries probed within maxAge. The cutoff is computed in Go and bound as a
 // parameter: observed_at is a naive timestamp holding utc, and comparing it

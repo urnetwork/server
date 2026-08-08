@@ -745,3 +745,30 @@ func TestProviderEgressLocationVerdictDefaults(t *testing.T) {
 		connect.AssertEqual(t, stored.Assurance, ProviderEgressAssuranceDirect)
 	})
 }
+
+func TestGetAllProviderEgressCountryCodes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		observed := server.NewId()
+		unobserved := server.NewId()
+
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:    observed,
+			CountryCode: "GB",
+			Verdict:     "verified",
+			ObservedAt:  server.NowUtc(),
+		})
+
+		codes := GetAllProviderEgressCountryCodes(ctx)
+
+		// observed providers come back lowercased, so callers can compare
+		// against location.country_code without normalising at each site
+		assert.Equal(t, codes[observed], "gb")
+
+		// a provider with no observed location is ABSENT, not "".
+		// Callers rely on the two-value lookup to fail closed.
+		_, ok := codes[unobserved]
+		assert.Equal(t, ok, false)
+	})
+}
