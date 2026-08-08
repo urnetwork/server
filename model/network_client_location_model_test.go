@@ -3334,6 +3334,31 @@ func TestProviderCountFilterShouldSkipCountGate(t *testing.T) {
 	)
 }
 
+// TestProviderCountFilterShouldRecountUngated covers the OUTPUT-side half of
+// the fleet-wide floor. shouldSkipCountGate looks at the two input maps before
+// the pass; shouldRecountUngated looks at what the pass produced. Non-empty
+// inputs can still yield an empty count -- a fleet-wide claimed/observed
+// mismatch, or every claimed country resolving to NULL -- and an empty count
+// wipes every location out of redis. Pure in-memory logic, no database.
+func TestProviderCountFilterShouldRecountUngated(t *testing.T) {
+	// the failure this exists to catch: rows existed, the gate ate all of
+	// them, nothing counted anywhere. Do not publish that; recount ungated.
+	assert.Equal(t, shouldRecountUngated(true, 152, 0), true)
+
+	// the gate counted something: publish it, however small
+	assert.Equal(t, shouldRecountUngated(true, 152, 1), false)
+
+	// no connected + valid + Public rows at all. Supply really is gone and
+	// emptying the published list is the correct answer, not a fallback.
+	assert.Equal(t, shouldRecountUngated(true, 0, 0), false)
+
+	// the gate was already skipped for this pass (shouldSkipCountGate fired).
+	// An empty count is then the ungated answer already -- recounting would
+	// produce the identical result and loop the reasoning.
+	assert.Equal(t, shouldRecountUngated(false, 152, 0), false)
+	assert.Equal(t, shouldRecountUngated(false, 0, 0), false)
+}
+
 // Testing_CreateProviderAtLocation inserts exactly the rows a provider needs
 // to clear the pre-existing UpdateClientLocations gate: a network_client row,
 // a Public provide_key, and a network_client_location_reliability row that is
@@ -3442,6 +3467,11 @@ func Testing_CreateProviderAtLocation(
 // claims. Before this change, connected + valid + a Public provide key was
 // enough on its own -- an unreachable or misrepresenting provider still
 // inflated the count.
+//
+// It covers all three exclusion paths against a real database, because each
+// one leans on SQL the in-memory providerCountFilter test cannot exercise: the
+// health check, the claimed-vs-observed MISMATCH, and a NULL claimed country
+// arriving from the LEFT JOIN onto `location`.
 func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3452,24 +3482,65 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		healthy := server.NewId()
 		unhealthy := server.NewId()
 		unprobed := server.NewId()
+		// healthy, but a probe watched it egress from GB while it claims US.
+		// This is the MISMATCH path: it exercises the LEFT JOIN onto
+		// `location`, the char(2) country_code round trip, and the
+		// strings.ToLower comparison inside countsTowardCountry -- none of
+		// which the in-memory filter test can reach.
+		wrongCountry := server.NewId()
+		// healthy AND observed exactly where it claims to be, but its
+		// country_location_id points at a `location` row that does not exist,
+		// so the LEFT JOIN yields a NULL claimed country. This is the
+		// NULL-claimed-country path: unverifiable against anything, so it must
+		// fail closed like an unobserved provider.
+		orphanClaim := server.NewId()
+		orphanCountryId := server.NewId()
 
-		// three providers in the same country, all connected with a Public
+		// four providers in the claimed country, all connected with a Public
 		// provide key; only `healthy` is measured healthy and observed in US
-		for _, clientId := range []server.Id{healthy, unhealthy, unprobed} {
+		for _, clientId := range []server.Id{healthy, unhealthy, unprobed, wrongCountry} {
 			Testing_CreateProviderAtLocation(ctx, networkId, clientId, countryId, "US")
 		}
+		// created at its own country id, whose `location` row is then removed
+		// out from under it. This schema declares no foreign keys, so the
+		// reliability row survives pointing at nothing -- which is exactly the
+		// state the LEFT JOIN has to handle.
+		Testing_CreateProviderAtLocation(ctx, networkId, orphanClaim, orphanCountryId, "US")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM location WHERE location_id = $1`,
+				orphanCountryId,
+			))
+		})
+
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 			ClientId: healthy, OKCount: 131, Total: 131, MeasuredAt: server.NowUtc(),
 		})
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 			ClientId: unhealthy, OKCount: 0, Total: 131, MeasuredAt: server.NowUtc(),
 		})
-		for _, clientId := range []server.Id{healthy, unhealthy} {
+		// both new providers pass health, so health is not what excludes them:
+		// the claimed-vs-observed country check is.
+		for _, clientId := range []server.Id{wrongCountry, orphanClaim} {
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, OKCount: 131, Total: 131, MeasuredAt: server.NowUtc(),
+			})
+		}
+		// ObservedAt must be now: GetAllProviderEgressCountryCodes returns only
+		// rows observed within ProviderEgressLocationMaxAge, so a zero-value
+		// ObservedAt would make these fixtures invisible and the assertions
+		// below would pass for the wrong reason.
+		for _, clientId := range []server.Id{healthy, unhealthy, orphanClaim} {
 			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 				ClientId: clientId, CountryCode: "US",
 				Verdict: "verified", ObservedAt: server.NowUtc(),
 			})
 		}
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: wrongCountry, CountryCode: "GB",
+			Verdict: "verified", ObservedAt: server.NowUtc(),
+		})
 
 		UpdateClientLocations(ctx, 1*time.Hour)
 
@@ -3477,7 +3548,9 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		assert.Equal(t, err, nil)
 
 		// only the measured-healthy, observed-in-US provider is counted.
-		// Before this change all three counted.
+		// Before this change all three of the original providers counted; the
+		// GB-egressing and NULL-claimed-country providers must not add to it
+		// either, so the total is still exactly 1.
 		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
 	})
 }

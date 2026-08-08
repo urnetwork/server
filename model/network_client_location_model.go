@@ -1870,6 +1870,58 @@ func (f providerCountFilter) shouldSkipCountGate() bool {
 	return len(f.healthCounts) == 0 || len(f.countryCodes) == 0
 }
 
+// shouldRecountUngated is the SECOND half of the fleet-wide floor, applied
+// after a gated counting pass instead of before it: gated says the gate was
+// actually applied to this pass, providerRows is how many connected + valid +
+// Public rows the count query returned, and countedLocations is how many
+// locations came out of it with any supply at all.
+//
+// This is NOT redundant with shouldSkipCountGate, and a future reader must not
+// collapse the two. They answer different questions and neither implies the
+// other:
+//
+//   - shouldSkipCountGate asks "did either probe pipeline produce ANY rows at
+//     all". It reads the two input maps.
+//   - this asks "did rows that exist produce ANY counted supply". It reads the
+//     OUTPUT of the pass.
+//
+// Non-empty inputs can still yield an empty output, by more than one route: a
+// fleet-wide mismatch between claimed and observed countries, a location-table
+// anomaly that makes every claimed country NULL (see the countryCode == nil
+// branch below), a partially drained egress-location table whose surviving rows
+// all belong to churned clients, or any future gate term added to
+// countsTowardCountry. In every one of those, the input maps are non-empty so
+// shouldSkipCountGate stays false, and yet locationClientCounts comes out
+// empty.
+//
+// An empty locationClientCounts is not a benign "no supply" result: every
+// location then misses the lookup below and lands in removeClientLocations,
+// which DELs every clientLocationKey from redis and publishes an empty
+// initialClientLocations -- /network/provider-locations returns nothing to
+// every app. Treat "rows existed but nothing counted" as "this pass learned
+// nothing" and redo it with the gate off, which is the same fallback
+// shouldSkipCountGate selects.
+//
+// providerRows > 0 is what separates this from a genuinely empty fleet. If the
+// count query returned no rows at all, there really is no connected + valid +
+// Public supply and emptying the published list is the correct answer.
+func shouldRecountUngated(gated bool, providerRows int, countedLocations int) bool {
+	return gated && providerRows > 0 && countedLocations == 0
+}
+
+// providerCountRow is one connected + valid + Public provider row from the
+// count query, held in memory so the pass can be counted twice (gated, then
+// ungated if the gated pass came out empty) without issuing a second query.
+type providerCountRow struct {
+	clientId          server.Id
+	cityLocationId    server.Id
+	regionLocationId  server.Id
+	countryLocationId server.Id
+	// the country the provider CLAIMS. nil when the claimed country has no
+	// `location` row to resolve it against.
+	claimedCountryCode *string
+}
+
 func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
 	topCitiesPerRegion := 20
 	topCitiesPerCountry := 10
@@ -1899,6 +1951,10 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	// only) instead. See shouldSkipCountGate for why BOTH maps are checked.
 	// Do NOT remove this as "redundant" with passesHealth's per-provider
 	// check -- it is a fleet-wide floor, not a per-provider one.
+	//
+	// This is only the input-side half of that floor: empty inputs are not the
+	// only way to reach an emptied count. See shouldRecountUngated, applied to
+	// the counted result below, for the other half.
 	skipCountGate := countFilter.shouldSkipCountGate()
 	if skipCountGate {
 		glog.Infof("[nclm]egress health or location records are empty; skipping the provider count gate for this pass\n")
@@ -1906,7 +1962,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		locationClientCounts := map[server.Id]int{}
+		providerCountRows := []providerCountRow{}
 
 		result, err := tx.Query(
 			ctx,
@@ -1978,37 +2034,46 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var clientId server.Id
-				var cityLocationId server.Id
-				var regionLocationId server.Id
-				var countryLocationId server.Id
-				var countryCode *string
+				// declared per iteration on purpose: claimedCountryCode is a
+				// pointer, and hoisting these out of the loop would make every
+				// retained row alias the last scanned value.
+				var row providerCountRow
 				server.Raise(result.Scan(
-					&clientId,
-					&cityLocationId,
-					&regionLocationId,
-					&countryLocationId,
-					&countryCode,
+					&row.clientId,
+					&row.cityLocationId,
+					&row.regionLocationId,
+					&row.countryLocationId,
+					&row.claimedCountryCode,
 				))
+				providerCountRows = append(providerCountRows, row)
+			}
+		})
 
+		// counted from the retained rows rather than inline in the scan loop, so
+		// the same pass can be counted a second time with the gate off without
+		// re-querying. See shouldRecountUngated.
+		countProviderRows := func(gated bool) map[server.Id]int {
+			locationClientCounts := map[server.Id]int{}
+			for _, row := range providerCountRows {
 				// This is the number every app shows when a user picks a
 				// location, so count only providers a probe has MEASURED
 				// healthy and OBSERVED egressing from the country they claim.
 				// Counting on the claim alone advertised providers that were
 				// either unreachable or in a different country entirely.
 				//
-				// countryCode is NULL when the claimed country has no location
-				// row, which cannot be verified against anything -- fail closed,
-				// same as an unobserved provider.
+				// claimedCountryCode is NULL when the claimed country has no
+				// location row, which cannot be verified against anything --
+				// fail closed, same as an unobserved provider.
 				//
-				// Unless the whole gate is skipped for this pass (see
-				// skipCountGate above) -- an unprobed fleet is "unknown", not
-				// "unhealthy", and must not empty the public list.
-				if !skipCountGate {
-					if countryCode == nil {
+				// Unless the gate is off for this pass (see skipCountGate
+				// above and shouldRecountUngated below) -- an unprobed fleet is
+				// "unknown", not "unhealthy", and must not empty the public
+				// list.
+				if gated {
+					if row.claimedCountryCode == nil {
 						continue
 					}
-					if !countFilter.countsTowardCountry(clientId, *countryCode) {
+					if !countFilter.countsTowardCountry(row.clientId, *row.claimedCountryCode) {
 						continue
 					}
 				}
@@ -2026,14 +2091,31 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 				// forward guard against upstream/main, where it does not yet --
 				// see distinctIds.
 				for _, locationId := range distinctIds(
-					&cityLocationId,
-					&regionLocationId,
-					&countryLocationId,
+					&row.cityLocationId,
+					&row.regionLocationId,
+					&row.countryLocationId,
 				) {
 					locationClientCounts[locationId] += 1
 				}
 			}
-		})
+			return locationClientCounts
+		}
+
+		gated := !skipCountGate
+		locationClientCounts := countProviderRows(gated)
+
+		// the output-side half of the fleet-wide floor. shouldSkipCountGate
+		// guards the INPUTS (did a probe pipeline produce rows); this guards
+		// the OUTPUT (did those rows produce any counted supply). Neither
+		// implies the other -- see shouldRecountUngated for why they must not
+		// be collapsed.
+		if shouldRecountUngated(gated, len(providerCountRows), len(locationClientCounts)) {
+			glog.Infof(
+				"[nclm]the count gate emptied all %d connected provider rows fleet-wide; recounting ungated for this pass\n",
+				len(providerCountRows),
+			)
+			locationClientCounts = countProviderRows(false)
+		}
 
 		server.CreateTempTableInTx(
 			ctx,

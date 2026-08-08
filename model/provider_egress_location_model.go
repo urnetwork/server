@@ -290,8 +290,35 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 // A provider with no observed location is ABSENT from the map rather than
 // present with an empty string. Callers use the two-value lookup and treat
 // absence as "not verified", which fails closed.
+//
+// Only rows observed within ProviderEgressLocationMaxAge are returned, matching
+// the bound every other reader applies via GetFreshProviderEgressLocation. That
+// invariant is load bearing: the sweeper deliberately retains rows far longer
+// than the trust window (see the comment in
+// taskworker/work/provider_egress_location_work.go, "reads already ignore stale
+// rows"), so an unbounded read here would keep counting a provider as supply
+// for a country it was probed in weeks ago and has since moved out of -- the
+// exact "advertised in a country it does not egress from" defect this gate
+// exists to close. A provider whose only row has aged out is ABSENT, same as
+// one never probed, which fails closed.
+//
+// The cutoff is computed in Go and bound as a parameter rather than written
+// into the SQL: observed_at is a naive timestamp holding utc, so comparing it
+// against sql now() would cast through the session timezone. This mirrors
+// GetFreshProviderEgressLocation exactly.
+//
+// Verdicts are DELIBERATELY not consulted: a row recorded 'suspect' or
+// 'unstable' counts the same as 'verified'. That is consistent with the
+// standing rule that verdicts are advisory and nothing in selection or scoring
+// reads them (see the ProviderEgressLocation doc comment). Revisit only when
+// verdicts become authoritative fleet-wide -- filtering on them here alone
+// would silently drop providers from the public count on the strength of a
+// judgement nothing else in the system honors, and would shrink this map
+// enough to matter for the fleet-wide floor in shouldSkipCountGate.
 func GetAllProviderEgressCountryCodes(ctx context.Context) map[server.Id]string {
 	countryCodes := map[server.Id]string{}
+
+	minObservedAt := server.NowUtc().Add(-ProviderEgressLocationMaxAge)
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -299,8 +326,11 @@ func GetAllProviderEgressCountryCodes(ctx context.Context) map[server.Id]string 
 			`
 			SELECT client_id, country_code
 			FROM provider_egress_location
-			WHERE country_code IS NOT NULL AND country_code != ''
+			WHERE
+				observed_at >= $1 AND
+				country_code IS NOT NULL AND country_code != ''
 			`,
+			minObservedAt,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

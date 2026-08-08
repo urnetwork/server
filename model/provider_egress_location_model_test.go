@@ -752,6 +752,7 @@ func TestGetAllProviderEgressCountryCodes(t *testing.T) {
 
 		observed := server.NewId()
 		unobserved := server.NewId()
+		stale := server.NewId()
 
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId:    observed,
@@ -759,16 +760,34 @@ func TestGetAllProviderEgressCountryCodes(t *testing.T) {
 			Verdict:     "verified",
 			ObservedAt:  server.NowUtc(),
 		})
+		// probed once, well outside the trust window. The sweeper deliberately
+		// retains rows far longer than ProviderEgressLocationMaxAge because
+		// "reads already ignore stale rows" (see
+		// taskworker/work/provider_egress_location_work.go), so a row like this
+		// really does sit in the table -- and this bulk read is one of the
+		// reads that has to ignore it. Unbounded, it would keep counting this
+		// provider as supply for a country it may have left weeks ago.
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:    stale,
+			CountryCode: "GB",
+			Verdict:     "verified",
+			ObservedAt:  server.NowUtc().Add(-ProviderEgressLocationMaxAge - time.Hour),
+		})
 
 		codes := GetAllProviderEgressCountryCodes(ctx)
 
 		// observed providers come back lowercased, so callers can compare
 		// against location.country_code without normalising at each site
-		assert.Equal(t, codes[observed], "gb")
+		connect.AssertEqual(t, codes[observed], "gb")
 
 		// a provider with no observed location is ABSENT, not "".
 		// Callers rely on the two-value lookup to fail closed.
 		_, ok := codes[unobserved]
-		assert.Equal(t, ok, false)
+		connect.AssertEqual(t, ok, false)
+
+		// a provider whose only observation has aged out is ABSENT too --
+		// indistinguishable from never probed, which fails closed
+		_, ok = codes[stale]
+		connect.AssertEqual(t, ok, false)
 	})
 }
