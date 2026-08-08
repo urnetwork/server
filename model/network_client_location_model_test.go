@@ -3400,11 +3400,20 @@ func Testing_CreateProviderAtLocation(
 					country_code,
 					location_full_name
 				)
-				VALUES ($1, $2, $3, $1, $3, $3)
+				VALUES ($1, $2, $3, $1, $4, $5)
 				ON CONFLICT (location_id) DO NOTHING
 			`,
 			countryId,
 			LocationTypeCountry,
+			// One value, bound three times as three separate parameters.
+			// Reusing a single $3 across location_name (varchar), country_code
+			// (char(2)) and location_full_name (varchar) makes postgres try to
+			// deduce one type for it and fail the whole statement with
+			// "inconsistent types deduced for parameter $3" (SQLSTATE 42P08).
+			// Caught only by running against a real database -- it builds and
+			// vets clean.
+			countryCode,
+			countryCode,
 			countryCode,
 		))
 
