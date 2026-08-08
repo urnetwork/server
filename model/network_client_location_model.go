@@ -1861,6 +1861,10 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	initialClientLocations := &InitialClientLocations{}
 
+	// one bulk load per pass, outside the tx: this loop runs over the whole
+	// provider population
+	countFilter := newProviderCountFilter(ctx)
+
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		locationClientCounts := map[server.Id]int{}
@@ -1869,9 +1873,13 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			ctx,
 			`
 	        SELECT
+	        	network_client_location_reliability.client_id,
 	        	network_client_location_reliability.city_location_id,
 	        	network_client_location_reliability.region_location_id,
-	        	network_client_location_reliability.country_location_id
+	        	network_client_location_reliability.country_location_id,
+	        	-- the country the provider CLAIMS, to check against the country a
+	        	-- probe observed it egressing from
+	        	country_location.country_code
 
 	        FROM network_client_location_reliability
 
@@ -1891,6 +1899,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	        LEFT JOIN client_connection_reliability_score ON
 	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id AND
 				client_connection_reliability_score.lookback_index = 0
+
+	        LEFT JOIN location AS country_location ON
+	        	country_location.location_id = network_client_location_reliability.country_location_id
 
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
@@ -1928,14 +1939,34 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
+				var clientId server.Id
 				var cityLocationId server.Id
 				var regionLocationId server.Id
 				var countryLocationId server.Id
+				var countryCode *string
 				server.Raise(result.Scan(
+					&clientId,
 					&cityLocationId,
 					&regionLocationId,
 					&countryLocationId,
+					&countryCode,
 				))
+
+				// This is the number every app shows when a user picks a
+				// location, so count only providers a probe has MEASURED
+				// healthy and OBSERVED egressing from the country they claim.
+				// Counting on the claim alone advertised providers that were
+				// either unreachable or in a different country entirely.
+				//
+				// countryCode is NULL when the claimed country has no location
+				// row, which cannot be verified against anything -- fail closed,
+				// same as an unobserved provider.
+				if countryCode == nil {
+					continue
+				}
+				if !countFilter.countsTowardCountry(clientId, *countryCode) {
+					continue
+				}
 
 				// count each client at most once per distinct location id. A
 				// client whose geo lookup resolved neither a city nor a region

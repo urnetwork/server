@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -3235,4 +3236,152 @@ func TestProviderCountFilter(t *testing.T) {
 
 	// comparison is case insensitive on the caller's side
 	assert.Equal(t, f.countsTowardCountry(healthy, "US"), true)
+}
+
+// Testing_CreateProviderAtLocation inserts exactly the rows a provider needs
+// to clear the pre-existing UpdateClientLocations gate: a network_client row,
+// a Public provide_key, and a network_client_location_reliability row that is
+// connected, valid, and pinned to countryId at all three granularities (city =
+// region = country), mirroring the country-only fallback in
+// SetConnectionLocation (a geo lookup with no city/region resolves to the
+// country id at every column -- see the fix(beta) comment there).
+//
+// It also creates the `location` row for countryId itself: the gated query
+// under test resolves the provider's CLAIMED country by joining
+// network_client_location_reliability.country_location_id back to `location`,
+// and loadClientLocations only surfaces a location that has a `location` row.
+// Both go through raw SQL rather than CreateLocation/SetConnectionLocation
+// because the caller picks countryId up front (so a later lookup can key on
+// it), and CreateLocation always mints its own id.
+//
+// health and observed egress location are deliberately NOT set here -- every
+// caller states its own via SetProviderEgressHealth/SetProviderEgressLocation,
+// exactly as the pre-gate minimums (connected/valid/Public key) are set here
+// while health is layered on top by each test.
+func Testing_CreateProviderAtLocation(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	countryId server.Id,
+	countryCode string,
+) {
+	countryCode = strings.ToLower(countryCode)
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO location (
+					location_id,
+					location_type,
+					location_name,
+					country_location_id,
+					country_code,
+					location_full_name
+				)
+				VALUES ($1, $2, $3, $1, $3, $3)
+				ON CONFLICT (location_id) DO NOTHING
+			`,
+			countryId,
+			LocationTypeCountry,
+			countryCode,
+		))
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_client (
+					client_id,
+					network_id
+				)
+				VALUES ($1, $2)
+				ON CONFLICT (client_id) DO NOTHING
+			`,
+			clientId,
+			networkId,
+		))
+
+		// client_address_hash_count = 1 AND location_count = 1 AND
+		// country_location_id IS NOT NULL is exactly the GENERATED `valid`
+		// expression on this table (see the CREATE TABLE in db_migrations.go);
+		// `valid` itself cannot be assigned directly.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_client_location_reliability (
+					client_id,
+					network_id,
+					update_block_number,
+					city_location_id,
+					region_location_id,
+					country_location_id,
+					client_address_hash_count,
+					location_count,
+					connected
+				)
+				VALUES ($1, $2, 0, $3, $3, $3, 1, 1, true)
+				ON CONFLICT (client_id) DO UPDATE SET
+					network_id = $2,
+					city_location_id = $3,
+					region_location_id = $3,
+					country_location_id = $3,
+					client_address_hash_count = 1,
+					location_count = 1,
+					connected = true
+			`,
+			clientId,
+			networkId,
+			countryId,
+		))
+	})
+
+	SetProvide(ctx, clientId, map[ProvideMode][]byte{
+		ProvideModePublic: []byte("testing-public-provide-secret"),
+	})
+}
+
+// TestUpdateClientLocationsCountIsGated is the core assertion for this task:
+// UpdateClientLocations must count a provider toward provider_count only where
+// a probe measured it healthy AND observed it egressing from the country it
+// claims. Before this change, connected + valid + a Public provide key was
+// enough on its own -- an unreachable or misrepresenting provider still
+// inflated the count.
+func TestUpdateClientLocationsCountIsGated(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		countryId := server.NewId()
+
+		healthy := server.NewId()
+		unhealthy := server.NewId()
+		unprobed := server.NewId()
+
+		// three providers in the same country, all connected with a Public
+		// provide key; only `healthy` is measured healthy and observed in US
+		for _, clientId := range []server.Id{healthy, unhealthy, unprobed} {
+			Testing_CreateProviderAtLocation(ctx, networkId, clientId, countryId, "US")
+		}
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: healthy, OKCount: 131, Total: 131, MeasuredAt: server.NowUtc(),
+		})
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: unhealthy, OKCount: 0, Total: 131, MeasuredAt: server.NowUtc(),
+		})
+		for _, clientId := range []server.Id{healthy, unhealthy} {
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, CountryCode: "US",
+				Verdict: "verified", ObservedAt: server.NowUtc(),
+			})
+		}
+
+		UpdateClientLocations(ctx, 1*time.Hour)
+
+		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
+		assert.Equal(t, err, nil)
+
+		// only the measured-healthy, observed-in-US provider is counted.
+		// Before this change all three counted.
+		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
+	})
 }
