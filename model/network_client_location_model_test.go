@@ -860,6 +860,10 @@ func TestFindProviders2ReliabilityFlushLag(t *testing.T) {
 				))
 			})
 
+			// measured healthy, so the reliability minimums under test are the
+			// deciding filter and not the egress-health gate
+			testing_setProviderEgressHealthy(ctx, clientId)
+
 			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
 			connect.AssertEqual(t, err, nil)
 
@@ -1064,6 +1068,10 @@ func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
 					connectionId, 100*1024*1024, 1,
 				))
 			})
+
+			// measured healthy, so the reliability minimums under test are the
+			// deciding filter and not the egress-health gate
+			testing_setProviderEgressHealthy(ctx, clientId)
 
 			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
 			connect.AssertEqual(t, err, nil)
@@ -1375,6 +1383,10 @@ func TestUpdateClientScoresCountsClientsWithoutReliabilityScores(t *testing.T) {
 			})
 		})
 		connect.AssertEqual(t, scoreCount, 0)
+
+		// measured healthy, so the missing reliability score under test is the
+		// only thing that could exclude this provider
+		testing_setProviderEgressHealthy(ctx, clientId)
 
 		err = UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
@@ -1758,6 +1770,11 @@ func connectPublicAndNetworkOnlyProviders(
 				connectionId, 100*1024*1024, 1,
 			))
 		})
+
+		// measured healthy, so the egress-health gate is not what separates
+		// these two providers -- the provide mode under test is
+		testing_setProviderEgressHealthy(ctx, clientId)
+
 		return clientId
 	}
 
@@ -1955,6 +1972,11 @@ func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
 				SendByteCount:              1024,
 			},
 		)
+
+		// measured healthy, so the egress-health gate is not what excludes a
+		// provider here -- the location roll-up under test is
+		testing_setProviderEgressHealthy(ctx, clientId)
+
 		return clientId
 	}
 
@@ -2045,6 +2067,11 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 					SendByteCount:              1024,
 				},
 			)
+
+			// measured healthy, so the caller's network -- not the
+			// egress-health gate -- is what decides visibility here
+			testing_setProviderEgressHealthy(ctx, clientId)
+
 			return clientId
 		}
 
@@ -2281,6 +2308,11 @@ func connectProvidersOfEveryProvideMode(ctx context.Context, t testing.TB, locat
 				connectionId, 100*1024*1024, 1,
 			))
 		})
+
+		// measured healthy for every provider, so the egress-health gate is not
+		// what separates them -- the provide mode under test is
+		testing_setProviderEgressHealthy(ctx, clientId)
+
 		return clientId
 	}
 
@@ -2446,4 +2478,459 @@ func assertPoolAdmitsOnlyContractableProviders(
 	if len(clientScores) != 2 {
 		t.Errorf("candidate pool holds %d clients, want exactly the 2 that can settle a contract", len(clientScores))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The egress-health gate on the public provider list.
+//
+// UpdateClientScores is the single writer of the precomputed score/filter sets
+// that both GET /network/provider-locations and POST /network/find-providers2
+// read, so a gate applied where PassesMinimums is set covers both surfaces.
+// Until it existed the system only MEASURED health and nothing acted on it: a
+// proxy answering 0 of 131 destinations still passed, because the pre-existing
+// minimums are reliability weight and score, and a blackholed proxy stays
+// perfectly *connected*.
+// ---------------------------------------------------------------------------
+
+// testing_setProviderEgressHealth records one egress-health measurement.
+func testing_setProviderEgressHealth(ctx context.Context, clientId server.Id, okCount int, total int) {
+	SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+		ClientId:   clientId,
+		MeasuredAt: server.NowUtc(),
+		OKCount:    okCount,
+		Total:      total,
+	})
+}
+
+// testing_setProviderEgressHealthy marks providers measured healthy at the rate
+// the real healthy fleet measures. Every test that expects a provider to be
+// SELECTABLE has to call this: a provider with no health record at all is
+// excluded by design (fail closed -- out until you pass), so without it the
+// fixture is testing exclusion rather than whatever it meant to test.
+func testing_setProviderEgressHealthy(ctx context.Context, clientIds ...server.Id) {
+	for _, clientId := range clientIds {
+		testing_setProviderEgressHealth(ctx, clientId, 131, 131)
+	}
+}
+
+// testing_connectQualifyingProviders connects n providers into one location,
+// each of which clears every minimum that existed BEFORE the health gate:
+// connected, valid, a Public provide key, and the latency and speed samples
+// whose absence is otherwise the usual reason a fixture provider fails.
+//
+// It deliberately mirrors connectPublicAndNetworkOnlyProviders and adds no
+// reliability stats of its own. A provider with no client reliability score row
+// clears the lookback thresholds (see
+// TestUpdateClientScoresCountsClientsWithoutReliabilityScores); one carrying a
+// single freshly-added sample does not, so seeding stats here would make every
+// fixture provider fail the pre-existing minimums and the health assertions
+// below would pass for the wrong reason.
+//
+// Health is deliberately not set here, so each test states its own.
+func testing_connectQualifyingProviders(
+	ctx context.Context,
+	t testing.TB,
+	location *Location,
+	n int,
+) []server.Id {
+	t.Helper()
+
+	handlerId := CreateNetworkClientHandler(ctx)
+	clientIds := []server.Id{}
+
+	for i := range n {
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+		connectionId, _, _, _, err := ConnectNetworkClient(
+			ctx,
+			clientId,
+			fmt.Sprintf("0.0.0.%d:0", i+1),
+			handlerId,
+		)
+		connect.AssertEqual(t, err, nil)
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		connect.AssertEqual(t, err, nil)
+
+		SetProvide(ctx, clientId, map[ProvideMode][]byte{
+			ProvideModePublic:  []byte("public-secret"),
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+
+		// identical latency and speed for every provider, so nothing but the
+		// health record can separate them
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_client_latency (connection_id, latency_ms, sample_count) VALUES ($1, $2, $3)`,
+				connectionId, 30, 1,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count) VALUES ($1, $2, $3)`,
+				connectionId, 100*1024*1024, 1,
+			))
+		})
+
+		clientIds = append(clientIds, clientId)
+	}
+
+	UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+
+	return clientIds
+}
+
+// testing_selectableClientScores is what a user-facing caller sees: the
+// precomputed pool for a location with forceMinimum off, which is the mode
+// GetProviderLocations and FindProviders2 read.
+func testing_selectableClientScores(
+	ctx context.Context,
+	t testing.TB,
+	location *Location,
+	forceMinimum bool,
+) map[server.Id]*ClientScore {
+	t.Helper()
+	clientScores, err := loadClientScores(
+		forceMinimum,
+		RankModeQuality,
+		ctx,
+		map[server.Id]bool{location.LocationId: true},
+		map[server.Id]bool{},
+		server.Id{},
+		100,
+	)
+	connect.AssertEqual(t, err, nil)
+	return clientScores
+}
+
+func testing_healthGateCity(ctx context.Context) *Location {
+	city := &Location{
+		LocationType: LocationTypeCity,
+		City:         "Palo Alto",
+		Region:       "California",
+		Country:      "United States",
+		CountryCode:  "us",
+	}
+	CreateLocation(ctx, city)
+	return city
+}
+
+// The whole point of the feature. A provider measured 0 of 131 -- every
+// destination blackholed, the exact reading 158 seeded beta proxies gave -- must
+// not be offered to a user, while an identically-configured provider measured
+// healthy still is. Before the gate BOTH were selectable, because a blackholed
+// proxy is still connected and connectivity is all the pre-existing minimums
+// measure.
+func TestUpdateClientScoresExcludesMeasuredUnhealthyProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		healthyClientId, deadClientId := clientIds[0], clientIds[1]
+
+		testing_setProviderEgressHealth(ctx, healthyClientId, 131, 131)
+		testing_setProviderEgressHealth(ctx, deadClientId, 0, 131)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+
+		if _, ok := clientScores[healthyClientId]; !ok {
+			t.Fatal("a provider measured 131/131 is not selectable; the gate is excluding healthy providers")
+		}
+		if _, ok := clientScores[deadClientId]; ok {
+			t.Fatal("a provider measured 0/131 is still selectable; the measurement is not being acted on")
+		}
+	})
+}
+
+// Fail closed. A provider nobody has probed is not known to work, and the
+// user's rule is out until you pass. This is the case that hides the ~2038
+// never-tested providers in the beta pool, and it is the one a well-meaning
+// change is most likely to soften ("no record means no evidence of harm"), so
+// it gets its own test.
+func TestUpdateClientScoresExcludesNeverMeasuredProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		measuredClientId, neverMeasuredClientId := clientIds[0], clientIds[1]
+
+		// deliberately no health record at all for neverMeasuredClientId
+		testing_setProviderEgressHealthy(ctx, measuredClientId)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+
+		if _, ok := clientScores[measuredClientId]; !ok {
+			t.Fatal("a measured-healthy provider is not selectable")
+		}
+		if _, ok := clientScores[neverMeasuredClientId]; ok {
+			t.Fatal("a provider with no health record at all is selectable; the gate must fail closed")
+		}
+		if got := GetProviderEgressHealth(ctx, neverMeasuredClientId); got != nil {
+			t.Fatalf("fixture is wrong: the never-measured provider has a health record %+v", got)
+		}
+	})
+}
+
+// The gate must be a gate and nothing else. Two providers identical in every
+// scored respect, differing only in that one measured 131/131 and the other
+// 129/131 -- both comfortably healthy -- must come out with exactly the same
+// score and the same scaled weight, because health is not an input to the
+// ranking arithmetic. If health ever gets folded into the weight, the better-
+// measured provider outranks the other here and this fails.
+func TestUpdateClientScoresHealthDoesNotRescoreQualifyingProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		perfectClientId, goodClientId := clientIds[0], clientIds[1]
+
+		testing_setProviderEgressHealth(ctx, perfectClientId, 131, 131)
+		testing_setProviderEgressHealth(ctx, goodClientId, 129, 131)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+
+		perfect, ok := clientScores[perfectClientId]
+		if !ok {
+			t.Fatal("the 131/131 provider is not selectable")
+		}
+		good, ok := clientScores[goodClientId]
+		if !ok {
+			t.Fatal("the 129/131 provider is not selectable; 129/131 is well above the 90% bar")
+		}
+
+		if perfect.Scores[RankModeQuality] != good.Scores[RankModeQuality] {
+			t.Fatalf(
+				"scores diverged: 131/131 scored %d, 129/131 scored %d -- health must not enter the score",
+				perfect.Scores[RankModeQuality],
+				good.Scores[RankModeQuality],
+			)
+		}
+		if perfect.ScaledWeights[RankModeQuality] != good.ScaledWeights[RankModeQuality] {
+			t.Fatalf(
+				"scaled weights diverged: 131/131 weighted %v, 129/131 weighted %v -- this is a gate, not a re-ranking",
+				perfect.ScaledWeights[RankModeQuality],
+				good.ScaledWeights[RankModeQuality],
+			)
+		}
+		if perfect.ReliabilityWeight != good.ReliabilityWeight {
+			t.Fatalf(
+				"reliability weights diverged: %v vs %v",
+				perfect.ReliabilityWeight,
+				good.ReliabilityWeight,
+			)
+		}
+	})
+}
+
+// The boundary is at exactly 90%: >= passes, below fails. Written at a
+// denominator of 100 on purpose -- 90% of 131 is 117.9, so 131 destinations
+// cannot express the boundary at all and a test using it would prove nothing
+// about which side of the line `>=` falls on.
+func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		atBarClientId, belowBarClientId := clientIds[0], clientIds[1]
+
+		testing_setProviderEgressHealth(ctx, atBarClientId, 90, 100)
+		testing_setProviderEgressHealth(ctx, belowBarClientId, 89, 100)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+
+		if _, ok := clientScores[atBarClientId]; !ok {
+			t.Fatal("a provider at exactly 90/100 is excluded; the bar is >= 90%, not > 90%")
+		}
+		if _, ok := clientScores[belowBarClientId]; ok {
+			t.Fatal("a provider at 89/100 is selectable; it is below the bar")
+		}
+	})
+}
+
+// A run that sampled no destinations measured nothing, so it is not evidence of
+// health and must not pass -- and computing ok/total on it must not divide by
+// zero. total_count is an ordinary integer column with no positive constraint,
+// so this row is reachable from any prober that reports an empty sample.
+func TestUpdateClientScoresZeroTotalHealthDoesNotPassOrPanic(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		emptyRunClientId, healthyClientId := clientIds[0], clientIds[1]
+
+		testing_setProviderEgressHealth(ctx, emptyRunClientId, 0, 0)
+		testing_setProviderEgressHealthy(ctx, healthyClientId)
+
+		// the pass itself must survive the row
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+
+		if _, ok := clientScores[emptyRunClientId]; ok {
+			t.Fatal("a provider whose health run sampled 0 destinations is selectable; 0/0 measures nothing")
+		}
+		if _, ok := clientScores[healthyClientId]; !ok {
+			t.Fatal("the healthy provider disappeared alongside the empty-run one")
+		}
+	})
+}
+
+// forceMinimum exists so an operator census can see providers that fail the
+// minimums. The health gate is folded into exactly that same PassesMinimums
+// flag, so a health-excluded provider must stay visible to a forceMinimum
+// caller for the same reason -- otherwise the providers most in need of
+// inspection are the ones an operator can no longer see.
+func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 3)
+		healthyClientId, deadClientId, neverMeasuredClientId := clientIds[0], clientIds[1], clientIds[2]
+
+		testing_setProviderEgressHealthy(ctx, healthyClientId)
+		testing_setProviderEgressHealth(ctx, deadClientId, 0, 131)
+		// neverMeasuredClientId gets no record
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		// the user-facing view has only the healthy one
+		strict := testing_selectableClientScores(ctx, t, city, false)
+		if len(strict) != 1 {
+			t.Fatalf("user-facing pool holds %d providers, want only the measured-healthy one", len(strict))
+		}
+		if _, ok := strict[healthyClientId]; !ok {
+			t.Fatal("the wrong provider survived the user-facing gate")
+		}
+
+		// the operator census has all three
+		forced := testing_selectableClientScores(ctx, t, city, true)
+		for _, clientId := range []server.Id{healthyClientId, deadClientId, neverMeasuredClientId} {
+			if _, ok := forced[clientId]; !ok {
+				t.Fatalf("forceMinimum=true cannot see provider %s; the operator census must be unaffected", clientId)
+			}
+		}
+
+		// and the location itself is still listed to a forceMinimum caller
+		forcedStables, err := loadLocationStables(
+			ctx,
+			[]server.Id{city.CountryLocationId},
+			true,
+			RankModeQuality,
+			server.Id{},
+		)
+		connect.AssertEqual(t, err, nil)
+		if _, ok := forcedStables[city.CountryLocationId]; !ok {
+			t.Fatal("forceMinimum=true no longer lists the location")
+		}
+	})
+}
+
+// THE GRADUATION PATH. An excluded provider has to keep being probed, or it can
+// never measure healthy again and is stuck out permanently -- the gate would
+// become a one-way door.
+//
+// GetProviderEgressLocationDue reads network_client_location_reliability,
+// provide_key, provider_egress_location and provider_egress_probe_attempt. It
+// does not read PassesMinimums, the redis score sets, or provider_egress_health,
+// so structurally it cannot see the gate. This test is the regression guard on
+// that: it asserts both halves at once -- gone from the selection pool, still in
+// the probe queue -- so a future change that wires selection state into the
+// queue fails here rather than silently stranding every excluded provider.
+func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 1)
+		deadClientId := clientIds[0]
+
+		// measured blackholed, and probed an hour ago -- so this goes through the
+		// stale-but-probed pass of the due query, which is the realistic state for
+		// a provider that has a health record at all
+		testing_setProviderEgressHealth(ctx, deadClientId, 0, 131)
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId:    deadClientId,
+			LocationId:  city.LocationId,
+			CountryCode: "us",
+			ObservedAt:  now.Add(-time.Hour),
+		})
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+		if _, ok := clientScores[deadClientId]; ok {
+			t.Fatal("fixture is wrong: the provider was not excluded, so this proves nothing about the queue")
+		}
+
+		due := GetProviderEgressLocationDue(
+			ctx,
+			now.Add(-time.Minute),
+			now.Add(-time.Minute),
+			100,
+		)
+		if !slices.Contains(due, deadClientId) {
+			t.Fatal(
+				"an excluded provider is not in the probe due-queue: it can never be re-measured, " +
+					"so it can never graduate back into the public list",
+			)
+		}
+	})
+}
+
+// Recovery is automatic and needs no manual step: the gate reads the health
+// table fresh on every pass, and SetProviderEgressHealth replaces the row, so
+// the next pass after a good measurement puts the provider back.
+//
+// This is also what makes the deliberate absence of any staleness cutoff safe.
+// A stale BAD record keeps a provider hidden until it is probed again, and the
+// ungated due-queue above is what guarantees that re-probe happens.
+func TestUpdateClientScoresRestoresAProviderWhoseHealthRecovers(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := testing_healthGateCity(ctx)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 1)
+		clientId := clientIds[0]
+
+		testing_setProviderEgressHealth(ctx, clientId, 0, 131)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+		if _, ok := testing_selectableClientScores(ctx, t, city, false)[clientId]; ok {
+			t.Fatal("the blackholed provider was selectable before it recovered")
+		}
+
+		// a later probe finds it healthy. nothing else happens -- no operator
+		// action, no re-registration, no cache flush
+		testing_setProviderEgressHealth(ctx, clientId, 131, 131)
+
+		err = UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+		if _, ok := testing_selectableClientScores(ctx, t, city, false)[clientId]; !ok {
+			t.Fatal("a provider that measured healthy again did not come back on the next pass")
+		}
+	})
 }

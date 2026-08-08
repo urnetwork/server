@@ -2883,6 +2883,57 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	minScoreScale := 0.1
 	maxScoreScale := 1.0
 
+	// the measured egress health a provider must reach to be offered to users
+	// at all, as a fraction of the destinations its last probe run sampled.
+	//
+	// 90% because it cleanly separates working from broken on the real
+	// population: the healthy fleet measures 129-131 of 131 destinations, while
+	// a dead proxy measures 0 of 131. Nothing observed sits near the line, so
+	// the exact figure is not load bearing -- it only has to be far above 0 and
+	// below the ~98% a genuinely working provider always clears.
+	//
+	// Compared exactly as `10*ok >= 9*total` rather than through a float
+	// division, so the boundary is the same for every denominator.
+	const minEgressHealthOKNumerator = 9
+	const minEgressHealthOKDenominator = 10
+
+	// health is loaded once for the whole pass rather than per client: this
+	// walks every provider, and the table is one row per ever-probed provider.
+	//
+	// # Staleness
+	//
+	// A record is used however old it is, deliberately. Nothing sweeps
+	// provider_egress_health and SetProviderEgressHealth upserts on client_id,
+	// so a row is always that provider's most recent measurement -- there is no
+	// such thing as a superseded row still sitting in the table. Ageing records
+	// out would mean that if the prober ever stalls, the entire public list
+	// silently empties, which is a far worse failure than trusting a
+	// measurement that is a day old.
+	//
+	// The asymmetry that leaves is intended. A stale *good* record keeps a
+	// provider visible; a stale *bad* record keeps it hidden until it is probed
+	// again. That is only safe because the probe due-queue
+	// (GetProviderEgressLocationDue) is deliberately not gated on any of this --
+	// it reads the live provider population directly, so an excluded provider is
+	// still handed to the prober and still graduates the moment it measures
+	// healthy. If that queue ever starts consulting these scores, an excluded
+	// provider can never be re-measured and is stuck out permanently.
+	egressHealthCounts := GetAllProviderEgressHealthCounts(ctx)
+	// passesEgressHealth reports whether a probe has MEASURED this provider
+	// healthy. Fail closed: no record at all (never probed) does not pass, and
+	// neither does a record with no destinations in it, which is also not a
+	// measurement of anything. Guarding total keeps the ratio well defined.
+	passesEgressHealth := func(clientId server.Id) bool {
+		counts, ok := egressHealthCounts[clientId]
+		if !ok {
+			return false
+		}
+		if counts.Total <= 0 {
+			return false
+		}
+		return minEgressHealthOKDenominator*counts.OKCount >= minEgressHealthOKNumerator*counts.Total
+	}
+
 	// migration: set each client score to the lowest lookback index index
 	migrateClientScore := func(clientScore *ClientScore) {
 		lookbackIndexes := slices.Collect(maps.Keys(clientScore.LookbackClientScores))
@@ -2903,8 +2954,15 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		clientScore.ScaledWeights = map[string]float32{}
 		clientScore.PassesMinimums = map[string]bool{}
 
+		// measured egress health does not vary by rank mode, so it is evaluated
+		// once per client and seeds every mode's minimum. It is a gate and
+		// nothing else: it can only take a provider out of the pool, and the
+		// scaled-weight arithmetic below is untouched, so every provider that
+		// still qualifies keeps exactly the weight and ordering it has today.
+		passesHealth := passesEgressHealth(clientScore.ClientId)
+
 		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
-			passesMinimum := true
+			passesMinimum := passesHealth
 			// all lookback thresholds must pass
 			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
 				if lookbackClientScore.IndependentReliabilityWeight < minFilter.minIndependentReliabilityWeights[lookbackIndex] {

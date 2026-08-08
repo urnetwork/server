@@ -132,6 +132,62 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 	})
 }
 
+// ProviderEgressHealthCounts is the ok/total tally alone, for consumers that
+// only need to decide "did this provider carry traffic" in bulk. The heavy
+// fields (per-class results, failure name lists) are diagnostics and are left
+// unread, so a whole-table load stays cheap.
+type ProviderEgressHealthCounts struct {
+	MeasuredAt time.Time
+	OKCount    int
+	Total      int
+}
+
+// GetAllProviderEgressHealthCounts reads every provider's latest egress-health
+// tally in one query, keyed by client id.
+//
+// This exists for UpdateClientScores, which walks the whole provider population
+// on every pass and needs each one's health. A per-client GetProviderEgressHealth
+// there would be one round trip per provider per pass; the table holds exactly
+// one row per ever-probed provider (SetProviderEgressHealth upserts on
+// client_id), which is hundreds of rows, so the whole thing is cheaper to hold
+// in a map than to query piecemeal.
+//
+// A provider that has never been measured has no entry, exactly as
+// GetProviderEgressHealth returns nil for it. Never measured is not the same as
+// measured-unhealthy and the two must stay distinguishable to the caller.
+func GetAllProviderEgressHealthCounts(ctx context.Context) map[server.Id]ProviderEgressHealthCounts {
+	healthCounts := map[server.Id]ProviderEgressHealthCounts{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				client_id,
+				measured_at,
+				ok_count,
+				total_count
+			FROM provider_egress_health
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var counts ProviderEgressHealthCounts
+				server.Raise(result.Scan(
+					&clientId,
+					&counts.MeasuredAt,
+					&counts.OKCount,
+					&counts.Total,
+				))
+				healthCounts[clientId] = counts
+			}
+		})
+	})
+
+	return healthCounts
+}
+
 // GetProviderEgressHealth reads a provider's latest egress-health run, or nil
 // when the provider has never been measured. Never measured is not the same as
 // measured-unhealthy, so it is a nil result rather than a zero-valued one:
