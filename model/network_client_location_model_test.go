@@ -2527,6 +2527,20 @@ func testing_setProviderEgressHealthy(ctx context.Context, clientIds ...server.I
 // below would pass for the wrong reason.
 //
 // Health is deliberately not set here, so each test states its own.
+//
+// Because these providers carry no reliability history, they clear the lookback
+// thresholds trivially, which is what makes health the only discriminator in the
+// tests below -- but it means these tests alone do not show that the health gate
+// and the reliability minimums COMPOSE on a provider with real scores, which is
+// what every provider in production has.
+//
+// TestFindProviders2ReliabilityFlushLag and TestFindProviders2ReliabilityDeployGap
+// are that coverage. They accumulate genuine per-block reliability (they assert
+// the scoring loop ran, so the pass is not vacuous) and then go end to end
+// through FindProviders2 with ForceMinimum unset, asserting every provider comes
+// back. They fail if a healthy provider with real reliability scores is
+// wrongly excluded -- which is exactly how they behaved before the
+// testing_setProviderEgressHealthy call was added to them.
 func testing_connectQualifyingProviders(
 	ctx context.Context,
 	t testing.TB,
