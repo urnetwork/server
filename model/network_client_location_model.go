@@ -1776,6 +1776,12 @@ func distinctIds(ids ...*server.Id) []server.Id {
 // as 9/10. Compared exactly as `10*ok >= 9*total` rather than through a float
 // division, so the boundary is the same for every denominator.
 //
+// 90% because it cleanly separates working from broken on the real
+// population: the healthy fleet measures 129-131 of 131 destinations, while
+// a dead proxy measures 0 of 131. Nothing observed sits near the line, so
+// the exact figure is not load bearing -- it only has to be far above 0 and
+// below the ~98% a genuinely working provider always clears.
+//
 // Package scope, not function scope: both UpdateClientScores and
 // UpdateClientLocations gate on this now, and two copies could drift.
 const minEgressHealthOKNumerator = 9
