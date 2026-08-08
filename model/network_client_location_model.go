@@ -1851,6 +1851,25 @@ func (f providerCountFilter) countsTowardCountry(clientId server.Id, countryCode
 	return observed == strings.ToLower(countryCode)
 }
 
+// shouldSkipCountGate reports whether the count gate should be skipped
+// entirely for this pass, falling back to the pre-gate behavior (connected +
+// valid + Public key only) instead of fail-closed per provider.
+//
+// Both maps are checked, not just healthCounts, because they are fed by two
+// INDEPENDENT pipelines that can stall separately: health arrives over the
+// external push endpoint (api/handlers/provider_egress_health_handlers.go),
+// while the observed egress location comes from a separate internal job
+// (controller/provider_egress_location_controller.go). If only the health
+// pipeline stalls (or vice versa), the healthy-but-unlocated -- or
+// located-but-unhealthy -- provider still fails closed in countsTowardCountry
+// and locationClientCounts still empties fleet-wide, which is exactly the
+// wiped-list failure this gate exists to prevent. Do NOT collapse this back
+// to a single condition: either map being empty is "we know nothing from that
+// pipeline", which must not be treated as "everything failed."
+func (f providerCountFilter) shouldSkipCountGate() bool {
+	return len(f.healthCounts) == 0 || len(f.countryCodes) == 0
+}
+
 func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
 	topCitiesPerRegion := 20
 	topCitiesPerCountry := 10
@@ -1865,22 +1884,24 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	// provider population
 	countFilter := newProviderCountFilter(ctx)
 
-	// An empty health table means "the prober has told us nothing yet" --
-	// stalled pipeline, truncated table, cold environment -- NOT "every
-	// provider measured unhealthy". Per-provider fail-closed (an individual
+	// An empty health OR countryCodes map means one of the two probe
+	// pipelines has told us nothing yet -- stalled job, truncated table, cold
+	// environment -- NOT "every provider measured unhealthy" or "every
+	// provider is mislocated". Per-provider fail-closed (an individual
 	// provider with no record does not count) is the intended behavior; but
-	// applying it fleet-wide when NO provider has ever been probed would
-	// empty locationClientCounts entirely, which sends every single location
-	// through removeClientLocations below and DELs every key from redis --
-	// wiping the whole public provider list because the prober died, not
-	// because supply is actually gone. That is a different, worse failure
-	// mode than the one this gate exists to fix, so skip the gate for this
-	// pass and count as before (connected + valid + Public key only) instead.
+	// applying it fleet-wide when an entire pipeline has produced zero rows
+	// would empty locationClientCounts entirely, which sends every single
+	// location through removeClientLocations below and DELs every key from
+	// redis -- wiping the whole public provider list because one prober
+	// died, not because supply is actually gone. That is a different, worse
+	// failure mode than the one this gate exists to fix, so skip the gate
+	// for this pass and count as before (connected + valid + Public key
+	// only) instead. See shouldSkipCountGate for why BOTH maps are checked.
 	// Do NOT remove this as "redundant" with passesHealth's per-provider
 	// check -- it is a fleet-wide floor, not a per-provider one.
-	skipCountGate := len(countFilter.healthCounts) == 0
+	skipCountGate := countFilter.shouldSkipCountGate()
 	if skipCountGate {
-		glog.Infof("[nclm]no egress health records; skipping the provider count gate for this pass\n")
+		glog.Infof("[nclm]egress health or location records are empty; skipping the provider count gate for this pass\n")
 	}
 
 	server.Tx(ctx, func(tx server.PgTx) {

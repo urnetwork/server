@@ -3281,6 +3281,59 @@ func TestProviderCountFilter(t *testing.T) {
 	assert.Equal(t, f.countsTowardCountry(healthy, "US"), true)
 }
 
+// TestProviderCountFilterShouldSkipCountGate covers the fleet-wide floor in
+// UpdateClientLocations: health and observed-country come from two
+// INDEPENDENT pipelines (an external push endpoint and a separate internal
+// job, respectively) that can stall separately, so either map being empty --
+// not just health -- must skip the count gate for the pass. This is pure
+// in-memory logic, no database required.
+func TestProviderCountFilterShouldSkipCountGate(t *testing.T) {
+	someProvider := server.NewId()
+
+	// both maps empty -- neither pipeline has produced anything: skip
+	assert.Equal(
+		t,
+		providerCountFilter{
+			healthCounts: map[server.Id]ProviderEgressHealthCounts{},
+			countryCodes: map[server.Id]string{},
+		}.shouldSkipCountGate(),
+		true,
+	)
+
+	// health empty, countryCodes populated -- the health pipeline alone
+	// stalled: skip
+	assert.Equal(
+		t,
+		providerCountFilter{
+			healthCounts: map[server.Id]ProviderEgressHealthCounts{},
+			countryCodes: map[server.Id]string{someProvider: "us"},
+		}.shouldSkipCountGate(),
+		true,
+	)
+
+	// countryCodes empty, health populated -- the location pipeline alone
+	// stalled: skip. This is the case the previous, health-only guard missed.
+	assert.Equal(
+		t,
+		providerCountFilter{
+			healthCounts: map[server.Id]ProviderEgressHealthCounts{someProvider: {OKCount: 131, Total: 131}},
+			countryCodes: map[server.Id]string{},
+		}.shouldSkipCountGate(),
+		true,
+	)
+
+	// neither empty -- both pipelines are producing data: do not skip, apply
+	// the gate normally
+	assert.Equal(
+		t,
+		providerCountFilter{
+			healthCounts: map[server.Id]ProviderEgressHealthCounts{someProvider: {OKCount: 131, Total: 131}},
+			countryCodes: map[server.Id]string{someProvider: "us"},
+		}.shouldSkipCountGate(),
+		false,
+	)
+}
+
 // Testing_CreateProviderAtLocation inserts exactly the rows a provider needs
 // to clear the pre-existing UpdateClientLocations gate: a network_client row,
 // a Public provide_key, and a network_client_location_reliability row that is
