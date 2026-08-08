@@ -3505,7 +3505,17 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		// out from under it. This schema declares no foreign keys, so the
 		// reliability row survives pointing at nothing -- which is exactly the
 		// state the LEFT JOIN has to handle.
-		Testing_CreateProviderAtLocation(ctx, networkId, orphanClaim, orphanCountryId, "US")
+		//
+		// Uses "ZZ" rather than "US" because `location` also carries
+		// UNIQUE(location_full_name) (see db_migrations.go), and
+		// Testing_CreateProviderAtLocation's location insert is only
+		// ON CONFLICT (location_id) DO NOTHING -- a second "us" row at a
+		// different location id collides with that unique index instead of
+		// being ignored. The observed country code below is never actually
+		// compared for this provider (the NULL claimed country short-circuits
+		// first), but keeping it "ZZ" too keeps the fixture internally
+		// consistent with what it claims to be.
+		Testing_CreateProviderAtLocation(ctx, networkId, orphanClaim, orphanCountryId, "ZZ")
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -3531,12 +3541,20 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		// rows observed within ProviderEgressLocationMaxAge, so a zero-value
 		// ObservedAt would make these fixtures invisible and the assertions
 		// below would pass for the wrong reason.
-		for _, clientId := range []server.Id{healthy, unhealthy, orphanClaim} {
+		for _, clientId := range []server.Id{healthy, unhealthy} {
 			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 				ClientId: clientId, CountryCode: "US",
 				Verdict: "verified", ObservedAt: server.NowUtc(),
 			})
 		}
+		// matches the "ZZ" it claims (see Testing_CreateProviderAtLocation
+		// call above) so the fixture stays internally consistent, even though
+		// the NULL claimed country short-circuits the comparison before this
+		// observed code is ever read.
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: orphanClaim, CountryCode: "ZZ",
+			Verdict: "verified", ObservedAt: server.NowUtc(),
+		})
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId: wrongCountry, CountryCode: "GB",
 			Verdict: "verified", ObservedAt: server.NowUtc(),
