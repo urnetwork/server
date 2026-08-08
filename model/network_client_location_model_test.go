@@ -582,6 +582,16 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 		)
 		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
 
+		// UpdateClientLocations counts only a provider a probe measured
+		// healthy AND observed egressing from the country it claims (see
+		// providerCountFilter); this fixture claims "us", so it must be
+		// observed in "us" too, or the round trip under test never happens.
+		testing_setProviderEgressHealthy(ctx, clientId)
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: clientId, LocationId: city.LocationId,
+			CountryCode: "us", Verdict: "verified", ObservedAt: server.NowUtc(),
+		})
+
 		// client location cache round trip
 
 		err = UpdateClientLocations(ctx, 5*time.Minute)
@@ -1525,6 +1535,17 @@ func TestUpdateClientLocationsCountsClientsWithoutReliabilityScores(t *testing.T
 		})
 		connect.AssertEqual(t, scoreCount, 0)
 
+		// UpdateClientLocations counts only a provider a probe measured
+		// healthy AND observed egressing from the country it claims (see
+		// providerCountFilter); this fixture claims "us", so it must be
+		// observed in "us" too, or the LEFT JOIN behavior under test is never
+		// reached.
+		testing_setProviderEgressHealthy(ctx, clientId)
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: clientId, LocationId: city.LocationId,
+			CountryCode: "us", Verdict: "verified", ObservedAt: server.NowUtc(),
+		})
+
 		err = UpdateClientLocations(ctx, time.Hour)
 		connect.AssertEqual(t, err, nil)
 
@@ -1724,7 +1745,7 @@ func TestUpdateClientLocationsCountsOnlyPublicProviders(t *testing.T) {
 		}
 
 		// serves strangers -- must be counted
-		connectOne(map[ProvideMode][]byte{
+		publicClientId := connectOne(map[ProvideMode][]byte{
 			ProvideModePublic:  []byte("public-secret"),
 			ProvideModeNetwork: []byte("network-secret"),
 		})
@@ -1735,6 +1756,17 @@ func TestUpdateClientLocationsCountsOnlyPublicProviders(t *testing.T) {
 		})
 		// no provide key at all -- must NOT be counted
 		connectOne(nil)
+
+		// UpdateClientLocations counts only a provider a probe measured
+		// healthy AND observed egressing from the country it claims (see
+		// providerCountFilter). Only the Public-key client needs this -- the
+		// other two are excluded upstream by the provide-mode filter under
+		// test, before the count gate is ever reached.
+		testing_setProviderEgressHealthy(ctx, publicClientId)
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: publicClientId, LocationId: city.LocationId,
+			CountryCode: "us", Verdict: "verified", ObservedAt: server.NowUtc(),
+		})
 
 		UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 
@@ -2214,6 +2246,17 @@ func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
 		// measured healthy, so the egress-health gate is not what excludes a
 		// provider here -- the location roll-up under test is
 		testing_setProviderEgressHealthy(ctx, clientId)
+
+		// UpdateClientLocations also requires a probe-observed egress country
+		// matching the CLAIMED one (see providerCountFilter). The two
+		// providers this helper builds claim different countries -- observe
+		// each in its own (location.CountryCode), not a shared one, or the
+		// country-only provider (claims "ca") would wrongly fail closed
+		// against an "us" observation.
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: clientId, LocationId: location.LocationId,
+			CountryCode: location.CountryCode, Verdict: "verified", ObservedAt: server.NowUtc(),
+		})
 
 		return clientId
 	}

@@ -1865,6 +1865,24 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	// provider population
 	countFilter := newProviderCountFilter(ctx)
 
+	// An empty health table means "the prober has told us nothing yet" --
+	// stalled pipeline, truncated table, cold environment -- NOT "every
+	// provider measured unhealthy". Per-provider fail-closed (an individual
+	// provider with no record does not count) is the intended behavior; but
+	// applying it fleet-wide when NO provider has ever been probed would
+	// empty locationClientCounts entirely, which sends every single location
+	// through removeClientLocations below and DELs every key from redis --
+	// wiping the whole public provider list because the prober died, not
+	// because supply is actually gone. That is a different, worse failure
+	// mode than the one this gate exists to fix, so skip the gate for this
+	// pass and count as before (connected + valid + Public key only) instead.
+	// Do NOT remove this as "redundant" with passesHealth's per-provider
+	// check -- it is a fleet-wide floor, not a per-provider one.
+	skipCountGate := len(countFilter.healthCounts) == 0
+	if skipCountGate {
+		glog.Infof("[nclm]no egress health records; skipping the provider count gate for this pass\n")
+	}
+
 	server.Tx(ctx, func(tx server.PgTx) {
 
 		locationClientCounts := map[server.Id]int{}
@@ -1961,11 +1979,17 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 				// countryCode is NULL when the claimed country has no location
 				// row, which cannot be verified against anything -- fail closed,
 				// same as an unobserved provider.
-				if countryCode == nil {
-					continue
-				}
-				if !countFilter.countsTowardCountry(clientId, *countryCode) {
-					continue
+				//
+				// Unless the whole gate is skipped for this pass (see
+				// skipCountGate above) -- an unprobed fleet is "unknown", not
+				// "unhealthy", and must not empty the public list.
+				if !skipCountGate {
+					if countryCode == nil {
+						continue
+					}
+					if !countFilter.countsTowardCountry(clientId, *countryCode) {
+						continue
+					}
 				}
 
 				// count each client at most once per distinct location id. A
