@@ -10,6 +10,8 @@ import (
 
 	"maps"
 
+	"github.com/go-playground/assert/v2"
+
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
@@ -3182,4 +3184,55 @@ func TestUpdateClientScoresRestoresAProviderWhoseHealthRecovers(t *testing.T) {
 			t.Fatal("a provider that measured healthy again did not come back on the next pass")
 		}
 	})
+}
+
+func TestProviderCountFilter(t *testing.T) {
+	healthy := server.NewId()
+	degraded := server.NewId()
+	unmeasured := server.NewId()
+	zeroTotal := server.NewId()
+	wrongCountry := server.NewId()
+	unobserved := server.NewId()
+
+	f := providerCountFilter{
+		healthCounts: map[server.Id]ProviderEgressHealthCounts{
+			// 118/131 is the first passing value: 10*118 >= 9*131 (1180 >= 1179)
+			healthy: {OKCount: 118, Total: 131},
+			// 117/131 is the last failing value: 1170 < 1179
+			degraded:     {OKCount: 117, Total: 131},
+			zeroTotal:    {OKCount: 0, Total: 0},
+			wrongCountry: {OKCount: 131, Total: 131},
+			unobserved:   {OKCount: 131, Total: 131},
+		},
+		countryCodes: map[server.Id]string{
+			healthy:      "us",
+			degraded:     "us",
+			zeroTotal:    "us",
+			wrongCountry: "gb",
+			// unobserved deliberately absent
+		},
+	}
+
+	// the 90% boundary, asserted on the integer comparison
+	assert.Equal(t, f.passesHealth(healthy), true)
+	assert.Equal(t, f.passesHealth(degraded), false)
+
+	// fail closed: never probed, and probed-with-no-destinations
+	assert.Equal(t, f.passesHealth(unmeasured), false)
+	assert.Equal(t, f.passesHealth(zeroTotal), false)
+
+	// counts only where health passes AND the observed country matches
+	assert.Equal(t, f.countsTowardCountry(healthy, "us"), true)
+	assert.Equal(t, f.countsTowardCountry(degraded, "us"), false)
+
+	// healthy but egressing from somewhere else: not counted in the claim
+	assert.Equal(t, f.countsTowardCountry(wrongCountry, "us"), false)
+	// ...and it does count where it actually is
+	assert.Equal(t, f.countsTowardCountry(wrongCountry, "gb"), true)
+
+	// healthy but never located: fail closed
+	assert.Equal(t, f.countsTowardCountry(unobserved, "us"), false)
+
+	// comparison is case insensitive on the caller's side
+	assert.Equal(t, f.countsTowardCountry(healthy, "US"), true)
 }

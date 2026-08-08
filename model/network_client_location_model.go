@@ -1772,6 +1772,79 @@ func distinctIds(ids ...*server.Id) []server.Id {
 	return distinct
 }
 
+// The share of destinations a provider must reach to count as healthy: 90%,
+// as 9/10. Compared exactly as `10*ok >= 9*total` rather than through a float
+// division, so the boundary is the same for every denominator.
+//
+// Package scope, not function scope: both UpdateClientScores and
+// UpdateClientLocations gate on this now, and two copies could drift.
+const minEgressHealthOKNumerator = 9
+const minEgressHealthOKDenominator = 10
+
+// providerCountFilter answers one question: does this provider count as real,
+// reachable supply?
+//
+// It exists so the advertised provider_count (UpdateClientLocations) and the
+// gated membership (UpdateClientScores) apply an IDENTICAL predicate. They ran
+// different rules before: membership was gated on egress health while the count
+// was not, so a location could survive the gate and still advertise providers
+// that no probe had ever reached.
+//
+// Both maps are loaded once per pass. These loops run over the entire provider
+// population, so a per-provider query here is one round trip per provider.
+type providerCountFilter struct {
+	healthCounts map[server.Id]ProviderEgressHealthCounts
+	countryCodes map[server.Id]string
+}
+
+func newProviderCountFilter(ctx context.Context) providerCountFilter {
+	return providerCountFilter{
+		healthCounts: GetAllProviderEgressHealthCounts(ctx),
+		countryCodes: GetAllProviderEgressCountryCodes(ctx),
+	}
+}
+
+// passesHealth reports whether a probe has MEASURED this provider healthy.
+// Fail closed: no record at all (never probed) does not pass, and neither does
+// a record with no destinations in it, which is not a measurement of anything.
+// Guarding total also keeps the ratio well defined.
+//
+// Compared exactly as 10*ok >= 9*total rather than through a float, so the 90%
+// boundary cannot drift with rounding.
+func (f providerCountFilter) passesHealth(clientId server.Id) bool {
+	counts, ok := f.healthCounts[clientId]
+	if !ok {
+		return false
+	}
+	if counts.Total <= 0 {
+		return false
+	}
+	return minEgressHealthOKDenominator*counts.OKCount >= minEgressHealthOKNumerator*counts.Total
+}
+
+// countsTowardCountry reports whether this provider counts as supply for
+// countryCode. It must both be measured healthy and have been OBSERVED
+// egressing from that country.
+//
+// The two locations are different claims. network_client_location is where the
+// provider says it is, derived from its own connection. provider_egress_location
+// is where a probe actually watched its traffic leave. Counting on the claim
+// alone advertises providers in countries they do not egress from -- measured
+// on beta at 3 of 152 healthy providers claiming `at` while egressing from `gb`
+// -- which is what an adversarial provider would exploit at scale.
+//
+// A provider with no observed location is not counted, matching the health rule.
+func (f providerCountFilter) countsTowardCountry(clientId server.Id, countryCode string) bool {
+	if !f.passesHealth(clientId) {
+		return false
+	}
+	observed, ok := f.countryCodes[clientId]
+	if !ok {
+		return false
+	}
+	return observed == strings.ToLower(countryCode)
+}
+
 func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
 	topCitiesPerRegion := 20
 	topCitiesPerCountry := 10
@@ -3060,20 +3133,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	minScoreScale := 0.1
 	maxScoreScale := 1.0
 
-	// the measured egress health a provider must reach to be offered to users
-	// at all, as a fraction of the destinations its last probe run sampled.
-	//
-	// 90% because it cleanly separates working from broken on the real
-	// population: the healthy fleet measures 129-131 of 131 destinations, while
-	// a dead proxy measures 0 of 131. Nothing observed sits near the line, so
-	// the exact figure is not load bearing -- it only has to be far above 0 and
-	// below the ~98% a genuinely working provider always clears.
-	//
-	// Compared exactly as `10*ok >= 9*total` rather than through a float
-	// division, so the boundary is the same for every denominator.
-	const minEgressHealthOKNumerator = 9
-	const minEgressHealthOKDenominator = 10
-
 	// health is loaded once for the whole pass rather than per client: this
 	// walks every provider, and the table is one row per ever-probed provider.
 	//
@@ -3095,21 +3154,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// still handed to the prober and still graduates the moment it measures
 	// healthy. If that queue ever starts consulting these scores, an excluded
 	// provider can never be re-measured and is stuck out permanently.
-	egressHealthCounts := GetAllProviderEgressHealthCounts(ctx)
-	// passesEgressHealth reports whether a probe has MEASURED this provider
-	// healthy. Fail closed: no record at all (never probed) does not pass, and
-	// neither does a record with no destinations in it, which is also not a
-	// measurement of anything. Guarding total keeps the ratio well defined.
-	passesEgressHealth := func(clientId server.Id) bool {
-		counts, ok := egressHealthCounts[clientId]
-		if !ok {
-			return false
-		}
-		if counts.Total <= 0 {
-			return false
-		}
-		return minEgressHealthOKDenominator*counts.OKCount >= minEgressHealthOKNumerator*counts.Total
-	}
+	// Shared with UpdateClientLocations so the gated membership and the
+	// advertised count can never disagree about what "healthy" means.
+	// UpdateClientScores uses passesHealth ONLY: its candidate pool is not
+	// country-scoped, so the observed-country check does not apply here.
+	countFilter := newProviderCountFilter(ctx)
 
 	// migration: set each client score to the lowest lookback index index
 	migrateClientScore := func(clientScore *ClientScore) {
@@ -3136,7 +3185,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		// nothing else: it can only take a provider out of the pool, and the
 		// scaled-weight arithmetic below is untouched, so every provider that
 		// still qualifies keeps exactly the weight and ordering it has today.
-		passesHealth := passesEgressHealth(clientScore.ClientId)
+		passesHealth := countFilter.passesHealth(clientScore.ClientId)
 
 		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
 			passesMinimum := passesHealth
