@@ -79,9 +79,15 @@ func RemoveDisconnectedNetworkClients(
 	clientSession *session.ClientSession,
 ) (*RemoveDisconnectedNetworkClientsResult, error) {
 	// connection rows are kept briefly for diagnostics; inactive clients are
-	// reaped 30 days after deactivation, since provisioned child clients
-	// (e.g. proxy devices) cannot recover from a reaped client_id; abandoned
-	// top-level clients are marked inactive after 90 days unseen (auth_time)
+	// reaped `NetworkClientReapAfterDeactivate` after deactivation, since
+	// provisioned child clients (e.g. proxy devices) cannot recover from a
+	// reaped client_id; abandoned top-level clients are marked inactive after
+	// `TopLevelClientIdleExpiration` unseen (auth_time).
+	//
+	// Both windows are named rather than restated here: this comment said "90
+	// days" for three weeks after TopLevelClientIdleExpiration was tightened
+	// to 30 (2026-07-18), and that stale number was still being quoted as the
+	// retention answer. The constants carry their own rationale.
 	minConnectionTime := server.NowUtc().Add(-8 * time.Hour)
 	minClientTime := server.NowUtc().Add(-model.NetworkClientReapAfterDeactivate)
 	minTopLevelAuthTime := server.NowUtc().Add(-model.TopLevelClientIdleExpiration)
