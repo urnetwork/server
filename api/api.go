@@ -60,6 +60,35 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
 		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
+		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
+		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
+		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
+		// operator-to-server, same operator secret: the certificate pins this
+		// server observed DIRECTLY for the geolocation source hosts. The
+		// prober fetches them here instead of carrying a compile-time
+		// constant, and refuses to probe at all if it cannot get a complete
+		// set -- probing unpinned would let the provider under test forge its
+		// own location, which is the thing the probe exists to catch.
+		router.NewRoute("GET", "/network/geolocation-source-pins", handlers.GeolocationSourcePins),
+		// operator-to-server, gated by the same operator secret as the egress
+		// location ingest above: the active bandwidth probe's download target,
+		// its result submission, and the byte-budget reservation the prober
+		// takes before spending any probe bytes
+		router.NewRoute("GET", "/network/provider-bandwidth-test", handlers.ProviderBandwidthTest),
+		router.NewRoute("POST", "/network/provider-bandwidth-result", handlers.ProviderBandwidthResult),
+		router.NewRoute("POST", "/network/provider-bandwidth-reserve", handlers.ProviderBandwidthReserve),
+		// operator-to-server, same operator secret again: the egress-health
+		// run the prober takes over the tunnel the geolocation probe already
+		// opened. Until this existed the result was a log line and nothing
+		// else.
+		router.NewRoute("POST", "/network/provider-egress-health", handlers.ProviderEgressHealthResult),
+		// client-to-server, and the only route in this group that is NOT
+		// operator-secret authed: a real client network reporting that a
+		// provider carried nothing. The reporting network is taken from the
+		// session jwt, never from the body, because the quorum counts distinct
+		// networks. A met quorum only brings the provider's next probe
+		// forward -- see model.ProviderClientVerdictQuorumMet.
+		router.NewRoute("POST", "/network/provider-verdict", handlers.ProviderClientVerdictSubmit),
 		router.NewRoute("GET", "/network/clients", handlers.NetworkClients),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),

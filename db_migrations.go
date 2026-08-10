@@ -4837,4 +4837,708 @@ var migrations = []any{
 	newSqlMigration(`
 		ALTER TABLE transfer_balance_code ADD COLUMN cancel_time timestamp NULL
 	`),
+
+	// provider egress locations: locations learned by an operator-run prober
+	// that routes geolocation lookups through a provider's own egress rather
+	// than trusting a lookup on the provider's control-connection ip, since
+	// the egress is where user traffic actually exits and can differ from
+	// where the provider's control connection originates (e.g. behind a VPN
+	// or hosting network). Keyed by client_id, one row per provider, upserted
+	// by the operator's prober. location_id is the canonical country (or
+	// city, when the probe was city-confident) location row. observed_at is
+	// when the probe ran, and is what freshness is judged against.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_egress_location (
+            client_id      uuid NOT NULL PRIMARY KEY,
+            location_id    uuid NOT NULL,
+            country_code   varchar(2) NOT NULL,
+            asn            bigint NOT NULL DEFAULT 0,
+            org            varchar(256) NOT NULL DEFAULT '',
+            hosting        bool NOT NULL DEFAULT false,
+            proxy          bool NOT NULL DEFAULT false,
+            mobile         bool NOT NULL DEFAULT false,
+            city_confident bool NOT NULL DEFAULT false,
+            observed_at    timestamp NOT NULL,
+            update_time    timestamp NOT NULL
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_egress_location_observed_at
+            ON provider_egress_location (observed_at)
+    `),
+
+	// provider egress probe attempts: when the prober last *tried* a provider,
+	// successful or not, and how the try failed.
+	//
+	// This cannot live on provider_egress_location, because the case it exists
+	// to handle is precisely a provider that has no row there. A provider that
+	// connects, holds a Public provide key and fails every probe (firewalled
+	// egress, dead upstream) never gets an egress row, so its observed_at stays
+	// NULL, so it sorts to the head of the due queue forever. Enough of them and
+	// every batch the prober asks for is the same set of permanently-dead
+	// providers, and no healthy provider's location is ever refreshed -- while
+	// the endpoint keeps returning a full, plausible-looking batch.
+	// GetProviderEgressLocationDue defers on a recent attempt as well as a fresh
+	// success, which needs somewhere to record the attempt.
+	//
+	// Pulled forward from the P2 verdict model
+	// (docs/superpowers/specs/2026-07-25-enforced-provider-geo-probing-design.md,
+	// probe_attempt_at / probe_failure) because the P1 schedule cannot function
+	// without it. Deliberately only the two columns the schedule reads, not the
+	// rest of that model.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_egress_probe_attempt (
+            client_id     uuid NOT NULL PRIMARY KEY,
+            attempt_at    timestamp NOT NULL,
+            probe_failure varchar(64) NOT NULL DEFAULT '',
+            update_time   timestamp NOT NULL
+        )
+    `),
+
+	// serves the sweep in RemoveExpiredProviderEgressProbeAttempts. The due
+	// query reaches this table by primary key through the left join, so it
+	// needs no index of its own.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_egress_probe_attempt_attempt_at
+            ON provider_egress_probe_attempt (attempt_at)
+    `),
+
+	// serves the stale-but-probed pass of GetProviderEgressLocationDue, which
+	// drives from provider_egress_location with `observed_at < $n ORDER BY
+	// observed_at, client_id LIMIT $m`. With client_id in the index the
+	// predicate and the whole ORDER BY -- tie-break included -- are one ordered
+	// index scan that stops when the batch is full: no sort, and no heap visit
+	// to resolve the tie. The pre-existing (observed_at) index alone leaves the
+	// client_id tie-break to a sort.
+	//
+	// The other pass (never-probed) needs no new index: it is an anti-join over
+	// network_client_location_reliability ordered by client_id, which the
+	// existing (valid, connected, client_id) index already serves as an ordered
+	// scan, and both anti-joins plus the provide_key EXISTS are primary-key
+	// probes.
+	//
+	// This supersedes provider_egress_location_observed_at, which is now a
+	// prefix of it -- including for the RemoveExpiredProviderEgressLocations
+	// sweep. The redundant index is left in place deliberately: dropping it is a
+	// separate decision with its own (small) risk, and this migration is meant
+	// to be purely additive.
+	//
+	// Appended, never inserted: migrations here apply by slice index, so
+	// editing or reordering an already-applied entry corrupts live databases.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_egress_location_observed_at_client_id
+            ON provider_egress_location (observed_at, client_id)
+    `),
+
+	// The recorded judgement for a probed egress location: `verdict` is
+	// verified/unverified/suspect, `verdict_reason` the short failure class that
+	// produced it (see probeverdict), and `assurance` how the probe reached the
+	// provider (`direct` until multi-hop lands in P3).
+	//
+	// All three are additive with safe defaults, so every existing row reads as
+	// an unjudged direct probe and every existing reader of
+	// provider_egress_location is unaffected. Nothing writes a non-default
+	// verdict until the ingest path computes one.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS on every
+	// statement makes a re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        ALTER TABLE provider_egress_location
+            ADD COLUMN IF NOT EXISTS verdict varchar(16) NOT NULL DEFAULT 'unverified',
+            ADD COLUMN IF NOT EXISTS verdict_reason varchar(64) NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS assurance varchar(16) NOT NULL DEFAULT 'direct'
+    `),
+
+	// One measured throughput figure per provider, from either source (passive
+	// aggregation of settled bytes, or an active sampled download) -- consumers
+	// read one number and the `source` column says which produced it.
+	//
+	// client_id is the primary key, so a new measurement overwrites the old one
+	// (mirrors provider_egress_location's own shape). This is a ranking input,
+	// not a history: keeping every sample would grow without bound for a value
+	// only ever read as "the current figure".
+	//
+	// SUPERSEDED: a later migration in this file re-keys the table on
+	// (client_id, source) so each source keeps its own current figure. The
+	// statement below is left exactly as applied -- see that migration for why.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_bandwidth (
+            client_id          uuid NOT NULL PRIMARY KEY,
+            bytes_per_second   double precision NOT NULL,
+            source             varchar(16) NOT NULL,
+            sample_byte_count  bigint NOT NULL,
+            window_start       timestamp NOT NULL,
+            window_end         timestamp NOT NULL,
+            update_time        timestamp NOT NULL
+        )
+    `),
+
+	// serves staleness sweeps and "who needs a fresh measurement" scans, which
+	// range on window_end. Lookups of a single provider's figure go through the
+	// primary key and need no index of their own.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_bandwidth_window_end
+            ON provider_bandwidth (window_end)
+    `),
+
+	// The deployment-wide byte budget for active bandwidth probing: one row per
+	// admitted reservation, counting against a fixed hourly bucket. See
+	// ReserveProviderBandwidthSlot for why active probe bytes need a spend
+	// limit at all -- they are real, paid contract traffic on any deployment
+	// where payouts are planned, regardless of the balance code used.
+	//
+	// byte_count is bigint, not int: a single bucket's budget is measured in
+	// hundreds of megabytes, so an int would overflow well inside the range
+	// this ledger has to sum over a day. client_id is stored for observability
+	// only -- the limit itself is global, not scoped per provider, so nothing
+	// reads this column to make an admission decision.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS on every
+	// statement makes a re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_bandwidth_quota (
+            provider_bandwidth_quota_id uuid NOT NULL PRIMARY KEY,
+            client_id                   uuid NOT NULL,
+            byte_count                  bigint NOT NULL,
+            bucket_start                timestamp NOT NULL,
+            create_time                 timestamp NOT NULL
+        )
+    `),
+
+	// every read of this table is a range over the lookahead window
+	// (`$1 <= bucket_start AND bucket_start < $2`), and the reaper deletes by
+	// the same column, so bucket_start is the only index it needs.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_bandwidth_quota_bucket_start
+            ON provider_bandwidth_quota (bucket_start)
+    `),
+
+	// Re-key provider_bandwidth on (client_id, source).
+	//
+	// The active probe measures two independent targets per provider -- the
+	// operator's own download endpoint and a public CDN -- and the two figures
+	// are the point: a provider that prioritises one path and not the other is
+	// invisible in a single number and obvious in a pair. Keyed on client_id
+	// alone the two overwrite each other on every pass, so only one target can
+	// be stored at all. Averaging them into the one row would lose the same
+	// signal more quietly.
+	//
+	// The source becomes part of the key rather than each target getting its
+	// own columns, because a further target then needs no migration at all:
+	// 'passive', 'active-operator' and 'active-cdn' are three rows in the same
+	// shape, and a fourth would be a fourth row.
+	//
+	// No backfill: provider_bandwidth is empty on every deployment (nothing has
+	// written to it yet -- the active prober is the first writer and ships with
+	// this change), so re-keying cannot orphan or collide with an existing row.
+	//
+	// Appended, never inserted: migrations apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. DROP CONSTRAINT IF EXISTS
+	// paired with the ADD makes the whole statement idempotent -- a re-run
+	// drops whatever primary key is present and re-adds this one.
+	newSqlMigration(`
+        ALTER TABLE provider_bandwidth
+            DROP CONSTRAINT IF EXISTS provider_bandwidth_pkey,
+            ADD CONSTRAINT provider_bandwidth_pkey PRIMARY KEY (client_id, source)
+    `),
+
+	// The latest egress-health run per provider: does this provider actually
+	// carry traffic to the real internet, across several independent classes
+	// of destination. The prober has computed this every pass since P2 and
+	// only ever logged it, so the signal rolls off with the container logs.
+	//
+	// Keyed on client_id alone, so a run replaces the previous one -- the
+	// current picture per provider, not a history, exactly as
+	// provider_egress_location behaves. Trending, if it is ever wanted,
+	// belongs in a separate partitioned append table rather than a second key
+	// column here.
+	//
+	// class_results is jsonb rather than a column per class because the class
+	// set is the prober's, not the schema's: adding a destination class must
+	// not need a migration, and the per-class tally is read as a diagnostic
+	// document ("dns=4/4 cdn=0/5 site=12/12" separates a datacenter-refusal
+	// from a blackhole) rather than filtered or aggregated on in sql.
+	//
+	// reputation_ok/reputation_total and reputation_failed_names are stored
+	// SEPARATELY from ok_count/total_count and must never be folded into them.
+	// The reputation class measures whether big vendors treat the exit ip as a
+	// datacenter address; nearly every honest hosted provider fails most of it
+	// because it IS hosted. Summing it into the health figure would score a
+	// provider that carried every byte it was asked for as partly broken. The
+	// ingest endpoint rejects a 'reputation' key inside class_results for the
+	// same reason.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS makes a
+	// re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_egress_health (
+            client_id               uuid NOT NULL,
+            measured_at             timestamp NOT NULL,
+            ok_count                int NOT NULL,
+            total_count             int NOT NULL,
+            class_results           jsonb NOT NULL,
+            reputation_ok           int NOT NULL,
+            reputation_total        int NOT NULL,
+            failed_names            text NOT NULL DEFAULT '',
+            reputation_failed_names text NOT NULL DEFAULT '',
+
+            PRIMARY KEY (client_id)
+        )
+    `),
+
+	// Blackhole verdicts reported by real clients: one row per report, per
+	// provider, per reporting network. A client that removes a provider for
+	// carrying nothing (see connect's detectBlackhole) says so here.
+	//
+	// APPEND-ONLY ON PURPOSE. A reporter may say anything as often as it likes;
+	// the cap is on what a reporter can COUNT FOR -- at most one verdict per
+	// reporter network per provider per aggregation window -- and it is applied
+	// at read time, in ProviderClientVerdictQuorumMet, never on the write path.
+	// Capping the writes instead would make the table lie about what was
+	// actually reported, and would put a rate-limit decision in front of the
+	// one signal that says a provider is dead.
+	//
+	// reporter_network_id comes from the authenticated session and never from
+	// the request body. It is the entire basis of the quorum: distinct networks
+	// are what a griefer has to buy, and a body-supplied reporter id would cost
+	// nothing at all.
+	//
+	// A met quorum only REPRIORITISES the provider for probing -- it never
+	// demotes, excludes, or touches filter sets, scores, PassesMinimums or
+	// find-providers2. See ProviderClientVerdictQuorumMet for why the trigger
+	// (client verdicts) and the punishment (the prober) are separated.
+	//
+	// syn_sent/syn_received are accepted and validated by the endpoint but
+	// deliberately not columns here: aggregation keys on receive_ack_count
+	// alone, and a column nothing reads is a column that drifts.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS makes a
+	// re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_client_verdict (
+            provider_client_id  uuid NOT NULL,
+            reporter_network_id uuid NOT NULL,
+            reason              text NOT NULL,
+            send_ack_count      bigint NOT NULL,
+            send_ack_bytes      bigint NOT NULL,
+            receive_ack_count   bigint NOT NULL,
+            receive_ack_bytes   bigint NOT NULL,
+            window_seconds      int NOT NULL,
+            create_time         timestamp NOT NULL,
+
+            PRIMARY KEY (provider_client_id, reporter_network_id, create_time)
+        )
+    `),
+
+	// serves the window read (GetProviderClientVerdictsInWindow), which is
+	// `provider_client_id = $1 AND $2 <= create_time ORDER BY create_time`.
+	// The primary key's leading column alone would find the provider's rows and
+	// then filter and sort every verdict ever written about it -- and this table
+	// is append-only and unbounded per reporter, so that set only grows. With
+	// create_time second the window is an ordered range scan that stops at the
+	// scan limit.
+	//
+	// reporter_network_id is deliberately not in the index: the read does not
+	// filter on it, and the one-verdict-per-reporter cap is applied in Go, not
+	// by the database.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS provider_client_verdict_provider_create_time
+            ON provider_client_verdict (provider_client_id, create_time)
+    `),
+
+	// the certificate pins this server has OBSERVED for the geolocation source
+	// hosts, by connecting to each host directly -- on the server's own
+	// network, no provider in the path -- and validating the chain under full
+	// WebPKI. See model.GeolocationSourcePin for why a direct, verified
+	// observation is the only thing that may ever write this table: a pin
+	// learned through a provider tunnel would let the provider under test teach
+	// the server its own forged certificate.
+	//
+	// One row per host, upserted: this is the current observation, not a
+	// history. A rotation is recorded in the refresh job's log line (old and
+	// new values), which is what was missing when the hardcoded pins went stale
+	// and silently took every source out of the consensus set.
+	//
+	// Both spki columns are NOT NULL and never written empty. An empty pin is
+	// not "no constraint", it is a pin that matches nothing, so a half-observed
+	// row would fail the prober closed for that host just as surely as a wrong
+	// one. The observation job leaves the previous row untouched rather than
+	// writing a partial one.
+	//
+	// No secondary index: the primary key on host serves both access paths --
+	// the per-host upsert, and the unqualified read of every row (three rows,
+	// one per source host).
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. IF NOT EXISTS makes a
+	// re-run -- or a duplicated merge resolution -- a no-op.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS geolocation_source_pin (
+            host              text NOT NULL,
+            leaf_spki         text NOT NULL,
+            intermediate_spki text NOT NULL,
+            observed_at       timestamp NOT NULL,
+
+            PRIMARY KEY (host)
+        )
+    `),
+
+	// Backfill every location row that was created with a blank
+	// `location_name`, then forbid the state structurally.
+	//
+	// The rows come from `AddDefaultLocations`' location-group member path,
+	// which built a `Location` with only a `CountryCode` and no `Country`;
+	// `CreateLocation` wrote `location_name` straight from that empty field. On
+	// the live beta deployment that is 161 country rows and 2 region rows (`hk`,
+	// `sg`) -- 163 of 565. The creating path is fixed in the two commits before
+	// this one; this is the data those commits arrived too late to prevent.
+	//
+	// The 249-entry mapping below is GENERATED from `model.ISOCountryName` --
+	// the same table `CreateLocation` now resolves through -- by probing all 676
+	// two-letter codes and emitting the ones it answers for. A migration cannot
+	// call Go, and 249 hand-typed names is exactly how a wrong one gets in, so
+	// the SQL is machine-derived from the Go table rather than transcribed
+	// alongside it. It is the full ISO table, not just the 161 codes beta
+	// happens to hold, so the same migration repairs any deployment.
+	//
+	// Order matters twice, and neither order is cosmetic:
+	//
+	//  1. The backfill must precede the CHECK. Adding the constraint first fails
+	//     the migration on the 163 rows it exists to prevent.
+	//  2. The city `location_full_name` repair must precede the region rename,
+	//     because it selects its rows by the region still being blank. Renaming
+	//     first would leave the cities holding ", ," forever.
+	//
+	// Appended, never inserted: migrations here apply by slice index
+	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
+	// already-applied entry corrupts live databases. The temp table is
+	// ON COMMIT DROP and the constraint is dropped-if-exists before being added,
+	// so a re-run -- or a duplicated merge resolution -- is a no-op.
+	newSqlMigration(`
+        CREATE TEMP TABLE iso_country_name_backfill (
+            country_code char(2) PRIMARY KEY,
+            country_name varchar(128) NOT NULL
+        ) ON COMMIT DROP;
+
+        INSERT INTO iso_country_name_backfill (country_code, country_name) VALUES
+            ('ad', 'Andorra'),
+            ('ae', 'United Arab Emirates'),
+            ('af', 'Afghanistan'),
+            ('ag', 'Antigua and Barbuda'),
+            ('ai', 'Anguilla'),
+            ('al', 'Albania'),
+            ('am', 'Armenia'),
+            ('ao', 'Angola'),
+            ('aq', 'Antarctica'),
+            ('ar', 'Argentina'),
+            ('as', 'American Samoa'),
+            ('at', 'Austria'),
+            ('au', 'Australia'),
+            ('aw', 'Aruba'),
+            ('ax', 'Åland Islands'),
+            ('az', 'Azerbaijan'),
+            ('ba', 'Bosnia and Herzegovina'),
+            ('bb', 'Barbados'),
+            ('bd', 'Bangladesh'),
+            ('be', 'Belgium'),
+            ('bf', 'Burkina Faso'),
+            ('bg', 'Bulgaria'),
+            ('bh', 'Bahrain'),
+            ('bi', 'Burundi'),
+            ('bj', 'Benin'),
+            ('bl', 'Saint Barthélemy'),
+            ('bm', 'Bermuda'),
+            ('bn', 'Brunei Darussalam'),
+            ('bo', 'Bolivia'),
+            ('bq', 'Bonaire, Sint Eustatius and Saba'),
+            ('br', 'Brazil'),
+            ('bs', 'Bahamas'),
+            ('bt', 'Bhutan'),
+            ('bv', 'Bouvet Island'),
+            ('bw', 'Botswana'),
+            ('by', 'Belarus'),
+            ('bz', 'Belize'),
+            ('ca', 'Canada'),
+            ('cc', 'Cocos (Keeling) Islands'),
+            ('cd', 'Congo, The Democratic Republic of the'),
+            ('cf', 'Central African Republic'),
+            ('cg', 'Congo'),
+            ('ch', 'Switzerland'),
+            ('ci', 'Côte d''Ivoire'),
+            ('ck', 'Cook Islands'),
+            ('cl', 'Chile'),
+            ('cm', 'Cameroon'),
+            ('cn', 'China'),
+            ('co', 'Colombia'),
+            ('cr', 'Costa Rica'),
+            ('cu', 'Cuba'),
+            ('cv', 'Cabo Verde'),
+            ('cw', 'Curaçao'),
+            ('cx', 'Christmas Island'),
+            ('cy', 'Cyprus'),
+            ('cz', 'Czechia'),
+            ('de', 'Germany'),
+            ('dj', 'Djibouti'),
+            ('dk', 'Denmark'),
+            ('dm', 'Dominica'),
+            ('do', 'Dominican Republic'),
+            ('dz', 'Algeria'),
+            ('ec', 'Ecuador'),
+            ('ee', 'Estonia'),
+            ('eg', 'Egypt'),
+            ('eh', 'Western Sahara'),
+            ('er', 'Eritrea'),
+            ('es', 'Spain'),
+            ('et', 'Ethiopia'),
+            ('fi', 'Finland'),
+            ('fj', 'Fiji'),
+            ('fk', 'Falkland Islands (Malvinas)'),
+            ('fm', 'Micronesia, Federated States of'),
+            ('fo', 'Faroe Islands'),
+            ('fr', 'France'),
+            ('ga', 'Gabon'),
+            ('gb', 'United Kingdom'),
+            ('gd', 'Grenada'),
+            ('ge', 'Georgia'),
+            ('gf', 'French Guiana'),
+            ('gg', 'Guernsey'),
+            ('gh', 'Ghana'),
+            ('gi', 'Gibraltar'),
+            ('gl', 'Greenland'),
+            ('gm', 'Gambia'),
+            ('gn', 'Guinea'),
+            ('gp', 'Guadeloupe'),
+            ('gq', 'Equatorial Guinea'),
+            ('gr', 'Greece'),
+            ('gs', 'South Georgia and the South Sandwich Islands'),
+            ('gt', 'Guatemala'),
+            ('gu', 'Guam'),
+            ('gw', 'Guinea-Bissau'),
+            ('gy', 'Guyana'),
+            ('hk', 'Hong Kong'),
+            ('hm', 'Heard Island and McDonald Islands'),
+            ('hn', 'Honduras'),
+            ('hr', 'Croatia'),
+            ('ht', 'Haiti'),
+            ('hu', 'Hungary'),
+            ('id', 'Indonesia'),
+            ('ie', 'Ireland'),
+            ('il', 'Israel'),
+            ('im', 'Isle of Man'),
+            ('in', 'India'),
+            ('io', 'British Indian Ocean Territory'),
+            ('iq', 'Iraq'),
+            ('ir', 'Iran'),
+            ('is', 'Iceland'),
+            ('it', 'Italy'),
+            ('je', 'Jersey'),
+            ('jm', 'Jamaica'),
+            ('jo', 'Jordan'),
+            ('jp', 'Japan'),
+            ('ke', 'Kenya'),
+            ('kg', 'Kyrgyzstan'),
+            ('kh', 'Cambodia'),
+            ('ki', 'Kiribati'),
+            ('km', 'Comoros'),
+            ('kn', 'Saint Kitts and Nevis'),
+            ('kp', 'North Korea'),
+            ('kr', 'South Korea'),
+            ('kw', 'Kuwait'),
+            ('ky', 'Cayman Islands'),
+            ('kz', 'Kazakhstan'),
+            ('la', 'Laos'),
+            ('lb', 'Lebanon'),
+            ('lc', 'Saint Lucia'),
+            ('li', 'Liechtenstein'),
+            ('lk', 'Sri Lanka'),
+            ('lr', 'Liberia'),
+            ('ls', 'Lesotho'),
+            ('lt', 'Lithuania'),
+            ('lu', 'Luxembourg'),
+            ('lv', 'Latvia'),
+            ('ly', 'Libya'),
+            ('ma', 'Morocco'),
+            ('mc', 'Monaco'),
+            ('md', 'Moldova'),
+            ('me', 'Montenegro'),
+            ('mf', 'Saint Martin (French part)'),
+            ('mg', 'Madagascar'),
+            ('mh', 'Marshall Islands'),
+            ('mk', 'North Macedonia'),
+            ('ml', 'Mali'),
+            ('mm', 'Myanmar'),
+            ('mn', 'Mongolia'),
+            ('mo', 'Macao'),
+            ('mp', 'Northern Mariana Islands'),
+            ('mq', 'Martinique'),
+            ('mr', 'Mauritania'),
+            ('ms', 'Montserrat'),
+            ('mt', 'Malta'),
+            ('mu', 'Mauritius'),
+            ('mv', 'Maldives'),
+            ('mw', 'Malawi'),
+            ('mx', 'Mexico'),
+            ('my', 'Malaysia'),
+            ('mz', 'Mozambique'),
+            ('na', 'Namibia'),
+            ('nc', 'New Caledonia'),
+            ('ne', 'Niger'),
+            ('nf', 'Norfolk Island'),
+            ('ng', 'Nigeria'),
+            ('ni', 'Nicaragua'),
+            ('nl', 'Netherlands'),
+            ('no', 'Norway'),
+            ('np', 'Nepal'),
+            ('nr', 'Nauru'),
+            ('nu', 'Niue'),
+            ('nz', 'New Zealand'),
+            ('om', 'Oman'),
+            ('pa', 'Panama'),
+            ('pe', 'Peru'),
+            ('pf', 'French Polynesia'),
+            ('pg', 'Papua New Guinea'),
+            ('ph', 'Philippines'),
+            ('pk', 'Pakistan'),
+            ('pl', 'Poland'),
+            ('pm', 'Saint Pierre and Miquelon'),
+            ('pn', 'Pitcairn'),
+            ('pr', 'Puerto Rico'),
+            ('ps', 'Palestine, State of'),
+            ('pt', 'Portugal'),
+            ('pw', 'Palau'),
+            ('py', 'Paraguay'),
+            ('qa', 'Qatar'),
+            ('re', 'Réunion'),
+            ('ro', 'Romania'),
+            ('rs', 'Serbia'),
+            ('ru', 'Russian Federation'),
+            ('rw', 'Rwanda'),
+            ('sa', 'Saudi Arabia'),
+            ('sb', 'Solomon Islands'),
+            ('sc', 'Seychelles'),
+            ('sd', 'Sudan'),
+            ('se', 'Sweden'),
+            ('sg', 'Singapore'),
+            ('sh', 'Saint Helena, Ascension and Tristan da Cunha'),
+            ('si', 'Slovenia'),
+            ('sj', 'Svalbard and Jan Mayen'),
+            ('sk', 'Slovakia'),
+            ('sl', 'Sierra Leone'),
+            ('sm', 'San Marino'),
+            ('sn', 'Senegal'),
+            ('so', 'Somalia'),
+            ('sr', 'Suriname'),
+            ('ss', 'South Sudan'),
+            ('st', 'Sao Tome and Principe'),
+            ('sv', 'El Salvador'),
+            ('sx', 'Sint Maarten (Dutch part)'),
+            ('sy', 'Syria'),
+            ('sz', 'Eswatini'),
+            ('tc', 'Turks and Caicos Islands'),
+            ('td', 'Chad'),
+            ('tf', 'French Southern Territories'),
+            ('tg', 'Togo'),
+            ('th', 'Thailand'),
+            ('tj', 'Tajikistan'),
+            ('tk', 'Tokelau'),
+            ('tl', 'Timor-Leste'),
+            ('tm', 'Turkmenistan'),
+            ('tn', 'Tunisia'),
+            ('to', 'Tonga'),
+            ('tr', 'Türkiye'),
+            ('tt', 'Trinidad and Tobago'),
+            ('tv', 'Tuvalu'),
+            ('tw', 'Taiwan'),
+            ('tz', 'Tanzania'),
+            ('ua', 'Ukraine'),
+            ('ug', 'Uganda'),
+            ('um', 'United States Minor Outlying Islands'),
+            ('us', 'United States'),
+            ('uy', 'Uruguay'),
+            ('uz', 'Uzbekistan'),
+            ('va', 'Holy See (Vatican City State)'),
+            ('vc', 'Saint Vincent and the Grenadines'),
+            ('ve', 'Venezuela'),
+            ('vg', 'Virgin Islands, British'),
+            ('vi', 'Virgin Islands, U.S.'),
+            ('vn', 'Vietnam'),
+            ('vu', 'Vanuatu'),
+            ('wf', 'Wallis and Futuna'),
+            ('ws', 'Samoa'),
+            ('ye', 'Yemen'),
+            ('yt', 'Mayotte'),
+            ('za', 'South Africa'),
+            ('zm', 'Zambia'),
+            ('zw', 'Zimbabwe');
+
+        -- The city rows under a blank region are not themselves blank, but their
+        -- location_full_name carries the empty region through the same
+        -- composition -- "Hong Kong, , hk". Repaired to the shape the city INSERT
+        -- writes, city, region, code, using the name the region is about to get.
+        -- This runs FIRST: after the rename the region is no longer blank and this
+        -- statement would match nothing.
+        UPDATE location AS city
+        SET location_full_name =
+            city.location_name || ', ' || iso.country_name || ', ' || city.country_code
+        FROM location AS region
+        JOIN iso_country_name_backfill AS iso
+            ON iso.country_code = region.country_code
+        WHERE
+            city.location_type = 'city' AND
+            city.region_location_id = region.location_id AND
+            region.location_type = 'region' AND
+            region.location_name = '';
+
+        -- The 2 blank region rows are RENAMED, not deleted: each has a city child
+        -- pointing at it through region_location_id (Hong Kong under hk,
+        -- Singapore under sg), so dropping them would orphan a live city. They
+        -- exist because the geolocation database returns no subdivision for a
+        -- subdivision-less country, so the region was created with an empty name;
+        -- the only fact such a row carries is "the whole of this country", which is
+        -- why it is named after its country rather than after a subdivision that
+        -- was never in the source data. location_full_name is composed the way
+        -- the region INSERT composes it, name, code.
+        UPDATE location AS region
+        SET
+            location_name = iso.country_name,
+            location_full_name = iso.country_name || ', ' || region.country_code
+        FROM iso_country_name_backfill AS iso
+        WHERE
+            region.location_type = 'region' AND
+            region.location_name = '' AND
+            iso.country_code = region.country_code;
+
+        -- The 161 country rows. location_full_name is deliberately NOT touched:
+        -- the country INSERT writes the bare country code into it, so these rows
+        -- already hold exactly what a correctly-named country row holds. Only the
+        -- name was ever missing.
+        UPDATE location AS country
+        SET location_name = iso.country_name
+        FROM iso_country_name_backfill AS iso
+        WHERE
+            country.location_type = 'country' AND
+            country.location_name = '' AND
+            iso.country_code = country.country_code;
+
+        DROP TABLE iso_country_name_backfill;
+
+        -- The structural backstop. A blank name is never a real location, so it is
+        -- rejected by the database rather than depending on every future caller
+        -- remembering to resolve one.
+        ALTER TABLE location DROP CONSTRAINT IF EXISTS location_name_not_blank;
+
+        ALTER TABLE location
+            ADD CONSTRAINT location_name_not_blank
+            CHECK (location_name <> '')
+    `),
 }

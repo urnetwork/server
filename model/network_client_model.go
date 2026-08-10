@@ -515,12 +515,26 @@ func AuthNetworkClient(
 				}
 			}
 
-			proxyDeviceState := authClient.ProxyConfig.InitialDeviceState.ProxyDeviceState
+			// InitialDeviceState is optional -- it is a pointer tagged
+			// `omitempty`, so a caller may legitimately send a proxy_config
+			// without it. Dereferencing it unconditionally panicked the whole
+			// request into a 500 with no usable message.
+			//
+			// A zero value falls through to the "Invalid location" branch
+			// below, which is exactly what a caller who sent an empty device
+			// state already got. That keeps the failure a clean, described
+			// error instead of a crash.
+			initialDeviceState := authClient.ProxyConfig.InitialDeviceState
+			if initialDeviceState == nil {
+				initialDeviceState = &ExtendedProxyDeviceState{}
+			}
+
+			proxyDeviceState := initialDeviceState.ProxyDeviceState
 			if proxyDeviceState.Location == nil {
 				// try the country code
 				proxyDeviceState.Location = GetConnectLocationForCountryCode(
 					session.Ctx,
-					authClient.ProxyConfig.InitialDeviceState.CountryCode,
+					initialDeviceState.CountryCode,
 				)
 			}
 
@@ -573,6 +587,18 @@ func AuthNetworkClient(
 							ProxyClient: *proxyClient,
 						}
 					} else {
+						// Log the real cause. The message returned to the caller
+						// stays generic on purpose -- it crosses a trust boundary
+						// and the underlying errors name server-side config -- but
+						// discarding it entirely turned a one-line diagnosis
+						// ("No proxy hosts available", i.e. proxy.yml has no hosts
+						// block) into a multi-hour one, because the operator saw
+						// only this sentence.
+						glog.Errorf(
+							"[proxy]could not create proxy client for %s: %s\n",
+							proxyDeviceConfig.ProxyId,
+							err,
+						)
 						authClientResult.Error = &AuthNetworkClientError{
 							Message: "Could not create proxy client",
 						}

@@ -155,6 +155,12 @@ func TestGetProvidersMapAggregatesRegions(t *testing.T) {
 					))
 				}
 			})
+			// the map counts only providers holding a Public provide key (see
+			// TestProviderStatsCountOnlyPublicProviders); every provider this
+			// helper builds is meant to count, so give them all one
+			SetProvide(ctx, clientId, map[ProvideMode][]byte{
+				ProvideModePublic: []byte("public-secret"),
+			})
 		}
 
 		addProvider(nsw, true, true)
@@ -182,5 +188,131 @@ func TestGetProvidersMapAggregatesRegions(t *testing.T) {
 		// the dots on the globe
 		connect.AssertEqual(t, true, au["New South Wales"].Lat < -28 && au["New South Wales"].Lat > -38)
 		connect.AssertEqual(t, true, au["New South Wales"].Lon > 140)
+	})
+}
+
+// Both public provider numbers must answer the same question the public
+// provider *list* answers: how much supply a stranger can actually pick.
+//
+// `/network/provider-locations` (UpdateClientLocations) counts only providers
+// holding a Public provide key -- GetProvideRelationship returns
+// ProvideModePublic for a cross-network pair, so without a Public key a
+// provider can only ever serve its own network and is effectively private.
+// `/stats/providers-map` and CountProviderCountries applied no provide-mode
+// filter at all, so they reported supply that no user outside the provider's
+// own network could select: the map and the country count would both exceed
+// the list, in the same deployment, for the same population.
+//
+// Deleting either EXISTS predicate must fail this test.
+func TestProviderStatsCountOnlyPublicProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// two countries so the country count distinguishes them: the Public
+		// provider is the only one in Australia, the Network-only provider the
+		// only one in Japan. A correct count is 1 country, not 2.
+		nsw := &Location{
+			LocationType: LocationTypeRegion,
+			Region:       "New South Wales",
+			Country:      "Australia",
+			CountryCode:  "au",
+		}
+		CreateLocation(ctx, nsw)
+		tokyo := &Location{
+			LocationType: LocationTypeRegion,
+			Region:       "Tokyo",
+			Country:      "Japan",
+			CountryCode:  "jp",
+		}
+		CreateLocation(ctx, tokyo)
+
+		// a connected, valid, scored provider in `region` holding exactly the
+		// provide modes given (nil for none at all)
+		addProvider := func(region *Location, modes map[ProvideMode][]byte) {
+			clientId := server.NewId()
+			networkId := server.NewId()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						INSERT INTO network_client_location_reliability (
+							client_id,
+							network_id,
+							update_block_number,
+							region_location_id,
+							country_location_id,
+							client_address_hash_count,
+							location_count,
+							connected
+						)
+						VALUES ($1, $2, 1, $3, $4, 1, 1, true)
+					`,
+					clientId,
+					networkId,
+					region.LocationId,
+					region.CountryLocationId,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						INSERT INTO client_connection_reliability_score (
+							client_id,
+							lookback_index,
+							independent_reliability_score,
+							independent_reliability_weight,
+							reliability_score,
+							reliability_weight,
+							min_block_number,
+							max_block_number,
+							region_location_id,
+							country_location_id
+						)
+						VALUES ($1, 0, 1, 1, 1, 1, 1, 1, $2, $3)
+					`,
+					clientId,
+					region.LocationId,
+					region.CountryLocationId,
+				))
+			})
+			if modes != nil {
+				SetProvide(ctx, clientId, modes)
+			}
+		}
+
+		// serves strangers -- must be counted by both surfaces
+		addProvider(nsw, map[ProvideMode][]byte{
+			ProvideModePublic:  []byte("public-secret"),
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+		// own network only -- must NOT be counted by either surface
+		addProvider(tokyo, map[ProvideMode][]byte{
+			ProvideModeNetwork: []byte("network-secret"),
+		})
+		// no provide key at all -- must NOT be counted by either surface
+		addProvider(tokyo, nil)
+
+		// surface 1: /stats/providers-map
+		providersMap, err := GetProvidersMap(ctx)
+		connect.AssertEqual(t, err, nil)
+
+		au := providersMap["au"]
+		connect.AssertNotEqual(t, au, nil)
+		connect.AssertEqual(t, au["New South Wales"].ProviderCount, 1)
+
+		// Japan's only supply is network-only/keyless, so it must not appear on
+		// the public map at all -- not as a region with a zero count, and not
+		// as a country
+		// Errorf, not Fatalf: the country count below is the *other* surface
+		// this test covers, and a run that stopped here would never exercise
+		// it -- both predicates need to be seen failing independently.
+		if jp, found := providersMap["jp"]; found {
+			t.Errorf("providers map contains jp = %v; its only providers are network-only/keyless and unreachable to any user outside their own network", jp)
+		}
+
+		// surface 2: the /stats country count
+		countries := CountProviderCountries(ctx)
+		if countries != 1 {
+			t.Fatalf("CountProviderCountries() = %d, want 1 (only au has a Public provider; jp's are network-only/keyless)", countries)
+		}
 	})
 }

@@ -228,9 +228,31 @@ func AddDefaultLocations(ctx context.Context, cityLimit int) {
 				}
 			case string:
 				// country code
+				//
+				// The name MUST be resolved here. This branch used to build a
+				// `&Location{LocationType: LocationTypeCountry, CountryCode: v}`
+				// with no `Country` at all, and `CreateLocation` writes
+				// `location_name` from `Country` -- so every country reachable
+				// only through a location group (i.e. every code below that
+				// iso-country-list.yml does not name) was inserted with an empty
+				// name. That single omission produced 161 blank-named country
+				// rows on the live beta deployment.
+				countryCode := strings.ToLower(v)
+				country, ok := resolveCountryName(countryCode)
+				if !ok {
+					// deliberately fatal: the member lists below are hardcoded
+					// country codes, so an unresolvable one is a typo in this
+					// file, not a data condition to tolerate.
+					panic(fmt.Errorf(
+						"location group \"%s\" member \"%s\" is not a known country code",
+						name,
+						v,
+					))
+				}
 				location := &Location{
 					LocationType: LocationTypeCountry,
-					CountryCode:  v,
+					Country:      country,
+					CountryCode:  countryCode,
 				}
 				CreateLocation(ctx, location)
 				memberLocationIds = append(memberLocationIds, location.LocationId)
@@ -856,6 +878,47 @@ func (self *Location) CityLocation() (*Location, error) {
 	}
 }
 
+// resolveCountryName resolves the display name of an ISO-3166-1 alpha-2
+// country code.
+//
+// The order matters. The deployment's own `iso-country-list.yml` wins wherever
+// it has an entry, because some deployments deliberately use their own naming
+// ("South Korea", not "Korea, Republic of"). The built-in ISO table is the
+// fallback for the codes that file omits -- which on the live beta deployment
+// is 191 of the 249 assigned codes.
+//
+// The fallback lives in Go rather than in config on purpose:
+// `iso-country-list.yml` is a per-deployment vault resource and only one
+// deployment's copy is in this repo, so a config-only fix would repair that one
+// deployment and leave every other one inserting blank names.
+//
+// ok is false when the code is in neither, which means it is not a country.
+// Callers must NOT substitute the code for the name -- a location row named
+// "cn" is the same bug wearing a different hat, just quieter.
+func resolveCountryName(countryCode string) (string, bool) {
+	code := strings.ToLower(countryCode)
+	if len(code) != 2 {
+		return "", false
+	}
+
+	// unlike `AddDefaultLocations`, this does not *require* the config
+	// resource: `CreateLocation` is also a runtime path, and a deployment
+	// without the file must fall through to the Go table rather than panic.
+	if resource, err := server.Config.SimpleResource("iso-country-list.yml"); err == nil {
+		// the file is keyed by upper case code (`AE: United Arab Emirates`)
+		for configCode, configName := range resource.Parse() {
+			if !strings.EqualFold(configCode, code) {
+				continue
+			}
+			if name, ok := configName.(string); ok && name != "" {
+				return name, true
+			}
+		}
+	}
+
+	return ISOCountryName(code)
+}
+
 func CreateLocation(ctx context.Context, location *Location) {
 	var countryCode string
 	if location.CountryCode != "" {
@@ -866,6 +929,66 @@ func CreateLocation(ctx context.Context, location *Location) {
 	}
 	if 2 < len(countryCode) {
 		countryCode = countryCode[0:2]
+	}
+
+	// No location row may be inserted with an empty `location_name`. Each
+	// insert below writes the name straight from the field the row is named
+	// after -- `Country`, `Region`, `City` -- so an empty field is an empty
+	// name, and the `location_full_name` built from it comes out shaped like
+	// ", hk". Both were observed on the live beta deployment.
+	//
+	// A country with no name is resolved from its code. Everything else
+	// resolves to its nearest NAMED ancestor rather than erroring, because the
+	// unnamed-region case is reached on the connect-announce hot path: mmdb
+	// returns no subdivision for the subdivision-less countries (hk, sg, mc,
+	// va, ...), `GuessLocationType` still classifies those as a city because
+	// the city is set, and refusing the whole location there would turn a
+	// cosmetically-bad row into a failed connection for every client in those
+	// countries. Degrading loses city precision for them; it does not lose the
+	// connection, and it never writes a blank name.
+	switch location.LocationType {
+	case LocationTypeCountry, LocationTypeRegion, LocationTypeCity:
+	default:
+		// the inserts below are selected by `LocationType`, and an unrecognized
+		// one (including the zero value, from a `Location` built without the
+		// field) falls through every early return and lands on the city insert
+		// with whatever the caller left empty. That is a blank name by another
+		// route, so it is refused here rather than resolved.
+		glog.Errorf(
+			"[loc]refusing to create a location: \"%s\" is not a known location type.\n",
+			location.LocationType,
+		)
+		server.Raise(fmt.Errorf("Unknown location type \"%s\".", location.LocationType))
+	}
+	if location.Country == "" {
+		country, ok := resolveCountryName(countryCode)
+		if !ok {
+			// not a country. There is no ancestor to fall back to, and
+			// inventing a name (or reusing the code as one) is what made this
+			// class of bug invisible in the first place.
+			glog.Errorf(
+				"[loc]refusing to create a location: \"%s\" is not a known country code.\n",
+				countryCode,
+			)
+			server.Raise(fmt.Errorf("Unknown country code \"%s\".", countryCode))
+		}
+		location.Country = country
+	}
+	if location.LocationType == LocationTypeCity && location.City == "" {
+		glog.Infof(
+			"[loc]unnamed city in \"%s\"; resolving at region granularity.\n",
+			countryCode,
+		)
+		location.LocationType = LocationTypeRegion
+	}
+	if location.LocationType != LocationTypeCountry && location.Region == "" {
+		// a city row is keyed under a region row, so a city whose region has no
+		// name cannot be created either
+		glog.Infof(
+			"[loc]unnamed region in \"%s\"; resolving at country granularity.\n",
+			countryCode,
+		)
+		location.LocationType = LocationTypeCountry
 	}
 
 	// country
@@ -1386,6 +1509,36 @@ func SetConnectionLocation(
 			}
 		})
 
+		// fix(beta): the free-tier ipinfo geo db resolves many IPs --
+		// datacenter, mobile, and VPN egress especially -- to country or
+		// region granularity only, with no city. network_client_location
+		// requires city_location_id and region_location_id NOT NULL, so a
+		// country-only location's NULL city/region made this INSERT panic
+		// inside server.Tx. That panic propagated out of the connection
+		// announce goroutine (connect/transport_announce.go), whose
+		// HandleError wrapper then cancelled the whole connection context --
+		// tearing down every country-only client's connect connection right
+		// after auth (the app itself included, whichever egress it resolved
+		// to), and, because the panic hit before the disconnect-cleanup
+		// defer was registered, orphaning the connection row as
+		// connected=true forever. Fall back to the coarsest available
+		// granularity so the columns are always non-null: a country-only
+		// location stores its country id for city/region too, which keeps
+		// the provider locatable at country level instead of crashing the
+		// connection. If even the country id is missing (location row absent
+		// or malformed), return a clean error so the caller's existing
+		// graceful retry path handles it -- never panic here.
+		if countryLocationId == nil {
+			returnErr = fmt.Errorf("Location %s has no country granularity.", locationId)
+			return
+		}
+		if cityLocationId == nil {
+			cityLocationId = countryLocationId
+		}
+		if regionLocationId == nil {
+			regionLocationId = countryLocationId
+		}
+
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -1590,6 +1743,185 @@ func initialClientLocationsKey() string {
 	return fmt.Sprintf("{cl}i")
 }
 
+// returns the given ids with nils dropped and duplicates removed, preserving
+// order.
+//
+// A client's city/region/country location ids are not guaranteed to differ: a
+// country-only geo resolution stores the country id in all three columns and a
+// region-only one stores it in two, because SetConnectionLocation falls back to
+// the coarsest granularity available rather than writing a NULL into the NOT
+// NULL city/region columns. Anything that fans a client out across the three
+// columns has to treat them as a set, or the client is counted once per column
+// instead of once per location it is in.
+//
+// Scope: that coarsest-granularity fallback is a beta change. upstream/main has
+// no country-only fallback -- it passes the NULL through and the insert raises
+// -- so on main today no row with city = region = country exists and this
+// dedupe changes nothing there. It becomes load-bearing upstream when the
+// fallback lands with PR #407, which carries its own copy of this helper.
+func distinctIds(ids ...*server.Id) []server.Id {
+	distinct := make([]server.Id, 0, len(ids))
+	for _, id := range ids {
+		if id == nil {
+			continue
+		}
+		if !slices.Contains(distinct, *id) {
+			distinct = append(distinct, *id)
+		}
+	}
+	return distinct
+}
+
+// The share of destinations a provider must reach to count as healthy: 90%,
+// as 9/10. Compared exactly as `10*ok >= 9*total` rather than through a float
+// division, so the boundary is the same for every denominator.
+//
+// 90% because it cleanly separates working from broken on the real
+// population: the healthy fleet measures 129-131 of 131 destinations, while
+// a dead proxy measures 0 of 131. Nothing observed sits near the line, so
+// the exact figure is not load bearing -- it only has to be far above 0 and
+// below the ~98% a genuinely working provider always clears.
+//
+// Package scope, not function scope: both UpdateClientScores and
+// UpdateClientLocations gate on this now, and two copies could drift.
+const minEgressHealthOKNumerator = 9
+const minEgressHealthOKDenominator = 10
+
+// providerCountFilter answers one question: does this provider count as real,
+// reachable supply?
+//
+// It exists so the advertised provider_count (UpdateClientLocations) and the
+// gated membership (UpdateClientScores) apply an IDENTICAL predicate. They ran
+// different rules before: membership was gated on egress health while the count
+// was not, so a location could survive the gate and still advertise providers
+// that no probe had ever reached.
+//
+// Both maps are loaded once per pass. These loops run over the entire provider
+// population, so a per-provider query here is one round trip per provider.
+type providerCountFilter struct {
+	healthCounts map[server.Id]ProviderEgressHealthCounts
+	countryCodes map[server.Id]string
+}
+
+func newProviderCountFilter(ctx context.Context) providerCountFilter {
+	return providerCountFilter{
+		healthCounts: GetAllProviderEgressHealthCounts(ctx),
+		countryCodes: GetAllProviderEgressCountryCodes(ctx),
+	}
+}
+
+// passesHealth reports whether a probe has MEASURED this provider healthy.
+// Fail closed: no record at all (never probed) does not pass, and neither does
+// a record with no destinations in it, which is not a measurement of anything.
+// Guarding total also keeps the ratio well defined.
+//
+// Compared exactly as 10*ok >= 9*total rather than through a float, so the 90%
+// boundary cannot drift with rounding.
+func (f providerCountFilter) passesHealth(clientId server.Id) bool {
+	counts, ok := f.healthCounts[clientId]
+	if !ok {
+		return false
+	}
+	if counts.Total <= 0 {
+		return false
+	}
+	return minEgressHealthOKDenominator*counts.OKCount >= minEgressHealthOKNumerator*counts.Total
+}
+
+// countsTowardCountry reports whether this provider counts as supply for
+// countryCode. It must both be measured healthy and have been OBSERVED
+// egressing from that country.
+//
+// The two locations are different claims. network_client_location is where the
+// provider says it is, derived from its own connection. provider_egress_location
+// is where a probe actually watched its traffic leave. Counting on the claim
+// alone advertises providers in countries they do not egress from -- measured
+// on beta at 3 of 152 healthy providers claiming `at` while egressing from `gb`
+// -- which is what an adversarial provider would exploit at scale.
+//
+// A provider with no observed location is not counted, matching the health rule.
+func (f providerCountFilter) countsTowardCountry(clientId server.Id, countryCode string) bool {
+	if !f.passesHealth(clientId) {
+		return false
+	}
+	observed, ok := f.countryCodes[clientId]
+	if !ok {
+		return false
+	}
+	return observed == strings.ToLower(countryCode)
+}
+
+// shouldSkipCountGate reports whether the count gate should be skipped
+// entirely for this pass, falling back to the pre-gate behavior (connected +
+// valid + Public key only) instead of fail-closed per provider.
+//
+// Both maps are checked, not just healthCounts, because they are fed by two
+// INDEPENDENT pipelines that can stall separately: health arrives over the
+// external push endpoint (api/handlers/provider_egress_health_handlers.go),
+// while the observed egress location comes from a separate internal job
+// (controller/provider_egress_location_controller.go). If only the health
+// pipeline stalls (or vice versa), the healthy-but-unlocated -- or
+// located-but-unhealthy -- provider still fails closed in countsTowardCountry
+// and locationClientCounts still empties fleet-wide, which is exactly the
+// wiped-list failure this gate exists to prevent. Do NOT collapse this back
+// to a single condition: either map being empty is "we know nothing from that
+// pipeline", which must not be treated as "everything failed."
+func (f providerCountFilter) shouldSkipCountGate() bool {
+	return len(f.healthCounts) == 0 || len(f.countryCodes) == 0
+}
+
+// shouldRecountUngated is the SECOND half of the fleet-wide floor, applied
+// after a gated counting pass instead of before it: gated says the gate was
+// actually applied to this pass, providerRows is how many connected + valid +
+// Public rows the count query returned, and countedLocations is how many
+// locations came out of it with any supply at all.
+//
+// This is NOT redundant with shouldSkipCountGate, and a future reader must not
+// collapse the two. They answer different questions and neither implies the
+// other:
+//
+//   - shouldSkipCountGate asks "did either probe pipeline produce ANY rows at
+//     all". It reads the two input maps.
+//   - this asks "did rows that exist produce ANY counted supply". It reads the
+//     OUTPUT of the pass.
+//
+// Non-empty inputs can still yield an empty output, by more than one route: a
+// fleet-wide mismatch between claimed and observed countries, a location-table
+// anomaly that makes every claimed country NULL (see the countryCode == nil
+// branch below), a partially drained egress-location table whose surviving rows
+// all belong to churned clients, or any future gate term added to
+// countsTowardCountry. In every one of those, the input maps are non-empty so
+// shouldSkipCountGate stays false, and yet locationClientCounts comes out
+// empty.
+//
+// An empty locationClientCounts is not a benign "no supply" result: every
+// location then misses the lookup below and lands in removeClientLocations,
+// which DELs every clientLocationKey from redis and publishes an empty
+// initialClientLocations -- /network/provider-locations returns nothing to
+// every app. Treat "rows existed but nothing counted" as "this pass learned
+// nothing" and redo it with the gate off, which is the same fallback
+// shouldSkipCountGate selects.
+//
+// providerRows > 0 is what separates this from a genuinely empty fleet. If the
+// count query returned no rows at all, there really is no connected + valid +
+// Public supply and emptying the published list is the correct answer.
+func shouldRecountUngated(gated bool, providerRows int, countedLocations int) bool {
+	return gated && providerRows > 0 && countedLocations == 0
+}
+
+// providerCountRow is one connected + valid + Public provider row from the
+// count query, held in memory so the pass can be counted twice (gated, then
+// ungated if the gated pass came out empty) without issuing a second query.
+type providerCountRow struct {
+	clientId          server.Id
+	cityLocationId    server.Id
+	regionLocationId  server.Id
+	countryLocationId server.Id
+	// the country the provider CLAIMS. nil when the claimed country has no
+	// `location` row to resolve it against.
+	claimedCountryCode *string
+}
+
 func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr error) {
 	topCitiesPerRegion := 20
 	topCitiesPerCountry := 10
@@ -1600,45 +1932,190 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	initialClientLocations := &InitialClientLocations{}
 
+	// one bulk load per pass, outside the tx: this loop runs over the whole
+	// provider population
+	countFilter := newProviderCountFilter(ctx)
+
+	// An empty health OR countryCodes map means one of the two probe
+	// pipelines has told us nothing yet -- stalled job, truncated table, cold
+	// environment -- NOT "every provider measured unhealthy" or "every
+	// provider is mislocated". Per-provider fail-closed (an individual
+	// provider with no record does not count) is the intended behavior; but
+	// applying it fleet-wide when an entire pipeline has produced zero rows
+	// would empty locationClientCounts entirely, which sends every single
+	// location through removeClientLocations below and DELs every key from
+	// redis -- wiping the whole public provider list because one prober
+	// died, not because supply is actually gone. That is a different, worse
+	// failure mode than the one this gate exists to fix, so skip the gate
+	// for this pass and count as before (connected + valid + Public key
+	// only) instead. See shouldSkipCountGate for why BOTH maps are checked.
+	// Do NOT remove this as "redundant" with passesHealth's per-provider
+	// check -- it is a fleet-wide floor, not a per-provider one.
+	//
+	// This is only the input-side half of that floor: empty inputs are not the
+	// only way to reach an emptied count. See shouldRecountUngated, applied to
+	// the counted result below, for the other half.
+	skipCountGate := countFilter.shouldSkipCountGate()
+	if skipCountGate {
+		glog.Infof("[nclm]egress health or location records are empty; skipping the provider count gate for this pass\n")
+	}
+
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		locationClientCounts := map[server.Id]int{}
+		providerCountRows := []providerCountRow{}
 
 		result, err := tx.Query(
 			ctx,
 			`
 	        SELECT
+	        	network_client_location_reliability.client_id,
 	        	network_client_location_reliability.city_location_id,
 	        	network_client_location_reliability.region_location_id,
-	        	network_client_location_reliability.country_location_id
+	        	network_client_location_reliability.country_location_id,
+	        	-- the country the provider CLAIMS, to check against the country a
+	        	-- probe observed it egressing from
+	        	country_location.country_code
 
 	        FROM network_client_location_reliability
 
-	        INNER JOIN client_connection_reliability_score ON
+	        -- fix(beta): this was an INNER JOIN upstream, which requires a
+	        -- client to already have a row in client_connection_reliability_score
+	        -- (populated by a separate multi-stage rollup: raw events -> redis
+	        -- drain -> client_reliability_running -> reliability scores) before
+	        -- it counts toward any provider location at all. At small/cold-start
+	        -- scale (this self-contained beta env) that rollup chain can go
+	        -- indefinitely without producing a single row even though real,
+	        -- currently-connected/valid clients exist -- the INNER JOIN then
+	        -- discards every one of them, and /network/provider-locations comes
+	        -- back completely empty despite real providers being connected.
+	        -- LEFT JOIN counts a location from connected+valid alone, which is
+	        -- real, already-verified data (see SetConnectionLocation), without
+	        -- waiting on the reliability-scoring pipeline to catch up.
+	        LEFT JOIN client_connection_reliability_score ON
 	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id AND
 				client_connection_reliability_score.lookback_index = 0
 
+	        LEFT JOIN location AS country_location ON
+	        	country_location.location_id = network_client_location_reliability.country_location_id
+
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
-	        	network_client_location_reliability.valid = true
+	        	network_client_location_reliability.valid = true AND
+	        	-- this is the number shown to everyone, so count only providers
+	        	-- a stranger can actually reach. GetProvideRelationship returns
+	        	-- ProvideModePublic for a cross-network pair, so a Public
+	        	-- provide key is what makes a provider generally reachable;
+	        	-- without one it advertises supply nobody outside its own
+	        	-- network can use.
+	        	--
+	        	-- Note this is deliberately narrower than the candidate pool
+	        	-- UpdateClientScores builds. That pool also carries
+	        	-- ProvideModeNetwork providers, which are real usable supply
+	        	-- for sources inside their own network, and FindProviders2
+	        	-- filters them per request against the caller's network. They
+	        	-- do not belong in a public count.
+	        	--
+	        	-- Every other mode is excluded, not just Stream. In particular
+	        	-- resolveNonCompanionProvideMode
+	        	-- (controller/connect_controller.go) lets a Stream-only
+	        	-- destination be resolved as a *companion* stream, but that
+	        	-- dead-ends at CreateCompanionTransferEscrow, which requires a
+	        	-- pre-existing reverse-direction origin contract -- so a
+	        	-- Stream-only destination can never bootstrap a session and is
+	        	-- correctly absent from both the count and the pool.
+	        	EXISTS (
+	        		SELECT 1 FROM provide_key
+	        		WHERE
+	        			provide_key.client_id = network_client_location_reliability.client_id AND
+	        			provide_key.provide_mode = $1
+	        	)
 	        `,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var cityLocationId server.Id
-				var regionLocationId server.Id
-				var countryLocationId server.Id
+				// declared per iteration on purpose: claimedCountryCode is a
+				// pointer, and hoisting these out of the loop would make every
+				// retained row alias the last scanned value.
+				var row providerCountRow
 				server.Raise(result.Scan(
-					&cityLocationId,
-					&regionLocationId,
-					&countryLocationId,
+					&row.clientId,
+					&row.cityLocationId,
+					&row.regionLocationId,
+					&row.countryLocationId,
+					&row.claimedCountryCode,
 				))
-
-				locationClientCounts[cityLocationId] += 1
-				locationClientCounts[regionLocationId] += 1
-				locationClientCounts[countryLocationId] += 1
+				providerCountRows = append(providerCountRows, row)
 			}
 		})
+
+		// counted from the retained rows rather than inline in the scan loop, so
+		// the same pass can be counted a second time with the gate off without
+		// re-querying. See shouldRecountUngated.
+		countProviderRows := func(gated bool) map[server.Id]int {
+			locationClientCounts := map[server.Id]int{}
+			for _, row := range providerCountRows {
+				// This is the number every app shows when a user picks a
+				// location, so count only providers a probe has MEASURED
+				// healthy and OBSERVED egressing from the country they claim.
+				// Counting on the claim alone advertised providers that were
+				// either unreachable or in a different country entirely.
+				//
+				// claimedCountryCode is NULL when the claimed country has no
+				// location row, which cannot be verified against anything --
+				// fail closed, same as an unobserved provider.
+				//
+				// Unless the gate is off for this pass (see skipCountGate
+				// above and shouldRecountUngated below) -- an unprobed fleet is
+				// "unknown", not "unhealthy", and must not empty the public
+				// list.
+				if gated {
+					if row.claimedCountryCode == nil {
+						continue
+					}
+					if !countFilter.countsTowardCountry(row.clientId, *row.claimedCountryCode) {
+						continue
+					}
+				}
+
+				// count each client at most once per distinct location id. A
+				// client whose geo lookup resolved neither a city nor a region
+				// is stored with city = region = country (see
+				// SetConnectionLocation's country fallback), so incrementing
+				// all three unconditionally counted that one client three
+				// times in its own country. Distinct ids -- a real
+				// city-granular client -- still roll up into their region and
+				// country exactly as before.
+				//
+				// This is a live fix on beta, where that fallback exists, and a
+				// forward guard against upstream/main, where it does not yet --
+				// see distinctIds.
+				for _, locationId := range distinctIds(
+					&row.cityLocationId,
+					&row.regionLocationId,
+					&row.countryLocationId,
+				) {
+					locationClientCounts[locationId] += 1
+				}
+			}
+			return locationClientCounts
+		}
+
+		gated := !skipCountGate
+		locationClientCounts := countProviderRows(gated)
+
+		// the output-side half of the fleet-wide floor. shouldSkipCountGate
+		// guards the INPUTS (did a probe pipeline produce rows); this guards
+		// the OUTPUT (did those rows produce any counted supply). Neither
+		// implies the other -- see shouldRecountUngated for why they must not
+		// be collapsed.
+		if shouldRecountUngated(gated, len(providerCountRows), len(locationClientCounts)) {
+			glog.Infof(
+				"[nclm]the count gate emptied all %d connected provider rows fleet-wide; recounting ungated for this pass\n",
+				len(providerCountRows),
+			)
+			locationClientCounts = countProviderRows(false)
+		}
 
 		server.CreateTempTableInTx(
 			ctx,
@@ -1920,6 +2397,9 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 		cmd := r.Get(ctx, initialClientLocationsKey())
 
 		initialClientLocationsBytes, _ := cmd.Bytes()
+		if len(initialClientLocationsBytes) == 0 {
+			return
+		}
 		b := bytes.NewBuffer(initialClientLocationsBytes)
 		e := gob.NewDecoder(b)
 		var initialClientLocations_ InitialClientLocations
@@ -1937,6 +2417,13 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 func loadLocationStables(
 	ctx context.Context,
 	locationIds []server.Id,
+	// forceMinimum selects which pre-computed key family to read. The writer
+	// (UpdateClientScores) populates both, so this only chooses between them.
+	// User-facing listing passes false and keeps today's behaviour; an operator
+	// census passes true, because a location where every provider fails the
+	// minimums gate is otherwise invisible and its providers can never be
+	// probed or graduate probation.
+	forceMinimum bool,
 	rankMode RankMode,
 	clientLocationId server.Id,
 ) (
@@ -1953,7 +2440,7 @@ func loadLocationStables(
 		for _, locationId := range locationIds {
 			locationFilterCmds[locationId] = pipe.Get(
 				ctx,
-				clientScoreLocationFilterKey(false, rankMode, locationId, clientLocationId),
+				clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId),
 			)
 		}
 		// note ignore the error for GET since it will include missing key
@@ -2069,6 +2556,8 @@ func FindProviderLocations(
 		locationStables, _ := loadLocationStables(
 			session.Ctx,
 			slices.Collect(maps.Keys(clientLocations)),
+			// user-facing search: only surface locations that meet the bar
+			false,
 			rankMode,
 			clientLocationId,
 		)
@@ -2123,20 +2612,25 @@ func GetProviderLocations(
 
 	// the caller ip is used to match against provider excluded lists
 	clientIp, _, err := session.ParseClientIpPort()
-	if err != nil {
-		return nil, err
-	}
 
-	ipInfo, err := server.GetIpInfo(clientIp)
-	if err != nil {
-		return nil, err
+	var clientLocationId server.Id
+	if err == nil {
+		ipInfo, err := server.GetIpInfo(clientIp)
+		if err == nil {
+			clientLocationId = countryCodeLocationIds()[ipInfo.CountryCode]
+		} else {
+			glog.V(2).Infof("[GetProviderLocations] could not get ip info for %s: %s\n", clientIp, err)
+		}
+	} else {
+		glog.V(2).Infof("[GetProviderLocations] could not parse client ip: %s\n", err)
 	}
-
-	clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
 
 	initialClientLocations, err := loadInitialClientLocations(session.Ctx)
 	if err != nil {
 		return nil, err
+	}
+	if initialClientLocations == nil {
+		initialClientLocations = &InitialClientLocations{}
 	}
 
 	locationIds := []server.Id{}
@@ -2149,6 +2643,8 @@ func GetProviderLocations(
 	locationStables, _ := loadLocationStables(
 		session.Ctx,
 		locationIds,
+		// user-facing listing: only surface locations that meet the bar
+		false,
 		rankMode,
 		clientLocationId,
 	)
@@ -2305,6 +2801,16 @@ type ClientScore struct {
 	HasLatencyTest               bool
 	HasSpeedTest                 bool
 
+	// true when the provider holds a ProvideModeNetwork provide key but no
+	// ProvideModePublic one, i.e. it can only settle a contract with a source
+	// in its own network. FindProviders2 keeps such a provider only for callers
+	// in NetworkId. It is stored negated on purpose: the score cache is gob
+	// encoded with a 5h ttl, so entries written before this field existed decode
+	// with the zero value, and the zero value has to mean "publicly usable" --
+	// the pre-existing behaviour -- or every provider would be treated as
+	// network-only until the cache turned over.
+	NetworkOnly bool
+
 	// set only on the top-level score, never on the `LookbackClientScores`
 	// copies: each score is gob-serialized into thousands of cache key
 	// permutations, and gob transmits zero-valued arrays, so these are
@@ -2403,6 +2909,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			clientScore = &ClientScore{
 				ClientId:             lookbackClientScore.ClientId,
 				NetworkId:            lookbackClientScore.NetworkId,
+				NetworkOnly:          lookbackClientScore.NetworkOnly,
 				LookbackClientScores: map[int]*ClientScore{},
 			}
 			m[lookbackClientScore.ClientId] = clientScore
@@ -2504,6 +3011,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		var lookbackIndex int
 		var reliabilityWeight float64
 		var independentReliabilityWeight float64
+		var publiclyUsable bool
 		server.Raise(result.Scan(
 			&cityLocationXId,
 			&regionLocationXId,
@@ -2519,11 +3027,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			&lookbackIndex,
 			&reliabilityWeight,
 			&independentReliabilityWeight,
+			&publiclyUsable,
 		))
 		lookbackClientScore = &ClientScore{
 			ClientId:                     clientId,
 			LookbackIndex:                lookbackIndex,
 			NetworkId:                    networkId,
+			NetworkOnly:                  !publiclyUsable,
 			ReliabilityWeight:            reliabilityWeight,
 			IndependentReliabilityWeight: independentReliabilityWeight,
 			MinRelativeLatencyMillis:     minRelativeLatencyMillis,
@@ -2567,18 +3077,66 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	            network_client_location_reliability.max_bytes_per_second,
 	            network_client_location_reliability.has_latency_test,
 	            network_client_location_reliability.has_speed_test,
-	            client_connection_reliability_score.lookback_index,
-	            client_connection_reliability_score.reliability_weight,
-	            client_connection_reliability_score.independent_reliability_weight
+	            -- fix(beta): see the LEFT JOIN comment below
+	            COALESCE(client_connection_reliability_score.lookback_index, 0),
+	            COALESCE(client_connection_reliability_score.reliability_weight, 1),
+	            COALESCE(client_connection_reliability_score.independent_reliability_weight, 1),
+	            -- publicly usable: holds a Public provide key, so a caller from
+	            -- any network can settle a contract with it. A provider that is
+	            -- in the pool without this is Network-only, and FindProviders2
+	            -- hands it out to callers in its own network only.
+	            EXISTS (
+	            	SELECT 1 FROM provide_key
+	            	WHERE
+	            		provide_key.client_id = network_client_location_reliability.client_id AND
+	            		provide_key.provide_mode = $1
+	            )
 
 	        FROM network_client_location_reliability
 
-	        INNER JOIN client_connection_reliability_score ON
+	        -- fix(beta): same class of issue as UpdateClientLocations above --
+	        -- an INNER JOIN here requires a reliability score to already exist
+	        -- before a client counts toward its location's stability filter at
+	        -- all, which the reliability-scoring pipeline may never produce at
+	        -- this env's small/cold-start scale. LEFT JOIN plus the COALESCE
+	        -- defaults above treats an unscored client as neutral (full
+	        -- weight, lookback 0) rather than excluding it outright.
+	        LEFT JOIN client_connection_reliability_score ON
 	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
-	        	network_client_location_reliability.valid = true
+	        	network_client_location_reliability.valid = true AND
+	        	-- the candidate pool, unlike the public count in
+	        	-- UpdateClientLocations, carries every provider that can settle
+	        	-- a contract with *someone*: Public for any caller, Network for
+	        	-- callers in the provider's own network. GetProvideRelationship
+	        	-- only ever returns one of those two, so this pair is exactly
+	        	-- the set CreateContract can accept. FindProviders2 then decides
+	        	-- eligibility per request -- it has to be done there and not
+	        	-- here, because the score cache is keyed by (forceMinimum,
+	        	-- rankMode, locationId, callerLocationId) and is not
+	        	-- network-scoped.
+	        	--
+	        	-- Restricting this to Public would remove Network-only
+	        	-- providers from their own network's discovery, which works
+	        	-- today via CreateContractNoEscrow. Stream is still excluded:
+	        	-- resolveNonCompanionProvideMode can resolve a Stream-only
+	        	-- destination as a companion, but that dead-ends at
+	        	-- CreateCompanionTransferEscrow, which needs a pre-existing
+	        	-- reverse origin contract, so it can never bootstrap a session.
+	        	--
+	        	-- GetProviderLocations gates on loadLocationStables, populated
+	        	-- from here; see exportClientScores for why the ClientFilter it
+	        	-- reads stays Public-only.
+	        	EXISTS (
+	        		SELECT 1 FROM provide_key
+	        		WHERE
+	        			provide_key.client_id = network_client_location_reliability.client_id AND
+	        			provide_key.provide_mode IN ($1, $2)
+	        	)
 	        `,
+			ProvideModePublic,
+			ProvideModeNetwork,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -2591,26 +3149,25 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 					clientScore.CountryLocationId = countryLocationId
 				}
 
-				clientScores, ok := locationClientScores[*cityLocationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[*cityLocationId] = clientScores
+				// once per distinct location id: a country-only client stores
+				// its country id in all three columns (see
+				// SetConnectionLocation), and a client belongs in a location's
+				// pool once. The per-location map is keyed by client id so a
+				// repeat is already absorbed, but going through the set makes
+				// the intent explicit and keeps this loop in step with the
+				// counting loop in UpdateClientLocations.
+				for _, locationId := range distinctIds(
+					cityLocationId,
+					regionLocationId,
+					countryLocationId,
+				) {
+					clientScores, ok := locationClientScores[locationId]
+					if !ok {
+						clientScores = map[server.Id]*ClientScore{}
+						locationClientScores[locationId] = clientScores
+					}
+					setLocationIds(addClientScore(lookbackClientScore, clientScores))
 				}
-				setLocationIds(addClientScore(lookbackClientScore, clientScores))
-
-				clientScores, ok = locationClientScores[*regionLocationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[*regionLocationId] = clientScores
-				}
-				setLocationIds(addClientScore(lookbackClientScore, clientScores))
-
-				clientScores, ok = locationClientScores[*countryLocationId]
-				if !ok {
-					clientScores = map[server.Id]*ClientScore{}
-					locationClientScores[*countryLocationId] = clientScores
-				}
-				setLocationIds(addClientScore(lookbackClientScore, clientScores))
 			}
 		})
 
@@ -2629,13 +3186,24 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		            network_client_location_reliability.max_bytes_per_second,
 		            network_client_location_reliability.has_latency_test,
 		            network_client_location_reliability.has_speed_test,
-		            client_connection_reliability_score.lookback_index,
-	                client_connection_reliability_score.reliability_weight,
-	                client_connection_reliability_score.independent_reliability_weight
+		            COALESCE(client_connection_reliability_score.lookback_index, 0),  -- fix(beta): see LEFT JOIN comment below
+	                COALESCE(client_connection_reliability_score.reliability_weight, 1),
+	                COALESCE(client_connection_reliability_score.independent_reliability_weight, 1),
+	                -- publicly usable; see the per-location query above
+	                EXISTS (
+	                	SELECT 1 FROM provide_key
+	                	WHERE
+	                		provide_key.client_id = network_client_location_reliability.client_id AND
+	                		provide_key.provide_mode = $1
+	                )
 
 	            FROM network_client_location_reliability
 
-	            INNER JOIN client_connection_reliability_score ON
+	            -- fix(beta): same class of issue as UpdateClientLocations/the query
+            -- above this one -- treats an unscored client as neutral rather
+            -- than excluding it, since the reliability-scoring pipeline may
+            -- never populate at this env's small/cold-start scale
+            LEFT JOIN client_connection_reliability_score ON
 	        		client_connection_reliability_score.client_id = network_client_location_reliability.client_id
 
 	            LEFT JOIN location_group_member location_group_member_city ON
@@ -2649,36 +3217,40 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 	            WHERE
 	            	network_client_location_reliability.connected = true AND
-	            	network_client_location_reliability.valid = true
+	            	network_client_location_reliability.valid = true AND
+	            	-- same rule as the per-location query above: Public or
+	            	-- Network. This one fills locationGroupClientScores -> the
+	            	-- clientScoreLocationGroup* redis keys -> loadClientScores
+	            	-- -> FindProviders2 whenever a spec carries a
+	            	-- LocationGroupId, so a user who picks a promoted group
+	            	-- (e.g. "Strong Privacy Laws") must be filtered by the same
+	            	-- request-time network check as a plain location.
+	            	EXISTS (
+	            		SELECT 1 FROM provide_key
+	            		WHERE
+	            			provide_key.client_id = network_client_location_reliability.client_id AND
+	            			provide_key.provide_mode IN ($1, $2)
+	            	)
 	        `,
+			ProvideModePublic,
+			ProvideModeNetwork,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId := loadClientScore(result)
 
-				if cityLocationGroupId != nil {
-					clientScores, ok := locationGroupClientScores[*cityLocationGroupId]
+				// once per distinct group id. The three location columns can
+				// be the same id (a country-only client), in which case all
+				// three group joins resolve to the same membership rows.
+				for _, locationGroupId := range distinctIds(
+					cityLocationGroupId,
+					regionLocationGroupId,
+					countryLocationGroupId,
+				) {
+					clientScores, ok := locationGroupClientScores[locationGroupId]
 					if !ok {
 						clientScores = map[server.Id]*ClientScore{}
-						locationGroupClientScores[*cityLocationGroupId] = clientScores
-					}
-					addClientScore(lookbackClientScore, clientScores)
-				}
-
-				if regionLocationGroupId != nil {
-					clientScores, ok := locationGroupClientScores[*regionLocationGroupId]
-					if !ok {
-						clientScores = map[server.Id]*ClientScore{}
-						locationGroupClientScores[*regionLocationGroupId] = clientScores
-					}
-					addClientScore(lookbackClientScore, clientScores)
-				}
-
-				if countryLocationGroupId != nil {
-					clientScores, ok := locationGroupClientScores[*countryLocationGroupId]
-					if !ok {
-						clientScores = map[server.Id]*ClientScore{}
-						locationGroupClientScores[*countryLocationGroupId] = clientScores
+						locationGroupClientScores[locationGroupId] = clientScores
 					}
 					addClientScore(lookbackClientScore, clientScores)
 				}
@@ -2725,6 +3297,33 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	minScoreScale := 0.1
 	maxScoreScale := 1.0
 
+	// health is loaded once for the whole pass rather than per client: this
+	// walks every provider, and the table is one row per ever-probed provider.
+	//
+	// # Staleness
+	//
+	// A record is used however old it is, deliberately. Nothing sweeps
+	// provider_egress_health and SetProviderEgressHealth upserts on client_id,
+	// so a row is always that provider's most recent measurement -- there is no
+	// such thing as a superseded row still sitting in the table. Ageing records
+	// out would mean that if the prober ever stalls, the entire public list
+	// silently empties, which is a far worse failure than trusting a
+	// measurement that is a day old.
+	//
+	// The asymmetry that leaves is intended. A stale *good* record keeps a
+	// provider visible; a stale *bad* record keeps it hidden until it is probed
+	// again. That is only safe because the probe due-queue
+	// (GetProviderEgressLocationDue) is deliberately not gated on any of this --
+	// it reads the live provider population directly, so an excluded provider is
+	// still handed to the prober and still graduates the moment it measures
+	// healthy. If that queue ever starts consulting these scores, an excluded
+	// provider can never be re-measured and is stuck out permanently.
+	// Shared with UpdateClientLocations so the gated membership and the
+	// advertised count can never disagree about what "healthy" means.
+	// UpdateClientScores uses passesHealth ONLY: its candidate pool is not
+	// country-scoped, so the observed-country check does not apply here.
+	countFilter := newProviderCountFilter(ctx)
+
 	// migration: set each client score to the lowest lookback index index
 	migrateClientScore := func(clientScore *ClientScore) {
 		lookbackIndexes := slices.Collect(maps.Keys(clientScore.LookbackClientScores))
@@ -2745,8 +3344,15 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		clientScore.ScaledWeights = map[string]float32{}
 		clientScore.PassesMinimums = map[string]bool{}
 
+		// measured egress health does not vary by rank mode, so it is evaluated
+		// once per client and seeds every mode's minimum. It is a gate and
+		// nothing else: it can only take a provider out of the pool, and the
+		// scaled-weight arithmetic below is untouched, so every provider that
+		// still qualifies keeps exactly the weight and ordering it has today.
+		passesHealth := countFilter.passesHealth(clientScore.ClientId)
+
 		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
-			passesMinimum := true
+			passesMinimum := passesHealth
 			// all lookback thresholds must pass
 			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
 				if lookbackClientScore.IndependentReliabilityWeight < minFilter.minIndependentReliabilityWeights[lookbackIndex] {
@@ -2789,17 +3395,29 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		filter *ClientFilter,
 	) {
 		clientScores := []*ClientScore{}
-		netReliabilityWeight := float64(0)
+		publicCount := 0
+		publicNetReliabilityWeight := float64(0)
 		for _, clientScore := range s {
 			if clientScore.PassesMinimums[rankMode] || forceMinimum {
-				netReliabilityWeight += clientScore.ReliabilityWeight
 				clientScores = append(clientScores, clientScore)
+				if !clientScore.NetworkOnly {
+					publicCount += 1
+					publicNetReliabilityWeight += clientScore.ReliabilityWeight
+				}
 			}
 		}
 
+		// the samples above carry Network-only providers too -- FindProviders2
+		// filters them per request against the caller's network -- but the
+		// ClientFilter does not. It is read only by loadLocationStables, which
+		// decides the `Stable` flag GetProviderLocations publishes to every
+		// user. That is a public surface, so like the provider count in
+		// UpdateClientLocations it counts only providers a stranger can reach:
+		// a location whose only supply is network-only is not stable, and with
+		// zero public providers it reports no providers at all.
 		filter = &ClientFilter{
-			Count:                len(clientScores),
-			NetReliabilityWeight: netReliabilityWeight,
+			Count:                publicCount,
+			NetReliabilityWeight: publicNetReliabilityWeight,
 		}
 
 		mathrand.Shuffle(len(clientScores), func(i int, j int) {
@@ -3249,6 +3867,34 @@ func FindProviders2(
 		loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
 		if 50.0 <= loadMillis {
 			glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
+		}
+
+		// drop providers this caller cannot contract with.
+		//
+		// UpdateClientScores puts both Public and Network-only providers in the
+		// pool. A Network-only provider can only settle a contract with a
+		// source in its own network (GetProvideRelationship ->
+		// ProvideModeNetwork -> CreateContractNoEscrow); it is real, usable
+		// supply for those users and has always been discoverable to them, so
+		// it stays. For anyone else CreateContract would reject with
+		// NoPermission, so it goes.
+		//
+		// This must happen here, after loadClientScores, and must never be
+		// baked into the cached set: the client score redis entries are keyed
+		// by (forceMinimum, rankMode, locationId, callerLocationId) with no
+		// network component, so a single cached set is shared by callers from
+		// every network.
+		//
+		// A session with no jwt yields the zero network id, which matches no
+		// provider -- fail closed rather than leak.
+		var callerNetworkId server.Id
+		if session.ByJwt != nil {
+			callerNetworkId = session.ByJwt.NetworkId
+		}
+		for clientId, clientScore := range clientScores {
+			if clientScore.NetworkOnly && clientScore.NetworkId != callerNetworkId {
+				delete(clientScores, clientId)
+			}
 		}
 
 		for clientId, _ := range excludeFinalDestinations() {

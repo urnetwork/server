@@ -125,10 +125,38 @@ func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProvider
 
 				WHERE
 					network_client_location_reliability.connected = true AND
-					network_client_location_reliability.valid = true
+					network_client_location_reliability.valid = true AND
+					-- same Public-only rule as UpdateClientLocations
+					-- (network_client_location_model.go): this map is public,
+					-- so it must count only providers a stranger can actually
+					-- reach. GetProvideRelationship returns ProvideModePublic
+					-- for a cross-network pair, so a Public provide key is
+					-- what makes a provider generally reachable; a
+					-- ProvideModeNetwork provider is real supply only to its
+					-- own network and is effectively private.
+					--
+					-- The Public rule is the ONLY rule shared with
+					-- UpdateClientLocations. This map is deliberately NOT
+					-- gated on egress health or on an observed egress country,
+					-- so since that gate shipped it reports MORE providers
+					-- than /network/provider-locations will let anyone pick
+					-- from (~305 vs ~137 for the US on beta). That is
+					-- acceptable because the map is an aggregate
+					-- supply-footprint statistic -- where the fleet physically
+					-- is -- not a pick list, and nothing selects from it.
+					-- Revisit if it ever becomes a selection surface, or is
+					-- shown next to the per-location provider_count, where the
+					-- two numbers disagreeing would read as a bug.
+					EXISTS (
+						SELECT 1 FROM provide_key
+						WHERE
+							provide_key.client_id = network_client_location_reliability.client_id AND
+							provide_key.provide_mode = $1
+					)
 
 				GROUP BY location.country_code, location.location_name
 			`,
+			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
