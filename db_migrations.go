@@ -4881,11 +4881,10 @@ var migrations = []any{
 	// GetProviderEgressLocationDue defers on a recent attempt as well as a fresh
 	// success, which needs somewhere to record the attempt.
 	//
-	// Pulled forward from the P2 verdict model
-	// (docs/superpowers/specs/2026-07-25-enforced-provider-geo-probing-design.md,
-	// probe_attempt_at / probe_failure) because the P1 schedule cannot function
-	// without it. Deliberately only the two columns the schedule reads, not the
-	// rest of that model.
+	// Pulled forward from the larger provider-verdict model (probe_attempt_at
+	// / probe_failure) because the due schedule cannot function without it.
+	// Deliberately only the two columns the schedule reads, not the rest of
+	// that model.
 	newSqlMigration(`
         CREATE TABLE IF NOT EXISTS provider_egress_probe_attempt (
             client_id     uuid NOT NULL PRIMARY KEY,
