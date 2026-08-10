@@ -151,11 +151,52 @@ const (
 	// defaultProviderEgressDueLimit is the batch size when the caller does not
 	// ask for one.
 	defaultProviderEgressDueLimit = 100
-	// maxProviderEgressDueLimit bounds the batch size regardless of what the
-	// caller asks for, so one request cannot ask the database for the entire
-	// provider population.
-	maxProviderEgressDueLimit = 500
+	// defaultMaxProviderEgressDueLimit bounds the batch size regardless of what
+	// the caller asks for, so one request cannot ask the database for the
+	// entire provider population.
+	//
+	// This is the FALLBACK. The effective value comes from
+	// provider_egress_due.yml -- see maxProviderEgressDueLimit below.
+	defaultMaxProviderEgressDueLimit = 500
 )
+
+// maxProviderEgressDueLimit is the ceiling on one due batch, read from
+// provider_egress_due.yml.
+//
+// It is configuration, not a constant, for the same reason the bandwidth budget
+// is (see provider_bandwidth.yml): capacity is a property of the deployment.
+// The 500 fallback is sized for a beta-scale fleet. A deployment holding ~100k
+// providers needs a different regime entirely -- at a 6h re-probe backoff that
+// is ~16,700 probes/hour, and a 500-per-request ceiling caps the whole fleet at
+// 500/hour no matter how much prober capacity exists behind it.
+//
+// OPTIONAL, exactly like provider_bandwidth.yml and pro.yml: a deployment
+// without the file must not fail to boot, it falls back to the conservative
+// default.
+var maxProviderEgressDueLimit = sync.OnceValue(func() int {
+	resource, err := server.Config.SimpleResource("provider_egress_due.yml")
+	if err != nil {
+		glog.Infof(
+			"[pegl]provider_egress_due.yml not present; using the default due limit of %d\n",
+			defaultMaxProviderEgressDueLimit,
+		)
+		return defaultMaxProviderEgressDueLimit
+	}
+	var y struct {
+		MaxDueLimit int `yaml:"max_due_limit"`
+	}
+	resource.UnmarshalYaml(&y)
+	if y.MaxDueLimit <= 0 {
+		glog.Errorf(
+			"[pegl]provider_egress_due.yml has max_due_limit=%d, which is not usable; using the default %d\n",
+			y.MaxDueLimit,
+			defaultMaxProviderEgressDueLimit,
+		)
+		return defaultMaxProviderEgressDueLimit
+	}
+	glog.Infof("[pegl]max due limit: %d from provider_egress_due.yml\n", y.MaxDueLimit)
+	return y.MaxDueLimit
+})
 
 // providerEgressDueAge is how stale a stored probe must be before its provider
 // is offered up for re-probing. It is deliberately shorter than
@@ -208,7 +249,35 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
-		limit = min(parsed, maxProviderEgressDueLimit)
+		limit = min(parsed, maxProviderEgressDueLimit())
+	}
+
+	// shard_index / shard_count partition the queue across independent probers.
+	// Absent (or shard_count=1) is the single-prober case and behaves exactly as
+	// before, so an existing prober needs no change.
+	//
+	// Without this, every prober polling inside the attempt backoff gets the
+	// SAME rows -- the queue hands work out but never claims it -- so N probers
+	// repeat one prober's work instead of dividing it.
+	shardCount := 1
+	shardIndex := 0
+	if raw := r.URL.Query().Get("shard_count"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		shardCount = parsed
+	}
+	if raw := r.URL.Query().Get("shard_index"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		// an out-of-range index would silently return nothing forever, which
+		// looks identical to "the fleet is fully probed" -- reject it instead
+		if err != nil || parsed < 0 || shardCount <= parsed {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		shardIndex = parsed
 	}
 
 	// both cutoffs are computed here and passed as arguments; observed_at and
@@ -219,7 +288,14 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 	minAttemptAt := now.Add(-model.ProviderEgressProbeAttemptBackoff)
 
 	result := &ProviderEgressLocationDueResult{
-		ClientIds: model.GetProviderEgressLocationDue(r.Context(), minObservedAt, minAttemptAt, limit),
+		ClientIds: model.GetProviderEgressLocationDueSharded(
+			r.Context(),
+			minObservedAt,
+			minAttemptAt,
+			limit,
+			shardIndex,
+			shardCount,
+		),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
