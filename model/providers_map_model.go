@@ -133,9 +133,20 @@ func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProvider
 					-- for a cross-network pair, so a Public provide key is
 					-- what makes a provider generally reachable; a
 					-- ProvideModeNetwork provider is real supply only to its
-					-- own network and is effectively private. Without this the
-					-- map reports more providers than /network/provider-locations
-					-- will let anyone pick from.
+					-- own network and is effectively private.
+					--
+					-- The Public rule is the ONLY rule shared with
+					-- UpdateClientLocations. This map is deliberately NOT
+					-- gated on egress health or on an observed egress country,
+					-- so since that gate shipped it reports MORE providers
+					-- than /network/provider-locations will let anyone pick
+					-- from (~305 vs ~137 for the US on beta). That is
+					-- acceptable because the map is an aggregate
+					-- supply-footprint statistic -- where the fleet physically
+					-- is -- not a pick list, and nothing selects from it.
+					-- Revisit if it ever becomes a selection surface, or is
+					-- shown next to the per-location provider_count, where the
+					-- two numbers disagreeing would read as a bug.
 					EXISTS (
 						SELECT 1 FROM provide_key
 						WHERE
