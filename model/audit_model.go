@@ -34,6 +34,14 @@ const (
 	AuditEventTypeCirclePayoutFailed          AuditEventType = "circle_payout_failed"
 )
 
+// Removed series (2026-08, see STATS3.md): packets (all_packets_*), extenders
+// (extenders_*, extender_transfer_*), and superspeed
+// (providers_superspeed_data, providers_summary_superspeed). None had a real
+// producer — packets were fabricated bytes/1500, extenders had no writer at
+// all, and no superspeed signal is wired — so rather than serve honest zeros
+// the fields are gone from the payload. Removal is output-side only: an
+// already-exported redis blob keeps the old keys until the next export
+// overwrites it, and decoding an old blob simply ignores them.
 type Stats struct {
 	Lookback    int   `json:"lookback"`
 	CreatedTime int64 `json:"created_time"`
@@ -42,14 +50,8 @@ type Stats struct {
 	AllTransferSummary     int            `json:"all_transfer_summary"`
 	AllTransferSummaryRate int            `json:"all_transfer_summary_rate"`
 
-	AllPacketsData        map[string]int `json:"all_packets_data"`
-	AllPacketsSummary     int            `json:"all_packets_summary"`
-	AllPacketsSummaryRate int            `json:"all_packets_summary_rate"`
-
-	ProvidersData              map[string]int `json:"providers_data"`
-	ProvidersSuperspeedData    map[string]int `json:"providers_superspeed_data"`
-	ProvidersSummary           int            `json:"providers_summary"`
-	ProvidersSummarySuperspeed int            `json:"providers_summary_superspeed"`
+	ProvidersData    map[string]int `json:"providers_data"`
+	ProvidersSummary int            `json:"providers_summary"`
 
 	CountriesData    map[string]int `json:"countries_data"`
 	CountriesSummary int            `json:"countries_summary"`
@@ -59,15 +61,6 @@ type Stats struct {
 
 	CitiesData    map[string]int `json:"cities_data"`
 	CitiesSummary int            `json:"cities_summary"`
-
-	ExtenderTransferData        map[string]int `json:"extender_transfer_data"`
-	ExtenderTransferSummary     int            `json:"extender_transfer_summary"`
-	ExtenderTransferSummaryRate int            `json:"extender_transfer_summary_rate"`
-
-	ExtendersData              map[string]int `json:"extenders_data"`
-	ExtendersSuperspeedData    map[string]int `json:"extenders_superspeed_data"`
-	ExtendersSummary           int            `json:"extenders_summary"`
-	ExtendersSummarySuperspeed int            `json:"extenders_summary_superspeed"`
 
 	NetworksData    map[string]int `json:"networks_data"`
 	NetworksSummary int            `json:"networks_summary"`
@@ -79,8 +72,6 @@ type Stats struct {
 
 	// deviceId -> *ProviderState
 	activeProviders map[server.Id]*ProviderState
-	// extenderId -> *ExtenderState
-	activeExtenders map[server.Id]*ExtenderState
 	// networkId -> bool
 	activeNetworks map[server.Id]bool
 	// deviceId -> bool
@@ -89,21 +80,32 @@ type Stats struct {
 
 type ProviderState struct {
 	networkId   server.Id
-	superspeed  bool
 	countryName string
 	regionName  string
 	cityName    string
-}
-
-type ExtenderState struct {
-	networkId  server.Id
-	superspeed bool
 }
 
 // 90 is the standard lookback used in the api
 func ComputeStats90(ctx context.Context) *Stats {
 	return ComputeStats(ctx, 90)
 }
+
+// ComputeStats aggregates the audit event feeds into the public daily series
+// served by /stats/last-90.
+//
+// Data honesty: until 2026-08 the ONLY writer of audit_provider_event and
+// audit_contract_event was the sample generator (hardcoded "Palo Alto"), so
+// the provider/city/region/country and transfer series were fake. Real
+// producers now exist (model/audit_provider_sweep_model.go): the provider
+// series is real from the deploy of SweepProviderAuditEvents forward, plus at
+// most ~30 days of labeled reconstruction (BackfillProviderAuditEvents,
+// bounded by client_reliability retention); the transfer series is real from
+// RollupTransferAuditEvents forward plus contract-retention-bounded backfill.
+// History beyond that was never recorded and is not reconstructable — those
+// days correctly read zero rather than a fabricated value. See STATS3.md for
+// the per-series accuracy audit: series with no possible real producer
+// (packets, extenders, superspeed) were REMOVED from the payload; devices has
+// no producer yet and reads zero pending a semantics decision.
 
 func ComputeStats(ctx context.Context, lookback int) *Stats {
 	stats := &Stats{
@@ -117,10 +119,6 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		// provider daily stats + cities, regions, countries
 		computeStatsProvider(ctx, stats, conn)
 
-		glog.Infof("[audit]ComputeStats90 computeStatsExtender\n")
-		// extender daily stats
-		computeStatsExtender(ctx, stats, conn)
-
 		glog.Infof("[audit]ComputeStats90 computeStatsNetwork\n")
 		// network daily stats
 		computeStatsNetwork(ctx, stats, conn)
@@ -132,14 +130,6 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		glog.Infof("[audit]ComputeStats90 computeStatsTransfer\n")
 		// all transfer
 		computeStatsTransfer(ctx, stats, conn)
-
-		glog.Infof("[audit]ComputeStats90 computeStatsPackets\n")
-		// all packets
-		computeStatsPackets(ctx, stats, conn)
-
-		glog.Infof("[audit]ComputeStats90 computeStatsExtenderTransfer\n")
-		// extender transfer
-		computeStatsExtenderTransfer(ctx, stats, conn)
 	})
 
 	return stats
@@ -205,27 +195,29 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn server.PgConn)
 		activeProviders := map[server.Id]*ProviderState{}
 
 		providersData := map[string]int{}
-		providersSuperspeedData := map[string]int{}
 		countriesData := map[string]int{}
 		regionsData := map[string]int{}
 		citiesData := map[string]int{}
 
 		exportActive := func() {
-			providersSuperspeed := map[server.Id]bool{}
 			countryNames := map[string]bool{}
 			regionNames := map[string]bool{}
 			cityNames := map[string]bool{}
-			for deviceId, providerState := range activeProviders {
-				if providerState.superspeed {
-					providersSuperspeed[deviceId] = true
+			for _, providerState := range activeProviders {
+				// an unlocated provider has empty names; "unknown" is not a
+				// country/region/city, so it must not add a distinct bucket
+				if providerState.countryName != "" {
+					countryNames[providerState.countryName] = true
 				}
-				countryNames[providerState.countryName] = true
-				regionNames[providerState.regionName] = true
-				cityNames[providerState.cityName] = true
+				if providerState.regionName != "" {
+					regionNames[providerState.regionName] = true
+				}
+				if providerState.cityName != "" {
+					cityNames[providerState.cityName] = true
+				}
 			}
 
 			providersData[activeDay] = len(activeProviders)
-			providersSuperspeedData[activeDay] = len(providersSuperspeed)
 			countriesData[activeDay] = len(countryNames)
 			regionsData[activeDay] = len(regionNames)
 			citiesData[activeDay] = len(cityNames)
@@ -253,23 +245,17 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn server.PgConn)
 				activeDay = day
 			}
 
-			// update the active providers
+			// update the active providers. Both online variants count the
+			// same: the superspeed distinction was removed from the payload
+			// (no real signal), but historical superspeed events remain valid
+			// online events.
 			switch AuditEventType(eventType) {
 			case AuditEventTypeProviderOffline:
 				delete(activeProviders, deviceId)
-			case AuditEventTypeProviderOnlineSuperspeed:
+			case AuditEventTypeProviderOnlineSuperspeed,
+				AuditEventTypeProviderOnlineNotSuperspeed:
 				providerState := &ProviderState{
 					networkId:   networkId,
-					superspeed:  true,
-					countryName: countryName,
-					regionName:  regionName,
-					cityName:    cityName,
-				}
-				activeProviders[deviceId] = providerState
-			case AuditEventTypeProviderOnlineNotSuperspeed:
-				providerState := &ProviderState{
-					networkId:   networkId,
-					superspeed:  false,
 					countryName: countryName,
 					regionName:  regionName,
 					cityName:    cityName,
@@ -278,16 +264,19 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn server.PgConn)
 			}
 		}
 		exportActive()
-		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
+		// pack through endDay INCLUSIVE: with transitions-only real emission a
+		// day (including today) can have no events at all while providers stay
+		// online; the carried state must still be exported for that day. (The
+		// old sample generator emitted events every few minutes, which masked
+		// the missing endDay bucket.)
+		for packDay := nextDay(activeDay); packDay <= endDay; packDay = nextDay(activeDay) {
 			// server.Logger().Printf("%s <> %s\n", packDay, endDay)
 			activeDay = packDay
 			exportActive()
 		}
 
 		stats.ProvidersData = providersData
-		stats.ProvidersSuperspeedData = providersSuperspeedData
 		stats.ProvidersSummary = summary(providersData)
-		stats.ProvidersSummarySuperspeed = summary(providersSuperspeedData)
 		stats.CountriesData = countriesData
 		stats.CountriesSummary = summary(countriesData)
 		stats.RegionsData = regionsData
@@ -296,126 +285,6 @@ func computeStatsProvider(ctx context.Context, stats *Stats, conn server.PgConn)
 		stats.CitiesSummary = summary(citiesData)
 
 		stats.activeProviders = activeProviders
-	})
-}
-
-func computeStatsExtender(ctx context.Context, stats *Stats, conn server.PgConn) {
-	startDay, endDay := dayRange(stats.Lookback)
-	result, err := conn.Query(
-		ctx,
-		`
-			SELECT
-				t.day,
-				t.extender_id,
-				audit_extender_event.network_id,
-				audit_extender_event.event_type
-			FROM (
-				SELECT
-					to_char(event_time, 'YYYY-MM-DD') AS day,
-					extender_id,
-					MAX(event_id::varchar) AS max_event_id
-				FROM audit_extender_event
-				WHERE
-					now() - interval '1 days' * @lookback <= event_time AND
-					event_type IN (
-						@eventTypeExtenderOffline,
-						@eventTypeExtenderOnlineSuperspeed,
-						@eventTypeExtenderOnlineNotSuperspeed
-					)
-				GROUP BY day, extender_id
-
-				UNION ALL
-
-				SELECT
-					@startDay AS day,
-					extender_id,
-					MAX(event_id::varchar) AS max_event_id
-				FROM audit_extender_event
-				WHERE
-					event_time < now() - interval '1 days' * @lookback AND
-					event_type IN (
-						@eventTypeExtenderOffline,
-						@eventTypeExtenderOnlineSuperspeed,
-						@eventTypeExtenderOnlineNotSuperspeed
-					)
-				GROUP BY extender_id
-			) t
-			INNER JOIN audit_extender_event ON t.max_event_id::uuid = audit_extender_event.event_id
-			ORDER BY day ASC
-		`,
-		server.PgNamedArgs{
-			"startDay":                             startDay,
-			"lookback":                             stats.Lookback,
-			"eventTypeExtenderOffline":             AuditEventTypeExtenderOffline,
-			"eventTypeExtenderOnlineSuperspeed":    AuditEventTypeExtenderOnlineSuperspeed,
-			"eventTypeExtenderOnlineNotSuperspeed": AuditEventTypeExtenderOnlineNotSuperspeed,
-		},
-	)
-	server.WithPgResult(result, err, func() {
-		activeDay := startDay
-		activeExtenders := map[server.Id]*ExtenderState{}
-
-		extendersData := map[string]int{}
-		extendersSuperspeedData := map[string]int{}
-
-		exportActive := func() {
-			extendersSuperspeed := map[server.Id]bool{}
-			for extenderId, extenderState := range activeExtenders {
-				if extenderState.superspeed {
-					extendersSuperspeed[extenderId] = true
-				}
-			}
-
-			extendersData[activeDay] = len(activeExtenders)
-			extendersSuperspeedData[activeDay] = len(extendersSuperspeed)
-		}
-
-		var day string
-		var extenderId server.Id
-		var networkId server.Id
-		var eventType string
-		for result.Next() {
-			result.Scan(&day, &extenderId, &networkId, &eventType)
-
-			if day != activeDay {
-				exportActive()
-				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
-					activeDay = packDay
-					exportActive()
-				}
-				activeDay = day
-			}
-
-			// update the active providers
-			switch AuditEventType(eventType) {
-			case AuditEventTypeExtenderOffline:
-				delete(activeExtenders, extenderId)
-			case AuditEventTypeExtenderOnlineSuperspeed:
-				providerState := &ExtenderState{
-					networkId:  networkId,
-					superspeed: true,
-				}
-				activeExtenders[extenderId] = providerState
-			case AuditEventTypeExtenderOnlineNotSuperspeed:
-				providerState := &ExtenderState{
-					networkId:  networkId,
-					superspeed: false,
-				}
-				activeExtenders[extenderId] = providerState
-			}
-		}
-		exportActive()
-		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
-			activeDay = packDay
-			exportActive()
-		}
-
-		stats.ExtendersData = extendersData
-		stats.ExtendersSuperspeedData = extendersSuperspeedData
-		stats.ExtendersSummary = summary(extendersData)
-		stats.ExtendersSummarySuperspeed = summary(extendersSuperspeedData)
-
-		stats.activeExtenders = activeExtenders
 	})
 }
 
@@ -500,7 +369,8 @@ func computeStatsNetwork(ctx context.Context, stats *Stats, conn server.PgConn) 
 			}
 		}
 		exportActive()
-		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
+		// endDay inclusive: see computeStatsProvider
+		for packDay := nextDay(activeDay); packDay <= endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			exportActive()
 		}
@@ -512,15 +382,29 @@ func computeStatsNetwork(ctx context.Context, stats *Stats, conn server.PgConn) 
 	})
 }
 
+// computeStatsDevice: the devices series is CONNECTED-PER-DAY — a device
+// counts on day D iff it had at least one connection that day. From the
+// added/removed event feed (SweepDeviceAuditEvents) that is the union of
+//   - devices whose carried state is "added" (connected across the day), and
+//   - devices touched by ANY event that day (an added or removed event both
+//     imply a connection existed that day),
+//
+// so a device that connects and disconnects within one day still counts that
+// day even though its end-of-day state is removed. Carry-in rows (the
+// pre-window state synthesized onto startDay) establish state only — they are
+// not same-day connection evidence, which is why event_time is fetched and
+// compared against the window start.
 func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
 	startDay, endDay := dayRange(stats.Lookback)
+	windowStart := server.NowUtc().Add(-24 * time.Hour * time.Duration(stats.Lookback))
 	result, err := conn.Query(
 		ctx,
 		`
 			SELECT
 				t.day,
 				t.device_id,
-				audit_device_event.event_type
+				audit_device_event.event_type,
+				audit_device_event.event_time
 			FROM (
 				SELECT
 					to_char(event_time, 'YYYY-MM-DD') AS day,
@@ -563,21 +447,33 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
 	server.WithPgResult(result, err, func() {
 		activeDay := startDay
 		activeDevices := map[server.Id]bool{}
+		// devices with a same-day event: connected that day even if their
+		// end-of-day state is removed
+		touchedDevices := map[server.Id]bool{}
 
 		devicesData := map[string]int{}
 
 		exportActive := func() {
-			devicesData[activeDay] = len(activeDevices)
+			count := len(activeDevices)
+			for deviceId := range touchedDevices {
+				if !activeDevices[deviceId] {
+					count += 1
+				}
+			}
+			devicesData[activeDay] = count
 		}
 
 		var day string
 		var deviceId server.Id
 		var eventType string
+		var eventTime time.Time
 		for result.Next() {
-			result.Scan(&day, &deviceId, &eventType)
+			result.Scan(&day, &deviceId, &eventType, &eventTime)
 
 			if day != activeDay {
 				exportActive()
+				// packed (eventless) days count carried state only
+				touchedDevices = map[server.Id]bool{}
 				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
 					activeDay = packDay
 					exportActive()
@@ -585,7 +481,11 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
 				activeDay = day
 			}
 
-			// update the active providers
+			if !eventTime.Before(windowStart) {
+				touchedDevices[deviceId] = true
+			}
+
+			// update the carried state
 			switch AuditEventType(eventType) {
 			case AuditEventTypeDeviceRemoved:
 				delete(activeDevices, deviceId)
@@ -594,7 +494,9 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
 			}
 		}
 		exportActive()
-		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
+		touchedDevices = map[server.Id]bool{}
+		// endDay inclusive: see computeStatsProvider
+		for packDay := nextDay(activeDay); packDay <= endDay; packDay = nextDay(activeDay) {
 			activeDay = packDay
 			exportActive()
 		}
@@ -669,140 +571,6 @@ func computeStatsTransfer(ctx context.Context, stats *Stats, conn server.PgConn)
 		stats.AllTransferSummary = int(math.Round(float64(allTransferSummary) / float64(1024*1024)))
 		// bytes to average gbps
 		stats.AllTransferSummaryRate = int(math.Round(float64(8*allTransferSummary) / float64(1024*1024*60*60*24)))
-	})
-}
-
-func computeStatsPackets(ctx context.Context, stats *Stats, conn server.PgConn) {
-	startDay, endDay := dayRange(stats.Lookback)
-	result, err := conn.Query(
-		ctx,
-		`
-			SELECT
-				to_char(event_time, 'YYYY-MM-DD') AS day,
-				COALESCE(SUM(transfer_packets), 0) AS net_transfer_packets
-			FROM audit_contract_event
-			WHERE
-				now() - interval '1 days' * @lookback < event_time AND
-				event_type IN (@eventTypeContractClosedSuccess)
-			GROUP BY day
-
-			UNION ALL
-
-			SELECT
-				@startDay AS day,
-				COALESCE(SUM(transfer_packets), 0) AS net_transfer_packets
-			FROM audit_contract_event
-			WHERE
-				event_time BETWEEN now() - interval '1 days' * (@lookback + 1) AND now() - interval '1 days' * @lookback AND
-				to_char(event_time, 'YYYY-MM-DD') = @startDay AND
-				event_type IN (@eventTypeContractClosedSuccess)
-
-			ORDER BY day ASC
-		`,
-		server.PgNamedArgs{
-			"startDay":                       startDay,
-			"lookback":                       stats.Lookback,
-			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
-		},
-	)
-	server.WithPgResult(result, err, func() {
-		activeDay := startDay
-		allPacketsData := map[string]int{}
-
-		var day string
-		var netTransferPackets int
-		for result.Next() {
-			result.Scan(&day, &netTransferPackets)
-
-			if day != activeDay {
-				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
-					activeDay = packDay
-					allPacketsData[activeDay] = 0
-				}
-				activeDay = day
-			}
-
-			allPacketsData[activeDay] += netTransferPackets
-		}
-		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
-			activeDay = packDay
-			allPacketsData[activeDay] = 0
-		}
-
-		allPacketsSummary := summary(allPacketsData)
-		stats.AllPacketsData = allPacketsData
-		// GiB
-		stats.AllPacketsSummary = allPacketsSummary
-		// packets to average pps
-		stats.AllPacketsSummaryRate = int(math.Round(float64(allPacketsSummary) / float64(60*60*24)))
-	})
-}
-
-func computeStatsExtenderTransfer(ctx context.Context, stats *Stats, conn server.PgConn) {
-	startDay, endDay := dayRange(stats.Lookback)
-	result, err := conn.Query(
-		ctx,
-		`
-			SELECT
-				to_char(event_time, 'YYYY-MM-DD') AS day,
-				COALESCE(SUM(transfer_byte_count), 0) AS net_transfer_byte_count
-			FROM audit_contract_event
-			WHERE
-				now() - interval '1 days' * @lookback < event_time AND
-				extender_id IS NOT NULL AND
-				event_type IN (@eventTypeContractClosedSuccess)
-			GROUP BY day
-
-			UNION ALL
-
-			SELECT
-				@startDay AS day,
-				COALESCE(SUM(transfer_byte_count), 0) AS net_transfer_byte_count
-			FROM audit_contract_event
-			WHERE
-				event_time BETWEEN now() - interval '1 days' * (@lookback + 1) AND now() - interval '1 days' * @lookback AND
-				to_char(event_time, 'YYYY-MM-DD') = @startDay AND
-				extender_id IS NOT NULL AND
-				event_type IN (@eventTypeContractClosedSuccess)
-
-			ORDER BY day ASC
-		`,
-		server.PgNamedArgs{
-			"startDay":                       startDay,
-			"lookback":                       stats.Lookback,
-			"eventTypeContractClosedSuccess": AuditEventTypeContractClosedSuccess,
-		},
-	)
-	server.WithPgResult(result, err, func() {
-		activeDay := startDay
-		extenderTransferData := map[string]int{}
-
-		var day string
-		var netTransferBytes int
-		for result.Next() {
-			result.Scan(&day, &netTransferBytes)
-
-			if day != activeDay {
-				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
-					activeDay = packDay
-					extenderTransferData[activeDay] = 0
-				}
-				activeDay = day
-			}
-
-			extenderTransferData[activeDay] += netTransferBytes
-		}
-		for packDay := nextDay(activeDay); packDay < endDay; packDay = nextDay(activeDay) {
-			activeDay = packDay
-			extenderTransferData[activeDay] = 0
-		}
-
-		extenderTransferSummary := summary(extenderTransferData)
-		stats.ExtenderTransferData = extenderTransferData
-		// GiB
-		stats.ExtenderTransferSummary = int(math.Round(float64(extenderTransferSummary) / float64(1024*1024)))
-		// bytes to average gbps
-		stats.ExtenderTransferSummaryRate = int(math.Round(float64(8*extenderTransferSummary) / float64(1024*1024*60*60*24)))
 	})
 }
 

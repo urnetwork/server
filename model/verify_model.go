@@ -229,8 +229,17 @@ func verifyTrailLockKey(trailId server.Id) string {
 
 const verifyReapKey = "verify_reap"
 
-func verifyEgressKey(ip netip.Addr) string {
-	return fmt.Sprintf("verify_egress_%s", ip.Unmap().String())
+// keyed by the peppered subnet-bucket hash (VerifyEgressIpHash), never the
+// raw ip: the validator scores ip subnet blocks, not individual addresses, so
+// the index needs no more granularity than the hash — and this removes the
+// only raw client-ip-at-rest in redis. the hex form doubles as the reverse
+// hash's field name so both directions key identically.
+func verifyEgressKey(egressHash [32]byte) string {
+	return verifyEgressKeyFromHex(hex.EncodeToString(egressHash[:]))
+}
+
+func verifyEgressKeyFromHex(egressHashHex string) string {
+	return fmt.Sprintf("verify_egress_%s", egressHashHex)
 }
 
 func verifyClientEgressKey(clientId server.Id) string {
@@ -319,6 +328,8 @@ func FeedVerifyEgress(
 		return
 	}
 	ip = ip.Unmap()
+	egressHash := VerifyEgressIpHash(ip, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
+	egressHashHex := hex.EncodeToString(egressHash[:])
 	nowMs := uint64(server.NowUtc().UnixMilli())
 	ttlSeconds := int64(settings.EgressTtl / time.Second)
 
@@ -335,17 +346,18 @@ else redis.call('SET', KEYS[1], ARGV[3], 'EX', ARGV[2]) return 0 end`
 		r.Eval(
 			ctx,
 			claimScript,
-			[]string{verifyEgressKey(ip)},
+			[]string{verifyEgressKey(egressHash)},
 			clientId.String(),
 			ttlSeconds,
 			verifyEgressAmbiguous,
 		)
 
-		// record the ip in the client's reverse hash with a per-entry expiry
+		// record the egress hash in the client's reverse hash with a
+		// per-entry expiry (field name = the same hex the forward key uses)
 		expireMs := nowMs + uint64(settings.EgressTtl/time.Millisecond)
 		clientEgressKey := verifyClientEgressKey(clientId)
 		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			pipe.HSet(ctx, clientEgressKey, ip.String(), expireMs)
+			pipe.HSet(ctx, clientEgressKey, egressHashHex, expireMs)
 			pipe.Expire(ctx, clientEgressKey, settings.EgressTtl)
 			return nil
 		})
@@ -363,14 +375,16 @@ func ClearVerifyEgress(
 	ctx context.Context,
 	clientId server.Id,
 	ip netip.Addr,
+	settings *VerifySettings,
 ) {
 	if !ip.IsValid() {
 		return
 	}
 	ip = ip.Unmap()
+	egressHash := VerifyEgressIpHash(ip, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
 	server.Redis(ctx, func(r server.RedisClient) {
-		r.HDel(ctx, verifyClientEgressKey(clientId), ip.String())
-		server.RedisRemoveIfEqual(r, ctx, verifyEgressKey(ip), []byte(clientId.String()))
+		r.HDel(ctx, verifyClientEgressKey(clientId), hex.EncodeToString(egressHash[:]))
+		server.RedisRemoveIfEqual(r, ctx, verifyEgressKey(egressHash), []byte(clientId.String()))
 	})
 	updateVerifyEligibleMembership(ctx, clientId)
 }
@@ -387,19 +401,18 @@ func RemoveVerifyEgressForClient(
 		if err != nil && !errors.Is(err, redis.Nil) {
 			server.Raise(err)
 		}
-		for ipStr := range entries {
-			if ip, err := netip.ParseAddr(ipStr); err == nil {
-				server.RedisRemoveIfEqual(r, ctx, verifyEgressKey(ip), []byte(clientId.String()))
-			}
+		for egressHashHex := range entries {
+			server.RedisRemoveIfEqual(r, ctx, verifyEgressKeyFromHex(egressHashHex), []byte(clientId.String()))
 		}
 		r.Del(ctx, verifyClientEgressKey(clientId))
 		r.SRem(ctx, verifyEligibleKey, clientId.String())
 	})
 }
 
-// verifyLiveEgressIps reads the client's reverse hash and returns the ips
-// whose entries have not expired, opportunistically deleting expired fields.
-func verifyLiveEgressIps(
+// verifyLiveEgressHashes reads the client's reverse hash and returns the
+// egress-hash hex fields whose entries have not expired, opportunistically
+// deleting expired fields.
+func verifyLiveEgressHashes(
 	ctx context.Context,
 	r server.RedisClient,
 	clientId server.Id,
@@ -409,21 +422,21 @@ func verifyLiveEgressIps(
 	if err != nil && !errors.Is(err, redis.Nil) {
 		server.Raise(err)
 	}
-	liveIps := []string{}
-	expiredIps := []string{}
-	for ipStr, expireMsStr := range entries {
+	liveHashes := []string{}
+	expiredHashes := []string{}
+	for egressHashHex, expireMsStr := range entries {
 		var expireMs uint64
 		fmt.Sscanf(expireMsStr, "%d", &expireMs)
 		if nowMs < expireMs {
-			liveIps = append(liveIps, ipStr)
+			liveHashes = append(liveHashes, egressHashHex)
 		} else {
-			expiredIps = append(expiredIps, ipStr)
+			expiredHashes = append(expiredHashes, egressHashHex)
 		}
 	}
-	if 0 < len(expiredIps) {
-		r.HDel(ctx, verifyClientEgressKey(clientId), expiredIps...)
+	if 0 < len(expiredHashes) {
+		r.HDel(ctx, verifyClientEgressKey(clientId), expiredHashes...)
 	}
-	return liveIps
+	return liveHashes
 }
 
 // updateVerifyEligibleMembership recomputes one client's membership in the
@@ -438,15 +451,13 @@ func updateVerifyEligibleMembership(
 
 	eligible := false
 	server.Redis(ctx, func(r server.RedisClient) {
-		liveIps := verifyLiveEgressIps(ctx, r, clientId, nowMs)
-		if len(liveIps) == 1 {
-			if ip, err := netip.ParseAddr(liveIps[0]); err == nil {
-				forward, err := r.Get(ctx, verifyEgressKey(ip)).Result()
-				if err != nil && !errors.Is(err, redis.Nil) {
-					server.Raise(err)
-				}
-				eligible = forward == clientId.String()
+		liveHashes := verifyLiveEgressHashes(ctx, r, clientId, nowMs)
+		if len(liveHashes) == 1 {
+			forward, err := r.Get(ctx, verifyEgressKeyFromHex(liveHashes[0])).Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				server.Raise(err)
 			}
+			eligible = forward == clientId.String()
 		}
 	})
 
@@ -489,10 +500,12 @@ func ResolveVerifyEgress(
 		return
 	}
 	ip = ip.Unmap()
+	egressHash := VerifyEgressIpHash(ip, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
+	egressHashHex := hex.EncodeToString(egressHash[:])
 	nowMs := uint64(server.NowUtc().UnixMilli())
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		forward, err := r.Get(ctx, verifyEgressKey(ip)).Result()
+		forward, err := r.Get(ctx, verifyEgressKey(egressHash)).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
 			server.Raise(err)
 		}
@@ -506,8 +519,8 @@ func ResolveVerifyEgress(
 			return
 		}
 
-		liveIps := verifyLiveEgressIps(ctx, r, resolvedId, nowMs)
-		if len(liveIps) == 1 && liveIps[0] == ip.String() {
+		liveHashes := verifyLiveEgressHashes(ctx, r, resolvedId, nowMs)
+		if len(liveHashes) == 1 && liveHashes[0] == egressHashHex {
 			clientId = &resolvedId
 		}
 	})

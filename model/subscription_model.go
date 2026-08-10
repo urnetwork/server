@@ -17,6 +17,7 @@ import (
 
 	// "maps"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
@@ -781,9 +782,29 @@ func AddTransferBalance(ctx context.Context, transferBalance *TransferBalance) {
 // TODO if none, return err
 func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId server.Id, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
+		balanceId, returnErr = getOverlappingTransferBalance(conn, ctx, purchaseToken, expiryTime)
+	})
+
+	return
+}
+
+// GetOverlappingTransferBalanceInTx is the in-tx variant, for callers that gate a
+// credit on the check and need the check and the credit in ONE transaction (the
+// Play renewal path re-checks under an advisory lock before crediting).
+func GetOverlappingTransferBalanceInTx(tx server.PgTx, ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId server.Id, returnErr error) {
+	return getOverlappingTransferBalance(tx, ctx, purchaseToken, expiryTime)
+}
+
+// overlappingBalanceQuerier is the intersection of PgConn and PgTx this query
+// needs, so the Db and InTx variants can share one implementation.
+type overlappingBalanceQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func getOverlappingTransferBalance(conn overlappingBalanceQuerier, ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId server.Id, returnErr error) {
+	result, err := conn.Query(
+		ctx,
+		`
                 SELECT
                     balance_id
                 FROM transfer_balance
@@ -794,16 +815,15 @@ func GetOverlappingTransferBalance(ctx context.Context, purchaseToken string, ex
                 ORDER BY end_time DESC
                 LIMIT 1
             `,
-			purchaseToken,
-			expiryTime,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&balanceId))
-			} else {
-				returnErr = errors.New("Overlapping transfer balance not found.")
-			}
-		})
+		purchaseToken,
+		expiryTime,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&balanceId))
+		} else {
+			returnErr = errors.New("Overlapping transfer balance not found.")
+		}
 	})
 
 	return
@@ -1372,6 +1392,70 @@ func CreateCompanionTransferEscrow(
 				server.Raise(result.Scan(&companionContractId))
 			}
 		})
+
+		if companionContractId == nil {
+			// Fall back to a companion contract as the origin anchor. In an
+			// asymmetric relationship every return-direction contract is
+			// itself a companion (the return side has no plain contract path
+			// by definition), and the ONLY companion-on-companion requester
+			// is the forward side's TLS-server EncryptedControl reply
+			// carrier (EncryptionControlUseCompanion): its reply direction
+			// mirrors the peer's companion-carried return direction. With
+			// plain-origin-only matching that carrier can never open — a
+			// deadlock that EncryptionModeRequired surfaces as a hard
+			// establishment failure (Opportunistic silently downgraded the
+			// peer's direction to plaintext instead, which is how it went
+			// unnoticed). The payer is unchanged: the companion's
+			// destination side pays, exactly as for a plain-origin
+			// companion. Plain origins stay preferred; the chain is bounded
+			// in practice at depth two (a reply carrier answering a return
+			// direction).
+			result, err := tx.Query(
+				ctx,
+				`
+                    SELECT contract_id
+                    FROM (
+                        (
+                            SELECT contract_id, create_time
+                            FROM transfer_contract
+                            WHERE
+                                open = true AND
+                                source_id = $1 AND
+                                destination_id = $2 AND
+                                companion_contract_id IS NOT NULL
+                            ORDER BY create_time ASC
+                            LIMIT 1
+                        )
+
+                        UNION ALL
+
+                        (
+                            SELECT contract_id, create_time
+                            FROM transfer_contract
+                            WHERE
+                                open = false AND
+                                $3 <= close_time AND
+                                source_id = $1 AND
+                                destination_id = $2 AND
+                                companion_contract_id IS NOT NULL
+                            ORDER BY create_time ASC
+                            LIMIT 1
+                        )
+
+                        ORDER BY create_time ASC
+                        LIMIT 1
+                    ) AS earliest_companion_origin
+                `,
+				destinationId,
+				sourceId,
+				server.NowUtc().Add(-originContractTimeout),
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&companionContractId))
+				}
+			})
+		}
 
 		if companionContractId == nil {
 			returnErr = ErrMissingCompanionOrigin
@@ -3200,7 +3284,7 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 						transaction_id
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (network_id, subscription_type, end_time, start_time) DO UPDATE
+			ON CONFLICT (network_id, subscription_type, end_time, start_time, market) DO UPDATE
 			SET
 				net_revenue_nano_cents = $5,
 				purchase_token = $6
@@ -3415,7 +3499,10 @@ func AddProTransferBalanceToAllNetworks(
 					fraction := float64(endTime.Sub(startTime)) / float64(supporterDuration)
 					subsidyNetRevenue = NanoCents(fraction * float64(netRevenueNanoCents))
 				}
-				supporters[networkId] = subsidyNetRevenue
+				// SUM, do not overwrite: a network can hold several active renewals
+				// at once (one row per market), and each contributes its own
+				// pro-rated revenue to the subsidy accounting
+				supporters[networkId] += subsidyNetRevenue
 			}
 		})
 

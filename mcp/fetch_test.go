@@ -6,6 +6,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -16,6 +17,9 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 func TestSealRoundTrip(t *testing.T) {
@@ -65,6 +69,152 @@ func TestSealExpires(t *testing.T) {
 		out := &fetchContinuation{}
 		err = unseal(sealLabelContinuation, binding, sealed, out)
 		connect.AssertEqual(t, err, errSealExpired)
+	})
+}
+
+func TestSealedStateRejectsEveryIdentityDimension(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		userId := server.NewId()
+		networkId := server.NewId()
+		clientId := "oauth-client"
+		resource := McpResource
+		binding := identityStateBinding(userId.String(), networkId, clientId, resource)
+
+		sealed, err := seal(
+			sealLabelCookies,
+			binding,
+			&cookieJarState{Origins: map[string][]*storedCookie{}},
+			fetchSealTtl,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		otherBindings := map[string]string{
+			"subject": identityStateBinding(server.NewId().String(), networkId, clientId, resource),
+			"network": identityStateBinding(userId.String(), server.NewId(), clientId, resource),
+			"client":  identityStateBinding(userId.String(), networkId, "other-client", resource),
+			"audience": identityStateBinding(
+				userId.String(),
+				networkId,
+				clientId,
+				"https://other.example/mcp",
+			),
+		}
+		for dimension, otherBinding := range otherBindings {
+			out := &cookieJarState{}
+			if err := unseal(sealLabelCookies, otherBinding, sealed, out); err == nil {
+				t.Fatalf("sealed state replayed across %s", dimension)
+			}
+		}
+	})
+}
+
+func TestReuseProxyRequiresCurrentNetworkOwner(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		ownerNetworkId := server.NewId()
+		ownerUserId := server.NewId()
+		ownerDeviceId := server.NewId()
+		ownerClientId := server.NewId()
+		ownerNetworkName := fmt.Sprintf("proxy-owner-%s", ownerNetworkId)
+		model.Testing_CreateNetwork(ctx, ownerNetworkId, ownerNetworkName, ownerUserId)
+		model.Testing_CreateDevice(
+			ctx,
+			ownerNetworkId,
+			ownerDeviceId,
+			ownerClientId,
+			"proxy owner",
+			"mcp",
+		)
+
+		proxyDeviceConfig := &model.ProxyDeviceConfig{
+			ProxyDeviceConnection: model.ProxyDeviceConnection{ClientId: ownerClientId},
+			ProxyDeviceMode:       model.ProxyDeviceModeDevice,
+		}
+		if err := model.CreateProxyDeviceConfig(ctx, proxyDeviceConfig); err != nil {
+			t.Fatalf("create proxy device config: %v", err)
+		}
+		proxyClient, err := model.CreateProxyClient(
+			ctx,
+			proxyDeviceConfig.ProxyId,
+			ownerClientId,
+			proxyDeviceConfig.InstanceId,
+			model.CreateProxyClientOptions{},
+		)
+		if err != nil {
+			t.Fatalf("create proxy client: %v", err)
+		}
+
+		ownerSession := session.NewLocalClientSession(
+			ctx,
+			"",
+			jwt.NewByJwt(ownerNetworkId, ownerUserId, ownerNetworkName, false, false),
+		)
+		defer ownerSession.Cancel()
+		ownerBinding := identityStateBinding(
+			ownerUserId.String(),
+			ownerNetworkId,
+			"oauth-client",
+			McpResource,
+		)
+		ownerHandle, err := seal(
+			sealLabelProxy,
+			ownerBinding,
+			&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+			fetchSealTtl,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		acquired, err := reuseProxy(ownerSession, ownerBinding, ownerHandle)
+		connect.AssertEqual(t, err, nil)
+		if acquired == nil {
+			t.Fatal("owner could not reuse its proxy handle")
+		}
+		refreshedHandle := &sealedProxyHandle{}
+		if err := unseal(sealLabelProxy, ownerBinding, acquired.signedProxyId, refreshedHandle); err != nil {
+			t.Fatalf("unseal refreshed proxy handle: %v", err)
+		}
+		connect.AssertEqual(t, refreshedHandle.SignedProxyId, proxyClient.AuthToken)
+
+		attackerNetworkId := server.NewId()
+		attackerUserId := server.NewId()
+		attackerNetworkName := fmt.Sprintf("proxy-attacker-%s", attackerNetworkId)
+		model.Testing_CreateNetwork(ctx, attackerNetworkId, attackerNetworkName, attackerUserId)
+		attackerSession := session.NewLocalClientSession(
+			ctx,
+			"",
+			jwt.NewByJwt(attackerNetworkId, attackerUserId, attackerNetworkName, false, false),
+		)
+		defer attackerSession.Cancel()
+		attackerBinding := identityStateBinding(
+			attackerUserId.String(),
+			attackerNetworkId,
+			"oauth-client",
+			McpResource,
+		)
+		// Sealing the owner's raw proxy credential with the attacker's binding
+		// isolates the ownership check. A real caller cannot perform this seal.
+		attackerHandle, err := seal(
+			sealLabelProxy,
+			attackerBinding,
+			&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+			fetchSealTtl,
+		)
+		connect.AssertEqual(t, err, nil)
+		if _, err := reuseProxy(attackerSession, attackerBinding, attackerHandle); err == nil {
+			t.Fatal("proxy handle reused by a different network")
+		}
+
+		removeResult, err := model.RemoveNetworkClient(
+			&model.RemoveNetworkClientArgs{ClientId: ownerClientId},
+			ownerSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		if removeResult.Error != nil {
+			t.Fatalf("deactivate proxy owner: %s", removeResult.Error.Message)
+		}
+		if _, err := reuseProxy(ownerSession, ownerBinding, acquired.signedProxyId); err == nil {
+			t.Fatal("proxy handle reused after its owner client was deactivated")
+		}
 	})
 }
 
@@ -223,6 +373,115 @@ func TestFetchRedirectStripsCrossOriginCredentials(t *testing.T) {
 	connect.AssertEqual(t, validateFetchRedirect(bodyRedirect, []*http.Request{original}) != nil, true)
 }
 
+func TestFetchOneEnforcesCrossOriginCredentialBoundary(t *testing.T) {
+	credentialOrigin, err := url.Parse("https://credentials.example/start")
+	connect.AssertEqual(t, err, nil)
+
+	receivedHeaders := make(chan http.Header, 1)
+	resourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		receivedHeaders <- request.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer resourceServer.Close()
+	resourceUrl, err := url.Parse(resourceServer.URL)
+	connect.AssertEqual(t, err, nil)
+
+	_, err = fetchOne(
+		context.Background(),
+		resourceServer.Client(),
+		http.MethodGet,
+		resourceUrl,
+		credentialOrigin,
+		map[string]string{
+			"Authorization": "Bearer secret",
+			"Cookie":        "session=secret",
+			"X-Api-Key":     "secret",
+			"Accept":        "image/png",
+		},
+		"",
+		1024,
+	)
+	if err != nil {
+		t.Fatalf("fetch cross-origin resource: %v", err)
+	}
+	resourceHeaders := <-receivedHeaders
+	for _, name := range []string{"Authorization", "Cookie", "X-Api-Key"} {
+		if value := resourceHeaders.Get(name); value != "" {
+			t.Fatalf("cross-origin resource received %s=%q", name, value)
+		}
+	}
+	connect.AssertEqual(t, resourceHeaders.Get("Accept"), "image/png")
+
+	redirectHeaders := make(chan http.Header, 1)
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		redirectHeaders <- request.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer redirectTarget.Close()
+	redirectSource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.Redirect(w, request, redirectTarget.URL, http.StatusFound)
+	}))
+	defer redirectSource.Close()
+	redirectUrl, err := url.Parse(redirectSource.URL)
+	connect.AssertEqual(t, err, nil)
+	redirectClient := redirectSource.Client()
+	redirectClient.CheckRedirect = validateFetchRedirect
+
+	_, err = fetchOne(
+		context.Background(),
+		redirectClient,
+		http.MethodGet,
+		redirectUrl,
+		redirectUrl,
+		map[string]string{
+			"X-Api-Key": "secret",
+			"Accept":    "application/json",
+		},
+		"",
+		1024,
+	)
+	if err != nil {
+		t.Fatalf("follow cross-origin redirect: %v", err)
+	}
+	redirectedHeaders := <-redirectHeaders
+	connect.AssertEqual(t, redirectedHeaders.Get("X-Api-Key"), "")
+	connect.AssertEqual(t, redirectedHeaders.Get("Accept"), "application/json")
+
+	bodyTargetReached := make(chan struct{}, 1)
+	bodyTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		bodyTargetReached <- struct{}{}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer bodyTarget.Close()
+	bodySource := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.Redirect(w, request, bodyTarget.URL, http.StatusTemporaryRedirect)
+	}))
+	defer bodySource.Close()
+	bodySourceUrl, err := url.Parse(bodySource.URL)
+	connect.AssertEqual(t, err, nil)
+	bodyClient := bodySource.Client()
+	bodyClient.CheckRedirect = validateFetchRedirect
+
+	_, err = fetchOne(
+		context.Background(),
+		bodyClient,
+		http.MethodPost,
+		bodySourceUrl,
+		bodySourceUrl,
+		nil,
+		"secret request body",
+		1024,
+	)
+	if err == nil || !strings.Contains(err.Error(), "refusing to redirect a request body across origins") {
+		t.Fatalf("cross-origin body redirect error = %v", err)
+	}
+	select {
+	case <-bodyTargetReached:
+		t.Fatal("cross-origin redirect forwarded the request body")
+	default:
+	}
+}
+
 func TestFetchCookiesStayOnPageOrigin(t *testing.T) {
 	jar, err := cookiejar.New(nil)
 	connect.AssertEqual(t, err, nil)
@@ -259,6 +518,48 @@ func TestFetchOneCapsResponseBody(t *testing.T) {
 	connect.AssertEqual(t, response.truncated, true)
 }
 
+func TestFetchResourceByteLimitIsServerOwned(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		requested int
+		expected  int
+	}{
+		{name: "negative", requested: -1, expected: fetchDefaultMaxResourceBytes},
+		{name: "zero", requested: 0, expected: fetchDefaultMaxResourceBytes},
+		{name: "below ceiling", requested: 1024, expected: 1024},
+		{name: "at ceiling", requested: fetchMaxResourceBytes, expected: fetchMaxResourceBytes},
+		{name: "above ceiling", requested: fetchMaxResourceBytes + 1, expected: fetchMaxResourceBytes},
+	} {
+		actual := fetchResourceByteLimit(testCase.requested)
+		if actual != testCase.expected {
+			t.Errorf("%s: byte limit = %d, want %d", testCase.name, actual, testCase.expected)
+		}
+	}
+}
+
+func TestFetchEmbeddedByteBudgetIsAggregateAndServerOwned(t *testing.T) {
+	connect.AssertEqual(
+		t,
+		fetchEmbeddedResourceByteLimit(fetchMaxResourceBytes+1, 0),
+		fetchMaxResourceBytes,
+	)
+	connect.AssertEqual(
+		t,
+		fetchEmbeddedResourceByteLimit(fetchMaxResourceBytes, fetchMaxEmbeddedBytes-1024),
+		1024,
+	)
+	connect.AssertEqual(
+		t,
+		fetchEmbeddedResourceByteLimit(fetchMaxResourceBytes, fetchMaxEmbeddedBytes),
+		0,
+	)
+	connect.AssertEqual(
+		t,
+		fetchEmbeddedResourceByteLimit(fetchMaxResourceBytes, fetchMaxEmbeddedBytes+1),
+		0,
+	)
+}
+
 func TestFetchConcurrencyIsLimitedPerIdentity(t *testing.T) {
 	limiter := newFetchConcurrencyLimiter()
 	releaseOne, err := limiter.acquire(context.Background(), "identity-one")
@@ -268,7 +569,8 @@ func TestFetchConcurrencyIsLimitedPerIdentity(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 	defer releaseTwo()
 
-	waitCtx, cancelWait := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	cancelWait()
 	defer cancelWait()
 	_, err = limiter.acquire(waitCtx, "identity-one")
 	connect.AssertEqual(t, err != nil, true)
@@ -276,6 +578,28 @@ func TestFetchConcurrencyIsLimitedPerIdentity(t *testing.T) {
 	otherRelease, err := limiter.acquire(context.Background(), "identity-two")
 	connect.AssertEqual(t, err, nil)
 	otherRelease()
+}
+
+func TestFetchConcurrencyIsLimitedGlobally(t *testing.T) {
+	limiter := newFetchConcurrencyLimiter()
+	releases := make([]func(), 0, fetchMaxConcurrentCalls)
+	for i := range fetchMaxConcurrentCalls {
+		release, err := limiter.acquire(context.Background(), fmt.Sprintf("identity-%d", i))
+		connect.AssertEqual(t, err, nil)
+		releases = append(releases, release)
+	}
+	connect.AssertEqual(t, cap(limiter.globalSemaphore), fetchMaxConcurrentCalls)
+	connect.AssertEqual(t, len(limiter.globalSemaphore), fetchMaxConcurrentCalls)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	cancelWait()
+	_, err := limiter.acquire(waitCtx, "overflow")
+	connect.AssertEqual(t, err != nil, true)
 }
 
 func TestFetchNextStepDescribesThreading(t *testing.T) {

@@ -44,10 +44,10 @@ func TestSubscriptionBalanceMultipleMarkets(t *testing.T) {
 		connect.AssertEqual(t, result.CurrentSubscription, nil)
 
 		// subscribed in the App Store, then again on the web through Stripe.
-		// The windows differ because the purchases happened on different days --
-		// they have to: subscription_renewal is keyed by
-		// (network_id, subscription_type, end_time, start_time), so two markets
-		// sharing a window to the microsecond would upsert onto one row.
+		// The windows differ because the purchases happened on different days.
+		// (They no longer HAVE to: market is part of the renewal key now, so
+		// identical windows keep separate rows too -- see
+		// TestSubscriptionBalanceIdenticalWindowsTwoMarkets.)
 		renewals := []struct {
 			market           model.SubscriptionMarket
 			startDay, endDay int
@@ -97,6 +97,114 @@ func TestSubscriptionBalanceMultipleMarkets(t *testing.T) {
 		connect.AssertNotEqual(t, result.CurrentSubscription, nil)
 		connect.AssertEqual(t, result.CurrentSubscription.Plan, model.SubscriptionTypeSupporter)
 		connect.AssertEqual(t, slices.Contains(stores, result.CurrentSubscription.Store), true)
+	})
+}
+
+// TestSubscriptionBalanceIdenticalWindowsTwoMarkets pins the S8 fix: the renewal
+// key now includes market, so two markets landing the IDENTICAL window -- to the
+// microsecond -- keep two rows, each with its own revenue and transaction id. The
+// old key (network_id, subscription_type, end_time, start_time) upserted the
+// second market onto the first market's row: revenue OVERWRITTEN (not summed),
+// market and transaction id kept from the first -- so the second store was
+// invisible in the UI, with no cancel path, while it kept charging.
+func TestSubscriptionBalanceIdenticalWindowsTwoMarkets(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "samewindow", userId)
+
+		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+
+		now := server.NowUtc()
+		day := 24 * time.Hour
+
+		// the same window to the microsecond, from two different stores
+		startTime := now.Add(-1 * day)
+		endTime := now.Add(29 * day)
+
+		renewals := []struct {
+			market        model.SubscriptionMarket
+			transactionId string
+			netRevenue    model.NanoCents
+		}{
+			{model.SubscriptionMarketStripe, "in_samewindow_1", model.UsdToNanoCents(10)},
+			{model.SubscriptionMarketX402, "0xsamewindow1", model.UsdToNanoCents(12)},
+		}
+		for _, renewal := range renewals {
+			err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+				NetworkId:          networkId,
+				SubscriptionType:   model.SubscriptionTypeSupporter,
+				StartTime:          startTime,
+				EndTime:            endTime,
+				NetRevenue:         renewal.netRevenue,
+				SubscriptionMarket: renewal.market,
+				TransactionId:      renewal.transactionId,
+			})
+			connect.AssertEqual(t, err, nil)
+		}
+
+		// both markets surface, so both have a cancel path in the UI
+		markets := model.GetActiveSubscriptionRenewalMarkets(
+			ctx,
+			networkId,
+			model.SubscriptionTypeSupporter,
+		)
+		connect.AssertEqual(t, markets, []string{
+			model.SubscriptionMarketStripe,
+			model.SubscriptionMarketX402,
+		})
+
+		result, err := SubscriptionBalance(clientSession)
+		connect.AssertEqual(t, err, nil)
+		stores := []string{}
+		for _, subscription := range result.Subscriptions {
+			stores = append(stores, subscription.Store)
+		}
+		connect.AssertEqual(t, stores, []string{
+			model.SubscriptionMarketStripe,
+			model.SubscriptionMarketX402,
+		})
+
+		// each row keeps ITS OWN revenue and transaction id -- nothing was
+		// overwritten
+		type renewalRow struct {
+			market        string
+			transactionId string
+			netRevenue    model.NanoCents
+		}
+		rows := map[string]renewalRow{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT market, transaction_id, net_revenue_nano_cents
+				FROM subscription_renewal
+				WHERE network_id = $1
+				`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var row renewalRow
+					server.Raise(result.Scan(&row.market, &row.transactionId, &row.netRevenue))
+					rows[row.market] = row
+				}
+			})
+		})
+		connect.AssertEqual(t, len(rows), 2)
+		for _, renewal := range renewals {
+			row := rows[renewal.market]
+			connect.AssertEqual(t, row.transactionId, renewal.transactionId)
+			connect.AssertEqual(t, row.netRevenue, renewal.netRevenue)
+		}
 	})
 }
 

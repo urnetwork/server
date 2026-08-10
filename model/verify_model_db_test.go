@@ -110,7 +110,7 @@ func TestVerifyEgressBijection(t *testing.T) {
 		c5 := server.NewId()
 		ip5 := netip.MustParseAddr("203.0.113.50")
 		FeedVerifyEgress(ctx, c5, ip5, settings)
-		ClearVerifyEgress(ctx, c5, ip5)
+		ClearVerifyEgress(ctx, c5, ip5, settings)
 		if got := ResolveVerifyEgress(ctx, ip5, settings); got != nil {
 			t.Fatalf("cleared ip still resolves to %v", got)
 		}
@@ -573,6 +573,77 @@ func TestSampleVerifyNextHop(t *testing.T) {
 		}
 		if !CheckVerifyEligibilityToken(ctx, providerA, settings) {
 			t.Fatal("pad must not spend a real provider's tokens")
+		}
+	})
+}
+
+// The egress index must never hold a raw client ip — keys and reverse-hash
+// fields are the peppered subnet-bucket hash (VerifyEgressIpHash). The
+// validator scores subnet blocks, not individual addresses, so two ips in
+// one bucket are one egress identity.
+func TestVerifyEgressIndexStoresNoRawIp(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultVerifySettings()
+
+		clientId := server.NewId()
+		ip := netip.MustParseAddr("198.51.100.77")
+		FeedVerifyEgress(ctx, clientId, ip, settings)
+
+		// resolution still works, keyed on the hash
+		if got := ResolveVerifyEgress(ctx, ip, settings); got == nil || *got != clientId {
+			t.Fatalf("hash-keyed egress did not resolve: %v", got)
+		}
+
+		// no redis key mentions the ip, and the reverse-hash fields are
+		// 64-char hex hashes rather than addresses
+		server.Redis(ctx, func(r server.RedisClient) {
+			keys, err := r.Keys(ctx, "*198.51.100*").Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if 0 < len(keys) {
+				t.Fatalf("raw ip appears in redis keys: %v", keys)
+			}
+			entries, err := r.HGetAll(ctx, verifyClientEgressKey(clientId)).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("expected 1 reverse entry, got %v", entries)
+			}
+			for field := range entries {
+				if len(field) != 64 {
+					t.Fatalf("reverse field is not a 32-byte hex hash: %q", field)
+				}
+			}
+		})
+
+		// same /29 bucket (default v4 prefix): .72 and .73 are one identity.
+		// the same client feeding both keeps exactly one live bucket, so it
+		// stays eligible-shaped (one egress), and both addresses resolve.
+		c2 := server.NewId()
+		FeedVerifyEgress(ctx, c2, netip.MustParseAddr("198.51.100.88"), settings)
+		FeedVerifyEgress(ctx, c2, netip.MustParseAddr("198.51.100.89"), settings)
+		if got := ResolveVerifyEgress(ctx, netip.MustParseAddr("198.51.100.89"), settings); got == nil || *got != c2 {
+			t.Fatalf("same-bucket second ip did not resolve to the claimant: %v", got)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			entries, err := r.HGetAll(ctx, verifyClientEgressKey(c2)).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("same-bucket ips should collapse to one reverse entry, got %d", len(entries))
+			}
+		})
+
+		// a different client feeding an ip in the SAME bucket contends: the
+		// bucket goes ambiguous and resolves to nobody (never guess)
+		c3 := server.NewId()
+		FeedVerifyEgress(ctx, c3, netip.MustParseAddr("198.51.100.90"), settings)
+		if got := ResolveVerifyEgress(ctx, netip.MustParseAddr("198.51.100.88"), settings); got != nil {
+			t.Fatalf("contended bucket resolved to %v, want nil", got)
 		}
 	})
 }

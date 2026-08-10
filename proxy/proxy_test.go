@@ -184,40 +184,23 @@ type proxyTestPorts struct {
 	wg    int
 }
 
+// reserveProxyTestPorts allocates the proxy servers' listen ports through
+// server.ReserveTestListenPorts: probed on the wildcard address the servers
+// actually bind, from below the OS ephemeral range so the release -> bind
+// window cannot lose a port to the process's own outbound dials (see the
+// allocator doc in server/test_util.go; certification failure c12-1).
 func reserveProxyTestPorts(t testing.TB) (*proxyTestPorts, func()) {
-	var reservations []io.Closer
-	reserveTcp := func() int {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("reserve tcp test port: %v", err)
-		}
-		reservations = append(reservations, listener)
-		return listener.Addr().(*net.TCPAddr).Port
+	ports, release, err := server.ReserveTestListenPorts("tcp", "tcp", "tcp", "tcp", "udp")
+	if err != nil {
+		t.Fatalf("reserve proxy test ports: %v", err)
 	}
-	reserveUdp := func() int {
-		packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("reserve udp test port: %v", err)
-		}
-		reservations = append(reservations, packetConn)
-		return packetConn.LocalAddr().(*net.UDPAddr).Port
-	}
-	ports := &proxyTestPorts{
-		socks: reserveTcp(),
-		http:  reserveTcp(),
-		https: reserveTcp(),
-		api:   reserveTcp(),
-		wg:    reserveUdp(),
-	}
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() {
-			for _, reservation := range reservations {
-				reservation.Close()
-			}
-		})
-	}
-	return ports, release
+	return &proxyTestPorts{
+		socks: ports[0],
+		http:  ports[1],
+		https: ports[2],
+		api:   ports[3],
+		wg:    ports[4],
+	}, release
 }
 
 func listenProxyTestTcp(t testing.TB) net.Listener {
@@ -507,6 +490,14 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 	// give the proxy listeners a moment to bind
 	select {
 	case <-time.After(1 * time.Second):
+	}
+
+	// a server whose listen failed panics and its rescue handler cancels the
+	// shared ctx; report that as the bring-up failure it is instead of letting
+	// a later step surface collateral (c12-1 died as a misleading wg "device
+	// closed" one second after two EADDRINUSE bind panics)
+	if ctx.Err() != nil {
+		t.Fatalf("proxy server bring-up canceled the harness ctx (a listener failed to bind; see Unexpected error above)")
 	}
 
 	// register the wg client with the wg server (in production this is driven by

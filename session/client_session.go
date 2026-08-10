@@ -34,8 +34,17 @@ type ClientSession struct {
 	Cancel context.CancelFunc
 	// ip:port
 	ClientAddress string
-	Header        map[string][]string
-	ByJwt         *jwt.ByJwt
+	// pre-computed peppered address hash + port (see server.ClientIpHash),
+	// set instead of ClientAddress when the session is reconstructed from
+	// storage that persists only the hash (deferred tasks). The raw address
+	// is deliberately absent on such sessions: consumers that need the ip
+	// itself (geo lookup, egress parsing) get a parse error, exactly as they
+	// would for any unparseable address, while consumers of
+	// ClientAddressHashPort keep working against the stored hash.
+	clientAddressHash     *[32]byte
+	clientAddressHashPort int
+	Header                map[string][]string
+	ByJwt                 *jwt.ByJwt
 }
 
 func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
@@ -72,6 +81,23 @@ func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt
 		ClientAddress: clientAddress,
 		Header:        map[string][]string{},
 		ByJwt:         byJwt,
+	}
+}
+
+// NewLocalClientSessionWithAddressHash reconstructs a session from storage
+// that persists only the peppered address hash + port (deferred tasks), never
+// the raw ip:port. ClientAddress stays empty on the returned session — see
+// the field comment on ClientSession.
+func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash [32]byte, clientPort int, byJwt *jwt.ByJwt) *ClientSession {
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	return &ClientSession{
+		Ctx:                   cancelCtx,
+		Cancel:                cancel,
+		clientAddressHash:     &clientAddressHash,
+		clientAddressHashPort: clientPort,
+		Header:                map[string][]string{},
+		ByJwt:                 byJwt,
 	}
 }
 
@@ -142,6 +168,11 @@ func (self *ClientSession) ParseClientIpPort() (ip netip.Addr, port int, err err
 }
 
 func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, clientPort int, err error) {
+	// a session reconstructed from hash-only storage carries the hash
+	// directly; there is no raw address to derive it from
+	if self.clientAddressHash != nil {
+		return *self.clientAddressHash, self.clientAddressHashPort, nil
+	}
 	var clientIp string
 	clientIp, clientPort, err = server.SplitClientAddress(self.ClientAddress)
 	if err != nil {
@@ -153,16 +184,24 @@ func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, 
 
 func (self *ClientSession) WithByJwt(byJwt *jwt.ByJwt) *ClientSession {
 	return &ClientSession{
-		Ctx:           self.Ctx,
-		Cancel:        self.Cancel,
-		ClientAddress: self.ClientAddress,
-		Header:        self.Header,
-		ByJwt:         byJwt,
+		Ctx:                   self.Ctx,
+		Cancel:                self.Cancel,
+		ClientAddress:         self.ClientAddress,
+		clientAddressHash:     self.clientAddressHash,
+		clientAddressHashPort: self.clientAddressHashPort,
+		Header:                self.Header,
+		ByJwt:                 byJwt,
 	}
 }
 
 func Testing_CreateClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession {
 	cancelCtx, cancel := context.WithCancel(ctx)
+
+	// tests commonly hand a bare &ByJwt{NetworkId, UserId} literal; tokens
+	// minted or derived from it must survive full claims validation
+	if byJwt != nil {
+		jwt.Testing_NormalizeClaims(byJwt)
+	}
 
 	clientAddress := "0.0.0.0:0"
 

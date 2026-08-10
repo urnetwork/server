@@ -180,3 +180,86 @@ func TestCompanionContractMissingOriginIsBounded(t *testing.T) {
 		}
 	})
 }
+
+// TestCompanionContractChainsToCompanionOrigin pins the asymmetric
+// reply-carrier case: in an asymmetric relationship the return side's
+// contracts are all companions, so the forward side's TLS-server
+// EncryptedControl reply carrier requests a companion whose only possible
+// origin is ITSELF a companion. The origin lookup must fall back to a
+// companion anchor when no plain origin exists — with plain-origin-only
+// matching this deadlocks, which EncryptionModeRequired surfaces as a hard
+// establishment failure (5/5 attempt timeouts in
+// TestConnectWithAsymmetricContractsWithForceStreamEncrypted) while
+// Opportunistic silently downgraded the return direction to plaintext.
+func TestCompanionContractChainsToCompanionOrigin(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sourceNetworkId, sourceId, destinationNetworkId, destinationId := companionOriginTestSetup(ctx, t)
+
+		// fund the SOURCE network too: in the chained case each side pays for
+		// the companion whose destination it is
+		// a unique purchase event id: the setup's code already used the
+		// empty-string event id, and purchase events are unique per event id
+		balanceCode, err := model.CreateBalanceCode(
+			ctx,
+			model.ByteCount(1024*1024*1024*1024),
+			365*24*time.Hour,
+			model.UsdToNanoCents(10.00),
+			server.NewId().String(),
+			server.NewId().String(),
+			"",
+		)
+		connect.AssertEqual(t, err, nil)
+		model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceNetworkId,
+		}, ctx)
+
+		// the forward direction: a plain origin source -> destination
+		originEscrow, err := model.CreateTransferEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			model.ByteCount(1024*1024),
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, originEscrow, nil)
+
+		// the return direction: a companion destination -> source anchored on
+		// the plain origin (the normal asymmetric return contract)
+		returnEscrow, err := model.CreateCompanionTransferEscrow(
+			ctx,
+			destinationNetworkId,
+			destinationId,
+			sourceNetworkId,
+			sourceId,
+			model.ByteCount(1024*1024),
+			connect.DefaultContractManagerSettings().OriginContractLinger,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, returnEscrow, nil)
+
+		// the reply carrier's case: a companion source -> destination whose
+		// only origin-direction contract (destination -> source) is the
+		// companion above. Must chain, not deadlock.
+		replyCarrierEscrow, err := model.CreateCompanionTransferEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			model.ByteCount(1024*1024),
+			connect.DefaultContractManagerSettings().OriginContractLinger,
+		)
+		if err != nil {
+			t.Fatalf(
+				"the reply-carrier companion must chain to a companion origin (got %v): plain-origin-only matching deadlocks the asymmetric TLS-server reply carrier",
+				err,
+			)
+		}
+		connect.AssertNotEqual(t, replyCarrierEscrow, nil)
+	})
+}

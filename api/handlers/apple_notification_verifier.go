@@ -161,6 +161,37 @@ func (self *appleNotificationVerifier) verifyNotification(
 	return &notification, nil
 }
 
+// verifyTransaction verifies a client-reported StoreKit transaction JWS
+// (Transaction.jwsRepresentation) with the SAME pinned-root machinery as
+// notification JWS: ES256, three-certificate x5c chain with the Apple policy
+// extensions, terminating at a pinned Apple root, chain validity judged at the
+// JWS's own signedDate. A client report is an unauthenticated-content push --
+// unlike the payment reconciler's authenticated TLS pulls from Apple, which
+// may decode without re-verifying -- so it gets webhook-grade verification.
+//
+// The signedDate freshness window is intentionally NOT applied (matching the
+// nested-JWS handling in verifyNotification): the report may legitimately be
+// retried days after purchase, that being the whole point of the retryable
+// reporting path. The transaction's identity (bundle, environment) must match
+// this app's notification config.
+func (self *appleNotificationVerifier) verifyTransaction(
+	signedTransaction string,
+) (map[string]any, error) {
+	claims, err := self.verifyJws(signedTransaction, false)
+	if err != nil {
+		return nil, fmt.Errorf("verify transaction JWS: %w", err)
+	}
+	bundleId, _ := appleStringClaim(claims, "bundleId")
+	if bundleId != self.config.BundleId {
+		return nil, errors.New("transaction bundle does not match this app")
+	}
+	environment, _ := appleStringClaim(claims, "environment")
+	if !slices.Contains(self.config.Environments, environment) {
+		return nil, errors.New("transaction environment is not allowed")
+	}
+	return claims, nil
+}
+
 func (self *appleNotificationVerifier) verifyNestedIdentity(
 	claims map[string]any,
 	bundleId string,

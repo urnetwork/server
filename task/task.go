@@ -166,14 +166,19 @@ func ScheduleTask[T any, R any](
 }
 
 type preparedTask struct {
-	taskId         server.Id
-	functionName   string
-	argsJson       []byte
-	byJwtJson      *string
-	runAt          time.Time
-	runOnceKey     *string
-	priority       TaskPriority
-	maxTimeSeconds int
+	taskId       server.Id
+	functionName string
+	argsJson     []byte
+	// the peppered address hash + port (server.ClientIpHash) of the
+	// scheduling session, never the raw ip:port. nil when the session has no
+	// parseable address (local/internal schedulers).
+	clientAddressHash []byte
+	clientAddressPort int
+	byJwtJson         *string
+	runAt             time.Time
+	runOnceKey        *string
+	priority          TaskPriority
+	maxTimeSeconds    int
 }
 
 func prepareTask[T any, R any](
@@ -237,15 +242,29 @@ func prepareTask[T any, R any](
 		runOnceKey = &runOnceKey_
 	}
 
+	// persist only the peppered hash of the scheduling address. the raw
+	// ip:port used to be stored here verbatim and outlived the request in
+	// pending_task (and finished_task for 24h); the 2024 hashing migration
+	// missed this call site. an unparseable/absent address stores NULL, which
+	// is also what sessions reconstructed from these rows carry.
+	var clientAddressHash []byte
+	clientAddressPort := 0
+	if hash, port, err := clientSession.ClientAddressHashPort(); err == nil {
+		clientAddressHash = hash[:]
+		clientAddressPort = port
+	}
+
 	return preparedTask{
-		taskId:         server.NewId(),
-		functionName:   taskTarget.TargetFunctionName(),
-		argsJson:       argsJson,
-		byJwtJson:      byJwtJson,
-		runAt:          runAt.At.UTC(),
-		runOnceKey:     runOnceKey,
-		priority:       runPriority.Priority,
-		maxTimeSeconds: int(runMaxTime.MaxTime / time.Second),
+		taskId:            server.NewId(),
+		functionName:      taskTarget.TargetFunctionName(),
+		argsJson:          argsJson,
+		clientAddressHash: clientAddressHash,
+		clientAddressPort: clientAddressPort,
+		byJwtJson:         byJwtJson,
+		runAt:             runAt.At.UTC(),
+		runOnceKey:        runOnceKey,
+		priority:          runPriority.Priority,
+		maxTimeSeconds:    int(runMaxTime.MaxTime / time.Second),
 	}
 }
 
@@ -268,6 +287,8 @@ func ScheduleTaskInTx[T any, R any](
 		        function_name,
 		        args_json,
 		        client_address,
+		        client_address_hash,
+		        client_address_port,
 		        client_by_jwt_json,
 		        run_at,
 		        run_once_key,
@@ -275,16 +296,17 @@ func ScheduleTaskInTx[T any, R any](
 		        run_max_time_seconds,
 		        claim_time,
 		        release_time
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+			) VALUES ($1, $2, $3, '', $4, $5, $6, $7, $8, $9, $10, $11, $11)
 			ON CONFLICT (run_once_key) DO UPDATE SET
-				run_at = LEAST(pending_task.run_at, $6),
-				run_priority = LEAST(pending_task.run_priority, $8),
-				run_max_time_seconds = GREATEST(pending_task.run_max_time_seconds, $9)
+				run_at = LEAST(pending_task.run_at, $7),
+				run_priority = LEAST(pending_task.run_priority, $9),
+				run_max_time_seconds = GREATEST(pending_task.run_max_time_seconds, $10)
 		`,
 		p.taskId,
 		p.functionName,
 		p.argsJson,
-		clientSession.ClientAddress,
+		p.clientAddressHash,
+		p.clientAddressPort,
 		p.byJwtJson,
 		p.runAt,
 		p.runOnceKey,
@@ -331,6 +353,8 @@ func ScheduleTaskInTxIfAbsent[T any, R any](
 		        function_name,
 		        args_json,
 		        client_address,
+		        client_address_hash,
+		        client_address_port,
 		        client_by_jwt_json,
 		        run_at,
 		        run_once_key,
@@ -338,13 +362,14 @@ func ScheduleTaskInTxIfAbsent[T any, R any](
 		        run_max_time_seconds,
 		        claim_time,
 		        release_time
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+			) VALUES ($1, $2, $3, '', $4, $5, $6, $7, $8, $9, $10, $11, $11)
 			ON CONFLICT (run_once_key) DO NOTHING
 		`,
 		p.taskId,
 		p.functionName,
 		p.argsJson,
-		clientSession.ClientAddress,
+		p.clientAddressHash,
+		p.clientAddressPort,
 		p.byJwtJson,
 		p.runAt,
 		p.runOnceKey,
@@ -386,6 +411,8 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 		        pending_task.function_name,
 		        pending_task.args_json,
 		        pending_task.client_address,
+		        pending_task.client_address_hash,
+		        pending_task.client_address_port,
 		        pending_task.client_by_jwt_json,
 		        pending_task.run_at,
 		        pending_task.run_once_key,
@@ -442,6 +469,8 @@ func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {
 					&task.FunctionName,
 					&task.ArgsJson,
 					&task.ClientAddress,
+					&task.ClientAddressHash,
+					&task.ClientAddressPort,
 					&byJwtJson,
 					&task.RunAt,
 					&runOnceKey,
@@ -482,6 +511,8 @@ func GetFinishedTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*
 		            finished_task.function_name,
 		            finished_task.args_json,
 		            finished_task.client_address,
+		            finished_task.client_address_hash,
+		            finished_task.client_address_port,
 		            finished_task.client_by_jwt_json,
 		            finished_task.run_at,
 		            finished_task.run_once_key,
@@ -510,6 +541,8 @@ func GetFinishedTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*
 					&finishedTask.FunctionName,
 					&finishedTask.ArgsJson,
 					&finishedTask.ClientAddress,
+					&finishedTask.ClientAddressHash,
+					&finishedTask.ClientAddressPort,
 					&byJwtJson,
 					&finishedTask.RunAt,
 					&runOnceKey,
@@ -780,6 +813,8 @@ type Task struct {
 	FunctionName      string
 	ArgsJson          string
 	ClientAddress     string
+	ClientAddressHash []byte
+	ClientAddressPort int
 	ClientByJwtJson   string
 	RunAt             time.Time
 	RunOnceKey        string
@@ -800,6 +835,20 @@ func (self *Task) ClientSession(ctx context.Context) (*session.ClientSession, er
 		}
 	}
 
+	// rows written since the hash migration carry only the peppered address
+	// hash; reconstruct a session around it directly. legacy rows (written
+	// before the migration, or by an old binary during a rolling deploy)
+	// still carry the raw address and take the plain path until they drain.
+	if len(self.ClientAddressHash) == 32 {
+		clientSession := session.NewLocalClientSessionWithAddressHash(
+			ctx,
+			[32]byte(self.ClientAddressHash),
+			self.ClientAddressPort,
+			byJwt,
+		)
+		return clientSession, nil
+	}
+
 	clientSession := session.NewLocalClientSession(
 		ctx,
 		self.ClientAddress,
@@ -814,6 +863,8 @@ type FinishedTask struct {
 	FunctionName      string
 	ArgsJson          string
 	ClientAddress     string
+	ClientAddressHash []byte
+	ClientAddressPort int
 	ClientByJwtJson   string
 	RunAt             time.Time
 	RunOnceKey        string
@@ -835,6 +886,20 @@ func (self *FinishedTask) ClientSession(ctx context.Context) (*session.ClientSes
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// rows written since the hash migration carry only the peppered address
+	// hash; reconstruct a session around it directly. legacy rows (written
+	// before the migration, or by an old binary during a rolling deploy)
+	// still carry the raw address and take the plain path until they drain.
+	if len(self.ClientAddressHash) == 32 {
+		clientSession := session.NewLocalClientSessionWithAddressHash(
+			ctx,
+			[32]byte(self.ClientAddressHash),
+			self.ClientAddressPort,
+			byJwt,
+		)
+		return clientSession, nil
 	}
 
 	clientSession := session.NewLocalClientSession(
@@ -1729,6 +1794,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 				        function_name,
 				        args_json,
 				        client_address,
+				        client_address_hash,
+				        client_address_port,
 				        client_by_jwt_json,
 				        run_at,
 				        run_once_key,
@@ -1745,6 +1812,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 				        function_name,
 				        args_json,
 				        client_address,
+				        client_address_hash,
+				        client_address_port,
 				        client_by_jwt_json,
 				        run_at,
 				        run_once_key,

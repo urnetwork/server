@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -952,14 +953,24 @@ func auditNetworkCreate(
 	networkId server.Id,
 	session *session.ClientSession,
 ) {
+	// The peppered address hash (server.ClientIpHash), never the raw ip:port.
+	// audit_network_event rows are permanent — there is no reaper — so a raw
+	// address stored here would outlive every retention promise we make. The
+	// hash keeps the abuse-correlation value (same /29 or /56 bucket ⇒ same
+	// hash) without holding the address itself. Rows written before this
+	// change are rewritten by migration_20260807_ScrubTaskAndAuditClientAddresses.
 	type Details struct {
-		NetworkCreate NetworkCreateArgs `json:"network_create"`
-		ClientAddress string            `json:"client_address"`
+		NetworkCreate     NetworkCreateArgs `json:"network_create"`
+		ClientAddressHash string            `json:"client_address_hash,omitempty"`
+		ClientPort        int               `json:"client_port,omitempty"`
 	}
 
 	details := Details{
 		NetworkCreate: networkCreate,
-		ClientAddress: session.ClientAddress,
+	}
+	if clientAddressHash, clientPort, err := session.ClientAddressHashPort(); err == nil {
+		details.ClientAddressHash = hex.EncodeToString(clientAddressHash[:])
+		details.ClientPort = clientPort
 	}
 
 	detailsJson, err := json.Marshal(details)

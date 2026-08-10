@@ -138,10 +138,19 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 		server.NowUtc().Add(365*24*time.Hour),
 	)
 	connect.AssertEqual(t, err, nil)
-	userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-		NetworkId: networkId,
-		UserId:    userId,
-	})
+	// Mint the session jwt through NewByJwt, never a bare struct literal:
+	// AuthNetworkClient derives each by-client jwt from this session jwt
+	// (Client() copies CreateTime), and the platform transport auth
+	// validates every claim — a zero CreateTime is rejected as "Invalid
+	// signed token claims", the transports redial forever, and every test
+	// on this env times out waiting for its provide ack (c13-1).
+	userSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+		networkId,
+		userId,
+		fmt.Sprintf("peerdiscovery-%s", networkId),
+		false,
+		false,
+	))
 
 	return &peerDiscoveryEnv{
 		t:           t,
@@ -866,10 +875,15 @@ func TestExchangePeerDiscoveryNetworkIsolation(t *testing.T) {
 		networkId2 := server.NewId()
 		userId2 := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId2, fmt.Sprintf("peerdiscovery2-%s", networkId2), userId2)
-		userSession2 := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
-			NetworkId: networkId2,
-			UserId:    userId2,
-		})
+		// minted, not a literal: derived client jwts must survive the
+		// transport's claims validation (see the env setup comment)
+		userSession2 := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
+			networkId2,
+			userId2,
+			fmt.Sprintf("peerdiscovery2-%s", networkId2),
+			false,
+			false,
+		))
 		authClient2 := func(args *model.AuthNetworkClientArgs) (server.Id, string) {
 			result, err := model.AuthNetworkClient(args, userSession2)
 			connect.AssertEqual(t, err, nil)

@@ -68,7 +68,7 @@ func setupEncryptedConnectPair(
 	// Sketch of the per-client settings the scenarios rely on:
 	//
 	//   settings := connect.DefaultClientSettings()
-	//   settings.EncryptionSettings.Encrypt = true
+	//   settings.EncryptionSettings.Mode = connect.EncryptionModeOpportunistic
 	//   settings.EncryptionSettings.HandshakeTimeout = 60 * time.Second
 	//   settings.SendBufferSettings.IdleTimeout = sendIdleTimeout
 	//   settings.ReceiveBufferSettings.IdleTimeout = receiveIdleTimeout

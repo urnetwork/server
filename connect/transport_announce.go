@@ -330,7 +330,7 @@ func (self *ConnectionAnnounce) run() {
 		cleanupCtx := context.Background()
 		model.DisconnectNetworkClient(cleanupCtx, connectionId)
 		if verifyEgressOk {
-			model.ClearVerifyEgress(cleanupCtx, self.clientId, verifyEgressIp)
+			model.ClearVerifyEgress(cleanupCtx, self.clientId, verifyEgressIp, verifySettings)
 		}
 		if glog.V(1) {
 			glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))

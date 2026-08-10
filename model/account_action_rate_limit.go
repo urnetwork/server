@@ -18,6 +18,7 @@ const (
 	AccountActionChangeNetworkName    = "change_network_name"
 	AccountActionGenerateSeedphrase   = "generate_seedphrase"
 	AccountActionRegenerateSeedphrase = "regenerate_seedphrase"
+	AccountActionVerifyStorePurchase  = "verify_store_purchase"
 )
 
 const (
@@ -31,6 +32,16 @@ const (
 
 const AccountActionDailyWindow = 24 * time.Hour
 
+// The purchase-verify endpoints are verify-with-store calls an abuser could
+// spin, so they carry an hourly (not daily) budget: a well-behaved client
+// polling a pending purchase at the retry-policy cap (5 minutes) uses 12
+// attempts per hour, comfortably under the limit, while a tight abuse loop is
+// cut off within the hour.
+const (
+	AccountActionVerifyStorePurchaseWindow      = time.Hour
+	AccountActionVerifyStorePurchaseWindowLimit = 30
+)
+
 // actionDisplayNames gives each action a human-readable name for the
 // rate-limit error message, so a client can tell which of the several
 // daily limits it hit instead of seeing one generic message for all of them.
@@ -41,6 +52,7 @@ var actionDisplayNames = map[string]string{
 	AccountActionChangeNetworkName:    "changing your network name",
 	AccountActionGenerateSeedphrase:   "generating a seedphrase",
 	AccountActionRegenerateSeedphrase: "regenerating a seedphrase",
+	AccountActionVerifyStorePurchase:  "verifying a store purchase",
 }
 
 func maxAccountActionAttemptsError(action string) error {

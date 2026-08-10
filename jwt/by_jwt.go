@@ -685,3 +685,20 @@ func sign(claims gojwt.Claims) string {
 	}
 	return jwtSigned
 }
+
+// Testing_NormalizeClaims fills the registered claims and CreateTime of a
+// hand-built ByJwt fixture, leaving explicitly set fields as-is. Tests
+// commonly construct sessions from a bare &ByJwt{NetworkId, UserId} literal;
+// tokens minted or derived from such a fixture (AuthNetworkClient derives
+// by-client jwts via Client, which copies CreateTime) must survive
+// ParseByJwt's full claims validation and ValidateByJwtState's
+// credential_change_time comparison, both of which reject a zero CreateTime.
+// Production mint paths go through NewByJwt and never need this.
+func Testing_NormalizeClaims(byJwt *ByJwt) {
+	if byJwt.CreateTime.IsZero() {
+		byJwt.CreateTime = server.CodecTime(server.NowUtc())
+	}
+	if byJwt.Subject == "" {
+		byJwt.RegisteredClaims = newRegisteredClaims(byJwt.UserId)
+	}
+}

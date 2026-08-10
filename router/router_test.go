@@ -121,8 +121,18 @@ func TestRouterBasic(t *testing.T) {
 			}
 		}()
 
+		// session.Auth verifies jwt state against the db (ValidateByJwtState:
+		// the network/user must exist, a client jwt needs an active
+		// network_client row, and the jwt CreateTime must not predate the
+		// user's credential_change_time), so the rows must exist before the
+		// jwts are minted
 		networkId := server.NewId()
 		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, "test device", "test spec")
+
 		byJwt := jwt.NewByJwt(
 			networkId,
 			userId,
@@ -134,8 +144,6 @@ func TestRouterBasic(t *testing.T) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
 		}
 
-		deviceId := server.NewId()
-		clientId := server.NewId()
 		byClientJwt := byJwt.Client(deviceId, clientId)
 		authClient := func(header http.Header) {
 			header.Add("Authorization", fmt.Sprintf("Bearer %s", byClientJwt.Sign()))

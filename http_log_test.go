@@ -1,7 +1,9 @@
 package server
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -62,5 +64,98 @@ func TestSafeLogValueRedactsNestedSecrets(t *testing.T) {
 	headers := safe["headers"].(map[string][]string)
 	if headers["Authorization"][0] != "[REDACTED]" || headers["Content-Type"][0] != "application/json" {
 		t.Fatalf("header map redaction is incorrect: %v", headers)
+	}
+}
+
+func TestSafeLogValueRedactsStructsPointersAndTypedSlices(t *testing.T) {
+	type nestedMetadata struct {
+		AccessToken  string `json:"access_token"`
+		Credential   string `json:"credential"`
+		RefreshToken string
+		RequestBody  string
+		Somebody     string
+		Operation    string `json:"operation"`
+	}
+	type requestMetadata struct {
+		Password string
+		Nested   *nestedMetadata  `json:"nested"`
+		Items    []nestedMetadata `json:"items"`
+	}
+
+	value := &requestMetadata{
+		Password: "password-secret",
+		Nested: &nestedMetadata{
+			AccessToken:  "access-secret",
+			Credential:   "credential-secret",
+			RefreshToken: "refresh-secret",
+			RequestBody:  "request-body-secret",
+			Somebody:     "nested-visible",
+			Operation:    "refresh",
+		},
+		Items: []nestedMetadata{{
+			AccessToken: "slice-secret",
+			Operation:   "persist",
+		}},
+	}
+	serialized := ErrorJsonWithCustomNoStack(errors.New("handler failed"), map[string]any{
+		"request": value,
+	})
+
+	for _, secret := range []string{
+		"password-secret", "access-secret", "credential-secret", "refresh-secret",
+		"request-body-secret", "slice-secret",
+	} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("structured error log retained %q: %s", secret, serialized)
+		}
+	}
+	for _, safeValue := range []string{"refresh", "persist", "nested-visible"} {
+		if !strings.Contains(serialized, safeValue) {
+			t.Fatalf("structured error log removed safe value %q: %s", safeValue, serialized)
+		}
+	}
+
+	type cyclicMetadata struct {
+		Password string
+		Next     *cyclicMetadata
+	}
+	cycle := &cyclicMetadata{Password: "cycle-secret"}
+	cycle.Next = cycle
+	serialized = ErrorJsonWithCustomNoStack(errors.New("handler failed"), map[string]any{
+		"request": cycle,
+	})
+	if strings.Contains(serialized, "cycle-secret") {
+		t.Fatalf("cyclic structured log retained a secret: %s", serialized)
+	}
+	if !strings.Contains(serialized, "nesting limit") {
+		t.Fatalf("cyclic structured log did not stop at the nesting limit: %s", serialized)
+	}
+}
+
+func TestErrorJsonWithCustomNoStackRedactsCredentials(t *testing.T) {
+	serialized := ErrorJsonWithCustomNoStack(errors.New("handler failed"), map[string]any{
+		"headers": http.Header{
+			"Authorization": []string{"Bearer raw-secret"},
+			"Cookie":        []string{"session=cookie-secret"},
+			"Content-Type":  []string{"application/json"},
+		},
+		"metadata": map[string]any{
+			"refresh_token": "refresh-secret",
+			"by_jwt":        "jwt-secret",
+			"request_body":  "body-secret",
+			"operation":     "update",
+			"somebody":      "visible",
+		},
+	})
+
+	for _, secret := range []string{"raw-secret", "cookie-secret", "refresh-secret", "jwt-secret", "body-secret"} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("structured error log retained %q: %s", secret, serialized)
+		}
+	}
+	for _, safeValue := range []string{"application/json", "update", "visible", "handler failed"} {
+		if !strings.Contains(serialized, safeValue) {
+			t.Fatalf("structured error log removed safe value %q: %s", safeValue, serialized)
+		}
 	}
 }

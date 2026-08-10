@@ -28,6 +28,16 @@ type appleTestCertificateChain struct {
 	leafKey         *ecdsa.PrivateKey
 }
 
+// Selects notification identities and independent nested-signature corruption.
+type appleTestNotificationOptions struct {
+	bundleId          string
+	environment       string
+	appAppleId        int64
+	nestedBundleId    string
+	tamperTransaction bool
+	tamperRenewal     bool
+}
+
 func newAppleTestCertificateChain(t testing.TB, now time.Time, leafNotAfter time.Time) *appleTestCertificateChain {
 	t.Helper()
 
@@ -136,15 +146,20 @@ func appleTestSignedNotification(
 	t testing.TB,
 	chain *appleTestCertificateChain,
 	now time.Time,
-	bundleId string,
-	environment string,
-	tamperTransaction bool,
+	options appleTestNotificationOptions,
 ) string {
 	t.Helper()
+	if options.appAppleId == 0 {
+		options.appAppleId = 6741000606
+	}
+	nestedBundleId := options.nestedBundleId
+	if nestedBundleId == "" {
+		nestedBundleId = options.bundleId
+	}
 	transaction := chain.sign(t, gojwt.MapClaims{
 		"signedDate":      now.UnixMilli(),
-		"bundleId":        bundleId,
-		"environment":     environment,
+		"bundleId":        nestedBundleId,
+		"environment":     options.environment,
 		"appAccountToken": server.NewId().String(),
 		"transactionId":   "transaction-1",
 		"productId":       "supporter_monthly_26",
@@ -152,14 +167,17 @@ func appleTestSignedNotification(
 		"expiresDate":     now.Add(30 * 24 * time.Hour).UnixMilli(),
 		"price":           int64(4990),
 	})
-	if tamperTransaction {
-		parts := strings.Split(transaction, ".")
-		if parts[2][0] == 'A' {
-			parts[2] = "B" + parts[2][1:]
-		} else {
-			parts[2] = "A" + parts[2][1:]
-		}
-		transaction = strings.Join(parts, ".")
+	if options.tamperTransaction {
+		transaction = tamperAppleTestJws(transaction)
+	}
+	renewal := chain.sign(t, gojwt.MapClaims{
+		"signedDate":  now.UnixMilli(),
+		"bundleId":    nestedBundleId,
+		"environment": options.environment,
+		"productId":   "supporter_monthly_26",
+	})
+	if options.tamperRenewal {
+		renewal = tamperAppleTestJws(renewal)
 	}
 
 	return chain.sign(t, gojwt.MapClaims{
@@ -169,12 +187,24 @@ func appleTestSignedNotification(
 		"version":          appleNotificationVersion,
 		"signedDate":       now.UnixMilli(),
 		"data": map[string]any{
-			"bundleId":              bundleId,
-			"environment":           environment,
-			"appAppleId":            int64(6741000606),
+			"bundleId":              options.bundleId,
+			"environment":           options.environment,
+			"appAppleId":            options.appAppleId,
 			"signedTransactionInfo": transaction,
+			"signedRenewalInfo":     renewal,
 		},
 	})
+}
+
+// Corrupts a generated compact JWS without changing its signed claims.
+func tamperAppleTestJws(signed string) string {
+	parts := strings.Split(signed, ".")
+	if parts[2][0] == 'A' {
+		parts[2] = "B" + parts[2][1:]
+	} else {
+		parts[2] = "A" + parts[2][1:]
+	}
+	return strings.Join(parts, ".")
 }
 
 func appleTestVerifier(chain *appleTestCertificateChain, now time.Time) *appleNotificationVerifier {
@@ -195,26 +225,66 @@ func TestAppleNotificationVerifierTrustAndIdentity(t *testing.T) {
 	trustedChain := newAppleTestCertificateChain(t, now, now.Add(24*time.Hour))
 	verifier := appleTestVerifier(trustedChain, now)
 
-	happyPayload := appleTestSignedNotification(t, trustedChain, now, "network.ur", "Production", false)
+	happyPayload := appleTestSignedNotification(t, trustedChain, now, appleTestNotificationOptions{
+		bundleId:    "network.ur",
+		environment: "Production",
+	})
 	notification, err := verifier.verifyNotification(happyPayload)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, notification.TransactionInfo["transactionId"], "transaction-1")
+	connect.AssertEqual(t, notification.RenewalInfo["productId"], "supporter_monthly_26")
 
 	untrustedChain := newAppleTestCertificateChain(t, now, now.Add(24*time.Hour))
-	untrustedPayload := appleTestSignedNotification(t, untrustedChain, now, "network.ur", "Production", false)
+	untrustedPayload := appleTestSignedNotification(t, untrustedChain, now, appleTestNotificationOptions{
+		bundleId:    "network.ur",
+		environment: "Production",
+	})
 	_, err = verifier.verifyNotification(untrustedPayload)
 	connect.AssertEqual(t, err != nil, true)
 
-	tamperedPayload := appleTestSignedNotification(t, trustedChain, now, "network.ur", "Production", true)
+	tamperedPayload := appleTestSignedNotification(t, trustedChain, now, appleTestNotificationOptions{
+		bundleId:          "network.ur",
+		environment:       "Production",
+		tamperTransaction: true,
+	})
 	_, err = verifier.verifyNotification(tamperedPayload)
 	connect.AssertEqual(t, err != nil, true)
+	tamperedRenewalPayload := appleTestSignedNotification(t, trustedChain, now, appleTestNotificationOptions{
+		bundleId:      "network.ur",
+		environment:   "Production",
+		tamperRenewal: true,
+	})
+	_, err = verifier.verifyNotification(tamperedRenewalPayload)
+	connect.AssertEqual(t, err != nil, true)
 
-	wrongBundlePayload := appleTestSignedNotification(t, trustedChain, now, "other.bundle", "Production", false)
+	wrongBundlePayload := appleTestSignedNotification(t, trustedChain, now, appleTestNotificationOptions{
+		bundleId:    "other.bundle",
+		environment: "Production",
+	})
 	_, err = verifier.verifyNotification(wrongBundlePayload)
 	connect.AssertEqual(t, err != nil, true)
 
-	wrongEnvironmentPayload := appleTestSignedNotification(t, trustedChain, now, "network.ur", "Development", false)
+	wrongEnvironmentPayload := appleTestSignedNotification(t, trustedChain, now, appleTestNotificationOptions{
+		bundleId:    "network.ur",
+		environment: "Development",
+	})
 	_, err = verifier.verifyNotification(wrongEnvironmentPayload)
+	connect.AssertEqual(t, err != nil, true)
+
+	wrongAppPayload := appleTestSignedNotification(t, trustedChain, now, appleTestNotificationOptions{
+		bundleId:    "network.ur",
+		environment: "Production",
+		appAppleId:  1,
+	})
+	_, err = verifier.verifyNotification(wrongAppPayload)
+	connect.AssertEqual(t, err != nil, true)
+
+	nestedIdentityPayload := appleTestSignedNotification(t, trustedChain, now, appleTestNotificationOptions{
+		bundleId:       "network.ur",
+		environment:    "Production",
+		nestedBundleId: "other.bundle",
+	})
+	_, err = verifier.verifyNotification(nestedIdentityPayload)
 	connect.AssertEqual(t, err != nil, true)
 }
 
@@ -222,7 +292,10 @@ func TestAppleNotificationVerifierRejectsExpiredCertificate(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	expiredChain := newAppleTestCertificateChain(t, now, now.Add(-time.Hour))
 	verifier := appleTestVerifier(expiredChain, now)
-	payload := appleTestSignedNotification(t, expiredChain, now, "network.ur", "Production", false)
+	payload := appleTestSignedNotification(t, expiredChain, now, appleTestNotificationOptions{
+		bundleId:    "network.ur",
+		environment: "Production",
+	})
 
 	_, err := verifier.verifyNotification(payload)
 	connect.AssertEqual(t, err != nil, true)
@@ -238,11 +311,47 @@ func TestParseAppleRootCertificates(t *testing.T) {
 	connect.AssertEqual(t, len(certificates), 1)
 }
 
+func TestConfiguredAppleRootCertificates(t *testing.T) {
+	certificates, err := parseAppleRootCertificates(server.Config.RequireBytes("apple_roots.pem"))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, len(certificates), 3)
+
+	expectedCommonNames := map[string]bool{
+		"Apple Root CA":      true,
+		"Apple Root CA - G2": true,
+		"Apple Root CA - G3": true,
+	}
+	for _, certificate := range certificates {
+		commonName := certificate.Subject.CommonName
+		if !expectedCommonNames[commonName] {
+			t.Fatalf("unexpected configured Apple root %q", certificate.Subject.CommonName)
+		}
+		delete(expectedCommonNames, commonName)
+		if !certificate.IsCA {
+			t.Fatalf("configured Apple root %q is not a CA", certificate.Subject.CommonName)
+		}
+		if err := verifyAppleRootSelfSignature(certificate); err != nil {
+			t.Fatalf("configured Apple root %q is not self-signed: %v", certificate.Subject.CommonName, err)
+		}
+	}
+	if len(expectedCommonNames) != 0 {
+		t.Fatalf("configured Apple roots are missing common names: %v", expectedCommonNames)
+	}
+
+	tamperedRoot := *certificates[0]
+	tamperedRoot.Signature = append([]byte(nil), tamperedRoot.Signature...)
+	tamperedRoot.Signature[0] ^= 1
+	if err := validateAppleRootCertificate(&tamperedRoot); err == nil {
+		t.Fatal("configured Apple root validation accepted a tampered self-signature")
+	}
+}
+
 func TestAppleNotificationBodyLimit(t *testing.T) {
+	const maxAppleNotificationBytes = 1024 * 1024
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/apple-notification",
-		strings.NewReader(strings.Repeat("x", 1024*1024+1)),
+		strings.NewReader(strings.Repeat("x", maxAppleNotificationBytes+1)),
 	)
 	recorder := httptest.NewRecorder()
 

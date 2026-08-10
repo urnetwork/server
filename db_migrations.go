@@ -4645,4 +4645,196 @@ var migrations = []any{
 			process_time timestamp NOT NULL DEFAULT now()
 		)
 	`),
+
+	// The 2024 client_address_hash migration (network_client_connection,
+	// user_auth_attempt) missed the task tables and the network-create audit
+	// blob, all of which persisted the raw ip:port past the request:
+	// pending_task for the life of the task, finished_task for 24h, and
+	// audit_network_event.event_details permanently (no reaper). Store the
+	// peppered hash + port instead (server.ClientIpHash), matching the 2024
+	// columns. client_address keeps its NOT NULL shape with a '' default so
+	// old binaries keep working during a rolling deploy; new code writes ''.
+	// Once no pre-hash binaries remain, a follow-up migration can DROP
+	// client_address from both tables, mirroring user_auth_attempt.
+	newSqlMigration(`
+		ALTER TABLE pending_task
+			ADD COLUMN client_address_hash BYTEA NULL,
+			ADD COLUMN client_address_port int NOT NULL DEFAULT 0,
+			ALTER COLUMN client_address SET DEFAULT ''
+	`),
+	newSqlMigration(`
+		ALTER TABLE finished_task
+			ADD COLUMN client_address_hash BYTEA NULL,
+			ADD COLUMN client_address_port int NOT NULL DEFAULT 0,
+			ALTER COLUMN client_address SET DEFAULT ''
+	`),
+	// rewrite the raw addresses already persisted by the three call sites
+	newCodeMigration(migration_20260807_ScrubTaskAndAuditClientAddresses),
+
+	// Ledger of Stripe invoices that have already been credited, mirroring the
+	// apple_subscription_transaction shape: the insert (ON CONFLICT DO NOTHING)
+	// gates the credit inside the same tx, so an at-least-once invoice.paid
+	// delivery credits exactly once. Stripe was the only store path with no
+	// such gate.
+	newSqlMigration(`
+		CREATE TABLE stripe_invoice (
+			invoice_id varchar(128) NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// On-chain Solana payments the Helius webhook could not fulfil: no open
+	// intent matched (late or unknown reference) or the amount was under the
+	// quote. The money moved and Helius was acked 200 (it never re-examines a
+	// delivered tx), so without a row the only record was a log line. Each row
+	// carries enough to repair by hand: the tx signature, the amount received,
+	// the quote it was checked against when one matched, and the account keys
+	// the reference was searched among when none did.
+	newSqlMigration(`
+		CREATE TABLE solana_unfulfilled_payment (
+			tx_signature varchar(128) NOT NULL PRIMARY KEY,
+			reason varchar(32) NOT NULL,
+			token_amount_usd double precision NOT NULL,
+			expected_amount_usd double precision NULL,
+			payment_reference varchar(256) NULL,
+			network_id uuid NULL,
+			reference_candidates text NULL,
+			transaction_time timestamp NULL,
+			record_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// subscription_renewal was keyed by (network_id, subscription_type,
+	// end_time, start_time): a second market landing the IDENTICAL window
+	// upserted onto the first market's row, overwriting (not summing) revenue
+	// and keeping the first market/transaction_id -- so the second market was
+	// invisible to GetActiveSubscriptionRenewalMarkets (no cancel path) and
+	// uncancellable through UnsubscribeStripe. Include market in the key so
+	// each store keeps its own row. Existing rows are kept: the new key is a
+	// superset of the old, so no existing rows can collide, and NULL markets
+	// (rows predating the column) are normalized to '' first.
+	newSqlMigration(`
+		UPDATE subscription_renewal SET market = '' WHERE market IS NULL;
+		ALTER TABLE subscription_renewal ALTER COLUMN market SET DEFAULT '';
+		ALTER TABLE subscription_renewal ALTER COLUMN market SET NOT NULL;
+		ALTER TABLE subscription_renewal DROP CONSTRAINT subscription_renewal_pkey;
+		ALTER TABLE subscription_renewal ADD PRIMARY KEY (network_id, subscription_type, end_time, start_time, market)
+	`),
+
+	// Audit trail for the hourly payment reconciliation task (UPGRADE.md §8).
+	// Every repair the reconciler makes -- a credit for a lost webhook, an
+	// entitlement ended because the store says it is already over -- is a row
+	// here, with the store evidence id it acted on. Operator visibility is the
+	// point: a spike in repair counts IS the alarm that webhooks are broken. A
+	// run that repairs nothing writes only a heartbeat row (store = 'all'),
+	// and a store skipped for missing credentials writes a skipped_store row.
+	// action: credited | ended | skipped_store | heartbeat | error.
+	newSqlMigration(`
+		CREATE TABLE payment_reconciliation_event (
+			event_id uuid NOT NULL PRIMARY KEY,
+			run_id uuid NOT NULL,
+			store varchar(32) NOT NULL,
+			network_id uuid NULL,
+			action varchar(32) NOT NULL,
+			evidence varchar(256) NULL,
+			details text NULL,
+			event_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX payment_reconciliation_event_run_id ON payment_reconciliation_event (run_id)
+	`),
+	newSqlMigration(`
+		CREATE INDEX payment_reconciliation_event_store_action_event_time
+			ON payment_reconciliation_event (store, action, event_time)
+	`),
+
+	// Per-store incremental watermark for the reconciler's store-side listings
+	// (e.g. Stripe invoices created since the last successful run). A sibling
+	// of the event table rather than a row-kind inside it: the watermark is
+	// one mutable upsert-in-place value per store, while events are an
+	// append-only audit trail -- mixing them would make "the watermark" a
+	// MAX() over audit rows that must then never be pruned.
+	newSqlMigration(`
+		CREATE TABLE payment_reconciliation_watermark (
+			store varchar(32) NOT NULL PRIMARY KEY,
+			watermark_time timestamp NOT NULL,
+			update_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// Dry-run audit support for manual reconciliation runs (bringyourctl
+	// payments reconcile --dry-run). A dry run records would_credit /
+	// would_end events -- the same evidence and details the real repair would
+	// carry -- plus its own heartbeat/error rows, all tagged dry_run = true.
+	// The default false keeps every existing query correct: operator queries
+	// over real repairs, heartbeats, and errors exclude dry runs without
+	// changing.
+	newSqlMigration(`
+		ALTER TABLE payment_reconciliation_event
+			ADD COLUMN dry_run bool NOT NULL DEFAULT false
+	`),
+
+	// Last emitted provider audit state per device, maintained by
+	// SweepProviderAuditEvents (model/audit_provider_sweep_model.go). The sweep
+	// diffs the live provider set (public provide key + connected connection)
+	// against this table and appends real online/offline transitions to
+	// audit_provider_event -- the feed ComputeStats90 aggregates. Kept separate
+	// from the append-only event table so the sweep reads one small
+	// current-state row per device instead of a per-device latest-event scan.
+	newSqlMigration(`
+		CREATE TABLE audit_provider_state (
+			device_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			online bool NOT NULL,
+			superspeed bool NOT NULL,
+			country_name varchar(128) NOT NULL,
+			region_name varchar(128) NOT NULL,
+			city_name varchar(128) NOT NULL,
+			event_time timestamp NOT NULL,
+
+			PRIMARY KEY (device_id)
+		)
+	`),
+
+	// Last emitted device audit state per client, maintained by
+	// SweepDeviceAuditEvents -- the audit_provider_state analog for the
+	// devices series (device connected-per-day; every connected client, not
+	// just providers).
+	newSqlMigration(`
+		CREATE TABLE audit_device_state (
+			device_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			online bool NOT NULL,
+			event_time timestamp NOT NULL,
+
+			PRIMARY KEY (device_id)
+		)
+	`),
+
+	// Real-time Stripe refund/dispute clawback (UPGRADE.md §2 S7).
+	// stripe_refund is the idempotency ledger: a refund is delivered via BOTH
+	// charge.refunded and refund.created, so the clawback is keyed on the
+	// refund (or dispute) id and the insert gates the clawback inside the
+	// same tx -- the stripe_invoice shape, pointed the other way. network_id
+	// and action record the outcome for the operator (also mirrored into
+	// payment_reconciliation_event).
+	newSqlMigration(`
+		CREATE TABLE stripe_refund (
+			refund_id varchar(128) NOT NULL PRIMARY KEY,
+			charge_id varchar(128) NOT NULL,
+			network_id uuid NULL,
+			action varchar(32) NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// A refunded-but-unredeemed balance code is VOIDED by stamping
+	// cancel_time: the redeem and check paths exclude cancelled codes, so a
+	// code whose charge was refunded can never be redeemed afterwards. NULL =
+	// live, matching the redeem_balance_id convention on the same table.
+	newSqlMigration(`
+		ALTER TABLE transfer_balance_code ADD COLUMN cancel_time timestamp NULL
+	`),
 }

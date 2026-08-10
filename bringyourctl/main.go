@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -54,7 +55,12 @@ Usage:
     bringyourctl stats diff-samples --a=<path> --b=<path> [--json] [--label-a=<label>] [--label-b=<label>]
     bringyourctl stats providers-map
     bringyourctl stats import
-    bringyourctl stats add
+    bringyourctl stats migrate-202608
+    bringyourctl stats sweep-providers
+    bringyourctl stats rollup-transfer [--start=<date>] [--end=<date>]
+    bringyourctl stats backfill [--start=<date>] [--end=<date>]
+    bringyourctl stats purge-samples
+    bringyourctl stats add-sample
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
@@ -67,6 +73,7 @@ Usage:
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send payout-email --user_auth=<user_auth>
     bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
+    bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
@@ -127,6 +134,7 @@ Options:
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
+    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, or solana.
     -c --count=<count>	Number to process [default: 1000].`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
@@ -177,8 +185,18 @@ Options:
 			statsProvidersMap(opts)
 		} else if import_, _ := opts.Bool("import"); import_ {
 			statsImport(opts)
-		} else if add, _ := opts.Bool("add"); add {
-			statsAdd(opts)
+		} else if migrate202608, _ := opts.Bool("migrate-202608"); migrate202608 {
+			statsMigrate202608(opts)
+		} else if sweepProviders, _ := opts.Bool("sweep-providers"); sweepProviders {
+			statsSweepProviders(opts)
+		} else if rollupTransfer, _ := opts.Bool("rollup-transfer"); rollupTransfer {
+			statsRollupTransfer(opts)
+		} else if backfill, _ := opts.Bool("backfill"); backfill {
+			statsBackfill(opts)
+		} else if purgeSamples, _ := opts.Bool("purge-samples"); purgeSamples {
+			statsPurgeSamples(opts)
+		} else if addSample, _ := opts.Bool("add-sample"); addSample {
+			statsAddSample(opts)
 		}
 	} else if locations, _ := opts.Bool("locations"); locations {
 		if addDefault, _ := opts.Bool("add-default"); addDefault {
@@ -211,6 +229,10 @@ Options:
 			sendPayoutEmail(opts)
 		} else if networkUserInterviewRequest1, _ := opts.Bool("network-user-interview-request-1"); networkUserInterviewRequest1 {
 			sendNetworkUserInterviewRequest1(opts)
+		}
+	} else if payments, _ := opts.Bool("payments"); payments {
+		if reconcile, _ := opts.Bool("reconcile"); reconcile {
+			paymentsReconcile(opts)
 		}
 	} else if payout, _ := opts.Bool("payout"); payout {
 		if single, _ := opts.Bool("single"); single {
@@ -723,8 +745,170 @@ func statsImport(opts docopt.Opts) {
 	}
 }
 
-func statsAdd(opts docopt.Opts) {
-	controller.AddSampleEvents(context.Background(), 4*60)
+// statsMigrate202608 executes the STATS3.md deploy runbook in order:
+//
+//  1. db migrate    — applies ALL pending db migrations (bringyourctl's
+//     migrate has no per-feature subset; the stats migration rides along)
+//  2. purge-samples — delete the fake sample-generator audit rows
+//  3. sweep-providers — seed today's real provider snapshot
+//  4. backfill      — reconstruct provider history from client_reliability
+//     (default full reach) + roll up settled-transfer days
+//  5. stats export  — refresh the public /stats/last-90 redis blob now
+//
+// Every step is idempotent, so the SEQUENCE is safe to re-run from the top
+// after a failure: migrations are versioned no-ops once applied, purge
+// deletes only whatever sample rows remain, the sweep emits only unrecorded
+// transitions, backfill replaces its own provenance-marked rows, and export
+// overwrites the blob. A step failure stops the sequence and reports which
+// steps completed.
+func statsMigrate202608(opts docopt.Opts) {
+	ctx := context.Background()
+
+	type step struct {
+		name string
+		run  func() string
+	}
+	steps := []step{
+		{
+			name: "db migrate",
+			run: func() string {
+				server.ApplyDbMigrations(ctx)
+				return "applied all pending migrations (bringyourctl migrate has no per-feature subset)"
+			},
+		},
+		{
+			name: "purge-samples",
+			run: func() string {
+				providerCount, contractCount := model.PurgeSampleAuditEvents(ctx)
+				return fmt.Sprintf("purged %d sample provider events, %d sample contract events", providerCount, contractCount)
+			},
+		},
+		{
+			name: "sweep-providers",
+			run: func() string {
+				onlineCount, offlineCount := model.SweepProviderAuditEvents(ctx)
+				addedCount, removedCount := model.SweepDeviceAuditEvents(ctx)
+				return fmt.Sprintf(
+					"%d providers online, %d offline; %d devices added, %d removed",
+					onlineCount, offlineCount, addedCount, removedCount,
+				)
+			},
+		},
+		{
+			name: "backfill",
+			run: func() string {
+				start := server.NowUtc().Add(-model.ClientExpiration)
+				end := server.NowUtc()
+				eventCount := model.BackfillProviderAuditEvents(ctx, start, end)
+				deviceEventCount := model.BackfillDeviceAuditEvents(ctx, start, end)
+				dayCount := model.RollupTransferAuditEvents(ctx, start, end)
+				return fmt.Sprintf(
+					"%d provider events, %d device events, %d transfer rollup days",
+					eventCount, deviceEventCount, dayCount,
+				)
+			},
+		},
+		{
+			name: "stats export",
+			run: func() string {
+				stats := model.ComputeStats(ctx, 90)
+				model.ExportStats(ctx, stats)
+				return "refreshed redis stats.last-90"
+			},
+		},
+	}
+
+	fmt.Printf("stats migrate-202608: %d steps; every step is idempotent, so this command is safe to re-run from the top\n", len(steps))
+	for i, s := range steps {
+		startTime := time.Now()
+		outcome, err := func() (outcome string, err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("%v", r)
+				}
+			}()
+			return s.run(), nil
+		}()
+		elapsed := time.Since(startTime).Round(time.Millisecond)
+		if err != nil {
+			fmt.Printf("[%d/%d] %s FAILED after %s: %v\n", i+1, len(steps), s.name, elapsed, err)
+			fmt.Printf("completed steps: %d of %d; the sequence stopped at %q.\n", i, len(steps), s.name)
+			fmt.Printf("every step is idempotent — fix the failure and re-run `bringyourctl stats migrate-202608` from the top.\n")
+			os.Exit(1)
+		}
+		fmt.Printf("[%d/%d] %s ok in %s — %s\n", i+1, len(steps), s.name, elapsed, outcome)
+	}
+	fmt.Printf("stats migrate-202608 complete\n")
+}
+
+// statsSweepProviders runs one provider + device audit sweep immediately (the
+// taskworker runs both on a schedule). On a fresh deploy this seeds the feed
+// with the current real provider AND connected-device snapshots so
+// /stats/last-90 is not empty on day one.
+func statsSweepProviders(opts docopt.Opts) {
+	ctx := context.Background()
+	onlineCount, offlineCount := model.SweepProviderAuditEvents(ctx)
+	fmt.Printf("provider audit sweep: %d online, %d offline\n", onlineCount, offlineCount)
+	addedCount, removedCount := model.SweepDeviceAuditEvents(ctx)
+	fmt.Printf("device audit sweep: %d added, %d removed\n", addedCount, removedCount)
+}
+
+// statsDayRange parses --start/--end (YYYY-MM-DD, UTC) with defaults.
+func statsDayRange(opts docopt.Opts, defaultLookback time.Duration) (time.Time, time.Time) {
+	now := server.NowUtc()
+	start := now.Add(-defaultLookback)
+	end := now
+	if s, err := opts.String("--start"); err == nil && s != "" {
+		t, err := time.ParseInLocation("2006-01-02", s, time.UTC)
+		server.Raise(err)
+		start = t
+	}
+	if s, err := opts.String("--end"); err == nil && s != "" {
+		t, err := time.ParseInLocation("2006-01-02", s, time.UTC)
+		server.Raise(err)
+		end = t
+	}
+	return start, end
+}
+
+// statsRollupTransfer (re-)rolls the daily settled-transfer audit rows for a
+// day range. Idempotent per day.
+func statsRollupTransfer(opts docopt.Opts) {
+	start, end := statsDayRange(opts, model.CompletedContractExpiration)
+	dayCount := model.RollupTransferAuditEvents(context.Background(), start, end)
+	fmt.Printf("transfer audit rollup: %d days\n", dayCount)
+}
+
+// statsBackfill reconstructs recent REAL provider history from the
+// client_reliability blocks (reach bounded by that table's ~30 day retention)
+// and rolls up the settled-transfer days still present in the contract
+// tables. Explicitly labeled reconstruction (event_details provenance
+// markers), idempotent by replacement — see model.BackfillProviderAuditEvents
+// for the stated approximations. It does NOT fabricate history beyond what
+// the real tables retain.
+func statsBackfill(opts docopt.Opts) {
+	ctx := context.Background()
+	start, end := statsDayRange(opts, model.ClientExpiration)
+	eventCount := model.BackfillProviderAuditEvents(ctx, start, end)
+	fmt.Printf("provider audit backfill: %d events\n", eventCount)
+	deviceEventCount := model.BackfillDeviceAuditEvents(ctx, start, end)
+	fmt.Printf("device audit backfill: %d events (provider-population coverage only pre-deploy)\n", deviceEventCount)
+	dayCount := model.RollupTransferAuditEvents(ctx, start, end)
+	fmt.Printf("transfer audit rollup: %d days\n", dayCount)
+}
+
+// statsPurgeSamples deletes the fake sample-generator rows (NULL
+// event_details) from the provider and contract audit feeds. Until 2026-08
+// the sample generator was the only writer of those feeds, so in production
+// this removes exactly the fake "Palo Alto" data.
+func statsPurgeSamples(opts docopt.Opts) {
+	providerCount, contractCount := model.PurgeSampleAuditEvents(context.Background())
+	fmt.Printf("purged %d sample provider events, %d sample contract events\n", providerCount, contractCount)
+}
+
+func statsAddSample(opts docopt.Opts) {
+	err := controller.AddSampleEventsForTesting(context.Background(), 4*60)
+	server.Raise(err)
 }
 
 func locationsAddDefault(opts docopt.Opts) {
@@ -1271,6 +1455,150 @@ func payoutPlanApplyBonus(opts docopt.Opts) {
 	}
 
 	model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents)
+}
+
+// paymentsReconcile runs one payment reconciliation pass (UPGRADE.md §8) by
+// hand -- the same controller orchestrator the hourly task runs, never a
+// separate implementation. --dry-run audits what a real run WOULD repair
+// without changing anything: store reads happen for real, every write
+// (credit, ended entitlement, unfulfilled-record clearing, watermark advance)
+// is suppressed, and each suppressed repair is a would_credit/would_end audit
+// row tagged dry_run. A real run holds the same run-level advisory lock the
+// task path holds, so a CLI run and the hourly task can never interleave --
+// whichever starts second reports busy and exits. Exits non-zero if any store
+// errored.
+func paymentsReconcile(opts docopt.Opts) {
+	ctx := context.Background()
+
+	dryRun, _ := opts.Bool("--dry-run")
+	options := &controller.PaymentReconcileRunOptions{
+		DryRun: dryRun,
+	}
+
+	allStores := []string{
+		model.SubscriptionMarketStripe,
+		model.SubscriptionMarketApple,
+		model.SubscriptionMarketGoogle,
+		model.SubscriptionMarketSolana,
+	}
+	stores := allStores
+	if store, _ := opts.String("--store"); store != "" {
+		if !slices.Contains(allStores, store) {
+			fmt.Printf("unknown store %q (expected stripe, apple, google, or solana)\n", store)
+			os.Exit(1)
+		}
+		options.Stores = []string{store}
+		stores = options.Stores
+	}
+
+	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+	result, err := controller.RunPaymentReconciliationWithOptions(clientSession, options)
+	if err != nil {
+		if errors.Is(err, controller.ErrPaymentReconcileRunInProgress) {
+			fmt.Println("another reconciliation run (the hourly task or another CLI run) holds the run lock; try again when it finishes")
+		} else {
+			fmt.Printf("reconciliation failed: %s\n", err)
+		}
+		os.Exit(1)
+	}
+
+	if result.DryRun {
+		fmt.Printf("payment reconciliation DRY RUN %s -- audit only, nothing was changed\n", result.RunId)
+	} else {
+		fmt.Printf("payment reconciliation run %s\n", result.RunId)
+	}
+
+	creditLabel, endLabel := "credited", "ended"
+	if result.DryRun {
+		creditLabel, endLabel = "would-credit", "would-end"
+	}
+	fmt.Println()
+	fmt.Printf("%-8s %9s %13s %10s %7s  %s\n", "store", "examined", creditLabel, endLabel, "errors", "notes")
+	fmt.Println(strings.Repeat("-", 78))
+	for _, store := range stores {
+		summary := result.StoreResults[store]
+		if summary == nil {
+			summary = &controller.PaymentReconcileStoreResult{}
+		}
+		notes := []string{}
+		if summary.Skipped {
+			notes = append(notes, "skipped: missing credentials")
+		}
+		if summary.BudgetExhausted {
+			notes = append(notes, "api budget exhausted (next run continues)")
+		}
+		if 0 < summary.EmailFallbacks {
+			notes = append(notes, fmt.Sprintf("email fallbacks: %d", summary.EmailFallbacks))
+		}
+		fmt.Printf(
+			"%-8s %9d %13d %10d %7d  %s\n",
+			store, summary.Examined, summary.Credited, summary.Ended, summary.Errors,
+			strings.Join(notes, "; "),
+		)
+	}
+
+	// the per-action audit lines, straight from the run's audit rows
+	actionLines := 0
+	for _, event := range model.GetPaymentReconciliationEvents(ctx, result.RunId) {
+		switch event.Action {
+		case model.PaymentReconcileActionHeartbeat, model.PaymentReconcileActionSkippedStore:
+			continue
+		}
+		if actionLines == 0 {
+			fmt.Println()
+		}
+		actionLines += 1
+		networkStr := "-"
+		if event.NetworkId != nil {
+			networkStr = event.NetworkId.String()
+		}
+		detailsStr := ""
+		if 0 < len(event.Details) {
+			if detailsJson, err := json.Marshal(event.Details); err == nil {
+				detailsStr = string(detailsJson)
+			}
+		}
+		fmt.Printf(
+			"  [%s] %-12s network=%s evidence=%s %s\n",
+			event.Store, event.Action, networkStr, event.Evidence, detailsStr,
+		)
+	}
+
+	// S11: every invoice.paid credit since the last watermark that resolved
+	// its network by the LEGACY customer-email fallback -- surfaced so any use
+	// is explicit, until the fallback can be retired
+	if 0 < len(result.EmailFallbackEvents) {
+		fmt.Println()
+		fmt.Printf(
+			"stripe email-fallback credits since the last watermark (%d) -- legacy invoices resolved by customer email (UPGRADE.md S11):\n",
+			len(result.EmailFallbackEvents),
+		)
+		for _, event := range result.EmailFallbackEvents {
+			networkStr := "-"
+			if event.NetworkId != nil {
+				networkStr = event.NetworkId.String()
+			}
+			detailsStr := ""
+			if 0 < len(event.Details) {
+				if detailsJson, err := json.Marshal(event.Details); err == nil {
+					detailsStr = string(detailsJson)
+				}
+			}
+			fmt.Printf(
+				"  [%s] invoice=%s network=%s %s\n",
+				event.EventTime.UTC().Format(time.RFC3339), event.Evidence, networkStr, detailsStr,
+			)
+		}
+	}
+
+	fmt.Println()
+	fmt.Printf(
+		"%s %d, %s %d, errors %d, skipped %v\n",
+		creditLabel, result.Credited, endLabel, result.Ended, result.Errors, result.SkippedStores,
+	)
+	if 0 < result.Errors {
+		os.Exit(1)
+	}
 }
 
 func adminWalletEstimateFee(opts docopt.Opts) {

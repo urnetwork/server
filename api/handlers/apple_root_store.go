@@ -8,6 +8,9 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -172,9 +175,15 @@ func validateAppleRootCertificate(rootCertificate *x509.Certificate) error {
 	if !rootCertificate.IsCA || !rootCertificate.BasicConstraintsValid {
 		return errors.New("Apple root certificate is not a valid CA")
 	}
-	if !bytes.Equal(rootCertificate.RawIssuer, rootCertificate.RawSubject) ||
-		rootCertificate.CheckSignatureFrom(rootCertificate) != nil {
-		return errors.New("Apple root certificate is not self-signed")
+	if rootCertificate.Issuer.String() != rootCertificate.Subject.String() {
+		return fmt.Errorf(
+			"Apple root certificate issuer %q does not match subject %q",
+			rootCertificate.Issuer.String(),
+			rootCertificate.Subject.String(),
+		)
+	}
+	if err := verifyAppleRootSelfSignature(rootCertificate); err != nil {
+		return fmt.Errorf("Apple root certificate self-signature is invalid: %w", err)
 	}
 	organizationIsApple := false
 	for _, organization := range rootCertificate.Subject.Organization {
@@ -187,4 +196,24 @@ func validateAppleRootCertificate(rootCertificate *x509.Certificate) error {
 		return errors.New("root certificate is not issued by Apple Inc.")
 	}
 	return nil
+}
+
+// Checks trust-anchor integrity, including Apple's legacy SHA-1 root.
+func verifyAppleRootSelfSignature(rootCertificate *x509.Certificate) error {
+	if err := rootCertificate.CheckSignatureFrom(rootCertificate); err == nil {
+		return nil
+	} else if rootCertificate.SignatureAlgorithm != x509.SHA1WithRSA {
+		return err
+	}
+
+	// Apple's original root uses a SHA-1 self-signature, which crypto/x509
+	// intentionally refuses for certificate chains. A root's self-signature
+	// does not establish trust—the configured certificate already is the trust
+	// anchor—but checking it still catches corrupt or incomplete root data.
+	publicKey, ok := rootCertificate.PublicKey.(*rsa.PublicKey)
+	if !ok {
+		return errors.New("Apple SHA-1 root does not carry an RSA public key")
+	}
+	digest := sha1.Sum(rootCertificate.RawTBSCertificate)
+	return rsa.VerifyPKCS1v15(publicKey, crypto.SHA1, digest[:], rootCertificate.Signature)
 }

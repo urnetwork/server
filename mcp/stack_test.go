@@ -112,8 +112,10 @@ type fetchTestStack struct {
 	closeOnce sync.Once
 }
 
+// Selects production security policy and optional target-request observation.
 type fetchTestStackOptions struct {
 	disableSecurityPolicies bool
+	onWebRequest            func()
 }
 
 // Tears down the stack. Admission is stopped before the root ctx is canceled:
@@ -157,31 +159,20 @@ type fetchTestPorts struct {
 	https int
 }
 
-// Binds ephemeral ports and hands them back with a release func, so the proxy
-// servers can claim ports the OS is not about to hand to something else.
+// reserveFetchTestPorts allocates the proxy http/https listen ports through
+// server.ReserveTestListenPorts: probed on the wildcard address the servers
+// actually bind, from below the OS ephemeral range so the release -> bind
+// window cannot lose a port to the process's own outbound dials (see the
+// allocator doc in server/test_util.go; certification failure c12-1).
 func reserveFetchTestPorts(t testing.TB) (*fetchTestPorts, func()) {
-	var reservations []io.Closer
-	reserveTcp := func() int {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("reserve tcp test port: %v", err)
-		}
-		reservations = append(reservations, listener)
-		return listener.Addr().(*net.TCPAddr).Port
+	ports, release, err := server.ReserveTestListenPorts("tcp", "tcp")
+	if err != nil {
+		t.Fatalf("reserve fetch test ports: %v", err)
 	}
-	ports := &fetchTestPorts{
-		http:  reserveTcp(),
-		https: reserveTcp(),
-	}
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() {
-			for _, reservation := range reservations {
-				reservation.Close()
-			}
-		})
-	}
-	return ports, release
+	return &fetchTestPorts{
+		http:  ports[0],
+		https: ports[1],
+	}, release
 }
 
 // An already-bound listener, so an in-process server keeps its OS-assigned
@@ -283,8 +274,9 @@ func seedFetchTestProxyClientIpv4(t testing.TB, ctx context.Context) {
 
 // Starts the local web server on 127.0.0.1. The index page references its
 // sub-resources both relatively and by absolute url, so a fetch that follows
-// sub-resources exercises both forms against the same origin.
-func startFetchTestWebServer(t testing.TB) *httptest.Server {
+// sub-resources exercises both forms against the same origin. The callback,
+// when present, observes every request before the route handler runs.
+func startFetchTestWebServer(t testing.TB, onWebRequest func()) *httptest.Server {
 	pngBytes, err := base64.StdEncoding.DecodeString(fetchTestPngBase64)
 	if err != nil {
 		t.Fatalf("decode test png: %v", err)
@@ -363,7 +355,12 @@ img { image-rendering: pixelated; }
 `, fetchTestPageMarker, fetchTestPageMarker, webServer.URL)
 	})
 
-	webServer = httptest.NewServer(mux)
+	webServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if onWebRequest != nil {
+			onWebRequest()
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	return webServer
 }
 
@@ -381,7 +378,7 @@ func setupFetchTestStackWithOptions(t testing.TB, options *fetchTestStackOptions
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// ---- the local web server the provider egresses to -----------------------
-	webServer := startFetchTestWebServer(t)
+	webServer := startFetchTestWebServer(t, options.onWebRequest)
 
 	// ---- local connect server (plain ws, in-process) -------------------------
 	connectHost := "fetchtest"

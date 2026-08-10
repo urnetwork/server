@@ -333,12 +333,7 @@ func fetchTool(
 	if includeResources == "" {
 		includeResources = includeResourcesLinks
 	}
-	if maxResourceBytes <= 0 {
-		maxResourceBytes = fetchDefaultMaxResourceBytes
-	}
-	if fetchMaxResourceBytes < maxResourceBytes {
-		maxResourceBytes = fetchMaxResourceBytes
-	}
+	maxResourceBytes = fetchResourceByteLimit(maxResourceBytes)
 
 	// resources are embedded until the budget runs out; whatever is left is
 	// handed back as a continuation rather than dropped silently
@@ -355,12 +350,11 @@ func fetchTool(
 			break
 		}
 
-		remainingEmbeddedBytes := fetchMaxEmbeddedBytes - embeddedBytes
-		if remainingEmbeddedBytes <= 0 {
+		resourceByteLimit := fetchEmbeddedResourceByteLimit(maxResourceBytes, embeddedBytes)
+		if resourceByteLimit <= 0 {
 			remaining = append(remaining, pending[i:]...)
 			break
 		}
-		resourceByteLimit := min(maxResourceBytes, remainingEmbeddedBytes)
 		resource, err := fetchOne(
 			budgetCtx,
 			httpClient,
@@ -450,6 +444,23 @@ func fetchTool(
 	contents = append(contents, &mcpsdk.TextContent{Text: out.NextStep})
 
 	return &mcpsdk.CallToolResult{Content: contents}, out, nil
+}
+
+// Applies the default and absolute per-resource ceiling to caller input.
+func fetchResourceByteLimit(requested int) int {
+	if requested <= 0 {
+		return fetchDefaultMaxResourceBytes
+	}
+	return min(requested, fetchMaxResourceBytes)
+}
+
+// Caps the next resource by both its own and the remaining call byte budgets.
+func fetchEmbeddedResourceByteLimit(requested int, embeddedBytes int) int {
+	remainingBytes := fetchMaxEmbeddedBytes - embeddedBytes
+	if remainingBytes <= 0 {
+		return 0
+	}
+	return min(fetchResourceByteLimit(requested), remainingBytes)
 }
 
 // One loaded url.

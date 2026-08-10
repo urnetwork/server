@@ -280,3 +280,91 @@ func TestStripeCheckoutInlineNeverRedirect(t *testing.T) {
 	// without never, embedded still demands its return_url
 	connect.AssertEqual(t, stripeCheckoutApplyUiMode(&stripe.CheckoutSessionParams{}, StripeUiModeEmbedded, false, noUrls), false)
 }
+
+// TestStripeCheckoutFulfillsEveryLineAndQuantity pins the S10 fixes: a checkout
+// session with several line items fulfils EVERY line (the per-session purchase
+// event key used to make the second line a "duplicate" of the first), quantity
+// multiplies the data delivered (two units on one line were paid twice and
+// delivered once), and a session with a known network but NO email still credits
+// (it used to error out before crediting and stay unfulfilled forever once
+// Stripe's retry window lapsed).
+func TestStripeCheckoutFulfillsEveryLineAndQuantity(t *testing.T) {
+	skipWithoutProYml(t)
+
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		prevSkus := stripeSkusFunc
+		stripeSkusFunc = func() map[string]*Sku {
+			return map[string]*Sku{
+				"prod_1tib": {
+					FeeFraction:                   0.3,
+					BalanceByteCountHumanReadable: "1tib",
+				},
+				"prod_10tib": {
+					FeeFraction:                   0.3,
+					BalanceByteCountHumanReadable: "10tib",
+				},
+			}
+		}
+		defer func() { stripeSkusFunc = prevSkus }()
+
+		networkId := server.NewId()
+
+		// two line items on one session, the first with quantity 2, NO email --
+		// the network is known, so the credit must land anyway
+		lineItems := []*StripeLineItem{
+			{
+				Id:          "li_1",
+				AmountTotal: 1000,
+				Quantity:    2,
+				Price:       &StripeLineItemProduct{Product: "prod_1tib"},
+			},
+			{
+				Id:          "li_2",
+				AmountTotal: 3000,
+				Quantity:    1,
+				Price:       &StripeLineItemProduct{Product: "prod_10tib"},
+			},
+		}
+
+		err := stripeFulfillCheckoutLineItems(
+			ctx,
+			"cs_test_multiline_1",
+			lineItems,
+			"", // no email: the known network is the delivery mechanism
+			&networkId,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		// BOTH lines landed, and the quantity-2 line delivered twice the data
+		balances := model.GetActiveTransferBalances(ctx, networkId)
+		connect.AssertEqual(t, len(balances), 2)
+		byteCounts := map[model.ByteCount]bool{}
+		for _, balance := range balances {
+			byteCounts[balance.BalanceByteCount] = true
+			connect.AssertEqual(t, balance.Pro, false)
+		}
+		connect.AssertEqual(t, byteCounts[2*model.Tib], true)  // 1 TiB x quantity 2
+		connect.AssertEqual(t, byteCounts[10*model.Tib], true) // 10 TiB x quantity 1
+
+		// a Stripe retry of the SAME session fulfils nothing twice: both line keys
+		// are already in the ledger
+		err = stripeFulfillCheckoutLineItems(
+			ctx,
+			"cs_test_multiline_1",
+			lineItems,
+			"",
+			&networkId,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 2)
+
+		// the first line keeps the BARE session id as its key, so sessions
+		// fulfilled before per-line keys existed stay idempotent on retry
+		_, err = model.GetBalanceCodeIdForPurchaseEventId(ctx, "cs_test_multiline_1")
+		connect.AssertEqual(t, err, nil)
+		_, err = model.GetBalanceCodeIdForPurchaseEventId(ctx, "cs_test_multiline_1/1")
+		connect.AssertEqual(t, err, nil)
+	})
+}

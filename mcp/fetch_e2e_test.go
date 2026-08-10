@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,7 +267,12 @@ func TestFetchNonPublicTargetTimesOutThroughConnect(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		stack := setupFetchTestStackWithOptions(t, &fetchTestStackOptions{})
+		var targetRequestCount atomic.Int64
+		stack := setupFetchTestStackWithOptions(t, &fetchTestStackOptions{
+			onWebRequest: func() {
+				targetRequestCount.Add(1)
+			},
+		})
 		defer stack.close()
 		defer useFetchTestStack(stack)()
 
@@ -279,6 +285,7 @@ func TestFetchNonPublicTargetTimesOutThroughConnect(t *testing.T) {
 			fetchCallBudget = originalFetchCallBudget
 		}()
 
+		requestCountBeforeFetch := targetRequestCount.Load()
 		startTime := time.Now()
 		result, err := session.CallTool(stack.ctx, &mcpsdk.CallToolParams{
 			Name: "fetch",
@@ -296,5 +303,6 @@ func TestFetchNonPublicTargetTimesOutThroughConnect(t *testing.T) {
 			strings.Contains(errorMessage, "timeout") || strings.Contains(errorMessage, "deadline exceeded"),
 			true,
 		)
+		connect.AssertEqual(t, targetRequestCount.Load(), requestCountBeforeFetch)
 	})
 }

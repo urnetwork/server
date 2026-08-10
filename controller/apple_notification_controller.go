@@ -41,29 +41,31 @@ func ProcessAppleNotification(
 	}
 
 	actionable := notification.NotificationType == "SUBSCRIBED" || notification.NotificationType == "DID_RENEW"
+	// REFUND / REVOKE: Apple returned the money (or revoked family-shared
+	// access) -- the transaction's entitlement must END now (UPGRADE.md §2 S7).
+	// Verified through the SAME pinned-root path as SUBSCRIBED/DID_RENEW (this
+	// function only ever sees already-verified claims), and the transaction is
+	// validated the same way minus the entitlement fields a revocation payload
+	// need not carry.
+	revocation := notification.NotificationType == "REFUND" || notification.NotificationType == "REVOKE"
 	var transaction *validatedAppleTransaction
 	if notification.TransactionInfo != nil {
 		transaction, err = validateAppleTransaction(notification, allowedProductIds, actionable)
 		if err != nil {
 			return false, err
 		}
-	} else if actionable || notification.NotificationType == "EXPIRED" {
+	} else if actionable || revocation || notification.NotificationType == "EXPIRED" {
 		return false, errors.New("missing verified transaction claims")
 	}
 
+	var revokedNetworkIds []server.Id
 	server.Tx(ctx, func(tx server.PgTx) {
 		processed = false
 		returnErr = nil
+		revokedNetworkIds = nil
 
 		if transaction != nil {
-			var networkExists bool
-			result, err := tx.Query(ctx, `SELECT EXISTS (SELECT 1 FROM network WHERE network_id = $1)`, transaction.networkId)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&networkExists))
-				}
-			})
-			if !networkExists {
+			if !appleNetworkExistsInTx(tx, ctx, transaction.networkId) {
 				returnErr = errors.New("App Store account token does not name an existing network")
 				return
 			}
@@ -86,59 +88,131 @@ func ProcessAppleNotification(
 			notification.Subtype,
 			time.UnixMilli(notification.SignedDate),
 		))
-		if notificationTag.RowsAffected() == 0 || !actionable {
+		if notificationTag.RowsAffected() == 0 || !(actionable || revocation) {
 			return
 		}
 
-		transactionTag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO apple_subscription_transaction (
-					transaction_id,
-					notification_uuid,
-					network_id,
-					product_id
-				)
-				VALUES ($1, $2, $3, $4)
-				ON CONFLICT DO NOTHING
-			`,
-			transaction.transactionId,
-			notificationId,
-			transaction.networkId,
-			transaction.productId,
-		))
-		if transactionTag.RowsAffected() == 0 {
+		if revocation {
+			// End the transaction's renewal and the pro balance it granted; the
+			// apple_subscription_transaction ledger row STAYS as history (it is
+			// the idempotency gate for the credit, and the credit did happen).
+			// Idempotent two ways: the notification ledger above absorbs a
+			// redelivery, and the end itself only touches windows still in the
+			// future -- so a REFUND after a REVOKE (or after natural expiry)
+			// ends nothing twice.
+			revokedNetworkIds = model.EndReconciledEntitlementForTransactionsInTx(
+				tx,
+				ctx,
+				model.SubscriptionMarketApple,
+				[]string{transaction.transactionId},
+				server.NowUtc(),
+			)
+			if eventErr := model.AddPaymentReconciliationEventInTx(tx, ctx, &model.PaymentReconciliationEvent{
+				RunId:     server.NewId(),
+				Store:     model.SubscriptionMarketApple,
+				NetworkId: &transaction.networkId,
+				Action:    model.PaymentReconcileActionRevoked,
+				Evidence:  transaction.transactionId,
+				Details: map[string]any{
+					"notification_type": notification.NotificationType,
+					"subtype":           notification.Subtype,
+					"ended":             0 < len(revokedNetworkIds),
+				},
+			}); eventErr != nil {
+				// the event commits with the clawback or neither does; Apple
+				// retries the notification
+				server.Raise(eventErr)
+			}
 			return
 		}
 
-		endTime := transaction.expiresTime.Add(SubscriptionGracePeriod)
-		renewal := &model.SubscriptionRenewal{
-			NetworkId:          transaction.networkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          transaction.purchaseTime,
-			EndTime:            endTime,
-			NetRevenue:         transaction.netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketApple,
-			TransactionId:      transaction.transactionId,
-		}
-		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, renewal))
-
-		model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
-			NetworkId:             transaction.networkId,
-			StartTime:             transaction.purchaseTime,
-			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			SubsidyNetRevenue:     transaction.netRevenue,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
-			Pro:                   true,
-		})
-		processed = true
+		processed = appleCreditSubscriptionTransactionInTx(tx, ctx, notificationId, transaction)
 	})
 
 	if processed {
 		model.UpdateProNetwork(ctx, transaction.networkId)
 	}
+	for _, networkId := range revokedNetworkIds {
+		// the entitlement ended under the network -- make the downgrade visible
+		// immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(ctx, networkId)
+	}
 	return processed, returnErr
+}
+
+func appleNetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId server.Id) bool {
+	var networkExists bool
+	result, err := tx.Query(ctx, `SELECT EXISTS (SELECT 1 FROM network WHERE network_id = $1)`, networkId)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&networkExists))
+		}
+	})
+	return networkExists
+}
+
+// appleCreditSubscriptionTransactionInTx is the ONE place a verified App Store
+// transaction turns into an entitlement, gated by the
+// apple_subscription_transaction ledger (ON CONFLICT DO NOTHING,
+// rows-affected checked) in the SAME tx as the credit. Shared by the
+// notification webhook (ProcessAppleNotification) and the payment reconciler,
+// so a reconcile credit racing a late notification for the same transaction
+// produces exactly one credit -- whichever inserts the ledger row second sees
+// zero rows affected and adds nothing.
+//
+// notificationId is the notification UUID for webhook credits; the reconciler
+// passes a fresh id (the column is only a provenance pointer, unique per row).
+// Returns true only when this call committed a new entitlement. The caller
+// must refresh the pro cache (model.UpdateProNetwork) after commit when true.
+func appleCreditSubscriptionTransactionInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	notificationId server.Id,
+	transaction *validatedAppleTransaction,
+) bool {
+	transactionTag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO apple_subscription_transaction (
+				transaction_id,
+				notification_uuid,
+				network_id,
+				product_id
+			)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT DO NOTHING
+		`,
+		transaction.transactionId,
+		notificationId,
+		transaction.networkId,
+		transaction.productId,
+	))
+	if transactionTag.RowsAffected() == 0 {
+		return false
+	}
+
+	endTime := transaction.expiresTime.Add(SubscriptionGracePeriod)
+	renewal := &model.SubscriptionRenewal{
+		NetworkId:          transaction.networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          transaction.purchaseTime,
+		EndTime:            endTime,
+		NetRevenue:         transaction.netRevenue,
+		SubscriptionMarket: model.SubscriptionMarketApple,
+		TransactionId:      transaction.transactionId,
+	}
+	server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, renewal))
+
+	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
+		NetworkId:             transaction.networkId,
+		StartTime:             transaction.purchaseTime,
+		EndTime:               endTime,
+		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		SubsidyNetRevenue:     transaction.netRevenue,
+		BalanceByteCount:      RefreshSupporterTransferBalance,
+		Pro:                   true,
+	})
+	return true
 }
 
 func validateAppleTransaction(

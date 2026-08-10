@@ -97,6 +97,11 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
 		router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
 		router.NewRoute("POST", "/subscription/create-payment-id", handlers.SubscriptionCreatePaymentId),
+		// client purchase reporting (UPGRADE.md §4 item 2): verify proof of
+		// purchase with the store and credit through the same idempotency
+		// gates as the webhooks and the payment reconciler
+		router.NewRoute("POST", "/subscription/verify-play-purchase", handlers.SubscriptionVerifyPlayPurchase),
+		router.NewRoute("POST", "/subscription/verify-apple-transaction", handlers.SubscriptionVerifyAppleTransaction),
 		// x402: agents pay inline (HTTP 402 + X-PAYMENT). Both 404 while x402 is
 		// not configured/enabled -- see vault/<env>/x402.yml.
 		router.NewRoute("GET", "/x402/skus", handlers.X402Skus),

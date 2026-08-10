@@ -20,15 +20,28 @@ type ExportStatsArgs struct {
 type ExportStatsResult struct {
 }
 
-// exportStatsDisabled temporarily halts the audit stats export loop:
-// ComputeStats90 runs seven 90-day aggregate passes every 30 seconds. It is
-// now tagged with server.ReplicaDb, but until an actual replica is attached
-// the load still lands on the primary, so the loop stays gated. While
-// disabled, /stats/last-90 keeps serving the last exported redis blob
-// (stats.last-90 has no ttl); refresh it manually with
-// `bringyourctl stats export` if needed. Set false to resume the loop
-// (InitTasks reseeds it at taskworker startup).
-const exportStatsDisabled = true
+// exportStatsDisabled halts the audit stats export loop. Re-enabled
+// 2026-08-08 (user decision) together with the real provider event feed
+// (SweepProviderAuditEvents / STATS3.md): the public /stats/last-90 blob now
+// refreshes continuously instead of requiring a manual
+// `bringyourctl stats export`.
+//
+// The original gating reason was CADENCE, not the export itself:
+// ComputeStats90 runs its 90-day aggregate passes (four, since the
+// extender/packets/superspeed series were removed -- see STATS3.md), and the
+// old loop ran them every 30 SECONDS against the primary (ReplicaDb still
+// lands on the primary until a replica is attached). The series has daily
+// granularity, so the loop now runs every exportStatsInterval instead -- the
+// same load argument that gated it, answered by cadence rather than by
+// disabling.
+const exportStatsDisabled = false
+
+// exportStatsInterval is how often the public stats blob recomputes. Daily
+// granularity data + a 15-minute provider sweep cadence means anything
+// tighter than minutes is waste; hourly keeps the primary load negligible
+// (4 aggregate passes/hour vs the old 30-second loop) while the public feed
+// stays fresh well within a day's resolution.
+const exportStatsInterval = 1 * time.Hour
 
 func ScheduleExportStats(clientSession *session.ClientSession, tx server.PgTx) {
 	if exportStatsDisabled {
@@ -40,7 +53,7 @@ func ScheduleExportStats(clientSession *session.ClientSession, tx server.PgTx) {
 		&ExportStatsArgs{},
 		clientSession,
 		task.RunOnce("export_stats"),
-		task.RunAt(server.NowUtc().Add(30*time.Second)),
+		task.RunAt(server.NowUtc().Add(exportStatsInterval)),
 	)
 }
 
@@ -65,6 +78,113 @@ func ExportStatsPost(
 	tx server.PgTx,
 ) error {
 	ScheduleExportStats(clientSession, tx)
+	return nil
+}
+
+// SweepProviderAuditEvents appends real provider online/offline transitions
+// to the audit_provider_event feed by diffing the live provider set (public
+// provide key + connected connection) against the last emitted state
+// (audit_provider_state). Transitions-only, so a quiet sweep writes nothing;
+// the cadence bounds transition detection latency, which only needs to be
+// well under a day (the stats resolution). The first run seeds the feed with
+// the current provider snapshot. See model.SweepProviderAuditEvents.
+
+type SweepProviderAuditEventsArgs struct {
+}
+
+type SweepProviderAuditEventsResult struct {
+	OnlineCount        int `json:"online_count"`
+	OfflineCount       int `json:"offline_count"`
+	DeviceAddedCount   int `json:"device_added_count"`
+	DeviceRemovedCount int `json:"device_removed_count"`
+}
+
+func ScheduleSweepProviderAuditEvents(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		SweepProviderAuditEvents,
+		&SweepProviderAuditEventsArgs{},
+		clientSession,
+		task.RunOnce("sweep_provider_audit_events"),
+		task.RunAt(server.NowUtc().Add(15*time.Minute)),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+func SweepProviderAuditEvents(
+	sweepProviderAuditEvents *SweepProviderAuditEventsArgs,
+	clientSession *session.ClientSession,
+) (*SweepProviderAuditEventsResult, error) {
+	onlineCount, offlineCount := model.SweepProviderAuditEvents(clientSession.Ctx)
+	if 0 < onlineCount || 0 < offlineCount {
+		glog.Infof("[audit]provider sweep: %d online, %d offline\n", onlineCount, offlineCount)
+	}
+	// the devices series (connected-per-day, ALL connected clients) rides the
+	// same cadence
+	deviceAddedCount, deviceRemovedCount := model.SweepDeviceAuditEvents(clientSession.Ctx)
+	if 0 < deviceAddedCount || 0 < deviceRemovedCount {
+		glog.Infof("[audit]device sweep: %d added, %d removed\n", deviceAddedCount, deviceRemovedCount)
+	}
+	return &SweepProviderAuditEventsResult{
+		OnlineCount:        onlineCount,
+		OfflineCount:       offlineCount,
+		DeviceAddedCount:   deviceAddedCount,
+		DeviceRemovedCount: deviceRemovedCount,
+	}, nil
+}
+
+func SweepProviderAuditEventsPost(
+	sweepProviderAuditEvents *SweepProviderAuditEventsArgs,
+	sweepProviderAuditEventsResult *SweepProviderAuditEventsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleSweepProviderAuditEvents(clientSession, tx)
+	return nil
+}
+
+// RollupTransferAuditEvents maintains the daily settled-transfer rollup rows
+// in audit_contract_event (one aggregate row per complete UTC day, from
+// transfer_contract x contract_close). Re-rolling the last few days each run
+// picks up late closes; each day is idempotent by replacement.
+
+type RollupTransferAuditEventsArgs struct {
+}
+
+type RollupTransferAuditEventsResult struct {
+	DayCount int `json:"day_count"`
+}
+
+func ScheduleRollupTransferAuditEvents(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RollupTransferAuditEvents,
+		&RollupTransferAuditEventsArgs{},
+		clientSession,
+		task.RunOnce("rollup_transfer_audit_events"),
+		task.RunAt(server.NowUtc().Add(6*time.Hour)),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+func RollupTransferAuditEvents(
+	rollupTransferAuditEvents *RollupTransferAuditEventsArgs,
+	clientSession *session.ClientSession,
+) (*RollupTransferAuditEventsResult, error) {
+	now := server.NowUtc()
+	dayCount := model.RollupTransferAuditEvents(clientSession.Ctx, now.Add(-3*24*time.Hour), now)
+	return &RollupTransferAuditEventsResult{
+		DayCount: dayCount,
+	}, nil
+}
+
+func RollupTransferAuditEventsPost(
+	rollupTransferAuditEvents *RollupTransferAuditEventsArgs,
+	rollupTransferAuditEventsResult *RollupTransferAuditEventsResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRollupTransferAuditEvents(clientSession, tx)
 	return nil
 }
 

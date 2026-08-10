@@ -136,11 +136,17 @@ func SetProxyWgHandoffForGeneration(
 	handoffJson, err := json.Marshal(handoff)
 	server.Raise(err)
 
+	// sealed, never plain: the blob pairs each peer's raw public ip:port
+	// endpoint with its tunnel ClientIpv4 (joinable to client_id), so at
+	// rest it must be encrypted (server.WgHandoffSeal; key from
+	// vault/<env>/wireguard.yml)
+	sealedHandoff := server.WgHandoffSeal(handoffJson)
+
 	server.Redis(ctx, func(r server.RedisClient) {
 		server.Raise(r.Set(
 			ctx,
 			proxyWgHandoffKey(proxyHost, block, generation),
-			string(handoffJson),
+			sealedHandoff,
 			proxyWgHandoffTtlOrDefault(ttl),
 		).Err())
 	})
@@ -176,6 +182,17 @@ func TakeProxyWgHandoffForGeneration(
 	})
 	if handoffJson == "" {
 		return time.Time{}, nil
+	}
+	// sealed blobs decrypt; a legacy plain-json blob (written before
+	// encryption, still inside its ttl during a deploy) falls through and
+	// parses directly. a sealed blob that fails to open is discarded — the
+	// handoff is best-effort by design (a missed one means the replacement
+	// instance waits for peers to re-initiate).
+	if plain, sealed, err := server.WgHandoffOpen(handoffJson); sealed {
+		if err != nil {
+			return time.Time{}, nil
+		}
+		handoffJson = string(plain)
 	}
 	var handoff proxyWgHandoff
 	if err := json.Unmarshal([]byte(handoffJson), &handoff); err != nil {

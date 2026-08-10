@@ -664,9 +664,57 @@ func x402RequirementsForNetwork(paymentRequired *X402PaymentRequired, network st
 	return nil, fmt.Errorf("network not quoted: %s", network)
 }
 
-// x402GrantProMonth grants Pro for one month: a subscription renewal (so the monthly
-// Pro grant task keeps renewing the data allowance) plus the Pro balance itself
-// (pro = true), which is what actually confers the entitlement.
+// x402ProMonthDuration is what a pro_1month purchase buys: a ROLLING month from the
+// moment of purchase, the same shape as the Solana monthly plan. It used to be
+// ProGrantWindow (the CALENDAR month), so paying full price on the 28th bought ~3
+// days -- and a second purchase in the same month collapsed onto the same renewal
+// row and extended nothing.
+const x402ProMonthDuration = 30 * 24 * time.Hour
+
+// x402AlreadyGrantedForTransaction reports whether a settle transaction has already
+// been granted, in either grant shape (a renewal row for Pro, a purchase-token
+// balance for data). This is what makes settle->grant IDEMPOTENT on the settle tx:
+// an agent retrying a request whose settlement succeeded (the facilitator settles
+// the same signed payment to the same transaction) must not be granted twice.
+func x402AlreadyGrantedForTransaction(
+	ctx context.Context,
+	tx server.PgTx,
+	networkId server.Id,
+	transaction string,
+) (granted bool) {
+	if transaction == "" {
+		return false
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT 1 FROM subscription_renewal
+		WHERE network_id = $1 AND market = $2 AND transaction_id = $3
+		UNION ALL
+		SELECT 1 FROM transfer_balance
+		WHERE network_id = $1 AND purchase_token = $3
+		LIMIT 1
+		`,
+		networkId,
+		model.SubscriptionMarketX402,
+		transaction,
+	)
+	server.WithPgResult(result, err, func() {
+		granted = result.Next()
+	})
+	return
+}
+
+// x402GrantProMonth grants Pro for one ROLLING month from the purchase: a
+// subscription renewal (so the monthly Pro grant task keeps renewing the data
+// allowance) plus the Pro balance itself (pro = true), which is what actually
+// confers the entitlement.
+//
+// Each purchase gets its own window starting at ITS purchase time, so a second
+// purchase lands a second renewal row (the renewal key includes market and the
+// windows are distinct) and EXTENDS the entitlement rather than collapsing onto
+// the first. The grant is idempotent on the settle transaction: a retry after a
+// lost response grants nothing twice.
 func x402GrantProMonth(
 	ctx context.Context,
 	networkId server.Id,
@@ -674,9 +722,20 @@ func x402GrantProMonth(
 	netRevenue model.NanoCents,
 	settleResponse *X402SettleResponse,
 ) (returnErr error) {
-	startTime, endTime := ProGrantWindow(server.NowUtc())
+	startTime := server.NowUtc()
+	endTime := startTime.Add(x402ProMonthDuration + SubscriptionGracePeriod)
 
+	granted := false
 	server.Tx(ctx, func(tx server.PgTx) {
+		if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
+			// this settle tx already granted -- an agent retry, not a new purchase
+			glog.Infof(
+				"[x402]tx %s already granted for network %s; ignoring retry\n",
+				settleResponse.Transaction, networkId,
+			)
+			return
+		}
+
 		err := model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
 			NetworkId:          networkId,
 			SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -699,20 +758,27 @@ func x402GrantProMonth(
 			startTime,
 			endTime,
 		)
+		if returnErr == nil {
+			granted = true
+		}
 	})
 
 	if returnErr != nil {
 		return
 	}
 
-	// the upgrade takes effect immediately rather than after ProCacheTtl
-	model.UpdateProNetwork(ctx, networkId)
+	if granted {
+		// the upgrade takes effect immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(ctx, networkId)
+	}
 
 	return
 }
 
 // x402GrantData adds a data balance. pro = false: buying data never grants Pro. The
 // balance is valid for pro.yml data_code.duration (1 year), the same as a data code.
+// Idempotent on the settle transaction (carried as the balance's purchase token),
+// so an agent retry of a settled purchase does not credit twice.
 func x402GrantData(
 	ctx context.Context,
 	networkId server.Id,
@@ -723,14 +789,24 @@ func x402GrantData(
 	startTime := server.NowUtc()
 	endTime := startTime.Add(model.Pro().DataCodeDuration)
 
-	model.AddTransferBalance(ctx, &model.TransferBalance{
-		NetworkId:             networkId,
-		StartTime:             startTime,
-		EndTime:               endTime,
-		StartBalanceByteCount: sku.ByteCount,
-		BalanceByteCount:      sku.ByteCount,
-		NetRevenue:            netRevenue,
-		PurchaseToken:         settleResponse.Transaction,
+	server.Tx(ctx, func(tx server.PgTx) {
+		if x402AlreadyGrantedForTransaction(ctx, tx, networkId, settleResponse.Transaction) {
+			glog.Infof(
+				"[x402]tx %s already granted for network %s; ignoring retry\n",
+				settleResponse.Transaction, networkId,
+			)
+			return
+		}
+
+		model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: sku.ByteCount,
+			BalanceByteCount:      sku.ByteCount,
+			NetRevenue:            netRevenue,
+			PurchaseToken:         settleResponse.Transaction,
+		})
 	})
 
 	return nil

@@ -801,6 +801,7 @@ func TestConnectNoNackEncryptedAllowFallback(t *testing.T) {
 			&testConnectConfig{
 				enableTransportReform: true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -812,6 +813,7 @@ func TestConnectWithSymmetricContractsNoNackEncryptedAllowFallback(t *testing.T)
 			&testConnectConfig{
 				enableTransportReform: true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -822,6 +824,7 @@ func TestConnectWithAsymmetricContractsNoNackEncryptedAllowFallback(t *testing.T
 		testConnect(t, contractTestAsymmetric,
 			&testConnectConfig{
 				enableEncryption: true,
+				allowFallback:    true,
 			})
 	})
 }
@@ -834,6 +837,7 @@ func TestConnectWithChaosNoNackEncryptedAllowFallback(t *testing.T) {
 				enableChaos:           true,
 				enableTransportReform: true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -846,6 +850,7 @@ func TestConnectWithSymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *t
 				enableChaos:           true,
 				enableTransportReform: true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -858,6 +863,7 @@ func TestConnectWithAsymmetricContractsWithChaosNoNackEncryptedAllowFallback(t *
 				enableChaos:           true,
 				enableTransportReform: true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -868,6 +874,7 @@ func TestConnectNoTransportReformNoNackEncryptedAllowFallback(t *testing.T) {
 		testConnect(t, contractTestNone,
 			&testConnectConfig{
 				enableEncryption: true,
+				allowFallback:    true,
 			})
 	})
 }
@@ -879,6 +886,7 @@ func TestConnectWithChaosNoTransportReformNoNackEncryptedAllowFallback(t *testin
 			&testConnectConfig{
 				enableChaos:      true,
 				enableEncryption: true,
+				allowFallback:    true,
 			})
 	})
 }
@@ -892,6 +900,7 @@ func TestConnectH1EncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				transportMode:         connect.TransportModeH1,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -905,6 +914,7 @@ func TestConnectAutoEncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				transportMode:         connect.TransportModeAuto,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -918,6 +928,7 @@ func TestConnectH3EncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				transportMode:         connect.TransportModeH3,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -931,6 +942,7 @@ func TestConnectDnsEncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				transportMode:         connect.TransportModeH3Dns,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -944,6 +956,7 @@ func TestConnectDnsPumpEncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				transportMode:         connect.TransportModeH3DnsPump,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -956,6 +969,7 @@ func TestConnectWithSymmetricContractsEncryptedAllowFallback(t *testing.T) {
 				enableTransportReform: true,
 				enableNack:            true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -969,6 +983,7 @@ func TestConnectWithSymmetricContractsWithForceStreamEncryptedAllowFallback(t *t
 				enableNack:            true,
 				forceStream:           true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -981,6 +996,7 @@ func TestConnectWithAsymmetricContractsEncryptedAllowFallback(t *testing.T) {
 				enableTransportReform: true,
 				enableNack:            true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -994,6 +1010,7 @@ func TestConnectWithAsymmetricContractsWithForceStreamEncryptedAllowFallback(t *
 				enableNack:            true,
 				forceStream:           true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1008,6 +1025,7 @@ func TestConnectWithChaosH1EncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				transportMode:         connect.TransportModeH1,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1022,6 +1040,7 @@ func TestConnectWithChaosH3EncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				transportMode:         connect.TransportModeH3,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1035,6 +1054,7 @@ func TestConnectWithSymmetricContractsWithChaosEncryptedAllowFallback(t *testing
 				enableTransportReform: true,
 				enableNack:            true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1048,6 +1068,7 @@ func TestConnectWithAsymmetricContractsWithChaosEncryptedAllowFallback(t *testin
 				enableTransportReform: true,
 				enableNack:            true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1059,6 +1080,7 @@ func TestConnectNoTransportReformEncryptedAllowFallback(t *testing.T) {
 			&testConnectConfig{
 				enableNack:       true,
 				enableEncryption: true,
+				allowFallback:    true,
 			})
 	})
 }
@@ -1071,6 +1093,7 @@ func TestConnectWithChaosNoTransportReformEncryptedAllowFallback(t *testing.T) {
 				enableChaos:      true,
 				enableNack:       true,
 				enableEncryption: true,
+				allowFallback:    true,
 			})
 	})
 }
@@ -1084,6 +1107,7 @@ func TestConnectWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				enableNewInstance:     true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1097,6 +1121,7 @@ func TestConnectWithSymmetricContractsWithNewInstanceEncryptedAllowFallback(t *t
 				enableNack:            true,
 				enableNewInstance:     true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1110,6 +1135,7 @@ func TestConnectWithAsymmetricContractsWithNewInstanceEncryptedAllowFallback(t *
 				enableNack:            true,
 				enableNewInstance:     true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1124,6 +1150,7 @@ func TestConnectWithChaosWithNewInstanceEncryptedAllowFallback(t *testing.T) {
 				enableNack:            true,
 				enableNewInstance:     true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1138,6 +1165,7 @@ func TestConnectWithSymmetricContractsWithChaosWithNewInstanceEncryptedAllowFall
 				enableNack:            true,
 				enableNewInstance:     true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1152,6 +1180,7 @@ func TestConnectWithAsymmetricContractsWithChaosWithNewInstanceEncryptedAllowFal
 				enableNack:            true,
 				enableNewInstance:     true,
 				enableEncryption:      true,
+				allowFallback:         true,
 			})
 	})
 }
@@ -1164,6 +1193,7 @@ func TestConnectNoTransportReformWithNewInstanceEncryptedAllowFallback(t *testin
 				enableNack:        true,
 				enableNewInstance: true,
 				enableEncryption:  true,
+				allowFallback:     true,
 			})
 	})
 }
@@ -1177,6 +1207,7 @@ func TestConnectWithChaosNoTransportReformWithNewInstanceEncryptedAllowFallback(
 				enableNack:        true,
 				enableNewInstance: true,
 				enableEncryption:  true,
+				allowFallback:     true,
 			})
 	})
 }
@@ -1199,6 +1230,14 @@ type testConnectConfig struct {
 	// clients (set symmetrically: both sides need Encrypt=true to handshake).
 	// During the handshake (cipher nil) traffic is plaintext, then outer-wrapped.
 	enableEncryption bool
+	// allowFallback selects the end-to-end encryption mode when
+	// enableEncryption is set: true runs EncryptionModeOpportunistic (seal
+	// when established, plaintext otherwise — the historical behavior), false
+	// runs EncryptionModeRequired (fail-closed: application data never
+	// plaintext; the entry gate holds sends until the cipher establishes).
+	// The ...EncryptedAllowFallback test battery sets true; the base
+	// ...Encrypted tests exercise Required.
+	allowFallback bool
 }
 
 // this test that two clients can communicate via the connect server
@@ -1478,7 +1517,42 @@ func testConnect(
 	clientStrategyA := connect.NewClientStrategyWithDefaults(ctx)
 	clientStrategyB := connect.NewClientStrategyWithDefaults(ctx)
 
+	// Hermetic p2p: the default WebRtcSettings gather ICE candidates on every
+	// host interface and query live STUN servers. On a multihomed host that
+	// is a per-attempt lottery — failed attempts of the ForceStream variants
+	// showed thousands of cross-interface "no route to host" pion failures
+	// and closed-agent churn filling the stall window, while passing attempts
+	// showed almost none. Loopback-only, no STUN makes any p2p attempt
+	// deterministic (a couple of loopback pairs) without disabling the p2p
+	// machinery the stream paths exercise.
+	hermeticWebRtc := func(s *connect.ClientSettings) {
+		s.WebRtcSettings.Log = connect.NewNoopLogger()
+		s.WebRtcSettings.IceServerUrls = nil
+		s.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
+	}
+
+	// The out-of-band peer key fetcher is the contract-free identity source:
+	// with contracts enabled the peer's key also arrives via the stored
+	// contract, but contractTestNone has no contracts, and without ANY key
+	// source the peer identity proof buffers forever — under
+	// EncryptionModeRequired that is a correct fail-closed refusal (no
+	// verified identity, no cipher, no data), which surfaced as 5/5
+	// establishment timeouts in every contractTestNone+Encrypted variant
+	// once the AllowFallback wiring ran Required here (Opportunistic ran
+	// those directions plaintext and hid it). Production wires this fetcher
+	// through the platform GetClientKey api; the closures late-bind because
+	// the peer client is constructed after these settings are consumed.
+	var clientA, clientB *connect.Client
+	peerKeyFetcherFor := func(peer **connect.Client) func(connect.Id) func(context.Context) ([]byte, error) {
+		return func(peerId connect.Id) func(context.Context) ([]byte, error) {
+			return func(ctx context.Context) ([]byte, error) {
+				return (*peer).ClientKeyManager().PublicKey(), nil
+			}
+		}
+	}
+
 	clientSettingsA := connect.DefaultClientSettings()
+	hermeticWebRtc(clientSettingsA)
 	clientSettingsA.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckBufferSize = 0
 	clientSettingsA.SendBufferSettings.AckTimeout = sequenceStateTimeout
@@ -1508,21 +1582,42 @@ func testConnect(
 	// session + handshake per burst so bugs in the restart -> plaintext ->
 	// upgrade path surface instead of being hidden by session reuse.
 	// (Production uses max(send,receive) idle; correctness must hold at 0.)
+	// IdleTimeout=0 reaps the encryption session at refs==0 — a stress that
+	// forces a fresh session + handshake per burst to exercise the
+	// restart -> plaintext -> upgrade path. That rationale is
+	// OPPORTUNISTIC-only: under Required there is no plaintext bridge, so a
+	// per-burst reap makes every burst pay a full handshake under the entry
+	// gate, and the peer's independent reap between bursts leaves it unable
+	// to decrypt the next wrap — it nacks, the sealer re-handshakes, and the
+	// cycle repeats every burst (a reap-nack-rehandshake thrash that only
+	// Required feels; observed stalling ~1/3 of Required asymmetric attempts
+	// under -race). Required instead uses a realistic idle timeout matching
+	// production (DefaultClientSettings sets max(send,receive) idle), which
+	// keeps the established cipher across bursts while still exercising a
+	// fresh handshake at setup.
 	encryptionSessionIdleTimeout := 0 * time.Second
+	if config.enableEncryption && !config.allowFallback {
+		encryptionSessionIdleTimeout = sequenceStateTimeout
+	}
 	if config.enableEncryption {
-		clientSettingsA.EncryptionSettings.Encrypt = true
+		clientSettingsA.EncryptionSettings.Mode = connect.EncryptionModeRequired
+		if config.allowFallback {
+			clientSettingsA.EncryptionSettings.Mode = connect.EncryptionModeOpportunistic
+		}
 		clientSettingsA.EncryptionSettings.IdleTimeout = encryptionSessionIdleTimeout
 		if contractTest != contractTestAsymmetric {
 			clientSettingsA.EncryptionSettings.EncryptionControlUseCompanion = false
 		}
 	}
-	clientA := connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA, clientSettingsA.ContractManagerSettings), clientSettingsA)
+	clientSettingsA.EncryptionSettings.NewPeerClientPublicKeyFetcher = peerKeyFetcherFor(&clientB)
+	clientA = connect.NewClient(ctx, connect.Id(clientIdA), Testing_NewControllerOutOfBandControl(ctx, clientIdA, clientSettingsA.ContractManagerSettings), clientSettingsA)
 	// routeManagerA := connect.NewRouteManager(clientA)
 	// contractManagerA := connect.NewContractManagerWithDefaults(clientA)
 	// clientA.Setup(routeManagerA, contractManagerA)
 	// go clientA.Run()
 
 	clientSettingsB := connect.DefaultClientSettings()
+	hermeticWebRtc(clientSettingsB)
 	clientSettingsB.SendBufferSettings.SequenceBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckBufferSize = 0
 	clientSettingsB.SendBufferSettings.AckTimeout = sequenceStateTimeout
@@ -1544,13 +1639,17 @@ func testConnect(
 	clientSettingsB.ControlPingTimeout = 30 * time.Second
 	clientSettingsB.DefaultTransferOpts.ForceStream = config.forceStream
 	if config.enableEncryption {
-		clientSettingsB.EncryptionSettings.Encrypt = true
+		clientSettingsB.EncryptionSettings.Mode = connect.EncryptionModeRequired
+		if config.allowFallback {
+			clientSettingsB.EncryptionSettings.Mode = connect.EncryptionModeOpportunistic
+		}
 		clientSettingsB.EncryptionSettings.IdleTimeout = encryptionSessionIdleTimeout
 		if contractTest != contractTestAsymmetric {
 			clientSettingsB.EncryptionSettings.EncryptionControlUseCompanion = false
 		}
 	}
-	clientB := connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB, clientSettingsB.ContractManagerSettings), clientSettingsB)
+	clientSettingsB.EncryptionSettings.NewPeerClientPublicKeyFetcher = peerKeyFetcherFor(&clientA)
+	clientB = connect.NewClient(ctx, connect.Id(clientIdB), Testing_NewControllerOutOfBandControl(ctx, clientIdB, clientSettingsB.ContractManagerSettings), clientSettingsB)
 	// routeManagerB := connect.NewRouteManager(clientB)
 	// contractManagerB := connect.NewContractManagerWithDefaults(clientB)
 	// clientB.Setup(routeManagerB, contractManagerB)
