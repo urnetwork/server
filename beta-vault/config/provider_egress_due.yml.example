@@ -1,0 +1,18 @@
+# Ceiling on one provider-egress due batch, for THIS deployment.
+#
+# Capacity is a property of the deployment, so each one sets its own -- the same
+# reasoning as provider_bandwidth.yml. Absent, the server falls back to 500,
+# which is sized for a beta-scale fleet.
+#
+# Sizing: a prober sustains roughly (concurrency / probe_duration) probes per
+# hour -- measured at ~20/hour per concurrent slot, a probe being ~3 min because
+# a dead provider burns the full probe timeout across all destinations. The
+# batch has to cover one poll interval:
+#
+#   max_due_limit >= concurrency * (interval / probe_duration)
+#
+# For a fleet of ~100k on the 6h attempt backoff that is ~16,700 probes/hour
+# fleet-wide; split across N probers with shard_count=N, each needs its own
+# share of that. 500 caps the whole fleet at 500/hour regardless of how much
+# prober capacity sits behind it.
+max_due_limit: 500

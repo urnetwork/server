@@ -903,11 +903,41 @@ func matchChildLocation(
 // quantify over. The same holds for `observed_at IS NULL` on
 // provider_egress_location, whose client_id is likewise a primary key and whose
 // observed_at is NOT NULL: the only way that test is true is that no row exists.
+// GetProviderEgressLocationDue is the unsharded queue: one prober takes the
+// whole fleet. Equivalent to GetProviderEgressLocationDueSharded with a single
+// shard, and kept so existing callers are unaffected.
 func GetProviderEgressLocationDue(
 	ctx context.Context,
 	minObservedAt time.Time,
 	minAttemptAt time.Time,
 	limit int,
+) []server.Id {
+	return GetProviderEgressLocationDueSharded(ctx, minObservedAt, minAttemptAt, limit, 0, 1)
+}
+
+// GetProviderEgressLocationDueSharded partitions the queue across independent
+// probers via shardIndex/shardCount.
+//
+// Without partitioning, every prober polling inside the attempt-backoff window
+// receives the SAME rows. The queue hands work out but never claims it, and the
+// deduplicating NOT EXISTS on provider_egress_probe_attempt only bites once an
+// attempt row lands -- at submit time, minutes after the batch went out, which
+// is exactly when the other probers are polling. N probers therefore repeat the
+// same work, and throughput does not rise as hosts are added.
+//
+// Hashing client_id gives each prober a disjoint slice with no locks, no leases
+// and no new columns, which suits a fixed set of hosts. A prober that goes away
+// leaves its slice unprobed until it returns, rather than stranding a claim
+// that something then has to reap.
+//
+// shardCount <= 1 disables sharding, which is the single-prober case.
+func GetProviderEgressLocationDueSharded(
+	ctx context.Context,
+	minObservedAt time.Time,
+	minAttemptAt time.Time,
+	limit int,
+	shardIndex int,
+	shardCount int,
 ) []server.Id {
 	clientIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -944,6 +974,16 @@ func GetProviderEgressLocationDue(
 					WHERE
 						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
 						$2 <= provider_egress_probe_attempt.attempt_at
+				) AND
+				-- shard partition. hashtext returns a SIGNED int32 and postgres
+				-- '%' keeps the sign of the dividend, so a bare
+				-- hashtext(...) % n = i never matches the negative half of the
+				-- hash space and roughly half the fleet would never be probed.
+				-- The extra (+ n) % n normalises into [0, n).
+				-- $4 <= 1 short-circuits to the unsharded behaviour.
+				(
+					$4 <= 1 OR
+					((hashtext(network_client_location_reliability.client_id::text) % $4) + $4) % $4 = $5
 				)
 
 			ORDER BY network_client_location_reliability.client_id ASC
@@ -952,6 +992,8 @@ func GetProviderEgressLocationDue(
 			ProvideModePublic,
 			minAttemptAt.UTC(),
 			limit,
+			shardCount,
+			shardIndex,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -998,6 +1040,12 @@ func GetProviderEgressLocationDue(
 					WHERE
 						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
 						$3 <= provider_egress_probe_attempt.attempt_at
+				) AND
+				-- the same shard partition as pass 1; see the note there for why
+				-- the modulo has to be normalised. $5 <= 1 is the unsharded case.
+				(
+					$5 <= 1 OR
+					((hashtext(provider_egress_location.client_id::text) % $5) + $5) % $5 = $6
 				)
 
 			-- oldest probe first, client_id breaking the tie, so batch
@@ -1011,6 +1059,8 @@ func GetProviderEgressLocationDue(
 			minObservedAt.UTC(),
 			minAttemptAt.UTC(),
 			remaining,
+			shardCount,
+			shardIndex,
 		)
 		server.WithPgResult(result, err, func() {
 			// the two passes are separate statements and so separate snapshots.
