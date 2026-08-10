@@ -120,10 +120,9 @@ func ComputePassiveProviderBandwidth(
 				-- companion_contract_id IS NULL excludes return-traffic legs: a
 				-- client's return traffic settles as a contract where the CLIENT
 				-- is the destination, which would otherwise be misread as that
-				-- client acting as a fast provider. See
-				-- docs/superpowers/specs/2026-07-25-enforced-provider-geo-probing-design.md
-				-- "Threat model" -- confirmed empirically: on beta, every
-				-- non-Public-key "earner" turned out to be exactly this.
+				-- client acting as a fast provider. Confirmed empirically on a
+				-- live deployment: every non-Public-key "earner" turned out to
+				-- be exactly this.
 				transfer_contract.companion_contract_id IS NULL AND
 				$2 <= contract_close.close_time
 			`,

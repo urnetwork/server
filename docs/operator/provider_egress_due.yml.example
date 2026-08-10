@@ -1,8 +1,13 @@
 # Ceiling on one provider-egress due batch, for THIS deployment.
 #
+# Install as `provider_egress_due.yml` in the deployment's CONFIG home --
+# $WARP_CONFIG_HOME, else $WARP_HOME/config -- alongside provider_bandwidth.yml.
+# It is read through server.Config (a config mount), not the vault, despite
+# holding no secret worth vaulting.
+#
 # Capacity is a property of the deployment, so each one sets its own -- the same
 # reasoning as provider_bandwidth.yml. Absent, the server falls back to 500,
-# which is sized for a beta-scale fleet.
+# which is sized for a fleet of a few dozen providers.
 #
 # Sizing: a prober sustains roughly (concurrency / probe_duration) probes per
 # hour -- measured at ~20/hour per concurrent slot, a probe being ~3 min because
