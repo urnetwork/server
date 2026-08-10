@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -359,7 +360,16 @@ func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		deadline := time.Now().Add(10 * time.Second)
+		// The peer has to finish a whole TestEnv setup (redis lease + pg
+		// database creation) before it can write its marker, and that cost is
+		// not bounded by anything this test controls: it is ~1.2s idle but was
+		// observed at ~30s during a loaded -race suite against a pg carrying
+		// abandoned test databases. This budget only has to be longer than a
+		// pathological setup — the parent still bounds the test overall — so
+		// keep it generous. A tight budget here fails the run for being slow,
+		// which says nothing about lease separation.
+		started := time.Now()
+		deadline := started.Add(90 * time.Second)
 		for {
 			first, firstErr := os.ReadFile(filepath.Join(dir, "first"))
 			second, secondErr := os.ReadFile(filepath.Join(dir, "second"))
@@ -371,7 +381,8 @@ func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {
 			}
 			if deadline.Before(time.Now()) {
 				t.Fatalf(
-					"timed out waiting for both lease markers: first=%v second=%v",
+					"timed out after %s waiting for both lease markers: first=%v second=%v",
+					time.Since(started),
 					firstErr,
 					secondErr,
 				)
@@ -417,5 +428,91 @@ func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {
 	}
 	if secondErr != nil {
 		t.Fatalf("second lease child failed: %v\n%s", secondErr, secondOutput.String())
+	}
+}
+
+// ---- test listen port allocator ------------------------------------------
+//
+// Deterministic pins for the two allocator rules from certification failure
+// c12-1 (see the allocator doc in test_util.go). Each test occupies or
+// inspects real sockets, so the properties are asserted against actual OS
+// bind semantics, not a simulation.
+
+// TestReserveTestListenPortsStayBelowEphemeralRange: every allocated port
+// must sit below the OS ephemeral range (macOS: 49152+, Linux default:
+// 32768+). A port from the ephemeral range can be handed to any outbound
+// dial in the release->bind window — that is the collision that killed
+// c12-1 — so allocation from that range is a regression regardless of how
+// rarely it collides.
+func TestReserveTestListenPortsStayBelowEphemeralRange(t *testing.T) {
+	ports, release, err := ReserveTestListenPorts(
+		"tcp", "tcp", "tcp", "tcp", "udp", "udp",
+	)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	defer release()
+	for i, port := range ports {
+		if port < testListenPortFloor || testListenPortCeiling <= port {
+			t.Fatalf(
+				"port[%d] = %d outside [%d, %d): an ephemeral-range port can be lost to the process's own outbound dials between release and server bind",
+				i, port, testListenPortFloor, testListenPortCeiling,
+			)
+		}
+	}
+}
+
+// TestReserveTestListenPortsProbeWildcardScope: the probe must run on the
+// wildcard address the servers actually bind. The test occupies 0.0.0.0:P,
+// rewinds the allocator so P is the next candidate, and requires the
+// allocator to skip it. It also pins the OS semantics that make a loopback
+// probe insufficient: with SO_REUSEADDR (Go's listener default), binding
+// 127.0.0.1:P SUCCEEDS while 0.0.0.0:P is held — so a loopback probe would
+// have accepted P and the server's wildcard bind would then have failed
+// EADDRINUSE, exactly like c12-1.
+func TestReserveTestListenPortsProbeWildcardScope(t *testing.T) {
+	// a port the allocator itself proved wildcard-free
+	ports, release, err := ReserveTestListenPorts("tcp")
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	occupiedPort := ports[0]
+	release()
+
+	// occupy it on the wildcard, playing the part of the process's own
+	// outbound dial (or any other socket) landing on the number
+	occupier, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", occupiedPort))
+	if err != nil {
+		t.Fatalf("occupy wildcard %d: %v", occupiedPort, err)
+	}
+	defer occupier.Close()
+
+	// the semantics pin: loopback bind succeeds while the wildcard is held,
+	// so probing loopback proves nothing about the server's wildcard bind
+	loopback, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", occupiedPort))
+	if err != nil {
+		t.Fatalf(
+			"loopback bind on wildcard-held port %d failed (%v): the OS no longer allows the specific-over-wildcard bind, so the loopback-probe hazard this test pins has changed shape — revisit the allocator doc",
+			occupiedPort, err,
+		)
+	}
+	loopback.Close()
+
+	// rewind so the occupied port is the next candidate, then allocate: the
+	// wildcard probe must skip it
+	atomic.StoreInt64(&testListenPortNext, int64(occupiedPort))
+	if next := testNextListenPortCandidate(); next != occupiedPort {
+		t.Fatalf("rewind: next candidate = %d, want %d", next, occupiedPort)
+	}
+	ports, release, err = ReserveTestListenPorts("tcp")
+	if err != nil {
+		t.Fatalf("reserve with occupied candidate: %v", err)
+	}
+	defer release()
+	if ports[0] == occupiedPort {
+		t.Fatalf(
+			"allocator returned wildcard-occupied port %d: the probe is not checking the address the servers bind",
+			occupiedPort,
+		)
 	}
 }

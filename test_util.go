@@ -7,12 +7,16 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "net/http/pprof" // Import for side effects
@@ -260,6 +264,19 @@ type TestEnv struct {
 	RerunTimeout      time.Duration
 }
 
+// testEnvTeardownBound is how long a failed attempt waits for teardown
+// before abandoning it (see the comment at the teardown defer in Run).
+// Env-overridable so the harness's own meta-test can exercise the abandon
+// path without a 60s wait per attempt.
+func testEnvTeardownBound() time.Duration {
+	if v := os.Getenv("WARP_TEST_TEARDOWN_BOUND_SECONDS"); v != "" {
+		if seconds, err := strconv.Atoi(v); err == nil && 0 < seconds {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 60 * time.Second
+}
+
 func DefaultTestEnv() *TestEnv {
 	return &TestEnv{
 		ApplyDbMigrations: true,
@@ -305,7 +322,28 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 				}
 			}()
 			teardown := self.setup()
-			defer teardown()
+			defer func() {
+				// Teardown can block forever when the attempt failed an
+				// assertion while sibling goroutines it spawned still hold
+				// pool connections: FailNow's Goexit runs these defers LIFO,
+				// so teardown's pgxpool Close() waits on connections whose
+				// owner goroutines were never joined, close(done) below never
+				// runs, and the whole package hangs to its timeout instead of
+				// reporting the failure (cost two 1h+ CI runs before it was
+				// found). Bound the wait: a teardown that cannot complete is
+				// abandoned loudly so the failure itself gets reported; the
+				// leaked attempt goroutines die with the test process.
+				teardownDone := make(chan struct{})
+				go func() {
+					defer close(teardownDone)
+					teardown()
+				}()
+				select {
+				case <-teardownDone:
+				case <-time.After(testEnvTeardownBound()):
+					glog.Errorf("[test_env]teardown blocked >60s (attempt goroutines still holding env resources); abandoning teardown so the failure can report\n")
+				}
+			}()
 			callback(tb)
 		}()
 		<-done
@@ -469,6 +507,8 @@ func (self *TestEnv) setup() func() {
 	}()
 	testRedisDb := testRedisLease.db
 
+	reapOrphanedTestPgDbs(ctx)
+
 	Db(ctx, func(conn PgConn) {
 		_, err := conn.Exec(
 			ctx,
@@ -577,4 +617,180 @@ cluster: %t`,
 			Raise(err)
 		}, OptReadWrite())
 	}
+}
+
+// testPgDbOrphanAge is how old an abandoned test database must be before the
+// reaper drops it. A TestEnv's database lives for one test, so this is orders
+// of magnitude longer than any live database's lifetime — a running suite is
+// never touched even when a single package runs for hours.
+const testPgDbOrphanAge = 2 * time.Hour
+
+var reapOrphanedTestPgDbsOnce sync.Once
+
+// reapOrphanedTestPgDbs drops test databases left behind by test processes
+// that died before teardown.
+//
+// Teardown drops its own database, but a process killed mid-run (SIGKILL, an
+// interrupted suite, a harness panic) never reaches it, and nothing else ever
+// cleans up: 87 orphans had accumulated over a month. They are not inert.
+// Every CREATE DATABASE copies a template and scans pg_database, so setup gets
+// slower as they pile up — a cross-process setup that normally takes ~1.2s was
+// observed taking ~30s, which is what broke the lease-separation test's
+// rendezvous.
+//
+// Age comes from the UnixMilli stamp the name already carries, so no catalog
+// timestamp is needed. Runs once per test binary. Failures are ignored: a drop
+// losing a race with another process's live database (or its own teardown) is
+// expected and must never fail the run that happened to sweep.
+func reapOrphanedTestPgDbs(ctx context.Context) {
+	reapOrphanedTestPgDbsOnce.Do(func() {
+		HandleError(func() {
+			cutoff := NowUtc().Add(-testPgDbOrphanAge).UnixMilli()
+			orphans := []string{}
+			Db(ctx, func(conn PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT datname
+					FROM pg_database
+					WHERE datname LIKE 'test\_%'
+					`,
+				)
+				WithPgResult(result, err, func() {
+					for result.Next() {
+						var datname string
+						Raise(result.Scan(&datname))
+						parts := strings.Split(datname, "_")
+						if len(parts) < 2 {
+							continue
+						}
+						millis, err := strconv.ParseInt(parts[1], 10, 64)
+						if err != nil {
+							continue
+						}
+						if millis < cutoff {
+							orphans = append(orphans, datname)
+						}
+					}
+				})
+			})
+			for _, datname := range orphans {
+				func() {
+					defer func() {
+						// a live database, or one being dropped by its own
+						// teardown right now, is not this sweep's problem
+						recover()
+					}()
+					Db(ctx, func(conn PgConn) {
+						_, err := conn.Exec(
+							ctx,
+							fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, datname),
+						)
+						Raise(err)
+					}, OptReadWrite())
+				}()
+			}
+			if 0 < len(orphans) {
+				glog.Infof("[test]reaped %d orphaned test databases\n", len(orphans))
+			}
+		})
+	})
+}
+
+// ---- test listen port allocation ------------------------------------------
+//
+// Test servers (proxy socks/http/https/api, wg) take a port NUMBER in their
+// settings and bind it themselves on the wildcard address, so tests must pick
+// ports up front and there is inherently a reserve -> release -> server-bind
+// window. Two rules make that window safe, both learned from certification
+// failure c12-1 (TestProxyWgHandoffFastReconnect):
+//
+//  1. Allocate BELOW the OS ephemeral port range (macOS: 49152+, Linux
+//     default: 32768+). A reservation obtained from ":0" lands in the
+//     ephemeral range, and in the release->bind window the process's own
+//     outbound dials (pg, redis, platform http) are assigned local ports from
+//     exactly that range — in c12-1 two of them landed on the just-released
+//     numbers and the servers' wildcard binds failed EADDRINUSE. Ports below
+//     the range are never assigned to outbound sockets, which removes that
+//     collision class instead of narrowing the window.
+//
+//  2. Probe the WILDCARD address the servers actually bind, not loopback. Go
+//     listeners set SO_REUSEADDR, so binding 127.0.0.1:P succeeds even while
+//     another socket holds 0.0.0.0:P — a loopback reservation therefore never
+//     proves the server's wildcard bind can succeed. The reverse bind fails,
+//     which is exactly how c12-1 died.
+//
+// The counter is pid-salted so concurrent test processes walk disjoint
+// sequences, and each returned port is held by a wildcard reservation socket
+// until release so sequential callers in one process cannot collide either.
+
+const (
+	// [testListenPortFloor, testListenPortCeiling) stays clear of well-known
+	// service ports below and every platform's ephemeral range above.
+	testListenPortFloor   = 20000
+	testListenPortCeiling = 32768
+)
+
+var testListenPortNext int64 = int64(
+	testListenPortFloor +
+		(os.Getpid()*7919)%(testListenPortCeiling-testListenPortFloor),
+)
+
+// testNextListenPortCandidate returns the next port number the allocator will
+// probe, without advancing it. Deterministic tests use this to occupy the
+// candidate and assert the probe's scope.
+func testNextListenPortCandidate() int {
+	return testListenPortFloor +
+		int(atomic.LoadInt64(&testListenPortNext)-testListenPortFloor)%
+			(testListenPortCeiling-testListenPortFloor)
+}
+
+// ReserveTestListenPorts picks one free port per requested network ("tcp" or
+// "udp"), probed and reserved on the wildcard address. The reservations stay
+// bound until release, which callers invoke immediately before starting the
+// servers that re-bind the same numbers.
+func ReserveTestListenPorts(networks ...string) (ports []int, release func(), returnErr error) {
+	var reservations []io.Closer
+	closeAll := func() {
+		for _, reservation := range reservations {
+			reservation.Close()
+		}
+	}
+	for _, network := range networks {
+		port, reservation, err := reserveTestListenPort(network)
+		if err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		ports = append(ports, port)
+		reservations = append(reservations, reservation)
+	}
+	var releaseOnce sync.Once
+	release = func() {
+		releaseOnce.Do(closeAll)
+	}
+	return ports, release, nil
+}
+
+func reserveTestListenPort(network string) (int, io.Closer, error) {
+	span := testListenPortCeiling - testListenPortFloor
+	for range span {
+		port := testListenPortFloor +
+			int(atomic.AddInt64(&testListenPortNext, 1)-1-testListenPortFloor)%span
+		switch network {
+		case "tcp":
+			listener, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
+			if err == nil {
+				return port, listener, nil
+			}
+		case "udp":
+			packetConn, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", port))
+			if err == nil {
+				return port, packetConn, nil
+			}
+		default:
+			return 0, nil, fmt.Errorf("reserve test listen port: unsupported network %q", network)
+		}
+	}
+	return 0, nil, fmt.Errorf("reserve test listen port: no free %s port in [%d, %d)", network, testListenPortFloor, testListenPortCeiling)
 }

@@ -131,8 +131,25 @@ type SubscriptionBalanceResult struct {
 	/**
 	 * OpenTransferByteCount - The total number of bytes tied up in open transfers
 	 */
-	OpenTransferByteCount     model.ByteCount          `json:"open_transfer_byte_count"`
-	CurrentSubscription       *Subscription            `json:"current_subscription,omitempty"`
+	OpenTransferByteCount model.ByteCount `json:"open_transfer_byte_count"`
+	/**
+	 * CurrentSubscription - ONE of the active subscriptions, or nil.
+	 *
+	 * Shipped apple/android/windows/linux clients read this through the sdk and
+	 * treat it as the plan indicator, so it keeps its exact single-value meaning.
+	 * It cannot name more than one store; use Subscriptions for the full set.
+	 */
+	CurrentSubscription *Subscription `json:"current_subscription,omitempty"`
+	/**
+	 * Subscriptions - EVERY store currently billing this network, one entry per
+	 * store, so a caller can offer a cancel path for each. A user subscribed on
+	 * two stores is charged by both and has to cancel in both places.
+	 *
+	 * Not gated on Pro: an active renewal row means a store is taking money now,
+	 * and that is exactly when the cancel path must be reachable, entitlement
+	 * bookkeeping notwithstanding.
+	 */
+	Subscriptions             []*Subscription          `json:"subscriptions,omitempty"`
 	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
 	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
 	UpdateTime                time.Time                `json:"update_time"`
@@ -180,6 +197,21 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		}
 	}
 
+	// one entry per store billing this network. MIN(market) above can only name
+	// one of them, so a second store would otherwise be invisible -- and keep
+	// charging, with nowhere in the ui to go and cancel it.
+	subscriptions := []*Subscription{}
+	for _, market := range model.GetActiveSubscriptionRenewalMarkets(
+		session.Ctx,
+		session.ByJwt.NetworkId,
+		model.SubscriptionTypeSupporter,
+	) {
+		subscriptions = append(subscriptions, &Subscription{
+			Store: market,
+			Plan:  model.SubscriptionTypeSupporter,
+		})
+	}
+
 	// FIXME
 	pendingPayout := model.ByteCount(0)
 
@@ -188,6 +220,7 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		StartBalanceByteCount:     startBalanceByteCount,
 		OpenTransferByteCount:     openTransferByteCount,
 		CurrentSubscription:       currentSubscription,
+		Subscriptions:             subscriptions,
 		ActiveTransferBalances:    transferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
 		UpdateTime:                server.NowUtc(),
@@ -242,11 +275,24 @@ func CoinbaseWebhook(
 	coinbaseWebhook *CoinbaseWebhookArgs,
 	clientSession *session.ClientSession,
 ) (*CoinbaseWebhookResult, error) {
+	// A signed-but-malformed event must be an ERROR, never a panic: a nil deref
+	// here would 500 this delivery and every retry of it, forever, with only a
+	// stack trace to find it by. The error is still a non-2xx (Coinbase retries
+	// and shows the failure in its dashboard), but it says what is missing.
+	if coinbaseWebhook.Event == nil {
+		return nil, errors.New("Coinbase event missing.")
+	}
 	if coinbaseWebhook.Event.Type == "charge:confirmed" {
+		if coinbaseWebhook.Event.Data == nil {
+			return nil, errors.New("Coinbase event data missing.")
+		}
 		skuName := coinbaseWebhook.Event.Data.Name
 		skus := coinbaseSkus()
 		if sku, ok := skus[skuName]; ok {
-			purchaseEmail := coinbaseWebhook.Event.Data.Metadata.Email
+			purchaseEmail := ""
+			if coinbaseWebhook.Event.Data.Metadata != nil {
+				purchaseEmail = coinbaseWebhook.Event.Data.Metadata.Email
+			}
 			if purchaseEmail == "" {
 				return nil, errors.New("Missing purchase email to send balance code.")
 			}
@@ -256,7 +302,12 @@ func CoinbaseWebhook(
 				return nil, err
 			}
 
-			paymentUsd, err := strconv.ParseFloat(coinbaseWebhook.Event.Data.Payments[0].Net.Local.Amount, 64)
+			payments := coinbaseWebhook.Event.Data.Payments
+			if len(payments) == 0 || payments[0] == nil || payments[0].Net == nil || payments[0].Net.Local == nil {
+				return nil, errors.New("Coinbase event has no payment amount.")
+			}
+
+			paymentUsd, err := strconv.ParseFloat(payments[0].Net.Local.Amount, 64)
 			if err != nil {
 				return nil, err
 			}
@@ -329,6 +380,13 @@ func CreateBalanceCode(
 		return fmt.Errorf("balance code duration is not configured (pro.yml)")
 	}
 
+	// With no email AND no network there is no delivery mechanism at all -- the
+	// code would exist and nobody could ever learn it. Refuse so the webhook
+	// retries and the failure is visible.
+	if purchaseEmail == "" && redeemNetworkId == nil {
+		return fmt.Errorf("balance code needs a purchase email or a network to redeem into")
+	}
+
 	var balanceCode *model.BalanceCode
 
 	if balanceCodeId, err := model.GetBalanceCodeIdForPurchaseEventId(ctx, purchaseEventId); err == nil {
@@ -378,6 +436,13 @@ func CreateBalanceCode(
 				model.ByteCountHumanReadable(balanceCode.BalanceByteCount),
 			)
 		}
+	}
+
+	// No email on the purchase: nothing to send. This only happens when
+	// redeemNetworkId was set (the caller guards the both-empty case), so the
+	// credit has already landed in the right network above -- delivery is done.
+	if balanceCode.PurchaseEmail == "" {
+		return nil
 	}
 
 	awsMessageSender := GetAWSMessageSender()
@@ -535,6 +600,20 @@ type PlayWebhookResult struct {
 	Message *PlayWebhookResultMessage
 }
 
+// SUBSCRIPTION_REVOKED (RTDN notificationType 12): the user was refunded and
+// access ends NOW (UPGRADE.md §2 S7). Distinct from SUBSCRIPTION_EXPIRED (13),
+// the normal end of a paid period, which never claws anything back.
+const playRtdnNotificationTypeRevoked = 12
+
+// Replaceable only by the hermetic Play webhook tests, which stand up a fake
+// Android Publisher API (this test env has no google vault/config to read the
+// real package name, skus or oauth credentials from). Production never mutates
+// these.
+var playPublisherApiBaseUrl = "https://androidpublisher.googleapis.com"
+var playPackageNameFunc = playPackageName
+var playSkusFunc = func() map[string]*Sku { return playSkus() }
+var playAuthHeaderFunc = playAuthHeader
+
 // https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
 // https://developer.android.com/google/play/billing/rtdn-reference
 func PlayWebhook(
@@ -552,13 +631,14 @@ func PlayWebhook(
 		return nil, err
 	}
 
-	if rtdnMessage.PackageName == playPackageName() {
+	if rtdnMessage.PackageName == playPackageNameFunc() {
 		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2/get
 		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2#SubscriptionPurchaseV2
 		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptions/acknowledge
 		if rtdnMessage.SubscriptionNotification != nil {
 			url := fmt.Sprintf(
-				"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
+				"%s/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
+				playPublisherApiBaseUrl,
 				rtdnMessage.PackageName,
 				rtdnMessage.SubscriptionNotification.PurchaseToken,
 			)
@@ -566,7 +646,7 @@ func PlayWebhook(
 				clientSession.Ctx,
 				url,
 				func(header http.Header) {
-					playAuthHeader(clientSession.Ctx, header)
+					playAuthHeaderFunc(clientSession.Ctx, header)
 				},
 				server.ResponseJsonObject[*PlaySubscription],
 			)
@@ -575,6 +655,16 @@ func PlayWebhook(
 					switch v.StatusCode {
 					// Gone
 					case 410:
+						if rtdnMessage.SubscriptionNotification.NotificationType == playRtdnNotificationTypeRevoked {
+							// a revoked purchase can be gone from the store
+							// entirely; the renewal rows still map the token to
+							// its network
+							return playHandleRevoked(
+								clientSession,
+								rtdnMessage.SubscriptionNotification.PurchaseToken,
+								"GONE",
+							)
+						}
 						return &PlayWebhookResult{}, nil
 					default:
 						return nil, err
@@ -585,6 +675,26 @@ func PlayWebhook(
 			}
 
 			glog.Infof("[sub]google play sub: %v\n", sub)
+
+			if rtdnMessage.SubscriptionNotification.NotificationType == playRtdnNotificationTypeRevoked {
+				// verified against Google before clawing back: the RTDN push is
+				// only as trusted as the state fetch above confirms. A revoked
+				// subscription reports EXPIRED (or is 410, handled above); if
+				// Play still says ACTIVE, do nothing -- later signals will tell.
+				if sub.SubscriptionState == "SUBSCRIPTION_STATE_ACTIVE" {
+					glog.Warningf(
+						"[sub]play REVOKED notification for token %s but Play reports %s; ignoring\n",
+						rtdnMessage.SubscriptionNotification.PurchaseToken,
+						sub.SubscriptionState,
+					)
+					return &PlayWebhookResult{}, nil
+				}
+				return playHandleRevoked(
+					clientSession,
+					rtdnMessage.SubscriptionNotification.PurchaseToken,
+					sub.SubscriptionState,
+				)
+			}
 
 			if len(sub.LineItems) == 0 {
 				glog.Infof("Google play cannot not renew subscription with zero line items (%s)", rtdnMessage.SubscriptionNotification.PurchaseToken)
@@ -648,24 +758,39 @@ func PlayWebhook(
 			}
 
 			if acknowledgeAndCheckRenewal {
-				// Aknowledge
+				// Aknowledge. The result MATTERS: a purchase Google never sees
+				// acknowledged is auto-refunded after 3 days while any granted
+				// balance would stand. A failure here is a non-2xx so Pub/Sub
+				// redelivers and the acknowledge is attempted again.
 				url := fmt.Sprintf(
-					"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
+					"%s/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
+					playPublisherApiBaseUrl,
 					rtdnMessage.PackageName,
 					rtdnMessage.SubscriptionNotification.SubscriptionId,
 					rtdnMessage.SubscriptionNotification.PurchaseToken,
 				)
-				server.HttpPostRawRequireStatusOk(
+				_, err := server.HttpPostRawRequireStatusOk(
 					clientSession.Ctx,
 					url,
 					[]byte{},
 					func(header http.Header) {
-						playAuthHeader(clientSession.Ctx, header)
+						playAuthHeaderFunc(clientSession.Ctx, header)
 					},
 				)
+				if err != nil {
+					glog.Errorf(
+						"[sub]play acknowledge failed for token %s: %s\n",
+						rtdnMessage.SubscriptionNotification.PurchaseToken, err,
+					)
+					return nil, fmt.Errorf("could not acknowledge play purchase: %w", err)
+				}
 
-				// fire this immediately since we pull current plan from subscription_renewal table
-				PlaySubscriptionRenewal(
+				// fire this immediately since we pull current plan from subscription_renewal table.
+				// A credit failure (sku missing from play.yml, Google API failure) is a
+				// non-2xx so Pub/Sub RETRIES the delivery -- otherwise the entitlement
+				// would arrive only via the task scheduled at the END of the paid
+				// period, or never.
+				_, err = PlaySubscriptionRenewal(
 					&PlaySubscriptionRenewalArgs{
 						NetworkId:      networkId,
 						PackageName:    rtdnMessage.PackageName,
@@ -674,6 +799,13 @@ func PlayWebhook(
 					},
 					clientSession,
 				)
+				if err != nil {
+					glog.Errorf(
+						"[sub]play inline renewal failed for token %s: %s\n",
+						rtdnMessage.SubscriptionNotification.PurchaseToken, err,
+					)
+					return nil, err
+				}
 
 				// continually renew as long as the expiry time keeps getting pushed forward
 				// note RTDN messages for renewal may unreliably delivered, so Google
@@ -696,6 +828,45 @@ func PlayWebhook(
 	}
 	// else unknown package, ignore the message
 
+	return &PlayWebhookResult{}, nil
+}
+
+// playHandleRevoked ends a revoked purchase's entitlement: the renewals the
+// purchase token bought and the pro balances they granted, with the network
+// derived from the renewal rows themselves (a revoked token can be 410-Gone
+// at the store). Idempotent: a Pub/Sub redelivery finds nothing left to end
+// and records nothing. Always 200 -- a retry cannot do more.
+func playHandleRevoked(
+	clientSession *session.ClientSession,
+	purchaseToken string,
+	subscriptionState string,
+) (*PlayWebhookResult, error) {
+	endedNetworkIds := model.EndReconciledEntitlementForPurchaseToken(
+		clientSession.Ctx,
+		model.SubscriptionMarketGoogle,
+		purchaseToken,
+		server.NowUtc(),
+	)
+	for _, networkId := range endedNetworkIds {
+		if err := model.AddPaymentReconciliationEvent(clientSession.Ctx, &model.PaymentReconciliationEvent{
+			RunId:     server.NewId(),
+			Store:     model.SubscriptionMarketGoogle,
+			NetworkId: &networkId,
+			Action:    model.PaymentReconcileActionRevoked,
+			Evidence:  purchaseToken,
+			Details: map[string]any{
+				"subscription_state": subscriptionState,
+			},
+		}); err != nil {
+			// the audit trail must never turn a completed clawback into a
+			// failed delivery (Pub/Sub would redeliver into a no-op)
+			glog.Errorf("[sub]play revoked token %s: could not record event: %s\n", purchaseToken, err)
+		}
+	}
+	glog.Infof(
+		"[sub]play revoked token %s (%s): ended %d network(s)\n",
+		purchaseToken, subscriptionState, len(endedNetworkIds),
+	)
 	return &PlayWebhookResult{}, nil
 }
 
@@ -735,7 +906,8 @@ func PlaySubscriptionRenewal(
 ) (*PlaySubscriptionRenewalResult, error) {
 
 	url := fmt.Sprintf(
-		"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
+		"%s/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
+		playPublisherApiBaseUrl,
 		playSubscriptionRenewal.PackageName,
 		playSubscriptionRenewal.PurchaseToken,
 	)
@@ -743,7 +915,7 @@ func PlaySubscriptionRenewal(
 		clientSession.Ctx,
 		url,
 		func(header http.Header) {
-			playAuthHeader(clientSession.Ctx, header)
+			playAuthHeaderFunc(clientSession.Ctx, header)
 		},
 		server.ResponseJsonObject[*PlaySubscription],
 	)
@@ -804,9 +976,42 @@ func PlaySubscriptionRenewal(
 
 	if active {
 		if _, err := model.GetOverlappingTransferBalance(clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err != nil {
-			skus := playSkus()
+			skus := playSkusFunc()
 			skuName := playSubscriptionRenewal.SubscriptionId
-			if sku, ok := skus[skuName]; ok {
+			sku, ok := skus[skuName]
+			if !ok {
+				return nil, fmt.Errorf("Play sku not found: %s", skuName)
+			}
+
+			// The overlap check above is only a fast path: the inline webhook call
+			// and the scheduled renewal task can both pass it for the same token at
+			// once, and then both credit. So the credit happens in ONE tx that
+			// serializes on the purchase token (advisory xact lock, released at
+			// commit/rollback) and RE-CHECKS the overlap inside -- whichever of the
+			// two racers gets the lock second sees the balance the first one wrote
+			// and adds nothing.
+			renewed := false
+			var creditErr error
+			// ReadCommitted, NOT the default RepeatableRead: the gate is
+			// lock-then-recheck, and under RepeatableRead the second racer's
+			// snapshot is pinned by the lock statement itself, taken BEFORE it
+			// blocks -- after the winner commits, the loser re-checks against
+			// the pre-winner snapshot (sees no credit) and then aborts with a
+			// serialization failure (40001) on the rows the winner wrote.
+			// Per-statement snapshots make the post-lock re-check see the
+			// winner's commit, which is the entire point of the re-check.
+			server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					clientSession.Ctx,
+					`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+					playSubscriptionRenewal.PurchaseToken,
+				))
+
+				if _, err := model.GetOverlappingTransferBalanceInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
+					// a concurrent credit for this expiry already landed
+					return
+				}
+
 				if sku.Supporter {
 
 					endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
@@ -821,10 +1026,10 @@ func PlaySubscriptionRenewal(
 						SubscriptionType:   model.SubscriptionTypeSupporter,
 						SubscriptionMarket: model.SubscriptionMarketGoogle,
 					}
-					model.AddSubscriptionRenewal(
-						clientSession.Ctx,
-						renewal,
-					)
+					if err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, renewal); err != nil {
+						creditErr = err
+						return
+					}
 
 					// a supporter subscription -> carries the Pro entitlement
 					transferBalance := &model.TransferBalance{
@@ -837,11 +1042,11 @@ func PlaySubscriptionRenewal(
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 						Pro:                   true,
 					}
-					model.AddTransferBalance(
+					model.AddTransferBalanceInTx(
 						clientSession.Ctx,
+						tx,
 						transferBalance,
 					)
-					model.UpdateProNetwork(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 
 				} else {
 					// a data pack, NOT a subscription -> data only, never Pro
@@ -855,19 +1060,31 @@ func PlaySubscriptionRenewal(
 						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 						Pro:                   false,
 					}
-					model.AddTransferBalance(
+					model.AddTransferBalanceInTx(
 						clientSession.Ctx,
+						tx,
 						transferBalance,
 					)
 				}
-			} else {
-				return nil, fmt.Errorf("Play sku not found: %s", skuName)
+
+				renewed = true
+			}, server.TxReadCommitted)
+			if creditErr != nil {
+				return nil, creditErr
 			}
 
-			return &PlaySubscriptionRenewalResult{
-				ExpiryTime: minExpiryTime,
-				Renewed:    true,
-			}, nil
+			if renewed {
+				if sku.Supporter {
+					// the pro balance is committed -- refresh the entitlement so the
+					// upgrade is visible immediately rather than after ProCacheTtl
+					model.UpdateProNetwork(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+				}
+
+				return &PlaySubscriptionRenewalResult{
+					ExpiryTime: minExpiryTime,
+					Renewed:    true,
+				}, nil
+			}
 		}
 	}
 
@@ -1297,283 +1514,10 @@ type AppleNotificationDecodedPayload struct {
 	Status                int                    `json:"status"`
 	SignedRenewalInfo     string                 `json:"signedRenewalInfo"`
 	SignedTransactionInfo string                 `json:"signedTransactionInfo"`
-}
-
-func HandleSubscribedApple(ctx context.Context, notification AppleNotificationDecodedPayload) {
-
-	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
-
-	if err != nil {
-		glog.Errorf("[apple] Failed to parse signed info: %v", err)
-		return
-	}
-
-	if renewalInfo != nil {
-		glog.Infof("[apple] Renewal Info: %+v", renewalInfo)
-	} else {
-		glog.Infof("[apple] Renewal Info is nil")
-	}
-
-	if transactionInfo != nil {
-		glog.Infof("[apple] Transaction Info: %+v", transactionInfo)
-
-		// Extract key subscription details for database update
-		// var originalTransactionId string // for the original subscription transaction
-		var appTransactionId string // for the current subscription transaction
-		var productId string
-		var expiresDate time.Time
-		var networkId server.Id
-
-		// parse the network id
-		if networkIdStr, ok := transactionInfo["appAccountToken"].(string); ok {
-			networkId, err = server.ParseId(networkIdStr)
-			if err != nil {
-				glog.Errorf("[apple] Failed to parse network ID: %v", err)
-				return
-			}
-		}
-
-		if atid, ok := transactionInfo["appTransactionId"].(string); ok {
-			appTransactionId = atid
-		}
-
-		if exp, ok := transactionInfo["expiresDate"].(float64); ok {
-			expiresDate = time.Unix(int64(exp/1000), 0)
-		}
-
-		var priceNanoCents int64
-
-		if priceFloat, ok := transactionInfo["price"].(float64); ok {
-
-			// webhook price coming back like "4990" for $4.99
-			priceUsd := priceFloat / 1000
-
-			priceNanoCents = model.UsdToNanoCents(priceUsd)
-
-		}
-
-		// fixme: hardcoded fee fraction
-		feeFraction := 0.2
-
-		netRevenue := priceNanoCents - int64(float64(priceNanoCents)*feeFraction)
-
-		if netRevenue == 0 {
-			/**
-			 * For users who subscribe via TestFlight or with FREE_TRIAL, the price will be 0
-			 * We still want to mark them upgraded in the DB, which means they need some paid transfer_balance
-			 */
-			netRevenue = model.UsdToNanoCents(0.01)
-		}
-
-		glog.Infof("[apple] Subscription details - App Transaction ID: %s, Network ID: %s, Product ID: %s, Expires: %s, Net Revenue: %d",
-			appTransactionId,
-			networkId,
-			productId,
-			expiresDate.Format(time.RFC3339),
-			netRevenue,
-		)
-
-		startTime := time.Now()
-		endTime := expiresDate.Add(SubscriptionGracePeriod)
-
-		subscriptionRenewal := model.SubscriptionRenewal{
-			NetworkId:          networkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          startTime,
-			EndTime:            endTime,
-			NetRevenue:         netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketApple,
-			TransactionId:      appTransactionId,
-		}
-
-		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
-
-		// a supporter subscription -> carries the Pro entitlement
-		transferBalance := &model.TransferBalance{
-			NetworkId:             networkId,
-			StartTime:             startTime,
-			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
-			SubsidyNetRevenue:     netRevenue,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
-			Pro:                   true,
-		}
-		model.AddTransferBalance(
-			ctx,
-			transferBalance,
-		)
-		model.UpdateProNetwork(ctx, networkId)
-
-	} else {
-		glog.Infof("[apple] Transaction Info: nil")
-	}
-}
-
-func HandleExpiredApple(notification AppleNotificationDecodedPayload) {
-	glog.Infof("[apple] Subscription expired: %+v", notification.Data)
-
-	_, transactionInfo, err := ParseSignedInfo(notification)
-	if err != nil {
-		glog.Errorf("[apple] Failed to parse signed info: %v", err)
-		return
-	}
-
-	if transactionInfo != nil {
-		if originalTransactionId, ok := transactionInfo["originalTransactionId"].(string); ok {
-			glog.Infof("[apple] Marking subscription expired for transaction: %s", originalTransactionId)
-			// fixme: mark subscription expired in db
-		}
-	}
-
-	// could send a follow up email to the user?
-
-}
-
-func HandleRenewalApple(ctx context.Context, notification AppleNotificationDecodedPayload) {
-	glog.Infof("[apple] Subscription renewed: %+v", notification.Data)
-
-	var networkId server.Id
-	var appTransactionId string
-	var expiresDate time.Time
-
-	renewalInfo, transactionInfo, err := ParseSignedInfo(notification)
-	if err != nil {
-		glog.Errorf("[apple] Failed to parse signed info: %v", err)
-		return
-	}
-
-	if renewalInfo != nil {
-		glog.Infof("[apple] Renewal Info: %+v", renewalInfo)
-
-		if atid, ok := transactionInfo["appTransactionId"].(string); ok {
-			appTransactionId = atid
-		}
-
-		// for checking auto renewal status
-		// if autoRenewStatus, ok := renewalInfo["autoRenewStatus"].(float64); ok {
-		// 	if autoRenewStatus == 1 {
-		// 		glog.Infof("[apple] Auto-renewal is enabled")
-		// 	} else {
-		// 		glog.Infof("[apple] Auto-renewal is disabled")
-		// 	}
-		// }
-
-		if networkIdStr, ok := renewalInfo["appAccountToken"].(string); ok {
-			networkId, err = server.ParseId(networkIdStr)
-			if err != nil {
-				glog.Errorf("[apple] Failed to parse network ID: %v", err)
-				return
-			}
-		}
-
-		if renewalDate, ok := renewalInfo["renewalDate"].(float64); ok {
-			glog.Infof("[apple] Expiration intent: %v", renewalDate)
-			expiresDate = time.Unix(int64(renewalDate/1000), 0)
-		}
-
-		var priceNanoCents int64
-
-		if priceFloat, ok := renewalInfo["renewalPrice"].(float64); ok {
-
-			// webhook price coming back like "4990" for $4.99
-			priceUsd := priceFloat / 1000
-
-			priceNanoCents = model.UsdToNanoCents(priceUsd)
-
-		}
-
-		// fixme: hardcoded fee fraction
-		feeFraction := 0.2
-
-		netRevenue := priceNanoCents - int64(float64(priceNanoCents)*feeFraction)
-
-		glog.Infof("[apple] Subscription details - App Transaction ID: %s, Network ID: %s, Expires: %s, Net Revenue: %d",
-			appTransactionId,
-			networkId,
-			expiresDate.Format(time.RFC3339),
-			netRevenue,
-		)
-
-		subscriptionRenewal := model.SubscriptionRenewal{
-			NetworkId:          networkId,
-			SubscriptionType:   model.SubscriptionTypeSupporter,
-			StartTime:          time.Now(),
-			EndTime:            expiresDate.Add(SubscriptionGracePeriod),
-			NetRevenue:         netRevenue,
-			SubscriptionMarket: model.SubscriptionMarketApple,
-			TransactionId:      appTransactionId,
-		}
-
-		model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
-
-		AddRefreshTransferBalance(ctx, networkId)
-
-	} else {
-		glog.Infof("[apple] Renewal Info is nil")
-	}
-
-}
-
-func DecodeJWSPayload(jwsToken string) (map[string]interface{}, error) {
-	// split JWS
-	parts := strings.Split(jwsToken, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("invalid JWS format")
-	}
-
-	// decode
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode JWS payload: %v", err)
-	}
-
-	// parse
-	var payload map[string]interface{}
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return nil, fmt.Errorf("failed to parse JWS payload: %v", err)
-	}
-
-	return payload, nil
-}
-
-func ParseSignedInfo(notification AppleNotificationDecodedPayload) (map[string]interface{}, map[string]interface{}, error) {
-	var renewalInfo map[string]interface{}
-	var transactionInfo map[string]interface{}
-	var err error
-
-	var signedRenewalInfo string
-	if notification.SignedRenewalInfo != "" {
-		signedRenewalInfo = notification.SignedRenewalInfo
-		glog.Infoln("Using top-level SignedRenewalInfo")
-	} else if dataField, ok := notification.Data["signedRenewalInfo"].(string); ok && dataField != "" {
-		signedRenewalInfo = dataField
-		glog.Infoln("Using data.signedRenewalInfo")
-	}
-
-	if signedRenewalInfo != "" {
-		renewalInfo, err = DecodeJWSPayload(signedRenewalInfo)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decode signedRenewalInfo: %v", err)
-		}
-	}
-
-	var signedTransactionInfo string
-	if notification.SignedTransactionInfo != "" {
-		signedTransactionInfo = notification.SignedTransactionInfo
-		glog.Infoln("Using top-level SignedTransactionInfo")
-	} else if dataField, ok := notification.Data["signedTransactionInfo"].(string); ok && dataField != "" {
-		signedTransactionInfo = dataField
-		glog.Infoln("Using data.signedTransactionInfo")
-	}
-
-	if signedTransactionInfo != "" {
-		transactionInfo, err = DecodeJWSPayload(signedTransactionInfo)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to decode signedTransactionInfo: %v", err)
-		}
-	}
-
-	return renewalInfo, transactionInfo, nil
+	// Populated only by the App Store JWS verifier. Controller code must never
+	// decode SignedRenewalInfo or SignedTransactionInfo itself.
+	RenewalInfo     map[string]any `json:"-"`
+	TransactionInfo map[string]any `json:"-"`
 }
 
 /**
@@ -1687,21 +1631,33 @@ func HeliusWebhook(
 		return &HeliusWebhookResult{Message: "No transactions"}, nil
 	}
 
+	// One Helius delivery carries a BATCH of transactions, and a customer's payment can
+	// arrive behind any number of unrelated transfers in the same batch. So a
+	// transaction that does not match is SKIPPED (continue), never returned on: the
+	// early returns this loop used to take meant a valid payment behind any unrelated
+	// transfer was never examined at all -- Helius got its 200 and never retried, and
+	// the money bought nothing.
+	//
+	// A per-transaction DB failure is remembered and returned AFTER the whole batch is
+	// examined: the non-2xx makes Helius redeliver everything, and the consumed intents
+	// (tx_signature set) make the already-credited ones no-ops on the retry.
 	var matched int
+	var firstErr error
+	// the reason the transaction was skipped -- reported as the result message for a
+	// single-transaction delivery, so a caller (and the existing tests) can see WHY
+	skipMessage := ""
 	for _, transaction := range transactions {
 
 		if transaction.Type != "TRANSFER" {
 			glog.Infof("HeliusWebhook: ignoring non-transfer transaction: %s of type %s", transaction.Signature, transaction.Type)
-			return &HeliusWebhookResult{
-				Message: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
-			}, nil
+			skipMessage = fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type)
+			continue
 		}
 
 		if len(transaction.TokenTransfers) == 0 {
 			glog.Infof("HeliusWebhook: no token transfers found for transaction: %s", transaction.Signature)
-			return &HeliusWebhookResult{
-				Message: "Ignoring transaction with no token transfers",
-			}, nil
+			skipMessage = "Ignoring transaction with no token transfers"
+			continue
 		}
 
 		// Take the largest USDC transfer to one of our receiving addresses, WHATEVER its
@@ -1729,9 +1685,8 @@ func HeliusWebhook(
 
 		if !paymentReceived {
 			glog.Infof("HeliusWebhook: no USDC payment found for transaction: %s", transaction.Signature)
-			return &HeliusWebhookResult{
-				Message: "Ignoring transaction with no matching USDC payment",
-			}, nil
+			skipMessage = "Ignoring transaction with no matching USDC payment"
+			continue
 		}
 
 		// array of accounts to use to search for payment intents
@@ -1744,14 +1699,48 @@ func HeliusWebhook(
 
 		if err != nil {
 			glog.Infof("HeliusWebhook: error searching payment intents: %v", err)
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		// on-chain time, when the webhook carried one, for the unfulfilled record
+		var transactionTime *time.Time
+		if transaction.Timestamp != 0 {
+			t := time.Unix(transaction.Timestamp, 0).UTC()
+			transactionTime = &t
 		}
 
 		if paymentSearchResult == nil {
-			glog.Infof("HeliusWebhook: no payment intent found for transaction: %s", transaction.Signature)
-			return &HeliusWebhookResult{
-				Message: "No payment intent found for this network ID",
-			}, nil
+			skipMessage = "No payment intent found for this network ID"
+
+			// a REDELIVERY of a payment that already consumed its intent finds no
+			// open intent either -- that one is credited and done, not unfulfilled
+			if model.IsSolanaPaymentCompleted(clientSession.Ctx, transaction.Signature) {
+				glog.Infof("HeliusWebhook: transaction %s already credited; ignoring redelivery", transaction.Signature)
+				continue
+			}
+
+			// Money arrived at our address and no open intent matched -- a payment
+			// after the intent was swept, or an unknown reference. Helius is still
+			// acked 200 (it never re-examines a delivered tx), so record it where an
+			// operator can see and repair it, with the account keys the reference was
+			// searched among. A late payment whose intent has merely EXPIRED but not
+			// yet been swept never lands here: the search ignores expires_at on
+			// purpose, so it still resolves and is credited below -- late is not
+			// fraudulent.
+			glog.Errorf("HeliusWebhook: no payment intent found for transaction: %s; recording as unfulfilled\n", transaction.Signature)
+			if err := model.RecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
+				TxSignature:         transaction.Signature,
+				Reason:              model.SolanaUnfulfilledReasonNoIntent,
+				TokenAmountUsd:      tokenAmountReceived,
+				ReferenceCandidates: accounts,
+				TransactionTime:     transactionTime,
+			}); err != nil {
+				glog.Errorf("HeliusWebhook: could not record unfulfilled payment %s: %v\n", transaction.Signature, err)
+			}
+			continue
 		}
 
 		// Verify the payment against what the customer was QUOTED. Underpaying must not
@@ -1767,86 +1756,157 @@ func HeliusWebhook(
 				paymentSearchResult.ExpectedAmountUsd,
 				paymentSearchResult.PaymentReference,
 			)
-			return &HeliusWebhookResult{
-				Message: "Payment is less than the quoted price",
-			}, nil
+			// funds were kept and the intent stays open -- record the shortfall where
+			// an operator can see it, with the quote it was checked against
+			if err := model.RecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
+				TxSignature:       transaction.Signature,
+				Reason:            model.SolanaUnfulfilledReasonUnderpaid,
+				TokenAmountUsd:    tokenAmountReceived,
+				ExpectedAmountUsd: &paymentSearchResult.ExpectedAmountUsd,
+				PaymentReference:  &paymentSearchResult.PaymentReference,
+				NetworkId:         paymentSearchResult.NetworkId,
+				TransactionTime:   transactionTime,
+			}); err != nil {
+				glog.Errorf("HeliusWebhook: could not record unfulfilled payment %s: %v\n", transaction.Signature, err)
+			}
+			skipMessage = "Payment is less than the quoted price"
+			continue
 		}
 
-		// Grant the plan they actually bought. This used to be a YEAR every time, whatever
-		// they had chosen and whatever they had paid.
-		startTime := server.NowUtc()
-		endTime := startTime.Add(solanaPlanDuration(paymentSearchResult.SubscriptionPlan) + SubscriptionGracePeriod)
-
-		netRevenue := model.UsdToNanoCents(tokenAmountReceived)
-
-		var insertErr error
-
-		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-
-			subscriptionRenewal := model.SubscriptionRenewal{
-				NetworkId:          *paymentSearchResult.NetworkId,
-				SubscriptionType:   model.SubscriptionTypeSupporter,
-				StartTime:          startTime,
-				EndTime:            endTime,
-				NetRevenue:         netRevenue,
-				SubscriptionMarket: model.SubscriptionMarketSolana,
-				TransactionId:      paymentSearchResult.PaymentReference,
-			}
-
-			err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
-
-			if err != nil {
-				glog.Infof("HeliusWebhook: error adding subscription renewal: %v", err)
-				insertErr = err
-				return
-			}
-
-			// a supporter subscription -> carries the Pro entitlement
-			transferBalance := &model.TransferBalance{
-				NetworkId:             *paymentSearchResult.NetworkId,
-				StartTime:             startTime,
-				EndTime:               endTime,
-				StartBalanceByteCount: RefreshSupporterTransferBalance,
-				SubsidyNetRevenue:     netRevenue,
-				BalanceByteCount:      RefreshSupporterTransferBalance,
-				Pro:                   true,
-			}
-			model.AddTransferBalanceInTx(
-				clientSession.Ctx,
-				tx,
-				transferBalance,
-			)
-
-			err = model.MarkPaymentIntentCompletedInTx(
-				tx,
-				paymentSearchResult.PaymentReference,
-				transaction.Signature,
-				clientSession,
-			)
-
-			if err != nil {
-				glog.Infof("HeliusWebhook: error marking payment intent completed: %v", err)
-				insertErr = err
-			}
-		})
+		credited, insertErr := solanaCreditPaymentIntent(
+			clientSession,
+			paymentSearchResult,
+			transaction.Signature,
+			tokenAmountReceived,
+		)
 
 		if insertErr != nil {
 			glog.Infof("HeliusWebhook: error inserting payment data: %v", insertErr)
-			return nil, insertErr
+			if firstErr == nil {
+				firstErr = insertErr
+			}
+			continue
 		}
 
-		// the pro balance is committed -- refresh the entitlement so the upgrade is
-		// visible immediately rather than after ProCacheTtl
-		model.UpdateProNetwork(clientSession.Ctx, *paymentSearchResult.NetworkId)
+		if !credited {
+			// lost the race to a concurrent delivery of the same transaction, which
+			// already consumed the intent and credited
+			skipMessage = "No payment intent found for this network ID"
+			continue
+		}
 
 		matched++
 	}
 
+	// a per-transaction DB failure surfaces as a non-2xx AFTER the whole batch was
+	// examined, so Helius redelivers everything; the consumed intents make the
+	// already-credited transactions no-ops on the retry
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
 	if matched == 0 {
 		glog.Infof("HeliusWebhook: no matching payments found for %v", transactions)
+		// a single-transaction delivery keeps its specific reason; a batch with
+		// nothing matched can only be summarized
+		if len(transactions) == 1 && skipMessage != "" {
+			return &HeliusWebhookResult{Message: skipMessage}, nil
+		}
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// solanaCreditPaymentIntent consumes an open intent and grants the plan the
+// customer was quoted, in ONE tx. Shared by the Helius webhook and the payment
+// reconciler (which sweeps recorded unfulfilled payments whose reference now
+// resolves), so a reconcile credit racing a webhook redelivery of the same
+// transaction produces exactly one credit.
+//
+// The intent is consumed FIRST, in the same tx as the credit. The guarded
+// UPDATE (tx_signature IS NULL, rows-affected checked) is the concurrency
+// gate: two callers with the same transaction set the same signature, so only
+// rows-affected can tell them apart -- exactly one proceeds to credit, the
+// other sees a consumed intent and adds nothing (credited = false, no error).
+func solanaCreditPaymentIntent(
+	clientSession *session.ClientSession,
+	paymentSearchResult *model.PaymentIntentSearchResult,
+	signature string,
+	tokenAmountReceivedUsd float64,
+) (credited bool, returnErr error) {
+	// Grant the plan they actually bought. This used to be a YEAR every time,
+	// whatever they had chosen and whatever they had paid.
+	startTime := server.NowUtc()
+	endTime := startTime.Add(solanaPlanDuration(paymentSearchResult.SubscriptionPlan) + SubscriptionGracePeriod)
+
+	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
+
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+
+		completed, err := model.MarkPaymentIntentCompletedInTx(
+			tx,
+			paymentSearchResult.PaymentReference,
+			signature,
+			clientSession,
+		)
+		if err != nil {
+			glog.Infof("[sub]solana credit: error marking payment intent completed: %v", err)
+			returnErr = err
+			return
+		}
+		if !completed {
+			glog.Infof("[sub]solana credit: payment intent %s already completed; not crediting again", paymentSearchResult.PaymentReference)
+			return
+		}
+
+		subscriptionRenewal := model.SubscriptionRenewal{
+			NetworkId:          *paymentSearchResult.NetworkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          startTime,
+			EndTime:            endTime,
+			NetRevenue:         netRevenue,
+			SubscriptionMarket: model.SubscriptionMarketSolana,
+			TransactionId:      paymentSearchResult.PaymentReference,
+		}
+
+		err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
+
+		if err != nil {
+			glog.Infof("[sub]solana credit: error adding subscription renewal: %v", err)
+			returnErr = err
+			return
+		}
+
+		// a supporter subscription -> carries the Pro entitlement
+		transferBalance := &model.TransferBalance{
+			NetworkId:             *paymentSearchResult.NetworkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     netRevenue,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
+			Pro:                   true,
+		}
+		model.AddTransferBalanceInTx(
+			clientSession.Ctx,
+			tx,
+			transferBalance,
+		)
+
+		credited = true
+	})
+
+	if returnErr != nil {
+		return false, returnErr
+	}
+
+	if credited {
+		// the pro balance is committed -- refresh the entitlement so the upgrade
+		// is visible immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(clientSession.Ctx, *paymentSearchResult.NetworkId)
+	}
+
+	return credited, nil
 }
 
 /**

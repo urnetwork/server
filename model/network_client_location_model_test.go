@@ -349,7 +349,14 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		}
 
 		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(time.Hour), true)
-		UpdateClientScores(ctx, 5*time.Second, 1)
+		// The TTL is the redis expiry on the score/sample keys FindProviders2
+		// reads, and a cache miss there returns zero providers with a nil error
+		// (see the counts-key `continue` in loadClientScores) — not an error and
+		// not a db fallback. The sampling loop below runs 1024 queries and takes
+		// ~5.4s, so the original 5s TTL expired mid-loop and every remaining
+		// query came back empty ("0 does not equal 6"). Keep this comfortably
+		// longer than the whole test.
+		UpdateClientScores(ctx, 5*time.Minute, 1)
 
 		clientIds := slices.Collect(maps.Keys(clientSessions))
 		clientIdA := clientIds[0]
@@ -764,6 +771,234 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 // 		})
 // 	})
 // }
+
+func TestCreateLocationCityCoordinates(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		cityCoordinates := func(locationId server.Id) (latitude *float64, longitude *float64) {
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT latitude, longitude
+					FROM location
+					WHERE location_id = $1
+					`,
+					locationId,
+				)
+				server.WithPgResult(result, err, func() {
+					connect.AssertEqual(t, result.Next(), true)
+					server.Raise(result.Scan(&latitude, &longitude))
+				})
+			})
+			return
+		}
+
+		// created without coordinates: stored as NULL, not 0,0
+		a := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, a)
+
+		latitude, longitude := cityCoordinates(a.LocationId)
+		connect.AssertEqual(t, latitude, nil)
+		connect.AssertEqual(t, longitude, nil)
+
+		// the same city created again with coordinates self-heals the row
+		b := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+			Latitude:     37.4419,
+			Longitude:    -122.1430,
+		}
+		CreateLocation(ctx, b)
+		connect.AssertEqual(t, b.LocationId, a.LocationId)
+
+		latitude, longitude = cityCoordinates(a.LocationId)
+		connect.AssertEqual(t, *latitude, 37.4419)
+		connect.AssertEqual(t, *longitude, -122.1430)
+
+		// known coordinates are not overwritten
+		c := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+			Latitude:     1,
+			Longitude:    2,
+		}
+		CreateLocation(ctx, c)
+
+		latitude, longitude = cityCoordinates(a.LocationId)
+		connect.AssertEqual(t, *latitude, 37.4419)
+		connect.AssertEqual(t, *longitude, -122.1430)
+
+		// created with coordinates: stored on insert
+		d := &Location{
+			LocationType: LocationTypeCity,
+			City:         "San Francisco",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+			Latitude:     37.7749,
+			Longitude:    -122.4194,
+		}
+		CreateLocation(ctx, d)
+
+		latitude, longitude = cityCoordinates(d.LocationId)
+		connect.AssertEqual(t, *latitude, 37.7749)
+		connect.AssertEqual(t, *longitude, -122.4194)
+	})
+}
+
+func TestFindProviders2ProviderLocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		guestMode := false
+		isPro := false
+
+		clientSession := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(networkId, userId, "a", guestMode, isPro),
+		)
+
+		clientId := server.NewId()
+
+		Testing_CreateDevice(
+			ctx,
+			networkId,
+			server.NewId(),
+			clientId,
+			"",
+			"",
+		)
+
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := ConnectNetworkClient(
+			ctx,
+			clientId,
+			"0.0.0.0:0",
+			handlerId,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		secretKeys := map[ProvideMode][]byte{
+			ProvideModePublic: make([]byte, 32),
+		}
+		SetProvide(ctx, clientId, secretKeys)
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+			Latitude:     37.4419,
+			Longitude:    -122.1430,
+		}
+		CreateLocation(ctx, city)
+
+		createLocationGroup := &LocationGroup{
+			Name:     StrongPrivacyLaws,
+			Promoted: true,
+			MemberLocationIds: []server.Id{
+				city.CityLocationId,
+				city.RegionLocationId,
+				city.CountryLocationId,
+			},
+		}
+		CreateLocationGroup(ctx, createLocationGroup)
+
+		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+
+		clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+		connect.AssertEqual(t, err, nil)
+		stats := &ClientReliabilityStats{
+			ConnectionEstablishedCount: 1,
+			ProvideEnabledCount:        1,
+			ReceiveMessageCount:        1,
+			ReceiveByteCount:           1024,
+			SendMessageCount:           1,
+			SendByteCount:              1024,
+		}
+		AddClientReliabilityStats(
+			ctx,
+			networkId,
+			clientId,
+			clientAddressHash,
+			server.NowUtc(),
+			stats,
+		)
+		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+
+		err = UpdateClientScores(ctx, 5*time.Minute, 1)
+		connect.AssertEqual(t, err, nil)
+
+		// the reliability rows exist now, so the directory covers the city chain
+		loadLocationDirectory()
+
+		findProviders2 := func(spec *ProviderSpec) *FindProvidersProvider {
+			res, err := FindProviders2(
+				&FindProviders2Args{
+					Specs:        []*ProviderSpec{spec},
+					Count:        10,
+					ForceMinimum: true,
+				},
+				clientSession,
+			)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(res.Providers), 1)
+			connect.AssertEqual(t, res.Providers[0].ClientId, clientId)
+			return res.Providers[0]
+		}
+
+		// a location spec resolves the full location from the score cache
+		provider := findProviders2(&ProviderSpec{
+			LocationId: &city.LocationId,
+		})
+		location := provider.Location
+		connect.AssertEqual(t, location != nil, true)
+		connect.AssertEqual(t, location.Country, "United States")
+		connect.AssertEqual(t, location.CountryCode, "us")
+		connect.AssertEqual(t, location.Region, "California")
+		connect.AssertEqual(t, location.City, "Palo Alto")
+		connect.AssertEqual(t, *location.CountryLocationId, city.CountryLocationId)
+		connect.AssertEqual(t, *location.RegionLocationId, city.RegionLocationId)
+		connect.AssertEqual(t, *location.CityLocationId, city.CityLocationId)
+		regionLat, regionLon, ok := centroidFor("us", "California")
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, location.RegionCoordinates != nil, true)
+		connect.AssertEqual(t, *location.RegionCoordinates, LocationCoordinates{Lat: regionLat, Lon: regionLon})
+		connect.AssertEqual(t, location.CityCoordinates != nil, true)
+		connect.AssertEqual(t, *location.CityCoordinates, LocationCoordinates{Lat: 37.4419, Lon: -122.1430})
+
+		// group-keyed samples carry no location ids, so the location is omitted
+		provider = findProviders2(&ProviderSpec{
+			LocationGroupId: &createLocationGroup.LocationGroupId,
+		})
+		connect.AssertEqual(t, provider.Location, nil)
+
+		// before the directory has loaded, the location is omitted rather than
+		// blocking the request path
+		resetLocationDirectory()
+		provider = findProviders2(&ProviderSpec{
+			LocationId: &city.LocationId,
+		})
+		connect.AssertEqual(t, provider.Location, nil)
+	})
+}
 
 // FindProviders2 gates providers on reliability minimums (0.99 independent
 // reliability weight on the hour lookback). The reliability sink is

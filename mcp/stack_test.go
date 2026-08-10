@@ -85,13 +85,15 @@ type fetchTestStack struct {
 	cancel context.CancelFunc
 
 	// basic-auth username at the proxy ingress (empty password)
-	signedProxyId string
-	proxyClient   *model.ProxyClient
+	signedProxyId    string
+	mcpSignedProxyId string
+	proxyClient      *model.ProxyClient
 
 	// base url of the local web server, reachable through the provider egress
 	webUrl string
 
 	pdNetworkId       server.Id
+	pdUserId          server.Id
 	pdClientId        server.Id
 	providerNetworkId server.Id
 	providerClientId  server.Id
@@ -108,6 +110,12 @@ type fetchTestStack struct {
 	webServer          *httptest.Server
 
 	closeOnce sync.Once
+}
+
+// Selects production security policy and optional target-request observation.
+type fetchTestStackOptions struct {
+	disableSecurityPolicies bool
+	onWebRequest            func()
 }
 
 // Tears down the stack. Admission is stopped before the root ctx is canceled:
@@ -151,31 +159,20 @@ type fetchTestPorts struct {
 	https int
 }
 
-// Binds ephemeral ports and hands them back with a release func, so the proxy
-// servers can claim ports the OS is not about to hand to something else.
+// reserveFetchTestPorts allocates the proxy http/https listen ports through
+// server.ReserveTestListenPorts: probed on the wildcard address the servers
+// actually bind, from below the OS ephemeral range so the release -> bind
+// window cannot lose a port to the process's own outbound dials (see the
+// allocator doc in server/test_util.go; certification failure c12-1).
 func reserveFetchTestPorts(t testing.TB) (*fetchTestPorts, func()) {
-	var reservations []io.Closer
-	reserveTcp := func() int {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("reserve tcp test port: %v", err)
-		}
-		reservations = append(reservations, listener)
-		return listener.Addr().(*net.TCPAddr).Port
+	ports, release, err := server.ReserveTestListenPorts("tcp", "tcp")
+	if err != nil {
+		t.Fatalf("reserve fetch test ports: %v", err)
 	}
-	ports := &fetchTestPorts{
-		http:  reserveTcp(),
-		https: reserveTcp(),
-	}
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() {
-			for _, reservation := range reservations {
-				reservation.Close()
-			}
-		})
-	}
-	return ports, release
+	return &fetchTestPorts{
+		http:  ports[0],
+		https: ports[1],
+	}, release
 }
 
 // An already-bound listener, so an in-process server keeps its OS-assigned
@@ -277,8 +274,9 @@ func seedFetchTestProxyClientIpv4(t testing.TB, ctx context.Context) {
 
 // Starts the local web server on 127.0.0.1. The index page references its
 // sub-resources both relatively and by absolute url, so a fetch that follows
-// sub-resources exercises both forms against the same origin.
-func startFetchTestWebServer(t testing.TB) *httptest.Server {
+// sub-resources exercises both forms against the same origin. The callback,
+// when present, observes every request before the route handler runs.
+func startFetchTestWebServer(t testing.TB, onWebRequest func()) *httptest.Server {
 	pngBytes, err := base64.StdEncoding.DecodeString(fetchTestPngBase64)
 	if err != nil {
 		t.Fatalf("decode test png: %v", err)
@@ -357,19 +355,30 @@ img { image-rendering: pixelated; }
 `, fetchTestPageMarker, fetchTestPageMarker, webServer.URL)
 	})
 
-	webServer = httptest.NewServer(mux)
+	webServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if onWebRequest != nil {
+			onWebRequest()
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	return webServer
 }
 
 // Wires up the full local environment and returns the stack. It must be called
 // inside DefaultTestEnv().Run (db + redis + migrations ready).
 func setupFetchTestStack(t testing.TB) *fetchTestStack {
+	return setupFetchTestStackWithOptions(t, &fetchTestStackOptions{
+		disableSecurityPolicies: true,
+	})
+}
+
+func setupFetchTestStackWithOptions(t testing.TB, options *fetchTestStackOptions) *fetchTestStack {
 	setFetchTestEnv()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// ---- the local web server the provider egresses to -----------------------
-	webServer := startFetchTestWebServer(t)
+	webServer := startFetchTestWebServer(t, options.onWebRequest)
 
 	// ---- local connect server (plain ws, in-process) -------------------------
 	connectHost := "fetchtest"
@@ -486,7 +495,9 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	// inspection, so the policy is disabled here.
 	providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
 	providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
-	providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	if options.disableSecurityPolicies {
+		providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	}
 	providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
 	go func() {
 		<-ctx.Done()
@@ -516,7 +527,7 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	pdClientId := server.NewId()
 
 	model.Testing_CreateNetwork(ctx, pdNetworkId, pdNetworkName, pdUserId)
-	model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "proxydevice")
+	model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "mcp")
 	fetchTestRedeemBalance(t, ctx, pdNetworkId, fetchTestInitialBalance)
 
 	// the proxy device connects "by location" pinned directly to the provider
@@ -571,7 +582,9 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	// device drops its own egress to the loopback web server
 	pdmSettings := proxy.DefaultProxyDeviceManagerSettings()
 	pdmSettings.NetworkSpace = networkSpace
-	pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	if options.disableSecurityPolicies {
+		pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+	}
 	proxyDeviceManager := proxy.NewProxyDeviceManager(ctx, pdmSettings)
 	go func() {
 		<-ctx.Done()
@@ -595,15 +608,45 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 	if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
 		t.Fatalf("proxy device did not become ready (provider not reachable)")
 	}
+	proxyOwner := model.GetNetworkClient(ctx, proxyDeviceConfig.ClientId)
+	if proxyOwner == nil {
+		t.Fatalf("mcp proxy owner client %s does not exist", proxyDeviceConfig.ClientId)
+	}
+	if proxyOwner.NetworkId != pdNetworkId {
+		t.Fatalf(
+			"mcp proxy fixture owner network=%s device_spec=%q, want network=%s",
+			proxyOwner.NetworkId,
+			proxyOwner.DeviceSpec,
+			pdNetworkId,
+		)
+	}
+
+	mcpBinding := identityStateBinding(
+		pdUserId.String(),
+		pdNetworkId,
+		fetchTestOAuthClientId,
+		McpResource,
+	)
+	mcpSignedProxyId, err := seal(
+		sealLabelProxy,
+		mcpBinding,
+		&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+		fetchSealTtl,
+	)
+	if err != nil {
+		t.Fatalf("seal mcp proxy handle: %v", err)
+	}
 
 	return &fetchTestStack{
 		t:                  t,
 		ctx:                ctx,
 		cancel:             cancel,
 		signedProxyId:      proxyClient.AuthToken,
+		mcpSignedProxyId:   mcpSignedProxyId,
 		proxyClient:        proxyClient,
 		webUrl:             webServer.URL,
 		pdNetworkId:        pdNetworkId,
+		pdUserId:           pdUserId,
 		pdClientId:         pdClientId,
 		providerNetworkId:  providerNetworkId,
 		providerClientId:   providerClientId,

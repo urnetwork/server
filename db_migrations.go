@@ -4332,6 +4332,55 @@ var migrations = []any{
         ON transfer_contract (destination_id) WHERE open
     `),
 
+	// seedphrase auth
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_user_auth_seedphrase (
+            user_id             uuid NOT NULL PRIMARY KEY,
+            seedphrase_lookup   bytea NOT NULL,
+            seedphrase_hash     bytea NOT NULL,
+            seedphrase_salt     bytea NOT NULL,
+            create_time         timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE UNIQUE INDEX IF NOT EXISTS network_user_auth_seedphrase_lookup
+            ON network_user_auth_seedphrase (seedphrase_lookup)
+    `),
+
+	// network name reclaim (1-day cooldown)
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_name_reclaim (
+            old_name         varchar(256) NOT NULL PRIMARY KEY,
+            cool_down_until  timestamp NOT NULL
+        )
+    `),
+
+	// network create rate limit (5 per IP per day)
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_create_attempt (
+            network_create_attempt_id uuid NOT NULL PRIMARY KEY,
+            client_address_hash       bytea NOT NULL,
+            create_time               timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_create_attempt_hash_time
+            ON network_create_attempt (client_address_hash, create_time)
+    `),
+
+	// Index for bulk client deactivation via `client_id = ANY($1) AND network_id = $2`.
+	// Both the synchronous batch path (RemoveNetworkClientsBatch, ≤10k ids) and the
+	// background task path (RemoveNetworkClientsTask, 200k ids per invocation) use
+	// this predicate. Without this index the query planner must scan for each batch;
+	// at 200k IDs across 20 batches that can cause long lock times on large tables.
+	// On the large existing network_client table this must be built manually with
+	// CREATE INDEX CONCURRENTLY out of band — the IF NOT EXISTS gate makes this
+	// migration a no-op once it is pre-created.
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_client_network_id_client_id
+        ON network_client (network_id, client_id)
+    `),
+
 	// Defuse the 2026-07-17 planner-stats landmine (monitor/SIGNALS.md 2.3/5.8): at
 	// steady state only ~10-50k of 530M rows have open=true (~6e-5), so the
 	// default ANALYZE sample (300 x 100 = 30k rows) can miss every one.
@@ -4385,6 +4434,409 @@ var migrations = []any{
         CREATE INDEX IF NOT EXISTS network_client_top_level_contract_time
         ON network_client (contract_time) WHERE (active = true AND source_client_id IS NULL AND contract_time IS NOT NULL)
     `),
+
+	// oauth 2.1 / openid connect authorization server (IDP.md).
+	//
+	// A registered client. `client_id` is a client id metadata document url
+	// (an https url, the preferred mechanism) for cimd clients, and an opaque
+	// generated id for dynamic registration and pre-registered clients.
+	// cimd clients are cached rows refreshed from their document; the
+	// `metadata_expire_time` is when the cached copy goes stale.
+	newSqlMigration(`
+        CREATE TABLE oauth_client (
+            client_id varchar(1024) NOT NULL,
+            client_type varchar(16) NOT NULL,
+            client_name varchar(256) NULL,
+            client_uri varchar(1024) NULL,
+            logo_uri varchar(1024) NULL,
+            application_type varchar(16) NOT NULL DEFAULT 'web',
+            redirect_uris_json text NOT NULL,
+            scope varchar(1024) NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            update_time timestamp NOT NULL DEFAULT now(),
+            metadata_expire_time timestamp NULL,
+
+            PRIMARY KEY (client_id)
+        )
+    `),
+
+	// Single use authorization codes. Every value the token exchange must
+	// check back against is bound here at mint time: the pkce challenge, the
+	// redirect uri, the resource (rfc 8707), the granted scope, and the user
+	// and network the consent was for. `redeem_time` makes the single use
+	// rule enforceable -- a second redemption is detectable rather than
+	// silently allowed, which per oauth 2.1 means the code was leaked.
+	newSqlMigration(`
+        CREATE TABLE oauth_authorization_code (
+            code_hash bytea NOT NULL,
+            client_id varchar(1024) NOT NULL,
+            user_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            redirect_uri varchar(1024) NOT NULL,
+            code_challenge varchar(128) NOT NULL,
+            code_challenge_method varchar(8) NOT NULL,
+            resource varchar(1024) NOT NULL,
+            scope varchar(1024) NOT NULL,
+            nonce varchar(256) NULL,
+            principal varchar(256) NULL,
+            roles_json text NULL,
+            auth_time timestamp NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            expire_time timestamp NOT NULL,
+            redeem_time timestamp NULL,
+
+            PRIMARY KEY (code_hash)
+        )
+    `),
+
+	// the reaper sweeps expired codes; redeemed codes are kept until expiry so
+	// a replay is still detectable rather than looking like an unknown code
+	newSqlMigration(`
+        CREATE INDEX oauth_authorization_code_expire_time
+        ON oauth_authorization_code (expire_time)
+    `),
+
+	// Opaque refresh tokens, stored hashed: the raw value exists only in the
+	// response to the client. `family_id` ties a rotation chain together --
+	// each use issues a new token in the same family and retires the old one.
+	// Presenting a retired token is treated as theft and revokes the whole
+	// family, which is why retired rows are kept until they expire instead of
+	// being deleted.
+	newSqlMigration(`
+        CREATE TABLE oauth_refresh_token (
+            token_hash bytea NOT NULL,
+            family_id uuid NOT NULL,
+            client_id varchar(1024) NOT NULL,
+            user_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            resource varchar(1024) NOT NULL,
+            scope varchar(1024) NOT NULL,
+            principal varchar(256) NULL,
+            roles_json text NULL,
+            auth_time timestamp NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            expire_time timestamp NOT NULL,
+            rotate_time timestamp NULL,
+            revoke_time timestamp NULL,
+
+            PRIMARY KEY (token_hash)
+        )
+    `),
+
+	// revoking a family on reuse detection, and listing a user's grants
+	newSqlMigration(`
+        CREATE INDEX oauth_refresh_token_family_id
+        ON oauth_refresh_token (family_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX oauth_refresh_token_user_id_client_id
+        ON oauth_refresh_token (user_id, client_id)
+    `),
+
+	newSqlMigration(`
+        CREATE INDEX oauth_refresh_token_expire_time
+        ON oauth_refresh_token (expire_time)
+    `),
+
+	// Remembered consent, so re-authorizing for scopes the user already
+	// approved does not re-prompt. A request for any scope outside
+	// `scope` prompts again; approving replaces the row with the union.
+	newSqlMigration(`
+        CREATE TABLE oauth_consent (
+            user_id uuid NOT NULL,
+            client_id varchar(1024) NOT NULL,
+            network_id uuid NOT NULL,
+            scope varchar(1024) NOT NULL,
+            create_time timestamp NOT NULL DEFAULT now(),
+            update_time timestamp NOT NULL DEFAULT now(),
+
+            PRIMARY KEY (user_id, client_id)
+        )
+    `),
+
+	// account-based (not IP-based) daily rate limits on sensitive account
+	// actions: add/remove auth method, change/claim network name, and
+	// generate/regenerate seedphrase. One shared table, keyed by (user_id,
+	// action), so each action gets its own independent daily counter.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS network_user_action_attempt (
+            network_user_action_attempt_id uuid NOT NULL PRIMARY KEY,
+            user_id                        uuid NOT NULL,
+            action                         varchar(64) NOT NULL,
+            create_time                    timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS network_user_action_attempt_user_action_time
+            ON network_user_action_attempt (user_id, action, create_time)
+    `),
+
+	// a single, deployment-wide ledger for the bulk client removal API
+	// (RemoveNetworkClients): each admitted request records how many client
+	// ids it covered, and CheckAndRecordBulkClientRemovalQuota sums this
+	// column over the trailing hour to enforce MaxBulkClientRemovalsPerHour.
+	// network_id is stored for observability only -- the limit itself is
+	// global, not scoped per network.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS bulk_client_removal_quota (
+            bulk_client_removal_quota_id uuid NOT NULL PRIMARY KEY,
+            network_id                   uuid NOT NULL,
+            client_count                 int NOT NULL,
+            create_time                  timestamp NOT NULL DEFAULT now()
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_create_time
+            ON bulk_client_removal_quota (create_time)
+    `),
+
+	// bulk_client_removal_quota moves from a rolling trailing-hour window to
+	// fixed, non-overlapping hourly buckets (UTC): ReserveBulkClientRemovalSlot
+	// reserves a row against a specific bucket_start (the current hour, or a
+	// future one if the current hour is full), instead of every row implicitly
+	// counting against whatever "now" happens to be when queried. create_time
+	// remains as an audit field (when the reservation was made), separate from
+	// bucket_start (which hour it counts toward). No rows exist yet in
+	// practice, so the NOT NULL default here is never relied on for real data.
+	newSqlMigration(`
+        ALTER TABLE bulk_client_removal_quota
+            ADD COLUMN IF NOT EXISTS bucket_start timestamp NOT NULL DEFAULT now()
+    `),
+	newSqlMigration(`
+        CREATE INDEX IF NOT EXISTS bulk_client_removal_quota_bucket_start
+            ON bulk_client_removal_quota (bucket_start)
+    `),
+
+	// city point coordinates from the ip mmdb, written by `CreateLocation`.
+	// NULL means unknown (rows created before this column existed, or created
+	// without coordinates); `FindProviders2` omits city_coordinates for those.
+	newSqlMigration(`
+        ALTER TABLE location
+            ADD COLUMN latitude double precision NULL,
+            ADD COLUMN longitude double precision NULL
+    `),
+
+	// Account-wide JWT revocation watermark. Password resets advance this
+	// timestamp; API/connect reject credentials created before it.
+	newSqlMigration(`
+		ALTER TABLE network_user
+			ADD COLUMN credential_change_time timestamp NOT NULL DEFAULT 'epoch'
+	`),
+
+	// App Store notification UUIDs and entitlement-bearing transactions are
+	// separate ledgers: several notification types can legitimately reference
+	// one transaction, while each transaction may grant entitlement only once.
+	newSqlMigration(`
+		CREATE TABLE apple_notification (
+			notification_uuid uuid NOT NULL PRIMARY KEY,
+			notification_type varchar(64) NOT NULL,
+			subtype varchar(64) NOT NULL,
+			signed_date timestamp NOT NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE apple_subscription_transaction (
+			transaction_id varchar(128) NOT NULL PRIMARY KEY,
+			notification_uuid uuid NOT NULL UNIQUE,
+			network_id uuid NOT NULL,
+			product_id varchar(128) NOT NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// The 2024 client_address_hash migration (network_client_connection,
+	// user_auth_attempt) missed the task tables and the network-create audit
+	// blob, all of which persisted the raw ip:port past the request:
+	// pending_task for the life of the task, finished_task for 24h, and
+	// audit_network_event.event_details permanently (no reaper). Store the
+	// peppered hash + port instead (server.ClientIpHash), matching the 2024
+	// columns. client_address keeps its NOT NULL shape with a '' default so
+	// old binaries keep working during a rolling deploy; new code writes ''.
+	// Once no pre-hash binaries remain, a follow-up migration can DROP
+	// client_address from both tables, mirroring user_auth_attempt.
+	newSqlMigration(`
+		ALTER TABLE pending_task
+			ADD COLUMN client_address_hash BYTEA NULL,
+			ADD COLUMN client_address_port int NOT NULL DEFAULT 0,
+			ALTER COLUMN client_address SET DEFAULT ''
+	`),
+	newSqlMigration(`
+		ALTER TABLE finished_task
+			ADD COLUMN client_address_hash BYTEA NULL,
+			ADD COLUMN client_address_port int NOT NULL DEFAULT 0,
+			ALTER COLUMN client_address SET DEFAULT ''
+	`),
+	// rewrite the raw addresses already persisted by the three call sites
+	newCodeMigration(migration_20260807_ScrubTaskAndAuditClientAddresses),
+
+	// Ledger of Stripe invoices that have already been credited, mirroring the
+	// apple_subscription_transaction shape: the insert (ON CONFLICT DO NOTHING)
+	// gates the credit inside the same tx, so an at-least-once invoice.paid
+	// delivery credits exactly once. Stripe was the only store path with no
+	// such gate.
+	newSqlMigration(`
+		CREATE TABLE stripe_invoice (
+			invoice_id varchar(128) NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// On-chain Solana payments the Helius webhook could not fulfil: no open
+	// intent matched (late or unknown reference) or the amount was under the
+	// quote. The money moved and Helius was acked 200 (it never re-examines a
+	// delivered tx), so without a row the only record was a log line. Each row
+	// carries enough to repair by hand: the tx signature, the amount received,
+	// the quote it was checked against when one matched, and the account keys
+	// the reference was searched among when none did.
+	newSqlMigration(`
+		CREATE TABLE solana_unfulfilled_payment (
+			tx_signature varchar(128) NOT NULL PRIMARY KEY,
+			reason varchar(32) NOT NULL,
+			token_amount_usd double precision NOT NULL,
+			expected_amount_usd double precision NULL,
+			payment_reference varchar(256) NULL,
+			network_id uuid NULL,
+			reference_candidates text NULL,
+			transaction_time timestamp NULL,
+			record_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// subscription_renewal was keyed by (network_id, subscription_type,
+	// end_time, start_time): a second market landing the IDENTICAL window
+	// upserted onto the first market's row, overwriting (not summing) revenue
+	// and keeping the first market/transaction_id -- so the second market was
+	// invisible to GetActiveSubscriptionRenewalMarkets (no cancel path) and
+	// uncancellable through UnsubscribeStripe. Include market in the key so
+	// each store keeps its own row. Existing rows are kept: the new key is a
+	// superset of the old, so no existing rows can collide, and NULL markets
+	// (rows predating the column) are normalized to '' first.
+	newSqlMigration(`
+		UPDATE subscription_renewal SET market = '' WHERE market IS NULL;
+		ALTER TABLE subscription_renewal ALTER COLUMN market SET DEFAULT '';
+		ALTER TABLE subscription_renewal ALTER COLUMN market SET NOT NULL;
+		ALTER TABLE subscription_renewal DROP CONSTRAINT subscription_renewal_pkey;
+		ALTER TABLE subscription_renewal ADD PRIMARY KEY (network_id, subscription_type, end_time, start_time, market)
+	`),
+
+	// Audit trail for the hourly payment reconciliation task (UPGRADE.md §8).
+	// Every repair the reconciler makes -- a credit for a lost webhook, an
+	// entitlement ended because the store says it is already over -- is a row
+	// here, with the store evidence id it acted on. Operator visibility is the
+	// point: a spike in repair counts IS the alarm that webhooks are broken. A
+	// run that repairs nothing writes only a heartbeat row (store = 'all'),
+	// and a store skipped for missing credentials writes a skipped_store row.
+	// action: credited | ended | skipped_store | heartbeat | error.
+	newSqlMigration(`
+		CREATE TABLE payment_reconciliation_event (
+			event_id uuid NOT NULL PRIMARY KEY,
+			run_id uuid NOT NULL,
+			store varchar(32) NOT NULL,
+			network_id uuid NULL,
+			action varchar(32) NOT NULL,
+			evidence varchar(256) NULL,
+			details text NULL,
+			event_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX payment_reconciliation_event_run_id ON payment_reconciliation_event (run_id)
+	`),
+	newSqlMigration(`
+		CREATE INDEX payment_reconciliation_event_store_action_event_time
+			ON payment_reconciliation_event (store, action, event_time)
+	`),
+
+	// Per-store incremental watermark for the reconciler's store-side listings
+	// (e.g. Stripe invoices created since the last successful run). A sibling
+	// of the event table rather than a row-kind inside it: the watermark is
+	// one mutable upsert-in-place value per store, while events are an
+	// append-only audit trail -- mixing them would make "the watermark" a
+	// MAX() over audit rows that must then never be pruned.
+	newSqlMigration(`
+		CREATE TABLE payment_reconciliation_watermark (
+			store varchar(32) NOT NULL PRIMARY KEY,
+			watermark_time timestamp NOT NULL,
+			update_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// Dry-run audit support for manual reconciliation runs (bringyourctl
+	// payments reconcile --dry-run). A dry run records would_credit /
+	// would_end events -- the same evidence and details the real repair would
+	// carry -- plus its own heartbeat/error rows, all tagged dry_run = true.
+	// The default false keeps every existing query correct: operator queries
+	// over real repairs, heartbeats, and errors exclude dry runs without
+	// changing.
+	newSqlMigration(`
+		ALTER TABLE payment_reconciliation_event
+			ADD COLUMN dry_run bool NOT NULL DEFAULT false
+	`),
+
+	// Last emitted provider audit state per device, maintained by
+	// SweepProviderAuditEvents (model/audit_provider_sweep_model.go). The sweep
+	// diffs the live provider set (public provide key + connected connection)
+	// against this table and appends real online/offline transitions to
+	// audit_provider_event -- the feed ComputeStats90 aggregates. Kept separate
+	// from the append-only event table so the sweep reads one small
+	// current-state row per device instead of a per-device latest-event scan.
+	newSqlMigration(`
+		CREATE TABLE audit_provider_state (
+			device_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			online bool NOT NULL,
+			superspeed bool NOT NULL,
+			country_name varchar(128) NOT NULL,
+			region_name varchar(128) NOT NULL,
+			city_name varchar(128) NOT NULL,
+			event_time timestamp NOT NULL,
+
+			PRIMARY KEY (device_id)
+		)
+	`),
+
+	// Last emitted device audit state per client, maintained by
+	// SweepDeviceAuditEvents -- the audit_provider_state analog for the
+	// devices series (device connected-per-day; every connected client, not
+	// just providers).
+	newSqlMigration(`
+		CREATE TABLE audit_device_state (
+			device_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			online bool NOT NULL,
+			event_time timestamp NOT NULL,
+
+			PRIMARY KEY (device_id)
+		)
+	`),
+
+	// Real-time Stripe refund/dispute clawback (UPGRADE.md §2 S7).
+	// stripe_refund is the idempotency ledger: a refund is delivered via BOTH
+	// charge.refunded and refund.created, so the clawback is keyed on the
+	// refund (or dispute) id and the insert gates the clawback inside the
+	// same tx -- the stripe_invoice shape, pointed the other way. network_id
+	// and action record the outcome for the operator (also mirrored into
+	// payment_reconciliation_event).
+	newSqlMigration(`
+		CREATE TABLE stripe_refund (
+			refund_id varchar(128) NOT NULL PRIMARY KEY,
+			charge_id varchar(128) NOT NULL,
+			network_id uuid NULL,
+			action varchar(32) NULL,
+			process_time timestamp NOT NULL DEFAULT now()
+		)
+	`),
+
+	// A refunded-but-unredeemed balance code is VOIDED by stamping
+	// cancel_time: the redeem and check paths exclude cancelled codes, so a
+	// code whose charge was refunded can never be redeemed afterwards. NULL =
+	// live, matching the redeem_balance_id convention on the same table.
+	newSqlMigration(`
+		ALTER TABLE transfer_balance_code ADD COLUMN cancel_time timestamp NULL
+	`),
 
 	// provider egress locations: locations learned by an operator-run prober
 	// that routes geolocation lookups through a provider's own egress rather
@@ -4738,126 +5190,6 @@ var migrations = []any{
             observed_at       timestamp NOT NULL,
 
             PRIMARY KEY (host)
-        )
-    `),
-
-	// oauth 2.1 / openid connect authorization server (IDP.md).
-	//
-	// A registered client. `client_id` is a client id metadata document url
-	// (an https url, the preferred mechanism) for cimd clients, and an opaque
-	// generated id for dynamic registration and pre-registered clients.
-	// cimd clients are cached rows refreshed from their document; the
-	// `metadata_expire_time` is when the cached copy goes stale.
-	newSqlMigration(`
-        CREATE TABLE oauth_client (
-            client_id varchar(1024) NOT NULL,
-            client_type varchar(16) NOT NULL,
-            client_name varchar(256) NULL,
-            client_uri varchar(1024) NULL,
-            logo_uri varchar(1024) NULL,
-            application_type varchar(16) NOT NULL DEFAULT 'web',
-            redirect_uris_json text NOT NULL,
-            scope varchar(1024) NULL,
-            create_time timestamp NOT NULL DEFAULT now(),
-            update_time timestamp NOT NULL DEFAULT now(),
-            metadata_expire_time timestamp NULL,
-
-            PRIMARY KEY (client_id)
-        )
-    `),
-
-	// Single use authorization codes. Every value the token exchange must
-	// check back against is bound here at mint time: the pkce challenge, the
-	// redirect uri, the resource (rfc 8707), the granted scope, and the user
-	// and network the consent was for. `redeem_time` makes the single use
-	// rule enforceable -- a second redemption is detectable rather than
-	// silently allowed, which per oauth 2.1 means the code was leaked.
-	newSqlMigration(`
-        CREATE TABLE oauth_authorization_code (
-            code_hash bytea NOT NULL,
-            client_id varchar(1024) NOT NULL,
-            user_id uuid NOT NULL,
-            network_id uuid NOT NULL,
-            redirect_uri varchar(1024) NOT NULL,
-            code_challenge varchar(128) NOT NULL,
-            code_challenge_method varchar(8) NOT NULL,
-            resource varchar(1024) NOT NULL,
-            scope varchar(1024) NOT NULL,
-            nonce varchar(256) NULL,
-            principal varchar(256) NULL,
-            roles_json text NULL,
-            auth_time timestamp NOT NULL,
-            create_time timestamp NOT NULL DEFAULT now(),
-            expire_time timestamp NOT NULL,
-            redeem_time timestamp NULL,
-
-            PRIMARY KEY (code_hash)
-        )
-    `),
-
-	// the reaper sweeps expired codes; redeemed codes are kept until expiry so
-	// a replay is still detectable rather than looking like an unknown code
-	newSqlMigration(`
-        CREATE INDEX oauth_authorization_code_expire_time
-        ON oauth_authorization_code (expire_time)
-    `),
-
-	// Opaque refresh tokens, stored hashed: the raw value exists only in the
-	// response to the client. `family_id` ties a rotation chain together --
-	// each use issues a new token in the same family and retires the old one.
-	// Presenting a retired token is treated as theft and revokes the whole
-	// family, which is why retired rows are kept until they expire instead of
-	// being deleted.
-	newSqlMigration(`
-        CREATE TABLE oauth_refresh_token (
-            token_hash bytea NOT NULL,
-            family_id uuid NOT NULL,
-            client_id varchar(1024) NOT NULL,
-            user_id uuid NOT NULL,
-            network_id uuid NOT NULL,
-            resource varchar(1024) NOT NULL,
-            scope varchar(1024) NOT NULL,
-            principal varchar(256) NULL,
-            roles_json text NULL,
-            auth_time timestamp NOT NULL,
-            create_time timestamp NOT NULL DEFAULT now(),
-            expire_time timestamp NOT NULL,
-            rotate_time timestamp NULL,
-            revoke_time timestamp NULL,
-
-            PRIMARY KEY (token_hash)
-        )
-    `),
-
-	// revoking a family on reuse detection, and listing a user's grants
-	newSqlMigration(`
-        CREATE INDEX oauth_refresh_token_family_id
-        ON oauth_refresh_token (family_id)
-    `),
-
-	newSqlMigration(`
-        CREATE INDEX oauth_refresh_token_user_id_client_id
-        ON oauth_refresh_token (user_id, client_id)
-    `),
-
-	newSqlMigration(`
-        CREATE INDEX oauth_refresh_token_expire_time
-        ON oauth_refresh_token (expire_time)
-    `),
-
-	// Remembered consent, so re-authorizing for scopes the user already
-	// approved does not re-prompt. A request for any scope outside
-	// `scope` prompts again; approving replaces the row with the union.
-	newSqlMigration(`
-        CREATE TABLE oauth_consent (
-            user_id uuid NOT NULL,
-            client_id varchar(1024) NOT NULL,
-            network_id uuid NOT NULL,
-            scope varchar(1024) NOT NULL,
-            create_time timestamp NOT NULL DEFAULT now(),
-            update_time timestamp NOT NULL DEFAULT now(),
-
-            PRIMARY KEY (user_id, client_id)
         )
     `),
 

@@ -9,15 +9,12 @@ package mcp
 // stated in the tool description so callers are not misled.
 //
 // Target validation is deliberately narrow. The target hostname is resolved by
-// the provider at the egress location, not by this service, so dns rebinding
-// against our own network is not the threat model; what is worth refusing is a
-// non-http scheme or a literal address that names infrastructure rather than a
-// site on the internet.
+// the provider at the egress location, and the connect packet path enforces its
+// ip_security policy against the resolved address there.
 
 import (
 	"fmt"
 	"net"
-	"net/netip"
 	"net/url"
 	"strings"
 
@@ -37,10 +34,8 @@ const (
 	resourceKindMedia      = "media"
 )
 
-// Rejects targets that are not fetchable web urls. Loopback and private ranges
-// are refused by default because a caller should not be able to aim this tool
-// at infrastructure; tests that run their web server on loopback turn the check
-// off explicitly.
+// Rejects targets that are not fetchable web urls. Address policy belongs to
+// connect/ip_security at the actual egress, where DNS has the correct view.
 func validateFetchUrl(fetchUrl *url.URL) error {
 	switch fetchUrl.Scheme {
 	case "http", "https":
@@ -52,26 +47,12 @@ func validateFetchUrl(fetchUrl *url.URL) error {
 	if host == "" {
 		return fmt.Errorf("the url has no host")
 	}
-
-	if fetchAllowPrivateTargets {
-		return nil
+	if fetchUrl.User != nil {
+		return fmt.Errorf("url user information is not supported; use a request header")
 	}
 
-	// only literal addresses are checked. A hostname is resolved at the egress
-	// location, so resolving it here would describe a different network
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return nil
-	}
-	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
-		addr.IsLinkLocalMulticast() || addr.IsUnspecified() {
-		return fmt.Errorf("refusing to fetch a private or loopback address")
-	}
-	// the cloud metadata address is public-range but never a legitimate target
-	if addr.Is4() && addr.String() == "169.254.169.254" {
-		return fmt.Errorf("refusing to fetch a link local address")
-	}
-
+	// Non-public destinations are dropped by connect/ip_security after DNS
+	// resolution, so callers observe the expected connection timeout.
 	return nil
 }
 

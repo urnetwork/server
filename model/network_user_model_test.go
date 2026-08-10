@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urnetwork/connect"
+	"github.com/go-playground/assert/v2"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
@@ -26,33 +26,33 @@ func TestNetworkUser(t *testing.T) {
 
 		networkUser := GetNetworkUser(ctx, userId)
 
-		connect.AssertNotEqual(t, networkUser, nil)
-		connect.AssertEqual(t, networkUser.UserId, userId)
-		connect.AssertEqual(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
-		connect.AssertEqual(t, networkUser.Verified, true)
-		connect.AssertEqual(t, networkUser.AuthType, AuthTypePassword)
-		connect.AssertEqual(t, networkUser.NetworkName, networkName)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, networkUser.UserId, userId)
+		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
+		assert.Equal(t, networkUser.Verified, true)
+		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+		assert.Equal(t, networkUser.NetworkName, networkName)
 
 		// test for invalid user id
 		userId = server.NewId()
 		networkUser = GetNetworkUser(ctx, userId)
-		connect.AssertEqual(t, networkUser, nil)
+		assert.Equal(t, networkUser, nil)
 
-		// create guest network
-		guestNetworkId := server.NewId()
-		guestUserId := server.NewId()
-		guestNetworkName := "guest_hello_world"
+		// a second, independent network+user via the same helper
+		secondNetworkId := server.NewId()
+		secondUserId := server.NewId()
+		secondNetworkName := "second_hello_world"
 
-		Testing_CreateGuestNetwork(ctx, guestNetworkId, guestNetworkName, guestUserId)
+		Testing_CreateNetwork(ctx, secondNetworkId, secondNetworkName, secondUserId)
 
-		networkUser = GetNetworkUser(ctx, guestUserId)
+		networkUser = GetNetworkUser(ctx, secondUserId)
 
-		connect.AssertNotEqual(t, networkUser, nil)
-		connect.AssertEqual(t, networkUser.UserId, guestUserId)
-		connect.AssertEqual(t, networkUser.UserAuth, nil)
-		connect.AssertEqual(t, networkUser.Verified, false)
-		connect.AssertEqual(t, networkUser.AuthType, AuthTypeGuest)
-		connect.AssertEqual(t, networkUser.NetworkName, guestNetworkName)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, networkUser.UserId, secondUserId)
+		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", secondNetworkId))
+		assert.Equal(t, networkUser.Verified, true)
+		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+		assert.Equal(t, networkUser.NetworkName, secondNetworkName)
 
 	})
 }
@@ -89,12 +89,12 @@ func TestAddUserAuthPassword(t *testing.T) {
 			},
 			ctx,
 		)
-		connect.AssertNotEqual(t, err, nil)
+		assert.NotEqual(t, err, nil)
 
 		networkUser := GetNetworkUser(ctx, userId)
-		connect.AssertNotEqual(t, networkUser, nil)
-		connect.AssertEqual(t, len(networkUser.UserAuths), 1)
-		connect.AssertEqual(t, networkUser.UserAuths[0].AuthType, UserAuthTypeEmail)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 1)
+		assert.Equal(t, networkUser.UserAuths[0].AuthType, UserAuthTypeEmail)
 
 		/**
 		 * But adding a phone number should work
@@ -110,13 +110,13 @@ func TestAddUserAuthPassword(t *testing.T) {
 			},
 			ctx,
 		)
-		connect.AssertEqual(t, err, nil)
+		assert.Equal(t, err, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		connect.AssertNotEqual(t, networkUser, nil)
-		connect.AssertEqual(t, len(networkUser.UserAuths), 2)
-		connect.AssertEqual(t, strings.Contains(networkUser.UserAuths[1].UserAuth, userAuth), true) // adds "+1" to phone number, so doing a string check
-		connect.AssertEqual(t, networkUser.UserAuths[1].AuthType, UserAuthTypePhone)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.UserAuths), 2)
+		assert.Equal(t, strings.Contains(networkUser.UserAuths[1].UserAuth, userAuth), true) // adds "+1" to phone number, so doing a string check
+		assert.Equal(t, networkUser.UserAuths[1].AuthType, UserAuthTypePhone)
 
 	})
 }
@@ -154,15 +154,15 @@ func TestAddUserAuthWallet(t *testing.T) {
 			},
 			session.Ctx,
 		)
-		connect.AssertEqual(t, err, nil)
+		assert.Equal(t, err, nil)
 
 		/**
 		 * Make sure it's being populated whe we fetch the network user
 		 */
 		networkUser := GetNetworkUser(ctx, userId)
-		connect.AssertNotEqual(t, networkUser, nil)
-		connect.AssertEqual(t, len(networkUser.WalletAuths), 1)
-		connect.AssertEqual(t, networkUser.WalletAuths[0].WalletAddress, pk)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.WalletAuths), 1)
+		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, pk)
 
 		/**
 		 * Overwrite the wallet auth with a different public key
@@ -183,12 +183,12 @@ func TestAddUserAuthWallet(t *testing.T) {
 			},
 			ctx,
 		)
-		connect.AssertEqual(t, err, nil)
+		assert.Equal(t, err, nil)
 
 		networkUser = GetNetworkUser(ctx, userId)
-		connect.AssertNotEqual(t, networkUser, nil)
-		connect.AssertEqual(t, len(networkUser.WalletAuths), 1)
-		connect.AssertEqual(t, networkUser.WalletAuths[0].WalletAddress, pk)
+		assert.NotEqual(t, networkUser, nil)
+		assert.Equal(t, len(networkUser.WalletAuths), 1)
+		assert.Equal(t, networkUser.WalletAuths[0].WalletAddress, pk)
 
 	})
 }
@@ -204,8 +204,8 @@ func TestFindNetworkIdByEmail(t *testing.T) {
 		userAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
 
 		retrievedNetworkId, err := FindNetworkIdByEmail(ctx, userAuth)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, *retrievedNetworkId, networkId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, *retrievedNetworkId, networkId)
 
 		/**
 		 * Test SSO
@@ -227,16 +227,16 @@ func TestFindNetworkIdByEmail(t *testing.T) {
 		)
 
 		retrievedNetworkId, err = FindNetworkIdByEmail(ctx, email)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, *retrievedNetworkId, networkId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, *retrievedNetworkId, networkId)
 
 		/**
 		 * Test not found
 		 */
 
 		retrievedNetworkId, err = FindNetworkIdByEmail(ctx, "unknown@email.com")
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, retrievedNetworkId, nil)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, retrievedNetworkId, nil)
 
 	})
 }
@@ -263,16 +263,16 @@ func TestFindNetworkIdByWalletAddress(t *testing.T) {
 		)
 
 		retrievedNetworkId, err := FindNetworkIdByWalletAddress(ctx, publicKey)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, *retrievedNetworkId, networkId)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, *retrievedNetworkId, networkId)
 
 		/**
 		 * Test not found
 		 */
 
 		retrievedNetworkId, err = FindNetworkIdByWalletAddress(ctx, "unknown_wallet_address")
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, retrievedNetworkId, nil)
+		assert.Equal(t, err, nil)
+		assert.Equal(t, retrievedNetworkId, nil)
 
 	})
 }

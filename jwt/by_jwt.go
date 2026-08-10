@@ -30,8 +30,17 @@ var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
 	return jwt.RequireStringList("tls_key_paths")
 })
 
-// one month
-const expiryDuration = 30 * 24 * time.Hour
+const (
+	// A one-day credential bounds stale authorization even when a client stays
+	// online indefinitely. SDK APIs refresh at half-life and retry before this
+	// deadline, so conforming clients rotate without a protocol change.
+	expiryDuration = 24 * time.Hour
+	clockLeeway    = 30 * time.Second
+
+	ByJwtIssuer          = "urnetwork:byjwt"
+	ByJwtAudienceApi     = "urnetwork:api"
+	ByJwtAudienceConnect = "urnetwork:connect"
+)
 
 // the first key (most recent version) is used to sign new JWTs
 var byPrivateKeys = sync.OnceValue(func() []crypto.PrivateKey {
@@ -160,13 +169,27 @@ type ByJwt struct {
 	CreateTime  time.Time  `json:"create_time,omitempty"`
 	DeviceId    *server.Id `json:"device_id,omitempty"`
 	ClientId    *server.Id `json:"client_id,omitempty"`
-	GuestMode   bool       `json:"guest_mode,omitempty"`
-	Pro         bool       `json:"pro,omitempty"`
+	// Deprecated: always false for new tokens. Field kept for backward compat with existing guest JWTs.
+	GuestMode bool `json:"guest_mode,omitempty"`
+	Pro       bool `json:"pro,omitempty"`
 	// identity roles and principal, assigned at client or auth code creation.
 	// The values have no meaning to the network.
 	Roles     []string `json:"roles,omitempty"`
 	Principal string   `json:"principal,omitempty"`
 	gojwt.RegisteredClaims
+}
+
+func newRegisteredClaims(userId server.Id) gojwt.RegisteredClaims {
+	now := server.NowUtc()
+	return gojwt.RegisteredClaims{
+		Issuer:    ByJwtIssuer,
+		Subject:   userId.String(),
+		Audience:  gojwt.ClaimStrings{ByJwtAudienceApi, ByJwtAudienceConnect},
+		ExpiresAt: gojwt.NewNumericDate(now.Add(expiryDuration)),
+		NotBefore: gojwt.NewNumericDate(now),
+		IssuedAt:  gojwt.NewNumericDate(now),
+		ID:        server.NewId().String(),
+	}
 }
 
 func NewByJwt(
@@ -217,17 +240,29 @@ func NewByJwtWithCreateTime(
 		GuestMode:   guestMode,
 		Pro:         pro,
 		// round here so that the string representation in the jwt does not lose information
-		CreateTime: server.CodecTime(createTime),
-		RegisteredClaims: gojwt.RegisteredClaims{
-			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
-		},
+		CreateTime:       server.CodecTime(createTime),
+		RegisteredClaims: newRegisteredClaims(userId),
 	}
 }
 
 func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
-	// todo - remove this once clients support refresh
+	return ParseByJwtForAudience(ctx, jwtSigned, ByJwtAudienceApi)
+}
+
+// ParseByJwtForAudience verifies the signature and every registered lifetime
+// and identity claim. API and connect use distinct expected audiences even
+// though current client credentials are deliberately minted for both.
+func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience string) (*ByJwt, error) {
+	if audience == "" {
+		return nil, errors.New("Missing JWT audience.")
+	}
 	parserOptions := []gojwt.ParserOption{
-		gojwt.WithoutClaimsValidation(),
+		gojwt.WithValidMethods([]string{"ES256", "ES384", "ES512", "RS512"}),
+		gojwt.WithIssuer(ByJwtIssuer),
+		gojwt.WithAudience(audience),
+		gojwt.WithExpirationRequired(),
+		gojwt.WithIssuedAt(),
+		gojwt.WithLeeway(clockLeeway),
 	}
 
 	// select the verification key by the token's `kid` header when present and
@@ -250,6 +285,10 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	if err != nil {
 		return nil, errors.New("Could not verify signed token.")
 	}
+	if byJwt.Subject == "" || byJwt.Subject != byJwt.UserId.String() || byJwt.IssuedAt == nil ||
+		byJwt.NotBefore == nil || byJwt.ExpiresAt == nil || byJwt.ID == "" || byJwt.CreateTime.IsZero() {
+		return nil, errors.New("Invalid signed token claims.")
+	}
 
 	err = fixByJwt(ctx, byJwt)
 	if err != nil {
@@ -257,6 +296,66 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	}
 
 	return byJwt, nil
+}
+
+// ValidateByJwtState binds a cryptographically valid token to current account
+// and client state. Password resets invalidate older credentials through
+// credential_change_time, and removed clients stop working immediately.
+func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (returnErr error) {
+	if byJwt == nil {
+		return errors.New("Missing signed token.")
+	}
+	if requireClient && (byJwt.ClientId == nil || byJwt.DeviceId == nil) {
+		return errors.New("Client credential required.")
+	}
+
+	valid := false
+	var credentialChangeTime time.Time
+	server.Db(ctx, func(conn server.PgConn) {
+		if byJwt.ClientId == nil {
+			result, err := conn.Query(ctx, `
+				SELECT network_user.credential_change_time
+				FROM network_user
+				INNER JOIN network ON
+					network.admin_user_id = network_user.user_id AND
+					network.network_id = $2
+				WHERE network_user.user_id = $1
+			`, byJwt.UserId, byJwt.NetworkId)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&credentialChangeTime))
+					valid = true
+				}
+			})
+			return
+		}
+
+		result, err := conn.Query(ctx, `
+			SELECT network_user.credential_change_time
+			FROM network_user
+			INNER JOIN network ON
+				network.admin_user_id = network_user.user_id AND
+				network.network_id = $2
+			INNER JOIN network_client ON
+				network_client.client_id = $3 AND
+				network_client.network_id = network.network_id AND
+				network_client.active = true
+			WHERE
+				network_user.user_id = $1 AND
+				($4::uuid IS NULL OR network_client.device_id = $4)
+		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&credentialChangeTime))
+				valid = true
+			}
+		})
+	})
+
+	if !valid || byJwt.CreateTime.Before(credentialChangeTime) {
+		return errors.New("Signed token is no longer active.")
+	}
+	return nil
 }
 
 func ParseByJwtUnverified(ctx context.Context, jwtStr string) (*ByJwt, error) {
@@ -306,35 +405,31 @@ func (self *ByJwt) Sign() string {
 // before signing
 func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 	return &ByJwt{
-		NetworkId:   self.NetworkId,
-		UserId:      self.UserId,
-		NetworkName: self.NetworkName,
-		CreateTime:  self.CreateTime,
-		GuestMode:   self.GuestMode,
-		Pro:         self.Pro,
-		Roles:       self.Roles,
-		Principal:   self.Principal,
-		DeviceId:    &deviceId,
-		ClientId:    &clientId,
-		RegisteredClaims: gojwt.RegisteredClaims{
-			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
-		},
+		NetworkId:        self.NetworkId,
+		UserId:           self.UserId,
+		NetworkName:      self.NetworkName,
+		CreateTime:       self.CreateTime,
+		GuestMode:        self.GuestMode,
+		Pro:              self.Pro,
+		Roles:            self.Roles,
+		Principal:        self.Principal,
+		DeviceId:         &deviceId,
+		ClientId:         &clientId,
+		RegisteredClaims: newRegisteredClaims(self.UserId),
 	}
 }
 
 func (self *ByJwt) User() *ByJwt {
 	return &ByJwt{
-		NetworkId:   self.NetworkId,
-		UserId:      self.UserId,
-		NetworkName: self.NetworkName,
-		CreateTime:  self.CreateTime,
-		GuestMode:   self.GuestMode,
-		Pro:         self.Pro,
-		Roles:       self.Roles,
-		Principal:   self.Principal,
-		RegisteredClaims: gojwt.RegisteredClaims{
-			ExpiresAt: gojwt.NewNumericDate(time.Now().Add(expiryDuration)),
-		},
+		NetworkId:        self.NetworkId,
+		UserId:           self.UserId,
+		NetworkName:      self.NetworkName,
+		CreateTime:       self.CreateTime,
+		GuestMode:        self.GuestMode,
+		Pro:              self.Pro,
+		Roles:            self.Roles,
+		Principal:        self.Principal,
+		RegisteredClaims: newRegisteredClaims(self.UserId),
 	}
 }
 
@@ -589,4 +684,21 @@ func sign(claims gojwt.Claims) string {
 		panic(err)
 	}
 	return jwtSigned
+}
+
+// Testing_NormalizeClaims fills the registered claims and CreateTime of a
+// hand-built ByJwt fixture, leaving explicitly set fields as-is. Tests
+// commonly construct sessions from a bare &ByJwt{NetworkId, UserId} literal;
+// tokens minted or derived from such a fixture (AuthNetworkClient derives
+// by-client jwts via Client, which copies CreateTime) must survive
+// ParseByJwt's full claims validation and ValidateByJwtState's
+// credential_change_time comparison, both of which reject a zero CreateTime.
+// Production mint paths go through NewByJwt and never need this.
+func Testing_NormalizeClaims(byJwt *ByJwt) {
+	if byJwt.CreateTime.IsZero() {
+		byJwt.CreateTime = server.CodecTime(server.NowUtc())
+	}
+	if byJwt.Subject == "" {
+		byJwt.RegisteredClaims = newRegisteredClaims(byJwt.UserId)
+	}
 }

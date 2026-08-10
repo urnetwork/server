@@ -390,7 +390,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// if that fails, expect the auth message as the first message
 	auth, transportVersion := func() (*protocol.Auth, int) {
 		if glog.V(2) {
-			glog.Infof("[c]header: %v\n", r.Header)
+			glog.Infof("[c]header metadata: %v\n", server.SafeHttpHeadersForLog(r.Header))
 		}
 
 		headerAuth := r.Header.Get("Authorization")
@@ -468,13 +468,17 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	byJwt, err := jwt.ParseByJwt(handleCtx, auth.ByJwt)
+	byJwt, err := jwt.ParseByJwtForAudience(handleCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
 	if err != nil {
 		glog.Infof("[t]auth jwt err = %s\n", err)
 		return
 	}
 
 	if byJwt.ClientId == nil {
+		return
+	}
+	if err := jwt.ValidateByJwtState(handleCtx, byJwt, true); err != nil {
+		glog.Infof("[t]inactive auth jwt: %s\n", err)
 		return
 	}
 
@@ -1022,13 +1026,16 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return err
 	}
 
-	byJwt, err := jwt.ParseByJwt(handleCtx, auth.ByJwt)
+	byJwt, err := jwt.ParseByJwtForAudience(handleCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
 	if err != nil {
 		return err
 	}
 
 	if byJwt.ClientId == nil {
 		return fmt.Errorf("Missing client id.")
+	}
+	if err := jwt.ValidateByJwtState(handleCtx, byJwt, true); err != nil {
+		return err
 	}
 
 	clientId := *byJwt.ClientId

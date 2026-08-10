@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,16 +26,16 @@ import (
 	"github.com/urnetwork/server/oauth"
 )
 
+const fetchTestOAuthClientId = "https://claude.ai/mcp"
+
 // Points the fetch tool at the harness's local proxy ingress and loopback web
 // server, and restores the production defaults afterwards.
 func useFetchTestStack(stack *fetchTestStack) func() {
 	fetchUsePlainHttpProxy = true
-	fetchAllowPrivateTargets = true
 	fetchProxyAddrOverride = fmt.Sprintf("127.0.0.1:%d", stack.httpPort)
 
 	return func() {
 		fetchUsePlainHttpProxy = false
-		fetchAllowPrivateTargets = false
 		fetchProxyAddrOverride = ""
 	}
 }
@@ -42,13 +43,23 @@ func useFetchTestStack(stack *fetchTestStack) func() {
 // An authorized mcp session against an in-process mcp server. The fetch tool
 // needs both scopes: the transport enforces the read scope and the tool itself
 // enforces the fetch scope.
-func connectFetchTestClient(t testing.TB, ctx context.Context) (*mcpsdk.ClientSession, func()) {
+func connectFetchTestClient(t testing.TB, ctx context.Context, stack *fetchTestStack) (*mcpsdk.ClientSession, func()) {
 	serverUrl, cleanupServer := startTestServer(t)
-
-	session := connectAuthedTestClient(t, ctx, serverUrl, []string{
-		oauth.ScopeMcpRead,
-		oauth.ScopeMcpFetch,
+	accessToken, _, err := oauth.MintAccessToken(&oauth.MintAccessTokenArgs{
+		UserId:    stack.pdUserId,
+		NetworkId: stack.pdNetworkId,
+		ClientId:  fetchTestOAuthClientId,
+		Audience:  McpResource,
+		Scopes: []string{
+			oauth.ScopeMcpRead,
+			oauth.ScopeMcpFetch,
+		},
 	})
+	if err != nil {
+		t.Fatalf("mint fetch test access token: %v", err)
+	}
+
+	session := connectTestClientWithToken(t, ctx, serverUrl, accessToken)
 
 	return session, func() {
 		session.Close()
@@ -122,17 +133,26 @@ func TestFetchThroughProviderEgress(t *testing.T) {
 
 		defer useFetchTestStack(stack)()
 
-		session, cleanup := connectFetchTestClient(t, stack.ctx)
+		session, cleanup := connectFetchTestClient(t, stack.ctx, stack)
 		defer cleanup()
 
 		result, out := callFetchUntilOk(t, stack.ctx, session, map[string]any{
 			"url":             stack.webUrl + "/",
-			"signed_proxy_id": stack.signedProxyId,
+			"signed_proxy_id": stack.mcpSignedProxyId,
 		}, 120*time.Second)
 
 		connect.AssertEqual(t, out.Status, 200)
 		// the egress handle comes back so the caller can reuse it
-		connect.AssertEqual(t, out.SignedProxyId, stack.signedProxyId)
+		connect.AssertEqual(t, out.SignedProxyId != "", true)
+		handle := &sealedProxyHandle{}
+		binding := identityStateBinding(
+			stack.pdUserId.String(),
+			stack.pdNetworkId,
+			fetchTestOAuthClientId,
+			McpResource,
+		)
+		connect.AssertEqual(t, unseal(sealLabelProxy, binding, out.SignedProxyId, handle), nil)
+		connect.AssertEqual(t, handle.SignedProxyId, stack.signedProxyId)
 		// and the caller is told what to do with it
 		connect.AssertEqual(t, strings.Contains(out.NextStep, "signed_proxy_id"), true)
 
@@ -165,12 +185,12 @@ func TestFetchEmbedsReferencedMedia(t *testing.T) {
 
 		defer useFetchTestStack(stack)()
 
-		session, cleanup := connectFetchTestClient(t, stack.ctx)
+		session, cleanup := connectFetchTestClient(t, stack.ctx, stack)
 		defer cleanup()
 
 		result, out := callFetchUntilOk(t, stack.ctx, session, map[string]any{
 			"url":               stack.webUrl + "/",
-			"signed_proxy_id":   stack.signedProxyId,
+			"signed_proxy_id":   stack.mcpSignedProxyId,
 			"include_resources": includeResourcesEmbed,
 		}, 120*time.Second)
 
@@ -203,13 +223,13 @@ func TestFetchThreadsCookiesAcrossCalls(t *testing.T) {
 
 		defer useFetchTestStack(stack)()
 
-		session, cleanup := connectFetchTestClient(t, stack.ctx)
+		session, cleanup := connectFetchTestClient(t, stack.ctx, stack)
 		defer cleanup()
 
 		// the first load sets a cookie, which comes back sealed
 		_, out := callFetchUntilOk(t, stack.ctx, session, map[string]any{
 			"url":               stack.webUrl + "/setcookie",
-			"signed_proxy_id":   stack.signedProxyId,
+			"signed_proxy_id":   stack.mcpSignedProxyId,
 			"include_resources": includeResourcesNone,
 		}, 120*time.Second)
 
@@ -240,20 +260,49 @@ func TestFetchThreadsCookiesAcrossCalls(t *testing.T) {
 	})
 }
 
-func TestFetchRefusesPrivateTargets(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		session, cleanup := connectFetchTestClient(t, context.Background())
+func TestFetchNonPublicTargetTimesOutThroughConnect(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		var targetRequestCount atomic.Int64
+		stack := setupFetchTestStackWithOptions(t, &fetchTestStackOptions{
+			onWebRequest: func() {
+				targetRequestCount.Add(1)
+			},
+		})
+		defer stack.close()
+		defer useFetchTestStack(stack)()
+
+		session, cleanup := connectFetchTestClient(t, stack.ctx, stack)
 		defer cleanup()
 
-		// the private-target guard is on by default, so an authenticated
-		// caller still cannot aim the tool at infrastructure
-		result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{
+		originalFetchCallBudget := fetchCallBudget
+		fetchCallBudget = 1 * time.Second
+		defer func() {
+			fetchCallBudget = originalFetchCallBudget
+		}()
+
+		requestCountBeforeFetch := targetRequestCount.Load()
+		startTime := time.Now()
+		result, err := session.CallTool(stack.ctx, &mcpsdk.CallToolParams{
 			Name: "fetch",
 			Arguments: map[string]any{
-				"url": "http://169.254.169.254/latest/meta-data/",
+				"url":               stack.webUrl + "/",
+				"signed_proxy_id":   stack.mcpSignedProxyId,
+				"include_resources": includeResourcesNone,
 			},
 		})
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.IsError, true)
+		connect.AssertEqual(t, 750*time.Millisecond <= time.Since(startTime), true)
+		errorMessage := strings.ToLower(errorText(result))
+		connect.AssertEqual(t,
+			strings.Contains(errorMessage, "timeout") || strings.Contains(errorMessage, "deadline exceeded"),
+			true,
+		)
+		connect.AssertEqual(t, targetRequestCount.Load(), requestCountBeforeFetch)
 	})
 }

@@ -2,6 +2,7 @@ package router
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"fmt"
@@ -10,7 +11,6 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 
 	"github.com/urnetwork/glog"
 
@@ -31,6 +31,11 @@ var (
 	httpErrorCodeRegex = regexp.MustCompile("^((?:\\[[^\\]]*\\])*)\\s*(\\d+)\\s+(.*)$")
 )
 
+// This matches the existing public load-balancer cap. Enforcing it again at
+// the application boundary prevents a direct-backend request from bypassing
+// the public limit. Routes with smaller payloads should add a tighter cap.
+const MaxJsonRequestBytes int64 = 16 * 1024 * 1024
+
 // const BanMessage = "This client has been temporarily banned by bandit. support@ur.io"
 
 type ImplFunction[R any] func(*session.ClientSession) (R, error)
@@ -50,7 +55,7 @@ func writeJsonResponse[R any](w http.ResponseWriter, result R) {
 	}
 
 	if v := glog.V(2); v {
-		v.Infof("[h]response (%T): %s\n", result, responseJson)
+		v.Infof("[h]response (%T): %d bytes\n", result, len(responseJson))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(responseJson)
@@ -105,37 +110,6 @@ func implName[R any](impl ImplFunction[R]) string {
 	// remove all /vXXXX paths in the canonical module
 	name = implNameVersionRegex.ReplaceAllString(name, "")
 	return name
-}
-
-// guarantees NetworkId+UserId
-// denies guest mode requests
-func WrapRequireAuthNoGuest[R any](
-	impl ImplFunction[R],
-	w http.ResponseWriter,
-	req *http.Request,
-	formatters ...FormatFunction[R],
-) {
-	wrap(
-		func(session *session.ClientSession) (R, error) {
-			if err := session.Auth(req); err != nil {
-				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
-			}
-			if session.ByJwt.GuestMode {
-				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
-			}
-			r, err := impl(session)
-			if err != nil {
-				// wrap the error to tag the impl
-				err = fmt.Errorf("[%s]%s", implName(impl), err)
-			}
-			return r, err
-		},
-		w,
-		req,
-		formatters...,
-	)
 }
 
 // allow guest mode, or authenticated requests
@@ -230,8 +204,21 @@ func wrapWithInput[T any, R any](
 	// 	return
 	// }
 
+	if req.Body != nil {
+		if req.ContentLength > MaxJsonRequestBytes {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		req.Body = http.MaxBytesReader(w, req.Body, MaxJsonRequestBytes)
+	}
+
 	body, err := bodyFormatter(req)
 	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		glog.Infof("[h]request body formatter error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -241,14 +228,18 @@ func wrapWithInput[T any, R any](
 
 	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		glog.Infof("[h]request read error %s\n", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// guarded: the body->string copy and ReplaceAll must not run when V(2) is off
 	if v := glog.V(2); v {
-		v.Infof("[h]request (%T): %s\n", input, strings.ReplaceAll(string(bodyBytes), "\n", ""))
+		v.Infof("[h]request (%T): %d bytes\n", input, len(bodyBytes))
 	}
 
 	err = json.Unmarshal(bodyBytes, &input)
@@ -262,7 +253,7 @@ func wrapWithInput[T any, R any](
 	result, err := impl(input, session)
 	if err != nil {
 		custom := map[string]any{
-			"headers": req.Header,
+			"headers": server.SafeHttpHeadersForLog(req.Header),
 		}
 		if !RaiseHttpError(err, w) {
 			glog.Infof("[h]request impl error (%T): %s\n", input, server.ErrorJsonWithCustomNoStack(err, custom))
@@ -277,51 +268,6 @@ func wrapWithInput[T any, R any](
 	}
 
 	writeJsonResponse(w, result)
-}
-
-// guarantees NetworkId+UserId
-// denies guest mode requests
-func WrapWithInputRequireAuthNoGuest[T any, R any](
-	impl ImplWithInputFunction[T, R],
-	w http.ResponseWriter,
-	req *http.Request,
-	formatters ...FormatFunction[R],
-) {
-	WrapWithInputBodyFormatterRequireAuthNoGuest(
-		RequestBodyFormatter,
-		impl,
-		w,
-		req,
-		formatters...,
-	)
-}
-
-func WrapWithInputBodyFormatterRequireAuthNoGuest[T any, R any](
-	bodyFormatter BodyFormatFunction,
-	impl ImplWithInputFunction[T, R],
-	w http.ResponseWriter,
-	req *http.Request,
-	formatters ...FormatFunction[R],
-) {
-	wrapWithInput(
-		bodyFormatter,
-		func(arg T, session *session.ClientSession) (R, error) {
-			if err := session.Auth(req); err != nil {
-				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
-			}
-
-			if session.ByJwt.GuestMode {
-				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
-			}
-
-			return impl(arg, session)
-		},
-		w,
-		req,
-		formatters...,
-	)
 }
 
 // guarantees NetworkId+UserId

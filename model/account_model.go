@@ -222,6 +222,15 @@ func RemoveNetwork(
 					`,
 					userId,
 				)
+
+				// (cascade) delete network_user_auth_seedphrase
+				batch.Queue(
+					`
+						DELETE FROM network_user_auth_seedphrase
+						WHERE user_id = $1
+					`,
+					userId,
+				)
 			}
 		})
 
@@ -238,5 +247,14 @@ func RemoveNetwork(
 
 		success = true
 	})
+
+	if success {
+		// the networks stats series (ComputeStats) replays created/deleted
+		// events; creation is recorded in network_model.go, and without this
+		// the active-network count only ever grew
+		auditNetworkEvent := NewAuditNetworkEvent(AuditEventTypeNetworkDeleted)
+		auditNetworkEvent.NetworkId = networkId
+		AddAuditEvent(ctx, auditNetworkEvent)
+	}
 	return
 }

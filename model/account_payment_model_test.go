@@ -549,8 +549,18 @@ func TestPlanPaymentsDryRun(t *testing.T) {
 			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		}
 
-		// dry run: computes the plan but must not persist anything
-		dryPlan, err := PlanPaymentsDryRun(ctx)
+		// dry run: computes the plan but must not persist anything.
+		// zero-subsidy config (see planPassThroughPayments): the payout
+		// equality below compares two plans computed seconds apart, and the
+		// env config's min_payout_usd floor accrues per whole elapsed minute —
+		// a minute boundary landing between the dry and real plan would skew
+		// the real payout by the subsidy delta.
+		subsidyConfig := *EnvSubsidyConfig()
+		subsidyConfig.MinPayoutUsd = 0
+		subsidyConfig.UsdPerActiveUser = 0
+		subsidyConfig.SubscriptionNetRevenueFraction = 0
+		subsidyConfig.ReliabilitySubsidyPerPayoutUsd = 0
+		dryPlan, err := CreatePaymentPlan(ctx, &subsidyConfig, true, 0)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(dryPlan.NetworkPayments)), []server.Id{destinationNetworkId})
 		dryPayment := dryPlan.NetworkPayments[destinationNetworkId]
@@ -566,7 +576,7 @@ func TestPlanPaymentsDryRun(t *testing.T) {
 
 		// a real run immediately after sees the same (still unpaid) contracts and
 		// produces the same payout, and this time it does persist
-		realPlan, err := PlanPayments(ctx)
+		realPlan, err := PlanPaymentsWithConfig(ctx, &subsidyConfig)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(realPlan.NetworkPayments)), []server.Id{destinationNetworkId})
 		realPayment := realPlan.NetworkPayments[destinationNetworkId]
@@ -1110,7 +1120,18 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 
 		// plan a payment and complete the payment
 		// nothing to plan because the payout does not meet the min threshold
-		paymentPlan, err := PlanPayments(ctx)
+		// zero-subsidy config (see planPassThroughPayments): the env config's
+		// min_payout_usd floor accrues per WHOLE MINUTE of the plan window
+		// (subsidyScale truncates Sub/time.Minute), so `NetPayout == 0` below
+		// is only true while each plan lands within 60s of the previous
+		// window's end — an assertion about test speed, not the ledger. Under
+		// -race the escrow step-down loop alone takes ~90s and the plan pays
+		// exactly $500/43200 per elapsed minute (11574074 nano cents), which
+		// failed 4 of 5 attempts in a certification run. The zeroed config
+		// makes the expected payout 0 by construction; the nonzero subsidy
+		// path is covered by TestPaymentPlanSubsidyEqualWeight with backdated
+		// fixed windows.
+		paymentPlan, err := planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
 		connect.AssertEqual(t, paymentPlan.WithheldNetworkIds, []server.Id{destinationNetworkId})
@@ -1145,7 +1166,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{destinationNetworkId})
 
@@ -1210,7 +1231,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
 
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, slices.Collect(maps.Keys(paymentPlan.NetworkPayments)), []server.Id{destinationNetworkId})
 
@@ -1254,7 +1275,7 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		}
 
 		// there shoud be no more payments
-		paymentPlan, err = PlanPayments(ctx)
+		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 0)
 

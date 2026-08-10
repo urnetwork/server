@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,5 +100,66 @@ func TestProxyWgHandoff(t *testing.T) {
 		exportTime, peers = TakeProxyWgHandoffForGeneration(ctx, proxyHost, block, generation)
 		connect.AssertEqual(t, true, exportTime.IsZero())
 		connect.AssertEqual(t, 0, len(peers))
+	})
+}
+
+// The handoff blob pairs each peer's raw public ip:port with its tunnel
+// ClientIpv4 (joinable to client_id), so at rest in redis it must be sealed
+// (server.WgHandoffSeal) — never plain json. This pins: the stored value is
+// encrypted and contains no raw endpoint; take round-trips it; and a legacy
+// plain-json blob (written by a pre-encryption binary during a deploy) is
+// still readable.
+func TestProxyWgHandoffSealedAtRest(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		host := "sealtest-host"
+		block := "sealtest-block"
+		exportTime := server.NowUtc().Truncate(time.Millisecond)
+		peers := []*ProxyWgHandoffPeer{
+			{
+				ClientIpv4:        netip.MustParseAddr("10.99.0.7"),
+				Endpoint:          "203.0.113.99:51820",
+				LastHandshakeTime: exportTime,
+			},
+		}
+
+		SetProxyWgHandoff(ctx, host, block, exportTime, peers, time.Minute)
+
+		// the raw stored value is sealed and leaks neither endpoint nor
+		// tunnel address
+		var stored string
+		server.Redis(ctx, func(r server.RedisClient) {
+			var err error
+			stored, err = r.Get(ctx, proxyWgHandoffKey(host, block, "")).Result()
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+		if !strings.HasPrefix(stored, "enc1:") {
+			t.Fatalf("handoff stored unsealed: %.32q...", stored)
+		}
+		for _, raw := range []string{"203.0.113.99", "51820", "10.99.0.7", "endpoint"} {
+			if strings.Contains(stored, raw) {
+				t.Fatalf("sealed handoff leaks %q", raw)
+			}
+		}
+
+		// take decrypts and round-trips
+		gotTime, gotPeers := TakeProxyWgHandoff(ctx, host, block)
+		if !gotTime.Equal(exportTime) || len(gotPeers) != 1 || gotPeers[0].Endpoint != "203.0.113.99:51820" {
+			t.Fatalf("sealed round trip = (%v, %+v)", gotTime, gotPeers)
+		}
+
+		// legacy plain-json blob written by a pre-encryption binary still
+		// inside its ttl must remain readable during the deploy overlap
+		legacy := `{"export_time":"2026-08-07T00:00:00Z","peers":[{"client_ipv4":"10.99.0.8","endpoint":"203.0.113.98:51820","last_handshake_time":"2026-08-07T00:00:00Z"}]}`
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, proxyWgHandoffKey(host, block, ""), legacy, time.Minute).Err())
+		})
+		_, legacyPeers := TakeProxyWgHandoff(ctx, host, block)
+		if len(legacyPeers) != 1 || legacyPeers[0].Endpoint != "203.0.113.98:51820" {
+			t.Fatalf("legacy plain blob unreadable: %+v", legacyPeers)
+		}
 	})
 }

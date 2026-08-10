@@ -270,8 +270,14 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) bool {
 	entry := self.proxyLock(proxyId)
 
+	// log the peppered hash of the caller, not the raw address (and not the
+	// lock subnets, which for a LockCallerIp config are the customer's /32) —
+	// the rest of the request path (transport_announce, rate limits) already
+	// logs hex(ClientIpHash), so a refused caller stays correlatable with its
+	// other log lines without putting the address itself in the logs
 	if !entry.found {
-		glog.Infof("[proxy]caller %s refused: proxy %s has no config\n", addr, proxyId)
+		callerHash := server.ClientIpHashForAddr(addr)
+		glog.Infof("[proxy]caller %x refused: proxy %s has no config\n", callerHash[:8], proxyId)
 		return false
 	}
 
@@ -286,9 +292,10 @@ func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) 
 		}
 	}
 
+	callerHash := server.ClientIpHashForAddr(addr)
 	glog.Infof(
-		"[proxy]caller %s refused: outside the ip lock for proxy %s (%v)\n",
-		addr, proxyId, entry.lockSubnets,
+		"[proxy]caller %x refused: outside the ip lock for proxy %s (%d subnets)\n",
+		callerHash[:8], proxyId, len(entry.lockSubnets),
 	)
 	return false
 }

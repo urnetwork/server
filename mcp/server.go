@@ -25,6 +25,8 @@ import (
 
 const McpVersion = "0.0.1-beta.1"
 
+const mcpMaxRequestBodyBytes int64 = 2 * 1024 * 1024
+
 // Protocol guidance returned to clients at discover/initialize. The threading
 // rules are repeated at three levels -- here, in each tool description, and in
 // the next_step of every result -- because a caller that has to infer them
@@ -91,6 +93,12 @@ func newMcpHandlerFunc(mcpServer *mcpsdk.Server) http.HandlerFunc {
 	authorizedHandler := requireAccessToken(mcpHandler)
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		if mcpMaxRequestBodyBytes < r.ContentLength {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, mcpMaxRequestBodyBytes)
+
 		// tool handlers only see headers (`req.Extra.Header`). Thread the
 		// connection remote address through as a header for the client
 		// address fallback in auth.go. Set unconditionally so a caller

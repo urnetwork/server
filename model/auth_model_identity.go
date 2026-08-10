@@ -132,3 +132,19 @@ func createResetCode() string {
 	}
 	return hex.EncodeToString(resetCode)
 }
+
+func computeSeedphraseHash(seedphrase []byte, salt []byte) []byte {
+	pepperedSeedphrase := []byte{}
+	pepperedSeedphrase = append(pepperedSeedphrase, passwordPepper()...)
+	pepperedSeedphrase = append(pepperedSeedphrase, seedphrase...)
+	return argon2.Key(pepperedSeedphrase, salt, 3, 32*1024, 4, 32)
+}
+
+func createSeedphraseSalt() []byte {
+	salt := make([]byte, 32)
+	_, err := rand.Read(salt)
+	if err != nil {
+		panic(err)
+	}
+	return salt
+}

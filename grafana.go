@@ -2,7 +2,7 @@ package server
 
 // stats publishing to the warp grafana service.
 // every service pushes the default prometheus registry to the stable local
-// publish port on its host (`local_port` in vault grafana.yml), keyed by
+// publish port on its host (`local_port` in config grafana.yml), keyed by
 // {env, service, block, host, instance}. the grafana go front stamps the
 // receive time and forwards to mimir, so series go stale when a service
 // stops pushing.
@@ -25,8 +25,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -39,6 +41,87 @@ import (
 const statsPushInterval = 15 * time.Second
 
 const defaultGrafanaLocalPort = 3100
+
+// Narrow service-user view shared by ordinary identities/roles and vault-owned
+// passwords.
+type grafanaPushConfig struct {
+	Users []*grafanaPushUser `yaml:"users,omitempty"`
+}
+
+// One role-scoped HTTP Basic Auth identity.
+type grafanaPushUser struct {
+	Name     string   `yaml:"name,omitempty"`
+	Password string   `yaml:"password,omitempty"`
+	Roles    []string `yaml:"roles,omitempty"`
+}
+
+// Resolves ordinary endpoint configuration separately from the scoped push
+// credential.
+func grafanaPushSettings() (localPort int, username string, password string, err error) {
+	localPort = defaultGrafanaLocalPort
+	grafanaResource, err := Config.SimpleResource("grafana.yml")
+	if err != nil {
+		return 0, "", "", err
+	}
+	if localPorts := grafanaResource.Int("local_port"); 0 < len(localPorts) {
+		localPort = localPorts[0]
+	}
+
+	var ordinaryConfig grafanaPushConfig
+	grafanaResource.UnmarshalYaml(&ordinaryConfig)
+	ordinaryUsers := map[string]*grafanaPushUser{}
+	for _, ordinaryUser := range ordinaryConfig.Users {
+		if ordinaryUser == nil || ordinaryUser.Name == "" {
+			return 0, "", "", errors.New("config grafana.yml has an unnamed user")
+		}
+		if ordinaryUser.Password != "" {
+			return 0, "", "", fmt.Errorf("config grafana.yml contains password for %q", ordinaryUser.Name)
+		}
+		if ordinaryUsers[ordinaryUser.Name] != nil {
+			return 0, "", "", fmt.Errorf("config grafana.yml repeats user %q", ordinaryUser.Name)
+		}
+		ordinaryUsers[ordinaryUser.Name] = ordinaryUser
+	}
+
+	secretResource, err := Vault.SimpleResource("grafana.yml")
+	if err != nil {
+		return 0, "", "", err
+	}
+	var secretConfig grafanaPushConfig
+	secretResource.UnmarshalYaml(&secretConfig)
+	secretPasswords := map[string]string{}
+	for _, secretUser := range secretConfig.Users {
+		if secretUser == nil || secretUser.Name == "" {
+			return 0, "", "", errors.New("grafana.yml has an unnamed secret user")
+		}
+		if 0 < len(secretUser.Roles) {
+			return 0, "", "", fmt.Errorf("vault grafana.yml contains roles for %q", secretUser.Name)
+		}
+		if _, ok := secretPasswords[secretUser.Name]; ok {
+			return 0, "", "", fmt.Errorf("grafana.yml repeats secret user %q", secretUser.Name)
+		}
+		if ordinaryUsers[secretUser.Name] == nil {
+			return 0, "", "", fmt.Errorf("vault grafana.yml user %q is absent from config", secretUser.Name)
+		}
+		secretPasswords[secretUser.Name] = secretUser.Password
+	}
+	for _, ordinaryUser := range ordinaryConfig.Users {
+		if ordinaryUser != nil && ordinaryUser.Name != "" && slices.Contains(ordinaryUser.Roles, "push") {
+			if password := secretPasswords[ordinaryUser.Name]; password != "" {
+				return localPort, ordinaryUser.Name, password, nil
+			}
+		}
+	}
+	return 0, "", "", errors.New("grafana.yml has no credential with the push role")
+}
+
+// Centralizes the authenticated client boundary so local and regression-test
+// callers cannot accidentally omit the push credential.
+func newStatsPusher(pushUrl string, service string, username string, password string) *push.Pusher {
+	return push.New(pushUrl, service).
+		Gatherer(prometheus.DefaultGatherer).
+		BasicAuth(username, password)
+}
 
 var buildInfoGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
@@ -57,7 +140,7 @@ func init() {
 // (go runtime, process, and service metrics) to the local grafana
 // publish port every interval, until the context is done.
 // a no-op when not running under warp
-// or when grafana.yml is not in the vault.
+// or when ordinary configuration or a push credential is unavailable.
 // The returned flush pushes the current registry state immediately: call it
 // once at drain end so the final drain gauges land before the process exits
 // (series go stale as soon as the pusher stops).
@@ -85,14 +168,10 @@ func StartStatsPusher(ctx context.Context) (flush func()) {
 		return
 	}
 
-	grafanaResource, err := Vault.SimpleResource("grafana.yml")
+	localPort, username, password, err := grafanaPushSettings()
 	if err != nil {
-		glog.Infof("[stats]no grafana.yml in the vault (%s). Not publishing stats.\n", err)
+		glog.Infof("[stats]grafana push is not configured (%s). Not publishing stats.\n", err)
 		return
-	}
-	localPort := defaultGrafanaLocalPort
-	if localPorts := grafanaResource.Int("local_port"); 0 < len(localPorts) {
-		localPort = localPorts[0]
 	}
 
 	if version, err := Version(); err == nil {
@@ -107,8 +186,7 @@ func StartStatsPusher(ctx context.Context) (flush func()) {
 	}
 	instance := hex.EncodeToString(instanceBytes)
 
-	pusher := push.New(fmt.Sprintf("http://127.0.0.1:%d", localPort), service).
-		Gatherer(prometheus.DefaultGatherer).
+	pusher := newStatsPusher(fmt.Sprintf("http://127.0.0.1:%d", localPort), service, username, password).
 		Client(&http.Client{
 			Timeout: 10 * time.Second,
 		}).

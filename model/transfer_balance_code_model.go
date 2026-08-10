@@ -62,7 +62,8 @@ func RedeemBalanceCodeInTx(
             FROM transfer_balance_code
             WHERE
                 balance_code_secret = $1 AND
-                redeem_balance_id IS NULL
+                redeem_balance_id IS NULL AND
+                cancel_time IS NULL
         `,
 		redeemBalanceCode.Secret,
 	)
@@ -94,7 +95,16 @@ func RedeemBalanceCodeInTx(
 	duration := balanceCode.EndTime.Sub(balanceCode.StartTime)
 	endTime := now.Add(duration)
 
-	server.RaisePgResult(tx.Exec(
+	// The `redeem_balance_id IS NULL` predicate re-checks the SELECT above at
+	// write time. Under READ COMMITTED two concurrent redeems (a double-click, or
+	// webhook vs manual) can both read the code as unredeemed; the second UPDATE
+	// then blocks on the row lock, re-evaluates the predicate after the first
+	// commits, and affects zero rows -- so exactly one redeem credits.
+	// `cancel_time IS NULL` re-checks the void the same way: a code whose charge
+	// was refunded (ClawbackBalanceCodesForPurchaseEventInTx) concurrently with a
+	// redeem attempt either voids first (this UPDATE affects zero rows) or
+	// redeems first (the void falls into the end-the-granted-balance branch).
+	redeemTag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
             UPDATE transfer_balance_code
@@ -105,7 +115,9 @@ func RedeemBalanceCodeInTx(
                 end_time = $5,
                 network_id = $6
             WHERE
-                balance_code_id = $1
+                balance_code_id = $1 AND
+                redeem_balance_id IS NULL AND
+                cancel_time IS NULL
         `,
 		balanceCode.BalanceCodeId,
 		now,
@@ -114,6 +126,14 @@ func RedeemBalanceCodeInTx(
 		endTime,
 		redeemBalanceCode.NetworkId,
 	))
+	if redeemTag.RowsAffected() == 0 {
+		redeemBalanceCodeResult = &RedeemBalanceCodeResult{
+			Error: &RedeemBalanceCodeError{
+				Message: "Balance code already redeemed.",
+			},
+		}
+		return
+	}
 
 	// pro = false: a data code is DATA ONLY. It carries revenue (so `paid` is
 	// true), but redeeming one must never grant the Pro entitlement -- see
@@ -208,7 +228,8 @@ func CheckBalanceCode(
                 FROM transfer_balance_code
                 WHERE
                     balance_code_secret = $1 AND
-                    redeem_balance_id IS NULL
+                    redeem_balance_id IS NULL AND
+                    cancel_time IS NULL
             `,
 			checkBalanceCode.Secret,
 		)
@@ -409,6 +430,120 @@ func GetBalanceCodeIdForPurchaseEventId(ctx context.Context, purchaseEventId str
 			}
 		})
 	})
+	return
+}
+
+// ClawbackBalanceCodesForPurchaseEventInTx claws back everything a Stripe
+// checkout session granted through the balance-code ledger, when the
+// session's charge is refunded or disputed. Codes are keyed
+// purchase_event_id = sessionId (line 0) or sessionId/<line>, so the scope
+// is an exact match on the id before any '/' -- NOT a LIKE, whose '_'
+// wildcard would let the underscores in every Stripe id ("cs_test_...")
+// match other sessions.
+//
+//   - an UNREDEEMED code is voided by stamping cancel_time: the redeem and
+//     check paths exclude cancelled codes, so a refunded code can never be
+//     redeemed later. The void re-checks redeem_balance_id IS NULL at write
+//     time, so a redeem racing the void cannot slip through -- the loser of
+//     that race is re-read and handled as redeemed below.
+//   - a REDEEMED code's granted transfer_balance is ended at now (only while
+//     still active), and the balance's network is returned so the caller can
+//     refresh pro state.
+//
+// found = false means the session keys no balance codes at all: the caller
+// records an operator-visible event instead of guessing what to claw back.
+// Idempotent: a second pass finds the codes already cancelled and the
+// balances already ended, and changes nothing.
+func ClawbackBalanceCodesForPurchaseEventInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	stripeSessionId string,
+	now time.Time,
+) (found bool, voidedCount int, endedNetworkIds []server.Id) {
+	type codeRow struct {
+		balanceCodeId   server.Id
+		redeemBalanceId *server.Id
+	}
+	codeRows := []codeRow{}
+	result, err := tx.Query(
+		ctx,
+		`
+            SELECT balance_code_id, redeem_balance_id
+            FROM transfer_balance_code
+            WHERE
+                purchase_event_id = $1 OR
+                starts_with(purchase_event_id, $1 || '/')
+        `,
+		stripeSessionId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			row := codeRow{}
+			server.Raise(result.Scan(&row.balanceCodeId, &row.redeemBalanceId))
+			codeRows = append(codeRows, row)
+		}
+	})
+	if len(codeRows) == 0 {
+		return false, 0, nil
+	}
+	found = true
+
+	for _, row := range codeRows {
+		if row.redeemBalanceId == nil {
+			voidTag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+                    UPDATE transfer_balance_code
+                    SET cancel_time = $2
+                    WHERE
+                        balance_code_id = $1 AND
+                        redeem_balance_id IS NULL AND
+                        cancel_time IS NULL
+                `,
+				row.balanceCodeId,
+				now,
+			))
+			if 0 < voidTag.RowsAffected() {
+				voidedCount += 1
+				continue
+			}
+			// either already voided (nothing more to do) or a concurrent redeem
+			// won the race -- re-read and fall through to the redeemed branch
+			reread, rereadErr := tx.Query(
+				ctx,
+				`SELECT redeem_balance_id FROM transfer_balance_code WHERE balance_code_id = $1`,
+				row.balanceCodeId,
+			)
+			server.WithPgResult(reread, rereadErr, func() {
+				if reread.Next() {
+					server.Raise(reread.Scan(&row.redeemBalanceId))
+				}
+			})
+			if row.redeemBalanceId == nil {
+				continue
+			}
+		}
+
+		// redeemed: end the granted balance while it is still active
+		endResult, endErr := tx.Query(
+			ctx,
+			`
+                UPDATE transfer_balance
+                SET end_time = $2
+                WHERE balance_id = $1 AND end_time > $2
+                RETURNING network_id
+            `,
+			*row.redeemBalanceId,
+			now,
+		)
+		server.WithPgResult(endResult, endErr, func() {
+			for endResult.Next() {
+				var networkId server.Id
+				server.Raise(endResult.Scan(&networkId))
+				endedNetworkIds = append(endedNetworkIds, networkId)
+			}
+		})
+	}
 	return
 }
 

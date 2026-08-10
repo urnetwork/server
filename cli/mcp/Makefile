@@ -1,6 +1,8 @@
 
 GOBUILD=go build -trimpath
 
+.PHONY: all clean build init warp_build warp_build_image
+
 all: init clean build
 
 clean:
@@ -13,7 +15,10 @@ build:
 	env GOEXPERIMENT=greenteagc CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 ${GOBUILD} -o build/darwin/amd64/
 
 warp_build:
-	$(MAKE) all
+	@echo "warp_build must be run through warpctl build so govulncheck gates image publication." >&2
+	@false
+
+warp_build_image:
 	docker buildx build --progress=plain \
 		--build-arg warp_env=${WARP_ENV} \
 		--platform linux/arm64/v8,linux/amd64 \

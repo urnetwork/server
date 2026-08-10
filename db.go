@@ -37,6 +37,10 @@ var DbContextDoneError = errors.New("Done")
 
 const PgConnectTimeout = 30 * time.Second
 
+// PgCommitTimeout bounds the commit round trip, which runs on a context
+// detached from the caller (see the commit in `txWithPool`).
+const PgCommitTimeout = 30 * time.Second
+
 // type aliases to simplify user code
 type PgConn = *pgxpool.Conn
 type PgTx = pgx.Tx
@@ -675,7 +679,22 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			}()
 			if pgErr == nil {
 				// Logger().Printf("Db commit\n")
-				commitErr = tx.Commit(ctx)
+				// Commit on a context detached from the caller. The
+				// transaction body has already succeeded, so abandoning the
+				// commit round trip because the requester went away leaves an
+				// AMBIGUOUS outcome: postgres commits while the client reports
+				// an error, and every post-commit action is then skipped for
+				// work that is durably written (observed: a contract's escrow
+				// rows committed while its redis mirror increment was dropped,
+				// leaving the net escrow counter permanently short). Waiting
+				// for the real answer costs at most PgCommitTimeout and makes
+				// commitErr mean what the caller assumes it means.
+				commitCtx, commitCancel := context.WithTimeout(
+					context.WithoutCancel(ctx),
+					PgCommitTimeout,
+				)
+				commitErr = tx.Commit(commitCtx)
+				commitCancel()
 			} else {
 				if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
 					panic(rollbackErr)

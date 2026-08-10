@@ -53,10 +53,13 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/auth/network-delete", handlers.RemoveNetwork),
 		router.NewRoute("POST", "/auth/code-create", handlers.AuthCodeCreate),
 		router.NewRoute("POST", "/auth/code-login", handlers.AuthCodeLogin),
-		router.NewRoute("POST", "/auth/upgrade-guest", handlers.UpgradeGuest),
-		router.NewRoute("POST", "/auth/upgrade-guest-existing", handlers.UpgradeGuestExisting),
+		router.NewRoute("POST", "/auth/add-auth", handlers.AuthAdd),
+		router.NewRoute("POST", "/auth/remove-auth", handlers.AuthRemove),
+		router.NewRoute("POST", "/auth/regenerate-seedphrase", handlers.AuthRegenerateSeedphrase),
+		router.NewRoute("POST", "/auth/generate-seedphrase", handlers.AuthGenerateSeedphrase),
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
+		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
@@ -123,6 +126,11 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
 		router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
 		router.NewRoute("POST", "/subscription/create-payment-id", handlers.SubscriptionCreatePaymentId),
+		// client purchase reporting (UPGRADE.md §4 item 2): verify proof of
+		// purchase with the store and credit through the same idempotency
+		// gates as the webhooks and the payment reconciler
+		router.NewRoute("POST", "/subscription/verify-play-purchase", handlers.SubscriptionVerifyPlayPurchase),
+		router.NewRoute("POST", "/subscription/verify-apple-transaction", handlers.SubscriptionVerifyAppleTransaction),
 		// x402: agents pay inline (HTTP 402 + X-PAYMENT). Both 404 while x402 is
 		// not configured/enabled -- see vault/<env>/x402.yml.
 		router.NewRoute("GET", "/x402/skus", handlers.X402Skus),
@@ -167,6 +175,8 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/account/referral-network", handlers.GetReferralNetwork),
 		router.NewRoute("GET", "/account/unlink-referral-network", handlers.UnlinkReferralNetwork),
 		router.NewRoute("POST", "/account/set-referral", handlers.SetNetworkReferral),
+		router.NewRoute("POST", "/account/change-name", handlers.ChangeNetworkName),
+		router.NewRoute("POST", "/account/claim-name", handlers.ClaimNetworkName),
 		router.NewRoute("GET", "/account/points", handlers.GetAccountPoints),
 		router.NewRoute("GET", "/account/balance-codes", handlers.GetNetworkRedeemedBalanceCodes),
 		router.NewRoute("POST", "/referral-code/validate", handlers.ValidateReferralCode),

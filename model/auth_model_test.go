@@ -236,11 +236,19 @@ func TestAuthCodeIdentity(t *testing.T) {
 		connect.AssertEqual(t, loadedByJwt.Roles, []string{"role1", "role2"})
 		connect.AssertEqual(t, loadedByJwt.Principal, "svc-a")
 
-		// a guest session cannot create an auth code with roles or principal
+		// a guest session cannot create an auth code with roles or principal.
+		// "Guest" is decided by live account state (HasAnyAuthMethod), not the
+		// jwt's GuestMode claim — RefreshToken zeroes that claim on the first
+		// refresh regardless of account state — so the fixture must be a user
+		// with zero rows in every auth table, not this test's real user
+		// wearing a guest-flagged jwt.
+		guestNetworkId := server.NewId()
+		guestUserId := server.NewId()
+		Testing_CreateLegacyGuestNetwork(ctx, guestNetworkId, guestUserId)
 		guestSession := session.Testing_CreateClientSession(ctx, jwt.NewByJwt(
-			networkId,
-			userId,
-			networkName,
+			guestNetworkId,
+			guestUserId,
+			"g"+guestNetworkId.String(),
 			true,
 			isPro,
 		))

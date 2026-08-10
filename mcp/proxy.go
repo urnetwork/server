@@ -41,6 +41,7 @@ var errProxyGone = errors.New("the proxy for this signed_proxy_id no longer exis
 
 // Acquired egress, either reused or freshly provisioned.
 type acquiredProxy struct {
+	// opaque tenant-bound handle returned to the caller
 	signedProxyId string
 	proxyClient   *model.ProxyClient
 	// human readable egress location, echoed back so the caller can see where
@@ -54,6 +55,10 @@ type acquiredProxy struct {
 type upgradeRequired struct {
 	message string
 	terms   *controller.X402PaymentRequired
+}
+
+type sealedProxyHandle struct {
+	SignedProxyId string `json:"p"`
 }
 
 // Settles an x402 payment presented on a fetch call, so the retry that carries
@@ -79,11 +84,12 @@ func settleFetchPayment(clientSession *session.ClientSession, payment string) er
 // stale handle recovers without a special case.
 func acquireProxy(
 	clientSession *session.ClientSession,
+	binding string,
 	signedProxyId string,
 	locationQuery string,
 ) (*acquiredProxy, *upgradeRequired, error) {
 	if signedProxyId != "" {
-		proxy, err := reuseProxy(clientSession, signedProxyId)
+		proxy, err := reuseProxy(clientSession, binding, signedProxyId)
 		if err == nil {
 			return proxy, nil, nil
 		}
@@ -100,11 +106,15 @@ func acquireProxy(
 		}
 	}
 
-	return createProxy(clientSession, locationQuery)
+	return createProxy(clientSession, binding, locationQuery)
 }
 
-func reuseProxy(clientSession *session.ClientSession, signedProxyId string) (*acquiredProxy, error) {
-	proxyId, err := model.ParseSignedProxyId(signedProxyId)
+func reuseProxy(clientSession *session.ClientSession, binding string, signedProxyId string) (*acquiredProxy, error) {
+	handle := &sealedProxyHandle{}
+	if err := unseal(sealLabelProxy, binding, signedProxyId, handle); err != nil {
+		return nil, fmt.Errorf("invalid signed_proxy_id")
+	}
+	proxyId, err := model.ParseSignedProxyId(handle.SignedProxyId)
 	if err != nil {
 		return nil, fmt.Errorf("invalid signed_proxy_id")
 	}
@@ -112,6 +122,10 @@ func reuseProxy(clientSession *session.ClientSession, signedProxyId string) (*ac
 	proxyDeviceConfig := model.GetProxyDeviceConfig(clientSession.Ctx, proxyId)
 	if proxyDeviceConfig == nil {
 		return nil, errProxyGone
+	}
+	networkClient := model.GetNetworkClient(clientSession.Ctx, proxyDeviceConfig.ClientId)
+	if networkClient == nil || networkClient.NetworkId != clientSession.ByJwt.NetworkId {
+		return nil, fmt.Errorf("signed_proxy_id is not owned by this network")
 	}
 
 	proxyClient, err := model.GetProxyClient(clientSession.Ctx, proxyId)
@@ -124,8 +138,18 @@ func reuseProxy(clientSession *session.ClientSession, signedProxyId string) (*ac
 		location = proxyDeviceConfig.InitialDeviceState.Location.Name
 	}
 
+	refreshedHandle, err := seal(
+		sealLabelProxy,
+		binding,
+		&sealedProxyHandle{SignedProxyId: handle.SignedProxyId},
+		fetchSealTtl,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &acquiredProxy{
-		signedProxyId: signedProxyId,
+		signedProxyId: refreshedHandle,
 		proxyClient:   proxyClient,
 		location:      location,
 		created:       false,
@@ -134,6 +158,7 @@ func reuseProxy(clientSession *session.ClientSession, signedProxyId string) (*ac
 
 func createProxy(
 	clientSession *session.ClientSession,
+	binding string,
 	locationQuery string,
 ) (*acquiredProxy, *upgradeRequired, error) {
 	connectLocation, locationName, err := resolveLocation(clientSession, locationQuery)
@@ -186,8 +211,17 @@ func createProxy(
 	}
 
 	proxyClient := authClientResult.ProxyConfigResult.ProxyClient
+	sealedProxyId, err := seal(
+		sealLabelProxy,
+		binding,
+		&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+		fetchSealTtl,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
 	return &acquiredProxy{
-		signedProxyId: proxyClient.AuthToken,
+		signedProxyId: sealedProxyId,
 		proxyClient:   &proxyClient,
 		location:      locationName,
 		created:       true,
@@ -291,15 +325,31 @@ func newProxyHttpClient(proxy *acquiredProxy, timeout time.Duration) (*http.Clie
 	}
 
 	return &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if fetchMaxRedirects <= len(via) {
-				return fmt.Errorf("stopped after %d redirects", fetchMaxRedirects)
-			}
-			return validateFetchUrl(req.URL)
-		},
+		Transport:     transport,
+		Timeout:       timeout,
+		CheckRedirect: validateFetchRedirect,
 	}, nil
+}
+
+func validateFetchRedirect(req *http.Request, via []*http.Request) error {
+	if fetchMaxRedirects <= len(via) {
+		return fmt.Errorf("stopped after %d redirects", fetchMaxRedirects)
+	}
+	if err := validateFetchUrl(req.URL); err != nil {
+		return err
+	}
+	if len(via) == 0 || sameFetchOrigin(via[0].URL, req.URL) {
+		return nil
+	}
+
+	// A body-preserving redirect must never send caller data to a different
+	// origin. Redirects that have become GET/HEAD are safe after stripping
+	// everything except the public header allowlist.
+	if req.Body != nil || 0 < req.ContentLength {
+		return fmt.Errorf("refusing to redirect a request body across origins")
+	}
+	stripCrossOriginRequestHeaders(req)
+	return nil
 }
 
 // The https proxy carries the signed proxy id as the leading hostname label,

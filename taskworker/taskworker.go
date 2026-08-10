@@ -6,6 +6,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
@@ -54,8 +55,11 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredWalletNonces(clientSession, tx)
 		work.ScheduleRemoveExpiredProviderEgressLocations(clientSession, tx)
 		work.ScheduleRefreshGeolocationSourcePins(clientSession, tx)
+		work.ScheduleRemoveExpiredBulkClientRemovalQuota(clientSession, tx)
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
+		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
+		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleRollupClientReliabilityStats(clientSession, tx)
 		work.ScheduleUpdateClientReliabilityScores(clientSession, tx)
@@ -75,6 +79,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveOldSearchProviderStats(clientSession, tx)
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
+		work.SchedulePaymentReconcile(clientSession, tx)
 	})
 
 	// apply per-stream stats retention (MinIO ILM, or the local reaper) once at
@@ -172,6 +177,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		task.NewTaskTargetWithPost(
+			model.RemoveNetworkClientsTask,
+			model.RemoveNetworkClientsTaskPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.SweepOrphanContractData,
 			work.SweepOrphanContractDataPost,
 		),
@@ -247,12 +256,24 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RefreshGeolocationSourcePinsPost,
 		),
 		task.NewTaskTargetWithPost(
+			work.RemoveExpiredBulkClientRemovalQuota,
+			work.RemoveExpiredBulkClientRemovalQuotaPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditNetworkEvents,
 			work.RemoveOldAuditNetworkEventsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,
 			work.RemoveOldAuditEventsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SweepProviderAuditEvents,
+			work.SweepProviderAuditEventsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RollupTransferAuditEvents,
+			work.RollupTransferAuditEventsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldClientReliabilityStats,
@@ -353,6 +374,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.StFinalizePoke,
 			work.StFinalizePokePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.PaymentReconcile,
+			work.PaymentReconcilePost,
 		),
 	)
 

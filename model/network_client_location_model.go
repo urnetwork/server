@@ -38,6 +38,13 @@ func init() {
 	server.OnWarmup(func() {
 		countryCodeLocationIds()
 	})
+
+	server.OnReset(func() {
+		resetLocationDirectory()
+	})
+	server.OnWarmup(func() {
+		loadLocationDirectory()
+	})
 }
 
 func resetCountryCodeLocationIds() {
@@ -78,6 +85,108 @@ func resetCountryCodeLocationIds() {
 
 // country code is lowercase
 var countryCodeLocationIds func() map[string]server.Id
+
+type locationDirectoryEntry struct {
+	Name        string
+	CountryCode string
+	Latitude    *float64
+	Longitude   *float64
+}
+
+type locationDirectorySnapshot struct {
+	entries  map[server.Id]*locationDirectoryEntry
+	loadTime time.Time
+}
+
+// refresh matches the `clientLocationKey` ttl
+const locationDirectoryStaleAfter = 30 * time.Minute
+
+var locationDirectoryValue atomic.Pointer[locationDirectorySnapshot]
+var locationDirectoryLoading atomic.Bool
+
+func resetLocationDirectory() {
+	locationDirectoryValue.Store(nil)
+	locationDirectoryLoading.Store(false)
+}
+
+// the current location directory without blocking the caller.
+// nil until the first load completes (callers omit locations), and a stale
+// snapshot is served while a single background reload runs.
+func locationDirectory() map[server.Id]*locationDirectoryEntry {
+	snapshot := locationDirectoryValue.Load()
+	if snapshot == nil || locationDirectoryStaleAfter <= time.Since(snapshot.loadTime) {
+		if locationDirectoryLoading.CompareAndSwap(false, true) {
+			go connect.HandleError(func() {
+				defer locationDirectoryLoading.Store(false)
+				loadLocationDirectory()
+			})
+		}
+	}
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot.entries
+}
+
+func loadLocationDirectory() {
+	ctx := context.Background()
+
+	entries := map[server.Id]*locationDirectoryEntry{}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		// the seeded city list can be ~10^6 rows, so bound the directory to
+		// locations actually referenced by providers
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				location.location_id,
+				location.location_name,
+				location.country_code,
+				location.latitude,
+				location.longitude
+			FROM location
+			WHERE location.location_id IN (
+				SELECT DISTINCT city_location_id
+				FROM network_client_location_reliability
+				WHERE city_location_id IS NOT NULL
+
+				UNION
+
+				SELECT DISTINCT region_location_id
+				FROM network_client_location_reliability
+				WHERE region_location_id IS NOT NULL
+
+				UNION
+
+				SELECT DISTINCT country_location_id
+				FROM network_client_location_reliability
+				WHERE country_location_id IS NOT NULL
+			)
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var locationId server.Id
+				entry := &locationDirectoryEntry{}
+				server.Raise(result.Scan(
+					&locationId,
+					&entry.Name,
+					&entry.CountryCode,
+					&entry.Latitude,
+					&entry.Longitude,
+				))
+				entry.CountryCode = strings.ToLower(entry.CountryCode)
+				entries[locationId] = entry
+			}
+		})
+	})
+
+	locationDirectoryValue.Store(&locationDirectorySnapshot{
+		entries:  entries,
+		loadTime: server.NowUtc(),
+	})
+}
 
 const DefaultMaxDistanceFraction = float32(0.2)
 
@@ -1080,10 +1189,41 @@ func CreateLocation(ctx context.Context, location *Location) {
 			}
 		})
 
-		if cityLocation == nil {
+		// the mmdb uses 0,0 for unknown coordinates, and a genuine 0,0 city is
+		// effectively impossible, so 0,0 is stored as NULL (unknown)
+		hasCoordinates := location.Latitude != 0 || location.Longitude != 0
+
+		if cityLocation != nil {
+			if hasCoordinates {
+				// self-heal rows created before coordinates were stored
+				_, err = tx.Exec(
+					ctx,
+					`
+                    UPDATE location
+                    SET
+                        latitude = $2,
+                        longitude = $3
+                    WHERE
+                        location_id = $1 AND
+                        latitude IS NULL
+                `,
+					cityLocation.LocationId,
+					location.Latitude,
+					location.Longitude,
+				)
+				server.Raise(err)
+			}
+		} else {
 			// create a new location
 
 			locationId := server.NewId()
+
+			var latitude *float64
+			var longitude *float64
+			if hasCoordinates {
+				latitude = &location.Latitude
+				longitude = &location.Longitude
+			}
 
 			_, err = tx.Exec(
 				ctx,
@@ -1096,9 +1236,11 @@ func CreateLocation(ctx context.Context, location *Location) {
                         region_location_id,
                         country_location_id,
                         country_code,
-                        location_full_name
+                        location_full_name,
+                        latitude,
+                        longitude
                     )
-                    VALUES ($1, $2, $3, $1, $4, $5, $6, $7)
+                    VALUES ($1, $2, $3, $1, $4, $5, $6, $7, $8, $9)
                 `,
 				locationId,
 				LocationTypeCity,
@@ -1107,6 +1249,8 @@ func CreateLocation(ctx context.Context, location *Location) {
 				countryLocation.LocationId,
 				countryCode,
 				fmt.Sprintf("%s, %s, %s", location.City, location.Region, countryCode),
+				latitude,
+				longitude,
 			)
 			server.Raise(err)
 
@@ -2383,11 +2527,29 @@ type FindProviders2Result struct {
 }
 
 type FindProvidersProvider struct {
-	ClientId                   server.Id   `json:"client_id"`
-	EstimatedBytesPerSecond    ByteCount   `json:"estimated_bytes_per_second"`
-	HasEstimatedBytesPerSecond bool        `json:"has_estimated_bytes_per_second"`
-	Tier                       int         `json:"tier"`
-	IntermediaryIds            []server.Id `json:"intermediary_ids"`
+	ClientId                   server.Id         `json:"client_id"`
+	EstimatedBytesPerSecond    ByteCount         `json:"estimated_bytes_per_second"`
+	HasEstimatedBytesPerSecond bool              `json:"has_estimated_bytes_per_second"`
+	Tier                       int               `json:"tier"`
+	IntermediaryIds            []server.Id       `json:"intermediary_ids"`
+	Location                   *ProviderLocation `json:"location,omitempty"`
+}
+
+type LocationCoordinates struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
+type ProviderLocation struct {
+	Country           string               `json:"country,omitempty"`
+	CountryCode       string               `json:"country_code,omitempty"`
+	Region            string               `json:"region,omitempty"`
+	City              string               `json:"city,omitempty"`
+	CountryLocationId *server.Id           `json:"country_location_id,omitempty"`
+	RegionLocationId  *server.Id           `json:"region_location_id,omitempty"`
+	CityLocationId    *server.Id           `json:"city_location_id,omitempty"`
+	RegionCoordinates *LocationCoordinates `json:"region_coordinates,omitempty"`
+	CityCoordinates   *LocationCoordinates `json:"city_coordinates,omitempty"`
 }
 
 type ClientScore struct {
@@ -2411,6 +2573,14 @@ type ClientScore struct {
 	// the pre-existing behaviour -- or every provider would be treated as
 	// network-only until the cache turned over.
 	NetworkOnly bool
+
+	// set only on the top-level score, never on the `LookbackClientScores`
+	// copies: each score is gob-serialized into thousands of cache key
+	// permutations, and gob transmits zero-valued arrays, so these are
+	// pointers (omitted when nil) and stay nil on the nested lookback copies
+	CityLocationId    *server.Id
+	RegionLocationId  *server.Id
+	CountryLocationId *server.Id
 
 	LookbackIndex        int
 	LookbackClientScores map[int]*ClientScore
@@ -2735,6 +2905,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			for result.Next() {
 				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId := loadClientScore(result)
 
+				// top-level only; the lookback copies stay nil (see `ClientScore`)
+				setLocationIds := func(clientScore *ClientScore) {
+					clientScore.CityLocationId = cityLocationId
+					clientScore.RegionLocationId = regionLocationId
+					clientScore.CountryLocationId = countryLocationId
+				}
+
 				// once per distinct location id: a country-only client stores
 				// its country id in all three columns (see
 				// SetConnectionLocation), and a client belongs in a location's
@@ -2752,7 +2929,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 						clientScores = map[server.Id]*ClientScore{}
 						locationClientScores[locationId] = clientScores
 					}
-					addClientScore(lookbackClientScore, clientScores)
+					setLocationIds(addClientScore(lookbackClientScore, clientScores))
 				}
 			}
 		})
@@ -3313,12 +3490,68 @@ func loadClientScores(
 			}
 
 			for _, clientScore := range sample {
+				// a client can appear under multiple requested keys with
+				// identical ranking fields, but only location-keyed samples
+				// carry location ids. keep the copy that has them.
+				if existing, ok := clientScores[clientScore.ClientId]; ok {
+					if existing.CountryLocationId != nil && clientScore.CountryLocationId == nil {
+						continue
+					}
+				}
 				clientScores[clientScore.ClientId] = clientScore
 			}
 		}
 	})
 
 	return
+}
+
+// the response location from the score's cached location ids and the
+// process-local directory. nil when the ids are unknown (cache blobs written
+// before the ids were cached, group-keyed samples) or when the directory has
+// not loaded yet or cannot resolve the country.
+func resolveProviderLocation(
+	directory map[server.Id]*locationDirectoryEntry,
+	clientScore *ClientScore,
+) *ProviderLocation {
+	if clientScore.CountryLocationId == nil {
+		return nil
+	}
+	countryEntry := directory[*clientScore.CountryLocationId]
+	if countryEntry == nil {
+		return nil
+	}
+
+	location := &ProviderLocation{
+		Country:           countryEntry.Name,
+		CountryCode:       countryEntry.CountryCode,
+		CountryLocationId: clientScore.CountryLocationId,
+	}
+	if clientScore.RegionLocationId != nil {
+		if regionEntry := directory[*clientScore.RegionLocationId]; regionEntry != nil {
+			location.Region = regionEntry.Name
+			location.RegionLocationId = clientScore.RegionLocationId
+			if lat, lon, ok := centroidFor(countryEntry.CountryCode, regionEntry.Name); ok {
+				location.RegionCoordinates = &LocationCoordinates{
+					Lat: lat,
+					Lon: lon,
+				}
+			}
+		}
+	}
+	if clientScore.CityLocationId != nil {
+		if cityEntry := directory[*clientScore.CityLocationId]; cityEntry != nil {
+			location.City = cityEntry.Name
+			location.CityLocationId = clientScore.CityLocationId
+			if cityEntry.Latitude != nil && cityEntry.Longitude != nil {
+				location.CityCoordinates = &LocationCoordinates{
+					Lat: *cityEntry.Latitude,
+					Lon: *cityEntry.Longitude,
+				}
+			}
+		}
+	}
+	return location
 }
 
 func FindProviders2(
@@ -3484,6 +3717,8 @@ func FindProviders2(
 			return clientScoreA.Tiers[rankMode] - clientScoreB.Tiers[rankMode]
 		})
 
+		directory := locationDirectory()
+
 		// output in order of `clientIds`
 		for _, clientId := range clientIds {
 			clientScore := clientScores[clientId]
@@ -3492,6 +3727,7 @@ func FindProviders2(
 				Tier:                       clientScore.Tiers[rankMode],
 				EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
 				HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
+				Location:                   resolveProviderLocation(directory, clientScore),
 			}
 			providers = append(providers, provider)
 		}
