@@ -27,6 +27,7 @@ type peerDiscoveryEnv struct {
 	ctx context.Context
 
 	port        int
+	h3Port      int
 	exchange    *Exchange
 	handler     *ConnectHandler
 	httpServer  *http.Server
@@ -102,7 +103,19 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 	if mutateHandlerSettings != nil {
 		mutateHandlerSettings(handlerSettings)
 	}
-	connectHandler := NewConnectHandler(ctx, server.NewId(), exchange, handlerSettings)
+	h3PacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		httpListener.Close()
+		t.Fatalf("peer discovery h3 listener: %v", err)
+	}
+	h3Port := h3PacketConn.LocalAddr().(*net.UDPAddr).Port
+	connectHandler := NewConnectHandlerWithPacketConns(
+		ctx,
+		server.NewId(),
+		exchange,
+		handlerSettings,
+		ConnectHandlerPacketConns{H3: h3PacketConn},
+	)
 
 	// NewConnectHandler must derive the announce registration ttl from the
 	// exchange resident ttl: disconnect detection relies on the registration
@@ -156,6 +169,7 @@ func testing_newPeerDiscoveryEnvWithAllSettings(ctx context.Context, t testing.T
 		t:           t,
 		ctx:         ctx,
 		port:        port,
+		h3Port:      h3Port,
 		exchange:    exchange,
 		handler:     connectHandler,
 		httpServer:  httpServer,
@@ -173,6 +187,9 @@ func (self *peerDiscoveryEnv) Close() {
 	defer closeCancel()
 	if !self.handler.WaitForIdle(closeCtx) {
 		self.t.Errorf("peer discovery handlers did not finish during teardown")
+	}
+	if !self.exchange.WaitForIdle(closeCtx) {
+		self.t.Errorf("peer discovery exchange did not finish during teardown")
 	}
 }
 
@@ -198,6 +215,22 @@ func (self *peerDiscoveryEnv) newClient(clientId server.Id) *connect.Client {
 }
 
 func (self *peerDiscoveryEnv) newTransport(byClientJwt string, instanceId server.Id, routeManager *connect.RouteManager) *connect.PlatformTransport {
+	return self.newTransportWithMode(
+		byClientJwt,
+		instanceId,
+		routeManager,
+		connect.TransportModeH1,
+	)
+}
+
+// A forced mode gives transport-specific integration tests a real H1 or H3
+// path without the automatic mode election obscuring which carrier was used.
+func (self *peerDiscoveryEnv) newTransportWithMode(
+	byClientJwt string,
+	instanceId server.Id,
+	routeManager *connect.RouteManager,
+	mode connect.TransportMode,
+) *connect.PlatformTransport {
 	auth := &connect.ClientAuth{
 		ByJwt:      byClientJwt,
 		InstanceId: connect.Id(instanceId),
@@ -205,7 +238,7 @@ func (self *peerDiscoveryEnv) newTransport(byClientJwt string, instanceId server
 	}
 	settings := connect.DefaultPlatformTransportSettings()
 	settings.QuicTlsConfig.InsecureSkipVerify = true
-	settings.H3Port = 0
+	settings.H3Port = self.h3Port
 	settings.DnsPort = 0
 	return connect.NewPlatformTransportWithTargetMode(
 		self.ctx,
@@ -213,7 +246,7 @@ func (self *peerDiscoveryEnv) newTransport(byClientJwt string, instanceId server
 		routeManager,
 		fmt.Sprintf("ws://127.0.0.1:%d", self.port),
 		auth,
-		connect.TransportModeH1,
+		mode,
 		settings,
 	)
 }

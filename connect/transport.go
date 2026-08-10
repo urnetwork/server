@@ -49,6 +49,11 @@ var connectedGauge = prometheus.NewGauge(
 // egress verification and v6 support both need to be addressed in the future
 const AllowOnlyIpv4 = false
 
+const (
+	connectH3WriteBatchMaxMessageCount = 16
+	connectH3WriteBatchMaxByteCount    = 64 * 1024
+)
+
 // var serviceTransitionTime = time.Now().Add(30 * time.Second)
 
 func init() {
@@ -111,6 +116,18 @@ type ConnectHandlerSettings struct {
 	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
+}
+
+// newConnectQuicConfig keeps the server half of H3 aligned with the client's
+// conservative startup packet and enabled DPLPMTUD behavior.
+func newConnectQuicConfig(settings *ConnectHandlerSettings) *quic.Config {
+	return &quic.Config{
+		HandshakeIdleTimeout: settings.QuicConnectTimeout + settings.QuicHandshakeTimeout,
+		MaxIdleTimeout:       settings.MaxPingTimeout * 4,
+		KeepAlivePeriod:      0,
+		Allow0RTT:            true,
+		InitialPacketSize:    1400,
+	}
 }
 
 type ConnectHandler struct {
@@ -867,14 +884,7 @@ func (self *ConnectHandler) listenQuic(
 
 	defer handleCancel()
 
-	quicConfig := &quic.Config{
-		HandshakeIdleTimeout:    self.settings.QuicConnectTimeout + self.settings.QuicHandshakeTimeout,
-		MaxIdleTimeout:          self.settings.MaxPingTimeout * 4,
-		KeepAlivePeriod:         0,
-		Allow0RTT:               true,
-		DisablePathMTUDiscovery: true,
-		InitialPacketSize:       1400,
-	}
+	quicConfig := newConnectQuicConfig(self.settings)
 
 	// type clientConfig struct {
 	// 	tlsConfig *tls.Config
@@ -1160,56 +1170,92 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		go server.HandleError(func() {
 			defer handleCancel()
 
-			writeUser := func(message []byte, ok bool) bool {
-				if !ok {
-					return false
+			writeUserBatch := func(
+				firstMessage []byte,
+			) (receiveOpen bool, pendingMessage []byte, succeeded bool) {
+				var messageStorage [connectH3WriteBatchMaxMessageCount][]byte
+				messages := messageStorage[:1]
+				messages[0] = firstMessage
+				batchByteCount := len(firstMessage) + 4
+				receiveOpen = true
+			drainReady:
+				for len(messages) < cap(messages) {
+					select {
+					case <-handleCtx.Done():
+						receiveOpen = false
+						break drainReady
+					case message, ok := <-residentTransport.receive:
+						if !ok {
+							receiveOpen = false
+							break drainReady
+						}
+						framedByteCount := len(message) + 4
+						if connectH3WriteBatchMaxByteCount < batchByteCount+framedByteCount {
+							pendingMessage = message
+							break drainReady
+						}
+						messages = append(messages, message)
+						batchByteCount += framedByteCount
+					default:
+						break drainReady
+					}
 				}
+
 				stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-				err := framer.Write(stream, message)
-				connect.MessagePoolReturn(message)
+				err := framer.WriteBatch(stream, messages)
+				if err == nil {
+					for _, message := range messages {
+						announce.SendMessage(ByteCount(len(message)))
+					}
+				}
+				for _, message := range messages {
+					connect.MessagePoolReturn(message)
+				}
 				if err != nil {
 					if glog.V(2) {
 						glog.Infof("[ts]h3 err = %s\n", err)
 					}
-					return false
+					return receiveOpen, pendingMessage, false
 				}
-				// reliability tracking
-				announce.SendMessage(ByteCount(len(message)))
 				if glog.V(2) {
-					glog.Infof("[ts] ->%s\n", clientId)
+					glog.Infof("[ts] ->%s batch=%d\n", clientId, len(messages))
 				}
-				return true
+				return receiveOpen, pendingMessage, true
 			}
 
-			for {
-				// fast path without arming the ping timer
-				select {
-				case <-handleCtx.Done():
-					return
-				case message, ok := <-residentTransport.receive:
-					if !writeUser(message, ok) {
-						return
-					}
-					continue
-				default:
+			var pendingMessage []byte
+			defer func() {
+				if pendingMessage != nil {
+					connect.MessagePoolReturn(pendingMessage)
 				}
-
-				select {
-				case <-handleCtx.Done():
+			}()
+			for {
+				message := pendingMessage
+				pendingMessage = nil
+				if message == nil {
+					select {
+					case <-handleCtx.Done():
+						return
+					case nextMessage, ok := <-residentTransport.receive:
+						if !ok {
+							return
+						}
+						message = nextMessage
+					case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
+						stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+						err := framer.Write(stream, make([]byte, 0))
+						if err != nil {
+							glog.Infof("[ts]err = %s\n", err)
+							return
+						}
+						announce.SendMessage(0)
+						continue
+					}
+				}
+				receiveOpen, nextMessage, succeeded := writeUserBatch(message)
+				pendingMessage = nextMessage
+				if !succeeded || !receiveOpen {
 					return
-				case message, ok := <-residentTransport.receive:
-					if !writeUser(message, ok) {
-						return
-					}
-				case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
-					stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-					err := framer.Write(stream, make([]byte, 0))
-					if err != nil {
-						glog.Infof("[ts]err = %s\n", err)
-						return
-					}
-					// reliability tracking
-					announce.SendMessage(0)
 				}
 			}
 		})

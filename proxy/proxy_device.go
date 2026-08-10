@@ -666,38 +666,39 @@ func (self *ProxyDevice) PushDeviceRpc(ws sdk.DeviceRpcWs) error {
 func (self *ProxyDevice) Run() {
 	defer self.cancel()
 
-	// note the packet is only retained for the duration of the callback
-	// use `MessagePoolShareReadOnly` to share it outside of the callback
-	receiveCallback := func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
+	// A callback batch is borrowed for this call. The ordinary proxy mode
+	// injects it into gVisor with one GRO-aware write. The legacy external
+	// receive mode gets nonblocking shared copies; a full consumer is loss,
+	// never head-of-line blocking on the SDK receive pump.
+	receivePacketsCallback := func(
+		source connect.TransferPath,
+		provideMode protocol.ProvideMode,
+		ipPath *connect.IpPath,
+		packets [][]byte,
+	) {
 		if !self.UpdateActivity() {
 			return
 		}
-		for {
-			receive, notify := self.receiveWithNotify()
-			if receive != nil {
-				// the callback only borrows packet (ownership stays with the
-				// caller, which recycles it after we return). share a copy so
-				// ownership transfers to the receive consumer on a successful
-				// send; the consumer returns it to the pool after use.
-				sharedPacket := connect.MessagePoolShareReadOnly(packet)
-				select {
-				case <-self.ctx.Done():
-					connect.MessagePoolReturn(sharedPacket)
-					return
-				case receive <- sharedPacket:
-					self.UpdateActivity()
-					return
-				case <-notify:
-					connect.MessagePoolReturn(sharedPacket)
-				}
-			} else {
-				self.tun.Write(packet)
-				self.UpdateActivity()
+		receive, _ := self.receiveWithNotify()
+		if receive == nil {
+			_, _ = self.tun.WriteBatch(packets)
+			self.UpdateActivity()
+			return
+		}
+		for _, packet := range packets {
+			sharedPacket := connect.MessagePoolShareReadOnly(packet)
+			select {
+			case <-self.ctx.Done():
+				connect.MessagePoolReturn(sharedPacket)
 				return
+			case receive <- sharedPacket:
+				self.UpdateActivity()
+			default:
+				connect.MessagePoolReturn(sharedPacket)
 			}
 		}
 	}
-	sub := self.deviceLocal.AddReceivePacketCallback(receiveCallback)
+	sub := self.deviceLocal.AddReceivePacketsCallback(receivePacketsCallback)
 	defer sub()
 
 	// read in batches to reduce wakeups under load
@@ -713,12 +714,7 @@ func (self *ProxyDevice) Run() {
 		if !self.UpdateActivity() {
 			return
 		}
-		for _, packet := range packets[0:n] {
-			success := self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
-			if !success {
-				connect.MessagePoolReturn(packet)
-			}
-		}
+		self.deviceLocal.SendPacketsNoCopy(packets[:n])
 	}
 }
 

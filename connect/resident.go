@@ -440,6 +440,12 @@ type Exchange struct {
 	// drained bit for teardown behavior, but connection-only split state has
 	// no Resident on which to store that bit.
 	drainedClients map[server.Id]struct{}
+
+	// residentWorkerLock closes admission before tests or an orderly owner wait
+	// for all resident cleanup, including its final model/Redis removals.
+	residentWorkerLock    sync.Mutex
+	residentWorkersClosed bool
+	residentWorkers       sync.WaitGroup
 }
 
 func (self *Exchange) IsDraining() bool {
@@ -574,6 +580,23 @@ func (self *Exchange) NominateLocalResident(
 	instanceId server.Id,
 	residentIdToReplace *server.Id,
 ) bool {
+	// Admit before any model work. Close takes the same lock, so WaitForIdle
+	// cannot observe a zero worker count while a pre-close nomination is still
+	// between its database work and goroutine handoff.
+	self.residentWorkerLock.Lock()
+	if self.residentWorkersClosed {
+		self.residentWorkerLock.Unlock()
+		return false
+	}
+	self.residentWorkers.Add(1)
+	self.residentWorkerLock.Unlock()
+	workerStarted := false
+	defer func() {
+		if !workerStarted {
+			self.residentWorkers.Done()
+		}
+	}()
+
 	// Connection-activation gate for the plan's concurrent connected-client limit.
 	// a draining exchange refuses new residents, so a redialing client fails
 	// fast here and lands on a sibling service via the lb
@@ -623,12 +646,14 @@ func (self *Exchange) NominateLocalResident(
 		instanceId,
 		residentId,
 	)
+	workerStarted = true
 	// note: initial peer registration happens in ConnectionAnnounce.run once
 	// the connection survives the announce window (2026-07-15: registration
 	// on the nomination hot path melted pubsub under connection churn and
 	// hung nominations against memory-full redis nodes). The heartbeat below
 	// maintains and re-adds the registration for the resident's lifetime.
 	go server.HandleError(func() {
+		defer self.residentWorkers.Done()
 		defer func() {
 			cleanupCtx := context.Background()
 			model.RemoveResidentForClient(
@@ -1535,10 +1560,30 @@ func (self *Exchange) listenerFullReadEvery() int {
 }
 
 func (self *Exchange) Close() {
+	self.residentWorkerLock.Lock()
+	self.residentWorkersClosed = true
+	self.residentWorkerLock.Unlock()
 	if self.keyEventSubscriber != nil {
 		self.keyEventSubscriber.Close()
 	}
 	self.cancel()
+}
+
+// WaitForIdle waits until every admitted resident has completed teardown,
+// including its final model and peer-registration cleanup. Close must be
+// called first so the wait group cannot receive another admission.
+func (self *Exchange) WaitForIdle(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		self.residentWorkers.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-done:
+		return true
+	}
 }
 
 // each call overwrites the internal buffer
