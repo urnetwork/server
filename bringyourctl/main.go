@@ -44,6 +44,7 @@ Usage:
     bringyourctl db backfill-sweep-destination-id [--batch=<n>]
     bringyourctl db backfill-contract-reap-time [--batch=<n>]
     bringyourctl db sweep-orphans [--slice=<n>]
+    bringyourctl db scrub-client-addresses
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -159,6 +160,8 @@ Options:
 			dbBackfillContractReapTime(opts)
 		} else if sweepOrphans, _ := opts.Bool("sweep-orphans"); sweepOrphans {
 			dbSweepOrphans(opts)
+		} else if scrubClientAddresses, _ := opts.Bool("scrub-client-addresses"); scrubClientAddresses {
+			dbScrubClientAddresses(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -367,6 +370,19 @@ func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
 	server.DbMigrationVerbose = true
 	server.ApplyDbMigrations(context.Background())
+}
+
+// dbScrubClientAddresses re-runs the 20260807 raw-client-address scrub
+// (migration index 544) over pending_task, finished_task, and the
+// network-create audit blobs. The migration ran while binaries that still
+// write raw addresses were deployed, so rows written between the migration
+// and the address-hashing deploy carry raw addresses again; audit blobs are
+// permanent, so run this once after that deploy. Idempotent and safe to
+// re-run any time.
+func dbScrubClientAddresses(opts docopt.Opts) {
+	fmt.Printf("Scrubbing raw client addresses from task and audit rows ...\n")
+	scrubbedTaskCount, scrubbedAuditCount := server.ScrubTaskAndAuditClientAddresses(context.Background())
+	fmt.Printf("Scrubbed %d task row(s) and %d audit blob(s).\n", scrubbedTaskCount, scrubbedAuditCount)
 }
 
 // dbAudit compares the live DB schema against the schema the full local
