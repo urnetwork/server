@@ -1081,6 +1081,109 @@ func GetProviderEgressLocationDueSharded(
 				clientIds = append(clientIds, clientId)
 			}
 		})
+
+		remaining = limit - len(clientIds)
+		if remaining <= 0 {
+			return
+		}
+
+		// pass 3: located and fresh, but its egress HEALTH has gone stale.
+		//
+		// Passes 1 and 2 both key off provider_egress_location, so a provider
+		// with a fresh location was never re-offered no matter how old its
+		// health tally was. That is the schedule that published blackholes:
+		// health decides whether a provider is advertised
+		// (providerCountFilter.passesHealth) but location decided when it was
+		// re-measured, and location outlives health by 7 days to 1. A provider
+		// probed once, then quietly stopping forwarding, kept its passing tally
+		// and its place in the list until its LOCATION aged out days later.
+		//
+		// Now that GetAllProviderEgressHealthCounts drops stale rows, this pass
+		// is what keeps the list populated rather than merely correct: without
+		// it, every gated provider would age out of the map after
+		// ProviderEgressHealthMaxAge and never be re-measured, and the list
+		// would drain to nothing.
+		//
+		// Scoped to providers that HAVE a health row which has aged out, not to
+		// every provider lacking fresh health. The difference matters: "no fresh
+		// health" is also true of a provider that has never been measured at
+		// all, and offering those here would re-probe a provider whose location
+		// was taken minutes ago purely because no health row accompanies it --
+		// which is what pass 1 and the attempt backoff already govern. It also
+		// silently broke TestGetProviderEgressLocationDue, whose fixtures write
+		// locations without health rows: every one of them became due.
+		//
+		// A provider with a location but no health row is therefore left to
+		// passes 1 and 2. It is excluded from the list meanwhile (passesHealth
+		// fails closed on a missing row) and is re-offered when its location
+		// goes stale, so it is not stranded -- only deferred.
+		//
+		// Ordered by client_id: the 6h attempt backoff, not the ordering, is
+		// what rotates the sweep across the population.
+		minMeasuredAt := server.NowUtc().Add(-ProviderEgressHealthMaxAge / 2)
+
+		result, err = conn.Query(
+			ctx,
+			`
+			SELECT
+				network_client_location_reliability.client_id
+			FROM network_client_location_reliability
+
+			WHERE
+				network_client_location_reliability.connected = true AND
+				network_client_location_reliability.valid = true AND
+				EXISTS (
+					SELECT 1 FROM provide_key
+					WHERE
+						provide_key.client_id = network_client_location_reliability.client_id AND
+						provide_key.provide_mode = $1
+				) AND
+				EXISTS (
+					SELECT 1 FROM provider_egress_health
+					WHERE
+						provider_egress_health.client_id = network_client_location_reliability.client_id AND
+						provider_egress_health.measured_at < $2
+				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_probe_attempt
+					WHERE
+						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
+						$3 <= provider_egress_probe_attempt.attempt_at
+				) AND
+				-- the same shard partition as passes 1 and 2; see pass 1 for
+				-- why the modulo has to be normalised.
+				(
+					$5 <= 1 OR
+					((hashtext(network_client_location_reliability.client_id::text) % $5) + $5) % $5 = $6
+				)
+
+			ORDER BY network_client_location_reliability.client_id ASC
+			LIMIT $4
+			`,
+			ProvideModePublic,
+			minMeasuredAt.UTC(),
+			minAttemptAt.UTC(),
+			remaining,
+			shardCount,
+			shardIndex,
+		)
+		server.WithPgResult(result, err, func() {
+			// Same separate-snapshot hazard as pass 2, and additionally this
+			// pass overlaps pass 1 by construction: a never-probed provider has
+			// no health row either, so it satisfies this predicate too.
+			seen := map[server.Id]bool{}
+			for _, clientId := range clientIds {
+				seen[clientId] = true
+			}
+			for result.Next() {
+				var clientId server.Id
+				server.Raise(result.Scan(&clientId))
+				if seen[clientId] {
+					continue
+				}
+				clientIds = append(clientIds, clientId)
+			}
+		})
 	})
 	return clientIds
 }
