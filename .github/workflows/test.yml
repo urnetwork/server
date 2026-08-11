@@ -1,0 +1,75 @@
+name: test
+
+# Every branch, deliberately. Work on this project happens on long-lived
+# branches and forks as well as main, and listing them here would bake one
+# repository's layout into a file that is meant to stay identical wherever
+# it is merged. The concurrency group below keeps a busy branch to a single
+# run at a time.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: server
+
+      # Every github.com/urnetwork/* dependency resolves through a `replace
+      # ../` directive (see go.mod), so a lone checkout does not build: it
+      # fails with "missing go.sum entry", which names nothing about the real
+      # cause. All seven siblings must sit beside the checkout, under exactly
+      # these directory names.
+      #
+      # Tracking each sibling's default branch would make this repo's CI a
+      # function of six other repos' latest commits -- one unrelated push
+      # there turns every open PR here red at once. They are checked out at
+      # their default branch for now, which is the same thing a developer
+      # gets following the README; if that proves too noisy, pin `ref:` per
+      # sibling and bump deliberately.
+      - uses: actions/checkout@v4
+        with: { repository: urnetwork/connect, path: connect }
+      - uses: actions/checkout@v4
+        with: { repository: urnetwork/glog, path: glog }
+      - uses: actions/checkout@v4
+        with: { repository: urnetwork/sdk, path: sdk }
+      - uses: actions/checkout@v4
+        with: { repository: urnetwork/proxy, path: proxy }
+      - uses: actions/checkout@v4
+        with: { repository: urnetwork/goidenticons, path: goidenticons }
+      - uses: actions/checkout@v4
+        with: { repository: urnetwork/userwireguard, path: userwireguard }
+      - uses: actions/checkout@v4
+        with: { repository: urfoundation/sn, path: sn }
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Build
+        working-directory: server
+        run: go build ./...
+
+      - name: Vet
+        working-directory: server
+        run: go vet ./...
+
+      # Compiles every test binary without running any of them. The suite
+      # proper needs postgres and redis (see server.DefaultTestEnv), which
+      # this job deliberately does not stand up -- but a test file that no
+      # longer compiles is a break worth catching on every PR, and it is the
+      # failure that actually happens when a model signature changes.
+      - name: Compile tests
+        working-directory: server
+        run: go test -run 'XXX_NO_SUCH_TEST' -count=1 ./...
