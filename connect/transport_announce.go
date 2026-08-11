@@ -103,6 +103,12 @@ type ConnectionAnnounceSettings struct {
 	// instead of delivering them).
 	SyntheticSpeedBytesPerSecond ByteCount
 	SyntheticSpeedTimeout        time.Duration
+
+	// LifecycleStarted and LifecycleDone are optional, nonblocking observers
+	// for test fixtures that must join asynchronous connection cleanup. They
+	// are nil in production.
+	LifecycleStarted func()
+	LifecycleDone    func()
 }
 
 type LatencyTest struct {
@@ -238,7 +244,17 @@ func NewConnectionAnnounce(
 		PendingLatencyTest:     make(chan *LatencyTest),
 		PendingSpeedTest:       make(chan *SpeedTest),
 	}
-	go server.HandleError(announce.run, cancel)
+	lifecycleStarted := settings.LifecycleStarted
+	lifecycleDone := settings.LifecycleDone
+	if lifecycleStarted != nil {
+		lifecycleStarted()
+	}
+	go func() {
+		if lifecycleDone != nil {
+			defer lifecycleDone()
+		}
+		server.HandleError(announce.run, cancel)
+	}()
 	return announce
 }
 

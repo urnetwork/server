@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	// "os"
@@ -485,9 +486,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// auth failures are client-driven and unbounded in rate, so they are
+	// counted in the jwt package (urnetwork_auth_jwt_rejections_total) rather
+	// than logged per occurrence; the detail is at V(1)
 	byJwt, err := jwt.ParseByJwtForAudience(handleCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
 	if err != nil {
-		glog.Infof("[t]auth jwt err = %s\n", err)
+		if glog.V(1) {
+			glog.Infof("[t]auth jwt err = %s\n", err)
+		}
 		return
 	}
 
@@ -495,7 +501,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := jwt.ValidateByJwtState(handleCtx, byJwt, true); err != nil {
-		glog.Infof("[t]inactive auth jwt: %s\n", err)
+		if glog.V(1) {
+			glog.Infof("[t]inactive auth jwt: %s\n", err)
+		}
 		return
 	}
 
@@ -566,6 +574,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				residentTransport.Close()
 			}()
 
+			readTimer := time.NewTimer(0)
+			defer readTimer.Stop()
 			var speedTest *SpeedTest
 
 			for {
@@ -630,31 +640,20 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 					pingTracker.Receive()
 
-					// fast path without arming a timer
-					select {
-					case residentTransport.send <- message:
+					sendResult := residentTransport.sendMessage(
+						handleCtx.Done(),
+						message,
+						readTimer,
+						self.settings.ReadTimeout,
+					)
+					if sendResult == pooledMessageSendDone {
+						return
+					}
+					if sendResult == pooledMessageSendDelivered {
 						if glog.V(2) {
 							glog.Infof("[rtr] <-%s\n", clientId)
 						}
-						continue
-					default:
 					}
-
-					select {
-					case <-handleCtx.Done():
-						connect.MessagePoolReturn(message)
-						return
-					case <-residentTransport.Done():
-						connect.MessagePoolReturn(message)
-						return
-					case residentTransport.send <- message:
-						if glog.V(2) {
-							glog.Infof("[rtr] <-%s\n", clientId)
-						}
-					case <-time.After(self.settings.ReadTimeout):
-						connect.MessagePoolReturn(message)
-					}
-					// else ignore
 				}
 			}
 		})
@@ -968,6 +967,44 @@ func (self *ConnectHandler) listenQuic(
 	}
 }
 
+// Reads one pooled H3 authentication frame and lends its exact wire bytes to
+// the callback. The frame is returned on every decode and callback result.
+func withConnectQuicAuthFrame(
+	framer *connect.Framer,
+	reader io.Reader,
+	use func(auth *protocol.Auth, authFrameBytes []byte) error,
+) error {
+	return withObservedConnectQuicAuthFrame(framer, reader, nil, use)
+}
+
+// Reads one pooled H3 authentication frame and exposes its borrowed bytes to
+// an optional deterministic ownership observer before protocol decoding.
+func withObservedConnectQuicAuthFrame(
+	framer *connect.Framer,
+	reader io.Reader,
+	observe func(authFrameBytes []byte),
+	use func(auth *protocol.Auth, authFrameBytes []byte) error,
+) error {
+	authFrameBytes, err := framer.Read(reader)
+	if err != nil {
+		return err
+	}
+	defer connect.MessagePoolReturn(authFrameBytes)
+	if observe != nil {
+		observe(authFrameBytes)
+	}
+
+	message, err := connect.DecodeFrame(authFrameBytes)
+	if err != nil {
+		return err
+	}
+	auth, ok := message.(*protocol.Auth)
+	if !ok {
+		return fmt.Errorf("expected auth frame, got %T", message)
+	}
+	return use(auth, authFrameBytes)
+}
+
 func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
@@ -1021,56 +1058,58 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 	framer := connect.NewFramer(self.settings.FramerSettings)
 
+	var byJwt *jwt.ByJwt
+	var clientId server.Id
+	var instanceId server.Id
+	var connectionId server.Id
+	connectionRegistered := false
+	defer func() {
+		if connectionRegistered {
+			self.exchange.unregisterConnection(clientId, connectionId)
+		}
+	}()
 	stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
-	authFrameBytes, err := framer.Read(stream)
+	err = withConnectQuicAuthFrame(
+		framer,
+		stream,
+		func(auth *protocol.Auth, authFrameBytes []byte) error {
+			var authErr error
+			byJwt, authErr = jwt.ParseByJwtForAudience(
+				handleCtx,
+				auth.ByJwt,
+				jwt.ByJwtAudienceConnect,
+			)
+			if authErr != nil {
+				return authErr
+			}
+			if byJwt.ClientId == nil {
+				return fmt.Errorf("Missing client id.")
+			}
+			if authErr = jwt.ValidateByJwtState(handleCtx, byJwt, true); authErr != nil {
+				return authErr
+			}
+
+			clientId = *byJwt.ClientId
+			instanceId, authErr = server.IdFromBytes(auth.InstanceId)
+			if authErr != nil {
+				return authErr
+			}
+
+			// Verify the client is still part of the network.
+			networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
+			if networkId == nil || *networkId != byJwt.NetworkId {
+				return fmt.Errorf("Client id is not part of network.")
+			}
+
+			connectionId = server.NewId()
+			self.exchange.registerConnection(clientId, connectionId, handleCancel)
+			connectionRegistered = true
+
+			stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+			return framer.Write(stream, authFrameBytes)
+		},
+	)
 	if err != nil {
-		return err
-	}
-
-	message, err := connect.DecodeFrame(authFrameBytes)
-	if err != nil {
-		return err
-	}
-	auth, ok := message.(*protocol.Auth)
-	if !ok {
-		return err
-	}
-
-	byJwt, err := jwt.ParseByJwtForAudience(handleCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
-	if err != nil {
-		return err
-	}
-
-	if byJwt.ClientId == nil {
-		return fmt.Errorf("Missing client id.")
-	}
-	if err := jwt.ValidateByJwtState(handleCtx, byJwt, true); err != nil {
-		return err
-	}
-
-	clientId := *byJwt.ClientId
-
-	instanceId, err := server.IdFromBytes(auth.InstanceId)
-	if err != nil {
-		return err
-	}
-
-	// verify the client is still part of the network
-	// this will fail for example if the client has been removed
-	networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
-	if networkId == nil || *networkId != byJwt.NetworkId {
-		// server.Logger("ERROR HB\n")
-		return fmt.Errorf("Client id is not part of network.")
-	}
-
-	connectionId := server.NewId()
-	self.exchange.registerConnection(clientId, connectionId, handleCancel)
-	defer self.exchange.unregisterConnection(clientId, connectionId)
-
-	stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-	err = framer.Write(stream, authFrameBytes)
-	if err != nil {
-		// server.Logger("TIMEOUT HC\n")
 		return err
 	}
 
@@ -1121,6 +1160,8 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				residentTransport.Close()
 			}()
 
+			readTimer := time.NewTimer(0)
+			defer readTimer.Stop()
 			for {
 				stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 				message, err := framer.Read(stream)
@@ -1143,26 +1184,19 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 				pingTracker.Receive()
 
-				// fast path without arming a timer
-				select {
-				case residentTransport.send <- message:
-					if glog.V(2) {
-						glog.Infof("[rtr] <-%s\n", clientId)
-					}
-					continue
-				default:
-				}
-
-				select {
-				case <-handleCtx.Done():
-					connect.MessagePoolReturn(message)
+				sendResult := residentTransport.sendMessage(
+					handleCtx.Done(),
+					message,
+					readTimer,
+					self.settings.ReadTimeout,
+				)
+				if sendResult == pooledMessageSendDone {
 					return
-				case residentTransport.send <- message:
+				}
+				if sendResult == pooledMessageSendDelivered {
 					if glog.V(2) {
 						glog.Infof("[rtr] <-%s\n", clientId)
 					}
-				case <-time.After(self.settings.ReadTimeout):
-					connect.MessagePoolReturn(message)
 				}
 			}
 		})

@@ -177,31 +177,77 @@ func RemoveCompletedContractsPost(
 // contract_close/transfer_escrow/transfer_escrow_sweep rows whose contract no
 // longer exists. RemoveCompletedContracts cascades dependents together with
 // the contract deletes on every run, so this only catches orphans from
-// interrupted statements or older releases. Each pass is a full anti-join scan
-// of the dependent tables, which is why it runs daily and not on the retention
-// cadence.
+// interrupted statements or older releases.
+//
+// A pass over these tables is far too big to run end to end: contract_close
+// alone is ~1.5B rows, so probing all three against transfer_contract takes
+// hours. The pass is therefore SPREAD: each run pages a bounded
+// sweepOrphanContractMaxRowCount rows and returns where it stopped, Post hands
+// that cursor to the next run, and a full pass completes over days.
+//
+// The row budget is the load-bearing part. Before 2026-08-11 a run simply paged
+// until the task deadline killed it, which meant it never returned normally, so
+// Post never ran, so the weekly cadence was never re-armed and the chain fell
+// back to error-retry — restarting the pass from row zero every time. It had
+// never completed a single pass, was running ~63% of wall clock, and cost 7.6%
+// of all db time re-walking the same prefix of contract_close to find zero
+// orphans. Keep the budget well under MaxTime so a run always COMPLETES.
 
 type SweepOrphanContractDataArgs struct {
+	// where the previous run stopped; the zero value starts a fresh pass
+	Cursor model.SweepOrphanCursor `json:"cursor"`
 }
 
 type SweepOrphanContractDataResult struct {
 	RemovedCount int64 `json:"removed_count"`
+	// where this run stopped, handed back by Post as the next run's start
+	Cursor model.SweepOrphanCursor `json:"cursor"`
+	// every table was fully paged, so the next run starts a fresh pass
+	Done bool `json:"done"`
 }
 
+const (
+	sweepOrphanContractSliceSize = 50000
+	// rows paged per run: ~10M rows is a couple of minutes of slices, so a full
+	// ~2.6B-row pass lands over roughly a week of resume runs
+	sweepOrphanContractMaxRowCount = 10 * 1000 * 1000
+	// gap between the resume runs of one pass
+	sweepOrphanContractResumeTimeout = 30 * time.Minute
+	// bounds a stranded claim if a worker dies mid-run (SIGNALS 12.3); with the
+	// row budget sized as above a run is minutes, so this is pure headroom
+	sweepOrphanContractMaxTime = 30 * time.Minute
+)
+
+// ScheduleSweepOrphanContractData starts a fresh pass at the next weekly slot.
 func ScheduleSweepOrphanContractData(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleSweepOrphanContractData(
+		clientSession,
+		tx,
+		model.SweepOrphanCursor{},
+		// weekly, anchored off-peak (~10:00 UTC): steady state finds ~zero
+		// orphans (RemoveCompletedContracts cascades dependents inline), so a
+		// weekly pass is plenty and `bringyourctl db sweep-orphans` covers
+		// on-demand cleanup
+		nextWeeklyOffPeak(server.NowUtc()),
+	)
+}
+
+func scheduleSweepOrphanContractData(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	cursor model.SweepOrphanCursor,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		SweepOrphanContractData,
-		&SweepOrphanContractDataArgs{},
+		&SweepOrphanContractDataArgs{
+			Cursor: cursor,
+		},
 		clientSession,
 		task.RunOnce("sweep_orphan_contract_data"),
-		// weekly, anchored off-peak (~10:00 UTC): the bounded cursor sweep pages
-		// entire large child tables per pass (measured ~2% of db time for the
-		// provide_key slices alone) while finding ~zero orphans in steady state
-		// -- a weekly safety net is plenty, and `bringyourctl db sweep-orphans`
-		// covers on-demand cleanup
-		task.RunAt(nextWeeklyOffPeak(server.NowUtc())),
-		task.MaxTime(4*time.Hour),
+		task.RunAt(runAt),
+		task.MaxTime(sweepOrphanContractMaxTime),
 	)
 }
 
@@ -209,17 +255,20 @@ func SweepOrphanContractData(
 	sweepOrphanContractData *SweepOrphanContractDataArgs,
 	clientSession *session.ClientSession,
 ) (*SweepOrphanContractDataResult, error) {
-	// Re-enabled 2026-07-14 on the bounded cursor implementation (daily safety
-	// net for orphans left by crashes mid-delete or older releases; the reap_time
-	// reaper cascades dependents with the contract delete, so steady state finds
-	// ~nothing). The model fn pages each child table by primary key in sliceSize
-	// batches, one maintenance tx per slice -- unlike the previous
+	// the model fn pages each child table by primary key in sliceSize batches,
+	// one maintenance tx per slice -- unlike the pre-2026-07-14
 	// NOT EXISTS ... LIMIT form, which full-scanned each driver table when
-	// orphans were rare (prod incident 2026-07-14).
-	sliceSize := 50000
-	removedCount := model.SweepOrphanContractData(clientSession.Ctx, sliceSize)
+	// orphans were rare (prod incident 2026-07-14)
+	removedCount, cursor, done := model.SweepOrphanContractData(
+		clientSession.Ctx,
+		sweepOrphanContractData.Cursor,
+		sweepOrphanContractMaxRowCount,
+		sweepOrphanContractSliceSize,
+	)
 	return &SweepOrphanContractDataResult{
 		RemovedCount: removedCount,
+		Cursor:       cursor,
+		Done:         done,
 	}, nil
 }
 
@@ -229,7 +278,18 @@ func SweepOrphanContractDataPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleSweepOrphanContractData(clientSession, tx)
+	if sweepOrphanContractDataResult.Done {
+		// pass complete; start the next one on the weekly cadence
+		ScheduleSweepOrphanContractData(clientSession, tx)
+		return nil
+	}
+	// mid-pass: resume from where this run stopped
+	scheduleSweepOrphanContractData(
+		clientSession,
+		tx,
+		sweepOrphanContractDataResult.Cursor,
+		server.NowUtc().Add(sweepOrphanContractResumeTimeout),
+	)
 	return nil
 }
 

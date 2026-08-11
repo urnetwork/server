@@ -2,15 +2,15 @@ package oauth
 
 // Signer key loading and the published jwks.
 //
-// Keys are listed newest first in services.yml. The first signs new tokens;
+// Keys are listed newest first in vault auth.yml. The first signs new tokens;
 // every listed key verifies, so tokens signed before a rotation keep working
 // until they expire. Because access tokens live an hour, a rotated key can be
 // dropped from the list the day after it is replaced.
 //
 // The kid is the rfc 7638 thumbprint of the public key, so it is derived from
 // the key rather than assigned. `warpctl oauth keygen` writes the key file
-// under that name and prints the matching services.yml entry, which keeps the
-// three in agreement.
+// under that name and `warpctl oauth promote` inserts the matching auth.yml
+// entry, which keeps the three in agreement.
 
 import (
 	"crypto/ecdsa"

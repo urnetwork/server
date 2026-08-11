@@ -10,6 +10,7 @@ import (
 
 	"bytes"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	// "math"
@@ -128,14 +129,116 @@ func locationDirectory() map[server.Id]*locationDirectoryEntry {
 	return snapshot.entries
 }
 
+// locationDirectoryRedisKey shares one computed directory across the fleet.
+// The query behind it scans the whole ~53M-row reliability table, and every
+// process used to run it independently on its own staleness timer: ~1,550
+// executions per 48h, ~2% of all db time, to produce the same ~9k rows each
+// time (2026-08-11 audit). The ttl is the same staleness bound the per-process
+// snapshot already had, so nothing is served staler than before — the scan is
+// just paid once per window for the fleet instead of once per process.
+const locationDirectoryRedisKey = "location_directory"
+
+// locationDirectoryRow is the wire form of one directory entry. The directory is
+// keyed by location id in memory, but server.Id implements MarshalJSON and not
+// MarshalText, so it cannot be a json map key — the cache carries a list and the
+// map is rebuilt on read.
+type locationDirectoryRow struct {
+	LocationId  server.Id `json:"location_id"`
+	Name        string    `json:"name"`
+	CountryCode string    `json:"country_code"`
+	Latitude    *float64  `json:"latitude,omitempty"`
+	Longitude   *float64  `json:"longitude,omitempty"`
+}
+
+// getLocationDirectoryCache reads the fleet-shared directory, or nil on miss.
+// A redis failure is a miss, not an error: the caller falls back to querying pg,
+// which is exactly the pre-cache behavior.
+func getLocationDirectoryCache(ctx context.Context) map[server.Id]*locationDirectoryEntry {
+	var entries map[server.Id]*locationDirectoryEntry
+	server.Redis(ctx, func(r server.RedisClient) {
+		rowsJson, err := r.Get(ctx, locationDirectoryRedisKey).Result()
+		if err != nil {
+			// miss, or redis is unavailable; fall back to pg
+			return
+		}
+		rows := []*locationDirectoryRow{}
+		if err := json.Unmarshal([]byte(rowsJson), &rows); err != nil {
+			glog.V(1).Infof("[nclm]location directory cache decode err = %v\n", err)
+			return
+		}
+		entries = map[server.Id]*locationDirectoryEntry{}
+		for _, row := range rows {
+			entries[row.LocationId] = &locationDirectoryEntry{
+				Name:        row.Name,
+				CountryCode: row.CountryCode,
+				Latitude:    row.Latitude,
+				Longitude:   row.Longitude,
+			}
+		}
+	})
+	return entries
+}
+
+func setLocationDirectoryCache(
+	ctx context.Context,
+	entries map[server.Id]*locationDirectoryEntry,
+	ttl time.Duration,
+) {
+	rows := make([]*locationDirectoryRow, 0, len(entries))
+	for locationId, entry := range entries {
+		rows = append(rows, &locationDirectoryRow{
+			LocationId:  locationId,
+			Name:        entry.Name,
+			CountryCode: entry.CountryCode,
+			Latitude:    entry.Latitude,
+			Longitude:   entry.Longitude,
+		})
+	}
+	rowsJson, err := json.Marshal(rows)
+	if err != nil {
+		glog.V(1).Infof("[nclm]location directory cache encode err = %v\n", err)
+		return
+	}
+	server.Redis(ctx, func(r server.RedisClient) {
+		if err := r.Set(ctx, locationDirectoryRedisKey, string(rowsJson), ttl).Err(); err != nil {
+			// the directory is still usable in-process; the next loader just
+			// pays the query again
+			glog.V(1).Infof("[nclm]location directory cache write err = %v\n", err)
+		}
+	})
+}
+
 func loadLocationDirectory() {
 	ctx := context.Background()
 
+	entries := getLocationDirectoryCache(ctx)
+	if entries == nil {
+		entries = queryLocationDirectory(ctx)
+		setLocationDirectoryCache(ctx, entries, locationDirectoryStaleAfter)
+	}
+
+	locationDirectoryValue.Store(&locationDirectorySnapshot{
+		entries:  entries,
+		loadTime: server.NowUtc(),
+	})
+}
+
+func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirectoryEntry {
 	entries := map[server.Id]*locationDirectoryEntry{}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		// the seeded city list can be ~10^6 rows, so bound the directory to
-		// locations actually referenced by providers
+		// locations actually referenced by providers.
+		//
+		// The referenced set is collected as DISTINCT (city, region, country)
+		// TRIPLES in a single pass, then unnested. Selecting each column's
+		// DISTINCT separately and UNIONing them reads the same table three
+		// times — the planner runs three independent parallel seq scans, which
+		// measured 3x the buffers and ~3.5x the cpu of this shape (2026-08-11).
+		// The triple set is tiny (~7.8k rows against ~53M scanned), so the
+		// unnest above it is free; unnesting the three columns per ROW instead
+		// would push ~159M rows through the function scan and cost far more
+		// than the scan it saves.
 		result, err := conn.Query(
 			ctx,
 			`
@@ -147,21 +250,16 @@ func loadLocationDirectory() {
 				location.longitude
 			FROM location
 			WHERE location.location_id IN (
-				SELECT DISTINCT city_location_id
-				FROM network_client_location_reliability
-				WHERE city_location_id IS NOT NULL
-
-				UNION
-
-				SELECT DISTINCT region_location_id
-				FROM network_client_location_reliability
-				WHERE region_location_id IS NOT NULL
-
-				UNION
-
-				SELECT DISTINCT country_location_id
-				FROM network_client_location_reliability
-				WHERE country_location_id IS NOT NULL
+				SELECT DISTINCT loc.id
+				FROM (
+					SELECT DISTINCT
+						city_location_id AS c,
+						region_location_id AS r,
+						country_location_id AS n
+					FROM network_client_location_reliability
+				) triples
+				CROSS JOIN LATERAL unnest(ARRAY[triples.c, triples.r, triples.n]) AS loc(id)
+				WHERE loc.id IS NOT NULL
 			)
 			`,
 		)
@@ -182,10 +280,7 @@ func loadLocationDirectory() {
 		})
 	})
 
-	locationDirectoryValue.Store(&locationDirectorySnapshot{
-		entries:  entries,
-		loadTime: server.NowUtc(),
-	})
+	return entries
 }
 
 const DefaultMaxDistanceFraction = float32(0.2)
@@ -3864,9 +3959,17 @@ func FindProviders2(
 			return nil, err
 		}
 		loadEndTime := time.Now()
-		loadMillis := float64(loadEndTime.Sub(loadStartTime)/time.Nanosecond) / (1000.0 * 1000.0)
-		if 50.0 <= loadMillis {
-			glog.Infof("[nclm]findproviders2 load %.2fms (%d)\n", loadMillis, len(clientScores))
+		loadDuration := loadEndTime.Sub(loadStartTime)
+		loadMillis := float64(loadDuration) / float64(time.Millisecond)
+		findProviders2LoadSeconds.Observe(loadDuration.Seconds())
+		// one provider search per call makes this client-driven volume: the
+		// histogram is the signal, the slow-case line is V(1) detail
+		if 50*time.Millisecond <= loadDuration && glog.V(1) {
+			glog.Infof(
+				"[nclm]findproviders2 load %.2fms (%d)\n",
+				loadMillis,
+				len(clientScores),
+			)
 		}
 
 		// drop providers this caller cannot contract with.
@@ -3960,7 +4063,7 @@ func FindProviders2(
 				rankMode,
 				count,
 				ipInfo.CountryCode,
-				loadMillis,
+				float64(loadDuration.Nanoseconds())/1e6,
 				clientScores,
 				clientIds,
 			)

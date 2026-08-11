@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
@@ -28,6 +29,51 @@ func TestContractFailureClassIsBounded(t *testing.T) {
 		if got := contractFailureClass(test.err); got != test.want {
 			t.Fatalf("contractFailureClass(%q) = %q, want %q", test.err, got, test.want)
 		}
+	}
+}
+
+// TestRecordContractFailureCounts pins the observability that replaced the
+// per-failure log line. Contract failures are client-driven and ran over
+// 1,000/minute, so the log line at the default level was a way for any client
+// to spam the logs; the counter is now the only default-level signal, and it
+// must partition by both cause and companion mode.
+func TestRecordContractFailureCounts(t *testing.T) {
+	count := func(cause string, companion bool) float64 {
+		return testutil.ToFloat64(
+			contractFailureCounter.WithLabelValues(cause, fmt.Sprintf("%t", companion)),
+		)
+	}
+
+	tests := []struct {
+		err       error
+		companion bool
+		cause     string
+	}{
+		{fmt.Errorf("Missing origin contract for companion."), false, "missing_companion_origin"},
+		{fmt.Errorf("Missing origin contract for companion."), true, "missing_companion_origin"},
+		{fmt.Errorf("Insufficient balance (0)."), false, "insufficient_balance"},
+		{fmt.Errorf("Client does not exist."), false, "client_not_found"},
+		// an unclassified cause still lands in a bounded bucket: `other`
+		// rising is the signal to enable V(1) and look
+		{fmt.Errorf("postgres unavailable"), false, "other"},
+	}
+	for _, test := range tests {
+		before := count(test.cause, test.companion)
+		recordContractFailure(server.NewId(), server.NewId(), test.companion, 16384, test.err)
+		if after := count(test.cause, test.companion); after != before+1 {
+			t.Fatalf(
+				"counter{%s,%t} = %v, want %v",
+				test.cause, test.companion, after, before+1,
+			)
+		}
+	}
+
+	// companion mode partitions the same cause rather than merging it
+	before := count("missing_companion_origin", true)
+	recordContractFailure(server.NewId(), server.NewId(), false, 16384,
+		fmt.Errorf("Missing origin contract for companion."))
+	if after := count("missing_companion_origin", true); after != before {
+		t.Fatalf("a companion=false failure moved the companion=true counter: %v -> %v", before, after)
 	}
 }
 
@@ -371,19 +417,13 @@ func TestCreateContractCompanionStreamId(t *testing.T) {
 }
 
 // TestCreateContractNetworkNormalizedCompanionStreamId reproduces the
-// 2026-07-20 same-network report: the streamed (force_stream) contract
-// between the pair rode a stream and reported it, but the reply shipped
-// without the stream id, so neither the provider send nor the client receive
-// stats saw the stream — and, worse, the unstamped contract steered the
-// reply traffic off the stream (`openContractMultiRouteWriter` follows the
-// contract path once set). The reply request carries NO companion flag for
-// the network relationship (`RemoteUserNatProvider` skips
-// `CompanionContract()` for a network-mode source) and no stream request, so
-// it is indistinguishable from a forward send: while the pair has an active
-// stream, EVERY network contract between the pair must join it — the
-// platform directing the client to switch to the stream. Covers the
-// companion=true (older builds normalize) and companion=false (current
-// builds) request shapes.
+// 2026-07-20 same-network report: the streamed contract between the pair rode
+// a stream and reported it, but the reply shipped without that stream id. A
+// current provider reply retains the receiver-visible force-stream lane but
+// cannot reconstruct the sender's local intermediary list. Both forced and
+// unforced replies must therefore join the active pair stream instead of
+// creating a separate direct stream. Covers companion=true (older builds
+// normalize) and companion=false (current builds) request shapes.
 func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -416,9 +456,20 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 
 		streamVersion1 := uint32(1)
 
-		createContract := func(source server.Id, destination server.Id, companion bool, forceStream bool) *protocol.CreateContractResult {
+		createContract := func(
+			source server.Id,
+			destination server.Id,
+			companion bool,
+			forceStream bool,
+			intermediaryIds []server.Id,
+		) *protocol.CreateContractResult {
+			intermediaryIdBytes := make([][]byte, len(intermediaryIds))
+			for intermediaryIndex, intermediaryId := range intermediaryIds {
+				intermediaryIdBytes[intermediaryIndex] = intermediaryId.Bytes()
+			}
 			frames, err := CreateContract(ctx, source, &protocol.CreateContract{
 				DestinationId:     destination.Bytes(),
+				IntermediaryIds:   intermediaryIdBytes,
 				TransferByteCount: uint64(1024 * 1024),
 				Companion:         companion,
 				ForceStream:       &forceStream,
@@ -441,30 +492,44 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 			return stored
 		}
 
-		// forward: the client requests a streamed network contract to the
-		// provider (force_stream, the p2p shape)
-		forwardResult := createContract(client, provider, false, true)
+		// The client requests a multi-hop streamed network contract to the
+		// provider. The reply has no local copy of this intermediary route.
+		intermediary := newClient()
+		forwardResult := createContract(client, provider, false, true, []server.Id{intermediary})
 		forwardStored := storedContract(forwardResult)
 		connect.AssertEqual(t, forwardResult.Contract.ProvideMode, protocol.ProvideMode_Network)
 		connect.AssertEqual(t, len(forwardStored.StreamId) == 0, false)
 		streamId := server.Id(forwardStored.StreamId)
 
+		// The current provider reply preserves ForceStream in its TransferKey.
+		// With no intermediary list it must join the existing multi-hop stream,
+		// not create an unrelated direct stream for the same endpoint pair.
+		replyForcedResult := createContract(provider, client, false, true, nil)
+		replyForcedStored := storedContract(replyForcedResult)
+		connect.AssertEqual(t, replyForcedResult.Contract.ProvideMode, protocol.ProvideMode_Network)
+		connect.AssertEqual(t, len(replyForcedStored.StreamId) == 0, false)
+		connect.AssertEqual(t, server.Id(replyForcedStored.StreamId), streamId)
+		replyForcedContractId := server.Id(replyForcedStored.ContractId)
+		memberStreamId, _, ok := model.GetStream(ctx, replyForcedContractId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, memberStreamId, streamId)
+
 		// reply, current build shape: NO companion flag, no stream request —
 		// must still carry the SAME stream id and join the stream
-		replyResult := createContract(provider, client, false, false)
+		replyResult := createContract(provider, client, false, false, nil)
 		replyStored := storedContract(replyResult)
 		connect.AssertEqual(t, replyResult.Contract.ProvideMode, protocol.ProvideMode_Network)
 		connect.AssertEqual(t, len(replyStored.StreamId) == 0, false)
 		connect.AssertEqual(t, server.Id(replyStored.StreamId), streamId)
 
 		replyContractId := server.Id(replyStored.ContractId)
-		memberStreamId, _, ok := model.GetStream(ctx, replyContractId)
+		memberStreamId, _, ok = model.GetStream(ctx, replyContractId)
 		connect.AssertEqual(t, ok, true)
 		connect.AssertEqual(t, memberStreamId, streamId)
 
 		// reply, older build shape: companion request normalized to network —
 		// same outcome
-		replyNormalizedResult := createContract(provider, client, true, false)
+		replyNormalizedResult := createContract(provider, client, true, false, nil)
 		replyNormalizedStored := storedContract(replyNormalizedResult)
 		connect.AssertEqual(t, replyNormalizedResult.Contract.ProvideMode, protocol.ProvideMode_Network)
 		connect.AssertEqual(t, server.Id(replyNormalizedStored.StreamId), streamId)
@@ -478,7 +543,7 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 		// a forward-direction network contract without an explicit stream
 		// request also joins the pair's active stream — both directions of
 		// an actively streaming pair ride the stream
-		forward2Result := createContract(client, provider, false, false)
+		forward2Result := createContract(client, provider, false, false, nil)
 		forward2Stored := storedContract(forward2Result)
 		connect.AssertEqual(t, server.Id(forward2Stored.StreamId), streamId)
 
@@ -500,10 +565,10 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 
 		// with no active stream left for the pair, contracts stay unmarked
 		// (and must not resurrect the dead stream)
-		for _, contractId := range []server.Id{replyContractId, server.Id(replyNormalizedStored.ContractId), server.Id(forward2Stored.ContractId)} {
+		for _, contractId := range []server.Id{replyForcedContractId, replyContractId, server.Id(replyNormalizedStored.ContractId), server.Id(forward2Stored.ContractId)} {
 			model.RemoveFromStream(ctx, contractId)
 		}
-		reply2Result := createContract(provider, client, false, false)
+		reply2Result := createContract(provider, client, false, false, nil)
 		reply2Stored := storedContract(reply2Result)
 		connect.AssertEqual(t, len(reply2Stored.StreamId), 0)
 	})

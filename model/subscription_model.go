@@ -18,6 +18,7 @@ import (
 	// "maps"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
@@ -2611,6 +2612,34 @@ func ForceCloseAllOpenContractIds(ctx context.Context, minTime time.Time) error 
 	}
 }
 
+// forceCloseContractCounter partitions force-closed expired contracts by the
+// resolution taken. The volume is driven by clients that leave contracts open
+// — a per-contract log line ran ~87k/day, dwarfing every other log source —
+// so the disposition is counted and the per-contract detail (which carries
+// the contract id) stays at V(1).
+var forceCloseContractCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "contract",
+		Name:      "force_closed_total",
+		Help:      "Expired contracts force closed by the sweep, partitioned by resolution",
+	},
+	[]string{"resolution"},
+)
+
+func init() {
+	prometheus.MustRegister(forceCloseContractCounter)
+}
+
+// recordForceCloseContract counts one force-close resolution and emits the
+// per-contract detail at V(1). `tag` carries the contract id and batch index.
+func recordForceCloseContract(resolution string, tag string) {
+	forceCloseContractCounter.WithLabelValues(resolution).Inc()
+	if glog.V(1) {
+		glog.Infof("%sforce close contract: %s\n", tag, resolution)
+	}
+}
+
 // closes all open contracts with no update in the last `timeout`
 // cases handled:
 // - no closes
@@ -2869,7 +2898,10 @@ func ForceCloseOpenContractIds(
 	closeContract := func(tag string, openContract *OpenContract) error {
 		if openContract.dispute {
 			// todo: improve this with better detection of th eroot causes
-			glog.Infof("%ssettle contract dispute: both sides\n", tag)
+			forceCloseContractCounter.WithLabelValues("dispute_both_sides").Inc()
+			if glog.V(1) {
+				glog.Infof("%ssettle contract dispute: both sides\n", tag)
+			}
 			var posts []func() any
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -2883,7 +2915,7 @@ func ForceCloseOpenContractIds(
 
 		} else if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
 			// close with both sides 0
-			glog.Infof("%sforce close contract: both sides\n", tag)
+			recordForceCloseContract("both sides", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2909,7 +2941,7 @@ func ForceCloseOpenContractIds(
 
 		} else if openContract.sourceCloseTime == nil {
 			// source accepts destination
-			glog.Infof("%sforce close contract: source accepts destination\n", tag)
+			recordForceCloseContract("source accepts destination", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2924,7 +2956,7 @@ func ForceCloseOpenContractIds(
 
 		} else if openContract.destinationCloseTime == nil {
 			// destination accepts source
-			glog.Infof("%sforce close contract: destination accepts source\n", tag)
+			recordForceCloseContract("destination accepts source", tag)
 
 			err := CloseContract(
 				ctx,
@@ -2941,7 +2973,7 @@ func ForceCloseOpenContractIds(
 			// finalize one or more checkpoints
 
 			if *openContract.sourceCheckpoint {
-				glog.Infof("%sforce close contract: finalize source checkpoint\n", tag)
+				recordForceCloseContract("finalize source checkpoint", tag)
 
 				err := CloseContract(
 					ctx,
@@ -2956,7 +2988,7 @@ func ForceCloseOpenContractIds(
 			}
 
 			if *openContract.destinationCheckpoint {
-				glog.Infof("%sforce close contract: finalize destination checkpoint\n", tag)
+				recordForceCloseContract("finalize destination checkpoint", tag)
 				err := CloseContract(
 					ctx,
 					openContract.contractId,
@@ -3826,15 +3858,43 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 // RemoveCompletedContracts cascades these atomically with the contract delete,
 // so this is a low-cadence safety net for orphans left by older releases or
 // interrupted statements, not the primary cleanup mechanism. Each table is
-// paged fully by its primary key in bounded sliceSize slices (see
-// sweepOrphanCursor), so a call never full-scans a child table even when there
-// are no orphans.
-func SweepOrphanContractData(ctx context.Context, sliceSize int) (removedCount int64) {
-	// contract_close, keyed by (contract_id, party)
-	removedCount += sweepOrphanCursor(
+// paged by its primary key in bounded sliceSize slices (see sweepOrphanCursor),
+// so a call never full-scans a child table even when there are no orphans.
+//
+// A call pages at most maxRowCount rows starting from start, and returns the
+// position it stopped at. Pass the returned cursor as the next call's start to
+// resume; done reports that every table has been fully paged, so the caller can
+// begin a fresh pass. maxRowCount <= 0 pages every table to completion in one
+// call (the on-demand `bringyourctl db sweep-orphans` path).
+func SweepOrphanContractData(
+	ctx context.Context,
+	start SweepOrphanCursor,
+	maxRowCount int,
+	sliceSize int,
+) (removedCount int64, end SweepOrphanCursor, done bool) {
+	return sweepOrphanSteps(
 		ctx,
+		sweepOrphanContractSteps(),
+		start,
+		maxRowCount,
 		sliceSize,
-		`
+	)
+}
+
+// sweepOrphanContractSteps is the ordered list of child tables the contract
+// sweep pages. The order is part of the persisted cursor (SweepOrphanCursor.Step
+// indexes it), so inserting or removing a step invalidates in-flight cursors —
+// sweepOrphanSteps restarts the pass rather than skipping a table when the
+// persisted step is out of range.
+func sweepOrphanContractSteps() []sweepOrphanStep {
+	return []sweepOrphanStep{
+		// contract_close, keyed by (contract_id, party)
+		{
+			table: "contract_close",
+			newCursorTargets: func() []any {
+				return []any{new(server.Id), new(string)}
+			},
+			sql: `
 		WITH slice AS (
 			SELECT contract_id, party
 			FROM contract_close
@@ -3864,14 +3924,15 @@ func SweepOrphanContractData(ctx context.Context, sliceSize int) (removedCount i
 			bound.contract_id, bound.party
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id), new(string)} },
-	)
+		},
 
-	// transfer_escrow, keyed by (contract_id, balance_id)
-	removedCount += sweepOrphanCursor(
-		ctx,
-		sliceSize,
-		`
+		// transfer_escrow, keyed by (contract_id, balance_id)
+		{
+			table: "transfer_escrow",
+			newCursorTargets: func() []any {
+				return []any{new(server.Id), new(server.Id)}
+			},
+			sql: `
 		WITH slice AS (
 			SELECT contract_id, balance_id
 			FROM transfer_escrow
@@ -3901,14 +3962,15 @@ func SweepOrphanContractData(ctx context.Context, sliceSize int) (removedCount i
 			bound.contract_id, bound.balance_id
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id), new(server.Id)} },
-	)
+		},
 
-	// transfer_escrow_sweep, keyed by (contract_id, balance_id, network_id)
-	removedCount += sweepOrphanCursor(
-		ctx,
-		sliceSize,
-		`
+		// transfer_escrow_sweep, keyed by (contract_id, balance_id, network_id)
+		{
+			table: "transfer_escrow_sweep",
+			newCursorTargets: func() []any {
+				return []any{new(server.Id), new(server.Id), new(server.Id)}
+			},
+			sql: `
 		WITH slice AS (
 			SELECT contract_id, balance_id, network_id
 			FROM transfer_escrow_sweep
@@ -3939,10 +4001,137 @@ func SweepOrphanContractData(ctx context.Context, sliceSize int) (removedCount i
 			bound.contract_id, bound.balance_id, bound.network_id
 		FROM bound
 		`,
-		func() []any { return []any{new(server.Id), new(server.Id), new(server.Id)} },
-	)
+		},
+	}
+}
 
-	return
+// SweepOrphanCursor is a resumable position in a multi-table orphan sweep: which
+// table step, and how far that step's key cursor has advanced. It is returned in
+// the task result and handed back as the next run's start, which is what keeps a
+// budgeted sweep making forward progress instead of restarting its pass.
+//
+// Key holds the step's key columns as strings so the cursor round trips through
+// the task args as plain json; sweepOrphanSteps decodes it back into the step's
+// own typed columns.
+type SweepOrphanCursor struct {
+	Step int      `json:"step"`
+	Key  []string `json:"key,omitempty"`
+}
+
+// sweepOrphanStep is one child table's paged orphan sweep: the slice statement
+// (shape documented on sweepOrphanCursor) and a source of fresh typed pointers
+// for its key columns.
+type sweepOrphanStep struct {
+	table            string
+	sql              string
+	newCursorTargets func() []any
+}
+
+// sweepOrphanSteps pages steps in order starting from start, stopping once every
+// step is fully paged (done) or maxRowCount rows have been examined. When it
+// stops early the returned cursor is the exact resume point; pass it as the next
+// call's start. maxRowCount <= 0 pages every step to completion.
+//
+// The row budget is what makes this safe to run as a recurring task: the caller
+// always returns normally, so the task's Post hook runs and re-arms the chain. A
+// sweep that instead relied on the task deadline would be CANCELED rather than
+// completed, Post would never run, and the chain would fall back to error-retry
+// and restart its pass from zero every time (the 2026-08-11 finding: the sweep
+// had never completed a pass in its life and was re-walking the same prefix of
+// contract_close continuously, at ~7.6% of all db time).
+func sweepOrphanSteps(
+	ctx context.Context,
+	steps []sweepOrphanStep,
+	start SweepOrphanCursor,
+	maxRowCount int,
+	sliceSize int,
+) (removedCount int64, end SweepOrphanCursor, done bool) {
+	step := start.Step
+	key := start.Key
+	if step < 0 || len(steps) <= step {
+		// the step list changed under an in-flight cursor; restart the pass
+		// rather than skip tables
+		step = 0
+		key = nil
+	}
+
+	remaining := maxRowCount
+	for ; step < len(steps); step++ {
+		var startKey []any
+		if 0 < len(key) {
+			// a cursor that no longer decodes (a step's key columns changed)
+			// restarts that step, for the same reason as above
+			startKey, _ = decodeSweepCursorKey(key, steps[step].newCursorTargets())
+		}
+		key = nil
+
+		stepRemoved, rowCount, endKey, stepDone := sweepOrphanCursor(
+			ctx,
+			steps[step],
+			startKey,
+			remaining,
+			sliceSize,
+		)
+		removedCount += stepRemoved
+		if !stepDone {
+			return removedCount, SweepOrphanCursor{
+				Step: step,
+				Key:  encodeSweepCursorKey(endKey),
+			}, false
+		}
+		if 0 < maxRowCount {
+			remaining -= rowCount
+			if remaining <= 0 && step+1 < len(steps) {
+				// budget spent exactly at a table boundary: resume at the head
+				// of the next table
+				return removedCount, SweepOrphanCursor{Step: step + 1}, false
+			}
+		}
+	}
+	return removedCount, SweepOrphanCursor{}, true
+}
+
+// encodeSweepCursorKey renders scanned key columns as strings for the cursor
+// that round trips through the task args.
+func encodeSweepCursorKey(values []any) []string {
+	key := make([]string, len(values))
+	for i, value := range values {
+		switch v := value.(type) {
+		case server.Id:
+			key[i] = v.String()
+		case string:
+			key[i] = v
+		default:
+			// a new key column type must extend both halves of the codec
+			panic(fmt.Errorf("unsupported sweep cursor column type %T", value))
+		}
+	}
+	return key
+}
+
+// decodeSweepCursorKey parses an encoded cursor back into the column types the
+// step's statement expects. ok is false when the encoded cursor does not match
+// the step's current key shape, which the caller treats as "restart this step".
+func decodeSweepCursorKey(key []string, targets []any) (values []any, ok bool) {
+	if len(key) != len(targets) {
+		return nil, false
+	}
+	values = make([]any, len(targets))
+	for i, target := range targets {
+		switch target.(type) {
+		case *server.Id:
+			id, err := server.ParseId(key[i])
+			if err != nil {
+				return nil, false
+			}
+			values[i] = id
+		case *string:
+			values[i] = key[i]
+		default:
+			return nil, false
+		}
+	}
+	return values, true
 }
 
 // sweepOrphanCursor pages a child table by its primary key in fixed-size slices
@@ -3989,17 +4178,26 @@ func SweepOrphanContractData(ctx context.Context, sliceSize int) (removedCount i
 // every row the slice examined — deleted or not — and no row is skipped at a
 // slice boundary. newCursorTargets returns k fresh pointers to scan the max key
 // columns into; their dereferenced values become the next slice's cursor.
+//
+// startKey resumes an earlier call at that key (nil starts at the head of the
+// table). Paging stops when the table is fully paged (done) or maxRowCount rows
+// have been examined, whichever comes first; when it stops early, endKey is the
+// resume point. maxRowCount <= 0 pages to the end.
 func sweepOrphanCursor(
 	ctx context.Context,
+	step sweepOrphanStep,
+	startKey []any,
+	maxRowCount int,
 	sliceSize int,
-	sql string,
-	newCursorTargets func() []any,
-) (removedCount int64) {
-	// seed the cursor with the zero value of each key column; the first slice
-	// passes firstSlice=true so the bound is ignored, then it advances to each
-	// slice's max key.
-	cursor := derefCursor(newCursorTargets())
-	firstSlice := true
+) (removedCount int64, rowCount int, endKey []any, done bool) {
+	// on the first slice of a table the lower bound is disabled, so the cursor
+	// columns are only placeholders; resuming passes the real key and keeps the
+	// bound live from the start.
+	cursor := startKey
+	firstSlice := cursor == nil
+	if firstSlice {
+		cursor = derefCursor(step.newCursorTargets())
+	}
 	for {
 		args := make([]any, 0, len(cursor)+2)
 		args = append(args, firstSlice)
@@ -4007,7 +4205,7 @@ func sweepOrphanCursor(
 		args = append(args, sliceSize)
 
 		var sliceCount, deletedCount int64
-		targets := newCursorTargets()
+		targets := step.newCursorTargets()
 		gotRow := false
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// reset in case the tx is retried on a transient error
@@ -4017,7 +4215,7 @@ func sweepOrphanCursor(
 			scanTargets := make([]any, 0, len(targets)+2)
 			scanTargets = append(scanTargets, &sliceCount, &deletedCount)
 			scanTargets = append(scanTargets, targets...)
-			result, err := tx.Query(ctx, sql, args...)
+			result, err := tx.Query(ctx, step.sql, args...)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
 					server.Raise(result.Scan(scanTargets...))
@@ -4027,12 +4225,37 @@ func sweepOrphanCursor(
 		}, server.TxReadCommitted)
 
 		removedCount += deletedCount
+		rowCount += int(sliceCount)
 		if !gotRow || sliceCount < int64(sliceSize) {
-			return
+			return removedCount, rowCount, nil, true
 		}
 		cursor = derefCursor(targets)
 		firstSlice = false
+		if 0 < maxRowCount && maxRowCount <= rowCount {
+			return removedCount, rowCount, cursor, false
+		}
 	}
+}
+
+// sweepOrphanTable pages one child table to completion in a single call: the
+// unbudgeted, non-resumable form of sweepOrphanCursor, for sweeps whose driver
+// tables are small enough that a whole pass fits comfortably in one run (see
+// SweepOrphanNetworkClientData). Sweeps over the contract-scale tables must use
+// the budgeted form instead — see the note on sweepOrphanSteps.
+func sweepOrphanTable(
+	ctx context.Context,
+	sliceSize int,
+	sql string,
+	newCursorTargets func() []any,
+) (removedCount int64) {
+	removedCount, _, _, _ = sweepOrphanCursor(
+		ctx,
+		sweepOrphanStep{sql: sql, newCursorTargets: newCursorTargets},
+		nil,
+		0,
+		sliceSize,
+	)
+	return
 }
 
 // derefCursor dereferences a slice of typed pointers into a slice of their

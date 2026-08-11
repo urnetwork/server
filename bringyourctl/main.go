@@ -526,8 +526,12 @@ func dbSweepOrphans(opts docopt.Opts) {
 	networkClient := model.SweepOrphanNetworkClientData(ctx, sliceSize)
 	fmt.Printf("Removed %d orphan network-client row(s).\n", networkClient)
 
+	// maxRowCount 0 pages every table to completion in this one call. The
+	// recurring task instead pages a bounded number of rows per run and resumes
+	// from the returned cursor, since a full pass takes hours; on demand we want
+	// the whole pass.
 	fmt.Printf("Sweeping orphan contract data in slices of %d ...\n", sliceSize)
-	contract := model.SweepOrphanContractData(ctx, sliceSize)
+	contract, _, _ := model.SweepOrphanContractData(ctx, model.SweepOrphanCursor{}, 0, sliceSize)
 	fmt.Printf("Removed %d orphan contract row(s).\n", contract)
 }
 

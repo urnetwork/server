@@ -2739,7 +2739,7 @@ func removeProvideKeysForClientIds(ctx context.Context, clientIds []server.Id) {
 // never full-scans a child table even when there are no orphans.
 func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCount int64) {
 	// per-connection tables whose connection is gone, keyed by connection_id
-	removedCount += sweepOrphanCursor(
+	removedCount += sweepOrphanTable(
 		ctx,
 		sliceSize,
 		`
@@ -2768,7 +2768,7 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		func() []any { return []any{new(server.Id)} },
 	)
 
-	removedCount += sweepOrphanCursor(
+	removedCount += sweepOrphanTable(
 		ctx,
 		sliceSize,
 		`
@@ -2797,7 +2797,7 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		func() []any { return []any{new(server.Id)} },
 	)
 
-	removedCount += sweepOrphanCursor(
+	removedCount += sweepOrphanTable(
 		ctx,
 		sliceSize,
 		`
@@ -2916,7 +2916,7 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 
 	// proxy clients whose config is gone (covers configs deleted outside the
 	// reap, e.g. RemoveProxyDeviceConfig), keyed by proxy_id
-	removedCount += sweepOrphanCursor(
+	removedCount += sweepOrphanTable(
 		ctx,
 		sliceSize,
 		`
@@ -2947,7 +2947,7 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 
 	// change rows whose proxy client is gone, keyed by (proxy_host, block,
 	// change_id)
-	removedCount += sweepOrphanCursor(
+	removedCount += sweepOrphanTable(
 		ctx,
 		sliceSize,
 		`
@@ -3087,7 +3087,7 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 	}
 
 	// TLS certificates whose client is gone, keyed by client_id
-	removedCount += sweepOrphanCursor(
+	removedCount += sweepOrphanTable(
 		ctx,
 		sliceSize,
 		`
@@ -3117,7 +3117,7 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 	)
 
 	// devices no client references, keyed by device_id
-	removedCount += sweepOrphanCursor(
+	removedCount += sweepOrphanTable(
 		ctx,
 		sliceSize,
 		`

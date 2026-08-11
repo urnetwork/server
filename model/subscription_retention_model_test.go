@@ -300,7 +300,9 @@ func TestSweepOrphanContractData(t *testing.T) {
 		})
 
 		// limit=1 forces one delete per batch, exercising the batch loop
-		removedCount := SweepOrphanContractData(ctx, 1)
+		removedCount, _, done := SweepOrphanContractData(ctx, SweepOrphanCursor{}, 0, 1)
+		// an unbudgeted call pages every table to the end
+		connect.AssertEqual(t, done, true)
 		connect.AssertEqual(t, removedCount, int64(3*orphanCount))
 
 		// the live contract's rows survive
@@ -429,7 +431,9 @@ func TestSweepOrphanContractDataMultiSlice(t *testing.T) {
 		})
 
 		// sliceSize=3 forces multiple slices across the interleaved live/orphan rows
-		removedCount := SweepOrphanContractData(ctx, 3)
+		removedCount, _, done := SweepOrphanContractData(ctx, SweepOrphanCursor{}, 0, 3)
+		// an unbudgeted call pages every table to the end
+		connect.AssertEqual(t, done, true)
 		// each orphan contract contributes one close + one escrow + one sweep
 		connect.AssertEqual(t, removedCount, int64(3*orphanCount))
 
@@ -454,6 +458,303 @@ func TestSweepOrphanContractDataMultiSlice(t *testing.T) {
 				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow WHERE contract_id = $1`, id), true)
 			}
 		})
+	})
+}
+
+// A budgeted call stops after maxRowCount rows and reports where it stopped, and
+// resuming from that cursor finishes the pass — no orphan skipped at a stop
+// boundary, no live row taken. This is what lets the recurring task spread a pass
+// over days instead of restarting it from row zero on every run: before
+// 2026-08-11 the sweep only ever stopped by being CANCELED at its task deadline,
+// so it never returned a cursor, its Post hook never ran, and every retry
+// re-walked the same prefix of contract_close (~7.6% of all db time, and it had
+// never once completed a pass).
+//
+// maxRowCount counts rows PAGED, not rows deleted, so the budget bites even in
+// the steady state where there are no orphans at all.
+func TestSweepOrphanContractDataResumesFromCursor(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			ByteCount(1024*1024*1024),
+			365*24*time.Hour,
+			UsdToNanoCents(10.00),
+			"",
+			"",
+			"",
+		)
+		connect.AssertEqual(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, sourceSession.Ctx)
+
+		// live contracts whose dependents must survive every resume
+		liveCount := 3
+		liveContractIds := []server.Id{}
+		for range liveCount {
+			usedTransferByteCount := ByteCount(1024)
+			liveEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			connect.AssertEqual(t, err, nil)
+			err = CloseContract(ctx, liveEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			connect.AssertEqual(t, err, nil)
+			liveContractIds = append(liveContractIds, liveEscrow.ContractId)
+		}
+
+		orphanCount := 12
+		orphanContractIds := []server.Id{}
+		server.Tx(ctx, func(tx server.PgTx) {
+			for range orphanCount {
+				orphanContractId := server.NewId()
+				orphanContractIds = append(orphanContractIds, orphanContractId)
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO contract_close (contract_id, party, used_transfer_byte_count) VALUES ($1, $2, $3)`,
+					orphanContractId,
+					ContractPartySource,
+					1024,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO transfer_escrow (contract_id, balance_id, balance_byte_count) VALUES ($1, $2, $3)`,
+					orphanContractId,
+					server.NewId(),
+					1024,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO transfer_escrow_sweep (contract_id, balance_id, network_id, payout_byte_count, payout_net_revenue_nano_cents) VALUES ($1, $2, $3, $4, $5)`,
+					orphanContractId,
+					server.NewId(),
+					destinationNetworkId,
+					1024,
+					0,
+				))
+			}
+		})
+
+		// tiny slices and a tiny row budget so a pass needs many resumes and
+		// stops both mid-table and on table boundaries
+		sliceSize := 2
+		maxRowCount := 3
+
+		totalRemoved := int64(0)
+		cursor := SweepOrphanCursor{}
+		done := false
+		runs := 0
+		for !done {
+			runs += 1
+			if 500 < runs {
+				t.Fatalf("sweep did not converge in %d resumes; cursor is not advancing", runs)
+			}
+			var removedCount int64
+			removedCount, cursor, done = SweepOrphanContractData(ctx, cursor, maxRowCount, sliceSize)
+			totalRemoved += removedCount
+		}
+
+		// the budget really did split the pass -- otherwise this test would be
+		// asserting nothing about resuming
+		if runs < 2 {
+			t.Fatalf("expected the row budget to split the pass, got %d run(s)", runs)
+		}
+
+		// exactly the orphans, counted once each across all the resumes
+		connect.AssertEqual(t, totalRemoved, int64(3*orphanCount))
+		// a completed pass resets to the head, ready for a fresh pass
+		connect.AssertEqual(t, cursor, SweepOrphanCursor{})
+
+		server.Db(ctx, func(conn server.PgConn) {
+			exists := func(sql string, id server.Id) bool {
+				found := false
+				result, err := conn.Query(ctx, sql, id)
+				server.WithPgResult(result, err, func() {
+					found = result.Next()
+				})
+				return found
+			}
+			for _, id := range orphanContractIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM contract_close WHERE contract_id = $1`, id), false)
+				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow WHERE contract_id = $1`, id), false)
+				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow_sweep WHERE contract_id = $1`, id), false)
+			}
+			for _, id := range liveContractIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM contract_close WHERE contract_id = $1`, id), true)
+				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow WHERE contract_id = $1`, id), true)
+			}
+		})
+	})
+}
+
+// The production steady state is ~ZERO orphans: RemoveCompletedContracts already
+// cascades dependents with the contract delete, so a sweep pass deletes nothing
+// and the returned cursor is the ONLY thing that carries the pass forward. This
+// is the case that discriminates a broken resume, and the one that matters — a
+// resume that ignored its cursor would re-page the same head rows on every run
+// forever, which is precisely the 2026-08-11 production finding.
+//
+// Note the sibling TestSweepOrphanContractDataResumesFromCursor does NOT catch
+// that bug on its own: there the sweep deletes as it goes, so the head of the
+// table advances by deletion even when the cursor is ignored, and the pass
+// converges anyway. Only a fixture with nothing to delete isolates the cursor.
+func TestSweepOrphanContractDataAdvancesWithNoOrphans(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sourceNetworkId := server.NewId()
+		sourceId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationId := server.NewId()
+
+		sourceSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: sourceNetworkId,
+			ClientId:  &sourceId,
+		})
+
+		balanceCode, err := CreateBalanceCode(
+			ctx,
+			ByteCount(1024*1024*1024),
+			365*24*time.Hour,
+			UsdToNanoCents(10.00),
+			"",
+			"",
+			"",
+		)
+		connect.AssertEqual(t, err, nil)
+		RedeemBalanceCode(&RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: sourceSession.ByJwt.NetworkId,
+		}, sourceSession.Ctx)
+
+		// only live contracts: every dependent row has its parent, so the sweep
+		// deletes nothing and cannot advance by deletion
+		liveCount := 8
+		liveContractIds := []server.Id{}
+		for range liveCount {
+			usedTransferByteCount := ByteCount(1024)
+			liveEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
+			connect.AssertEqual(t, err, nil)
+			err = CloseContract(ctx, liveEscrow.ContractId, sourceId, usedTransferByteCount, false)
+			connect.AssertEqual(t, err, nil)
+			liveContractIds = append(liveContractIds, liveEscrow.ContractId)
+		}
+
+		// a budget well under the row count, so completing the pass REQUIRES the
+		// cursor to advance across runs
+		sliceSize := 2
+		maxRowCount := 3
+
+		cursor := SweepOrphanCursor{}
+		done := false
+		runs := 0
+		for !done {
+			runs += 1
+			if 200 < runs {
+				t.Fatalf(
+					"pass did not converge in %d resumes with nothing to delete: the cursor is not advancing the pass",
+					runs,
+				)
+			}
+			var removedCount int64
+			removedCount, cursor, done = SweepOrphanContractData(ctx, cursor, maxRowCount, sliceSize)
+			// nothing is orphaned, so nothing may ever be removed
+			connect.AssertEqual(t, removedCount, int64(0))
+		}
+
+		// the budget really did split the pass
+		if runs < 2 {
+			t.Fatalf("expected the row budget to split the pass, got %d run(s)", runs)
+		}
+		connect.AssertEqual(t, cursor, SweepOrphanCursor{})
+
+		// every live row survived the whole pass
+		server.Db(ctx, func(conn server.PgConn) {
+			exists := func(sql string, id server.Id) bool {
+				found := false
+				result, err := conn.Query(ctx, sql, id)
+				server.WithPgResult(result, err, func() {
+					found = result.Next()
+				})
+				return found
+			}
+			for _, id := range liveContractIds {
+				connect.AssertEqual(t, exists(`SELECT 1 FROM contract_close WHERE contract_id = $1`, id), true)
+				connect.AssertEqual(t, exists(`SELECT 1 FROM transfer_escrow WHERE contract_id = $1`, id), true)
+			}
+		})
+	})
+}
+
+// A cursor whose step no longer exists (the step list changed under an in-flight
+// pass, e.g. a table added or removed across a deploy) must restart the pass
+// rather than silently skip the tables it can no longer address.
+func TestSweepOrphanContractDataStaleCursorRestarts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		destinationNetworkId := server.NewId()
+		orphanContractId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO contract_close (contract_id, party, used_transfer_byte_count) VALUES ($1, $2, $3)`,
+				orphanContractId,
+				ContractPartySource,
+				1024,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO transfer_escrow_sweep (contract_id, balance_id, network_id, payout_byte_count, payout_net_revenue_nano_cents) VALUES ($1, $2, $3, $4, $5)`,
+				orphanContractId,
+				server.NewId(),
+				destinationNetworkId,
+				1024,
+				0,
+			))
+		})
+
+		// a step index past the end of the current step list
+		removedCount, cursor, done := SweepOrphanContractData(
+			ctx,
+			SweepOrphanCursor{Step: 99},
+			0,
+			10,
+		)
+		connect.AssertEqual(t, done, true)
+		connect.AssertEqual(t, cursor, SweepOrphanCursor{})
+		// the pass restarted at step 0, so the contract_close orphan was found
+		connect.AssertEqual(t, removedCount, int64(2))
+
+		// likewise a cursor whose key no longer decodes for its step
+		orphanContractId2 := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO contract_close (contract_id, party, used_transfer_byte_count) VALUES ($1, $2, $3)`,
+				orphanContractId2,
+				ContractPartySource,
+				1024,
+			))
+		})
+		removedCount, _, done = SweepOrphanContractData(
+			ctx,
+			SweepOrphanCursor{Step: 0, Key: []string{"not-a-uuid", string(ContractPartySource)}},
+			0,
+			10,
+		)
+		connect.AssertEqual(t, done, true)
+		connect.AssertEqual(t, removedCount, int64(1))
 	})
 }
 

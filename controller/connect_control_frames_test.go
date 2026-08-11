@@ -6,14 +6,68 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+func controlFrameFailureCount(message string, cause string) float64 {
+	return testutil.ToFloat64(controlFrameFailureCounter.WithLabelValues(message, cause))
+}
+
+// TestControlFrameFailureLabelsAreBounded pins both label sets of
+// urnetwork_connect_control_frame_failures_total. These labels are attached
+// to client-supplied input, so they must come from fixed switches — deriving
+// either from message contents would be a metric-cardinality attack, and an
+// unclassified value must fall into `other` rather than pass through.
+func TestControlFrameFailureLabelsAreBounded(t *testing.T) {
+	messages := []struct {
+		message any
+		want    string
+	}{
+		{&protocol.CreateContract{}, "create_contract"},
+		{&protocol.CloseContract{}, "close_contract"},
+		{&protocol.Provide{}, "provide"},
+		{&protocol.EncryptedKey{}, "encrypted_key"},
+		{&protocol.ClientKey{}, "client_key"},
+		{&protocol.ControlPing{}, "control_ping"},
+		{&protocol.ProvidePing{}, "provide_ping"},
+		// an undecodable frame reports no message
+		{nil, "other"},
+		// any message outside the dispatch collapses to one bucket
+		{&protocol.Pack{}, "other"},
+	}
+	for _, test := range messages {
+		if got := controlFrameMessageLabel(test.message); got != test.want {
+			t.Fatalf("controlFrameMessageLabel(%T) = %q, want %q", test.message, got, test.want)
+		}
+	}
+
+	causes := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("Contract already closed with outcome settled: a b c->d"), "contract_already_closed"},
+		{fmt.Errorf("Contract not found: a"), "contract_not_found"},
+		{fmt.Errorf("Client is not a party to the contract: a b c->d"), "not_a_party"},
+		{fmt.Errorf("Contract in dispute: a b c->d"), "contract_in_dispute"},
+		{fmt.Errorf("Cannot handle oob control message: *protocol.Pack"), "unhandled_message"},
+		{fmt.Errorf("control frame *protocol.CloseContract panicked: boom"), "panic"},
+		{fmt.Errorf("postgres unavailable"), "other"},
+	}
+	for _, test := range causes {
+		if got := controlFrameErrorClass(test.err); got != test.want {
+			t.Fatalf("controlFrameErrorClass(%q) = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
 
 // closeContractFrame builds a CloseContract control frame for a contract id.
 func closeContractFrame(t testing.TB, contractId server.Id) *protocol.Frame {
@@ -76,10 +130,19 @@ func TestConnectControlFramesProcessesEveryFrame(t *testing.T) {
 			closeContractFrame(t, firstContractId),
 			closeContractFrame(t, secondContractId),
 		}
-		_, err = ConnectControlFrames(ctx, sourceId, frames, connect.DefaultContractManagerSettings())
+		defer returnConnectControlFrames(frames)
+		// the duplicate close is the exact failure that flooded the resident
+		// log; it must land in the counter, which is now the only
+		// default-level signal for it
+		beforeDuplicate := controlFrameFailureCount("close_contract", "contract_already_closed")
+		outFrames, err := ConnectControlFrames(ctx, sourceId, frames, connect.DefaultContractManagerSettings())
+		defer returnConnectControlFrames(outFrames)
 		// the duplicate is reported...
 		if err == nil {
 			t.Fatal("expected the duplicate close to be reported")
+		}
+		if after := controlFrameFailureCount("close_contract", "contract_already_closed"); after != beforeDuplicate+1 {
+			t.Fatalf("counter{close_contract,contract_already_closed} = %v, want %v", after, beforeDuplicate+1)
 		}
 		// ...and the frame behind it was still applied
 		open := model.GetOpenContractIdsWithNoPartialClose(ctx, sourceId, destinationId)
@@ -110,6 +173,7 @@ func TestConnectControlFramesTeardownPanicPropagates(t *testing.T) {
 
 		// any frame will do: the db call under a cancelled context raises
 		frames := []*protocol.Frame{closeContractFrame(t, server.NewId())}
+		defer returnConnectControlFrames(frames)
 
 		panicked := false
 		func() {
@@ -124,6 +188,33 @@ func TestConnectControlFramesTeardownPanicPropagates(t *testing.T) {
 			t.Fatal("a teardown-race panic must propagate so the pack stays un-acked and the sender resends; swallowing it loses the operation")
 		}
 	})
+}
+
+// TestConnectControlFramesHandlesKeepAlivePings covers the keep-alive
+// messages older clients send to the control destination. ControlPing and
+// ProvidePing expect nothing back except the transfer-level ack, so the
+// dispatch must treat them as handled no-ops. Before the explicit cases they
+// fell through to the "Cannot handle oob control message" error, which
+// flooded the resident log at thousands of lines per second once the
+// credential-migration gates re-admitted the legacy fleet (2026-08-10).
+func TestConnectControlFramesHandlesKeepAlivePings(t *testing.T) {
+	ctx := context.Background()
+
+	controlPing, err := connect.ToFrame(&protocol.ControlPing{}, connect.DefaultProtocolVersion)
+	connect.AssertEqual(t, err, nil)
+	providePing, err := connect.ToFrame(&protocol.ProvidePing{}, connect.DefaultProtocolVersion)
+	connect.AssertEqual(t, err, nil)
+	defer returnConnectControlFrames([]*protocol.Frame{controlPing, providePing})
+
+	outFrames, err := ConnectControlFrames(
+		ctx,
+		server.NewId(),
+		[]*protocol.Frame{controlPing, providePing},
+		connect.DefaultContractManagerSettings(),
+	)
+	defer returnConnectControlFrames(outFrames)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, len(outFrames), 0)
 }
 
 // keep the linter honest about the import used only in a message

@@ -388,10 +388,10 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 	echoOn := &atomic.Bool{}
 	echoContent := perfRandContent(32)
 
-	destinationA := connect.DestinationId(connect.Id(peerA.clientId))
-	destinationB := connect.DestinationId(connect.Id(peerB.clientId))
+	destinationA := connect.Id(peerA.clientId)
+	destinationB := connect.Id(peerB.clientId)
 
-	send := func(client *connect.Client, destination connect.TransferPath, frame *protocol.Frame, ackCallback func(error), opts ...any) {
+	send := func(client *connect.Client, destination connect.Id, frame *protocol.Frame, ackCallback func(error), opts ...any) {
 		_, err := client.SendWithTimeoutDetailed(frame, destination, ackCallback, -1, opts...)
 		if err != nil && !server.IsDoneError(err) {
 			panic(fmt.Errorf("send error = %v", err))
@@ -633,7 +633,7 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 	blast := func(
 		label string,
 		client *connect.Client,
-		destination connect.TransferPath,
+		destination connect.Id,
 		peerStats *perfPeerStats,
 		contentSize int,
 		duration time.Duration,

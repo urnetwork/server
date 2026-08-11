@@ -131,6 +131,20 @@ var drainExcusesWrittenCounter = prometheus.NewCounter(
 	},
 )
 
+// nominationRefusedCounter partitions refused resident nominations by a
+// bounded cause. A refusal is driven by client redials — a fleet reconnecting
+// through a deploy drives this at an unbounded rate — so it is counted rather
+// than logged per occurrence; the detail is at V(1).
+var nominationRefusedCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "nominations_refused_total",
+		Help:      "Resident nominations refused, partitioned by a bounded cause",
+	},
+	[]string{"cause"},
+)
+
 func init() {
 	prometheus.MustRegister(forwardDroppedCounter)
 	prometheus.MustRegister(forwardReceiveDroppedCounter)
@@ -138,6 +152,7 @@ func init() {
 	prometheus.MustRegister(residentClientsGauge)
 	prometheus.MustRegister(drainResidentsRemainingGauge)
 	prometheus.MustRegister(drainExcusesWrittenCounter)
+	prometheus.MustRegister(nominationRefusedCounter)
 }
 
 // use 0 for deadlock testing
@@ -199,6 +214,11 @@ type ExchangeSettings struct {
 	ExchangeReadHeaderTimeout          time.Duration
 	ExchangeWriteHeaderTimeout         time.Duration
 	ExchangeReconnectAfterErrorTimeout time.Duration
+	// DialContext, when set, creates outbound internal exchange connections.
+	// Tests use it to place edge-to-edge TCP below a userspace network model.
+	// Nil retains the host TCP dialer. The exchange owns and closes successful
+	// returned connections.
+	DialContext connect.DialContextFunction
 
 	ExchangeResidentTtl time.Duration
 
@@ -601,7 +621,10 @@ func (self *Exchange) NominateLocalResident(
 	// a draining exchange refuses new residents, so a redialing client fails
 	// fast here and lands on a sibling service via the lb
 	if self.settings.EnableDrainCoordination && self.draining.Load() {
-		glog.Infof("[exchange]nominate refused: draining\n")
+		nominationRefusedCounter.WithLabelValues("draining").Inc()
+		if glog.V(1) {
+			glog.Infof("[exchange]nominate refused: draining\n")
+		}
 		return false
 	}
 
@@ -611,10 +634,13 @@ func (self *Exchange) NominateLocalResident(
 	// connection (see model.CanConnectNetworkPeer). This is a no-op while
 	// enforce_concurrent_clients is false in pro.yml.
 	if !model.CanConnectNetworkPeer(self.ctx, clientId) {
-		glog.Infof(
-			"[exchange]nominate refused: client %s is over the network concurrent client limit\n",
-			clientId,
-		)
+		nominationRefusedCounter.WithLabelValues("concurrent_client_limit").Inc()
+		if glog.V(1) {
+			glog.Infof(
+				"[exchange]nominate refused: client %s is over the network concurrent client limit\n",
+				clientId,
+			)
+		}
 		return false
 	}
 
@@ -949,12 +975,18 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		}
 	})
 
-	runTransport := func(send chan []byte, receive chan []byte, closeTransport func()) {
-		// this must close `receive`
+	runTransport := func(send chan []byte, receive chan []byte, removeTransport func()) {
+		var workers sync.WaitGroup
+		// startWorker joins socket ownership before queue drainage.
+		startWorker := func(run func()) {
+			workers.Add(1)
+			go server.HandleError(func() {
+				defer workers.Done()
+				run()
+			}, handleCancel)
+		}
 
-		defer closeTransport()
-
-		go server.HandleError(func() {
+		startWorker(func() {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
@@ -1028,7 +1060,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			}
 		})
 
-		go server.HandleError(func() {
+		startWorker(func() {
 			defer func() {
 				handleCancel()
 				close(receive)
@@ -1089,6 +1121,21 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		case <-handleCtx.Done():
 			glog.V(1).Infof("[ecr]handle done\n")
 		}
+
+		// Stop route admission before stopping the socket workers. Closing the
+		// connection then releases any worker blocked in a read or write. Once
+		// both producers have exited, every queued pooled message has one owner
+		// here and can be returned.
+		closeExchangeTransportQueues(
+			removeTransport,
+			func() {
+				handleCancel()
+				conn.Close()
+			},
+			&workers,
+			send,
+			receive,
+		)
 	}
 
 	runForward := func(forward chan []byte, closeForward func()) {
@@ -1096,9 +1143,17 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		// the only route a resident has is to its client_id
 		// a forward is a send where the source id does not match the client
 
-		defer closeForward()
+		var workers sync.WaitGroup
+		// startWorker joins the ping and socket-reader lifecycles.
+		startWorker := func(run func()) {
+			workers.Add(1)
+			go server.HandleError(func() {
+				defer workers.Done()
+				run()
+			}, handleCancel)
+		}
 
-		go server.HandleError(func() {
+		startWorker(func() {
 			defer handleCancel()
 
 			sendBuffer := NewDefaultExchangeBuffer(self.settings)
@@ -1115,7 +1170,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			}
 		})
 
-		go server.HandleError(func() {
+		startWorker(func() {
 			defer func() {
 				handleCancel()
 				close(forward)
@@ -1172,6 +1227,15 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		case <-handleCtx.Done():
 			glog.V(1).Infof("[ecrf]handle done\n")
 		}
+
+		// The socket reader is the only producer. Stop it before canceling and
+		// joining the resident consumer, so closeForward can deterministically
+		// return every message the consumer did not accept.
+		handleCancel()
+		conn.Close()
+		workers.Wait()
+		closeForward()
+		returnReadyPooledMessages(forward)
 	}
 
 	switch header.Op {
@@ -1267,7 +1331,7 @@ func (self *Exchange) sendResidentMigrate(
 	}
 	return resident.client.SendWithTimeout(
 		frame,
-		connect.DestinationId(connect.Id(resident.clientId)),
+		connect.Id(resident.clientId),
 		nil,
 		timeout,
 	)
@@ -1740,6 +1804,8 @@ type ExchangeHeader struct {
 type ExchangeConnection struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
+	done          chan struct{}
+	sendAdmission pooledMessageSendAdmission
 	conn          net.Conn
 	sendBuffer    *ExchangeBuffer
 	receiveBuffer *ExchangeBuffer
@@ -1750,6 +1816,11 @@ type ExchangeConnection struct {
 	header ExchangeHeader
 	host   string
 	port   int
+
+	// Test-only ownership barriers are nil in production. They run outside
+	// locks after a socket worker has taken or transferred queue ownership.
+	afterReceiveEnqueueForTest func([]byte)
+	afterSendDequeueForTest    func()
 }
 
 func NewExchangeConnection(
@@ -1770,10 +1841,14 @@ func NewExchangeConnection(
 
 	authority := fmt.Sprintf("%s:%d", hostRoute, port)
 
-	dialer := net.Dialer{
+	dialer := &net.Dialer{
 		Timeout: settings.ExchangeConnectTimeout,
 	}
-	conn, err := dialer.DialContext(ctx, "tcp", authority)
+	dialContext := dialer.DialContext
+	if settings.DialContext != nil {
+		dialContext = settings.DialContext
+	}
+	conn, err := dialContext(ctx, "tcp", authority)
 	if err != nil {
 		return nil, err
 	}
@@ -1819,6 +1894,7 @@ func NewExchangeConnection(
 	connection := &ExchangeConnection{
 		ctx:           cancelCtx,
 		cancel:        cancel,
+		done:          make(chan struct{}),
 		conn:          conn,
 		sendBuffer:    sendBuffer,
 		receiveBuffer: receiveBuffer,
@@ -1835,15 +1911,30 @@ func NewExchangeConnection(
 }
 
 func (self *ExchangeConnection) Run() {
+	var workers sync.WaitGroup
+	// startWorker joins every socket worker before final queue drainage.
+	startWorker := func(run func()) {
+		workers.Add(1)
+		go server.HandleError(func() {
+			defer workers.Done()
+			run()
+		}, self.cancel)
+	}
 	defer func() {
+		self.sendAdmission.close()
 		self.cancel()
 		self.conn.Close()
+		self.sendAdmission.wait()
+		workers.Wait()
+		returnReadyPooledMessages(self.send)
+		returnReadyPooledMessages(self.receive)
+		close(self.done)
 	}()
 
 	// only a transport connection will receive messages
 	switch self.header.Op {
 	case ExchangeOpTransport:
-		go server.HandleError(func() {
+		startWorker(func() {
 			defer func() {
 				self.cancel()
 				close(self.receive)
@@ -1873,6 +1964,7 @@ func (self *ExchangeConnection) Run() {
 				// fast path without arming a timer
 				select {
 				case self.receive <- message:
+					self.notifyReceiveEnqueuedForTest(message)
 					if glog.V(2) {
 						glog.Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 					}
@@ -1886,6 +1978,7 @@ func (self *ExchangeConnection) Run() {
 					connect.MessagePoolReturn(message)
 					return
 				case self.receive <- message:
+					self.notifyReceiveEnqueuedForTest(message)
 					if glog.V(2) {
 						glog.Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 					}
@@ -1901,7 +1994,7 @@ func (self *ExchangeConnection) Run() {
 		// nothing to receive, but time out on missing pings
 		close(self.receive)
 
-		go server.HandleError(func() {
+		startWorker(func() {
 			defer self.cancel()
 
 			for {
@@ -1925,7 +2018,7 @@ func (self *ExchangeConnection) Run() {
 		})
 	}
 
-	go server.HandleError(func() {
+	startWorker(func() {
 		defer self.cancel()
 
 		batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
@@ -1953,6 +2046,7 @@ func (self *ExchangeConnection) Run() {
 					break gather
 				}
 			}
+			self.notifySendDequeuedForTest()
 			err := self.sendBuffer.WriteMessages(self.conn, batch)
 			batch = batch[:0]
 			if err != nil {
@@ -2003,6 +2097,20 @@ func (self *ExchangeConnection) Run() {
 	}
 }
 
+// Signals a test after the receive worker transfers one pooled message.
+func (self *ExchangeConnection) notifyReceiveEnqueuedForTest(message []byte) {
+	if callback := self.afterReceiveEnqueueForTest; callback != nil {
+		callback(message)
+	}
+}
+
+// Signals a test after the send worker owns its batch and before socket I/O.
+func (self *ExchangeConnection) notifySendDequeuedForTest() {
+	if callback := self.afterSendDequeueForTest; callback != nil {
+		callback()
+	}
+}
+
 func (self *ExchangeConnection) IsDone() bool {
 	select {
 	case <-self.ctx.Done():
@@ -2016,19 +2124,48 @@ func (self *ExchangeConnection) Done() <-chan struct{} {
 	return self.ctx.Done()
 }
 
-func (self *ExchangeConnection) Close() {
-	self.cancel()
+// sendMessage admits one pooled message to the connection send queue. It
+// returns the message when the connection is already closing.
+func (self *ExchangeConnection) sendMessage(
+	ctxDone <-chan struct{},
+	message []byte,
+	timer *time.Timer,
+	timeout time.Duration,
+) pooledMessageSendResult {
+	if !self.sendAdmission.start() {
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	}
+	defer self.sendAdmission.done()
+	return sendPooledMessage(
+		ctxDone,
+		self.Done(),
+		self.send,
+		message,
+		timer,
+		timeout,
+	)
+}
 
-	close(self.send)
+func (self *ExchangeConnection) Close() {
+	self.sendAdmission.close()
+	self.cancel()
+	self.conn.Close()
+	self.sendAdmission.wait()
+	<-self.done
+	returnReadyPooledMessages(self.send)
+	returnReadyPooledMessages(self.receive)
 }
 
 func (self *ExchangeConnection) Cancel() {
 	self.cancel()
+	self.conn.Close()
 }
 
 type ResidentTransport struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx           context.Context
+	cancel        context.CancelFunc
+	sendAdmission pooledMessageSendAdmission
 
 	exchange *Exchange
 	header   ExchangeHeader
@@ -2040,6 +2177,138 @@ type ResidentTransport struct {
 
 	send    chan []byte
 	receive chan []byte
+}
+
+// pooledMessageSendResult describes the final ownership of one queue offer.
+type pooledMessageSendResult int
+
+const (
+	// pooledMessageSendDelivered transfers ownership to the destination queue.
+	pooledMessageSendDelivered pooledMessageSendResult = iota
+	// pooledMessageSendDropped returns ownership after a backpressure timeout.
+	pooledMessageSendDropped
+	// pooledMessageSendDone returns ownership because a lifecycle ended.
+	pooledMessageSendDone
+)
+
+// pooledMessageSendAdmission joins queue producers with owner teardown without
+// holding a lock while a producer waits for destination capacity.
+type pooledMessageSendAdmission struct {
+	stateLock sync.Mutex
+	closing   bool
+	producers sync.WaitGroup
+}
+
+// start admits one producer without holding the state lock during its send.
+func (self *pooledMessageSendAdmission) start() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.closing {
+		return false
+	}
+	self.producers.Add(1)
+	return true
+}
+
+// done releases one producer admitted by start.
+func (self *pooledMessageSendAdmission) done() {
+	self.producers.Done()
+}
+
+// close prevents future admission. Existing producers are joined separately
+// after their owning context has been canceled.
+func (self *pooledMessageSendAdmission) close() {
+	self.stateLock.Lock()
+	self.closing = true
+	self.stateLock.Unlock()
+}
+
+// wait joins every producer admitted before close.
+func (self *pooledMessageSendAdmission) wait() {
+	self.producers.Wait()
+}
+
+// sendPooledMessage sends one pooled message or returns it when ownership
+// cannot transfer. A nil peerDone disables the peer-lifecycle arm.
+func sendPooledMessage(
+	ctxDone <-chan struct{},
+	peerDone <-chan struct{},
+	destination chan<- []byte,
+	message []byte,
+	timer *time.Timer,
+	timeout time.Duration,
+) pooledMessageSendResult {
+	// Give an already-complete lifecycle priority over a writable buffered
+	// destination. This makes cancellation ownership deterministic.
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	default:
+	}
+
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case destination <- message:
+		return pooledMessageSendDelivered
+	default:
+	}
+
+	timer.Reset(timeout)
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case destination <- message:
+		return pooledMessageSendDelivered
+	case <-timer.C:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDropped
+	}
+}
+
+// returnReadyPooledMessages returns every pooled message currently queued on
+// a channel. The channel may be open or closed and may have another receiver
+// during teardown.
+func returnReadyPooledMessages(messages <-chan []byte) {
+	for {
+		select {
+		case message, ok := <-messages:
+			if !ok {
+				return
+			}
+			connect.MessagePoolReturn(message)
+		default:
+			return
+		}
+	}
+}
+
+// closeExchangeTransportQueues stops and joins the socket workers after route
+// removal has joined old snapshot writers, then returns both queue directions.
+func closeExchangeTransportQueues(
+	removeTransport func(),
+	stopWorkers func(),
+	workers *sync.WaitGroup,
+	send <-chan []byte,
+	receive <-chan []byte,
+) {
+	removeTransport()
+	stopWorkers()
+	workers.Wait()
+	returnReadyPooledMessages(send)
+	returnReadyPooledMessages(receive)
 }
 
 func NewResidentTransport(
@@ -2077,8 +2346,12 @@ func newResidentTransport(
 
 func (self *ResidentTransport) Run() {
 	defer func() {
+		self.sendAdmission.close()
 		self.cancel()
+		self.sendAdmission.wait()
 		close(self.receive)
+		returnReadyPooledMessages(self.send)
+		returnReadyPooledMessages(self.receive)
 	}()
 
 	handle := func(connection *ExchangeConnection) {
@@ -2113,20 +2386,14 @@ func (self *ResidentTransport) Run() {
 							self.cancel()
 							return
 						}
-						// fast path without arming a timer
-						select {
-						case connection.send <- message:
-							continue
-						default:
-						}
-						writeTimer.Reset(self.exchange.settings.WriteTimeout)
-						select {
-						case <-handleCtx.Done():
+						sendResult := connection.sendMessage(
+							handleCtx.Done(),
+							message,
+							writeTimer,
+							self.exchange.settings.WriteTimeout,
+						)
+						if sendResult == pooledMessageSendDone {
 							return
-						case <-connection.Done():
-							return
-						case connection.send <- message:
-						case <-writeTimer.C:
 						}
 					}
 				}
@@ -2144,20 +2411,18 @@ func (self *ResidentTransport) Run() {
 						// need a new connection
 						return
 					}
-					// fast path without arming a timer
-					select {
-					case self.receive <- message:
-						continue
-					default:
+					sendResult := sendPooledMessage(
+						handleCtx.Done(),
+						connection.Done(),
+						self.receive,
+						message,
+						readTimer,
+						self.exchange.settings.WriteTimeout,
+					)
+					if sendResult == pooledMessageSendDone {
+						return
 					}
-					readTimer.Reset(self.exchange.settings.WriteTimeout)
-					select {
-					case <-handleCtx.Done():
-						return
-					case <-connection.Done():
-						return
-					case self.receive <- message:
-					case <-readTimer.C:
+					if sendResult == pooledMessageSendDropped {
 						if glog.V(1) {
 							glog.Infof("[rt]drop %s->\n", self.clientId)
 						}
@@ -2264,10 +2529,34 @@ func (self *ResidentTransport) Done() <-chan struct{} {
 	return self.ctx.Done()
 }
 
-func (self *ResidentTransport) Close() {
-	self.cancel()
+// sendMessage admits one pooled message to the resident transport queue. It
+// returns the message when the transport is already closing.
+func (self *ResidentTransport) sendMessage(
+	ctxDone <-chan struct{},
+	message []byte,
+	timer *time.Timer,
+	timeout time.Duration,
+) pooledMessageSendResult {
+	if !self.sendAdmission.start() {
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	}
+	defer self.sendAdmission.done()
+	return sendPooledMessage(
+		ctxDone,
+		self.Done(),
+		self.send,
+		message,
+		timer,
+		timeout,
+	)
+}
 
-	close(self.send)
+func (self *ResidentTransport) Close() {
+	self.sendAdmission.close()
+	self.cancel()
+	self.sendAdmission.wait()
+	returnReadyPooledMessages(self.send)
 }
 
 func (self *ResidentTransport) Cancel() {
@@ -2275,8 +2564,9 @@ func (self *ResidentTransport) Cancel() {
 }
 
 type ResidentForward struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx           context.Context
+	cancel        context.CancelFunc
+	sendAdmission pooledMessageSendAdmission
 
 	exchange *Exchange
 
@@ -2307,7 +2597,12 @@ func NewResidentForward(
 }
 
 func (self *ResidentForward) Run() {
-	defer self.cancel()
+	defer func() {
+		self.sendAdmission.close()
+		self.cancel()
+		self.sendAdmission.wait()
+		returnReadyPooledMessages(self.send)
+	}()
 
 	handle := func(connection *ExchangeConnection) {
 		handleCtx, handleCancel := context.WithCancel(self.ctx)
@@ -2324,6 +2619,8 @@ func (self *ResidentForward) Run() {
 		})
 
 		// write
+		writeTimer := time.NewTimer(0)
+		defer writeTimer.Stop()
 		for {
 			select {
 			case <-handleCtx.Done():
@@ -2333,17 +2630,16 @@ func (self *ResidentForward) Run() {
 					// transport closed
 					return
 				}
-				// fast path without arming a timer
-				select {
-				case connection.send <- message:
-					continue
-				default:
-				}
-				select {
-				case <-handleCtx.Done():
+				sendResult := connection.sendMessage(
+					handleCtx.Done(),
+					message,
+					writeTimer,
+					self.exchange.settings.WriteTimeout,
+				)
+				if sendResult == pooledMessageSendDone {
 					return
-				case connection.send <- message:
-				case <-time.After(self.exchange.settings.WriteTimeout):
+				}
+				if sendResult == pooledMessageSendDropped {
 					if glog.V(1) {
 						glog.Infof("[rf]drop %s->\n", self.clientId)
 					}
@@ -2436,9 +2732,10 @@ func (self *ResidentForward) Done() <-chan struct{} {
 }
 
 func (self *ResidentForward) Close() {
+	self.sendAdmission.close()
 	self.cancel()
-
-	close(self.send)
+	self.sendAdmission.wait()
+	returnReadyPooledMessages(self.send)
 }
 
 func (self *ResidentForward) Cancel() {
@@ -2495,6 +2792,10 @@ type Resident struct {
 
 	clientReceiveUnsub func()
 	clientForwardUnsub func()
+
+	// Nil in production; tests use this barrier after forward cancellation and
+	// immediately before teardown joins the active consumer.
+	beforeForwardCloseJoinForTest func()
 
 	// streamHopListener *model.StreamHopListener
 }
@@ -2664,7 +2965,7 @@ func (self *Resident) Run() {
 			// added
 			streamOpen := streamHopToProtocol(hop)
 			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamOpen)
-			self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+			self.client.Send(frame, connect.Id(self.clientId), nil)
 		},
 		func(hop model.StreamHop) {
 			// removed
@@ -2672,7 +2973,7 @@ func (self *Resident) Run() {
 				StreamId: hop.StreamId().Bytes(),
 			}
 			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamClose)
-			self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+			self.client.Send(frame, connect.Id(self.clientId), nil)
 		},
 	)
 	// the listener callback runs on the single listener goroutine
@@ -2684,7 +2985,7 @@ func (self *Resident) Run() {
 			if initialHopSync {
 				initialHopSync = false
 				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamHopsToReset(event.StreamHops))
-				self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+				self.client.Send(frame, connect.Id(self.clientId), nil)
 			}
 			// the accumulator emits adds for the first snapshot too; the
 			// client's open is idempotent for streams kept by the reset
@@ -2764,7 +3065,7 @@ func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
 	flush()
 
 	for _, frame := range frames {
-		self.client.Send(frame, connect.DestinationId(connect.Id(self.clientId)), nil)
+		self.client.Send(frame, connect.Id(self.clientId), nil)
 	}
 }
 
@@ -2979,6 +3280,11 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		// because a select evaluates every case's send value once, regardless of
 		// which case fires — an inline share would over-share on the paths not taken.
 		shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
+		if !forward.sendAdmission.start() {
+			connect.MessagePoolReturn(shared)
+			return false
+		}
+		defer forward.sendAdmission.done()
 
 		// fast path: enqueue without blocking
 		select {
@@ -3043,15 +3349,19 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	self.UpdateActivity()
 	self.controlLimiter.delay()
 
-	// control errors are rare and load-bearing (e.g. a rejected CloseContract
-	// leaks an open contract): always log them. The previous inverted check
-	// (err == nil) logged nil on success and swallowed every real error.
+	// Control errors are load-bearing (e.g. a rejected CloseContract leaks an
+	// open contract) but client-driven and unbounded in rate: a resend loop
+	// would spam the logs. Each failing frame is classified and counted at the
+	// source (urnetwork_connect_control_frame_failures_total), so the joined
+	// error here only needs the V(1) detail.
 	if err := self.residentController.HandleControlFrames(frames); err != nil {
-		glog.Infof("[rr]control error = %s\n", err)
+		if glog.V(1) {
+			glog.Infof("[rr]control error = %s\n", err)
+		}
 	}
 }
 
-// caller must close `receive`
+// The caller removes the returned transport after its socket workers stop.
 func (self *Resident) AddTransport() (
 	send chan []byte,
 	receive chan []byte,
@@ -3096,7 +3406,22 @@ func (self *Resident) AddTransport() (
 	return
 }
 
+// AddForward attaches one exchange-forward queue to the resident client.
 func (self *Resident) AddForward() (
+	forward chan []byte,
+	closeForward func(),
+	returnErr error,
+) {
+	return self.addForwardWithReceive(func(message []byte) bool {
+		return self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
+	})
+}
+
+// addForwardWithReceive creates the accept-side forward queue. Tests provide
+// a controlled receiver to verify teardown while a delivery is in progress.
+func (self *Resident) addForwardWithReceive(
+	receive func(message []byte) bool,
+) (
 	forward chan []byte,
 	closeForward func(),
 	returnErr error,
@@ -3104,9 +3429,13 @@ func (self *Resident) AddForward() (
 	forwardCtx, forwardCancel := context.WithCancel(self.ctx)
 
 	forward = make(chan []byte, self.exchange.settings.ExchangeBufferSize)
+	forwardDone := make(chan struct{})
 
 	go server.HandleError(func() {
-		defer forwardCancel()
+		defer func() {
+			forwardCancel()
+			close(forwardDone)
+		}()
 		for {
 			select {
 			case <-forwardCtx.Done():
@@ -3115,7 +3444,7 @@ func (self *Resident) AddForward() (
 				if !ok {
 					return
 				}
-				if !self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout) {
+				if !receive(message) {
 					forwardReceiveDroppedCounter.Inc()
 					if glog.V(1) {
 						glog.Infof("[rf]drop receive full %s\n", self.clientId)
@@ -3127,8 +3456,16 @@ func (self *Resident) AddForward() (
 		}
 	})
 
+	var closeOnce sync.Once
 	closeForward = func() {
-		forwardCancel()
+		closeOnce.Do(func() {
+			forwardCancel()
+			if self.beforeForwardCloseJoinForTest != nil {
+				self.beforeForwardCloseJoinForTest()
+			}
+			<-forwardDone
+			returnReadyPooledMessages(forward)
+		})
 	}
 
 	return

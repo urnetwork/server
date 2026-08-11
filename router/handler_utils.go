@@ -233,7 +233,11 @@ func wrapWithInput[T any, R any](
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		glog.Infof("[h]request read error %s\n", err)
+		// a truncated or aborted body is client-driven, same as a malformed
+		// one below
+		if glog.V(1) {
+			glog.Infof("[h]request read error %s\n", err)
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -244,7 +248,11 @@ func wrapWithInput[T any, R any](
 
 	err = json.Unmarshal(bodyBytes, &input)
 	if err != nil {
-		glog.Infof("[h]request decoding error %s\n", err)
+		// a malformed body is client-supplied input: logging it at the
+		// default level lets any caller write to the logs at will
+		if glog.V(1) {
+			glog.Infof("[h]request decoding error %s\n", err)
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

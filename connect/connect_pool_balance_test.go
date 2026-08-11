@@ -217,7 +217,7 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 		if err != nil {
 			t.Fatalf("to frame: %v", err)
 		}
-		if !from.SendWithTimeout(frame, connect.DestinationId(connect.Id(toClientId)), func(err error) {}, 30*time.Second) {
+		if !from.SendWithTimeout(frame, connect.Id(toClientId), func(err error) {}, 30*time.Second) {
 			return false
 		}
 		select {

@@ -109,7 +109,7 @@ func TestExchangeStreamP2pPeerTraffic(t *testing.T) {
 			ack := make(chan error, 1)
 			sent := from.SendWithTimeout(
 				frame,
-				connect.DestinationId(connect.Id(toClientId)),
+				connect.Id(toClientId),
 				func(err error) {
 					select {
 					case ack <- err:

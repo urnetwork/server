@@ -192,8 +192,18 @@ var findProviders2SampleDrops = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "FindProviders2 sample jobs dropped at the queue (count or byte budget)",
 })
 
+// findProviders2LoadSeconds is the score-load latency of a FindProviders2
+// call. Every provider search runs this, so a per-call log line is
+// client-driven volume; the histogram carries the full distribution instead
+// of the previous >50ms exemplars, and the slow-case detail stays at V(1).
+var findProviders2LoadSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Name:    "urnetwork_findproviders2_load_seconds",
+	Help:    "FindProviders2 client-score load latency",
+	Buckets: prometheus.DefBuckets,
+})
+
 func init() {
-	prometheus.MustRegister(findProviders2SampleDrops)
+	prometheus.MustRegister(findProviders2SampleDrops, findProviders2LoadSeconds)
 }
 
 func enqueueFindProviders2Sample(job *findProviders2SampleJob) {

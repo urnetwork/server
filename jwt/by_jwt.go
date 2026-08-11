@@ -12,10 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
 
@@ -264,24 +267,187 @@ func NewByJwtWithCreateTime(
 	}
 }
 
+// rejectMissingExpiration gates the registered-claims hardening. Tokens
+// minted before the hardening carry none of the registered claims
+// (exp/iss/aud/sub/jti/nbf/iat), so rejecting on absence cuts off every
+// credential issued before the cutover at once. Until vault auth.yml sets
+// reject_missing_expiration: true, absent claims are tolerated and only the
+// claims present on a token are validated, giving the fleet time to
+// re-issue credentials through normal refresh. The vault value is read once
+// per process; changing it requires a restart.
+var rejectMissingExpirationOverride atomic.Pointer[bool]
+
+var vaultRejectMissingExpiration = sync.OnceValue(loadRejectMissingExpiration)
+
+func loadRejectMissingExpiration() bool {
+	return loadAuthSettingBool("reject_missing_expiration")
+}
+
+func rejectMissingExpiration() bool {
+	if value := rejectMissingExpirationOverride.Load(); value != nil {
+		return *value
+	}
+	return vaultRejectMissingExpiration()
+}
+
+// Testing_SetRejectMissingExpiration forces the gate for tests, bypassing the
+// vault setting. The returned pop restores the previous override.
+func Testing_SetRejectMissingExpiration(value bool) func() {
+	previous := rejectMissingExpirationOverride.Swap(&value)
+	return func() {
+		rejectMissingExpirationOverride.Store(previous)
+	}
+}
+
+// rejectExpired gates enforcement of a token's expiration when one is
+// present. Pre-hardening deploys never checked expiry, so clients hold
+// credentials whose exp passed long ago and refresh on their own schedule.
+// Until vault auth.yml sets reject_expired: true, a passed exp is tolerated
+// and logged, giving those clients time to refresh. Independent of
+// reject_missing_expiration: that gate decides whether exp must be present,
+// this one decides whether a passed exp is fatal.
+var rejectExpiredOverride atomic.Pointer[bool]
+
+var vaultRejectExpired = sync.OnceValue(loadRejectExpired)
+
+func loadRejectExpired() bool {
+	return loadAuthSettingBool("reject_expired")
+}
+
+func rejectExpired() bool {
+	if value := rejectExpiredOverride.Load(); value != nil {
+		return *value
+	}
+	return vaultRejectExpired()
+}
+
+// Testing_SetRejectExpired forces the reject_expired gate for tests,
+// bypassing the vault setting. The returned pop restores the previous
+// override.
+func Testing_SetRejectExpired(value bool) func() {
+	previous := rejectExpiredOverride.Swap(&value)
+	return func() {
+		rejectExpiredOverride.Store(previous)
+	}
+}
+
+// loadAuthSettingBool reads a bool key from vault auth.yml. A missing file or
+// key means false.
+func loadAuthSettingBool(key string) bool {
+	authResource, err := server.Vault.SimpleResource("auth.yml")
+	if err != nil {
+		return false
+	}
+	if values := authResource.Bool(key); len(values) == 1 {
+		return values[0]
+	}
+	return false
+}
+
+// AuthRejectionCause is the bounded reason a credential was refused. A
+// rejection is driven entirely by client-supplied input, so it is counted
+// rather than logged: a per-occurrence log line at default verbosity hands
+// any client — or any retry loop — a way to spam the logs. The counter is
+// the lossless rate signal; the matching detail line is emitted at V(1) for
+// diagnosis, where the operator opts into the volume.
+type AuthRejectionCause string
+
+const (
+	AuthRejectionSignature          AuthRejectionCause = "signature"
+	AuthRejectionExpired            AuthRejectionCause = "expired"
+	AuthRejectionNotYetValid        AuthRejectionCause = "not_yet_valid"
+	AuthRejectionUsedBeforeIssued   AuthRejectionCause = "used_before_issued"
+	AuthRejectionMissingClaims      AuthRejectionCause = "missing_claims"
+	AuthRejectionInvalidClaims      AuthRejectionCause = "invalid_claims"
+	AuthRejectionUnresolvedIdentity AuthRejectionCause = "unresolved_identity"
+	AuthRejectionMissingToken       AuthRejectionCause = "missing_token"
+	AuthRejectionClientRequired     AuthRejectionCause = "client_required"
+	AuthRejectionNoActiveRow        AuthRejectionCause = "no_active_row"
+	AuthRejectionCredentialRotated  AuthRejectionCause = "credential_rotated"
+)
+
+// AuthLegacyAcceptCause is the bounded reason a credential was accepted only
+// because a migration gate is off. Each counter going to zero is the signal
+// that the matching auth.yml gate can be flipped on.
+type AuthLegacyAcceptCause string
+
+const (
+	AuthLegacyMissingExpiration AuthLegacyAcceptCause = "missing_expiration"
+	AuthLegacyExpired           AuthLegacyAcceptCause = "expired"
+)
+
+var authRejectionCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "auth",
+		Name:      "jwt_rejections_total",
+		Help:      "Credential rejections partitioned by a bounded cause class",
+	},
+	[]string{"cause"},
+)
+
+var authLegacyAcceptCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "auth",
+		Name:      "jwt_legacy_accepts_total",
+		Help:      "Credentials accepted only because an auth.yml migration gate is off, by cause",
+	},
+	[]string{"cause"},
+)
+
+func init() {
+	prometheus.MustRegister(authRejectionCounter, authLegacyAcceptCounter)
+}
+
+// rejectByJwt counts a rejection, emits its detail at V(1), and returns the
+// opaque caller-facing error. The detail never reaches the default log level:
+// see AuthRejectionCause.
+func rejectByJwt(cause AuthRejectionCause, detailFormat string, args ...any) error {
+	authRejectionCounter.WithLabelValues(string(cause)).Inc()
+	if glog.V(1) {
+		glog.Infof("[jwt]reject %s: %s\n", cause, fmt.Sprintf(detailFormat, args...))
+	}
+	return errors.New("Could not verify signed token.")
+}
+
+// rejectByJwtClaims is rejectByJwt for the claims-shape failures, which
+// return a distinct caller-facing message.
+func rejectByJwtClaims(cause AuthRejectionCause, detailFormat string, args ...any) error {
+	authRejectionCounter.WithLabelValues(string(cause)).Inc()
+	if glog.V(1) {
+		glog.Infof("[jwt]reject %s: %s\n", cause, fmt.Sprintf(detailFormat, args...))
+	}
+	return errors.New("Invalid signed token claims.")
+}
+
 func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 	return ParseByJwtForAudience(ctx, jwtSigned, ByJwtAudienceApi)
 }
 
-// ParseByJwtForAudience verifies the signature and every registered lifetime
-// and identity claim. API and connect use distinct expected audiences even
+// ParseByJwtForAudience verifies the signature and the registered lifetime
+// and identity claims. API and connect use distinct expected audiences even
 // though current client credentials are deliberately minted for both.
+//
+// Tokens minted before the claims hardening carry no registered claims.
+// While the auth.yml reject_missing_expiration gate is off, absent claims
+// are tolerated and only the claims present on a token are validated; while
+// the reject_expired gate is off, a present-but-passed expiration is
+// tolerated too. A wrong claim value (issuer, audience, subject, not-before)
+// is rejected in every mode, and the signature is always enforced.
+//
+// The claims policy is enforced manually below rather than with parser
+// options because gojwt validates exp whenever it is present, with no option
+// to tolerate it; the parser layer checks decoding, the signature, and the
+// signing method only.
 func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience string) (*ByJwt, error) {
 	if audience == "" {
 		return nil, errors.New("Missing JWT audience.")
 	}
+	rejectMissing := rejectMissingExpiration()
 	parserOptions := []gojwt.ParserOption{
 		gojwt.WithValidMethods([]string{"ES256", "ES384", "ES512", "RS512"}),
-		gojwt.WithIssuer(ByJwtIssuer),
-		gojwt.WithAudience(audience),
-		gojwt.WithExpirationRequired(),
-		gojwt.WithIssuedAt(),
-		gojwt.WithLeeway(clockLeeway),
+		gojwt.WithoutClaimsValidation(),
 	}
 
 	// select the verification key by the token's `kid` header when present and
@@ -302,15 +468,64 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 	byJwt := &ByJwt{}
 	_, err := gojwt.ParseWithClaims(jwtSigned, byJwt, keyFunc, parserOptions...)
 	if err != nil {
-		return nil, errors.New("Could not verify signed token.")
+		// the caller-facing error stays opaque; the reason (malformed token
+		// vs bad signature) is only visible server-side
+		return nil, rejectByJwt(AuthRejectionSignature, "parse err = %v", err)
 	}
-	if byJwt.Subject == "" || byJwt.Subject != byJwt.UserId.String() || byJwt.IssuedAt == nil ||
-		byJwt.NotBefore == nil || byJwt.ExpiresAt == nil || byJwt.ID == "" || byJwt.CreateTime.IsZero() {
-		return nil, errors.New("Invalid signed token claims.")
+
+	// lifetime claims, validated whenever present with gojwt's comparison and
+	// leeway semantics. The gates decide whether an absent exp
+	// (reject_missing_expiration) or a passed exp (reject_expired) is fatal;
+	// not-before and issued-at violations are fatal in every mode.
+	now := server.NowUtc()
+	if byJwt.ExpiresAt == nil {
+		if rejectMissing {
+			return nil, rejectByJwtClaims(AuthRejectionMissingClaims, "missing expiration")
+		}
+		// gauge of remaining legacy-credential traffic, for deciding when to
+		// flip reject_missing_expiration on
+		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyMissingExpiration)).Inc()
+	} else if now.After(byJwt.ExpiresAt.Time.Add(clockLeeway)) {
+		if rejectExpired() {
+			return nil, rejectByJwt(AuthRejectionExpired, "token is expired")
+		}
+		// gauge of stale-credential traffic, for deciding when to flip
+		// reject_expired on
+		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyExpired)).Inc()
+	}
+	if byJwt.NotBefore != nil && now.Before(byJwt.NotBefore.Time.Add(-clockLeeway)) {
+		return nil, rejectByJwt(AuthRejectionNotYetValid, "token is not valid yet")
+	}
+	if byJwt.IssuedAt != nil && now.Before(byJwt.IssuedAt.Time.Add(-clockLeeway)) {
+		return nil, rejectByJwt(AuthRejectionUsedBeforeIssued, "token used before issued")
+	}
+
+	// identity claims
+	if rejectMissing {
+		if byJwt.Issuer != ByJwtIssuer ||
+			!slices.Contains(byJwt.Audience, audience) ||
+			byJwt.Subject == "" || byJwt.Subject != byJwt.UserId.String() ||
+			byJwt.IssuedAt == nil || byJwt.NotBefore == nil ||
+			byJwt.ID == "" || byJwt.CreateTime.IsZero() {
+			return nil, rejectByJwtClaims(AuthRejectionMissingClaims, "incomplete registered claims")
+		}
+	} else {
+		// legacy tokens predate all identity claims, so each is validated
+		// only when present
+		if byJwt.Issuer != "" && byJwt.Issuer != ByJwtIssuer {
+			return nil, rejectByJwtClaims(AuthRejectionInvalidClaims, "issuer mismatch")
+		}
+		if 0 < len(byJwt.Audience) && !slices.Contains(byJwt.Audience, audience) {
+			return nil, rejectByJwtClaims(AuthRejectionInvalidClaims, "audience mismatch")
+		}
+		if byJwt.Subject != "" && byJwt.Subject != byJwt.UserId.String() {
+			return nil, rejectByJwtClaims(AuthRejectionInvalidClaims, "subject mismatch")
+		}
 	}
 
 	err = fixByJwt(ctx, byJwt)
 	if err != nil {
+		authRejectionCounter.WithLabelValues(string(AuthRejectionUnresolvedIdentity)).Inc()
 		return nil, err
 	}
 
@@ -322,9 +537,11 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 // credential_change_time, and removed clients stop working immediately.
 func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (returnErr error) {
 	if byJwt == nil {
+		authRejectionCounter.WithLabelValues(string(AuthRejectionMissingToken)).Inc()
 		return errors.New("Missing signed token.")
 	}
 	if requireClient && (byJwt.ClientId == nil || byJwt.DeviceId == nil) {
+		authRejectionCounter.WithLabelValues(string(AuthRejectionClientRequired)).Inc()
 		return errors.New("Client credential required.")
 	}
 
@@ -371,7 +588,23 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) (
 		})
 	})
 
-	if !valid || byJwt.CreateTime.Before(credentialChangeTime) {
+	// the caller-facing message stays the same for both branches; the split
+	// (row gone/inactive vs credential rotation) is visible in the counter,
+	// and with ids at V(1)
+	if !valid {
+		authRejectionCounter.WithLabelValues(string(AuthRejectionNoActiveRow)).Inc()
+		if glog.V(1) {
+			glog.Infof("[jwt]reject %s: network=%s user=%s client=%v\n",
+				AuthRejectionNoActiveRow, byJwt.NetworkId, byJwt.UserId, byJwt.ClientId)
+		}
+		return errors.New("Signed token is no longer active.")
+	}
+	if byJwt.CreateTime.Before(credentialChangeTime) {
+		authRejectionCounter.WithLabelValues(string(AuthRejectionCredentialRotated)).Inc()
+		if glog.V(1) {
+			glog.Infof("[jwt]reject %s: rotated at %s, token created %s (user=%s)\n",
+				AuthRejectionCredentialRotated, credentialChangeTime, byJwt.CreateTime, byJwt.UserId)
+		}
 		return errors.New("Signed token is no longer active.")
 	}
 	return nil
@@ -469,13 +702,13 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 				networkId, err := server.ParseId(cachedValue)
 				if err == nil {
 					byJwt.NetworkId = networkId
-					glog.Infof("[jwt]fixed network_id with user_id (cached)\n")
+					glog.V(1).Infof("[jwt]fixed network_id with user_id (cached)\n")
 				}
 			} else {
 				networkId, err := getNetworkIdForUser(ctx, byJwt.UserId)
 				if err == nil {
 					byJwt.NetworkId = networkId
-					glog.Infof("[jwt]fixed network_id with user_id\n")
+					glog.V(1).Infof("[jwt]fixed network_id with user_id\n")
 					storeCtx := context.Background()
 					ttl := 15 * time.Minute
 					go server.HandleError(func() {
@@ -496,13 +729,13 @@ func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
 				networkId, err := server.ParseId(cachedValue)
 				if err == nil {
 					byJwt.NetworkId = networkId
-					glog.Infof("[jwt]fixed network_id with client_id (cached)\n")
+					glog.V(1).Infof("[jwt]fixed network_id with client_id (cached)\n")
 				}
 			} else {
 				networkId, err := getNetworkIdForClient(ctx, *byJwt.ClientId)
 				if err == nil {
 					byJwt.NetworkId = networkId
-					glog.Infof("[jwt]fixed network_id with client_id\n")
+					glog.V(1).Infof("[jwt]fixed network_id with client_id\n")
 					storeCtx := context.Background()
 					ttl := 15 * time.Minute
 					go server.HandleError(func() {

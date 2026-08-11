@@ -730,6 +730,28 @@ func RemovePendingTask(ctx context.Context, taskId server.Id) {
 	})
 }
 
+// RemovePendingTasksForFunctionInTx deletes every pending task targeting a
+// function that has been removed from the codebase. Such rows can never run
+// again: the runner fails them with ErrTargetNotFound and reschedules on the
+// clamped skew backoff forever, because at claim time deploy version skew is
+// indistinguishable from permanent removal. Call this from the startup
+// seeding (taskworker InitTasks) for each deliberately removed target. The
+// delete ignores claims on purpose — a row for a removed target is claimed
+// and re-errored every few seconds, so a claim filter would race with that
+// cycle. A rollback to a build that still schedules the function re-seeds
+// it, and the next roll-forward cleans it again.
+func RemovePendingTasksForFunctionInTx(ctx context.Context, tx server.PgTx, functionName string) (removedCount int64) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			DELETE FROM pending_task
+			WHERE function_name = $1
+		`,
+		functionName,
+	))
+	return tag.RowsAffected()
+}
+
 // ReleaseTask clears the claim lease on a pending task, making it claimable
 // again per its run_at (release_time <= run_at puts available_block back on
 // the run_at schedule). This is the operator recovery for a claim stranded
@@ -1366,6 +1388,15 @@ func (self *TaskWorker) waitRunDone(timeout time.Duration) bool {
 	case <-time.After(timeout):
 		return false
 	}
+}
+
+// HasTarget reports whether a function name resolves to a registered target
+// (including alternate names). Like AddTargets, registration is expected to
+// finish before Run, so this is for setup-time checks — e.g. guarding the
+// removed-target reap list against a live function name.
+func (self *TaskWorker) HasTarget(functionName string) bool {
+	_, ok := self.targets[functionName]
+	return ok
 }
 
 func (self *TaskWorker) AddTargets(taskTargets ...Target) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -12,6 +14,18 @@ import (
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
+
+// removedTaskTargets lists scheduled task functions that have been deleted
+// or renamed in the codebase. InitTasks reaps their pending rows on every
+// start: at claim time deploy version skew is indistinguishable from
+// permanent removal, so the runner never gives up on them and cleanup must
+// be explicit. Add the full function name whenever a scheduled function is
+// deleted or renamed; TestRemovedTaskTargetsAreNotRegistered keeps live
+// names off this list.
+var removedTaskTargets = []string{
+	// split into ScheduleRefreshFree/Pro/ReferralTransferBalances
+	"github.com/urnetwork/server/controller.RefreshTransferBalances",
+}
 
 // InitTasks schedules the recurring tasks. It is invoked at startup by the
 // taskworkercli command (and by the `init-tasks` subcommand).
@@ -80,6 +94,15 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
 		work.ScheduleStSyncChain(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
+
+		// pending rows for targets removed from the codebase can never run
+		// again and reschedule on the skew backoff forever; reap them here so
+		// a deploy self-heals the task table.
+		for _, functionName := range removedTaskTargets {
+			if removedCount := task.RemovePendingTasksForFunctionInTx(ctx, tx, functionName); 0 < removedCount {
+				glog.Infof("[taskworker]reaped %d pending tasks for removed target %s\n", removedCount, functionName)
+			}
+		}
 	})
 
 	// apply per-stream stats retention (MinIO ILM, or the local reaper) once at

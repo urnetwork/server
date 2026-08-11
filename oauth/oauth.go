@@ -7,11 +7,12 @@ package oauth
 // time so a token can never silently follow the user to a different network.
 //
 // Tokens issued here are signed with keys DEDICATED to oauth, loaded from the
-// `oauth` block of services.yml. They are deliberately disjoint from the ByJwt
-// signing keys (vault jwt.yml). This is a hard security boundary, not a
-// convention: `jwt.ParseByJwt` parses with claims validation disabled, so it
-// checks neither `aud` nor `exp`. If an oauth access token were signed by a
-// ByJwt key, a token scoped to `mcp:read` would verify as a full, unscoped,
+// `oauth` block of vault auth.yml (the auth runtime config, beside the byjwt
+// gates). They are deliberately disjoint from the ByJwt signing keys (vault
+// jwt.yml). This is a hard security boundary, not a convention:
+// `jwt.ParseByJwt` parses with claims validation disabled, so it checks
+// neither `aud` nor `exp`. If an oauth access token were signed by a ByJwt
+// key, a token scoped to `mcp:read` would verify as a full, unscoped,
 // effectively non-expiring platform credential on every api route. Disjoint
 // key sets make that impossible rather than merely disallowed.
 
@@ -81,37 +82,37 @@ type oauthConfig struct {
 	SignerKeys            []*signerKeyConfig `yaml:"signer_keys"`
 }
 
-type servicesConfig struct {
+type authConfig struct {
 	Oauth *oauthConfig `yaml:"oauth"`
 }
 
-// The oauth block of services.yml. Panics when absent: every route in this
+// The oauth block of vault auth.yml. Panics when absent: every route in this
 // package depends on it, and a server that silently issued unsigned or
 // wrongly-issued tokens would be worse than one that fails to start.
 var Config = sync.OnceValue(func() *oauthConfig {
-	var services servicesConfig
-	server.Vault.RequireSimpleResource("services.yml").UnmarshalYaml(&services)
+	var auth authConfig
+	server.Vault.RequireSimpleResource("auth.yml").UnmarshalYaml(&auth)
 
-	if services.Oauth == nil {
-		panic(fmt.Errorf("services.yml has no oauth block"))
+	if auth.Oauth == nil {
+		panic(fmt.Errorf("auth.yml has no oauth block"))
 	}
-	if services.Oauth.Issuer == "" {
-		panic(fmt.Errorf("services.yml oauth.issuer is required"))
+	if auth.Oauth.Issuer == "" {
+		panic(fmt.Errorf("auth.yml oauth.issuer is required"))
 	}
-	if services.Oauth.AuthorizationEndpoint == "" {
-		panic(fmt.Errorf("services.yml oauth.authorization_endpoint is required"))
+	if auth.Oauth.AuthorizationEndpoint == "" {
+		panic(fmt.Errorf("auth.yml oauth.authorization_endpoint is required"))
 	}
-	if len(services.Oauth.SignerKeys) == 0 {
-		panic(fmt.Errorf("services.yml oauth.signer_keys is empty; run `warpctl oauth keygen <env>`"))
+	if len(auth.Oauth.SignerKeys) == 0 {
+		panic(fmt.Errorf("auth.yml oauth.signer_keys is empty; run `warpctl oauth keygen <env>`, deploy, then `warpctl oauth promote <env>`"))
 	}
 
 	// the issuer is compared verbatim by clients (rfc 9207 forbids
 	// normalizing before comparison), so reject a form that would not match
-	if strings.HasSuffix(services.Oauth.Issuer, "/") {
-		panic(fmt.Errorf("services.yml oauth.issuer must not end in a slash"))
+	if strings.HasSuffix(auth.Oauth.Issuer, "/") {
+		panic(fmt.Errorf("auth.yml oauth.issuer must not end in a slash"))
 	}
 
-	return services.Oauth
+	return auth.Oauth
 })
 
 func Issuer() string {

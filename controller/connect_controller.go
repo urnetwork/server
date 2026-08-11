@@ -68,15 +68,80 @@ var contractFailureCounter = prometheus.NewCounterVec(
 	[]string{"cause", "companion"},
 )
 
-var contractFailureLogState = struct {
-	sync.Mutex
-	last map[string]time.Time
-}{
-	last: map[string]time.Time{},
-}
+var controlFrameFailureCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "control_frame_failures_total",
+		Help:      "Control frame failures partitioned by message type and a bounded cause class",
+	},
+	[]string{"message", "cause"},
+)
 
 func init() {
-	prometheus.MustRegister(transferByteCounter, contractFailureCounter)
+	prometheus.MustRegister(transferByteCounter, contractFailureCounter, controlFrameFailureCounter)
+}
+
+// controlFrameMessageLabel maps a control message to a bounded metric label.
+// The label may never be derived from the message contents: a client controls
+// what it sends, and an unbounded label set is a cardinality attack.
+func controlFrameMessageLabel(message any) string {
+	switch message.(type) {
+	case *protocol.CreateContract:
+		return "create_contract"
+	case *protocol.CloseContract:
+		return "close_contract"
+	case *protocol.Provide:
+		return "provide"
+	case *protocol.EncryptedKey:
+		return "encrypted_key"
+	case *protocol.ClientKey:
+		return "client_key"
+	case *protocol.ControlPing:
+		return "control_ping"
+	case *protocol.ProvidePing:
+		return "provide_ping"
+	default:
+		return "other"
+	}
+}
+
+// controlFrameErrorClass buckets a control frame failure. The benign,
+// client-driven classes are the ones that dominate in normal operation:
+// contract_already_closed is a routine ControlSync re-send under transport
+// churn, and contract_not_found is its cousin after a reap.
+func controlFrameErrorClass(err error) string {
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "already closed with outcome"):
+		return "contract_already_closed"
+	case strings.Contains(message, "contract not found"):
+		return "contract_not_found"
+	case strings.Contains(message, "is not a party to the contract"):
+		return "not_a_party"
+	case strings.Contains(message, "contract in dispute"):
+		return "contract_in_dispute"
+	case strings.Contains(message, "cannot handle oob control message"):
+		return "unhandled_message"
+	case strings.Contains(message, "panicked"):
+		return "panic"
+	default:
+		return "other"
+	}
+}
+
+// recordControlFrameFailure counts a control frame failure and emits its
+// detail at V(1). Control frames are client-supplied, so a per-occurrence log
+// line at the default level is a way for any client — or any resend loop — to
+// spam the logs; the counter is the lossless signal. Watch the `other` class
+// for causes that are not yet classified.
+func recordControlFrameFailure(message any, err error) {
+	cause := controlFrameErrorClass(err)
+	messageLabel := controlFrameMessageLabel(message)
+	controlFrameFailureCounter.WithLabelValues(messageLabel, cause).Inc()
+	if glog.V(1) {
+		glog.Infof("[control][error] message=%s class=%s err = %v\n", messageLabel, cause, err)
+	}
 }
 
 func contractFailureClass(err error) string {
@@ -104,19 +169,14 @@ func recordContractFailure(
 	companionLabel := fmt.Sprintf("%t", companion)
 	contractFailureCounter.WithLabelValues(cause, companionLabel).Inc()
 
-	// The historical line exceeded 1,000/minute in normal operation. Keep a
-	// visible exemplar for each bounded class/mode without restoring that log
-	// volume; the counter is the lossless rate signal.
-	key := cause + ":" + companionLabel
-	now := time.Now()
-	contractFailureLogState.Lock()
-	last := contractFailureLogState.last[key]
-	shouldLog := last.IsZero() || time.Minute <= now.Sub(last)
-	if shouldLog {
-		contractFailureLogState.last[key] = now
-	}
-	contractFailureLogState.Unlock()
-	if shouldLog {
+	// A contract failure is driven by client-supplied request state (a
+	// companion request racing its origin, an exhausted balance, an unknown
+	// client), so it is counted rather than logged: a per-occurrence line at
+	// the default level lets any client write to the logs, and this path
+	// exceeded 1,000/minute in normal operation. The counter is the lossless
+	// rate signal; watch the `other` class for causes that are not yet
+	// classified, and enable V(1) for the per-failure detail.
+	if glog.V(1) {
 		glog.Infof(
 			"[contract][error] class=%s %s->%s companion=%t transferByteCount=%d err = %v\n",
 			cause,
@@ -142,10 +202,28 @@ type ConnectControlError struct {
 	Message string `json:"message"`
 }
 
+// Controller response frames own their pooled payloads until a caller copies
+// them into its transport or deliberately drops them.
+func returnConnectControlFrames(frames []*protocol.Frame) {
+	for _, frame := range frames {
+		connect.MessagePoolReturn(frame.MessageBytes)
+	}
+}
+
 // the message is verified from source `clientId`
 func ConnectControl(
 	connectControl *ConnectControlArgs,
 	clientSession *session.ClientSession,
+) (*ConnectControlResult, error) {
+	return connectControlObserved(connectControl, clientSession, nil)
+}
+
+// Runs the HTTP control boundary with an optional borrowed response-frame
+// observer used by deterministic ownership tests. Nil is a production no-op.
+func connectControlObserved(
+	connectControl *ConnectControlArgs,
+	clientSession *session.ClientSession,
+	observeResultFrames func([]*protocol.Frame),
 ) (*ConnectControlResult, error) {
 	packBytes, err := connect.DecodeBase64(base64.StdEncoding, connectControl.Pack)
 	if err != nil {
@@ -165,6 +243,12 @@ func ConnectControl(
 		pack.Frames,
 		connect.DefaultContractManagerSettings(),
 	)
+	if observeResultFrames != nil {
+		observeResultFrames(resultFrames)
+	}
+	// The response pack owns a serialized copy. Release the controller's
+	// pooled frame payloads after every marshal or error return.
+	defer returnConnectControlFrames(resultFrames)
 
 	resultPack := &protocol.Pack{
 		Frames: resultFrames,
@@ -192,6 +276,14 @@ func ConnectControlFrames(
 	contractManagerSettings *connect.ContractManagerSettings,
 ) ([]*protocol.Frame, error) {
 	netOutFrames := []*protocol.Frame{}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			// A teardown panic does not return accumulated replies to the
+			// caller. Release replies from earlier frames before propagating it.
+			returnConnectControlFrames(netOutFrames)
+			panic(recovered)
+		}
+	}()
 
 	// Control frames in one pack are independent operations: the send side
 	// coalesces queued control messages (e.g. a burst of CloseContract syncs)
@@ -206,6 +298,9 @@ func ConnectControlFrames(
 	for _, frame := range frames {
 		message, err := connect.FromFrame(frame)
 		if err != nil {
+			// a frame that will not decode is client-supplied bytes; `nil`
+			// takes the bounded `other` message label
+			recordControlFrameFailure(nil, err)
 			errs = append(errs, err)
 			continue
 		}
@@ -245,12 +340,22 @@ func ConnectControlFrames(
 			case *protocol.ClientKey:
 				err = SetClientKey(ctx, clientId, v)
 
+			case *protocol.ControlPing, *protocol.ProvidePing:
+				// keep-alives: the transfer-level ack is the only response the
+				// sender waits for, and receipt already refreshes resident
+				// activity. Older clients ping the control destination
+				// constantly, so treating these as unhandled floods the log.
+
 			default:
 				err = fmt.Errorf("Cannot handle oob control message: %T", message)
 			}
 		}()
 
 		if err != nil {
+			// A handler may produce partial replies before reporting an error.
+			// This API does not return those frames, so release them here.
+			returnConnectControlFrames(outFrames)
+			recordControlFrameFailure(message, err)
 			errs = append(errs, err)
 			continue
 		}
@@ -635,22 +740,16 @@ func newContract(
 		case 0:
 			// force stream is not supported
 		default:
-			if forceStream || 0 < len(intermediaryIds) {
+			if 0 < len(intermediaryIds) {
 				streamId_ := model.AddToStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
 				streamId = &streamId_
 			} else {
-				// when the pair has an active stream, every network contract
-				// between the pair joins it — this is the platform directing
-				// the client to switch to the stream (see
-				// `CreateContractResult`). The load-bearing case is the
-				// same-network reply: the provider's return traffic for a
-				// network source carries NO companion flag (the client skips
-				// the companion contract for the network relationship), so
-				// the request is indistinguishable from a forward send, yet
-				// its send sequence is stream-bound (`source.Reverse()`
-				// keeps the stream id) — an unstamped contract would steer
-				// the reply OFF the stream onto the platform path and hide
-				// the stream from the contract stats on both ends
+				// When the pair has an active stream, every network contract
+				// between the pair joins it. Check the active pair before using
+				// force_stream to create a direct stream: a provider reply keeps
+				// the receiver-visible force-stream lane but cannot reconstruct
+				// the sender's local intermediary list. Creating a direct stream
+				// in that case forks the two directions onto different stream ids.
 				streamId_, ok := model.AddContractToPairStream(
 					ctx,
 					contractId,
@@ -658,6 +757,9 @@ func newContract(
 					destinationId,
 				)
 				if ok {
+					streamId = &streamId_
+				} else if forceStream {
+					streamId_ = model.AddToStream(ctx, contractId, sourceId, destinationId, nil)
 					streamId = &streamId_
 				}
 			}

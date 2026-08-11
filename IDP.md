@@ -83,11 +83,13 @@ vault/all/oauth/<Y.M.D>/<kid>.key           # active
 vault/all/oauth.pending/<Y.M.D>/<kid>.key   # staged, not yet signing
 ```
 
-`services.yml` references a key as `oauth/<kid>.key`; the vault resolver's
-`versionLookup` expands the version directory, so the reference never names one.
+The oauth runtime config (issuer, authorization endpoint, signer keys) lives in
+the `oauth` block of the env vault `auth.yml`, beside the byjwt gates. It
+references a key as `oauth/<kid>.key`; the vault resolver's `versionLookup`
+expands the version directory, so the reference never names one.
 
 The `kid` is the RFC 7638 JWK thumbprint of the public key. It is derived from
-the key rather than assigned, so the file name, the `services.yml` entry, the
+the key rather than assigned, so the file name, the `auth.yml` entry, the
 JWT header, and the JWKS entry cannot drift apart. The loader recomputes the
 thumbprint at startup and refuses to start on a mismatch — a mismatch would
 publish a JWKS that cannot verify the tokens actually being signed.
@@ -98,7 +100,7 @@ Generate with:
 warpctl oauth keygen <env>
 ```
 
-which writes to `oauth.pending` and prints the `services.yml` block.
+which writes to `oauth.pending`.
 
 **Rollout order matters more than for TLS.** A host told to sign with a key it
 does not have cannot serve, and a host missing a key another host is already
@@ -107,8 +109,10 @@ signing with cannot verify those tokens. So:
 1. deploy (xops edges) so every host has the pending key —
    `playbook-edges.yml` merges `oauth.pending` into `oauth` during vault staging,
    mirroring `tls.pending`
-2. move `all/oauth.pending/...` into `all/oauth/...`
-3. add the key to the **top** of `oauth.signer_keys` in `services.yml`
+2. run `warpctl oauth promote <env>`, which moves `all/oauth.pending/...` into
+   `all/oauth/...` and adds the key to the **top** of `oauth.signer_keys` in the
+   env vault `auth.yml`
+3. deploy again so hosts begin signing with it
 4. keep the previous key listed until every token it signed has expired
 
 `signer_keys` is newest-first: the first entry signs, and every entry is
@@ -280,7 +284,7 @@ auth-code → JWT → `Authorization: Bearer` flow, which will stop working.
   covers `api`, `app`, `connect`, `mcp`, `grafana` and several wildcards
 - a load-balancer route to whichever service serves the authorization endpoints
 - at least one signer key generated, staged through `oauth.pending`, and listed
-  in `services.yml`
+  in the env vault `auth.yml` (`warpctl oauth keygen` + `warpctl oauth promote`)
 
 The issuer is baked into every issued token and published in the discovery
 documents. Changing it later invalidates every outstanding token, so it is

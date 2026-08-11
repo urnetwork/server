@@ -323,7 +323,7 @@ func recordPeerReceives(client *connect.Client, sourceClientId server.Id) chan c
 func sendSimpleMessage(t testing.TB, from *connect.Client, toClientId server.Id, opts ...any) {
 	frame, err := connect.ToFrame(&protocol.SimpleMessage{Content: "hello"}, connect.DefaultProtocolVersion)
 	connect.AssertEqual(t, err, nil)
-	sent := from.SendWithTimeout(frame, connect.DestinationId(connect.Id(toClientId)), func(err error) {}, 60*time.Second, opts...)
+	sent := from.SendWithTimeout(frame, connect.Id(toClientId), func(err error) {}, 60*time.Second, opts...)
 	connect.AssertEqual(t, sent, true)
 }
 

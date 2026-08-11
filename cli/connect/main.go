@@ -111,7 +111,11 @@ Options:
 			case <-time.After(30 * time.Second):
 			}
 
-			glog.Infof("[connect]goroutines=%d/%d\n", runtime.NumGoroutine(), runtime.GOMAXPROCS(0))
+			// `go_goroutines` from the default prometheus registry carries this
+			// to grafana already; the periodic line is redundant volume
+			if glog.V(1) {
+				glog.Infof("[connect]goroutines=%d/%d\n", runtime.NumGoroutine(), runtime.GOMAXPROCS(0))
+			}
 		}
 	})
 

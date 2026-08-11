@@ -317,7 +317,7 @@ func measureStreamRoutePerformanceRun(
 		}
 		sent := sender.SendWithTimeout(
 			frame,
-			clientconnect.DestinationId(clientconnect.Id(destinationClientId)),
+			clientconnect.Id(destinationClientId),
 			nil,
 			60*time.Second,
 			transferOptions...,

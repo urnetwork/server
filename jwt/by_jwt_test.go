@@ -42,6 +42,8 @@ func TestByJwtLegacy(t *testing.T) {
 
 func TestByJwtRegisteredClaimsAreEnforced(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetRejectMissingExpiration(true)()
+		defer Testing_SetRejectExpired(true)()
 		ctx := context.Background()
 		newClaims := func() *ByJwt {
 			return NewByJwt(server.NewId(), server.NewId(), "test", false, false)
@@ -109,6 +111,234 @@ func TestByJwtRegisteredClaimsAreEnforced(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		_, err = ParseByJwt(ctx, hmacSigned)
 		connect.AssertEqual(t, err != nil, true)
+	})
+}
+
+// legacyByJwt mirrors a token minted before the claims hardening: business
+// fields and create_time only, no registered claims at all.
+func legacyByJwt() *ByJwt {
+	return &ByJwt{
+		NetworkId:   server.NewId(),
+		UserId:      server.NewId(),
+		NetworkName: "test",
+		CreateTime:  server.CodecTime(server.NowUtc()),
+	}
+}
+
+// TestByJwtMissingExpirationGate covers the credential-migration gate: with
+// reject_missing_expiration off (the default), tokens minted before the
+// claims hardening still parse, while any claim that is present — and the
+// signature — is validated as strictly as ever. With the gate on, legacy
+// tokens are rejected.
+func TestByJwtMissingExpirationGate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		popOff := Testing_SetRejectMissingExpiration(false)
+		defer popOff()
+		// expiry-when-present enforcement has its own gate; pin it on here so
+		// the presentButWrong cases below cover it, and see
+		// TestByJwtRejectExpiredGate for the gate-off behavior
+		popExpired := Testing_SetRejectExpired(true)
+		defer popExpired()
+
+		legacy := legacyByJwt()
+		signed := legacy.Sign()
+
+		parsed, err := ParseByJwt(ctx, signed)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, parsed, nil)
+		connect.AssertEqual(t, parsed.NetworkId, legacy.NetworkId)
+		connect.AssertEqual(t, parsed.UserId, legacy.UserId)
+		connect.AssertEqual(t, parsed.NetworkName, legacy.NetworkName)
+
+		// legacy tokens predate audiences, so they parse for every audience
+		_, err = ParseByJwtForAudience(ctx, signed, ByJwtAudienceConnect)
+		connect.AssertEqual(t, err, nil)
+
+		// a legacy-era client token (client_id and device_id, no registered
+		// claims) parses too
+		deviceId := server.NewId()
+		clientId := server.NewId()
+		legacyClient := legacyByJwt()
+		legacyClient.DeviceId = &deviceId
+		legacyClient.ClientId = &clientId
+		parsedClient, err := ParseByJwtForAudience(ctx, legacyClient.Sign(), ByJwtAudienceConnect)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *parsedClient.ClientId, clientId)
+		connect.AssertEqual(t, *parsedClient.DeviceId, deviceId)
+
+		// claims that are present are still validated with the gate off
+		presentButWrong := []struct {
+			name   string
+			mutate func(*ByJwt)
+		}{
+			{
+				name: "expired",
+				mutate: func(claims *ByJwt) {
+					claims.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Minute))
+				},
+			},
+			{
+				name: "future not before",
+				mutate: func(claims *ByJwt) {
+					claims.NotBefore = gojwt.NewNumericDate(server.NowUtc().Add(time.Hour))
+				},
+			},
+			{
+				name: "wrong issuer",
+				mutate: func(claims *ByJwt) {
+					claims.Issuer = "attacker"
+				},
+			},
+			{
+				name: "wrong audience",
+				mutate: func(claims *ByJwt) {
+					claims.Audience = gojwt.ClaimStrings{"attacker"}
+				},
+			},
+			{
+				name: "subject mismatch",
+				mutate: func(claims *ByJwt) {
+					claims.Subject = server.NewId().String()
+				},
+			},
+		}
+		for _, test := range presentButWrong {
+			claims := legacyByJwt()
+			test.mutate(claims)
+			if _, err := ParseByJwt(ctx, claims.Sign()); err == nil {
+				t.Fatalf("gate off accepted a token with an invalid present claim: %s", test.name)
+			}
+		}
+
+		// the signature is enforced in both modes
+		foreignKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		connect.AssertEqual(t, err, nil)
+		forgedToken := gojwt.NewWithClaims(gojwt.SigningMethodES256, legacyByJwt())
+		forgedSigned, err := forgedToken.SignedString(foreignKey)
+		connect.AssertEqual(t, err, nil)
+		_, err = ParseByJwt(ctx, forgedSigned)
+		connect.AssertNotEqual(t, err, nil)
+
+		// with the gate on, the same legacy token is rejected
+		popOn := Testing_SetRejectMissingExpiration(true)
+		defer popOn()
+		_, err = ParseByJwt(ctx, signed)
+		connect.AssertNotEqual(t, err, nil)
+
+		// and a current token is valid in both modes
+		fresh := NewByJwt(server.NewId(), server.NewId(), "test", false, false).Sign()
+		_, err = ParseByJwt(ctx, fresh)
+		connect.AssertEqual(t, err, nil)
+		popOn()
+		_, err = ParseByJwt(ctx, fresh)
+		connect.AssertEqual(t, err, nil)
+	})
+}
+
+// TestByJwtRejectExpiredGate covers the expired-credential migration gate:
+// with reject_expired off (the default), a present-but-passed expiration is
+// tolerated in every mode, while not-before and issued-at stay enforced.
+// With the gate on, expired tokens are rejected with the usual leeway.
+func TestByJwtRejectExpiredGate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		// pushGates pins both gates and returns a single pop
+		pushGates := func(rejectMissing bool, rejectExpired bool) func() {
+			popMissing := Testing_SetRejectMissingExpiration(rejectMissing)
+			popExpired := Testing_SetRejectExpired(rejectExpired)
+			return func() {
+				popExpired()
+				popMissing()
+			}
+		}
+
+		// a fully modern token whose lifetime has passed
+		expiredByJwt := func() *ByJwt {
+			claims := NewByJwt(server.NewId(), server.NewId(), "test", false, false)
+			claims.IssuedAt = gojwt.NewNumericDate(server.NowUtc().Add(-25 * time.Hour))
+			claims.NotBefore = claims.IssuedAt
+			claims.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Hour))
+			return claims
+		}
+
+		// gate off: the expired token parses whether or not the
+		// missing-expiration gate is on (the gates are independent)
+		pop := pushGates(false, false)
+		_, err := ParseByJwt(ctx, expiredByJwt().Sign())
+		connect.AssertEqual(t, err, nil)
+		pop()
+
+		pop = pushGates(true, false)
+		_, err = ParseByJwt(ctx, expiredByJwt().Sign())
+		connect.AssertEqual(t, err, nil)
+		pop()
+
+		// gate off: a legacy token whose only registered claim is a passed
+		// exp (the jan-era mints) parses too
+		pop = pushGates(false, false)
+		legacyExpired := legacyByJwt()
+		legacyExpired.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Minute))
+		_, err = ParseByJwt(ctx, legacyExpired.Sign())
+		connect.AssertEqual(t, err, nil)
+
+		// not-before and issued-at violations are fatal even with both gates
+		// off
+		futureNbf := legacyByJwt()
+		futureNbf.NotBefore = gojwt.NewNumericDate(server.NowUtc().Add(time.Hour))
+		_, err = ParseByJwt(ctx, futureNbf.Sign())
+		connect.AssertNotEqual(t, err, nil)
+
+		futureIat := legacyByJwt()
+		futureIat.IssuedAt = gojwt.NewNumericDate(server.NowUtc().Add(time.Hour))
+		_, err = ParseByJwt(ctx, futureIat.Sign())
+		connect.AssertNotEqual(t, err, nil)
+		pop()
+
+		// gate on: expired is rejected, and the clock leeway still applies
+		pop = pushGates(false, true)
+		_, err = ParseByJwt(ctx, expiredByJwt().Sign())
+		connect.AssertNotEqual(t, err, nil)
+
+		withinLeeway := NewByJwt(server.NewId(), server.NewId(), "test", false, false)
+		withinLeeway.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-10 * time.Second))
+		_, err = ParseByJwt(ctx, withinLeeway.Sign())
+		connect.AssertEqual(t, err, nil)
+
+		// a current token is valid in every mode
+		fresh := NewByJwt(server.NewId(), server.NewId(), "test", false, false).Sign()
+		_, err = ParseByJwt(ctx, fresh)
+		connect.AssertEqual(t, err, nil)
+		pop()
+	})
+}
+
+// TestAuthVaultSettings covers the auth.yml read: the
+// reject_missing_expiration and reject_expired keys are honored, and an
+// absent key or file means false (allow).
+func TestAuthVaultSettings(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		popBoth := server.Vault.PushSimpleResource("auth.yml", []byte("reject_missing_expiration: true\nreject_expired: true\n"))
+		connect.AssertEqual(t, loadRejectMissingExpiration(), true)
+		connect.AssertEqual(t, loadRejectExpired(), true)
+		popBoth()
+
+		popFalse := server.Vault.PushSimpleResource("auth.yml", []byte("reject_missing_expiration: false\nreject_expired: false\n"))
+		connect.AssertEqual(t, loadRejectMissingExpiration(), false)
+		connect.AssertEqual(t, loadRejectExpired(), false)
+		popFalse()
+
+		// each key defaults to false when the other is the only one set
+		popOne := server.Vault.PushSimpleResource("auth.yml", []byte("reject_missing_expiration: true\n"))
+		connect.AssertEqual(t, loadRejectExpired(), false)
+		popOne()
+
+		popOther := server.Vault.PushSimpleResource("auth.yml", []byte("unrelated: true\n"))
+		connect.AssertEqual(t, loadRejectMissingExpiration(), false)
+		connect.AssertEqual(t, loadRejectExpired(), false)
+		popOther()
 	})
 }
 

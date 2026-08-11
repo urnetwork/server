@@ -16,10 +16,11 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 
-	// "github.com/urnetwork/connect"
+	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 )
 
+// Applies verified resident control frames that cannot carry in-band replies.
 type residentController struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -28,8 +29,13 @@ type residentController struct {
 
 	residentContractManager *residentContractManager
 	settings                *ExchangeSettings
+
+	// Tests retain exact dropped response bytes before their final return.
+	// Nil is a production no-op.
+	beforeDroppedResponseReturnForTest func([]byte)
 }
 
+// Creates the in-band control boundary for one authenticated resident.
 func newResidentController(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -46,9 +52,10 @@ func newResidentController(
 	}
 }
 
-// the frames are verified from source `clientId`
-// control messages are not allowed to have replies
-// messages with replies must use resident_oob_controller in the api
+// HandleControlFrames applies frames verified as originating from clientId.
+// In-band control cannot carry replies; requests that need a response use the
+// API out-of-band controller. Any unexpected replies are dropped here, so this
+// boundary must return their pooled payloads.
 func (self *residentController) HandleControlFrames(frames []*protocol.Frame) error {
 	outFrames, err := controller.ConnectControlFrames(
 		self.ctx,
@@ -56,6 +63,14 @@ func (self *residentController) HandleControlFrames(frames []*protocol.Frame) er
 		frames,
 		self.settings.ContractManagerSettings,
 	)
+	defer func() {
+		for _, frame := range outFrames {
+			if self.beforeDroppedResponseReturnForTest != nil {
+				self.beforeDroppedResponseReturnForTest(frame.MessageBytes)
+			}
+			clientconnect.MessagePoolReturn(frame.MessageBytes)
+		}
+	}()
 	if err != nil {
 		return err
 	}

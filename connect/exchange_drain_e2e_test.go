@@ -481,7 +481,7 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 				sentCount.Add(1)
 				sent := clientA.SendWithTimeout(
 					frame,
-					connect.DestinationId(connect.Id(clientIdB)),
+					connect.Id(clientIdB),
 					func(err error) {
 						if err == nil {
 							ackCount.Add(1)

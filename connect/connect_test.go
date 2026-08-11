@@ -2054,7 +2054,7 @@ func testConnect(
 							}
 							_, err = clientA.SendWithTimeoutDetailed(
 								frame,
-								connect.DestinationId(connect.Id(clientIdB)),
+								connect.Id(clientIdB),
 								func(err error) {
 									if err != nil {
 										panic(err)
@@ -2077,7 +2077,7 @@ func testConnect(
 						}
 						_, err = clientA.SendWithTimeoutDetailed(
 							frame,
-							connect.DestinationId(connect.Id(clientIdB)),
+							connect.Id(clientIdB),
 							func(err error) {
 								select {
 								case ackA <- err:
@@ -2239,7 +2239,7 @@ func testConnect(
 							}
 							_, err = clientB.SendWithTimeoutDetailed(
 								frame,
-								connect.DestinationId(connect.Id(clientIdA)),
+								connect.Id(clientIdA),
 								func(err error) {
 									if err != nil {
 										panic(err)
@@ -2266,7 +2266,7 @@ func testConnect(
 						}
 						_, err = clientB.SendWithTimeoutDetailed(
 							frame,
-							connect.DestinationId(connect.Id(clientIdA)),
+							connect.Id(clientIdA),
 							func(err error) {
 								select {
 								case ackB <- err:
@@ -2367,8 +2367,8 @@ func testConnect(
 						return count
 					}
 					for {
-						_, _, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
-						_, _, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false, false)
+						_, _, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.Id(clientIdB), connect.MultiHopId{}, false, false)
+						_, _, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.Id(clientIdA), connect.MultiHopId{}, false, false)
 						_, _, receiveMessageTypesA := clientA.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), sequenceIdB)
 						_, _, receiveMessageTypesB := clientB.ReceiveQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), sequenceIdA)
 						count := 0
@@ -2386,12 +2386,12 @@ func testConnect(
 					}
 				}
 
-				resendItemCountA, resendItemByteCountA, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdB)), connect.MultiHopId{}, false, false)
+				resendItemCountA, resendItemByteCountA, sequenceIdA, resendMessageTypesA := clientA.ResendQueueSizeAndMessageTypes(connect.Id(clientIdB), connect.MultiHopId{}, false, false)
 				connect.AssertEqual(t, resendMessageTypesA, nil)
 				connect.AssertEqual(t, resendItemCountA, 0)
 				connect.AssertEqual(t, resendItemByteCountA, ByteCount(0))
 
-				resendItemCountB, resentItemByteCountB, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.DestinationId(connect.Id(clientIdA)), connect.MultiHopId{}, false, false)
+				resendItemCountB, resentItemByteCountB, sequenceIdB, resendMessageTypesB := clientB.ResendQueueSizeAndMessageTypes(connect.Id(clientIdA), connect.MultiHopId{}, false, false)
 				connect.AssertEqual(t, resendMessageTypesB, nil)
 				connect.AssertEqual(t, resendItemCountB, 0)
 				connect.AssertEqual(t, resentItemByteCountB, ByteCount(0))
@@ -2638,7 +2638,19 @@ func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, ca
 	// recover panics (e.g. a canceled ctx raised out of the db layer at test
 	// teardown) instead of crashing the test binary
 	go server.HandleError(func() {
+		defer func() {
+			for _, frame := range frames {
+				connect.MessagePoolReturn(frame.MessageBytes)
+			}
+		}()
 		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames, self.contractManagerSettings)
-		callback(resultFrames, err)
+		defer func() {
+			for _, frame := range resultFrames {
+				connect.MessagePoolReturn(frame.MessageBytes)
+			}
+		}()
+		if callback != nil {
+			callback(resultFrames, err)
+		}
 	})
 }
