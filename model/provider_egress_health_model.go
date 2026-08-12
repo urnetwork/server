@@ -132,6 +132,24 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 	})
 }
 
+// ProviderEgressHealthMaxAge is how long an egress-health measurement is
+// treated as current. Past it the provider is indistinguishable from one never
+// measured, and the gate fails it closed.
+//
+// 24h, against ProviderEgressLocationMaxAge's 7 days, because the two decay at
+// different rates. Where a provider egresses from is a property of its network
+// and rarely changes; whether it still carries traffic is a property of the
+// moment and can change without warning or notice -- a provider that stops
+// forwarding stays connected and keeps accepting clients, so nothing else in
+// the system reveals it.
+//
+// The value is a floor on how bad the list can get, not a tuning knob: it is
+// the longest a provider can blackhole while still being advertised. Shortening
+// it shrinks that window at the cost of demanding more probe throughput, since
+// every gated provider must be re-measured inside it or it drops out of the
+// list.
+const ProviderEgressHealthMaxAge = 24 * time.Hour
+
 // ProviderEgressHealthCounts is the ok/total tally alone, for consumers that
 // only need to decide "did this provider carry traffic" in bulk. The heavy
 // fields (per-class results, failure name lists) are diagnostics and are left
@@ -155,8 +173,28 @@ type ProviderEgressHealthCounts struct {
 // A provider that has never been measured has no entry, exactly as
 // GetProviderEgressHealth returns nil for it. Never measured is not the same as
 // measured-unhealthy and the two must stay distinguishable to the caller.
+//
+// # Stale evidence is not evidence
+//
+// Only measurements newer than ProviderEgressHealthMaxAge are returned. A
+// provider whose measurement has aged out is absent from the map and therefore
+// fails passesHealth closed, exactly as a never-measured one does -- which is
+// the correct reading, because both mean "no current evidence this provider
+// carries traffic."
+//
+// Omitting this bound published blackholes. Health drives the gate but nothing
+// re-measured it on its own schedule: the due queue keyed re-probes off
+// provider_egress_location's age, so a provider with a fresh location was never
+// re-probed and its health tally sat unchanged for days. On beta that left
+// 98.6% of gated providers advertised on evidence older than six hours, and 12
+// of 12 sampled from the stalest cohort answered ok=0/131 when probed -- total
+// blackholes, still in the public list, because a measurement taken days ago
+// said they were fine. GetAllProviderEgressCountryCodes has always bounded its
+// half this way; this is the missing symmetry.
 func GetAllProviderEgressHealthCounts(ctx context.Context) map[server.Id]ProviderEgressHealthCounts {
 	healthCounts := map[server.Id]ProviderEgressHealthCounts{}
+
+	minMeasuredAt := server.NowUtc().Add(-ProviderEgressHealthMaxAge)
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -168,7 +206,9 @@ func GetAllProviderEgressHealthCounts(ctx context.Context) map[server.Id]Provide
 				ok_count,
 				total_count
 			FROM provider_egress_health
+			WHERE measured_at >= $1
 			`,
+			minMeasuredAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

@@ -791,3 +791,108 @@ func TestGetAllProviderEgressCountryCodes(t *testing.T) {
 		connect.AssertEqual(t, ok, false)
 	})
 }
+
+// A provider whose egress HEALTH has aged out must be re-offered even though
+// its location is still fresh.
+//
+// The two ages are independent and only one of them gated re-probing. Health
+// decides whether a provider is published (providerCountFilter.passesHealth),
+// but both of the original passes keyed off provider_egress_location, which is
+// trusted seven times longer. A provider probed once and then quietly going
+// dark kept its passing tally, was never re-offered, and stayed in the public
+// list for days -- observed on beta as 12 of 12 sampled providers answering
+// ok=0/131 while still advertised.
+func TestGetProviderEgressLocationDueOffersStaleHealth(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		staleHealth := server.NewId()
+		freshHealth := server.NewId()
+
+		testing_connectProbeableProvider(t, ctx, staleHealth, city.LocationId, "0.0.0.1:0", ProvideModePublic)
+		testing_connectProbeableProvider(t, ctx, freshHealth, city.LocationId, "0.0.0.2:0", ProvideModePublic)
+
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		// BOTH locations are fresh, so neither is due under the location-driven
+		// passes. Health age is the only variable.
+		for _, clientId := range []server.Id{staleHealth, freshHealth} {
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, LocationId: city.LocationId,
+				CountryCode: "us", ObservedAt: now.Add(-1 * time.Hour),
+			})
+		}
+
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId:   staleHealth,
+			MeasuredAt: now.Add(-ProviderEgressHealthMaxAge),
+			OKCount:    100, Total: 100,
+		})
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId:   freshHealth,
+			MeasuredAt: now.Add(-1 * time.Minute),
+			OKCount:    100, Total: 100,
+		})
+
+		due := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), now, 100)
+
+		if !slices.Contains(due, staleHealth) {
+			t.Errorf("due = %v, must contain the provider whose health aged out (%s): "+
+				"its tally still gates the public list, so leaving it unmeasured advertises a provider nothing has checked in over %s",
+				due, staleHealth, ProviderEgressHealthMaxAge)
+		}
+		if slices.Contains(due, freshHealth) {
+			t.Errorf("due = %v, must not contain the provider measured a minute ago (%s): "+
+				"re-probing on fresh evidence spends the queue on providers that do not need it",
+				due, freshHealth)
+		}
+	})
+}
+
+// A provider that has a location but has NEVER been health-measured is left to
+// the location-driven passes, not offered by the health pass.
+//
+// Scoping matters: "lacks fresh health" is also true of a provider measured
+// never, and offering those would re-probe a provider whose location was taken
+// minutes ago purely because no health row accompanies it. Such a provider is
+// excluded from the list meanwhile (passesHealth fails closed on a missing row)
+// and returns via pass 2 when its location goes stale, so it is deferred rather
+// than stranded.
+func TestGetProviderEgressLocationDueLeavesNeverMeasuredToLocationPasses(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		noHealthRow := server.NewId()
+		testing_connectProbeableProvider(t, ctx, noHealthRow, city.LocationId, "0.0.0.1:0", ProvideModePublic)
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: noHealthRow, LocationId: city.LocationId,
+			CountryCode: "us", ObservedAt: now.Add(-1 * time.Hour),
+		})
+
+		if due := GetProviderEgressLocationDue(ctx, now.Add(-24*time.Hour), now, 100); slices.Contains(due, noHealthRow) {
+			t.Errorf("due = %v, must not contain the never-measured provider with a fresh location (%s)", due, noHealthRow)
+		}
+	})
+}
