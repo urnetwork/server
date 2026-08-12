@@ -31,10 +31,29 @@ var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
 })
 
 const (
-	// A one-day credential bounds stale authorization even when a client stays
-	// online indefinitely. SDK APIs refresh at half-life and retry before this
-	// deadline, so conforming clients rotate without a protocol change.
-	expiryDuration = 24 * time.Hour
+	// Reverted from 24h to 30 days by team decision.
+	//
+	// The one-day value bounded stale authorization for a client that stays
+	// online indefinitely, which is a real thing to want. It rested on
+	// "conforming clients rotate at half-life" -- and that is true of the sdk
+	// only since the half-life refresh landed on 2026-08-06. It is not true of
+	// anything else holding a token: an app build older than that, or any client
+	// issued a token it does not refresh.
+	//
+	// Those clients do not fail loudly at the deadline. They stay connected and
+	// keep accepting connections while carrying nothing, so they look healthy
+	// from every angle except an egress probe. Measured on beta: 95% probe
+	// success under 12h of client age, 14% at 20-24h, and 0% past 24h across 270
+	// attempts -- a fleet-wide blackhole on a 24h clock, invisible to everything
+	// that was not probing egress.
+	//
+	// 30 days does not fix the non-refreshing client, it only makes the deadline
+	// rare enough to notice. The durable protections are elsewhere and stay in
+	// place: the sdk's half-life rotation, and the server refusing to advertise
+	// a provider whose egress health has aged out (ProviderEgressHealthMaxAge).
+	// Shortening this again should wait until a client that ignores the deadline
+	// is the exception rather than the rule.
+	expiryDuration = 30 * 24 * time.Hour
 	clockLeeway    = 30 * time.Second
 
 	ByJwtIssuer          = "urnetwork:byjwt"
