@@ -11,6 +11,7 @@ import (
 	"time"
 
 	clientconnect "github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 )
 
@@ -263,6 +264,7 @@ func TestPerfvarCorrectnessFixtureJoinsPremeasurementPackPublication(t *testing.
 			ClientId:      clientconnect.NewId(),
 			DestinationId: clientconnect.NewId(),
 			AckRequired:   true,
+			MessageType:   protocol.MessageType_IpIpPacketToProvider,
 		}
 		publisherDone := make(chan struct{})
 		go func() {
@@ -437,6 +439,38 @@ func TestPerfvarSingleRegion1000msEveryRouteCorrectness(t *testing.T) {
 		2026081100,
 		10*time.Minute,
 	)
+}
+
+// A focused developer gate reproduces the maximum-RTT legacy P2P lifecycle
+// without paying for the preceding exchange routes.
+func TestPerfvarSingleRegion1000msP2pLegacyCorrectness(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
+	testEnvironment.Run(t, func(t testing.TB) {
+		profiles := initialNetworkProfiles(2026081100)
+		profile := profiles["single-region-1000ms-rtt"]
+		providerProfile := profiles["clean-lan"]
+		providerProfile.SourceNote = "synthetic provider colocated with server/connect"
+		fixture, err := newPerfvarCorrectnessFixture(
+			t,
+			fullTunRouteP2pLegacy,
+			profile,
+			profile,
+			providerProfile,
+			defaultTunResourceProfile(),
+			10*time.Minute,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, measureErr := fixture.measureExactTCP(64 * 1024)
+		fixture.close()
+		if measureErr != nil {
+			t.Fatal(measureErr)
+		}
+	})
 }
 
 // Fresh construction matches the performance runner's one-route-per-scenario
@@ -863,6 +897,45 @@ func TestPerfvarExtremeProfileRoutesCorrectness(t *testing.T) {
 			if measureErr != nil {
 				t.Fatalf("%s/%s exact bidirectional TCP and impairment evidence: %v", testCase.route, testCase.profileName, measureErr)
 			}
+		}
+	})
+}
+
+// A constrained direct carrier must continue carrying both inner TCP
+// directions after its initial send burst fills the modeled bottleneck queue.
+func TestPerfvarP2pFastRateLimitedTCPDirectionsCorrectness(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
+	testEnvironment.Run(t, func(t testing.TB) {
+		profiles := allNetworkProfiles(2026081412)
+		profile := profiles["rate-10mbps"]
+		cleanProfile := profiles["clean-lan"]
+		fixture, err := newPerfvarCorrectnessFixture(
+			t,
+			fullTunRouteP2pFast,
+			profile,
+			cleanProfile,
+			cleanProfile,
+			defaultTunResourceProfile(),
+			5*time.Minute,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fixture.close()
+		pair, measureErr := fixture.measureExactTCP(512 * 1024)
+		if measureErr != nil {
+			t.Fatalf(
+				"rate-limited exact TCP: %v; upload=%+v download=%+v live-p2p=%+v provider=%+v device=%+v",
+				measureErr,
+				pair.Upload,
+				pair.Download,
+				fixture.path.p2pNetwork.snapshot(),
+				fixture.path.providerStats.Snapshot(),
+				fixture.path.deviceStats.Snapshot(),
+			)
 		}
 	})
 }

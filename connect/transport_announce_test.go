@@ -70,3 +70,19 @@ func TestPassiveSpeedAndSyntheticGate(t *testing.T) {
 	connect.AssertEqual(t, provenMax, announce.passiveMaxBytesPerSecond)
 	connect.AssertEqual(t, false, announce.allowSyntheticSpeedWithLock())
 }
+
+// An unsolicited or malformed speed-stop control has no matching measurement
+// and must be ignored without dereferencing absent reader state.
+func TestConnectionAnnounceRejectsSpeedStopWithoutReaderState(t *testing.T) {
+	announce := &ConnectionAnnounce{}
+	if announce.ReceiveSpeed(nil) {
+		t.Fatal("unsolicited speed stop was accepted")
+	}
+	announce.speedTest = &SpeedTest{
+		TestId:         7,
+		TotalByteCount: 1024,
+	}
+	if announce.ReceiveSpeed(nil) {
+		t.Fatal("malformed speed stop was accepted for an active test")
+	}
+}

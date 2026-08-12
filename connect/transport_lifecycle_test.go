@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
 
@@ -199,4 +200,87 @@ func TestConnectHandlerQuicInitializationErrorClosesPreboundPacketConn(t *testin
 		t.Fatalf("failed QUIC initialization retained its packet conn: %v", err)
 	}
 	rebound.Close()
+}
+
+// Verifies one production transport finisher retains idle until a locally
+// dequeued or pending pooled message has been returned.
+func testConnectHandlerWorkersJoinPooledOwnership(
+	t *testing.T,
+	description string,
+	finish func(workers *connectHandlerWorkers, stop func()),
+) {
+	t.Helper()
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	message := clientconnect.MessagePoolGet(2 * 1024)
+	witnessBeforeRelease := clientconnect.MessagePoolShareReadOnly(message)
+	witnessAfterJoin := clientconnect.MessagePoolShareReadOnly(message)
+	workerEntered := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	var workers connectHandlerWorkers
+	workers.start(func() {
+		pendingMessage := message
+		defer clientconnect.MessagePoolReturn(pendingMessage)
+		close(workerEntered)
+		<-releaseWorker
+	})
+	select {
+	case <-workerEntered:
+	case <-testCtx.Done():
+		close(releaseWorker)
+		t.Fatalf("%s did not reach ownership barrier: %v", description, testCtx.Err())
+	}
+
+	stopEntered := make(chan struct{})
+	finishDone := make(chan struct{})
+	go func() {
+		finish(&workers, func() {
+			close(stopEntered)
+		})
+		close(finishDone)
+	}()
+	select {
+	case <-stopEntered:
+	case <-testCtx.Done():
+		close(releaseWorker)
+		t.Fatalf("%s finisher did not stop connection resources: %v", description, testCtx.Err())
+	}
+	select {
+	case <-finishDone:
+		close(releaseWorker)
+		t.Fatalf("%s finisher returned before ownership release", description)
+	default:
+	}
+	if clientconnect.MessagePoolReturn(witnessBeforeRelease) {
+		close(releaseWorker)
+		t.Fatalf("%s lost pooled ownership before worker release", description)
+	}
+
+	close(releaseWorker)
+	select {
+	case <-finishDone:
+	case <-testCtx.Done():
+		t.Fatalf("%s finisher did not join its workers: %v", description, testCtx.Err())
+	}
+	if !clientconnect.MessagePoolReturn(witnessAfterJoin) {
+		t.Fatalf("%s retained pooled ownership after worker join", description)
+	}
+}
+
+// H1 idle joins a writer that has dequeued a resident transport message.
+func TestConnectHandlerH1WorkersJoinDequeuedMessage(t *testing.T) {
+	testConnectHandlerWorkersJoinPooledOwnership(
+		t,
+		"h1 dequeued message",
+		finishH1ConnectHandlerWorkers,
+	)
+}
+
+// H3 idle joins the writer's oversized next message held between batches.
+func TestConnectHandlerH3WorkersJoinPendingMessage(t *testing.T) {
+	testConnectHandlerWorkersJoinPooledOwnership(
+		t,
+		"h3 pending message",
+		finishH3ConnectHandlerWorkers,
+	)
 }

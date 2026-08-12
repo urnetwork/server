@@ -1,6 +1,9 @@
+// Connect transports terminate client H1 WebSocket and H3 QUIC connections,
+// then expose each connection as one route to its resident client.
 package connect
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -51,9 +54,148 @@ var connectedGauge = prometheus.NewGauge(
 const AllowOnlyIpv4 = false
 
 const (
+	connectH1WriteBatchMaxMessageCount = 8
 	connectH3WriteBatchMaxMessageCount = 16
 	connectH3WriteBatchMaxByteCount    = 64 * 1024
 )
+
+// Narrows Gorilla's writer to the operations shared by production and the
+// deterministic ready-batch ownership tests.
+type connectH1WebSocketWriter interface {
+	SetWriteDeadline(deadline time.Time) error
+	WriteMessage(messageType int, data []byte) error
+}
+
+// Brackets one ready-only byte batch above the connection's TLS boundary.
+type connectH1WriteBatch interface {
+	BeginWriteBatch()
+	AbortWriteBatch()
+	FlushWriteBatch() error
+}
+
+// Returns the batching boundary only when Gorilla retained the connection
+// installed at hijack. The explicit nil check prevents a failed assertion's
+// typed nil pointer from becoming a non-nil interface.
+func connectH1WriteBatchForConn(conn net.Conn) connectH1WriteBatch {
+	writeBatchConn, ok := conn.(*connect.WebSocketWriteBatchConn)
+	if !ok || writeBatchConn == nil {
+		return nil
+	}
+	return writeBatchConn
+}
+
+// Preserves the original HTTP response behavior while replacing only the
+// connection returned to Gorilla after the WebSocket hijack.
+type connectH1BatchResponseWriter struct {
+	http.ResponseWriter
+}
+
+// Delegates the hijack and inserts the shared pass-through batching wrapper.
+func (self *connectH1BatchResponseWriter) Hijack() (
+	net.Conn,
+	*bufio.ReadWriter,
+	error,
+) {
+	hijacker, ok := self.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("connect response writer does not support hijacking")
+	}
+	conn, readWriter, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return connect.NewWebSocketWriteBatchConn(conn), readWriter, nil
+}
+
+// Writes one user frame immediately, plus at most seven more frames already
+// queued at the same instant. Every dequeued pooled buffer is returned after
+// the terminal flush; successful accounting is published only after that
+// flush reaches the delegated connection.
+func writeConnectH1UserReadyBatch(
+	ctx context.Context,
+	writer connectH1WebSocketWriter,
+	writeBatch connectH1WriteBatch,
+	receive <-chan []byte,
+	firstMessage []byte,
+	firstOpen bool,
+	writeTimeout time.Duration,
+	onSent func(ByteCount),
+) (open bool, err error) {
+	if !firstOpen {
+		return false, nil
+	}
+
+	var messageStorage [connectH1WriteBatchMaxMessageCount][]byte
+	messageStorage[0] = firstMessage
+	messageCount := 1
+	open = true
+	if writeBatch != nil {
+	drainReady:
+		for messageCount < len(messageStorage) {
+			select {
+			case <-ctx.Done():
+				open = false
+				break drainReady
+			case message, nextOpen := <-receive:
+				if !nextOpen {
+					open = false
+					break drainReady
+				}
+				messageStorage[messageCount] = message
+				messageCount += 1
+			default:
+				break drainReady
+			}
+		}
+	}
+	defer func() {
+		for _, message := range messageStorage[:messageCount] {
+			connect.MessagePoolReturn(message)
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return false, nil
+	default:
+	}
+
+	if err = writer.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return open, err
+	}
+	if writeBatch != nil {
+		writeBatch.BeginWriteBatch()
+	}
+
+	var sentByteCounts [connectH1WriteBatchMaxMessageCount]ByteCount
+	sentCount := 0
+	for _, message := range messageStorage[:messageCount] {
+		if len(message) <= 16 {
+			glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
+			continue
+		}
+		if err = writer.WriteMessage(websocket.BinaryMessage, message); err != nil {
+			if writeBatch != nil {
+				writeBatch.AbortWriteBatch()
+			}
+			return open, err
+		}
+		sentByteCounts[sentCount] = ByteCount(len(message))
+		sentCount += 1
+	}
+	if writeBatch != nil {
+		if err = writeBatch.FlushWriteBatch(); err != nil {
+			writeBatch.AbortWriteBatch()
+			return open, err
+		}
+	}
+	if onSent != nil {
+		for _, sentByteCount := range sentByteCounts[:sentCount] {
+			onSent(sentByteCount)
+		}
+	}
+	return open, nil
+}
 
 // var serviceTransitionTime = time.Now().Add(30 * time.Second)
 
@@ -117,6 +259,45 @@ type ConnectHandlerSettings struct {
 	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
+}
+
+// Joins all per-connection workers before their handler releases shared state.
+type connectHandlerWorkers struct {
+	workers sync.WaitGroup
+}
+
+// Starts one owned per-connection worker.
+func (self *connectHandlerWorkers) start(run func()) {
+	self.workers.Add(1)
+	go server.HandleError(func() {
+		defer self.workers.Done()
+		run()
+	})
+}
+
+// Waits until every started worker has returned its local ownership.
+func (self *connectHandlerWorkers) wait() {
+	self.workers.Wait()
+}
+
+// Stops H1 connection resources before joining every worker that can retain a
+// dequeued resident message.
+func finishH1ConnectHandlerWorkers(workers *connectHandlerWorkers, stop func()) {
+	stop()
+	workers.wait()
+}
+
+// Stops H3 stream resources before joining the writer's pending batch owner
+// and every other per-stream worker.
+func finishH3ConnectHandlerWorkers(workers *connectHandlerWorkers, stop func()) {
+	stop()
+	workers.wait()
+}
+
+// Joins final connection registration cleanup before handler idle can expose
+// the model and database as safe to tear down.
+func finishConnectionAnnounce(announce *ConnectionAnnounce) {
+	announce.CloseAndWait()
 }
 
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
@@ -351,9 +532,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// 		glog.Infof("[t]handle cancel: %s\n", server.ErrorJson(r, debug.Stack()))
 	// 	}
 	// }
-	defer handleCancel()
+	var requestWorkers connectHandlerWorkers
+	defer func() {
+		handleCancel()
+		requestWorkers.wait()
+	}()
 
-	go server.HandleError(func() {
+	requestWorkers.start(func() {
 		defer handleCancel()
 		select {
 		case <-r.Context().Done():
@@ -446,7 +631,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		WriteBufferSize: 4 * 1024,
 	}
 
-	ws, err := upgrader.Upgrade(w, r, nil)
+	batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
+	ws, err := upgrader.Upgrade(batchResponseWriter, r, nil)
 	if err != nil {
 		return
 	}
@@ -552,7 +738,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			testConfig,
 			&self.settings.ConnectionAnnounceSettings,
 		)
-		defer announce.Close()
+		defer finishConnectionAnnounce(announce)
 
 		residentTransport := NewResidentTransport(
 			handleCtx,
@@ -560,19 +746,21 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientId,
 			instanceId,
 		)
-		go server.HandleError(func() {
+		var workers connectHandlerWorkers
+		defer finishH1ConnectHandlerWorkers(&workers, func() {
+			handleCancel()
+			residentTransport.Close()
+			ws.Close()
+		})
+		workers.start(func() {
 			defer handleCancel()
 			residentTransport.Run()
-			// close is done in the write
 		})
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 
-		go server.HandleError(func() {
-			defer func() {
-				handleCancel()
-				residentTransport.Close()
-			}()
+		workers.start(func() {
+			defer handleCancel()
 
 			readTimer := time.NewTimer(0)
 			defer readTimer.Stop()
@@ -658,21 +846,28 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 
-		go server.HandleError(func() {
+		workers.start(func() {
 			defer handleCancel()
 
-			write := func(message []byte) error {
-				ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-				err := ws.WriteMessage(websocket.BinaryMessage, message)
-				connect.MessagePoolReturn(message)
+			recordWriteError := func(err error) {
+				// A WebSocket deadline or partial write is terminal; the Transfer
+				// sequence retries each logical message over a replacement route.
+				if connectionId := announce.ConnectionId(); connectionId != nil {
+					model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
+				}
+			}
+			write := func(message []byte, returnToPool bool) error {
+				if returnToPool {
+					defer connect.MessagePoolReturn(message)
+				}
+				err := ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+				if err == nil {
+					err = ws.WriteMessage(websocket.BinaryMessage, message)
+				}
 				if err != nil {
-					// note that for websocket a deadline timeout cannot be recovered
-					if connectionId := announce.ConnectionId(); connectionId != nil {
-						model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
-					}
+					recordWriteError(err)
 					return err
 				}
-				// reliability tracking
 				announce.SendMessage(ByteCount(len(message)))
 				if glog.V(2) {
 					glog.Infof("[ts] ->%s\n", clientId)
@@ -680,16 +875,28 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 
+			writeBatchConn := connectH1WriteBatchForConn(ws.UnderlyingConn())
 			writeUser := func(message []byte, ok bool) bool {
-				if !ok {
+				open, err := writeConnectH1UserReadyBatch(
+					handleCtx,
+					ws,
+					writeBatchConn,
+					residentTransport.receive,
+					message,
+					ok,
+					self.settings.WriteTimeout,
+					func(sentByteCount ByteCount) {
+						announce.SendMessage(sentByteCount)
+						if glog.V(2) {
+							glog.Infof("[ts] ->%s\n", clientId)
+						}
+					},
+				)
+				if err != nil {
+					recordWriteError(err)
 					return false
 				}
-				if len(message) <= 16 {
-					glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
-					connect.MessagePoolReturn(message)
-					return true
-				}
-				return write(message) == nil
+				return open
 			}
 
 			// speed test state: when non-zero, the writer is driving a speed
@@ -720,7 +927,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					}
 					mathrand.Read(chunk)
 					chunkCopy := connect.MessagePoolCopy(chunk)
-					if write(chunkCopy) != nil {
+					if write(chunkCopy, true) != nil {
 						return
 					}
 					speedTestChunksRemaining -= 1
@@ -728,26 +935,22 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						stopMessage := connect.MessagePoolGet(5)
 						stopMessage[0] = connect.TransportControlSpeedStop
 						binary.BigEndian.PutUint32(stopMessage[1:5], speedTestId)
-						if write(stopMessage) != nil {
+						if write(stopMessage, true) != nil {
 							return
 						}
 					}
-					// non-blocking drain of user traffic so it flows alongside
-					// the chunks without starving chunk progress
-				drainUser:
-					for {
-						select {
-						case <-handleCtx.Done():
+					// One bounded ready batch lets user traffic progress without
+					// postponing the next speed chunk under a continuous backlog.
+					select {
+					case <-handleCtx.Done():
+						return
+					case <-residentTransport.Done():
+						return
+					case message, ok := <-residentTransport.receive:
+						if !writeUser(message, ok) {
 							return
-						case <-residentTransport.Done():
-							return
-						case message, ok := <-residentTransport.receive:
-							if !writeUser(message, ok) {
-								return
-							}
-						default:
-							break drainUser
 						}
+					default:
 					}
 					continue
 				}
@@ -774,31 +977,15 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					}
 
 				case <-pingTimer.C:
-					ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-					err := ws.WriteMessage(websocket.BinaryMessage, make([]byte, 0))
-					if err != nil {
-						// note that for websocket a dealine timeout cannot be recovered
-						if connectionId := announce.ConnectionId(); connectionId != nil {
-							model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
-						}
+					if write(make([]byte, 0), false) != nil {
 						return
 					}
-					// reliability tracking
-					announce.SendMessage(0)
 				case latencyTest := <-announce.PendingLatencyTest:
 					if announce.SendLatency(latencyTest) {
 						message := latencyTest.TestId.Bytes()
-						ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-						err := ws.WriteMessage(websocket.BinaryMessage, message)
-						if err != nil {
-							// note that for websocket a dealine timeout cannot be recovered
-							if connectionId := announce.ConnectionId(); connectionId != nil {
-								model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
-							}
+						if write(message, false) != nil {
 							return
 						}
-						// reliability tracking
-						announce.SendMessage(model.ByteCount(len(message)))
 					}
 				case speedTest := <-announce.PendingSpeedTest:
 					// client should echo control values and packets in speed test mode.
@@ -811,7 +998,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						startMessage := connect.MessagePoolGet(5)
 						startMessage[0] = connect.TransportControlSpeedStart
 						binary.BigEndian.PutUint32(startMessage[1:5], speedTest.TestId)
-						if write(startMessage) != nil {
+						if write(startMessage, true) != nil {
 							return
 						}
 						speedTestId = speedTest.TestId
@@ -1007,9 +1194,14 @@ func withObservedConnectQuicAuthFrame(
 
 func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
-	defer handleCancel()
+	var connectionWorkers connectHandlerWorkers
+	defer func() {
+		handleCancel()
+		conn.CloseWithError(0, "")
+		connectionWorkers.wait()
+	}()
 
-	go server.HandleError(func() {
+	connectionWorkers.start(func() {
 		defer handleCancel()
 		select {
 		case <-conn.Context().Done():
@@ -1131,7 +1323,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			V0TestConfig(),
 			&self.settings.ConnectionAnnounceSettings,
 		)
-		defer announce.Close()
+		defer finishConnectionAnnounce(announce)
 
 		residentTransport := NewResidentTransport(
 			handleCtx,
@@ -1139,12 +1331,18 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			clientId,
 			instanceId,
 		)
-		go server.HandleError(func() {
+		var workers connectHandlerWorkers
+		defer finishH3ConnectHandlerWorkers(&workers, func() {
+			handleCancel()
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+			residentTransport.Close()
+		})
+		workers.start(func() {
 			defer handleCancel()
 			residentTransport.Run()
-			// close is done in the write
 		})
-		go server.HandleError(func() {
+		workers.start(func() {
 			defer handleCancel()
 			select {
 			case <-handleCtx.Done():
@@ -1154,11 +1352,8 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 
-		go server.HandleError(func() {
-			defer func() {
-				handleCancel()
-				residentTransport.Close()
-			}()
+		workers.start(func() {
+			defer handleCancel()
 
 			readTimer := time.NewTimer(0)
 			defer readTimer.Stop()
@@ -1201,7 +1396,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 		})
 
-		go server.HandleError(func() {
+		workers.start(func() {
 			defer handleCancel()
 
 			writeUserBatch := func(

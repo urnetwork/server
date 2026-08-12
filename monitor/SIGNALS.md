@@ -1270,6 +1270,11 @@ redeploy. Editing services.yml alone does nothing until the units are regenerate
 9. panels empty while `/api/health`, the ui, and login are all 200 → shared
    datasource row port drift (11.11): compare the provisioned datasource url to
    the port mimir is actually listening on for that host.
+10. the lb intermittently 504s / a fraction of requests hang while the rest are
+    fast, and ONE host also shows memberlist `i/o timeout` to every peer → that
+    host's conntrack table is full (11.12): `sysctl net.netfilter.nf_conntrack_count`
+    vs `_max`. Check this BEFORE anything grafana-specific — the container is a
+    victim, not the cause, and every other symptom here is downstream of it.
 
 ### 11.10 grafana.yml `{{ env: }}` → fleet-wide startup panic (2026-08-11)
 A config value may thread `{{ env:KEY }}`, but the KEYs live in settings.yml
@@ -1329,6 +1334,48 @@ docker exec $c grep -A1 warp-mimir /run/warp-grafana/provisioning/datasources/lo
   read routes are unauthenticated (same trust as the loopback child listeners
   the datasources dialed before), and the lan binding is reachable from every
   routed host.
+
+### 11.12 conntrack table full after a reboot → host-wide packet loss (2026-08-12)
+Presents as grafana "down": the lb returns intermittent 504 and ~1 in 6 requests
+hangs past 12s while the other five answer in 0.26s. It is NOT a grafana bug —
+one host is dropping packets for **every** new connection, and grafana is just
+the loudest victim.
+```
+sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max   # count == max
+dmesg -T | grep 'table full'          # nf_conntrack: table full, dropping packet
+grep conntrack /etc/sysctl.conf       # says 1048576 — but the RUNNING value is 262144
+uptime -s                             # the split falls exactly on boot time
+```
+- DECISIVE READ: **`/etc/sysctl.conf` says 1048576 while the running value is
+  262144.** The config is right and un-applied. 262144 = the module's own default
+  (65536 buckets x 4), so that exact number means "nobody ever set this".
+- MECHANISM: `net.netfilter.*` keys only exist once `nf_conntrack` is loaded. At
+  boot nothing loads it until docker configures nat, which is *after*
+  systemd-sysctl has already applied sysctl.conf — so the key silently no-ops
+  (systemd-sysctl still exits `0/SUCCESS`; there is no error to find) and the
+  module later comes up at its default. **Every reboot reverted it until the
+  next ansible run.** The ansible path always worked because the playbooks
+  modprobe first, which is why the fleet looked fine for months.
+- Compare across hosts before blaming the app — the correlation is the proof:
+  the four hosts booted before 2026-08-11 02:35 ran 1048576; the two booted
+  after (fireside 22:41, edge-3 02:14) ran 262144. Only edge-3 carried enough
+  traffic to actually fill it (peer edge-1 idles at 180k).
+- Symptom set is wide and misleading: loki/mimir memberlist gossip fails
+  `dial tcp <peer>:6492/6493: i/o timeout` to every peer, mimir queries return
+  `fetched_series_count=0`, ping drops 50-100%, and even ssh to the box drops
+  commands. `i/o timeout` (not `connection refused`) is the tell — packets are
+  dropped, not rejected. Partial rather than total loss = slots briefly freeing.
+- Do NOT chase the NIC. Check `ethtool`/`ip -s link` once to clear it and move
+  on: on edge-3 the link was 10Gb/s full duplex with 0 carrier and 0 TX errors,
+  and `rx_missed 10816 / 2.2B` packets is noise. ARP was clean too (every peer
+  agreed on the MAC, no duplicate IP), and INPUT policy was ACCEPT with no rules.
+- IMMEDIATE FIX (safe, instant, no restart — just realizes the host's own
+  declared config): `sudo sysctl -w net.netfilter.nf_conntrack_max=1048576`
+- PERMANENT FIX 2026-08-12: the playbooks now write
+  `/etc/modules-load.d/nf-conntrack.conf`, and `systemd-sysctl.service` is
+  ordered `After=systemd-modules-load.service`, so sysctl.conf applies on every
+  boot. Applied to playbook-{edges,dbs,redis-clusters,subtensor}.yml — all four
+  had the identical defect.
 
 ---
 

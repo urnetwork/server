@@ -155,7 +155,7 @@ func TestConnectionAnnounceDrainExcuse(t *testing.T) {
 				case <-time.After(150 * time.Millisecond):
 				}
 			}
-			announceCancel()
+			announce.CloseAndWait()
 
 			minBlock = blockNumber(startTime) - 1
 			maxBlock = blockNumber(server.NowUtc()) + 1

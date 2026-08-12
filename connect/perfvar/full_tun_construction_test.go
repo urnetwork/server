@@ -86,13 +86,13 @@ func TestFullTunConstructionOwnerRollbackClosesIndependentResourcesAfterError(t 
 		cleanupCounts,
 		expectedResources,
 	)
-	poolOutstandingAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
+	poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
 	if !poolBalanced {
 		t.Fatalf(
 			"independent cleanup message-pool ownership did not reconcile: %d -> %d classes=%v",
 			poolOutstandingBefore,
-			poolOutstandingAfter,
-			routeMessagePoolOutstandingClasses(),
+			poolSnapshotAfter.outstanding,
+			poolSnapshotAfter.classes,
 		)
 	}
 }
@@ -476,14 +476,14 @@ func TestFullTunConstructionRollbackClosesEveryAcquisitionStage(t *testing.T) {
 				)
 				environment.close()
 				environmentClosed = true
-				poolOutstandingAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
+				poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
 				if !poolBalanced {
 					t.Fatalf(
 						"%s message-pool ownership did not reconcile: %d -> %d classes=%v",
 						testCase.name,
 						poolOutstandingBefore,
-						poolOutstandingAfter,
-						routeMessagePoolOutstandingClasses(),
+						poolSnapshotAfter.outstanding,
+						poolSnapshotAfter.classes,
 					)
 				}
 			}()
@@ -613,14 +613,14 @@ func testFullTunConstructionReadyRouteRollback(
 		)
 		environment.close()
 		environmentClosed = true
-		poolOutstandingAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
+		poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
 		if !poolBalanced {
 			t.Fatalf(
 				"ready route %s message-pool ownership did not reconcile: %d -> %d classes=%v",
 				route,
 				poolOutstandingBefore,
-				poolOutstandingAfter,
-				routeMessagePoolOutstandingClasses(),
+				poolSnapshotAfter.outstanding,
+				poolSnapshotAfter.classes,
 			)
 		}
 	})
@@ -759,13 +759,13 @@ func TestFullTunConstructionRollbackContinuesAfterCleanupError(t *testing.T) {
 		)
 		environment.close()
 		environmentClosed = true
-		poolOutstandingAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
+		poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
 		if !poolBalanced {
 			t.Fatalf(
 				"cleanup error aggregation message-pool ownership did not reconcile: %d -> %d classes=%v",
 				poolOutstandingBefore,
-				poolOutstandingAfter,
-				routeMessagePoolOutstandingClasses(),
+				poolSnapshotAfter.outstanding,
+				poolSnapshotAfter.classes,
 			)
 		}
 	})

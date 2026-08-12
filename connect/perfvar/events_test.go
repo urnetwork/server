@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1122,50 +1121,67 @@ func TestFullTunExchangeH3LossCorrectness(t *testing.T) {
 	testFullTunImpairmentCorrectness(t, fullTunRouteExchangeH3, "loss-10bp", 4201)
 }
 
-// Fast P2P retains exact inner TCP at its current 1,500-byte outer-path target.
-func TestFullTunP2pFastMtuCorrectness(t *testing.T) {
-	testFullTunImpairmentCorrectness(t, fullTunRouteP2pFast, "mtu-1500", 4202)
-}
-
 // Exchange H3 discovers a 1,280-byte outer path without corrupting inner TCP.
 func TestFullTunExchangeH3MtuCorrectness(t *testing.T) {
 	testFullTunImpairmentCorrectness(t, fullTunRouteExchangeH3, "mtu-1280", 4203)
 }
 
-// This opt-in diagnostic pins the currently observed P2P fast-path MTU
-// limitation without making an intentionally failing network condition part
-// of the ordinary correctness suite. It should be updated when the carrier
-// learns a smaller path MTU or lowers its fragment payload.
-func TestFullTunP2pFastMtuBlackholeDetection(t *testing.T) {
-	if os.Getenv("CONNECT_PERFVAR_FAILURE_PROBE") != "1" {
-		return
-	}
+// One exact fast-P2P MTU fixture requires both inner TCP delivery and direct
+// carrier evidence that no submitted datagram exceeded the selected path.
+func testFullTunP2pFastMtuCorrectness(
+	t *testing.T,
+	profileName string,
+	seed int64,
+) {
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		profile := allNetworkProfiles(4204)["mtu-blackhole-1280"]
+		profile := allNetworkProfiles(seed)[profileName]
 		environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, true)
-		cleanProfile := allNetworkProfiles(4204)["clean-lan"]
+		cleanProfile := allNetworkProfiles(seed)["clean-lan"]
 		environment.accessProfile = cleanProfile
 		environment.providerAccessProfile = cleanProfile
 		environment.deviceAccessProfile = cleanProfile
 		path := newFullTunPath(ctx, t, environment, fullTunRouteP2pFast)
-		_, transferErr := measureFullTunUpload(ctx, path, 128*1024)
+		result, transferErr := measureFullTunUpload(ctx, path, 128*1024)
 		snapshot := path.p2pNetwork.snapshot()
+		verifyErr := path.verifyRoute()
 		path.close()
 		environment.close()
 		cancel()
-		if transferErr == nil {
-			t.Fatal("P2P fast MTU blackhole unexpectedly completed; update the documented limitation")
+		if transferErr != nil {
+			t.Fatalf("P2P fast %s path: %v", profileName, transferErr)
 		}
-		if snapshot.MtuDropCount == 0 || snapshot.MaximumPacketByteCount <= 1280 {
-			t.Fatalf("P2P MTU failure was not attributable to oversized datagrams: %+v", snapshot)
+		if verifyErr != nil {
+			t.Fatal(verifyErr)
 		}
-		t.Logf(
-			"[perfvar] expected P2P MTU-blackhole failure error=%v mtu-drops=%d maximum-packet-bytes=%d",
-			transferErr,
-			snapshot.MtuDropCount,
-			snapshot.MaximumPacketByteCount,
-		)
+		if result.UsefulByteCount != 128*1024 || result.ContentHash == "" {
+			t.Fatalf("P2P fast %s result=%+v", profileName, result)
+		}
+		if snapshot.MtuDropCount != 0 ||
+			uint64(profile.Forward.OuterMtu) < snapshot.MaximumPacketByteCount {
+			t.Fatalf(
+				"P2P fast carrier exceeded %d-byte path: %+v",
+				profile.Forward.OuterMtu,
+				snapshot,
+			)
+		}
 	})
+}
+
+// Fast P2P retains exact inner TCP on an ordinary 1,500-byte outer path.
+func TestFullTunP2pFastMtuCorrectness(t *testing.T) {
+	testFullTunP2pFastMtuCorrectness(t, "mtu-1500", 4202)
+}
+
+// The serial PERFVAR regression retains exact inner TCP on the 1,400-byte
+// outer path that exposed the oversized 1,472-byte carrier fragment.
+func TestFullTunP2pFastMtu1400Correctness(t *testing.T) {
+	testFullTunP2pFastMtuCorrectness(t, "mtu-1400", 4205)
+}
+
+// Fast P2P fragments below IPv6's minimum outer MTU, so a 1,280-byte path
+// carries exact inner TCP without a carrier drop.
+func TestFullTunP2pFastIpv6MinimumMtuCorrectness(t *testing.T) {
+	testFullTunP2pFastMtuCorrectness(t, "mtu-1280", 4204)
 }

@@ -311,7 +311,6 @@ func allNetworkProfiles(seed int64) map[string]networkProfile {
 			rateBitsPerSecond := rateMegabits * 1_000_000
 			for _, link := range []*linkProfile{forward, reverse} {
 				link.RateBitsPerSecond = rateBitsPerSecond
-				link.QueueByteCount = bandwidthDelayQueue(rateBitsPerSecond, 50*time.Millisecond)
 			}
 		})
 	}
@@ -410,6 +409,46 @@ func TestFocusedReorderProfilesChangeOnlyReorder(t *testing.T) {
 	}
 }
 
+// Each rate variation retains the non-limiting clean queue and every other
+// control field, so observed loss cannot come from the separate queue axis.
+func TestFocusedRateProfilesChangeOnlyRate(t *testing.T) {
+	const seed = 20260810
+	profiles := allNetworkProfiles(seed)
+	clean := initialNetworkProfiles(seed)["clean-lan"]
+	for _, rateMegabits := range []int64{10, 50, 100, 300, 1000, 2500} {
+		name := fmt.Sprintf("rate-%dmbps", rateMegabits)
+		actual, ok := profiles[name]
+		if !ok {
+			t.Errorf("missing profile %q", name)
+			continue
+		}
+		want := clean
+		want.Name = name
+		want.SourceNote = "synthetic focused variation"
+		want.Forward.RateBitsPerSecond = rateMegabits * 1_000_000
+		want.Reverse.RateBitsPerSecond = rateMegabits * 1_000_000
+		if actual != want {
+			t.Errorf("profile %q changed a field outside rate: actual=%+v want=%+v", name, actual, want)
+		}
+	}
+}
+
+// A no-drop profile cannot advertise a token-bucket burst larger than the
+// queue that must own those immediately conforming bytes.
+func TestProfileValidationRejectsNoDropQueueBelowAdvertisedBurst(t *testing.T) {
+	profile := initialNetworkProfiles(20260810)["clean-lan"]
+	profile.Forward.QueueByteCount = profile.Forward.BurstByteCount - 1
+	err := profile.validate()
+	want := fmt.Sprintf(
+		"forward no-drop queue bytes %d cannot own advertised burst bytes %d",
+		profile.Forward.QueueByteCount,
+		profile.Forward.BurstByteCount,
+	)
+	if err == nil || err.Error() != want {
+		t.Fatalf("no-drop burst validation err=%v want=%q", err, want)
+	}
+}
+
 // Focused profile identities are deterministic and distinct across axis values.
 func TestFocusedJitterAndReorderProfileHashes(t *testing.T) {
 	profiles := allNetworkProfiles(20260810)
@@ -471,6 +510,14 @@ func (self networkProfile) validate() error {
 		}
 		if profile.BurstByteCount <= 0 || profile.QueueByteCount <= 0 || profile.QueuePacketCount <= 0 {
 			return fmt.Errorf("%s queue and burst bounds must be positive", direction)
+		}
+		if !profile.AllowQueueDrops && profile.QueueByteCount < profile.BurstByteCount {
+			return fmt.Errorf(
+				"%s no-drop queue bytes %d cannot own advertised burst bytes %d",
+				direction,
+				profile.QueueByteCount,
+				profile.BurstByteCount,
+			)
 		}
 		if profile.BaseDelay < 0 || profile.Jitter < 0 || profile.ProcessingDelay < 0 {
 			return fmt.Errorf("%s delay values must not be negative", direction)

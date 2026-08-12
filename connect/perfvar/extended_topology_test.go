@@ -2159,13 +2159,13 @@ func (self *splitExchangeEnvironment) close() {
 		}
 	}
 	self.network.close()
-	poolOutstandingAfter, poolBalanced := routeMessagePoolBalance(self.poolOutstandingBefore)
+	poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(self.poolOutstandingBefore)
 	if !poolBalanced {
 		self.t.Errorf(
 			"split exchange message-pool ownership did not reconcile: %d -> %d classes=%v",
 			self.poolOutstandingBefore,
-			poolOutstandingAfter,
-			routeMessagePoolOutstandingClasses(),
+			poolSnapshotAfter.outstanding,
+			poolSnapshotAfter.classes,
 		)
 	}
 }

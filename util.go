@@ -262,12 +262,22 @@ func ToSdkId(id Id) *sdk.Id {
 
 type PostFunction = func() any
 
-func RunPosts(ctx context.Context, posts ...PostFunction) {
+// Runs every post generation and joins already-admitted work before returning
+// on cancellation. The optional hook is nil in production and lets a test hold
+// the exact canceled-worker join boundary.
+func runPosts(
+	ctx context.Context,
+	beforeCanceledWorkersWaitForTest func(),
+	posts ...PostFunction,
+) {
 	for 0 < len(posts) {
 		// run all posts in parallel
 		next := make(chan any)
+		var workerGroup sync.WaitGroup
 		for _, post := range posts {
+			workerGroup.Add(1)
 			go HandleError(func() {
+				defer workerGroup.Done()
 				success := false
 				defer func() {
 					if !success {
@@ -289,6 +299,10 @@ func RunPosts(ctx context.Context, posts ...PostFunction) {
 		for range len(posts) {
 			select {
 			case <-ctx.Done():
+				if beforeCanceledWorkersWaitForTest != nil {
+					beforeCanceledWorkersWaitForTest()
+				}
+				workerGroup.Wait()
 				return
 			case r := <-next:
 				if r != nil {
@@ -301,6 +315,13 @@ func RunPosts(ctx context.Context, posts ...PostFunction) {
 				}
 			}
 		}
+		workerGroup.Wait()
 		posts = nextPosts
 	}
+}
+
+// Runs post functions generation-by-generation until completion or context
+// cancellation, joining every post that began before the cancellation edge.
+func RunPosts(ctx context.Context, posts ...PostFunction) {
+	runPosts(ctx, nil, posts...)
 }

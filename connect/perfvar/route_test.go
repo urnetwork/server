@@ -97,32 +97,43 @@ func (self *routeAsyncLifecycle) closeAndWait(ctx context.Context) bool {
 	}
 }
 
+// A route pool snapshot keeps its aggregate and class attribution from the
+// same set of class observations.
+type routeMessagePoolSnapshot struct {
+	outstanding int64
+	classes     map[int]int64
+}
+
+// Capturing the class observations before the optional test callback makes a
+// return immediately after capture unable to tear aggregate from attribution.
+func captureRouteMessagePoolSnapshot(afterCapture func()) routeMessagePoolSnapshot {
+	classStats := clientconnect.GetMessagePoolClassStats()
+	if afterCapture != nil {
+		afterCapture()
+	}
+	snapshot := routeMessagePoolSnapshot{classes: map[int]int64{}}
+	for _, stats := range classStats {
+		classOutstanding := int64(stats.Taken) - int64(stats.Returned)
+		snapshot.outstanding += classOutstanding
+		if classOutstanding != 0 {
+			snapshot.classes[stats.Size] = classOutstanding
+		}
+	}
+	return snapshot
+}
+
 // The process-wide pool counter exposes checked-out ownership independently
 // of the bounded free lists retained for reuse.
 func routeMessagePoolOutstanding() int64 {
-	poolTaken, poolReturned, _ := clientconnect.MessagePoolCounts()
-	return int64(poolTaken) - int64(poolReturned)
-}
-
-// Per-class ownership makes a failed balance gate actionable without enabling
-// expensive pool tags for the performance process.
-func routeMessagePoolOutstandingClasses() map[int]int64 {
-	outstanding := map[int]int64{}
-	for _, stats := range clientconnect.GetMessagePoolClassStats() {
-		classOutstanding := int64(stats.Taken) - int64(stats.Returned)
-		if classOutstanding != 0 {
-			outstanding[stats.Size] = classOutstanding
-		}
-	}
-	return outstanding
+	return captureRouteMessagePoolSnapshot(nil).outstanding
 }
 
 // Pool reconciliation is sampled only after every fixture worker has joined.
 // A mismatch fails at that exact lifecycle barrier instead of polling a
 // process-global counter until unrelated activity can make it look balanced.
-func routeMessagePoolBalance(poolOutstandingBefore int64) (int64, bool) {
-	poolOutstandingAfter := routeMessagePoolOutstanding()
-	return poolOutstandingAfter, poolOutstandingAfter == poolOutstandingBefore
+func routeMessagePoolBalance(poolOutstandingBefore int64) (routeMessagePoolSnapshot, bool) {
+	poolSnapshotAfter := captureRouteMessagePoolSnapshot(nil)
+	return poolSnapshotAfter, poolSnapshotAfter.outstanding == poolOutstandingBefore
 }
 
 // An outstanding fixture buffer must fail at the first lifecycle barrier; a
@@ -130,11 +141,11 @@ func routeMessagePoolBalance(poolOutstandingBefore int64) (int64, bool) {
 func TestRouteMessagePoolBalanceUsesExactSnapshot(t *testing.T) {
 	poolOutstandingBefore := routeMessagePoolOutstanding()
 	message := clientconnect.MessagePoolGet(1)
-	poolOutstandingAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
-	if poolBalanced || poolOutstandingAfter != poolOutstandingBefore+1 {
+	poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(poolOutstandingBefore)
+	if poolBalanced || poolSnapshotAfter.outstanding != poolOutstandingBefore+1 {
 		t.Fatalf(
 			"outstanding pool buffer reported (%d,%t), want (%d,false)",
-			poolOutstandingAfter,
+			poolSnapshotAfter.outstanding,
 			poolBalanced,
 			poolOutstandingBefore+1,
 		)
@@ -142,13 +153,58 @@ func TestRouteMessagePoolBalanceUsesExactSnapshot(t *testing.T) {
 	if !clientconnect.MessagePoolReturn(message) {
 		t.Fatal("exact pool witness was not returned")
 	}
-	poolOutstandingAfter, poolBalanced = routeMessagePoolBalance(poolOutstandingBefore)
-	if !poolBalanced || poolOutstandingAfter != poolOutstandingBefore {
+	poolSnapshotAfter, poolBalanced = routeMessagePoolBalance(poolOutstandingBefore)
+	if !poolBalanced || poolSnapshotAfter.outstanding != poolOutstandingBefore {
 		t.Fatalf(
 			"returned pool buffer reported (%d,%t), want (%d,true)",
-			poolOutstandingAfter,
+			poolSnapshotAfter.outstanding,
 			poolBalanced,
 			poolOutstandingBefore,
+		)
+	}
+}
+
+// A return immediately after capture must not erase the captured buffer's
+// class while leaving it present in the aggregate diagnostic.
+func TestRouteMessagePoolSnapshotKeepsAggregateAndClassAttributionTogether(t *testing.T) {
+	poolSnapshotBefore := captureRouteMessagePoolSnapshot(nil)
+	classStats := clientconnect.GetMessagePoolClassStats()
+	if len(classStats) == 0 {
+		t.Fatal("message pool has no size classes")
+	}
+	message := clientconnect.MessagePoolGet(1)
+	messageReturned := false
+	poolSnapshotAfter := captureRouteMessagePoolSnapshot(func() {
+		messageReturned = clientconnect.MessagePoolReturn(message)
+	})
+	if !messageReturned {
+		t.Fatal("snapshot witness was not returned")
+	}
+	if poolSnapshotAfter.outstanding != poolSnapshotBefore.outstanding+1 {
+		t.Fatalf(
+			"captured outstanding=%d, want %d",
+			poolSnapshotAfter.outstanding,
+			poolSnapshotBefore.outstanding+1,
+		)
+	}
+	classSize := classStats[0].Size
+	if poolSnapshotAfter.classes[classSize] != poolSnapshotBefore.classes[classSize]+1 {
+		t.Fatalf(
+			"captured class[%d]=%d, want %d; before=%v after=%v",
+			classSize,
+			poolSnapshotAfter.classes[classSize],
+			poolSnapshotBefore.classes[classSize]+1,
+			poolSnapshotBefore.classes,
+			poolSnapshotAfter.classes,
+		)
+	}
+	poolSnapshotReturned := captureRouteMessagePoolSnapshot(nil)
+	if poolSnapshotReturned.outstanding != poolSnapshotBefore.outstanding {
+		t.Fatalf(
+			"returned witness outstanding=%d, want %d; classes=%v",
+			poolSnapshotReturned.outstanding,
+			poolSnapshotBefore.outstanding,
+			poolSnapshotReturned.classes,
 		)
 	}
 }
@@ -332,8 +388,7 @@ func newRouteEnvironmentWithNetworkPeersAfterPoolBaseline(
 	enableNetworkPeers bool,
 	afterPoolBaseline func(),
 ) *routeEnvironment {
-	poolOutstandingBefore := routeMessagePoolOutstanding()
-	poolOutstandingClassesBefore := routeMessagePoolOutstandingClasses()
+	poolSnapshotBefore := captureRouteMessagePoolSnapshot(nil)
 	if afterPoolBaseline != nil {
 		afterPoolBaseline()
 	}
@@ -519,8 +574,8 @@ func newRouteEnvironmentWithNetworkPeersAfterPoolBaseline(
 		extenderErrors:               make(chan error, 32),
 		announces:                    announces,
 		controls:                     newRouteAsyncLifecycle(),
-		poolOutstandingBefore:        poolOutstandingBefore,
-		poolOutstandingClassesBefore: poolOutstandingClassesBefore,
+		poolOutstandingBefore:        poolSnapshotBefore.outstanding,
+		poolOutstandingClassesBefore: poolSnapshotBefore.classes,
 	}
 }
 
@@ -1226,14 +1281,14 @@ func (self *routeEnvironment) close() {
 		self.t.Errorf("route exchange did not become idle")
 	}
 	self.network.close()
-	poolOutstandingAfter, poolBalanced := routeMessagePoolBalance(self.poolOutstandingBefore)
+	poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(self.poolOutstandingBefore)
 	if !poolBalanced {
 		self.t.Errorf(
 			"route message-pool ownership did not reconcile: %d -> %d classes=%v -> %v",
 			self.poolOutstandingBefore,
-			poolOutstandingAfter,
+			poolSnapshotAfter.outstanding,
 			self.poolOutstandingClassesBefore,
-			routeMessagePoolOutstandingClasses(),
+			poolSnapshotAfter.classes,
 		)
 	}
 }

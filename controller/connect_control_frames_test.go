@@ -152,19 +152,21 @@ func TestConnectControlFramesProcessesEveryFrame(t *testing.T) {
 	})
 }
 
-// TestConnectControlFramesTeardownPanicPropagates covers the other half of the
-// batch's error handling: WHICH failures may be swallowed.
+// TestConnectControlFramesCanceledContextPanicPropagates covers the other half
+// of the batch's error handling: which failures may be converted to errors.
 //
-// The model layer raises db failures as panics. A panic while this resident's
-// context is cancelled is a teardown race — the frame must stay UN-acked so
-// the sender's resend re-applies it against a healthy resident, so the panic
-// must propagate. (A live-context panic is instead reported as that frame's
-// error, so one poison frame cannot kill its siblings; that path is covered by
-// the batch test above, which relies on siblings surviving a failure.)
+// The model layer raises db failures as panics. A panic under a canceled caller
+// context belongs to that caller's lifecycle boundary and must propagate. A
+// live-context panic is instead reported as that frame's error, so one poison
+// frame cannot kill its siblings; that path is covered by the batch test above,
+// which relies on siblings surviving a failure. Resident controllers keep
+// their context live until admitted Client callbacks join, and Client isolates
+// registered application callback panics; this unit contract is not a transfer
+// ACK or resend signal.
 //
-// Without the ctx check the teardown panic is converted to an error, the pack
-// is acked, and the operation is lost for good.
-func TestConnectControlFramesTeardownPanicPropagates(t *testing.T) {
+// Without the ctx check cancellation is misclassified as an ordinary live
+// control-frame failure.
+func TestConnectControlFramesCanceledContextPanicPropagates(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -185,7 +187,7 @@ func TestConnectControlFramesTeardownPanicPropagates(t *testing.T) {
 			ConnectControlFrames(cancelCtx, server.NewId(), frames, connect.DefaultContractManagerSettings())
 		}()
 		if !panicked {
-			t.Fatal("a teardown-race panic must propagate so the pack stays un-acked and the sender resends; swallowing it loses the operation")
+			t.Fatal("a canceled-context panic was converted to an ordinary control-frame error")
 		}
 	})
 }

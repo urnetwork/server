@@ -21,12 +21,52 @@ import (
 
 	"maps"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
 )
+
+// taskPanicError converts a recovered task panic into the task's error.
+//
+// `server.IsDoneError` already classifies torn-down-connection pg panics
+// ("context canceled", "failed to deallocate cached statement(s)") as an
+// expected shutdown pattern, and `server.HandleError` drops them silently.
+// The task layer saw the same class and did the opposite — a multi-KB
+// "Unhandled:" blob with a full stack on every occurrence — because the
+// recover here runs BEFORE HandleError ever sees the panic, so that
+// classification never applied. Keep the failure itself loud (the task still
+// errors, reschedules, and names its cause) and drop only the stack for the
+// already-benign class; V(1) restores it when someone is debugging.
+func taskPanicError(r any) error {
+	if server.IsDoneError(r) {
+		if glog.V(1) {
+			return fmt.Errorf("Interrupted: %s", server.ErrorJson(r, debug.Stack()))
+		}
+		return fmt.Errorf("Interrupted: %v", r)
+	}
+	return fmt.Errorf("Unhandled: %s", server.ErrorJson(r, debug.Stack()))
+}
+
+// orphanedRunPostCounter counts RunPost tasks whose finished_task row was
+// reaped before the post ran. These used to reschedule forever; they now
+// complete as a no-op, and this is the only remaining signal that post
+// processing was skipped.
+var orphanedRunPostCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "task",
+		Name:      "run_post_orphaned_total",
+		Help:      "RunPost tasks completed as a no-op because their finished_task row was reaped",
+	},
+)
+
+func init() {
+	prometheus.MustRegister(orphanedRunPostCounter)
+}
 
 // the task system captures work that needs to be done to advance the platform
 // tasks have work and post-work that can atomically schedule new tasks
@@ -1042,7 +1082,7 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 
 	defer func() {
 		if r := recover(); r != nil {
-			returnErr = fmt.Errorf("Unhandled: %s", server.ErrorJson(r, debug.Stack()))
+			returnErr = taskPanicError(r)
 		}
 	}()
 
@@ -1131,7 +1171,7 @@ func (self *TaskTarget[T, R]) RunPost(
 
 	defer func() {
 		if r := recover(); r != nil {
-			returnErr = fmt.Errorf("Unhandled: %s", server.ErrorJson(r, debug.Stack()))
+			returnErr = taskPanicError(r)
 		}
 	}()
 
@@ -1416,8 +1456,21 @@ func (self *TaskWorker) RunPost(
 	finishedTasks := GetFinishedTasks(clientSession.Ctx, runPost.TaskId)
 	finishedTask, ok := finishedTasks[runPost.TaskId]
 	if !ok {
-		returnErr = errors.New("Finished task not found.")
-		return
+		// The finished_task row is gone, and it is never coming back:
+		// RunPost is scheduled in the same tx that writes the row, so the
+		// only way to observe its absence is `RemoveFinishedTasks` having
+		// reaped it (which it does unconditionally past postErrorMinTime, so
+		// a repeatedly-failing post "cannot strand forever"). Erroring here
+		// rescheduled the orphan against a row that will never return, so the
+		// reap traded a stranded finished_task for a pending_task that
+		// retries until the end of time. Complete instead — there is no post
+		// work to do — and count it. RunPostPost's UPDATE matches zero rows
+		// and succeeds, so the orphan clears.
+		orphanedRunPostCounter.Inc()
+		if glog.V(1) {
+			glog.Infof("[task]run post orphaned: finished task %s was reaped\n", runPost.TaskId)
+		}
+		return &RunPostResult{}, nil
 	}
 
 	// attach the finished task function name and args (%w keeps the error

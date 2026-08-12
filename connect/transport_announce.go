@@ -1,3 +1,5 @@
+// Connection announcements own connection registration, measurement, and the
+// final model cleanup for one accepted client transport.
 package connect
 
 import (
@@ -150,6 +152,8 @@ func (self *TestConfig) AllowSpeed() bool {
 	return 0 < self.MaxSpeedCount
 }
 
+// Owns the asynchronous model registration and all measurement children for
+// one transport. Close is nonjoining; the handler owner uses CloseAndWait.
 type ConnectionAnnounce struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -194,6 +198,13 @@ type ConnectionAnnounce struct {
 	testConfig         *TestConfig
 	PendingLatencyTest chan *LatencyTest
 	PendingSpeedTest   chan *SpeedTest
+
+	workerStateLock sync.Mutex
+	workerClosing   bool
+	workerGroup     sync.WaitGroup
+	done            chan struct{}
+
+	beforeWorkersWaitForTest func()
 }
 
 func NewConnectionAnnounceWithDefaults(
@@ -243,6 +254,7 @@ func NewConnectionAnnounce(
 		passiveWindowStartTime: time.Now(),
 		PendingLatencyTest:     make(chan *LatencyTest),
 		PendingSpeedTest:       make(chan *SpeedTest),
+		done:                   make(chan struct{}),
 	}
 	lifecycleStarted := settings.LifecycleStarted
 	lifecycleDone := settings.LifecycleDone
@@ -250,6 +262,7 @@ func NewConnectionAnnounce(
 		lifecycleStarted()
 	}
 	go func() {
+		defer close(announce.done)
 		if lifecycleDone != nil {
 			defer lifecycleDone()
 		}
@@ -258,8 +271,43 @@ func NewConnectionAnnounce(
 	return announce
 }
 
+// Starts one child only while the announcement lifecycle still accepts work.
+func (self *ConnectionAnnounce) startWorker(run func()) bool {
+	self.workerStateLock.Lock()
+	defer self.workerStateLock.Unlock()
+	if self.workerClosing {
+		return false
+	}
+	self.workerGroup.Add(1)
+	go server.HandleError(func() {
+		defer self.workerGroup.Done()
+		run()
+	}, self.cancel)
+	return true
+}
+
+// Closes child admission before joining every previously admitted worker.
+func (self *ConnectionAnnounce) closeWorkersAndWait() {
+	self.workerStateLock.Lock()
+	self.workerClosing = true
+	self.workerStateLock.Unlock()
+	if self.beforeWorkersWaitForTest != nil {
+		self.beforeWorkersWaitForTest()
+	}
+	self.workerGroup.Wait()
+}
+
+// Runs registration until cancellation, then joins every child before the
+// uncanceled final model cleanup. Completion is published only after cleanup.
 func (self *ConnectionAnnounce) run() {
-	defer self.cancel()
+	var cleanup func()
+	defer func() {
+		self.cancel()
+		self.closeWorkersAndWait()
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
 
 	if 0 < self.announceTimeout {
 		model.SetPendingNetworkClientConnection(self.ctx, self.clientId, self.announceTimeout+5*time.Second)
@@ -329,7 +377,7 @@ func (self *ConnectionAnnounce) run() {
 	verifyEgressIp, verifyEgressOk := model.ParseVerifyEgressIp(self.clientAddress)
 	if verifyEgressOk {
 		model.FeedVerifyEgress(self.ctx, self.clientId, verifyEgressIp, verifySettings)
-		go server.HandleError(func() {
+		self.startWorker(func() {
 			for {
 				select {
 				case <-self.ctx.Done():
@@ -338,20 +386,22 @@ func (self *ConnectionAnnounce) run() {
 				}
 				model.FeedVerifyEgress(self.ctx, self.clientId, verifyEgressIp, verifySettings)
 			}
-		}, self.cancel)
+		})
 	}
 
-	defer server.HandleError(func() {
-		// note use an uncanceled context for cleanup
-		cleanupCtx := context.Background()
-		model.DisconnectNetworkClient(cleanupCtx, connectionId)
-		if verifyEgressOk {
-			model.ClearVerifyEgress(cleanupCtx, self.clientId, verifyEgressIp, verifySettings)
-		}
-		if glog.V(1) {
-			glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
-		}
-	})
+	cleanup = func() {
+		server.HandleError(func() {
+			// note use an uncanceled context for cleanup
+			cleanupCtx := context.Background()
+			model.DisconnectNetworkClient(cleanupCtx, connectionId)
+			if verifyEgressOk {
+				model.ClearVerifyEgress(cleanupCtx, self.clientId, verifyEgressIp, verifySettings)
+			}
+			if glog.V(1) {
+				glog.Infof("[t][%s]disconnect client\n", hex.EncodeToString(clientAddressHash[:]))
+			}
+		})
+	}
 
 	self.setConnectionId(connectionId)
 	func() {
@@ -388,7 +438,7 @@ func (self *ConnectionAnnounce) run() {
 
 	// continuously measure the passive speed of the connection.
 	// active traffic proves the connection speed without a synthetic test.
-	go server.HandleError(func() {
+	self.startWorker(func() {
 		for {
 			select {
 			case <-self.ctx.Done():
@@ -397,7 +447,7 @@ func (self *ConnectionAnnounce) run() {
 			}
 			self.samplePassiveSpeed()
 		}
-	}, self.cancel)
+	})
 
 	nextTestTime := server.NowUtc().Add(self.settings.MaxTestTimeout)
 	nextTest := func() time.Duration {
@@ -646,8 +696,17 @@ func (self *ConnectionAnnounce) allowSyntheticSpeedWithLock() bool {
 	return true
 }
 
+// Requests shutdown without waiting for model cleanup. Internal callbacks may
+// use this; the external connection owner must use CloseAndWait.
 func (self *ConnectionAnnounce) Close() {
 	self.cancel()
+}
+
+// Cancels the announcement and joins registration, child workers, and final
+// model cleanup. It must be called by the external connection owner.
+func (self *ConnectionAnnounce) CloseAndWait() {
+	self.cancel()
+	<-self.done
 }
 
 func (self *ConnectionAnnounce) nextLatency() {
@@ -659,7 +718,7 @@ func (self *ConnectionAnnounce) nextLatency() {
 		defer self.stateLock.Unlock()
 		self.latencyTest = latencyTest
 	}()
-	go server.HandleError(func() {
+	self.startWorker(func() {
 		select {
 		case <-self.ctx.Done():
 		case self.PendingLatencyTest <- latencyTest:
@@ -759,7 +818,7 @@ func (self *ConnectionAnnounce) nextSpeed() {
 		self.speedTestId += 1
 		self.speedTest = speedTest
 	}()
-	go server.HandleError(func() {
+	self.startWorker(func() {
 		select {
 		case <-self.ctx.Done():
 		case self.PendingSpeedTest <- speedTest:
@@ -785,7 +844,7 @@ func (self *ConnectionAnnounce) ReceiveSpeed(speedTest *SpeedTest) (success bool
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 
-		if self.speedTest != nil && self.speedTest.TestId == speedTest.TestId && self.speedTest.TotalByteCount == speedTest.TotalByteCount {
+		if speedTest != nil && self.speedTest != nil && self.speedTest.TestId == speedTest.TestId && self.speedTest.TotalByteCount == speedTest.TotalByteCount {
 			testMillis := model.ByteCount((receiveTime.Sub(self.speedTestSendTime) + time.Millisecond/2) / time.Millisecond)
 			bytesPerSecond := (1000*speedTest.TotalByteCount + testMillis/2) / testMillis
 

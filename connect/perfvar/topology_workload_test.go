@@ -358,7 +358,7 @@ func measureFullTunUDPDirection(
 		if !ok || !path.deviceNoAckSends.waitThrough(ctx, registrationBoundary) {
 			return workloadResult{}, fmt.Errorf("join UDP provider registration source: %w", ctx.Err())
 		}
-		if err := path.waitForPostWorkloadBoundary(ctx); err != nil {
+		if err := path.waitForSetupBoundary(ctx); err != nil {
 			return workloadResult{}, fmt.Errorf("join UDP provider registration: %w", err)
 		}
 		carrierMeasurementStart, err := beginPerfvarCarrierMeasurement(path)
@@ -580,7 +580,7 @@ func measureFullTunUDPDirection(
 	if failureCount := sourceTracker.failures() - sourceFailureCountBefore; failureCount != 0 {
 		return workloadResult{}, fmt.Errorf("UDP source had %d asynchronous route-write failures", failureCount)
 	}
-	if err := path.waitForPostWorkloadBoundary(ctx); err != nil {
+	if err := path.waitForIntermediateWorkloadBoundary(ctx); err != nil {
 		return workloadResult{}, fmt.Errorf("join UDP measured packets: %w", err)
 	}
 	markerAttemptCount := 0
@@ -685,7 +685,7 @@ func measureFullTunUDPDirection(
 				return workloadResult{}, fmt.Errorf("after UDP terminal carrier %d: %w", markerAttemptCount, err)
 			}
 		}
-		if err := path.waitForPostWorkloadBoundary(ctx); err != nil {
+		if err := path.waitForIntermediateWorkloadBoundary(ctx); err != nil {
 			return workloadResult{}, fmt.Errorf(
 				"join marker %d: %w",
 				markerAttemptCount,

@@ -85,6 +85,7 @@ type fullTunPath struct {
 	preparedCarrierStart    *perfvarCarrierBoundary
 	carrierMeasurementStart *perfvarCarrierBoundary
 	carrierMeasurementEnd   *perfvarCarrierBoundary
+	activePackFailureFloor  *perfvarPackFailureCounts
 	carrierFencePackets     int
 	readinessAppFence       atomic.Bool
 	// Nil test seams can hold or drop an exact terminal-marker attempt.
@@ -95,6 +96,8 @@ type fullTunPath struct {
 	afterUdpTerminalReceiptForTest      func(bool)
 	beforeWarmedTcpAckForTest           func(context.Context, bool) error
 	beforeWarmedTcpMeasuredForTest      func(bool)
+	readinessProbePayloadForTest        []byte
+	beforeReadinessClientWriteForTest   func()
 	beforeReadinessServerCloseForTest   func()
 	beforeWorkloadServerCloseForTest    func()
 	workloadFlowServerSettingsForTest   *logicalTCPFlowServerSettings
@@ -639,12 +642,34 @@ func TestNoAckSendTrackerCloseIsSafeWithHeldObserver(t *testing.T) {
 func (self *fullTunPath) setCarrierMeasurementStart(boundary perfvarCarrierBoundary) {
 	self.measurementLock.Lock()
 	self.carrierMeasurementStart = &boundary
+	packFailureFloor := boundary.packFailures
+	self.activePackFailureFloor = &packFailureFloor
 	// A setup or warmup join can publish an earlier generic end. Starting the
 	// measured interval invalidates that end while retaining an explicit end
 	// published later by the workload.
 	self.carrierMeasurementEnd = nil
 	self.carrierFencePackets = 0
 	self.measurementLock.Unlock()
+}
+
+// Standard workloads pass their start boundary directly to the observer, so
+// their failure epoch is activated when that prepared boundary is consumed.
+func (self *fullTunPath) setActivePackFailureFloor(boundary perfvarCarrierBoundary) {
+	self.measurementLock.Lock()
+	packFailureFloor := boundary.packFailures
+	self.activePackFailureFloor = &packFailureFloor
+	self.measurementLock.Unlock()
+}
+
+// Ownership-only tests and setup joins may run without an active measurement.
+func (self *fullTunPath) activePackFailureFloorSnapshot() (*perfvarPackFailureCounts, bool) {
+	self.measurementLock.Lock()
+	defer self.measurementLock.Unlock()
+	if self.activePackFailureFloor == nil {
+		return nil, false
+	}
+	packFailureFloor := *self.activePackFailureFloor
+	return &packFailureFloor, true
 }
 
 // The performance observer consumes a workload-specific start at most once.
@@ -2917,6 +2942,64 @@ func fullTunClientSettings(
 		settings.ReadTimeout = max(settings.ReadTimeout, allowance)
 		settings.BufferTimeout = max(settings.BufferTimeout, allowance)
 		settings.ControlPingTimeout = max(settings.ControlPingTimeout, allowance)
+		// The detector instruments the nested transfer and Pion workers too.
+		// Raising only Client's outer queue deadlines left their production
+		// 15-second route writes and stream probes able to retire a healthy
+		// generated exit while one instrumented contract acquisition was still
+		// running. These are fixture-only liveness guards; exact test ordering
+		// continues to come from lifecycle barriers.
+		settings.SendBufferSettings.AckTimeout = max(
+			settings.SendBufferSettings.AckTimeout,
+			allowance,
+		)
+		settings.SendBufferSettings.WriteTimeout = max(
+			settings.SendBufferSettings.WriteTimeout,
+			allowance,
+		)
+		settings.ReceiveBufferSettings.GapTimeout = max(
+			settings.ReceiveBufferSettings.GapTimeout,
+			allowance,
+		)
+		settings.ReceiveBufferSettings.IdleTimeout = max(
+			settings.ReceiveBufferSettings.IdleTimeout,
+			allowance,
+		)
+		settings.ReceiveBufferSettings.MaxPeerAuditDuration = max(
+			settings.ReceiveBufferSettings.MaxPeerAuditDuration,
+			allowance,
+		)
+		settings.ReceiveBufferSettings.WriteTimeout = max(
+			settings.ReceiveBufferSettings.WriteTimeout,
+			allowance,
+		)
+		settings.ForwardBufferSettings.WriteTimeout = max(
+			settings.ForwardBufferSettings.WriteTimeout,
+			allowance,
+		)
+		p2pSettings := settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings
+		p2pSettings.WriteTimeout = max(p2pSettings.WriteTimeout, allowance)
+		p2pSettings.ReadTimeout = max(p2pSettings.ReadTimeout, allowance)
+		p2pSettings.ConnectTimeout = max(p2pSettings.ConnectTimeout, allowance)
+		p2pSettings.AdmissionRetryTimeout = max(
+			p2pSettings.AdmissionRetryTimeout,
+			allowance,
+		)
+		p2pSettings.EndToEndProbeTimeout = max(
+			p2pSettings.EndToEndProbeTimeout,
+			allowance,
+		)
+		settings.WebRtcSettings.DisconnectedTimeout = max(
+			settings.WebRtcSettings.DisconnectedTimeout,
+			allowance,
+		)
+		settings.WebRtcSettings.FailedTimeout = max(
+			settings.WebRtcSettings.FailedTimeout,
+			allowance,
+		)
+		settings.WebRtcSettings.SctpNoProgressTimeout = max(
+			settings.WebRtcSettings.SctpNoProgressTimeout,
+			allowance,
+		)
 	}
 	// A measured bulk run must not stop at the deliberately small one-MiB
 	// production opening contract. Contract rollover is covered separately;
@@ -2966,6 +3049,14 @@ func fullTunMultiClientSettings(path *fullTunPath) *clientconnect.MultiClientSet
 		settings.BlackholeConnectComparativeTimeout = 0
 		settings.WindowGeneratorTimeout = max(
 			settings.WindowGeneratorTimeout,
+			allowance,
+		)
+		// The initial-ping evaluation belongs to its expand pass. Race
+		// instrumentation must enlarge that pass boundary along with PingTimeout;
+		// otherwise the correct terminal cleanup cancels a healthy candidate at
+		// the unchanged production 15-second deadline.
+		settings.WindowExpandTimeout = max(
+			settings.WindowExpandTimeout,
 			allowance,
 		)
 		settings.StatsWindowMaxUnhealthyDuration = max(
@@ -3697,6 +3788,9 @@ func probeFullTunPath(
 	// turning an extreme-RTT measurement into a test of one tiny delayed TCP
 	// write. Web-like tiny exchanges are measured as their own workload.
 	payload := append([]byte(nil), deterministicPayload()[:fullTunProbePayloadByteCount]...)
+	if path.readinessProbePayloadForTest != nil {
+		payload = append([]byte(nil), path.readinessProbePayloadForTest...)
+	}
 	server := newReadinessEchoServer(
 		listener,
 		payload,
@@ -3745,6 +3839,9 @@ func probeFullTunPath(
 		connection.Close()
 		return failure("set readiness deadline", err)
 	}
+	if path.beforeReadinessClientWriteForTest != nil {
+		path.beforeReadinessClientWriteForTest()
+	}
 	writeStartTime := time.Now()
 	if err := writeFullTunAll(connection, payload); err != nil {
 		connection.Close()
@@ -3787,6 +3884,13 @@ func primeFullTunP2p(
 ) error {
 	if err := probeFullTunPath(ctx, path); err != nil {
 		return err
+	}
+	// The successful application response does not synchronously finish the
+	// inner TCP close. Join its source, Pack, and carrier tail before changing
+	// contract policy or disabling the exchange route; otherwise a late FIN or
+	// ACK can cross the route transition and lose every accepting writer.
+	if _, err := path.joinSourcePackCarrierBoundary(ctx); err != nil {
+		return fmt.Errorf("join exchange discovery probe tail: %w", err)
 	}
 	observedCtx, observedCancel := context.WithTimeout(ctx, 90*time.Second)
 	observedClient, observedErr := waitForCurrentGeneratedDeviceClient(
@@ -3908,8 +4012,11 @@ func primeFullTunP2p(
 			providerDelta,
 		)
 	}
-	if !path.waitForCarrierQuiescent(ctx) {
-		return fmt.Errorf("join forced one-hop P2P probe carrier: %w", ctx.Err())
+	// Carrier queues alone are not an application boundary: the inner TCP
+	// close can publish another Pack after they look empty. Join the complete
+	// source-to-carrier generation before construction publishes RouteReady.
+	if _, err := path.joinSourcePackCarrierBoundary(ctx); err != nil {
+		return fmt.Errorf("join forced one-hop P2P probe tail: %w", err)
 	}
 	return nil
 }
@@ -3924,6 +4031,12 @@ func primeFullTunStreamP2p(
 ) error {
 	if err := probeFullTunPath(ctx, path); err != nil {
 		return err
+	}
+	// A stream promotion has the same exchange-carried discovery tail as a
+	// one-hop route. Join it before publishing destinations or disabling any
+	// platform writer used by that tail.
+	if _, err := path.joinSourcePackCarrierBoundary(ctx); err != nil {
+		return fmt.Errorf("join exchange stream discovery probe tail: %w", err)
 	}
 	observedCtx, observedCancel := context.WithTimeout(ctx, 90*time.Second)
 	observedClient, observedErr := waitForCurrentGeneratedDeviceClient(
@@ -4049,19 +4162,11 @@ func primeFullTunStreamP2p(
 			path.providerRemoteNat.PacketStats(),
 		)
 	}
-	if _, stage, ok := path.waitForPackAndCarrierTerminalIdle(promotionCtx); !ok {
+	if _, err := path.joinSourcePackCarrierBoundary(promotionCtx); err != nil {
 		return fmt.Errorf(
-			"join promoted stream probe at %s: %w; device-pack={invalid=%t started=%d failures=%d samples=%+v} provider-pack={invalid=%t started=%d failures=%d samples=%+v} hops=%+v",
-			stage,
-			promotionCtx.Err(),
-			path.devicePackSends.invalid.Load(),
-			path.devicePackSends.started.Load(),
-			path.devicePackSends.failures.Load(),
-			path.devicePackSends.failureSnapshot(),
-			path.providerPackSends.invalid.Load(),
-			path.providerPackSends.started.Load(),
-			path.providerPackSends.failures.Load(),
-			path.providerPackSends.failureSnapshot(),
+			"join promoted stream probe tail: %w; stats=%+v hops=%+v",
+			err,
+			streamStatsSnapshots(),
 			path.streamP2pNetwork.snapshot(),
 		)
 	}
@@ -4136,6 +4241,13 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 	for _, sendRoutes := range self.platformSendRoutes {
 		sendRoutes.setDisabled(false)
 	}
+	// Closing the application TUN stops bridge admission. Join the bridge
+	// before flushing or closing its multi-client consumer so every pooled
+	// packet read before Close has one live ownership handoff or local return.
+	self.bridgeWaitGroup.Wait()
+	if self.bridgeStarted {
+		complete(fullTunConstructionResourceBridge, nil)
+	}
 	if self.deviceClient != nil {
 		if deviceClient := self.deviceClient.Load(); deviceClient != nil {
 			deviceClient.Flush()
@@ -4144,10 +4256,6 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 	if self.multiClient != nil {
 		self.multiClient.Close()
 		complete(fullTunConstructionResourceMultiClient, nil)
-	}
-	self.bridgeWaitGroup.Wait()
-	if self.bridgeStarted {
-		complete(fullTunConstructionResourceBridge, nil)
 	}
 	if self.apiGenerator != nil {
 		complete(
@@ -4170,10 +4278,9 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 		complete(fullTunConstructionResourceProviderLocalNat, nil)
 	}
 	if self.providerClient != nil {
-		self.providerClient.Flush()
 		complete(
 			fullTunConstructionResourceProviderClient,
-			self.providerClient.CloseAndWait(ctx),
+			closeClientAndOutOfBandWait(ctx, self.providerClient),
 		)
 	}
 	if self.providerTransport != nil {
@@ -4270,20 +4377,29 @@ func (self *fullTunPath) waitForCarrierQuiescent(ctx context.Context) bool {
 }
 
 // The route-wide post-workload fixed point begins above SendPack, then joins
-// exact Pack terminals and carrier quiescence. A stable owned Pion socket
-// backlog may remain; its candidate end is accepted only when second source,
-// Pack, and carrier generations are unchanged.
+// exact IP data Pack terminals and carrier quiescence. Reliable signaling and
+// maintenance remain in all-Pack diagnostics but do not own the application
+// boundary. A stable owned Pion socket backlog may remain; its candidate end
+// is accepted only when second source, workload-Pack, and carrier generations
+// are unchanged.
 func (self *fullTunPath) waitForPackAndCarrierTerminalIdle(
 	ctx context.Context,
 ) (perfvarCarrierBoundary, string, bool) {
 	trackers := []*sendPackLifecycleTracker{self.devicePackSends, self.providerPackSends}
+	lastInstability := ""
+	stageAfterInstability := func(stage string) string {
+		if lastInstability == "" {
+			return stage
+		}
+		return fmt.Sprintf("%s after unstable candidate: %s", stage, lastInstability)
+	}
 	for attempt := 1; ; attempt += 1 {
 		upstreamBefore, err := self.upstreamBoundary(ctx)
 		if err != nil {
-			return perfvarCarrierBoundary{}, "capture upstream boundary", false
+			return perfvarCarrierBoundary{}, stageAfterInstability("capture upstream boundary"), false
 		}
 		if !self.waitThroughUpstreamBoundary(ctx, upstreamBefore) {
-			return perfvarCarrierBoundary{}, "join upstream boundary", false
+			return perfvarCarrierBoundary{}, stageAfterInstability("join upstream boundary"), false
 		}
 		before := make([]sendPackLifecycleBoundary, len(trackers))
 		for trackerIndex, tracker := range trackers {
@@ -4293,10 +4409,11 @@ func (self *fullTunPath) waitForPackAndCarrierTerminalIdle(
 					trackerIndex,
 				), false
 			}
-			boundary, ok := tracker.boundary(ctx)
+			boundary, ok := tracker.workloadBoundary(ctx)
 			if !ok {
 				return perfvarCarrierBoundary{}, fmt.Sprintf(
-					"capture Pack boundary %d",
+					"%s %d",
+					stageAfterInstability("capture Pack boundary"),
 					trackerIndex,
 				), false
 			}
@@ -4304,16 +4421,29 @@ func (self *fullTunPath) waitForPackAndCarrierTerminalIdle(
 		}
 		for trackerIndex, tracker := range trackers {
 			if !tracker.waitThrough(ctx, before[trackerIndex]) {
+				entryDiagnostics := make([]string, 0, len(before[trackerIndex].entries))
+				for _, entry := range before[trackerIndex].entries {
+					entryDiagnostics = append(entryDiagnostics, fmt.Sprintf(
+						"%s->%s ack=%t type=%s phase=%d",
+						entry.clientId,
+						entry.destinationId,
+						entry.ackRequired,
+						entry.messageType,
+						entry.phase.Load(),
+					))
+				}
 				return perfvarCarrierBoundary{}, fmt.Sprintf(
-					"join Pack boundary %d entries=%d started=%d",
+					"%s %d entries=%d started=%d live=%v",
+					stageAfterInstability("join Pack boundary"),
 					trackerIndex,
 					len(before[trackerIndex].entries),
 					before[trackerIndex].startedCount,
+					entryDiagnostics,
 				), false
 			}
 		}
 		if !self.waitForCarrierQuiescent(ctx) {
-			return perfvarCarrierBoundary{}, "join carrier boundary", false
+			return perfvarCarrierBoundary{}, stageAfterInstability("join carrier boundary"), false
 		}
 		carrierEnd := snapshotPerfvarCarrier(self)
 		if self.afterCarrierEndCandidateForTest != nil {
@@ -4322,48 +4452,176 @@ func (self *fullTunPath) waitForPackAndCarrierTerminalIdle(
 
 		upstreamAfter, err := self.upstreamBoundary(ctx)
 		if err != nil {
-			return perfvarCarrierBoundary{}, "recapture upstream boundary", false
+			return perfvarCarrierBoundary{}, stageAfterInstability("recapture upstream boundary"), false
 		}
-		stable := fullTunUpstreamBoundaryStable(upstreamBefore, upstreamAfter)
+		upstreamStable := fullTunUpstreamBoundaryStable(upstreamBefore, upstreamAfter)
+		packStable := true
+		packInstability := ""
 		for trackerIndex, tracker := range trackers {
-			after, ok := tracker.boundary(ctx)
+			after, ok := tracker.workloadBoundary(ctx)
 			if !ok {
 				return perfvarCarrierBoundary{}, fmt.Sprintf(
-					"recapture Pack boundary %d",
+					"%s %d",
+					stageAfterInstability("recapture Pack boundary"),
 					trackerIndex,
 				), false
 			}
 			if after.startedCount != before[trackerIndex].startedCount || 0 < len(after.entries) {
-				stable = false
+				packStable = false
+				packInstability = fmt.Sprintf(
+					"Pack tracker %d changed started=%d->%d live=%d",
+					trackerIndex,
+					before[trackerIndex].startedCount,
+					after.startedCount,
+					len(after.entries),
+				)
 			}
 		}
-		if stable && perfvarCarrierTerminalSnapshotStable(self, carrierEnd) {
+		carrierInstability := perfvarCarrierSnapshotInstability(self, carrierEnd, false)
+		if upstreamStable && packStable && carrierInstability == "" {
 			return carrierEnd, "complete", true
+		}
+		switch {
+		case !upstreamStable:
+			lastInstability = fmt.Sprintf(
+				"upstream changed bridge=%d->%d provider=%d->%d live=%d/%d",
+				upstreamBefore.bridge.startedCount,
+				upstreamAfter.bridge.startedCount,
+				upstreamBefore.provider.startedCount,
+				upstreamAfter.provider.startedCount,
+				len(upstreamAfter.bridge.entries),
+				len(upstreamAfter.provider.entries),
+			)
+		case !packStable:
+			lastInstability = packInstability
+		default:
+			lastInstability = carrierInstability
 		}
 	}
 }
 
-// waitForPostWorkloadBoundary converts the exact fixed-point result into one
-// diagnostic shared by every workload observer.
-func (self *fullTunPath) waitForPostWorkloadBoundary(ctx context.Context) error {
+// joinSourcePackCarrierBoundary returns one exact application-source-to-carrier
+// fixed point without deciding whether a caller may publish it as a
+// measurement end. Priming and workload boundaries deliberately share this
+// ownership transaction so neither can miss IP data work still above the
+// simulated carrier.
+func (self *fullTunPath) joinSourcePackCarrierBoundary(
+	ctx context.Context,
+) (perfvarCarrierBoundary, error) {
 	carrierEnd, stage, ok := self.waitForPackAndCarrierTerminalIdle(ctx)
 	if ok {
-		self.setCarrierMeasurementEndIfAbsent(carrierEnd)
-		return nil
+		return carrierEnd, nil
 	}
-	return fmt.Errorf(
-		"join post-workload Pack and carrier boundary at %s: context=%v device-invalid=%t device-started=%d device-terminal-failures=%d device-failure-samples=%+v provider-invalid=%t provider-started=%d provider-terminal-failures=%d provider-failure-samples=%+v",
+	p2pSnapshot := p2pNetworkSnapshot{}
+	if self.p2pNetwork != nil {
+		p2pSnapshot = self.p2pNetwork.snapshot()
+	}
+	streamSnapshot := []streamP2pHopSnapshot{}
+	if self.streamP2pNetwork != nil {
+		streamSnapshot = self.streamP2pNetwork.snapshot()
+	}
+	return perfvarCarrierBoundary{}, fmt.Errorf(
+		"join source, workload Pack, and carrier boundary at %s: context=%v device-invalid=%t device-workload-started=%d device-workload-terminal-failures=%d device-all-terminal-failures=%d device-failure-samples=%+v provider-invalid=%t provider-workload-started=%d provider-workload-terminal-failures=%d provider-all-terminal-failures=%d provider-failure-samples=%+v access-links=%+v p2p=%+v stream=%+v",
 		stage,
 		ctx.Err(),
 		self.devicePackSends.invalid.Load(),
-		self.devicePackSends.started.Load(),
+		self.devicePackSends.workloadStarted.Load(),
+		self.devicePackSends.workloadFailures.Load(),
 		self.devicePackSends.failures.Load(),
 		self.devicePackSends.failureSnapshot(),
 		self.providerPackSends.invalid.Load(),
-		self.providerPackSends.started.Load(),
+		self.providerPackSends.workloadStarted.Load(),
+		self.providerPackSends.workloadFailures.Load(),
 		self.providerPackSends.failures.Load(),
 		self.providerPackSends.failureSnapshot(),
+		self.environment.network.snapshotLinks(),
+		p2pSnapshot,
+		streamSnapshot,
 	)
+}
+
+// A measured interval rejects only terminal failures newer than its exact
+// workload-local start. Setup candidate failures remain before the floor.
+func (self *fullTunPath) validateMeasuredPackFailures(
+	carrierEnd perfvarCarrierBoundary,
+) error {
+	packFailureFloor, active := self.activePackFailureFloorSnapshot()
+	if !active {
+		return nil
+	}
+	packFailures := carrierEnd.packFailures
+	if packFailures.deviceFailureCount < packFailureFloor.deviceFailureCount ||
+		packFailures.providerFailureCount < packFailureFloor.providerFailureCount {
+		return fmt.Errorf(
+			"Pack failure counters moved backward: start=%+v end=%+v",
+			*packFailureFloor,
+			packFailures,
+		)
+	}
+	deviceFailureCount := packFailures.deviceFailureCount -
+		packFailureFloor.deviceFailureCount
+	providerFailureCount := packFailures.providerFailureCount -
+		packFailureFloor.providerFailureCount
+	if deviceFailureCount == 0 && providerFailureCount == 0 {
+		return nil
+	}
+	deviceFailureSamples := []clientconnect.SendPackLifecycleObservation{}
+	if self.devicePackSends != nil {
+		deviceFailureSamples = self.devicePackSends.workloadFailureSnapshot()
+	}
+	providerFailureSamples := []clientconnect.SendPackLifecycleObservation{}
+	if self.providerPackSends != nil {
+		providerFailureSamples = self.providerPackSends.workloadFailureSnapshot()
+	}
+	return fmt.Errorf(
+		"measured Pack terminal failures device=%d provider=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
+		deviceFailureCount,
+		providerFailureCount,
+		*packFailureFloor,
+		packFailures,
+		deviceFailureSamples,
+		providerFailureSamples,
+	)
+}
+
+// Workload completion joins ownership first, then applies the active failure
+// epoch without changing the shared setup/priming transaction.
+func (self *fullTunPath) joinPostWorkloadBoundary(
+	ctx context.Context,
+) (perfvarCarrierBoundary, error) {
+	carrierEnd, err := self.joinSourcePackCarrierBoundary(ctx)
+	if err != nil {
+		return perfvarCarrierBoundary{}, err
+	}
+	if err := self.validateMeasuredPackFailures(carrierEnd); err != nil {
+		return perfvarCarrierBoundary{}, err
+	}
+	return carrierEnd, nil
+}
+
+// Setup and warmup traffic is joined before its terminal failure counts are
+// captured as the next workload-local baseline.
+func (self *fullTunPath) waitForSetupBoundary(ctx context.Context) error {
+	_, err := self.joinSourcePackCarrierBoundary(ctx)
+	return err
+}
+
+// waitForPostWorkloadBoundary publishes a generic terminal end for workloads
+// whose application completion is already known at this fixed point.
+func (self *fullTunPath) waitForPostWorkloadBoundary(ctx context.Context) error {
+	carrierEnd, err := self.joinPostWorkloadBoundary(ctx)
+	if err != nil {
+		return err
+	}
+	self.setCarrierMeasurementEndIfAbsent(carrierEnd)
+	return nil
+}
+
+// waitForIntermediateWorkloadBoundary joins route ownership without freezing
+// an end before a later application-level fence, such as a UDP terminal marker.
+func (self *fullTunPath) waitForIntermediateWorkloadBoundary(ctx context.Context) error {
+	_, err := self.joinPostWorkloadBoundary(ctx)
+	return err
 }
 
 // One upstream snapshot covers traffic that has entered before its first
@@ -4400,15 +4658,100 @@ func (self *fullTunPath) waitThroughUpstreamBoundary(
 		self.providerReturns.waitLifecycleThrough(ctx, boundary.provider)
 }
 
+// Terminal bridge entries may be captured while their final map deletion is
+// pending; their atomic terminal phase proves they no longer own source work.
+func fullTunBridgeLifecycleBoundaryTerminal(
+	boundary fullTunBridgeLifecycleBoundary,
+) bool {
+	for _, entry := range boundary.entries {
+		if entry.state.Load() != fullTunBridgeSendEntryTerminal {
+			return false
+		}
+	}
+	return true
+}
+
+// Active provider flow windows intentionally retain terminal entries until
+// the workload seals the window, so terminal phase—not slice length—defines
+// whether their source ownership is complete.
+func providerReturnLifecycleBoundaryTerminal(
+	boundary providerReturnLifecycleBoundary,
+) bool {
+	for _, entry := range boundary.entries {
+		if entry.state.Load() != providerReturnSendEntryTerminal {
+			return false
+		}
+	}
+	return true
+}
+
 // A stable source generation has no new or still-live item after the carrier
-// baseline was created.
+// baseline was created. Retained terminal flow-window entries are complete.
 func fullTunUpstreamBoundaryStable(
 	before fullTunUpstreamBoundary,
 	after fullTunUpstreamBoundary,
 ) bool {
 	return before.bridge.startedCount == after.bridge.startedCount &&
 		before.provider.startedCount == after.provider.startedCount &&
-		len(after.bridge.entries) == 0 && len(after.provider.entries) == 0
+		fullTunBridgeLifecycleBoundaryTerminal(after.bridge) &&
+		providerReturnLifecycleBoundaryTerminal(after.provider)
+}
+
+// A provider download keeps its exact terminal entries until the marker closes
+// the active flow window; that retention must not prevent the pre-marker
+// route-wide terminal boundary from completing.
+func TestFullTunUpstreamBoundaryStableAcceptsRetainedTerminalProviderFlow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tracker := newProviderReturnSendTracker()
+	defer tracker.close()
+	flowKey := providerReturnTrackerTestFlow(31)
+	window, ok := tracker.beginFlowWindow(ctx, flowKey)
+	if !ok {
+		t.Fatalf("begin provider-return flow window: %v", ctx.Err())
+	}
+	observeProviderReturnStarted(tracker, 1, flowKey, 1, 800)
+	flowBoundary, ok := tracker.flowBoundary(ctx, window, 1, 800)
+	if !ok {
+		t.Fatalf("capture provider-return flow boundary: %v", ctx.Err())
+	}
+	observeProviderReturnCompleted(tracker, 1, flowKey, 1, 800, true)
+	if !tracker.waitThrough(ctx, flowBoundary) {
+		t.Fatalf("join provider-return flow boundary: %v", ctx.Err())
+	}
+	before, ok := tracker.lifecycleBoundary(ctx)
+	if !ok {
+		t.Fatalf("capture first lifecycle boundary: %v", ctx.Err())
+	}
+	after, ok := tracker.lifecycleBoundary(ctx)
+	if !ok {
+		t.Fatalf("capture second lifecycle boundary: %v", ctx.Err())
+	}
+	if len(after.entries) != 1 ||
+		after.entries[0].state.Load() != providerReturnSendEntryTerminal {
+		t.Fatalf("active flow did not retain its terminal entry: %+v", after)
+	}
+	if !fullTunUpstreamBoundaryStable(
+		fullTunUpstreamBoundary{provider: before},
+		fullTunUpstreamBoundary{provider: after},
+	) {
+		t.Fatal("retained terminal provider flow made the upstream generation unstable")
+	}
+}
+
+// An unchanged generation with a pending entry still owns work and therefore
+// cannot be accepted merely because no new source item started.
+func TestFullTunUpstreamBoundaryStableRejectsPendingProviderFlow(t *testing.T) {
+	entry := &providerReturnSendEntry{}
+	boundary := fullTunUpstreamBoundary{
+		provider: providerReturnLifecycleBoundary{
+			entries:      []*providerReturnSendEntry{entry},
+			startedCount: 1,
+		},
+	}
+	if fullTunUpstreamBoundaryStable(boundary, boundary) {
+		t.Fatal("pending provider flow was accepted as terminal")
+	}
 }
 
 // The premeasurement fixed point has no wait/begin gap: upstream sources and
@@ -4428,6 +4771,18 @@ func (self *fullTunPath) waitForMeasurementBoundary(ctx context.Context) error {
 		return failure("application readiness", errors.New("readiness fence is absent"))
 	}
 	packTrackers := []*sendPackLifecycleTracker{self.devicePackSends, self.providerPackSends}
+	packFailure := func(trackerIndex int, tracker *sendPackLifecycleTracker) error {
+		return fmt.Errorf(
+			"tracker=%d invalid=%t workload-started=%d workload-failures=%d all-started=%d all-failures=%d samples=%+v",
+			trackerIndex,
+			tracker.invalid.Load(),
+			tracker.workloadStarted.Load(),
+			tracker.workloadFailures.Load(),
+			tracker.started.Load(),
+			tracker.failures.Load(),
+			tracker.failureSnapshot(),
+		)
+	}
 	for attempt := 1; ; attempt += 1 {
 		select {
 		case <-ctx.Done():
@@ -4447,15 +4802,15 @@ func (self *fullTunPath) waitForMeasurementBoundary(ctx context.Context) error {
 			if tracker == nil {
 				return failure("capture Pack boundary", errors.New("Pack lifecycle tracker is nil"))
 			}
-			boundary, ok := tracker.boundary(ctx)
+			boundary, ok := tracker.workloadBoundary(ctx)
 			if !ok {
-				return failure("capture Pack boundary", nil)
+				return failure("capture Pack boundary", packFailure(trackerIndex, tracker))
 			}
 			packBefore[trackerIndex] = boundary
 		}
 		for trackerIndex, tracker := range packTrackers {
 			if !tracker.waitThrough(ctx, packBefore[trackerIndex]) {
-				return failure("join Pack boundary", nil)
+				return failure("join Pack boundary", packFailure(trackerIndex, tracker))
 			}
 		}
 		if !self.waitForCarrierQuiescent(ctx) {
@@ -4483,9 +4838,9 @@ func (self *fullTunPath) waitForMeasurementBoundary(ctx context.Context) error {
 		}
 		packStable := true
 		for trackerIndex, tracker := range packTrackers {
-			after, ok := tracker.boundary(ctx)
+			after, ok := tracker.workloadBoundary(ctx)
 			if !ok {
-				return failure("verify Pack generation", nil)
+				return failure("verify Pack generation", packFailure(trackerIndex, tracker))
 			}
 			if after.startedCount != packBefore[trackerIndex].startedCount ||
 				0 < len(after.entries) {
@@ -4624,11 +4979,13 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 	defaults := clientconnect.DefaultMultiClientSettings()
 	clientSettings := fullTunClientSettings(fullTunRouteP2pFast, nil, nil, nil)
 	clientDefaults := clientconnect.DefaultClientSettings()
+	p2pSettings := clientSettings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings
 	platformSettings := fullTunPlatformSettings(0, nil)
 	platformDefaults := clientconnect.DefaultPlatformTransportSettings()
 	if !perfvarRaceEnabled {
 		if settings.SendStallTimeout != defaults.SendStallTimeout ||
 			settings.BlackholeReceiveTimeout != defaults.BlackholeReceiveTimeout ||
+			settings.WindowExpandTimeout != defaults.WindowExpandTimeout ||
 			clientSettings.ReadTimeout != clientDefaults.ReadTimeout ||
 			clientSettings.BufferTimeout != clientDefaults.BufferTimeout ||
 			clientSettings.ControlPingTimeout != 10*time.Second ||
@@ -4636,9 +4993,10 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 			platformSettings.ReadTimeout != platformDefaults.ReadTimeout ||
 			platformSettings.InactiveDrainTimeout != platformDefaults.InactiveDrainTimeout {
 			t.Fatalf(
-				"ordinary route settings multi=%s/%s client=%s/%s/%s platform=%s/%s/%s",
+				"ordinary route settings multi=%s/%s/%s client=%s/%s/%s platform=%s/%s/%s",
 				settings.SendStallTimeout,
 				settings.BlackholeReceiveTimeout,
+				settings.WindowExpandTimeout,
 				clientSettings.ReadTimeout,
 				clientSettings.BufferTimeout,
 				clientSettings.ControlPingTimeout,
@@ -4657,27 +5015,59 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 		settings.BlackholeReceiveTimeout != 0 ||
 		settings.BlackholeConnectTimeout < allowance ||
 		settings.WindowGeneratorTimeout < allowance ||
+		settings.WindowExpandTimeout < allowance ||
 		settings.StatsWindowMaxUnhealthyDuration < allowance ||
 		settings.SendStallTimeout < allowance ||
 		clientSettings.ReadTimeout < fixedAllowance ||
 		clientSettings.BufferTimeout < fixedAllowance ||
 		clientSettings.ControlPingTimeout < fixedAllowance ||
+		clientSettings.SendBufferSettings.AckTimeout < fixedAllowance ||
+		clientSettings.SendBufferSettings.WriteTimeout < fixedAllowance ||
+		clientSettings.ReceiveBufferSettings.GapTimeout < fixedAllowance ||
+		clientSettings.ReceiveBufferSettings.IdleTimeout < fixedAllowance ||
+		clientSettings.ReceiveBufferSettings.MaxPeerAuditDuration < fixedAllowance ||
+		clientSettings.ReceiveBufferSettings.WriteTimeout < fixedAllowance ||
+		clientSettings.ForwardBufferSettings.WriteTimeout < fixedAllowance ||
+		p2pSettings.WriteTimeout < fixedAllowance ||
+		p2pSettings.ReadTimeout < fixedAllowance ||
+		p2pSettings.ConnectTimeout < fixedAllowance ||
+		p2pSettings.AdmissionRetryTimeout < fixedAllowance ||
+		p2pSettings.EndToEndProbeTimeout < fixedAllowance ||
+		clientSettings.WebRtcSettings.DisconnectedTimeout < fixedAllowance ||
+		clientSettings.WebRtcSettings.FailedTimeout < fixedAllowance ||
+		clientSettings.WebRtcSettings.SctpNoProgressTimeout < fixedAllowance ||
 		platformSettings.PingTimeout < fixedAllowance ||
 		platformSettings.ReadTimeout < fixedAllowance ||
 		platformSettings.InactiveDrainTimeout < fixedAllowance {
 		t.Fatalf(
-			"race route settings multi=%s/%s/%s/%s/%s/%s/%s/%s client=%s/%s/%s platform=%s/%s/%s, want path allowance=%s fixed allowance=%s and receive disabled",
+			"race route settings multi=%s/%s/%s/%s/%s/%s/%s/%s/%s client=%s/%s/%s send=%s/%s receive=%s/%s/%s/%s forward=%s p2p=%s/%s/%s/%s/%s webrtc=%s/%s/%s platform=%s/%s/%s, want path allowance=%s fixed allowance=%s and receive disabled",
 			settings.PingTimeout,
 			settings.AckTimeout,
 			settings.BlackholeTimeout,
 			settings.BlackholeReceiveTimeout,
 			settings.BlackholeConnectTimeout,
 			settings.WindowGeneratorTimeout,
+			settings.WindowExpandTimeout,
 			settings.StatsWindowMaxUnhealthyDuration,
 			settings.SendStallTimeout,
 			clientSettings.ReadTimeout,
 			clientSettings.BufferTimeout,
 			clientSettings.ControlPingTimeout,
+			clientSettings.SendBufferSettings.AckTimeout,
+			clientSettings.SendBufferSettings.WriteTimeout,
+			clientSettings.ReceiveBufferSettings.GapTimeout,
+			clientSettings.ReceiveBufferSettings.IdleTimeout,
+			clientSettings.ReceiveBufferSettings.MaxPeerAuditDuration,
+			clientSettings.ReceiveBufferSettings.WriteTimeout,
+			clientSettings.ForwardBufferSettings.WriteTimeout,
+			p2pSettings.WriteTimeout,
+			p2pSettings.ReadTimeout,
+			p2pSettings.ConnectTimeout,
+			p2pSettings.AdmissionRetryTimeout,
+			p2pSettings.EndToEndProbeTimeout,
+			clientSettings.WebRtcSettings.DisconnectedTimeout,
+			clientSettings.WebRtcSettings.FailedTimeout,
+			clientSettings.WebRtcSettings.SctpNoProgressTimeout,
 			platformSettings.PingTimeout,
 			platformSettings.ReadTimeout,
 			platformSettings.InactiveDrainTimeout,
@@ -5616,7 +6006,7 @@ func measureFullTunUploadWithWarmupAndStartHook(
 			return workloadResult{}, contextBoundWorkloadError(ctx, err)
 		}
 	}
-	if err := path.waitForPostWorkloadBoundary(ctx); err != nil {
+	if err := path.waitForSetupBoundary(ctx); err != nil {
 		return workloadResult{}, fmt.Errorf("join upload setup/warmup boundary: %w", err)
 	}
 	carrierMeasurementStart, err := beginPerfvarCarrierMeasurement(path)
@@ -5890,7 +6280,7 @@ func measureFullTunDownloadWithWarmup(
 			return workloadResult{}, ctx.Err()
 		}
 	}
-	if err := path.waitForPostWorkloadBoundary(ctx); err != nil {
+	if err := path.waitForSetupBoundary(ctx); err != nil {
 		return workloadResult{}, fmt.Errorf("join download setup/warmup boundary: %w", err)
 	}
 	carrierMeasurementStart, err := beginPerfvarCarrierMeasurement(path)
@@ -6135,7 +6525,8 @@ func TestFullTunWarmedTCPWaitsForFinalWarmupPackTerminal(t *testing.T) {
 					tracker = path.providerPackSends
 				}
 				tracker.setBeforeTerminalReleaseForTest(func(
-					clientconnect.SendPackLifecycleObservation,
+					_ *sendPackLifecycleEntry,
+					_ clientconnect.SendPackLifecycleObservation,
 				) {
 					holdOnce.Do(func() {
 						close(terminalHeld)

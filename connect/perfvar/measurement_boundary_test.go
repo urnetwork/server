@@ -4,11 +4,14 @@ package perfvar
 
 import (
 	"context"
+	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
 	clientconnect "github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 )
 
 // A minimal route retains every lifecycle object used by the fixed point but
@@ -19,6 +22,31 @@ type fullTunMeasurementBoundaryTestFixture struct {
 	network  *simulatedIPNetwork
 	path     *fullTunPath
 	packEnds []*sendPackLifecycleTracker
+}
+
+// Publishes one complete failed Pack attempt through the same ordered observer
+// stream used by generated production Clients.
+func observeFailedSendPackLifecycle(tracker *sendPackLifecycleTracker, token uint64) {
+	observer := tracker.newObserver()
+	observation := clientconnect.SendPackLifecycleObservation{
+		ClientId:      clientconnect.NewId(),
+		DestinationId: clientconnect.NewId(),
+		Token:         token,
+		AckRequired:   true,
+		MessageType:   protocol.MessageType_IpIpPacketToProvider,
+	}
+	for _, phase := range []clientconnect.SendPackLifecyclePhase{
+		clientconnect.SendPackLifecyclePhaseStarted,
+		clientconnect.SendPackLifecyclePhaseFirstRouteWrite,
+		clientconnect.SendPackLifecyclePhaseTerminal,
+	} {
+		observation.Phase = phase
+		observation.Err = nil
+		if phase == clientconnect.SendPackLifecyclePhaseTerminal {
+			observation.Err = errors.New("deterministic Pack failure")
+		}
+		observer(observation)
+	}
 }
 
 // Construction starts empty source and Pack owners with a positive readiness
@@ -71,6 +99,135 @@ func requirePreparedCarrierStart(
 	}
 	if !perfvarCarrierGenerationStable(fixture.path, boundary) {
 		t.Fatal("prepared carrier generation was not stable at consumption")
+	}
+}
+
+// The observed P2P stall was one ExchangeSignals Pack at first route write
+// after application readiness. It is independent reliable control work: the
+// workload fixed point must complete, while the all-Pack diagnostic boundary
+// must retain that exact signal until its own terminal disposition.
+func TestFullTunMeasurementBoundaryIgnoresUnackedReliableSignaling(t *testing.T) {
+	fixture := newFullTunMeasurementBoundaryTestFixture()
+	defer fixture.close()
+	observer := fixture.path.devicePackSends.newObserver()
+	signal := clientconnect.SendPackLifecycleObservation{
+		ClientId:      clientconnect.NewId(),
+		DestinationId: clientconnect.NewId(),
+		Token:         1,
+		AckRequired:   true,
+		MessageType:   protocol.MessageType_TransferExchangeSignals,
+	}
+	for _, phase := range []clientconnect.SendPackLifecyclePhase{
+		clientconnect.SendPackLifecyclePhaseStarted,
+		clientconnect.SendPackLifecyclePhaseFirstRouteWrite,
+	} {
+		observation := signal
+		observation.Phase = phase
+		observer(observation)
+	}
+	allBoundary, ok := fixture.path.devicePackSends.boundary(fixture.ctx)
+	if !ok || len(allBoundary.entries) != 1 {
+		t.Fatalf("capture live signaling diagnostic boundary: %+v", allBoundary)
+	}
+
+	if err := fixture.path.waitForMeasurementBoundary(fixture.ctx); err != nil {
+		t.Fatalf("live reliable signaling blocked workload start: %v", err)
+	}
+	if _, err := beginPerfvarCarrierMeasurement(fixture.path); err != nil {
+		t.Fatalf("consume signaling-independent workload start: %v", err)
+	}
+	canceledCtx, canceled := context.WithCancel(context.Background())
+	canceled()
+	if fixture.path.devicePackSends.waitThrough(canceledCtx, allBoundary) {
+		t.Fatal("unacked signaling disappeared from the diagnostic boundary")
+	}
+
+	terminal := signal
+	terminal.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+	terminal.Err = errors.New("independent signaling failure")
+	observer(terminal)
+	if !fixture.path.devicePackSends.waitThrough(fixture.ctx, allBoundary) {
+		t.Fatalf("join signaling diagnostic terminal: %v", fixture.ctx.Err())
+	}
+	if failureCount := fixture.path.devicePackSends.failures.Load(); failureCount != 1 {
+		t.Fatalf("all-Pack signaling failure count=%d, want 1", failureCount)
+	}
+	if failureCount := fixture.path.devicePackSends.workloadFailures.Load(); failureCount != 0 {
+		t.Fatalf("signaling changed workload failure count to %d", failureCount)
+	}
+	if err := fixture.path.waitForPostWorkloadBoundary(fixture.ctx); err != nil {
+		t.Fatalf("independent signaling failure invalidated workload end: %v", err)
+	}
+}
+
+// Setup candidate failures are fully joined and become part of the exact
+// premeasurement floor instead of poisoning every later boundary.
+func TestFullTunMeasurementBoundaryBaselinesHistoricalPackFailure(t *testing.T) {
+	fixture := newFullTunMeasurementBoundaryTestFixture()
+	defer fixture.close()
+	observeFailedSendPackLifecycle(fixture.path.devicePackSends, 1)
+	if err := fixture.path.waitForSetupBoundary(fixture.ctx); err != nil {
+		t.Fatalf("join failed setup Pack: %v", err)
+	}
+	if err := fixture.path.waitForMeasurementBoundary(fixture.ctx); err != nil {
+		t.Fatalf("prepare boundary after setup failure: %v", err)
+	}
+	start, err := beginPerfvarCarrierMeasurement(fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.packFailures.deviceFailureCount != 1 ||
+		start.packFailures.providerFailureCount != 0 {
+		t.Fatalf("setup failure floor=%+v, want device one/provider zero", start.packFailures)
+	}
+	if err := fixture.path.waitForPostWorkloadBoundary(fixture.ctx); err != nil {
+		t.Fatalf("historical setup failure crossed measured epoch: %v", err)
+	}
+}
+
+// A terminal failure after the active carrier start is rejected even though
+// its exact ownership was drained successfully.
+func TestFullTunPostWorkloadBoundaryRejectsMeasuredPackFailure(t *testing.T) {
+	fixture := newFullTunMeasurementBoundaryTestFixture()
+	defer fixture.close()
+	if err := fixture.path.waitForMeasurementBoundary(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beginPerfvarCarrierMeasurement(fixture.path); err != nil {
+		t.Fatal(err)
+	}
+	observeFailedSendPackLifecycle(fixture.path.providerPackSends, 2)
+	err := fixture.path.waitForPostWorkloadBoundary(fixture.ctx)
+	if err == nil || !strings.Contains(err.Error(), "device=0 provider=1") {
+		t.Fatalf("measured Pack failure error=%v", err)
+	}
+}
+
+// A post-warmup start replaces the earlier floor, so a fully joined warmup
+// failure cannot invalidate a clean measured interval.
+func TestFullTunWorkloadLocalStartExcludesWarmupPackFailure(t *testing.T) {
+	fixture := newFullTunMeasurementBoundaryTestFixture()
+	defer fixture.close()
+	if err := fixture.path.waitForMeasurementBoundary(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := beginPerfvarCarrierMeasurement(fixture.path); err != nil {
+		t.Fatal(err)
+	}
+	observeFailedSendPackLifecycle(fixture.path.devicePackSends, 3)
+	if err := fixture.path.waitForSetupBoundary(fixture.ctx); err != nil {
+		t.Fatalf("join warmup failure: %v", err)
+	}
+	if err := fixture.path.waitForMeasurementBoundary(fixture.ctx); err != nil {
+		t.Fatalf("prepare post-warmup start: %v", err)
+	}
+	start, err := beginPerfvarCarrierMeasurement(fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.path.setCarrierMeasurementStart(start)
+	if err := fixture.path.waitForPostWorkloadBoundary(fixture.ctx); err != nil {
+		t.Fatalf("warmup failure crossed workload-local start: %v", err)
 	}
 }
 

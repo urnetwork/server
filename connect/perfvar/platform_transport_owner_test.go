@@ -4,12 +4,15 @@ package perfvar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	clientconnect "github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 )
 
 // platformTransportCloser is the smallest ownership contract needed by the
@@ -17,6 +20,23 @@ import (
 type platformTransportCloser interface {
 	Close()
 	CloseAndWait(context.Context) error
+}
+
+// A fixture-created API control owns requests after Client.CloseAndWait has
+// joined client-internal work.
+type clientOutOfBandCloser interface {
+	CloseAndWait(context.Context) error
+}
+
+// Closing a generated client joins both its internal lifecycle and the
+// independently owned API control requests it can launch during teardown.
+func closeClientAndOutOfBandWait(ctx context.Context, client *clientconnect.Client) error {
+	client.Flush()
+	result := client.CloseAndWait(ctx)
+	if control, ok := client.ClientOob().(clientOutOfBandCloser); ok {
+		result = errors.Join(result, control.CloseAndWait(ctx))
+	}
+	return result
 }
 
 // retainedPlatformTransport is immutable after publication. A lock-free stack
@@ -169,11 +189,12 @@ func (self *platformTransportOwner) closeAndWait(ctx context.Context) error {
 	self.closing.Store(true)
 	joined := map[*retainedPlatformTransport]bool{}
 	joinedClients := map[*clientconnect.Client]bool{}
+	var closeErr error
 	for {
 		for self.publishing.Load() != 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return errors.Join(closeErr, ctx.Err())
 			case <-self.progress:
 			}
 		}
@@ -183,12 +204,17 @@ func (self *platformTransportOwner) closeAndWait(ctx context.Context) error {
 				continue
 			}
 			if err := node.closer.CloseAndWait(ctx); err != nil {
-				return fmt.Errorf("join generated platform transport %d: %w", node.sequence, err)
+				closeErr = errors.Join(
+					closeErr,
+					fmt.Errorf("join generated platform transport %d: %w", node.sequence, err),
+				)
 			}
 			if node.client != nil && !joinedClients[node.client] {
-				node.client.Flush()
-				if err := node.client.CloseAndWait(ctx); err != nil {
-					return fmt.Errorf("join generated client %d: %w", node.sequence, err)
+				if err := closeClientAndOutOfBandWait(ctx, node.client); err != nil {
+					closeErr = errors.Join(
+						closeErr,
+						fmt.Errorf("join generated client %d: %w", node.sequence, err),
+					)
 				}
 				joinedClients[node.client] = true
 			}
@@ -198,8 +224,47 @@ func (self *platformTransportOwner) closeAndWait(ctx context.Context) error {
 			self.beforeStableCheckForTest()
 		}
 		if self.head.Load() == boundary && self.publishing.Load() == 0 {
-			return nil
+			return closeErr
 		}
+	}
+}
+
+// A blocking API control exposes the independently owned post-client join.
+type blockingClientOutOfBandControl struct {
+	joinEntered chan struct{}
+	releaseJoin chan struct{}
+	joinOnce    sync.Once
+}
+
+// Construction leaves the API join at an explicit release barrier.
+func newBlockingClientOutOfBandControl() *blockingClientOutOfBandControl {
+	return &blockingClientOutOfBandControl{
+		joinEntered: make(chan struct{}),
+		releaseJoin: make(chan struct{}),
+	}
+}
+
+// SendControl consumes frame ownership without starting unrelated work.
+func (self *blockingClientOutOfBandControl) SendControl(
+	frames []*protocol.Frame,
+	callback clientconnect.OobResultFunction,
+) {
+	for _, frame := range frames {
+		clientconnect.MessagePoolReturn(frame.MessageBytes)
+	}
+	if callback != nil {
+		callback(nil, context.Canceled)
+	}
+}
+
+// CloseAndWait publishes join entry and waits at the deterministic barrier.
+func (self *blockingClientOutOfBandControl) CloseAndWait(ctx context.Context) error {
+	self.joinOnce.Do(func() { close(self.joinEntered) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-self.releaseJoin:
+		return nil
 	}
 }
 
@@ -208,6 +273,7 @@ type blockingPlatformTransportCloser struct {
 	closeOnce sync.Once
 	started   chan struct{}
 	release   chan struct{}
+	joinErr   error
 }
 
 // Construction leaves teardown held until the test releases it explicitly.
@@ -232,7 +298,7 @@ func (self *blockingPlatformTransportCloser) CloseAndWait(ctx context.Context) e
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-self.release:
-		return nil
+		return self.joinErr
 	}
 }
 
@@ -319,27 +385,142 @@ func TestPlatformTransportOwnerRetainsEveryGeneratedReplacement(t *testing.T) {
 	}
 }
 
-// Generated transport ownership includes the generated Client whose transfer
-// workers can otherwise retain pooled messages after its carrier is joined.
-func TestPlatformTransportOwnerJoinsGeneratedClient(t *testing.T) {
+// Generated transport ownership includes the Client and its independent API
+// control requests before the owner publishes completion.
+func TestPlatformTransportOwnerJoinsGeneratedClientAndOutOfBandControl(t *testing.T) {
 	owner := newPlatformTransportOwner()
 	closer := newBlockingPlatformTransportCloser()
 	close(closer.release)
+	control := newBlockingClientOutOfBandControl()
 	client := clientconnect.NewClient(
 		t.Context(),
 		clientconnect.NewId(),
-		clientconnect.NewNoContractClientOob(),
+		control,
 		clientconnect.DefaultClientSettings(),
 	)
 	owner.add(client, nil, closer)
 
-	if err := owner.closeAndWait(t.Context()); err != nil {
-		t.Fatalf("join generated transport owner: %v", err)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	joinResult := make(chan error, 1)
+	go func() {
+		joinResult <- owner.closeAndWait(ctx)
+	}()
+	select {
+	case <-control.joinEntered:
+	case err := <-joinResult:
+		t.Fatalf("generated owner skipped API control join: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("generated owner did not reach API control join: %v", ctx.Err())
+	}
+	select {
+	case err := <-joinResult:
+		t.Fatalf("generated owner returned before API control release: %v", err)
+	default:
+	}
+	close(control.releaseJoin)
+	select {
+	case err := <-joinResult:
+		if err != nil {
+			t.Fatalf("join generated transport owner: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("generated owner did not complete: %v", ctx.Err())
 	}
 	select {
 	case <-client.Done():
 	default:
 		t.Fatal("generated client remained open after owner join")
+	}
+}
+
+// One failed transport join cannot skip its own client or any older retained
+// generation. Exact transport and API-control barriers prove cleanup continues
+// before the owner returns the aggregated error.
+func TestPlatformTransportOwnerContinuesAfterGeneratedTransportJoinError(t *testing.T) {
+	owner := newPlatformTransportOwner()
+	olderCloser := newBlockingPlatformTransportCloser()
+	newerCloser := newBlockingPlatformTransportCloser()
+	injectedErr := errors.New("injected generated transport join failure")
+	newerCloser.joinErr = injectedErr
+	close(newerCloser.release)
+	olderControl := newBlockingClientOutOfBandControl()
+	newerControl := newBlockingClientOutOfBandControl()
+	olderClient := clientconnect.NewClient(
+		t.Context(),
+		clientconnect.NewId(),
+		olderControl,
+		clientconnect.DefaultClientSettings(),
+	)
+	newerClient := clientconnect.NewClient(
+		t.Context(),
+		clientconnect.NewId(),
+		newerControl,
+		clientconnect.DefaultClientSettings(),
+	)
+	// The stack is newest-first, so the injected failure is observed before
+	// every held older-generation barrier.
+	owner.add(olderClient, nil, olderCloser)
+	owner.add(newerClient, nil, newerCloser)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	joinResult := make(chan error, 1)
+	go func() {
+		joinResult <- owner.closeAndWait(ctx)
+	}()
+
+	select {
+	case <-newerControl.joinEntered:
+	case err := <-joinResult:
+		t.Fatalf("owner skipped failed generation client cleanup: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("owner did not join failed generation client: %v", ctx.Err())
+	}
+	close(newerControl.releaseJoin)
+	select {
+	case <-olderCloser.started:
+	case err := <-joinResult:
+		t.Fatalf("owner skipped older generated transport after error: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("owner did not close older generated transport: %v", ctx.Err())
+	}
+	select {
+	case err := <-joinResult:
+		t.Fatalf("owner returned before older transport release: %v", err)
+	default:
+	}
+	close(olderCloser.release)
+	select {
+	case <-olderControl.joinEntered:
+	case err := <-joinResult:
+		t.Fatalf("owner skipped older generated client cleanup: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("owner did not join older generated client: %v", ctx.Err())
+	}
+	select {
+	case err := <-joinResult:
+		t.Fatalf("owner returned before older API-control release: %v", err)
+	default:
+	}
+	close(olderControl.releaseJoin)
+	select {
+	case err := <-joinResult:
+		if !errors.Is(err, injectedErr) {
+			t.Fatalf("owner error=%v, want %v", err, injectedErr)
+		}
+	case <-ctx.Done():
+		t.Fatalf("owner did not return aggregated join error: %v", ctx.Err())
+	}
+	for description, client := range map[string]*clientconnect.Client{
+		"newer": newerClient,
+		"older": olderClient,
+	} {
+		select {
+		case <-client.Done():
+		default:
+			t.Errorf("%s generated client remained open after owner join", description)
+		}
 	}
 }
 

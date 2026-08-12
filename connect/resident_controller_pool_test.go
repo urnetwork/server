@@ -76,11 +76,11 @@ func TestResidentControllerReturnsDroppedResponseFrameOwnership(t *testing.T) {
 
 		residentController := newResidentController(
 			ctx,
-			cancel,
 			sourceId,
 			nil,
 			settings,
 		)
+		defer residentController.Close()
 		responseWitnesses := make(chan []byte, 1)
 		residentController.beforeDroppedResponseReturnForTest = func(responseBytes []byte) {
 			responseWitness := clientconnect.MessagePoolShareReadOnly(responseBytes)

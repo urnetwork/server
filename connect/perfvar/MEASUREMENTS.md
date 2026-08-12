@@ -5,10 +5,13 @@
 Historical baseline captured on 2026-08-10. These are userspace, same-host
 results, not physical-device or Internet measurements.
 
-The historical baseline consists of five attempts per scenario for the
-clean path, the 500 ms and 1 s single-region paths, and the production H1
-extender path. A separate deterministic probe records the current fast-P2P MTU
-failure. Older one-run development logs are not mixed into the baseline.
+The historical baseline consists of five attempts per scenario for the clean
+path, the 500 ms and 1 s single-region paths, and the production H1 extender
+path. A separate historical probe records the then-current fast-P2P MTU
+failure. The current v2 carrier fragments at 1,188 bytes, reaches exactly a
+1,280-byte worst-case IPv6 packet in the real-wire test, and completes focused
+1,400- and 1,280-byte full-TUN MTU scenarios with zero oversize drops. Older
+one-run development logs are not mixed into the baseline.
 
 The clean table below is the original 8 MiB schema-1 baseline. It remains
 useful as historical evidence, but 8 MiB can sit largely inside transport and
@@ -28,6 +31,250 @@ seconds. The incomplete run is not a throughput sample. It motivated
 context-bound, rate-scaled workload deadlines, a 12–45 minute per-run bound,
 structured calibration failures, and the 20 MiB impaired-profile payload. The
 replacement long-transfer campaign is recorded separately below once complete.
+
+## 2026-08-12 exact-tree correctness and socket follow-up
+
+A serial, non-measurement correctness pass ran every `connect/perfvar` test on
+one process with `GOMAXPROCS=10`, `-p=1`, and `-parallel=1`. It passed in
+988.277 seconds. This includes all four routes, the 500 ms and 1 s
+single-region cases, P2P legacy and fast paths, 32 MiB regional TCP, outage,
+loss, rate, queue, reorder, MTU, migration, forced-probe, topology, ownership,
+and teardown gates. The raw log is
+`/tmp/perfvar-full-serial-20260812-mtu-resident.log`. This is correctness
+evidence, not a new throughput baseline.
+
+After the final ACK cancellation, TCP child-worker join, pure-ACK ownership,
+OOB callback join, resident-controller lifecycle, H3 receive-drain, fast-P2P
+wire-version/MTU, forced-probe barrier, 10 Mbps profile, and H1 depth-eight
+changes were all present, the canonical command was run again from a clean
+process. Every package test passed serially in 1,016.613 seconds. The final log
+is `/tmp/perfvar-full-serial-20260812-depth8-final.log`. Focused normal and race
+gates for the newly changed Connect and server ownership boundaries also
+passed; their logs are listed in the buffer-depth section. This second result
+is the completion gate for the exact source tree used by the next schema-3
+measurement campaign.
+
+The server H1 optimization was then exercised through the production full-TUN
+exchange route. `TestFullTunExchangeH1Correctness` passed five of five normal
+runs and one race-detector run. The logs are
+`/tmp/perfvar-exchange-h1-server-batch-normal-count5-20260812.log` and
+`/tmp/perfvar-exchange-h1-server-batch-race-20260812.log`.
+
+Socket microbenchmarks isolate the scheduling changes without attributing the
+result to the full tunnel. Each table entry is the median of five one-second
+samples on the Apple M1 Max.
+
+| H1 socket boundary | CPUs | Singleton MB/s | Ready-coalesced MB/s | Gain |
+|---|---:|---:|---:|---:|
+| Client TLS | 1 | 361.40 | 560.34 | +55.0% |
+| Client TLS | 10 | 216.61 | 548.90 | +153.4% |
+| Server cleartext | 1 | 578.17 | 1,283.79 | +122.0% |
+| Server cleartext | 10 | 273.13 | 869.67 | +218.4% |
+| Server TLS | 1 | 405.15 | 580.17 | +43.2% |
+| Server TLS | 10 | 228.87 | 604.72 | +164.2% |
+
+Saturated H1 traffic formed about four frames per ready batch and reduced TCP
+writes from one per frame to about 0.25. Allocation counts per frame did not
+increase. Sparse traffic remained one frame, one deadline, one TCP write, and
+one TLS record per batch. Server TLS sparse medians changed from 15.545 to
+15.656 microseconds at one CPU and from 20.122 to 20.300 microseconds at ten
+CPUs; the five-sample ranges overlap. The client sparse ranges also overlap.
+No batching wait is used.
+
+The existing exchange TCP writer already gathers at most 256 ready messages or
+256 KiB and uses `writev`. Its earlier five-sample benchmark measured a
+2,816.07 MB/s median for a 64-message ready batch versus 335.95 MB/s for 64
+separate framed writes. The actual outbound resident bridge does not regress to
+64 singleton writes. An exact barrier test observes `[1, 63]` socket-flush
+formation through both transport and forward bridges, versus `[64]` for a
+prefilled connection queue. A new five-sample, one-second real-TCP comparison
+measured 32.090 microseconds for `[64]` and 36.380 microseconds for `[1, 63]`,
+or 4.290 microseconds per burst. That isolated 13.4% difference does not justify
+a new batch-channel ownership protocol without production syscall evidence.
+
+Raw socket logs:
+
+- `/tmp/urnetwork-client-h1-tls-controls-20260812.log`;
+- `/tmp/urnetwork-client-h1-tls-coalesced-saturated-20260812.log`;
+- `/tmp/server-h1-batch-authoritative-20260812.log`;
+- `/tmp/server-h1-batch-sparse-authoritative-fixed-20260812.log`;
+- `/tmp/exchange-buffer-authoritative-before-20260812.log`; and
+- `/tmp/exchange-writev-bridge-authoritative-1s-20260812.log`.
+
+## 2026-08-12 buffer-depth evaluation
+
+This focused evaluation asks whether a ready-drain depth of eight improves the
+production socket and packet boundaries. It is separate from the full-TUN
+PERFVAR campaign: these are same-host boundary benchmarks, not end-to-end
+Internet throughput claims. Each reported value is the median of five
+one-second samples on the Apple M1 Max, with `GOMAXPROCS` set to either one or
+ten. Payload rate is useful payload bytes per second. For benchmarks that move
+different numbers of bytes per operation, MB/s—not raw ns/op—is the valid
+throughput comparison.
+
+### H1 write coalescing: depth four versus eight
+
+The client and server H1 writers drain only messages that are already ready;
+they do not wait to fill a batch. Raising the maximum from four to eight
+roughly halves the saturated write and deadline rate again.
+
+| H1 boundary | CPUs | Depth 4 ns/frame | Depth 8 ns/frame | Time change | Depth 4 MB/s | Depth 8 MB/s | Rate change |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Client TLS | 1 | 2,858 | 2,119 | -25.9% | 482.85 | 651.39 | +34.9% |
+| Client TLS | 10 | 2,861 | 1,978 | -30.9% | 482.31 | 697.82 | +44.7% |
+| Server cleartext | 1 | 1,308 | 969 | -25.9% | 1,055.18 | 1,423.63 | +34.9% |
+| Server cleartext | 10 | 1,922 | 1,199 | -37.6% | 717.98 | 1,151.09 | +60.3% |
+| Server TLS | 1 | 2,408 | 2,130 | -11.5% | 573.05 | 647.78 | +13.0% |
+| Server TLS | 10 | 2,668 | 1,844 | -30.9% | 517.21 | 748.17 | +44.7% |
+
+At ten CPUs the client formed a median of about 3.99 frames per depth-four
+batch and 7.91 per depth-eight batch. TCP writes and write deadlines fell from
+about 0.2505 to 0.1265 per frame. The server fixtures formed exactly four and
+eight frames and reduced both values from 0.25 to 0.125 per frame. Allocation
+counts were unchanged: three allocations per client frame and two per server
+frame.
+
+Sparse delivery stayed a singleton rather than waiting for more traffic:
+
+| Sparse TLS boundary | CPUs | Singleton median | Depth-8 ready-drain median | Change | Observed formation |
+|---|---:|---:|---:|---:|---|
+| Client | 1 | 20.691 us | 21.200 us | +2.5% | 1 frame, 1 write, 1 TLS record |
+| Client | 10 | 28.245 us | 28.420 us | +0.6% | 1 frame, 1 write, 1 TLS record |
+| Server | 1 | 19.818 us | 20.060 us | +1.2% | 1 frame, 1 write, 1 TLS record |
+| Server | 10 | 26.289 us | 26.976 us | +2.6% | 1 frame, 1 write, 1 TLS record |
+
+The five-sample sparse ranges overlap. No coalescing timer, sleep, or scheduler
+yield was added. Based on the consistent saturated gain and unchanged sparse
+behavior, the production H1 maximum is eight on both the client and server.
+The exact byte-bound, abort, short-write, flush-error, allocation, and
+ownership tests passed 100 repetitions normally and 100 repetitions under the
+race detector at the new bound.
+
+### H3, exchange, P2P, and TUN/NAT boundaries
+
+Depth eight is not a universal optimum. Every other candidate was measured at
+its actual ownership or socket boundary before deciding whether to change it.
+
+#### H3 QUIC stream writer
+
+| CPUs | Depth 8 ns/op | Depth 8 MB/s | Depth 16 ns/op | Depth 16 MB/s | Result |
+|---|---:|---:|---:|---:|---|
+| 1 | 1,440,281 | 122.64 | 1,417,388 | 124.62 | Depth 16 is 1.6% faster |
+| 10 | 1,419,624 | 124.43 | 1,427,647 | 123.73 | Depth 8 is 0.6% faster |
+
+The rates are effectively tied, while depth 16 used about 40 fewer allocations
+per operation. H3 remains at 16 messages and its existing 64 KiB byte bound.
+
+#### Exchange TCP writer and reader dispatch
+
+| Exchange write boundary | CPUs | Depth 8 MB/s | Ready 64 MB/s | Ready-64 gain |
+|---|---:|---:|---:|---:|
+| TCP `writev` | 1 | 1,696.37 | 2,575.58 | +51.8% |
+| TCP `writev` | 10 | 1,493.56 | 3,459.35 | +131.6% |
+
+The production exchange writer already has a larger bound: at most 256 ready
+messages or 256 KiB. Restricting it to eight would discard a material
+`writev` advantage, so its bound remains unchanged.
+
+A prototype also grouped complete exchange frames before downstream dispatch:
+
+| Exchange read dispatch | CPUs | Median ns/op | Change from singleton | Messages/dispatch |
+|---|---:|---:|---:|---:|
+| Singleton | 1 | 81,053 | baseline | 1.00 |
+| Batch 8 | 1 | 77,594 | -4.3% | 7.89 |
+| Batch 64 | 1 | 88,275 | +8.9% | 47.1 |
+| Singleton | 10 | 41,323 | baseline | 1.00 |
+| Batch 8 | 10 | 37,805 | -8.5% | 7.89 |
+| Batch 64 | 10 | 47,706 | +15.4% | 47.4 |
+
+The depth-eight dispatch prototype has a modest synthetic CPU benefit, but it
+does not reduce socket reads: the existing 64 KiB `bufio.Reader` already reads
+ahead from TCP. Adding another production batch would retain more pooled
+messages, weaken immediate backpressure, and add partial-batch teardown rules.
+No exchange read-path change is justified by a 4–9% dispatch-only result.
+
+#### P2P route queue
+
+The P2P route channel is capacity and backpressure, not a socket coalescing
+batch. A real WebRTC loopback comparison found no consistent depth-eight gain:
+
+| P2P carrier | CPUs | Channel 4 MB/s | Channel 8 MB/s | Channel-8 change |
+|---|---:|---:|---:|---:|
+| Legacy SCTP | 1 | 25.76 | 25.26 | -1.9% |
+| Legacy SCTP | 10 | 30.82 | 29.86 | -3.1% |
+| Fast SRTP | 1 | 65.10 | 63.13 | -3.0% |
+| Fast SRTP | 10 | 90.63 | 93.06 | +2.7% |
+
+The production capacity remains four. Raising it would double queued packet
+ownership and worst-case queueing without a repeatable throughput gain.
+
+#### P2P fast UDP ready drain
+
+The fast carrier's UDP writer was compared at depths four, eight, and the
+current 64. The most relevant eight-versus-64 medians are:
+
+| Topology and producer | CPUs | Depth 8 MB/s | Depth 64 MB/s | Depth-64 change |
+|---|---:|---:|---:|---:|
+| One hop, serial | 1 | 165.01 | 176.89 | +7.2% |
+| One hop, serial | 10 | 165.08 | 154.49 | -6.4% |
+| One hop, pipelined | 1 | 173.48 | 168.97 | -2.6% |
+| One hop, pipelined | 10 | 192.42 | 199.38 | +3.6% |
+| Two hops, serial | 1 | 87.04 | 91.65 | +5.3% |
+| Two hops, serial | 10 | 82.71 | 84.66 | +2.4% |
+| Two hops, pipelined | 1 | 91.20 | 90.83 | -0.4% |
+| Two hops, pipelined | 10 | 108.64 | 113.47 | +4.4% |
+
+Results are mixed, but depth 64 wins most two-hop and parallel-host cases and
+preserves larger Linux `sendmmsg` opportunities. It remains unchanged.
+
+#### Shared TUN/NAT packet drains
+
+| Direction and workload | CPUs | Depth 8 MB/s | Depth 64 MB/s | Depth-64 change |
+|---|---:|---:|---:|---:|
+| TCP upload | 1 | 325.53 | 368.89 | +13.3% |
+| TCP upload | 10 | 447.84 | 478.69 | +6.9% |
+| TCP download | 1 | 439.43 | 427.17 | -2.8% |
+| TCP download | 10 | 353.30 | 378.85 | +7.2% |
+| UDP upload | 1 | 155.24 | 161.57 | +4.1% |
+| UDP upload | 10 | 238.88 | 242.53 | +1.5% |
+| UDP download | 1 | 107.15 | 110.42 | +3.1% |
+| UDP download | 10 | 180.29 | 184.65 | +2.4% |
+
+Depth 64 wins seven of eight comparisons and remains the shared TUN/NAT
+limit. Transfer-frame limits are protocol and ownership bounds rather than
+generic socket read-ahead; they were not changed merely to make every number
+eight.
+
+### Buffer-depth decisions
+
+| Boundary | Decision |
+|---|---|
+| Client H1 writer | Raise ready-drain/coalescing maximum from 4 to 8 |
+| Server H1 writer | Raise ready-drain/coalescing maximum from 4 to 8 |
+| H3 QUIC writer | Keep 16 messages / 64 KiB |
+| Exchange TCP writer | Keep 256 messages / 256 KiB |
+| Exchange TCP reader | Keep singleton dispatch; `bufio.Reader` already reads ahead |
+| P2P route queue | Keep capacity 4 |
+| P2P fast UDP drain | Keep 64 |
+| Shared TUN/NAT drains | Keep 64 |
+
+Raw logs for this evaluation:
+
+- `/tmp/urnetwork-client-h1-tls-batch4-vs-8-20260812.log`;
+- `/tmp/urnetwork-server-h1-batch4-vs-8-20260812.log`;
+- `/tmp/urnetwork-client-h1-depth8-sparse-20260812.log`;
+- `/tmp/urnetwork-server-h1-depth8-sparse-20260812.log`;
+- `/tmp/urnetwork-h3-batch8-vs-16-fixed-20260812.log`;
+- `/tmp/urnetwork-exchange-depth8-evaluation-20260812.log`;
+- `/tmp/urnetwork-p2p-fast-udp-depth-evaluation-20260812.log`;
+- `/tmp/urnetwork-p2p-route-channel4-vs-8-20260812.log`; and
+- `/tmp/urnetwork-tun-nat-batch8-vs-64-20260812.log`.
+
+Focused production-bound correctness logs are
+`/tmp/connect-h1-batch-depth8-focused-normal-20260812.log`,
+`/tmp/connect-h1-batch-depth8-focused-race-20260812.log`,
+`/tmp/server-h1-batch-depth8-focused-normal-20260812.log`, and
+`/tmp/server-h1-batch-depth8-focused-race-20260812.log`.
 
 ## Historical main findings
 
@@ -524,18 +771,16 @@ with the final schema before using it for regression thresholds.
 
 ## Improvement candidates
 
-### 1. Fix high-RTT route readiness before tuning high-RTT throughput
+### 1. Re-measure high-RTT throughput after the readiness fix
 
-This is the highest-priority result. In 35 of the 36 non-extender failures, the
-destination server accepted the inner TCP connection but the first response
-never returned within the readiness boundary; the remaining legacy-P2P attempt
-reached stage 3 and reset. All 12 extender failures had the first shape.
-Increasing readiness payload and waiting for multiple modeled RTTs did not
-remove the failure during harness development. Instrument the shared TUN/NAT
-TCP path at packet enqueue, NAT translation, provider write, return
-translation, TUN delivery, ACK, retransmission, and RTO boundaries. Keep the
-existing failure records and zero-drop checks so a fix can be verified with
-repeated 500 ms and 1 s runs.
+The historical readiness failure was the highest-priority result: 47 attempts
+reached the destination server but did not return their first response. The
+current harness uses explicit route/probe boundaries, truthful child joins,
+and corrected return-route ownership. Its serial correctness run passed the
+500 ms, 1 s, legacy-P2P, forced-probe, and H1-extender gates. The defect is no
+longer reproducible in the deterministic suite. The next step is a new
+five-sample schema-3 throughput campaign; the historical conditional values
+must not be relabeled as post-fix performance.
 
 ### 2. Compare short-transfer startup with steady-state high-BDP throughput
 
@@ -578,13 +823,14 @@ device/provider TUN buffering, return ACK delivery, message batching, and
 shared-host scheduling. Parallel-flow and CPU/allocation profiles can separate
 a single-flow congestion-window limit from a processing limit.
 
-### 6. Make fast P2P safe on 1,280-byte outer paths
+### 6. Add path-aware growth above the safe 1,280-byte baseline
 
-Either negotiate a conservative payload size, implement path-MTU discovery
-with a reliable fallback, or fragment below the WebRTC/SRTP packet boundary.
-The deterministic blackhole test must change from reproducing failure to
-requiring successful, exact delivery with zero oversized writes before this is
-considered resolved.
+The fixed-MTU defect is resolved. Fast P2P v2 fragments at 1,188 bytes, which
+produces an exact worst-case 1,280-byte IPv6 packet. Real-Pion and full-TUN
+tests require complete delivery and zero oversized writes at both 1,400- and
+1,280-byte outer MTUs. Mixed v1/v2 peers reject mismatched readiness markers
+and fall back to SCTP. Future path-MTU work can grow above this conservative
+baseline when the selected path proves a larger datagram size.
 
 ### 7. Improve measurement validity before comparing high-RTT downloads
 
@@ -613,9 +859,10 @@ and should not be inferred from the tables above:
 - the mobile resource surrogate;
 - warmed regional TCP on the final source tree.
 
-Run those as curated axes rather than one large Cartesian product. First make
-the high-RTT readiness gate deterministic; otherwise failure censoring will
-dominate the impaired-profile analysis.
+Run those as curated axes rather than one large Cartesian product. The
+high-RTT readiness gate is now deterministic and green; retain it beside every
+new impaired-profile campaign so failure censoring cannot re-enter the
+throughput aggregates.
 
 ## Source logs
 
@@ -629,3 +876,13 @@ dominate the impaired-profile analysis.
 | `/tmp/perfvar-regional-extender-record5.log` | H1 extender regional matrix |
 | `/tmp/perfvar-p2p-mtu-failure.log` | Deterministic fast-P2P MTU diagnostic |
 | `/tmp/perfvar-h1-rtt-sweep-run1.log` | Exploratory one-run H1 RTT trend only |
+| `/tmp/perfvar-full-serial-20260812-depth8-final.log` | Final exact-tree complete serial correctness gate |
+| `/tmp/urnetwork-client-h1-tls-batch4-vs-8-20260812.log` | Client H1 saturated depth-four/eight comparison |
+| `/tmp/urnetwork-server-h1-batch4-vs-8-20260812.log` | Server cleartext and TLS H1 depth-four/eight comparison |
+| `/tmp/urnetwork-client-h1-depth8-sparse-20260812.log` | Client H1 sparse depth-eight latency control |
+| `/tmp/urnetwork-server-h1-depth8-sparse-20260812.log` | Server H1 sparse depth-eight latency control |
+| `/tmp/urnetwork-h3-batch8-vs-16-fixed-20260812.log` | Real QUIC H3 depth-eight/sixteen comparison |
+| `/tmp/urnetwork-exchange-depth8-evaluation-20260812.log` | Exchange writer and read-dispatch depth evaluation |
+| `/tmp/urnetwork-p2p-fast-udp-depth-evaluation-20260812.log` | Fast-P2P UDP drain depth comparison |
+| `/tmp/urnetwork-p2p-route-channel4-vs-8-20260812.log` | Real WebRTC route-channel depth comparison |
+| `/tmp/urnetwork-tun-nat-batch8-vs-64-20260812.log` | Shared TUN/NAT depth-eight/64 comparison |

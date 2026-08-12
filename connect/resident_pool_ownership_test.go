@@ -11,6 +11,8 @@ import (
 	"time"
 
 	clientconnect "github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/server"
 )
 
 // Retains one test-owned reference that becomes the final owner only after the
@@ -553,4 +555,363 @@ func TestCloseExchangeTransportQueuesDrainsJoinedOldSnapshotWriter(t *testing.T)
 		t.Fatalf("accept-side cleanup left %d old-snapshot messages", len(send))
 	}
 	requireResidentPoolOwnerReturned(t, witness, "accept-side old-snapshot cleanup")
+}
+
+// The real exchange accept loop admits each socket into WaitForIdle before its
+// handler can retain a pooled owner.
+func TestExchangeWaitForIdleJoinsAcceptedConnectionOwnership(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	exchangeCtx, exchangeCancel := context.WithCancel(context.Background())
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	exchange := &Exchange{
+		ctx:                  exchangeCtx,
+		cancel:               exchangeCancel,
+		hostToServicePorts:   map[int]int{port: port},
+		settings:             DefaultExchangeSettings(),
+		servicePortListeners: map[int]net.Listener{port: listener},
+		residents:            map[server.Id]*Resident{},
+	}
+	message := clientconnect.MessagePoolGet(2 * 1024)
+	witnessBeforeRelease := clientconnect.MessagePoolShareReadOnly(message)
+	witnessAfterJoin := clientconnect.MessagePoolShareReadOnly(message)
+	workerEntered := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseWorker) })
+	exchange.handleExchangeConnectionForTest = func(net.Conn) {
+		close(workerEntered)
+		<-releaseWorker
+		clientconnect.MessagePoolReturn(message)
+	}
+	go exchange.Run()
+	peerConn, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		exchange.Close()
+		clientconnect.MessagePoolReturn(witnessBeforeRelease)
+		clientconnect.MessagePoolReturn(witnessAfterJoin)
+		clientconnect.MessagePoolReturn(message)
+		t.Fatal(err)
+	}
+	defer peerConn.Close()
+	select {
+	case <-workerEntered:
+	case <-testCtx.Done():
+		t.Fatalf("accepted connection did not reach ownership barrier: %v", testCtx.Err())
+	}
+
+	exchange.Close()
+	waitResult := make(chan bool, 1)
+	go func() {
+		waitResult <- exchange.WaitForIdle(testCtx)
+	}()
+	select {
+	case result := <-waitResult:
+		t.Fatalf("exchange idle returned before accepted ownership release: %t", result)
+	default:
+	}
+	if clientconnect.MessagePoolReturn(witnessBeforeRelease) {
+		t.Fatal("accepted connection lost its pooled owner before worker release")
+	}
+
+	releaseOnce.Do(func() { close(releaseWorker) })
+	select {
+	case result := <-waitResult:
+		if !result {
+			t.Fatal("exchange idle deadline expired after accepted ownership release")
+		}
+	case <-testCtx.Done():
+		t.Fatalf("exchange did not join accepted connection: %v", testCtx.Err())
+	}
+	if !clientconnect.MessagePoolReturn(witnessAfterJoin) {
+		t.Fatal("accepted connection retained its pooled owner after exchange idle")
+	}
+}
+
+// Resident teardown joins the internal connect client before the exchange
+// publishes idle, including a reliable send held in its Ack callback.
+func TestExchangeWaitForIdleJoinsResidentInternalClientOwnership(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	exchangeCtx, exchangeCancel := context.WithCancel(context.Background())
+	settings := DefaultExchangeSettings()
+	exchange := &Exchange{
+		ctx:            exchangeCtx,
+		cancel:         exchangeCancel,
+		settings:       settings,
+		residents:      map[server.Id]*Resident{},
+		connections:    map[server.Id]map[server.Id]context.CancelFunc{},
+		drainedClients: map[server.Id]struct{}{},
+	}
+	clientSettings := clientconnect.DefaultClientSettingsWithBufferSize(settings.ExchangeBufferSize)
+	clientSettings.EncryptionSettings.Mode = clientconnect.EncryptionModeOff
+	clientSettings.ControlPingTimeout = 0
+	clientSettings.Log = clientconnect.NewNoopLogger()
+	client := clientconnect.NewClient(
+		exchangeCtx,
+		clientconnect.ControlId,
+		clientconnect.NewNoContractClientOob(),
+		clientSettings,
+	)
+	clientId := server.NewId()
+	client.ContractManager().AddNoContractPeer(clientconnect.Id(clientId))
+	residentCtx, residentCancel := context.WithCancel(exchangeCtx)
+	resident := &Resident{
+		ctx:                residentCtx,
+		cancel:             residentCancel,
+		exchange:           exchange,
+		clientId:           clientId,
+		instanceId:         server.NewId(),
+		residentId:         server.NewId(),
+		client:             client,
+		transports:         map[*clientTransport]bool{},
+		forwards:           map[server.Id]*ResidentForward{},
+		clientReceiveUnsub: func() {},
+		clientForwardUnsub: func() {},
+	}
+	exchange.residents[clientId] = resident
+	send, _, closeTransport, err := resident.AddTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTransport()
+
+	ackEntered := make(chan struct{})
+	releaseAck := make(chan struct{})
+	var ackEnteredOnce sync.Once
+	var releaseAckOnce sync.Once
+	defer releaseAckOnce.Do(func() { close(releaseAck) })
+	frame := clientconnect.RequireToFrameWithDefaultProtocolVersion(
+		&protocol.SimpleMessage{Content: "resident close ownership"},
+	)
+	if !client.SendWithTimeout(
+		frame,
+		clientconnect.Id(clientId),
+		func(error) {
+			ackEnteredOnce.Do(func() { close(ackEntered) })
+			<-releaseAck
+		},
+		time.Second,
+	) {
+		clientconnect.MessagePoolReturn(frame.MessageBytes)
+		t.Fatal("resident internal client did not admit the reliable send")
+	}
+
+	var transferFrameBytes []byte
+	select {
+	case transferFrameBytes = <-send:
+	case <-testCtx.Done():
+		t.Fatalf("resident internal client did not write its transfer frame: %v", testCtx.Err())
+	}
+	witnessBeforeRelease := clientconnect.MessagePoolShareReadOnly(transferFrameBytes)
+	witnessAfterJoin := clientconnect.MessagePoolShareReadOnly(transferFrameBytes)
+	clientconnect.MessagePoolReturn(transferFrameBytes)
+
+	exchange.residentWorkers.Add(1)
+	go func() {
+		defer exchange.residentWorkers.Done()
+		<-resident.Done()
+		exchange.closeResidentAndWait(resident)
+	}()
+	exchange.Close()
+	waitResult := make(chan bool, 1)
+	go func() {
+		waitResult <- exchange.WaitForIdle(testCtx)
+	}()
+	select {
+	case <-ackEntered:
+	case <-testCtx.Done():
+		t.Fatalf("resident send cleanup did not reach Ack callback: %v", testCtx.Err())
+	}
+	select {
+	case result := <-waitResult:
+		t.Fatalf("exchange idle returned before resident client ownership release: %t", result)
+	default:
+	}
+	if clientconnect.MessagePoolReturn(witnessBeforeRelease) {
+		t.Fatal("resident client lost its pooled owner before Ack cleanup release")
+	}
+
+	releaseAckOnce.Do(func() { close(releaseAck) })
+	select {
+	case result := <-waitResult:
+		if !result {
+			t.Fatal("exchange idle deadline expired after resident client release")
+		}
+	case <-testCtx.Done():
+		t.Fatalf("exchange did not join resident internal client: %v", testCtx.Err())
+	}
+	if !clientconnect.MessagePoolReturn(witnessAfterJoin) {
+		t.Fatal("resident client retained its pooled transfer frame after exchange idle")
+	}
+}
+
+// An admitted resident controller callback retains a live database context
+// until the internal client joins it, then closes before exchange idle.
+func TestExchangeResidentControllerContextOutlivesTransportCancellation(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	exchangeCtx, exchangeCancel := context.WithCancel(context.Background())
+	settings := DefaultExchangeSettings()
+	exchange := &Exchange{
+		ctx:            exchangeCtx,
+		cancel:         exchangeCancel,
+		settings:       settings,
+		residents:      map[server.Id]*Resident{},
+		connections:    map[server.Id]map[server.Id]context.CancelFunc{},
+		drainedClients: map[server.Id]struct{}{},
+	}
+	residentCtx, residentCancel := context.WithCancel(exchangeCtx)
+	clientSettings := clientconnect.DefaultClientSettingsWithBufferSize(settings.ExchangeBufferSize)
+	clientSettings.EncryptionSettings.Mode = clientconnect.EncryptionModeOff
+	clientSettings.ControlPingTimeout = 0
+	clientSettings.Log = clientconnect.NewNoopLogger()
+	residentClient := clientconnect.NewClient(
+		residentCtx,
+		clientconnect.ControlId,
+		clientconnect.NewNoContractClientOob(),
+		clientSettings,
+	)
+	clientId := server.NewId()
+	residentClient.ContractManager().AddNoContractPeer(clientconnect.Id(clientId))
+	residentController := newResidentController(
+		residentCtx,
+		clientId,
+		nil,
+		settings,
+	)
+	resident := &Resident{
+		ctx:                residentCtx,
+		cancel:             residentCancel,
+		exchange:           exchange,
+		clientId:           clientId,
+		instanceId:         server.NewId(),
+		residentId:         server.NewId(),
+		client:             residentClient,
+		residentController: residentController,
+		transports:         map[*clientTransport]bool{},
+		forwards:           map[server.Id]*ResidentForward{},
+		controlLimiter:     newLimiter(residentCtx, 0),
+		clientForwardUnsub: func() {},
+	}
+	resident.clientReceiveUnsub = residentClient.AddReceiveCallback(resident.handleClientReceive)
+	exchange.residents[clientId] = resident
+
+	residentSend, residentReceive, closeTransport, err := resident.AddTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceCtx, sourceCancel := context.WithCancel(context.Background())
+	sourceClient := clientconnect.NewClient(
+		sourceCtx,
+		clientconnect.Id(clientId),
+		clientconnect.NewNoContractClientOob(),
+		clientSettings,
+	)
+	sourceClient.ContractManager().AddNoContractPeer(clientconnect.ControlId)
+	sourceSendTransport := clientconnect.NewSendGatewayTransport()
+	sourceReceiveTransport := clientconnect.NewReceiveGatewayTransport()
+	sourceClient.RouteManager().UpdateTransport(
+		sourceSendTransport,
+		[]clientconnect.Route{residentReceive},
+	)
+	sourceClient.RouteManager().UpdateTransport(
+		sourceReceiveTransport,
+		[]clientconnect.Route{residentSend},
+	)
+
+	callbackEntered := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	callbackReturned := make(chan struct{})
+	clientJoinEntered := make(chan struct{})
+	var callbackOnce sync.Once
+	var releaseOnce sync.Once
+	var clientJoinOnce sync.Once
+	residentController.beforeHandleControlFramesForTest = func() {
+		callbackOnce.Do(func() {
+			close(callbackEntered)
+			<-releaseCallback
+			close(callbackReturned)
+		})
+	}
+	resident.beforeClientCloseJoinForTest = func() {
+		clientJoinOnce.Do(func() { close(clientJoinEntered) })
+	}
+
+	exchange.residentWorkers.Add(1)
+	go func() {
+		defer exchange.residentWorkers.Done()
+		<-resident.Done()
+		exchange.closeResidentAndWait(resident)
+	}()
+	defer func() {
+		releaseOnce.Do(func() { close(releaseCallback) })
+		sourceClient.RouteManager().RemoveTransport(sourceSendTransport)
+		sourceClient.RouteManager().RemoveTransport(sourceReceiveTransport)
+		sourceCancel()
+		sourceClient.CloseAndWait(testCtx)
+		closeTransport()
+		exchange.Close()
+		residentController.Close()
+		exchange.WaitForIdle(testCtx)
+	}()
+
+	frame := clientconnect.RequireToFrameWithDefaultProtocolVersion(
+		&protocol.SimpleMessage{Content: "resident controller close ordering"},
+	)
+	if !sourceClient.SendWithTimeout(
+		frame,
+		clientconnect.ControlId,
+		nil,
+		time.Second,
+	) {
+		clientconnect.MessagePoolReturn(frame.MessageBytes)
+		t.Fatal("source client did not admit resident control frame")
+	}
+	select {
+	case <-callbackEntered:
+	case <-testCtx.Done():
+		t.Fatalf("resident control callback did not enter: %v", testCtx.Err())
+	}
+
+	exchange.Close()
+	idleResult := make(chan bool, 1)
+	go func() {
+		idleResult <- exchange.WaitForIdle(testCtx)
+	}()
+	select {
+	case <-clientJoinEntered:
+	case <-testCtx.Done():
+		t.Fatalf("resident close did not reach client join: %v", testCtx.Err())
+	}
+	if err := residentController.ctx.Err(); err != nil {
+		t.Fatalf("controller context canceled before admitted callback joined: %v", err)
+	}
+	select {
+	case result := <-idleResult:
+		t.Fatalf("exchange idle returned before controller callback release: %t", result)
+	default:
+	}
+
+	releaseOnce.Do(func() { close(releaseCallback) })
+	select {
+	case <-callbackReturned:
+	case <-testCtx.Done():
+		t.Fatalf("resident control callback did not return: %v", testCtx.Err())
+	}
+	select {
+	case result := <-idleResult:
+		if !result {
+			t.Fatal("exchange idle deadline expired after controller callback release")
+		}
+	case <-testCtx.Done():
+		t.Fatalf("exchange did not join resident controller callback: %v", testCtx.Err())
+	}
+	if err := residentController.ctx.Err(); err == nil {
+		t.Fatal("controller context remained live after resident client join")
+	}
 }

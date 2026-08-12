@@ -278,8 +278,8 @@ func ConnectControlFrames(
 	netOutFrames := []*protocol.Frame{}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			// A teardown panic does not return accumulated replies to the
-			// caller. Release replies from earlier frames before propagating it.
+			// A propagated cancellation panic does not return accumulated replies
+			// to the caller. Release replies from earlier frames first.
 			returnConnectControlFrames(netOutFrames)
 			panic(recovered)
 		}
@@ -310,10 +310,11 @@ func ConnectControlFrames(
 
 		// The model layer raises db failures as panics (server.Raise). Two
 		// classes reach here:
-		// - a teardown race (this resident's ctx canceled mid-frame): the
-		//   frame must stay UN-acked so the sender's resend re-applies it
-		//   against a healthy resident — re-panic, which fails the delivery
-		//   before its ack (see ReceiveSequence.flushDeliver ownership).
+		// - a canceled caller context: propagate to the caller's lifecycle
+		//   boundary rather than classifying cancellation as a live frame error.
+		//   Resident controllers keep their context live until their admitted
+		//   Client callback has joined, so transport teardown does not cancel an
+		//   in-progress resident operation.
 		// - a live-ctx failure that survived the db layer's own transient
 		//   retries: treat as this frame's error so one poison frame cannot
 		//   kill its batch siblings or resend-loop forever, and so it is

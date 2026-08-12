@@ -919,10 +919,20 @@ func subtractP2pStats(
 	}
 }
 
+// Monotonic workload-Pack terminal failures are baselined separately from
+// ownership. Candidate-client admission failures before a measured interval
+// are valid setup history; any IP data failure inside the interval invalidates
+// the run. Independent control failures remain in tracker diagnostics.
+type perfvarPackFailureCounts struct {
+	deviceFailureCount   uint64
+	providerFailureCount uint64
+}
+
 // A carrier boundary snapshots every route-specific counter at one instant so
 // setup and teardown traffic cannot be mistaken for workload traffic.
 type perfvarCarrierBoundary struct {
 	capturedAt                     time.Time
+	packFailures                   perfvarPackFailureCounts
 	links                          map[string]directionalLinkSnapshot
 	p2pNetwork                     p2pNetworkSnapshot
 	deviceP2P                      clientconnect.P2pDataPlaneStatsSnapshot
@@ -934,6 +944,18 @@ type perfvarCarrierBoundary struct {
 	streamNonAdjacentDataDropCount uint64
 }
 
+// Nil trackers are valid in small carrier-only unit fixtures.
+func snapshotPerfvarPackFailures(path *fullTunPath) perfvarPackFailureCounts {
+	counts := perfvarPackFailureCounts{}
+	if path.devicePackSends != nil {
+		counts.deviceFailureCount = path.devicePackSends.workloadFailures.Load()
+	}
+	if path.providerPackSends != nil {
+		counts.providerFailureCount = path.providerPackSends.workloadFailures.Load()
+	}
+	return counts
+}
+
 // A reset-pass crossing is recoverable only by the unified source-to-carrier
 // fixed point, which joins the new generation and retries every carrier epoch.
 var errPerfvarCarrierStartCrossed = errors.New("carrier activity crossed the baseline reset pass")
@@ -942,9 +964,10 @@ var errPerfvarCarrierStartCrossed = errors.New("carrier activity crossed the bas
 // provider, making each intermediary's forwarding work independently visible.
 func snapshotPerfvarCarrier(path *fullTunPath) perfvarCarrierBoundary {
 	boundary := perfvarCarrierBoundary{
-		links:       path.environment.network.snapshotLinks(),
-		deviceP2P:   path.deviceStats.Snapshot(),
-		providerP2P: path.providerStats.Snapshot(),
+		packFailures: snapshotPerfvarPackFailures(path),
+		links:        path.environment.network.snapshotLinks(),
+		deviceP2P:    path.deviceStats.Snapshot(),
+		providerP2P:  path.providerStats.Snapshot(),
 	}
 	if path.p2pNetwork != nil {
 		boundary.p2pNetwork = path.p2pNetwork.snapshot()
@@ -973,6 +996,7 @@ func beginPerfvarCarrierMeasurement(
 	path *fullTunPath,
 ) (perfvarCarrierBoundary, error) {
 	if prepared := path.takePreparedCarrierStart(); prepared != nil {
+		path.setActivePackFailureFloor(*prepared)
 		return *prepared, nil
 	}
 	if err := path.waitForMeasurementBoundary(path.ctx); err != nil {
@@ -982,6 +1006,7 @@ func beginPerfvarCarrierMeasurement(
 	if prepared == nil {
 		return perfvarCarrierBoundary{}, errors.New("measurement fixed point published no carrier start")
 	}
+	path.setActivePackFailureFloor(*prepared)
 	return *prepared, nil
 }
 
@@ -1002,9 +1027,10 @@ func beginPerfvarCarrierMeasurementNow(
 		path.afterAccessCarrierStartForTest()
 	}
 	boundary := perfvarCarrierBoundary{
-		links:       links,
-		deviceP2P:   path.deviceStats.Snapshot(),
-		providerP2P: path.providerStats.Snapshot(),
+		packFailures: snapshotPerfvarPackFailures(path),
+		links:        links,
+		deviceP2P:    path.deviceStats.Snapshot(),
+		providerP2P:  path.providerStats.Snapshot(),
 	}
 	if path.p2pNetwork != nil {
 		p2pNetwork, p2pOk := path.p2pNetwork.beginMeasurementSnapshot(path.ctx)
@@ -1085,7 +1111,8 @@ func perfvarCarrierBaselinePassStable(
 			return false
 		}
 	}
-	if normalizeP2pNetwork(before.p2pNetwork) != normalizeP2pNetwork(after.p2pNetwork) ||
+	if before.packFailures != after.packFailures ||
+		normalizeP2pNetwork(before.p2pNetwork) != normalizeP2pNetwork(after.p2pNetwork) ||
 		subtractP2pStats(before.deviceP2P, after.deviceP2P) !=
 			(clientconnect.P2pDataPlaneStatsSnapshot{}) ||
 		subtractP2pStats(before.providerP2P, after.providerP2P) !=
@@ -1200,6 +1227,12 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 		name   string
 		mutate func(*perfvarCarrierBoundary)
 	}{
+		{name: "device Pack failures", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.packFailures.deviceFailureCount += 1
+		}},
+		{name: "provider Pack failures", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.packFailures.providerFailureCount += 1
+		}},
 		{name: "access link", mutate: func(boundary *perfvarCarrierBoundary) {
 			snapshot := boundary.links["access"]
 			snapshot.AdmittedPacketCount += 1
@@ -1273,7 +1306,24 @@ func perfvarCarrierSnapshotStable(
 	before perfvarCarrierBoundary,
 	requireMeasurementEpoch bool,
 ) bool {
+	return perfvarCarrierSnapshotInstability(path, before, requireMeasurementEpoch) == ""
+}
+
+// The first changed carrier generation gives fixed-point failures an exact
+// diagnostic while the boolean wrapper keeps normal hot-path callers terse.
+func perfvarCarrierSnapshotInstability(
+	path *fullTunPath,
+	before perfvarCarrierBoundary,
+	requireMeasurementEpoch bool,
+) string {
 	after := snapshotPerfvarCarrier(path)
+	if before.packFailures != after.packFailures {
+		return fmt.Sprintf(
+			"Pack failure counts changed from %+v to %+v",
+			before.packFailures,
+			after.packFailures,
+		)
+	}
 	linkStable := func(
 		start directionalLinkSnapshot,
 		end directionalLinkSnapshot,
@@ -1309,52 +1359,106 @@ func perfvarCarrierSnapshotStable(
 		return subtractP2pStats(start, end) == (clientconnect.P2pDataPlaneStatsSnapshot{})
 	}
 	if len(before.links) != len(after.links) {
-		return false
+		return fmt.Sprintf("access-link count changed from %d to %d", len(before.links), len(after.links))
 	}
 	for name, start := range before.links {
 		end, ok := after.links[name]
-		if !ok || !linkStable(start, end) {
-			return false
+		if !ok {
+			return fmt.Sprintf("access link %s disappeared", name)
+		}
+		if !linkStable(start, end) {
+			return fmt.Sprintf(
+				"access link %s changed start={epoch=%p submitted=%d} end={epoch=%p submitted=%d active=%d queued-packets=%d queued-bytes=%d}",
+				name,
+				start.measurementMaximumEpoch,
+				start.submittedPacketCount,
+				end.measurementMaximumEpoch,
+				end.submittedPacketCount,
+				end.activeSubmissionCount,
+				end.QueuedPacketCount,
+				end.QueuedByteCount,
+			)
 		}
 	}
 	if path.p2pNetwork != nil {
-		if !linkStable(before.p2pNetwork.Forward, after.p2pNetwork.Forward) ||
-			!linkStable(before.p2pNetwork.Reverse, after.p2pNetwork.Reverse) ||
-			!creditStable(
-				before.p2pNetwork.ForwardReceiveCredits,
-				after.p2pNetwork.ForwardReceiveCredits,
-			) ||
-			!creditStable(
-				before.p2pNetwork.ReverseReceiveCredits,
-				after.p2pNetwork.ReverseReceiveCredits,
-			) {
-			return false
+		if !linkStable(before.p2pNetwork.Forward, after.p2pNetwork.Forward) {
+			return "direct P2P forward link changed"
+		}
+		if !linkStable(before.p2pNetwork.Reverse, after.p2pNetwork.Reverse) {
+			return "direct P2P reverse link changed"
+		}
+		if !creditStable(
+			before.p2pNetwork.ForwardReceiveCredits,
+			after.p2pNetwork.ForwardReceiveCredits,
+		) {
+			return "direct P2P forward receive credits changed"
+		}
+		if !creditStable(
+			before.p2pNetwork.ReverseReceiveCredits,
+			after.p2pNetwork.ReverseReceiveCredits,
+		) {
+			return "direct P2P reverse receive credits changed"
 		}
 	}
-	if len(before.streamP2PHops) != len(after.streamP2PHops) ||
-		len(before.streamP2PClientStats) != len(after.streamP2PClientStats) {
-		return false
+	if len(before.streamP2PHops) != len(after.streamP2PHops) {
+		return fmt.Sprintf(
+			"stream P2P hop count changed from %d to %d",
+			len(before.streamP2PHops),
+			len(after.streamP2PHops),
+		)
+	}
+	if len(before.streamP2PClientStats) != len(after.streamP2PClientStats) {
+		return fmt.Sprintf(
+			"stream P2P client count changed from %d to %d",
+			len(before.streamP2PClientStats),
+			len(after.streamP2PClientStats),
+		)
 	}
 	for hopIndex, start := range before.streamP2PHops {
 		end := after.streamP2PHops[hopIndex]
-		if start.HopIndex != end.HopIndex ||
-			!linkStable(start.Forward.Link, end.Forward.Link) ||
-			!linkStable(start.Reverse.Link, end.Reverse.Link) ||
-			!creditStable(start.Forward.ReceiveCredits, end.Forward.ReceiveCredits) ||
-			!creditStable(start.Reverse.ReceiveCredits, end.Reverse.ReceiveCredits) {
-			return false
+		if start.HopIndex != end.HopIndex {
+			return fmt.Sprintf("stream P2P hop %d identity changed", hopIndex)
+		}
+		if !linkStable(start.Forward.Link, end.Forward.Link) {
+			return fmt.Sprintf("stream P2P hop %d forward link changed", hopIndex)
+		}
+		if !linkStable(start.Reverse.Link, end.Reverse.Link) {
+			return fmt.Sprintf("stream P2P hop %d reverse link changed", hopIndex)
+		}
+		if !creditStable(start.Forward.ReceiveCredits, end.Forward.ReceiveCredits) {
+			return fmt.Sprintf("stream P2P hop %d forward receive credits changed", hopIndex)
+		}
+		if !creditStable(start.Reverse.ReceiveCredits, end.Reverse.ReceiveCredits) {
+			return fmt.Sprintf("stream P2P hop %d reverse receive credits changed", hopIndex)
 		}
 	}
 	for clientIndex, start := range before.streamP2PClientStats {
 		if !p2pStatsStable(start, after.streamP2PClientStats[clientIndex]) {
-			return false
+			return fmt.Sprintf("stream P2P client %d data-plane stats changed", clientIndex)
 		}
 	}
-	return p2pStatsStable(before.deviceP2P, after.deviceP2P) &&
-		p2pStatsStable(before.providerP2P, after.providerP2P) &&
-		before.streamNonAdjacentDialCount == after.streamNonAdjacentDialCount &&
-		before.streamNonAdjacentStunDropCount == after.streamNonAdjacentStunDropCount &&
-		before.streamNonAdjacentDataDropCount == after.streamNonAdjacentDataDropCount
+	if !p2pStatsStable(before.deviceP2P, after.deviceP2P) {
+		return fmt.Sprintf(
+			"device P2P data-plane stats changed by %+v",
+			subtractP2pStats(before.deviceP2P, after.deviceP2P),
+		)
+	}
+	if !p2pStatsStable(before.providerP2P, after.providerP2P) {
+		return fmt.Sprintf(
+			"provider P2P data-plane stats changed by %+v",
+			subtractP2pStats(before.providerP2P, after.providerP2P),
+		)
+	}
+	if before.streamNonAdjacentDialCount != after.streamNonAdjacentDialCount {
+		return "stream nonadjacent dial count changed"
+	}
+	if before.streamNonAdjacentStunDropCount != after.streamNonAdjacentStunDropCount {
+		return "stream nonadjacent STUN drop count changed"
+	}
+	if before.streamNonAdjacentDataDropCount != after.streamNonAdjacentDataDropCount {
+		return "stream nonadjacent data drop count changed"
+	}
+	return ""
 }
 
 // A carrier submission after the lock-held baseline invalidates that generation

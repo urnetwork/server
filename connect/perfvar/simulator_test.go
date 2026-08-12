@@ -113,6 +113,71 @@ func TestSimulatorRateAndBurstPaceDelivery(t *testing.T) {
 	}
 }
 
+// A focused rate-only carrier accepts its complete advertised burst without
+// introducing unconfigured loss. The held first schedule is an exact barrier:
+// every later admission remains owned by the queue until the assertion setup
+// has filled the burst.
+func TestFocusedRateProfileQueuesAdvertisedBurstWithoutLoss(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	profile := allNetworkProfiles(2026081412)["rate-10mbps"].Forward
+	link := newDirectionalLink(ctx, profile, 2026081412, func([]byte) bool {
+		return true
+	})
+	releaseSchedule := make(chan struct{})
+	var releaseOnce sync.Once
+	defer func() {
+		releaseOnce.Do(func() { close(releaseSchedule) })
+		link.close()
+	}()
+	scheduleHeld := make(chan struct{})
+	var scheduleHeldOnce sync.Once
+	link.setAfterPacketScheduledForTest(func(linkScheduleObservation) {
+		scheduleHeldOnce.Do(func() { close(scheduleHeld) })
+		select {
+		case <-releaseSchedule:
+		case <-ctx.Done():
+		}
+	})
+
+	const packetByteCount = 1024
+	if _, err := link.submit(make([]byte, packetByteCount)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scheduleHeld:
+	case <-ctx.Done():
+		t.Fatalf("first rate-only packet did not reach scheduler barrier: %v", ctx.Err())
+	}
+	remainingByteCount := profile.BurstByteCount - packetByteCount
+	for 0 < remainingByteCount {
+		byteCount := min(packetByteCount, remainingByteCount)
+		if _, err := link.submit(make([]byte, byteCount)); err != nil {
+			t.Fatal(err)
+		}
+		remainingByteCount -= byteCount
+	}
+	snapshotWhileHeld := link.snapshot()
+	if snapshotWhileHeld.QueueDropPacketCount != 0 ||
+		snapshotWhileHeld.QueuedByteCount != profile.BurstByteCount {
+		t.Fatalf(
+			"rate-only burst queue=%+v configured burst=%d queue=%d",
+			snapshotWhileHeld,
+			profile.BurstByteCount,
+			profile.QueueByteCount,
+		)
+	}
+	releaseOnce.Do(func() { close(releaseSchedule) })
+	if !link.waitIdle(ctx) {
+		t.Fatalf("rate-only burst did not drain: %v", ctx.Err())
+	}
+	if snapshot := link.snapshot(); snapshot.QueueDropPacketCount != 0 ||
+		snapshot.UnexpectedQueueDropPacketCount != 0 ||
+		snapshot.DeliveredByteCount != uint64(profile.BurstByteCount) {
+		t.Fatalf("rate-only burst terminal=%+v", snapshot)
+	}
+}
+
 // Both packet and byte queue bounds remain hard under saturation.
 func TestSimulatorQueueBoundsAndOverflowAccounting(t *testing.T) {
 	profile := simulatorTestLinkProfile()

@@ -150,6 +150,7 @@ type proxyTestHarness struct {
 	// ws url of the device rpc endpoint the DeviceRemote connects to
 	deviceRpcUrl  string
 	connectServer *connectserver.ConnectHandler
+	exchange      *connectserver.Exchange
 
 	socksPort int
 	httpPort  int
@@ -162,18 +163,36 @@ type proxyTestHarness struct {
 
 func (self *proxyTestHarness) close(t testing.TB) {
 	self.closeOnce.Do(func() {
-		// Stop admission first. Connect's deferred rate-limit decrement uses
-		// Redis intentionally, so every admitted handler must finish before
-		// DefaultTestEnv closes this test's Redis pool.
-		self.connectServer.Close()
-		self.cancel()
-
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		if !self.connectServer.WaitForIdle(closeCtx) {
-			t.Errorf("connect handlers did not finish during harness teardown")
-		}
+		closeProxyConnectLifecycles(t, self.connectServer, self.exchange, self.cancel)
 	})
+}
+
+// Describes the shutdown boundary shared by the in-process connect handler
+// and exchange used in proxy acceptance tests.
+type proxyConnectLifecycle interface {
+	Close()
+	WaitForIdle(ctx context.Context) bool
+}
+
+// Stops admission on both server halves before joining their Redis and model
+// cleanup against one bounded teardown context.
+func closeProxyConnectLifecycles(
+	t testing.TB,
+	connectHandler proxyConnectLifecycle,
+	exchange proxyConnectLifecycle,
+	stop func(),
+) {
+	connectHandler.Close()
+	exchange.Close()
+	stop()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	if !connectHandler.WaitForIdle(closeCtx) {
+		t.Errorf("connect handlers did not finish during harness teardown")
+	}
+	if !exchange.WaitForIdle(closeCtx) {
+		t.Errorf("connect exchange did not finish during harness teardown")
+	}
 }
 
 type proxyTestPorts struct {
@@ -282,7 +301,6 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		<-ctx.Done()
 		connectHttp.Close()
 		apiHttp.Close()
-		exchange.Close()
 	}()
 
 	// give the listeners a moment to bind
@@ -546,6 +564,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		networkSpace:       networkSpace,
 		deviceRpcUrl:       deviceRpcUrl,
 		connectServer:      connectHandler,
+		exchange:           exchange,
 		socksPort:          testPorts.socks,
 		httpPort:           testPorts.http,
 		httpsPort:          testPorts.https,
