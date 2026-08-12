@@ -112,10 +112,14 @@ func TestByJwtRegisteredClaimsAreEnforced(t *testing.T) {
 	})
 }
 
-func TestByJwtLifetimeIsOneDay(t *testing.T) {
+// The lifetime is asserted rather than assumed because clients schedule their
+// own rotation against it, and the two have already fallen out of step once: a
+// move to 24h left every non-refreshing client silently dark after a day, while
+// staying connected and accepting traffic it could not carry.
+func TestByJwtLifetimeIsThirtyDays(t *testing.T) {
 	claims := NewByJwt(server.NewId(), server.NewId(), "test", false, false)
 	lifetime := claims.ExpiresAt.Time.Sub(claims.IssuedAt.Time)
-	connect.AssertEqual(t, lifetime, 24*time.Hour)
+	connect.AssertEqual(t, lifetime, 30*24*time.Hour)
 }
 
 // TestByJwtKid covers the `kid` key-selection behavior: a freshly signed token
