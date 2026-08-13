@@ -439,7 +439,8 @@ type Exchange struct {
 	// Optional already-bound sockets keyed by service port. Tests use these to
 	// eliminate release-to-rebind races and cross-process SO_REUSEPORT
 	// interference. The Exchange owns and closes every supplied listener.
-	servicePortListeners map[int]net.Listener
+	servicePortListeners          map[int]net.Listener
+	servicePortListenersCloseOnce sync.Once
 	// Nil in production; ownership tests replace protocol handling after the
 	// real accept-loop admission boundary.
 	handleExchangeConnectionForTest func(net.Conn)
@@ -1692,6 +1693,16 @@ func (self *Exchange) Close() {
 	self.connectionWorkerLock.Lock()
 	self.connectionWorkersClosed = true
 	self.connectionWorkerLock.Unlock()
+	// Close supplied sockets synchronously. Cancellation cannot own this edge:
+	// Close can win before Run admits the listener worker, in which case no
+	// worker exists to observe cancellation or execute its deferred Close.
+	self.servicePortListenersCloseOnce.Do(func() {
+		for _, listener := range self.servicePortListeners {
+			if listener != nil {
+				_ = listener.Close()
+			}
+		}
+	})
 	if self.keyEventSubscriber != nil {
 		self.keyEventSubscriber.Close()
 	}

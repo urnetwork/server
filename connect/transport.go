@@ -1398,6 +1398,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 		workers.start(func() {
 			defer handleCancel()
+			writeBatchStorage := make([]byte, connectH3WriteBatchMaxByteCount)
 
 			writeUserBatch := func(
 				firstMessage []byte,
@@ -1431,7 +1432,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				}
 
 				stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-				err := framer.WriteBatch(stream, messages)
+				err := framer.WriteBatchWithStorage(
+					stream,
+					messages,
+					writeBatchStorage,
+				)
 				if err == nil {
 					for _, message := range messages {
 						announce.SendMessage(ByteCount(len(message)))

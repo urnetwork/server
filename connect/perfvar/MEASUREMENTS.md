@@ -62,6 +62,12 @@ invocations passed in 934.771 seconds with `GOMAXPROCS=10`, `-p=1`, and
 correctness gate for the exact source tree used by the mobile measurements
 below.
 
+After the retained provider TCP timestamp/MSS/window changes, H3 storage
+reuse, all-route packet-group verification, and WireGuard measurements were
+complete, the same complete serial PERFVAR command ran again. All 342 tests
+passed in 830.667 seconds. This exact retained-tree gate is
+`/tmp/perfvar-full-serial-20260813-final-retained.log`.
+
 The server H1 optimization was then exercised through the production full-TUN
 exchange route. `TestFullTunExchangeH1Correctness` passed five of five normal
 runs and one race-detector run. The logs are
@@ -372,6 +378,309 @@ Raw logs:
 - `/tmp/perfvar-mobile-packet-group-vs-singular-h1-32m-count5-20260812.log`;
 - `/tmp/perfvar-mobile-packet-group-all-routes-32m-count5-20260812.log`; and
 - `/tmp/perfvar-mobile-tcp-autotune-2m-h1-32m-20260812.log`.
+
+## 2026-08-13 optimization synthesis
+
+This section records the architectural lessons from the focused boundary and
+full-TUN measurements. A result is called an improvement only when the changed
+boundary was measured against its previous behavior. Provider timestamp and
+peer-MSS handling, H3 retained storage, and the upward fast-P2P path-MTU
+candidate were evaluated independently. Rejected SACK, CUBIC, and fast-P2P
+upward-probing candidates were removed rather than retained on theoretical
+grounds.
+
+### Measured decisions
+
+| Area | Measured result | Production conclusion |
+|---|---|---|
+| H1 client/server write batching | Raising the ready-only maximum from four to eight improved saturated boundary throughput by 13.0–60.3%, depending on TLS and CPU count. Sparse medians changed by 0.6–2.6%, with overlapping ranges and exactly one frame/write/TLS record. | Keep depth eight. Do not add a coalescing delay. |
+| Exact-five-tuple logical sends | The original H1 mobile comparison improved from 336.497 to 416.331 Mbit/s (+23.73%). A final paired five-run all-route gate also improved every carrier: H1 +2.61%, H3 +15.86%, legacy P2P +2.84%, and fast P2P +0.35%. Route-selection/send time fell 12.0–49.9% and carrier bytes fell 4.0–6.4%. | Keep. Preserve a homogeneous packet group through policy, provider selection, candidate race, and SendSequence admission. Physical wire chunks remain an internal transport detail. |
+| Inner TCP auto-tuning | Raising only the modeled maximum from a fixed 256 KiB to 2 MiB improved the same H1 workload from 41.045 to 402.276 Mbit/s, or 9.80 times. Raising 2 MiB to 4 MiB added only 3.45% on that low-RTT workload. | A fixed small window is a route-independent ceiling. Keep a modest initial allocation and allow growth; size high-BDP maxima from RTT/rate and memory rather than from clean-path results alone. |
+| gVisor TUN maximum, 4 versus 16 MiB | With the provider held at 16 MiB, the original 4 MiB TUN completed the exact 1 s RTT / 20 MiB H1 workload correctly in 18.284 s at 9.176 Mbit/s. Raising only the TUN maximum to 16 MiB overflowed the profile's 4,096-packet queue, produced 2,304 queue drops, and timed out. | Reverted. Retain the 4 MiB TUN maximum; a larger advertised window is harmful until the sender and modeled/real path queues can absorb it. |
+| Provider NAT TCP maximum, 1 versus 16 MiB | Three exact traces with a 1 MiB maximum had a 27.016 s / 6.210 Mbit/s median. The same traces at 16 MiB had an 11.238 s / 14.928 Mbit/s median: 2.404 times faster and 58.40% less transfer time. Every paired trace improved; all six were correct with zero queue drops. | Keep the 16 MiB demand-driven maximum. Its three results reached about 94% of untunneled calibration and were therefore excluded from comparative route aggregates by the harness's 10% headroom rule; the raw correct transfer times remain the one-variable A/B evidence. |
+| Provider NAT TCP initial window, 64 KiB versus 1 MiB | Holding the 16 MiB maximum fixed, a 64 KiB post-handshake start measured 18.270 s / 9.183 Mbit/s. A memory-scaled 1 MiB start measured 11.238 s / 14.928 Mbit/s: 1.626 times faster, 38.49% less transfer time, and 28.79% less median warmup time. All six runs were correct with zero queue drops. | Keep the memory-scaled 1 MiB initial window. The SYN still advertises the literal 16-bit window; scaling applies only after the handshake. |
+| Provider NAT TCP timestamps | Negotiating and echoing TCP timestamps changed a three-run, correct and calibration-valid 64 KiB H1 upload at 1 s RTT from 25.087 to 3.081 seconds: 8.14 times faster, or 87.72% less time. Median goodput rose from 0.0209 to 0.1702 Mbit/s. At 500 ms, time changed only 0.92%, from 1.562 to 1.548 seconds. | Keep timestamps. They repair the one-second retransmission/RTT-estimation cliff without claiming a general 8.14-times bulk-throughput gain. |
+| Provider NAT TCP peer MSS | With a provider MTU of 1,440 and peer MTU of 640, ignoring peer MSS produced 48 packets per 64 KiB operation, of which 47 were oversized and dropped. Honoring the 600-byte peer MSS produced 112 accepted packets and no drops. On the equal-1,440-MTU control, median packetization time was effectively unchanged: 24.785 versus 24.710 microseconds at one CPU and 24.123 versus 24.082 microseconds at ten CPUs. | Keep peer-MSS enforcement. It prevents a deterministic asymmetric-MTU blackhole with no measurable equal-MTU regression. |
+| Provider NAT TCP SACK | Enabling SACK increased clean packet count from 756 to 772 because gVisor reserves larger option space. It was slower in clean, one-loss, three-loss, and delayed-three-loss comparisons. The delayed case was 1.95% slower and retransmitted the same three packets. | Reverted. Do not pay permanent option overhead when the measured loss patterns show no recovery reduction. |
+| Inner TCP CUBIC | On exact paired WAN seeds, CUBIC versus Reno measured -5.40%, +14.16%, and -22.46% goodput. The paired median was -5.40%; other attempts failed calibration before both variants produced comparable route samples. | Reverted. Retain gVisor Reno rather than choosing CUBIC from an unpaired aggregate or theory. |
+| H3 framing storage | Reusing one 64 KiB writer buffer improved the five-sample H3 socket median from 125.46 to 135.65 MB/s at one CPU (+8.12%) and from 120.43 to 123.25 MB/s at ten CPUs (+2.34%). | Retain writer-owned storage across H3 batches. The depth remains 16 messages / 64 KiB. |
+| H3 allocation pressure | Median bytes allocated per H3 operation fell from about 249 KiB to 50 KiB at one CPU and from about 259 KiB to 61 KiB at ten CPUs, reductions of about 80% and 77%. Allocation counts fell only modestly because QUIC/TLS owns most remaining objects. | The retained buffer removes one large repeated copy/allocation, but it is a partial H3 fix rather than evidence that H3 now matches H1. |
+| Exchange TCP writes | A 64-message ready `writev` measured 2,575–3,459 MB/s. The real outbound `[1,63]` bridge formation cost one extra onset flush and only a noisy 4.29 microseconds / 13.4% in the isolated comparison. | Preserve the current 256-message / 256 KiB writer. A new batch channel is not justified. |
+| Exchange TCP reads | An added depth-eight dispatch layer saved only 4–9% of synthetic dispatch CPU and did not reduce socket reads because the existing 64 KiB `bufio.Reader` already reads ahead. | Keep one logical frame per downstream dispatch and immediate backpressure. |
+| P2P route queue | Capacity eight ranged from -3.1% to +2.7% versus capacity four. | Keep capacity four; this is backpressure, not a coalescing bound. |
+| Fast-P2P UDP drain | Depth 64 had mixed one-hop results but generally won the two-hop and parallel cases and retains Linux `sendmmsg` opportunity. | Keep depth 64. |
+| Fast-P2P path MTU | A synthetic 32 MiB / 4 KiB-message carrier loop improved by 9.0% at one CPU and 11.5% at ten CPUs when an authenticated probe grew the outer packet from 1,280 to 1,500 bytes; fragment count fell 25%. Production full-TUN messages averaged about 2.95 KiB, however, so both payload geometries required three fragments. Three exact 32 MiB P2P-fast downloads measured 0.8620 Gbit/s with the safe fixed size and 0.8620 Gbit/s with probing; fragment totals were the same ~36.36k. | Reverted upward probing. Keep the fixed 1,188-byte payload and exact 1,280-byte worst-case IPv6 packet: the end-to-end workload showed no positive improvement, so the version/geometry/control complexity is not justified. |
+| WireGuard proxy upload | The proxy-side boundary improved 10.85% and 17.80% in operations/s at one and ten CPUs. At the exact server `ProxyDevice` boundary—including activity accounting, message-pool copies, and owned outer slices—depth eight cut median time by 17.24% and 29.83%, or raised operations/s by 20.83% and 42.51%. Depth 64 was 1.3–2.6% slower than eight. | Keep source-group activation and `SendBorrowedBatch`, with an upload bound of eight. The batch carries userwireguard's shared offset and copies every packet before asynchronous DeviceLocal admission. |
+| WireGuard proxy download | Ready-only depth 64 reduced the 128-packet median from 7.792 to 5.967 microseconds at one CPU and from 8.170 to 6.341 microseconds at ten CPUs: 30.59% and 28.84% more operations per second. Depth 64 was only 1.3–1.8% faster than depth 8, but depth 128 regressed 4.4–7.0% versus 64. | Keep depth 64. It adds no coalescing wait, matches the DeviceLocal/TUN batch boundary, and avoids the depth-128 regression. |
+| TUN/local-NAT drains | Depth 64 won seven of eight TCP/UDP direction comparisons, by 1.5–13.3%, and reached 478.69 MB/s on the ten-CPU TCP-upload boundary. | Keep depth 64. Do not normalize every queue to the H1 depth of eight. |
+
+The retained-H3 raw log is
+`/tmp/urnetwork-h3-retained-storage-20260813.log`. Its focused framing tests
+passed 100 repetitions normally and 100 repetitions with the race detector.
+The earlier buffer and full-TUN logs remain listed in their source sections.
+
+The retention rule used throughout is deliberately strict: a microbenchmark
+can identify a promising boundary, but an architectural change is kept only
+when the closest production-shaped benchmark also improves. This is why the
+synthetic fast-P2P MTU result was reverted after a neutral full-TUN result,
+while the WireGuard batch path was retained only after its gain survived the
+real `ProxyDevice` copy/admission boundary.
+
+### TCP option and local-control audit
+
+The synthetic provider endpoint and the gVisor TUN were audited separately.
+The provider now parses the three negotiated options it needs: MSS, window
+scale, and timestamps. Unknown or malformed option tails remain ignored rather
+than invalidating an otherwise valid IP packet. The focused retained tests
+passed 20 repetitions normally and 20 under the race detector.
+
+| TCP mechanism | Current state | Benchmark decision |
+|---|---|---|
+| Window scale | Retained. The SYN window stays a literal 16-bit value and scaling starts after the handshake. | Required for the measured high-BDP window work; covered by deterministic packet tests. |
+| Timestamps | Provider negotiates and echoes timestamp values on SYN-ACK, data, and ACK packets. | Keep: 8.14-times faster on the measured 1 s RTT short upload; neutral at 500 ms. |
+| Peer MSS | Provider caps return payload to peer MSS after subtracting negotiated timestamp bytes. | Keep: removes 47 oversized drops per 48 old packets on the asymmetric-MTU benchmark; neutral control. |
+| SACK-permitted and SACK blocks | gVisor supports SACK/RACK, but the provider candidate was measured with zero, one, three, and delayed-three losses. | Revert: all useful comparisons were flat or slower, while packet count rose 2.12%. |
+| Reno versus CUBIC | gVisor offers both; the historical/default TUN controller is Reno. | Keep Reno: paired CUBIC results were inconsistent and had a -5.40% paired median. |
+| Nagle / `TCP_NODELAY` | gVisor delayed-send mode defaults off; the provider's host TCP socket explicitly calls `SetNoDelay(true)`. | No candidate change: the desired low-latency setting is already active. |
+| Quick ACK | New gVisor endpoints enable quick ACK by default. | No candidate change. Connect's separate provider ACK-compression policy still needs its own instrumented experiment before changing its 50 ms bound. |
+| Receive auto-tuning | gVisor moderate receive buffering defaults on; production supplies demand-driven min/default/max ranges. | Keep. The provider 16 MiB maximum was 2.404 times faster than 1 MiB at 1 s RTT. The separate TUN 16 MiB candidate overflowed its path queue and was reverted to 4 MiB. |
+| Initial congestion window | gVisor uses ten segments. | No isolated change justified; increasing it would trade short-transfer startup against burst loss and queue pressure. |
+| RTO bounds | gVisor minimum is 200 ms; production caps the otherwise 120 s maximum at 8 s. | Treat as outage-tail policy, not a steady-goodput option. No new change was introduced by this audit. |
+| RACK loss detection | gVisor enables RACK internally, but its useful selective-loss evidence depends on SACK negotiation. | No separate provider toggle was changed; the measured provider SACK candidate was negative. |
+| PMTU discovery | gVisor can reduce sender payload after packet-too-big feedback; the fixed TUN/link MTU and provider peer-MSS cap remain the primary inner-path bounds. | No TCP-option change. Fast-P2P upward probing was measured separately and reverted because it did not improve the production full-TUN workload. |
+| Keepalive, retry count, linger, and TIME-WAIT | These defaults control idle failure detection, terminal retry duration, and socket retirement. | They do not raise steady bulk goodput. Leave unchanged unless a lifecycle/outage benchmark identifies a specific tail. |
+| ECN | This gVisor revision explicitly does not support TCP ECN. | Not benchmarkable as a configuration toggle; a provider-only implementation could not negotiate end-to-end ECN. |
+| TCP Fast Open | This gVisor revision has no TCP Fast Open option/cookie path. | Not benchmarkable without a separate stack feature implementation and replay/security design. |
+| PAWS | The provider uses wrap-safe timestamp ordering, while this gVisor revision does not expose a separate PAWS option to enable. | No independent toggle. Timestamp retention is based on the measured RTT/retransmission result, not a PAWS claim. |
+
+The standards context is [RFC 6691 for sender MSS use](https://datatracker.ietf.org/doc/rfc6691/),
+[RFC 7323 for window scaling and timestamps](https://datatracker.ietf.org/doc/rfc7323/),
+[RFC 2018 for SACK](https://datatracker.ietf.org/doc/rfc2018/), and
+[RFC 3168 for ECN](https://datatracker.ietf.org/doc/rfc3168/). These references
+explain the mechanisms; retain/revert decisions above come from the repository
+benchmarks.
+
+### General rules supported by the measurements
+
+1. Preserve semantic batches at the highest layer that knows they are one
+   directional flow. Reconstructing a batch after per-packet policy, routing,
+   race, and admission work recovers socket efficiency but not the repeated
+   CPU and scheduling work above it.
+2. Ready-drain only what is already queued. The H1 gain came without a timer,
+   sleep, or scheduler yield, so sparse latency stayed a singleton operation.
+3. Batch bounds describe different resources. H1's value of eight bounds TLS
+   coalescing, H3's 16/64 KiB bounds a QUIC stream write, exchange's 256/256
+   KiB bounds `writev`, and the P2P route's four bounds retained ownership.
+   They should not share one arbitrary number.
+4. Avoid copying merely to reduce syscall count when the underlying connection
+   already exposes a vectored write. Reusing unavoidable framing storage is a
+   win; replacing raw-TCP `writev` with a copied aggregate is not.
+5. Window ceilings must be evaluated at the route's bandwidth-delay product.
+   A buffer that is ample on a same-host path can cap throughput by orders of
+   magnitude at 500 ms or 1 s RTT.
+6. A same-host boundary over 1 Gbit/s is necessary but not sufficient. The
+   end-to-end route can still be limited by repeated selection, Transfer
+   framing, ACK cadence, carrier allocations, or the simulator calibration.
+
+
+### Final paired packet-group route gate
+
+A new exact-tree comparison alternated packet-at-a-time and packet-group modes
+for each of five clean-LAN seeds on every production carrier. Each sample moved
+32 MiB in the upload direction with the same mobile resource profile; only the
+bridge handoff mode changed.
+
+| Route | Packet-at-a-time Mbit/s | Packet-group Mbit/s | Goodput gain | Send-time reduction | Carrier-byte reduction |
+|---|---:|---:|---:|---:|---:|
+| Exchange H1 | 246.600 | 253.032 | +2.61% | 15.37% | 3.96% |
+| Exchange H3 | 142.728 | 165.368 | +15.86% | 19.71% | 4.53% |
+| P2P legacy | 247.087 | 254.094 | +2.84% | 49.87% | 6.43% |
+| P2P fast | 253.964 | 254.849 | +0.35% | 12.01% | 4.93% |
+
+All 40 transfers completed correctly. This isolates the group handoff on the
+current tree and supersedes an earlier cross-tree comparison that appeared to
+show a P2P upload regression. That older comparison changed several other
+components and is not valid evidence against grouping.
+
+### H1 exchange on the LTE surrogate
+
+Three complete paired 20 MiB runs on the synthetic LTE profile measured a raw
+median of 2.025 Mbit/s download and 2.669 Mbit/s upload. A fourth completed
+download was 2.177 Mbit/s. Every transfer was byte-exact, but all were excluded
+from comparative aggregates because the separately impaired underlay
+calibration was not at least 10% faster than the tunnel. The command was stopped
+after the three complete pairs rather than letting the five-pair campaign hit
+its 30-minute package limit.
+
+The result is not the profile's nominal radio capacity. The same 0.5%
+independent loss, 30 ms base delay, and jitter are applied on both user and
+provider access legs. It therefore measures H1 plus inner TCP recovery under a
+compounded two-leg cellular surrogate. Treat 2.0/2.7 Mbit/s as a reproducible
+stress result, not a prediction for one physical LTE connection.
+
+## `server/proxy` packet-flow audit
+
+The hosted proxy is a client of the Connect network. It does not run provider
+NAT and, because `HostedIncompatible` forces direct mode off, it cannot use
+legacy or fast P2P. Provider NAT TCP is analyzed separately below.
+
+### HTTP and SOCKS traffic
+
+The HTTP/SOCKS path already has the desired batch shape:
+
+1. The proxy relay dials through a private gVisor `Tun` owned by one
+   `ProxyDevice`.
+2. `ProxyDevice.Run` reads up to 64 packets with `Tun.ReadBatch` and calls
+   `DeviceLocal.SendPacketsNoCopy` once.
+3. `DeviceLocal` takes one immutable route snapshot. The production
+   `RemoteUserNatMultiClient` groups the burst by exact directional five tuple,
+   inspects the ordered payloads, selects a provider once per group, and admits
+   one logical Transfer group.
+4. Hosted devices normally use Auto, whose current production runner is H1.
+   The client H1 writer and `server/connect` H1 writer both use the measured
+   ready-only depth of eight. The exchange writer retains its larger `writev`
+   bound.
+5. Return traffic reaches `AddReceivePacketsCallback` as a borrowed batch.
+   The ordinary proxy mode calls `Tun.WriteBatch` once, enabling gVisor TCP GRO
+   before the proxy relay reads application bytes.
+
+Consequently, the exact-five-tuple grouping, H1 depth-eight coalescing,
+exchange `writev`, TUN depth-64 drain, and TUN GRO findings already apply to
+HTTP/SOCKS proxy traffic. There is no remaining packet-at-a-time downgrade in
+the `ProxyDevice.Run` bridge. `UpdateActivity` is atomic and runs once around a
+TUN batch; it is not a per-device mutex on the data path.
+
+The H3 retained-storage change applies only when a stored performance profile
+explicitly selects H3; current Auto uses H1. Fast-P2P path-MTU growth does not
+apply because hosted devices prohibit direct P2P. The memory-scaled gVisor
+ceiling applies to the proxy's private TUN stack; CUBIC was measured and
+rejected, so the stack retains Reno. The Provider NAT TCP SYN/window,
+timestamp, and peer-MSS changes do not apply to the proxy's private TUN: they
+are implemented by `TcpSequence` on the provider side and evaluated separately
+below. A proxy
+hosts many devices and flows, so its demand-allocated maximum still needs a
+multi-device load measurement before it receives a proxy-specific speedup
+claim.
+
+### WireGuard traffic
+
+WireGuard had two proxy-specific batch-to-single downgrades that HTTP/SOCKS
+did not have. A deeper audit corrected the meaning of its former batch-size
+one setting:
+
+- On the production Linux host, `userwireguard` uses the maximum of the TUN
+  batch size and its UDP bind batch size. The bind reports 128, so decrypted
+  packets could already reach `WgProxy.Write` as a same-peer batch even though
+  `WgProxy.BatchSize` returned one. The old `Write` then looped over that batch,
+  parsed the source, activated the same proxy device, and called singular
+  `WgTun.Send` / `ProxyDevice.Send` for every member.
+- The DeviceLocal return callback already received a batch, but the old
+  WireGuard mode shared each member into a `chan []byte` and `WgProxy.Read`
+  filled only the first supplied buffer. That prevented one ready burst from
+  reaching WireGuard's peer grouping, parallel encryption, and Linux UDP
+  batching together.
+
+There was also a correctness prerequisite. Buffers passed to
+`WgProxy.Write` are borrowed from `userwireguard`; its receive worker returns
+them to the WireGuard pool as soon as `Write` returns. The old singular
+`ProxyDevice.SendPacketNoCopy` handoff transferred those borrowed bytes to an
+asynchronous Connect send. The retained singular and batch paths now copy each
+borrowed packet into Connect's message pool before DeviceLocal takes ownership.
+
+The implemented proxy-specific path now:
+
+1. exposes a borrowed-batch operation through the optional `WgBatchTun`
+   capability;
+2. groups one decrypted WireGuard call by source proxy device, activates each
+   device once, copies its packets into Connect-owned buffers, and calls
+   `DeviceLocal.SendPacketsNoCopy` once so DeviceLocal performs exact-tuple
+   grouping; and
+3. ready-drains queued return packets into the buffers already supplied by
+   WireGuard, with no coalescing wait.
+
+Upload and download use independently measured bounds. Upload depth eight wins
+at the exact `server/proxy` boundary: versus singular sends it reduces median
+128-packet time from 11.428 to 9.458 microseconds at one CPU and from 11.415 to
+8.010 microseconds at ten CPUs. Depths 64 and 128 remain positive versus
+singular, but are slower than eight. Download depth 64 wins the ready-drain
+benchmark; depth 128 regresses. `BatchSize` remains 64 so userwireguard can
+supply the larger ready receive burst, while `Write` chunks that burst into
+upload groups of eight.
+
+Deterministic normal and race gates cover homogeneous and mixed source groups,
+borrowed-buffer reuse immediately after `Write`, partial output capacity,
+undersized buffers, ready-only read depth, cancellation, FIFO order, and exact
+pooled ownership. The retained result measures the boundary around, but not the
+ChaCha20-Poly1305 cipher itself; encrypted WireGuard correctness tests pass and
+the batching change does not alter cipher work per packet.
+
+## Provider NAT TCP: separate optimization goal
+
+Provider NAT TCP is not part of `server/proxy`, but it is a high-value core
+path: every TCP byte supplied by a provider crosses it in one direction or the
+other. Its current pipeline is:
+
+1. `RemoteUserNatProvider.ClientReceive` validates frames, groups admitted IP
+   packets by exact directional five tuple, and uses one nonblocking
+   `LocalUserNat` queue admission per group.
+2. `LocalUserNat.runSendShard` immediately loops over that homogeneous group,
+   reparses each packet, repeats the TCP-buffer lookup/admission, and enqueues
+   one `TcpSendItem` per packet.
+3. `TcpSequence` applies sequence/reorder/window state per packet and hands one
+   `writePayload` per packet to a second channel. Its socket writer later
+   ready-drains up to 64 payloads and uses `net.Buffers`/`writev`.
+4. In the return direction, one upstream socket read can be 64 KiB. It is
+   packetized to the inner MTU, ready-drained in batches of up to 64, and then
+   encoded into route-compatible Transfer chunks of at most two frames / 3
+   KiB. Socket-owned TCP return data retries Transfer admission on that flow's
+   dedicated reader because those consumed upstream bytes cannot be recreated.
+
+The existing provider/TUN microbenchmark is already above the gigabit target
+on a clean same-host path. With the production depth of 64 it measured 368.89
+MB/s at one CPU and 478.69 MB/s at ten CPUs for TCP upload, and 427.17 and
+378.85 MB/s respectively for TCP download. That means provider NAT is not the
+clean single-flow line-rate ceiling in isolation. It remains a priority for
+high RTT, CPU efficiency, mobile providers, and many simultaneous flows.
+
+The high-value provider-NAT targets, in order, are:
+
+1. **High-BDP receive-window and RTT warmup.** The provider SYN advertises a
+   literal 64 KiB window, then the first post-handshake ACK can advertise a
+   memory-scaled 1 MiB window and grow to a 16 MiB ceiling. It also negotiates
+   timestamps so the source can obtain useful RTT samples through a
+   retransmission. On the measured 1 s RTT short upload, the timestamp-capable
+   path reduced 25.087 seconds to 3.081 seconds. On the warmed 20 MiB workload,
+   increasing the provider ceiling from 1 to 16 MiB reduced the median from
+   27.016 to 11.238 seconds, while increasing the post-handshake start from 64
+   KiB to 1 MiB reduced it from 18.270 to 11.238 seconds. At 100 Mbit/s and 1 s
+   RTT the BDP is 12.5 MB, so the ceiling remains memory-target aware for
+   providers with hundreds of live flows. The separate gVisor TUN maximum
+   remains 4 MiB because its 16 MiB candidate overflowed the path queue.
+2. **Preserve the ingress group through flow lookup and sequence admission.**
+   The current code has already paid to prove that every member has one five
+   tuple, then discards that fact. A group-aware TCP-buffer/sequence operation
+   can use one map/LRU lookup, one channel admission, and one wakeup while still
+   applying TCP sequence, ACK, and reorder state to members in order under the
+   existing per-flow synchronization. No new global or send lock is needed.
+3. **Measure ACK cadence during warmup.** ACK compression is bounded at 50 ms
+   and sends early at half a window. That is reasonable at a large steady
+   window but can interact with a 64 KiB start and long RTT. Instrument ACK
+   delay, bytes acknowledged, advertised-window steps, and upstream write
+   progress before changing the timer; a shorter unconditional timer could
+   increase packets and CPU without improving bulk throughput.
+4. **Keep the socket batching that already works.** The upstream writer already
+   uses ready-only `writev(64)`, and the reader already reads 64 KiB and batches
+   return delivery. Replacing either with another channel or copied aggregate
+   is not a first-tier target. The optimization opportunity is above those
+   boundaries, where a known group is currently flattened.
+
+Required measurements are provider-specific rather than proxy measurements:
+singleton versus homogeneous groups of 1/8/64 packets; one and ten CPUs;
+single-flow and 8/64-flow load; clean and 100/500/1,000 ms RTT; time to first
+64 KiB, warmed 32 MiB goodput, ACK count, advertised-window history, flow-map
+lookups, channel admissions, socket writes, allocations, and pool balance.
+Barrier-driven ownership and cancellation tests must precede any group-aware
+production change.
 
 ## Historical main findings
 
@@ -923,14 +1232,16 @@ and carrier-write costs. Physical-device runs remain necessary to find any
 mobile operating-system, radio, power, or thermal ceiling not represented by
 the same-host surrogate.
 
-### 6. Add path-aware growth above the safe 1,280-byte baseline
+### 6. Keep the safe 1,280-byte fast-P2P geometry
 
 The fixed-MTU defect is resolved. Fast P2P v2 fragments at 1,188 bytes, which
 produces an exact worst-case 1,280-byte IPv6 packet. Real-Pion and full-TUN
 tests require complete delivery and zero oversized writes at both 1,400- and
-1,280-byte outer MTUs. Mixed v1/v2 peers reject mismatched readiness markers
-and fall back to SCTP. Future path-MTU work can grow above this conservative
-baseline when the selected path proves a larger datagram size.
+1,280-byte outer MTUs. The measured upward-probing candidate improved a
+synthetic 4 KiB-message carrier loop but did not reduce production full-TUN
+fragment count or move 32 MiB P2P-fast goodput. It was reverted. Revisit growth
+only if the logical Transfer message distribution changes enough to cross a
+fragment-count threshold in the end-to-end workload.
 
 ### 7. Improve measurement validity before comparing high-RTT downloads
 
@@ -977,6 +1288,7 @@ throughput aggregates.
 | `/tmp/perfvar-p2p-mtu-failure.log` | Deterministic fast-P2P MTU diagnostic |
 | `/tmp/perfvar-h1-rtt-sweep-run1.log` | Exploratory one-run H1 RTT trend only |
 | `/tmp/perfvar-full-serial-20260812-depth8-final.log` | Final exact-tree complete serial correctness gate |
+| `/tmp/perfvar-full-serial-20260813-final-retained.log` | Final 342-test serial correctness gate after retained optimizations |
 | `/tmp/urnetwork-client-h1-tls-batch4-vs-8-20260812.log` | Client H1 saturated depth-four/eight comparison |
 | `/tmp/urnetwork-server-h1-batch4-vs-8-20260812.log` | Server cleartext and TLS H1 depth-four/eight comparison |
 | `/tmp/urnetwork-client-h1-depth8-sparse-20260812.log` | Client H1 sparse depth-eight latency control |
@@ -986,3 +1298,24 @@ throughput aggregates.
 | `/tmp/urnetwork-p2p-fast-udp-depth-evaluation-20260812.log` | Fast-P2P UDP drain depth comparison |
 | `/tmp/urnetwork-p2p-route-channel4-vs-8-20260812.log` | Real WebRTC route-channel depth comparison |
 | `/tmp/urnetwork-tun-nat-batch8-vs-64-20260812.log` | Shared TUN/NAT depth-eight/64 comparison |
+| `/tmp/perfvar-final-baseline-rtt-h1-64k-20260813.log` | Three-run 500 ms / 1 s H1 control before provider timestamp negotiation |
+| `/tmp/perfvar-final-timestamp-rtt-h1-64k-20260813.log` | Three-run 500 ms / 1 s H1 result with provider timestamps |
+| `/tmp/urnetwork-tcp-mss-packetization-20260813.log` | Peer-MSS asymmetric/equal-MTU packetization comparison |
+| `/tmp/urnetwork-tcp-sack-recovery-20260813.log` | Clean and one-loss SACK comparison; rejected |
+| `/tmp/urnetwork-tcp-sack-three-drop-20260813.log` | Three-loss SACK comparison; rejected |
+| `/tmp/urnetwork-tcp-sack-delayed-three-drop-20260813.log` | Delayed three-loss SACK comparison; rejected |
+| `/tmp/perfvar-tcp-options-reno-h1-wan-warmed-20m-20260813.log` | Reno half of exact-seed WAN comparison |
+| `/tmp/perfvar-tcp-options-cubic-h1-wan-warmed-20m-20260813.log` | CUBIC half of exact-seed WAN comparison; rejected |
+| `/tmp/perfvar-tcp-tun-window4m-h1-1s-warmed-20m-20260813.log` | Correct 4 MiB gVisor TUN control for the isolated maximum-window comparison |
+| `/tmp/perfvar-tcp-tun-window16m-h1-1s-warmed-20m-20260813.log` | Rejected 16 MiB gVisor TUN candidate; 2,304 queue drops and workload timeout |
+| `/tmp/perfvar-tcp-provider-window1m-h1-1s-warmed-20m-count3-20260813.log` | Three-trace 1 MiB provider maximum control |
+| `/tmp/perfvar-tcp-provider-window16m-h1-1s-warmed-20m-count3-20260813.log` | Three-trace retained 16 MiB provider maximum and 1 MiB initial-window result |
+| `/tmp/perfvar-tcp-provider-initial64k-max16m-h1-1s-warmed-20m-count3-20260813.log` | Three-trace 64 KiB provider initial-window control with the 16 MiB maximum held fixed |
+| `/tmp/urnetwork-wireguard-upload-depth-final-20260813.log` | Correct singular versus grouped WireGuard upload and depth comparison |
+| `/tmp/urnetwork-wireguard-download-depth-final-20260813.log` | WireGuard ready-only download depth comparison |
+| `/tmp/urnetwork-server-proxy-wireguard-borrowed-upload-20260813.log` | Exact `ProxyDevice` borrowed-to-owned upload depth comparison |
+| `/tmp/perfvar-mobile-packet-group-all-routes-final-32m-count5-20260813.log` | Final paired packet-group A/B on every carrier |
+| `/tmp/perfvar-final-retained-h1-lte-20m-run5-20260813.log` | Three complete paired H1 LTE-surrogate runs plus one fourth download |
+| `/tmp/urnetwork-p2p-fast-path-mtu-growth-20260813.log` | Synthetic fast-P2P 1,280/1,400/1,500-byte geometry comparison |
+| `/tmp/perfvar-p2p-fast-pmtu-baseline-20260813.log` | Three-run fixed-1,280-byte full-TUN P2P-fast control |
+| `/tmp/perfvar-p2p-fast-pmtu-final-20260813.log` | Three-run upward-probing full-TUN P2P-fast candidate; rejected |

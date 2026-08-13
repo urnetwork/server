@@ -39,6 +39,7 @@ type perfvarMobileTcpWindowObservation struct {
 // burst; its singular mode is diagnostic and is never used by production.
 type perfvarMobilePacketGroupObservation struct {
 	RunIndex             int                           `json:"run_index"`
+	Route                fullTunRoute                  `json:"route"`
 	Mode                 string                        `json:"mode"`
 	UsefulByteCount      int64                         `json:"useful_byte_count"`
 	Duration             time.Duration                 `json:"duration_nanoseconds"`
@@ -797,57 +798,60 @@ func TestPerfvarMobilePacketGroupSweep(t *testing.T) {
 	}
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
-		profile := initialNetworkProfiles(20260812)["clean-lan"]
-		for runIndex := 1; runIndex <= 5; runIndex += 1 {
-			modes := []bool{true, false}
-			if runIndex%2 == 0 {
-				modes = []bool{false, true}
-			}
-			for _, singularBridgeSend := range modes {
-				resources := mobileTunResourceProfile()
-				resources.SingularBridgeSend = singularBridgeSend
-				fixture, err := newPerfvarCorrectnessFixture(
-					t,
-					fullTunRouteExchangeH1,
-					profile,
-					profile,
-					profile,
-					resources,
-					5*time.Minute,
-				)
-				if err != nil {
-					t.Fatalf("construct mobile packet group singular=%t: %v", singularBridgeSend, err)
+		for routeIndex, route := range perfvarCorrectnessRoutes() {
+			profile := initialNetworkProfiles(20260812 + int64(routeIndex))["clean-lan"]
+			for runIndex := 1; runIndex <= 5; runIndex += 1 {
+				modes := []bool{true, false}
+				if runIndex%2 == 0 {
+					modes = []bool{false, true}
 				}
-				observation, measureErr := fixture.measure(
-					perfvarWorkloadTCP,
-					perfvarDirectionUpload,
-					func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
-						return measureFullTunUpload(ctx, path, 32*1024*1024)
-					},
-				)
-				fixture.close()
-				if measureErr != nil {
-					t.Fatalf("measure mobile packet group singular=%t: %v", singularBridgeSend, measureErr)
+				for _, singularBridgeSend := range modes {
+					resources := mobileTunResourceProfile()
+					resources.SingularBridgeSend = singularBridgeSend
+					fixture, err := newPerfvarCorrectnessFixture(
+						t,
+						route,
+						profile,
+						profile,
+						profile,
+						resources,
+						5*time.Minute,
+					)
+					if err != nil {
+						t.Fatalf("construct mobile packet group singular=%t: %v", singularBridgeSend, err)
+					}
+					observation, measureErr := fixture.measure(
+						perfvarWorkloadTCP,
+						perfvarDirectionUpload,
+						func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
+							return measureFullTunUpload(ctx, path, 32*1024*1024)
+						},
+					)
+					fixture.close()
+					if measureErr != nil {
+						t.Fatalf("measure mobile packet group singular=%t: %v", singularBridgeSend, measureErr)
+					}
+					mode := "packet-group"
+					if singularBridgeSend {
+						mode = "packet-at-a-time"
+					}
+					record := perfvarMobilePacketGroupObservation{
+						RunIndex:             runIndex,
+						Route:                route,
+						Mode:                 mode,
+						UsefulByteCount:      observation.Result.UsefulByteCount,
+						Duration:             observation.Result.Duration,
+						GoodputGigabits:      observation.Result.GoodputGigabits,
+						BridgeBatches:        observation.Carrier.BridgeBatches,
+						CarrierWireByteCount: observation.Carrier.WireByteCount,
+						CarrierDuration:      observation.Carrier.Duration,
+					}
+					encoded, err := json.Marshal(record)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Logf("[perfvar-mobile-packet-group] %s", encoded)
 				}
-				mode := "packet-group"
-				if singularBridgeSend {
-					mode = "packet-at-a-time"
-				}
-				record := perfvarMobilePacketGroupObservation{
-					RunIndex:             runIndex,
-					Mode:                 mode,
-					UsefulByteCount:      observation.Result.UsefulByteCount,
-					Duration:             observation.Result.Duration,
-					GoodputGigabits:      observation.Result.GoodputGigabits,
-					BridgeBatches:        observation.Carrier.BridgeBatches,
-					CarrierWireByteCount: observation.Carrier.WireByteCount,
-					CarrierDuration:      observation.Carrier.Duration,
-				}
-				encoded, err := json.Marshal(record)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Logf("[perfvar-mobile-packet-group] %s", encoded)
 			}
 		}
 	})

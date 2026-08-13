@@ -184,6 +184,23 @@ it here in the same change. Ordinary assertion verbs such as `Accepts`,
 | outer protocol or underlay | H1/H3/WebRTC and their physical TCP/UDP packets carrying the inner traffic. |
 | MTU | Maximum packet size accepted by a link. PERFVAR's `OuterMtu` applies to the simulated physical carrier packet, not directly to the inner TUN packet. |
 | PMTU or path MTU | Smallest usable MTU across the physical path. H3 enables path MTU discovery; fast P2P uses a fragment payload sized for the IPv6 minimum outer MTU. |
+| TCP option | Variable-length field after the fixed TCP header, normally negotiated during the SYN handshake. Options consume bytes inside the MTU and therefore reduce data payload. |
+| MSS or peer MSS | Maximum TCP payload a peer says it can receive in one segment. It excludes IP and fixed TCP headers. A sender must also subtract bytes used by later TCP options so the complete IP packet fits the peer path. |
+| window scale | SYN-negotiated exponent extending the 16-bit TCP Window field after the handshake. The Window field in a SYN remains literal and unscaled. |
+| TCP timestamp | SYN-negotiated timestamp value and echoed timestamp used for RTT measurement and retransmission recovery. It is an inner-TCP option, not a PERFVAR wall clock or Connect event timestamp. |
+| SACK or selective acknowledgement | TCP option allowing a receiver to report noncontiguous received ranges after loss. It is distinct from WebRTC/SCTP SACK and from Connect Transfer ACK ranges. `NoSack` in a TCP benchmark means this inner-TCP option was not negotiated. |
+| PAWS | Protection Against Wrapped Sequences, a TCP timestamp use that rejects old segments after sequence-number wrap. It is not a separate Connect route or test phase. |
+| ECN | Explicit Congestion Notification, which marks congestion instead of requiring a drop when every endpoint and path supports it. The current gVisor inner-TCP stack does not implement it. |
+| TCP Fast Open or TFO | TCP extension allowing application data during connection establishment using a cookie. It is distinct from Connect P2P fast and is not implemented by the current gVisor stack. |
+| Reno or CUBIC | Alternative inner-TCP congestion-control algorithms in gVisor. Reno is the retained production default; a measured CUBIC candidate was reverted. Neither term describes Pion SCTP's separate congestion controller. |
+| congestion window or cwnd | Sender-side amount of unacknowledged TCP data permitted by congestion control. It is independent of the receiver-advertised window; the smaller bound limits the sender. |
+| initial congestion window | Congestion window at the start of a TCP flow, expressed in segments. The current gVisor default is ten. It is not the same as the provider's advertised receive window. |
+| Nagle or `TCP_NODELAY` | Nagle delays small TCP writes to combine them; `TCP_NODELAY` disables that delay. The gVisor TUN defaults to no delayed-send mode and provider host sockets explicitly enable `TCP_NODELAY`. |
+| quick ACK | TCP receiver preference to acknowledge promptly rather than waiting for the ordinary delayed-ACK cadence. It is distinct from Connect Transfer ACK compression. |
+| RTO | TCP retransmission timeout. Minimum, maximum, and exponential backoff affect loss/outage recovery; RTO is not RTT even though RTT samples inform it. |
+| RACK | Recent ACKnowledgment loss detection, which uses timing and selective acknowledgement evidence to identify lost TCP segments. It is inner-TCP recovery, not Connect route ACK tracking. |
+| TCP keepalive | Optional probe of an otherwise idle established TCP connection. It affects stale-peer detection, not active bulk-flow goodput. |
+| linger or TIME-WAIT | TCP close-state retention. Linger controls part of shutdown behavior; TIME-WAIT prevents old segments from contaminating a newer connection with the same tuple. Neither is a batching delay. |
 
 ## PERFVAR route, workload, and resource qualifiers
 
@@ -260,6 +277,8 @@ it here in the same change. Ordinary assertion verbs such as `Accepts`,
 | TCP buffer default | Initial gVisor send or receive buffer for a new endpoint. It is not necessarily the endpoint's lifetime limit when auto-tuning is enabled. |
 | TCP auto-tuning | gVisor growth of a TCP send or receive buffer as congestion-window and receive-rate evidence justify it, up to the configured maximum. A test that makes default and maximum equal disables useful growth. |
 | TCP buffer maximum or window ceiling | Per-connection upper bound for an auto-tuned TCP buffer. If it is below the route's bandwidth-delay product, one flow becomes window-limited even when the carrier has unused capacity. |
+| provider initial window | Provider NAT's receive window immediately after the SYN handshake. The SYN itself always carries an unscaled 16-bit value; the configured, memory-scaled initial window is advertised only after negotiated window scaling becomes active. It is distinct from the sender congestion window. |
+| provider maximum window | Demand-driven upper bound on Provider NAT's advertised receive window. It does not preallocate one maximum-sized packet queue per flow. It is distinct from the gVisor TUN buffer maximum, which belongs to the client-side userspace TCP stack. |
 | route-independent ceiling | Similar throughput across materially different carriers because a shared endpoint, application, scheduler, or harness boundary is limiting all of them. It is evidence to inspect the common path before optimizing one carrier. |
 | read-ahead | Complete messages or packets consumed from an upstream buffer before the downstream consumer asks for each one. Ready-only read-ahead does not wait for more input, but it still transfers ownership and weakens immediate backpressure. It does not necessarily reduce socket reads when a buffered reader already fetched the bytes. |
 | channel depth or buffer depth | Maximum queued items between independently scheduled producers and consumers. It controls burst absorption, ownership memory, backpressure, and queueing latency; it is not interchangeable with a writer's per-turn batch size. |

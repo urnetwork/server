@@ -481,6 +481,11 @@ type ProxyDevice struct {
 	receiveMonitor *connect.Monitor
 	receiveNotify  chan struct{}
 	receive        chan []byte
+
+	// Nil in production. Ownership tests replace the final asynchronous sends
+	// while retaining the same borrowed-to-owned copy boundary.
+	sendOwnedPacketForTest  func([]byte) bool
+	sendOwnedPacketsForTest func([][]byte) int
 }
 
 func NewProxyDeviceWithDefaults(
@@ -722,7 +727,43 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 	if !self.UpdateActivity() {
 		return false
 	}
-	return self.deviceLocal.SendPacketNoCopy(packet, int32(len(packet)))
+	ownedPacket := connect.MessagePoolCopy(packet)
+	sent := false
+	if self.sendOwnedPacketForTest != nil {
+		sent = self.sendOwnedPacketForTest(ownedPacket)
+	} else {
+		sent = self.deviceLocal.SendPacketNoCopy(ownedPacket, int32(len(ownedPacket)))
+	}
+	if sent {
+		return true
+	}
+	connect.MessagePoolReturn(ownedPacket)
+	return false
+}
+
+// Copies one borrowed userwireguard burst into Connect-owned buffers before
+// handing it to the asynchronous DeviceLocal group path.
+func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
+	if !self.UpdateActivity() {
+		return 0
+	}
+	ownedPackets := make([][]byte, len(packets))
+	for packetIndex, packet := range packets {
+		ownedPackets[packetIndex] = connect.MessagePoolCopy(packet[offset:])
+	}
+	if self.sendOwnedPacketsForTest != nil {
+		sentPacketCount := min(
+			max(0, self.sendOwnedPacketsForTest(ownedPackets)),
+			len(ownedPackets),
+		)
+		for _, ownedPacket := range ownedPackets[sentPacketCount:] {
+			connect.MessagePoolReturn(ownedPacket)
+		}
+		return sentPacketCount
+	}
+	// DeviceLocal's batch contract consumes every pooled packet, including
+	// members rejected by the selected route.
+	return self.deviceLocal.SendPacketsNoCopy(ownedPackets)
 }
 
 func (self *ProxyDevice) SetReceive(receive chan []byte) {

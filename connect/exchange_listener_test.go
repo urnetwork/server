@@ -1,11 +1,27 @@
+// This file verifies ownership and lifecycle behavior for already-bound
+// exchange listeners.
 package connect
 
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// An exchangeCloseRecordingListener exposes synchronous Close ownership while
+// delegating the actual TCP listener contract.
+type exchangeCloseRecordingListener struct {
+	net.Listener
+	closeCount atomic.Int64
+}
+
+// Close records the ownership action before releasing the socket.
+func (self *exchangeCloseRecordingListener) Close() error {
+	self.closeCount.Add(1)
+	return self.Listener.Close()
+}
 
 func TestExchangeUsesPreboundListener(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -75,4 +91,32 @@ func TestExchangeClosesPreboundListener(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// Closing an Exchange must release a supplied listener even if Run has not
+// admitted its listener worker. This is the exact constructor/Close race that
+// otherwise leaves the socket with no lifecycle owner.
+func TestExchangeCloseOwnsUnstartedPreboundListener(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
+	recordingListener := &exchangeCloseRecordingListener{Listener: listener}
+	exchange := &Exchange{
+		cancel:               func() {},
+		servicePortListeners: map[int]net.Listener{1: recordingListener},
+	}
+
+	exchange.Close()
+	if closeCount := recordingListener.closeCount.Load(); closeCount != 1 {
+		t.Fatalf("prebound listener close count=%d, want=1", closeCount)
+	}
+	replacement, err := net.Listen("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("rebind synchronously after Exchange.Close: %v", err)
+	}
+	_ = replacement.Close()
 }
