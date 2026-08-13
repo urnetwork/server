@@ -217,9 +217,12 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 			if err != nil {
 				return
 			}
-			for i := 0; i < n; i += 1 {
-				multiClient.SendPacket(deviceSource, protocol.ProvideMode_Network, packets[i], -1)
-			}
+			multiClient.SendPacketBatch(
+				deviceSource,
+				protocol.ProvideMode_Network,
+				packets[:n],
+				-1,
+			)
 		}
 	}()
 
@@ -258,6 +261,13 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	// ceiling rather than the worst-case sample.
 
 	streamByteCount := int64(mcTcpStreamByteCount)
+	if serverConnectRaceEnabled {
+		// The race detector makes the full-stack packet path CPU-bound and turns
+		// the 100 MiB performance sample into a several-minute scheduler test.
+		// Keep enough data to exercise repeated grouped admissions while making
+		// this build a concurrency/correctness gate, not a throughput gate.
+		streamByteCount = 4 * 1024 * 1024
+	}
 	chunk := make([]byte, 64*1024)
 	for i := range chunk {
 		chunk[i] = byte(i)
@@ -423,7 +433,7 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	if okRuns == 0 {
 		panic(fmt.Errorf("tcp stream: all %d runs stalled before completing", runs))
 	}
-	if goodput < mcTcpStreamMinGoodput {
+	if !serverConnectRaceEnabled && goodput < mcTcpStreamMinGoodput {
 		panic(fmt.Errorf("tcp stream goodput too low: %.2f MiB/s (%d/%d runs completed)", goodput, okRuns, runs))
 	}
 }

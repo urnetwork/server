@@ -68,6 +68,28 @@ complete, the same complete serial PERFVAR command ran again. All 342 tests
 passed in 830.667 seconds. This exact retained-tree gate is
 `/tmp/perfvar-full-serial-20260813-final-retained.log`.
 
+The complementary non-DB ownership and concurrency tier then passed under the
+race detector in 477.537 seconds with `-short`, `-p=1`, and `-parallel=1`. Its
+log is `/tmp/perfvar-short-race-20260813-final-retained.log`. An attempted
+full DB PERFVAR run under `-race` was rejected as invalid validation after its
+instrumented regional route and application deadlines expired. PERFVAR's
+documented contract deliberately uses the complete serial non-race tier for
+production-shaped timing and the short race tier for deterministic ownership
+and concurrency kernels. `server/test.sh` now enforces that split instead of
+running the wall-clock-sensitive campaign under race instrumentation.
+
+The retained tree also passed the complete Connect repository race suite and
+the complete proxy repository suite. The complete SDK suite also passed: the
+root race package, build and cgo modules, and all 28 JavaScript tests. The
+server validation was completed in segments: the root, API, API handler,
+API-key, proxy, and exhaustive
+`server/connect` route matrix passed before the obsolete singular full-stack
+performance bridge was stopped; both corrected grouped full-stack TCP tests
+then passed normally and under the race detector; and every package after
+`server/connect` passed under race. This is complete package and changed-path
+coverage, but it is not represented as one uninterrupted `server/test.sh`
+invocation.
+
 The server H1 optimization was then exercised through the production full-TUN
 exchange route. `TestFullTunExchangeH1Correctness` passed five of five normal
 runs and one race-detector run. The logs are
@@ -395,6 +417,7 @@ grounds.
 |---|---|---|
 | H1 client/server write batching | Raising the ready-only maximum from four to eight improved saturated boundary throughput by 13.0–60.3%, depending on TLS and CPU count. Sparse medians changed by 0.6–2.6%, with overlapping ranges and exactly one frame/write/TLS record. | Keep depth eight. Do not add a coalescing delay. |
 | Exact-five-tuple logical sends | The original H1 mobile comparison improved from 336.497 to 416.331 Mbit/s (+23.73%). A final paired five-run all-route gate also improved every carrier: H1 +2.61%, H3 +15.86%, legacy P2P +2.84%, and fast P2P +0.35%. Route-selection/send time fell 12.0–49.9% and carrier bytes fell 4.0–6.4%. | Keep. Preserve a homogeneous packet group through policy, provider selection, candidate race, and SendSequence admission. Physical wire chunks remain an internal transport detail. |
+| Full-stack TCP TUN bridge | On the same non-race full-stack test, singular `SendPacket` delivery completed one of four 100 MiB samples at 41.15 MiB/s. Preserving each `Tun.ReadBatch` through `SendPacketBatch` completed two of three samples at 44.70 and 44.47 MiB/s. Best goodput improved 8.63%, and allocated bytes fell from 4,629 to about 3,893 KiB/MiB (15.9%). | Keep the batch bridge in both full-stack TCP harnesses. Besides measuring the production architecture accurately, it avoids leaking a rejected singular packet owner. |
 | Inner TCP auto-tuning | Raising only the modeled maximum from a fixed 256 KiB to 2 MiB improved the same H1 workload from 41.045 to 402.276 Mbit/s, or 9.80 times. Raising 2 MiB to 4 MiB added only 3.45% on that low-RTT workload. | A fixed small window is a route-independent ceiling. Keep a modest initial allocation and allow growth; size high-BDP maxima from RTT/rate and memory rather than from clean-path results alone. |
 | gVisor TUN maximum, 4 versus 16 MiB | With the provider held at 16 MiB, the original 4 MiB TUN completed the exact 1 s RTT / 20 MiB H1 workload correctly in 18.284 s at 9.176 Mbit/s. Raising only the TUN maximum to 16 MiB overflowed the profile's 4,096-packet queue, produced 2,304 queue drops, and timed out. | Reverted. Retain the 4 MiB TUN maximum; a larger advertised window is harmful until the sender and modeled/real path queues can absorb it. |
 | Provider NAT TCP maximum, 1 versus 16 MiB | Three exact traces with a 1 MiB maximum had a 27.016 s / 6.210 Mbit/s median. The same traces at 16 MiB had an 11.238 s / 14.928 Mbit/s median: 2.404 times faster and 58.40% less transfer time. Every paired trace improved; all six were correct with zero queue drops. | Keep the 16 MiB demand-driven maximum. Its three results reached about 94% of untunneled calibration and were therefore excluded from comparative route aggregates by the harness's 10% headroom rule; the raw correct transfer times remain the one-variable A/B evidence. |
@@ -1289,6 +1312,12 @@ throughput aggregates.
 | `/tmp/perfvar-h1-rtt-sweep-run1.log` | Exploratory one-run H1 RTT trend only |
 | `/tmp/perfvar-full-serial-20260812-depth8-final.log` | Final exact-tree complete serial correctness gate |
 | `/tmp/perfvar-full-serial-20260813-final-retained.log` | Final 342-test serial correctness gate after retained optimizations |
+| `/tmp/perfvar-short-race-20260813-final-retained.log` | Final PERFVAR non-DB ownership/concurrency race gate |
+| `/tmp/connect-full-race-20260813-final-retained-rerun2.log` | Complete Connect repository race suite |
+| `/tmp/proxy-full-race-20260813-final-retained.log` | Complete proxy repository suite |
+| `/tmp/sdk-full-race-20260813-final-retained.log` | Complete SDK race, module, and JavaScript suite |
+| `/tmp/server-full-race-20260813-final-retained.log` | Server race run through the exhaustive route matrix and old singular full-stack bridge |
+| `/tmp/server-full-race-tail-20260813-final-retained-env.log` | Race-tested server packages after `server/connect`; the leading full-DB PERFVAR attempt is intentionally invalid and superseded by the serial/short-race split |
 | `/tmp/urnetwork-client-h1-tls-batch4-vs-8-20260812.log` | Client H1 saturated depth-four/eight comparison |
 | `/tmp/urnetwork-server-h1-batch4-vs-8-20260812.log` | Server cleartext and TLS H1 depth-four/eight comparison |
 | `/tmp/urnetwork-client-h1-depth8-sparse-20260812.log` | Client H1 sparse depth-eight latency control |
@@ -1315,6 +1344,10 @@ throughput aggregates.
 | `/tmp/urnetwork-wireguard-download-depth-final-20260813.log` | WireGuard ready-only download depth comparison |
 | `/tmp/urnetwork-server-proxy-wireguard-borrowed-upload-20260813.log` | Exact `ProxyDevice` borrowed-to-owned upload depth comparison |
 | `/tmp/perfvar-mobile-packet-group-all-routes-final-32m-count5-20260813.log` | Final paired packet-group A/B on every carrier |
+| `/tmp/server-connect-mctcp-singular-control.log` | Same-build full-stack TCP singular-bridge control |
+| `/tmp/server-connect-mctcp-group-final.log` | Same-build full-stack TCP retained packet-group bridge |
+| `/tmp/server-connect-mctcp-group-final-race-short.log` | Retained grouped full-stack TCP race correctness gate |
+| `/tmp/server-connect-mctcp-directional-group-final-race-short.log` | Retained grouped directional TCP race correctness gate |
 | `/tmp/perfvar-final-retained-h1-lte-20m-run5-20260813.log` | Three complete paired H1 LTE-surrogate runs plus one fourth download |
 | `/tmp/urnetwork-p2p-fast-path-mtu-growth-20260813.log` | Synthetic fast-P2P 1,280/1,400/1,500-byte geometry comparison |
 | `/tmp/perfvar-p2p-fast-pmtu-baseline-20260813.log` | Three-run fixed-1,280-byte full-TUN P2P-fast control |

@@ -59,6 +59,13 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 	stack, cleanup := setupMcStack(ctx, "mctcpdir")
 	defer cleanup()
 
+	streamByteCount := int64(mcDirStreamByteCount)
+	if serverConnectRaceEnabled {
+		// See the coupled full-stack TCP test. Under race this is a bounded
+		// grouped-path correctness workload rather than a capacity measurement.
+		streamByteCount = 4 * 1024 * 1024
+	}
+
 	// ---- sink server: reads and discards (upload target) ----------------------
 	sinkListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -95,7 +102,7 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 			}
 			go func() {
 				defer conn.Close()
-				remaining := int64(mcDirStreamByteCount)
+				remaining := streamByteCount
 				for 0 < remaining {
 					n := min(int64(len(chunk)), remaining)
 					conn.SetWriteDeadline(time.Now().Add(mcDirPerRunReadTimeout))
@@ -169,9 +176,12 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 			if err != nil {
 				return
 			}
-			for i := 0; i < n; i += 1 {
-				multiClient.SendPacket(deviceSource, protocol.ProvideMode_Network, packets[i], -1)
-			}
+			multiClient.SendPacketBatch(
+				deviceSource,
+				protocol.ProvideMode_Network,
+				packets[:n],
+				-1,
+			)
 		}
 	}()
 
@@ -188,8 +198,8 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 		chunk := make([]byte, 64*1024)
 		start := time.Now()
 		written := int64(0)
-		for written < mcDirStreamByteCount {
-			n := min(int64(len(chunk)), mcDirStreamByteCount-written)
+		for written < streamByteCount {
+			n := min(int64(len(chunk)), streamByteCount-written)
 			conn.SetWriteDeadline(time.Now().Add(mcDirPerRunReadTimeout))
 			wn, err := conn.Write(chunk[:n])
 			written += int64(wn)
@@ -217,14 +227,14 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 		buffer := make([]byte, 256*1024)
 		start := time.Now()
 		var readByteCount int64
-		for readByteCount < mcDirStreamByteCount {
+		for readByteCount < streamByteCount {
 			conn.SetReadDeadline(time.Now().Add(mcDirPerRunReadTimeout))
 			n, err := conn.Read(buffer)
 			if 0 < n {
 				atomic.AddInt64(&readByteCount, int64(n))
 			}
 			if err != nil {
-				if err == io.EOF && readByteCount == mcDirStreamByteCount {
+				if err == io.EOF && readByteCount == streamByteCount {
 					break
 				}
 				fmt.Printf("[mctcpdir]download stalled after %dMiB: %v (dropping sample)\n", readByteCount/(1024*1024), err)
@@ -253,7 +263,7 @@ func testConnectMultiClientTcpDirectionalPerformance(t testing.TB) {
 		if okRuns == 0 {
 			panic(fmt.Errorf("%s: all %d runs stalled before completing", label, runs))
 		}
-		if best < mcDirMinGoodput {
+		if !serverConnectRaceEnabled && best < mcDirMinGoodput {
 			panic(fmt.Errorf("%s goodput too low: %.2f MiB/s (%d/%d runs completed)", label, best, okRuns, runs))
 		}
 		return best

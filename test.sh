@@ -27,9 +27,29 @@ if [[ -d $proxy_dir ]]; then
     popd
 fi
 
+# PERFVAR separates production-shaped, wall-clock-sensitive DB correctness
+# from race-instrumented ownership and concurrency checks. Running its regional,
+# loss, outage, and throughput fixtures under -race changes their modeled timing
+# enough to create false route and workload timeouts. Run the complete serial
+# correctness tier first, then the package's documented short race tier.
+perfvar_dir="./connect/perfvar"
+if [[ -d $perfvar_dir ]]; then
+    pushd $perfvar_dir
+    match="/$(basename $(pwd))/\S*\.go\|^\S*_test.go"
+    go test -timeout 0 -p=1 -parallel=1 -v "$@" | grep --color=always -e "^" -e "$match"
+    if [[ ${pipestatus[1]} != 0 ]]; then
+        exit ${pipestatus[1]}
+    fi
+    GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 30m -p=1 -parallel=1 -short -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --color=always -e "^" -e "$match"
+    if [[ ${pipestatus[1]} != 0 ]]; then
+        exit ${pipestatus[1]}
+    fi
+    popd
+fi
+
 for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -sd ' ' -`; do
-    if [[ $d == $proxy_dir ]]; then
-        # run separately above (no -race, finite timeout)
+    if [[ $d == $proxy_dir || $d == $perfvar_dir ]]; then
+        # run separately above with each integration package's timing contract
         continue
     fi
     # if [[ $1 == "" || $1 == `basename $d` ]]; then
