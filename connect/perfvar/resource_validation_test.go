@@ -52,8 +52,11 @@ func TestPerfvarDefaultResourceProfile(t *testing.T) {
 	if resources.ChannelSize != 4096 {
 		t.Errorf("channel capacity=%d, want 4096", resources.ChannelSize)
 	}
-	if resources.TcpBuffer != 0 {
-		t.Errorf("TCP override=%d, want production default", resources.TcpBuffer)
+	if resources.TcpBufferDefault != 0 {
+		t.Errorf("TCP default override=%d, want production default", resources.TcpBufferDefault)
+	}
+	if resources.TcpBufferMax != 0 {
+		t.Errorf("TCP maximum override=%d, want production default", resources.TcpBufferMax)
 	}
 	if resources.UdpBuffer != 0 {
 		t.Errorf("UDP override=%d, want production default", resources.UdpBuffer)
@@ -73,8 +76,11 @@ func TestPerfvarMobileSurrogateResourceProfile(t *testing.T) {
 	if resources.ChannelSize != 256 {
 		t.Errorf("channel capacity=%d, want 256", resources.ChannelSize)
 	}
-	if resources.TcpBuffer != 256*1024 {
-		t.Errorf("TCP override=%d, want %d", resources.TcpBuffer, 256*1024)
+	if resources.TcpBufferDefault != 256*1024 {
+		t.Errorf("TCP default override=%d, want %d", resources.TcpBufferDefault, 256*1024)
+	}
+	if resources.TcpBufferMax != 2*1024*1024 {
+		t.Errorf("TCP maximum override=%d, want %d", resources.TcpBufferMax, 2*1024*1024)
 	}
 	if resources.UdpBuffer != 128*1024 {
 		t.Errorf("UDP override=%d, want %d", resources.UdpBuffer, 128*1024)
@@ -84,6 +90,22 @@ func TestPerfvarMobileSurrogateResourceProfile(t *testing.T) {
 	}
 	if resources.AppDelay != 100*time.Microsecond {
 		t.Errorf("application delay=%s, want %s", resources.AppDelay, 100*time.Microsecond)
+	}
+}
+
+// The constrained profile starts small but permits the same bounded TCP
+// auto-tuning available to a 32 MiB mobile process budget.
+func TestPerfvarMobileSurrogateTcpWindowRange(t *testing.T) {
+	settings := clientconnect.DefaultTunSettings()
+	resources := mobileTunResourceProfile()
+	applyTunResourceProfile(settings, resources)
+	for name, bufferRange := range map[string]clientconnect.TcpBufferRange{
+		"receive": settings.TcpReceiveBuffer,
+		"send":    settings.TcpSendBuffer,
+	} {
+		if bufferRange.Default != 256*1024 || bufferRange.Max != 2*1024*1024 {
+			t.Errorf("%s TCP buffer range=%+v", name, bufferRange)
+		}
 	}
 }
 

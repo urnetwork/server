@@ -5,7 +5,9 @@ package perfvar
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +16,37 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 )
+
+const (
+	perfvarMobileTcpWindowSweepEnvironment   = "CONNECT_PERFVAR_MOBILE_TCP_WINDOW_SWEEP"
+	perfvarMobilePacketGroupSweepEnvironment = "CONNECT_PERFVAR_MOBILE_PACKET_GROUP_SWEEP"
+)
+
+// One opt-in axis record isolates the TCP window from every other mobile
+// surrogate resource and route input.
+type perfvarMobileTcpWindowObservation struct {
+	TcpBufferDefault     int                           `json:"tcp_buffer_default_bytes"`
+	TcpBufferMax         int                           `json:"tcp_buffer_max_bytes"`
+	UsefulByteCount      int64                         `json:"useful_byte_count"`
+	Duration             time.Duration                 `json:"duration_nanoseconds"`
+	GoodputGigabits      float64                       `json:"goodput_gigabits_per_second"`
+	BridgeBatches        fullTunBridgeBatchObservation `json:"bridge_batches"`
+	CarrierWireByteCount uint64                        `json:"carrier_wire_byte_count"`
+	CarrierDuration      time.Duration                 `json:"carrier_duration_nanoseconds"`
+}
+
+// One opt-in comparison changes only group preservation after the native read
+// burst; its singular mode is diagnostic and is never used by production.
+type perfvarMobilePacketGroupObservation struct {
+	RunIndex             int                           `json:"run_index"`
+	Mode                 string                        `json:"mode"`
+	UsefulByteCount      int64                         `json:"useful_byte_count"`
+	Duration             time.Duration                 `json:"duration_nanoseconds"`
+	GoodputGigabits      float64                       `json:"goodput_gigabits_per_second"`
+	BridgeBatches        fullTunBridgeBatchObservation `json:"bridge_batches"`
+	CarrierWireByteCount uint64                        `json:"carrier_wire_byte_count"`
+	CarrierDuration      time.Duration                 `json:"carrier_duration_nanoseconds"`
+}
 
 // One owned fixture gives every route/profile case a hard lifetime and an
 // exact carrier observation boundary.
@@ -685,6 +718,136 @@ func TestPerfvarEveryRouteMobileSurrogateCorrectness(t *testing.T) {
 			fixture.close()
 			if measureErr != nil {
 				t.Fatalf("%s mobile-surrogate exact bidirectional TCP: %v", route, measureErr)
+			}
+		}
+	})
+}
+
+// An opt-in same-host sweep identifies the smallest auto-tuning ceiling that
+// removes the old fixed-window limit without changing any other axis.
+func TestPerfvarMobileTcpWindowSweep(t *testing.T) {
+	if os.Getenv(perfvarMobileTcpWindowSweepEnvironment) != "1" {
+		return
+	}
+	if perfvarRaceEnabled {
+		t.Fatal("mobile TCP window measurements must not run with the race detector")
+	}
+	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
+	testEnvironment.Run(t, func(t testing.TB) {
+		profile := initialNetworkProfiles(20260812)["clean-lan"]
+		for _, tcpBufferMax := range []int{
+			256 * 1024,
+			512 * 1024,
+			1024 * 1024,
+			2 * 1024 * 1024,
+			4 * 1024 * 1024,
+		} {
+			resources := mobileTunResourceProfile()
+			resources.TcpBufferMax = tcpBufferMax
+			fixture, err := newPerfvarCorrectnessFixture(
+				t,
+				fullTunRouteExchangeH1,
+				profile,
+				profile,
+				profile,
+				resources,
+				5*time.Minute,
+			)
+			if err != nil {
+				t.Fatalf("construct mobile TCP maximum=%d: %v", tcpBufferMax, err)
+			}
+			observation, measureErr := fixture.measure(
+				perfvarWorkloadTCP,
+				perfvarDirectionUpload,
+				func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
+					return measureFullTunUpload(ctx, path, 32*1024*1024)
+				},
+			)
+			fixture.close()
+			if measureErr != nil {
+				t.Fatalf("measure mobile TCP maximum=%d: %v", tcpBufferMax, measureErr)
+			}
+			record := perfvarMobileTcpWindowObservation{
+				TcpBufferDefault:     resources.TcpBufferDefault,
+				TcpBufferMax:         resources.TcpBufferMax,
+				UsefulByteCount:      observation.Result.UsefulByteCount,
+				Duration:             observation.Result.Duration,
+				GoodputGigabits:      observation.Result.GoodputGigabits,
+				BridgeBatches:        observation.Carrier.BridgeBatches,
+				CarrierWireByteCount: observation.Carrier.WireByteCount,
+				CarrierDuration:      observation.Carrier.Duration,
+			}
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("[perfvar-mobile-window] %s", encoded)
+		}
+	})
+}
+
+// An opt-in same-host comparison measures the old packet-at-a-time route
+// handoff against one whole-group send under the corrected TCP window.
+func TestPerfvarMobilePacketGroupSweep(t *testing.T) {
+	if os.Getenv(perfvarMobilePacketGroupSweepEnvironment) != "1" {
+		return
+	}
+	if perfvarRaceEnabled {
+		t.Fatal("mobile packet-group measurements must not run with the race detector")
+	}
+	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
+	testEnvironment.Run(t, func(t testing.TB) {
+		profile := initialNetworkProfiles(20260812)["clean-lan"]
+		for runIndex := 1; runIndex <= 5; runIndex += 1 {
+			modes := []bool{true, false}
+			if runIndex%2 == 0 {
+				modes = []bool{false, true}
+			}
+			for _, singularBridgeSend := range modes {
+				resources := mobileTunResourceProfile()
+				resources.SingularBridgeSend = singularBridgeSend
+				fixture, err := newPerfvarCorrectnessFixture(
+					t,
+					fullTunRouteExchangeH1,
+					profile,
+					profile,
+					profile,
+					resources,
+					5*time.Minute,
+				)
+				if err != nil {
+					t.Fatalf("construct mobile packet group singular=%t: %v", singularBridgeSend, err)
+				}
+				observation, measureErr := fixture.measure(
+					perfvarWorkloadTCP,
+					perfvarDirectionUpload,
+					func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
+						return measureFullTunUpload(ctx, path, 32*1024*1024)
+					},
+				)
+				fixture.close()
+				if measureErr != nil {
+					t.Fatalf("measure mobile packet group singular=%t: %v", singularBridgeSend, measureErr)
+				}
+				mode := "packet-group"
+				if singularBridgeSend {
+					mode = "packet-at-a-time"
+				}
+				record := perfvarMobilePacketGroupObservation{
+					RunIndex:             runIndex,
+					Mode:                 mode,
+					UsefulByteCount:      observation.Result.UsefulByteCount,
+					Duration:             observation.Result.Duration,
+					GoodputGigabits:      observation.Result.GoodputGigabits,
+					BridgeBatches:        observation.Carrier.BridgeBatches,
+					CarrierWireByteCount: observation.Carrier.WireByteCount,
+					CarrierDuration:      observation.Carrier.Duration,
+				}
+				encoded, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("[perfvar-mobile-packet-group] %s", encoded)
 			}
 		}
 	})

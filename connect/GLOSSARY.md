@@ -204,7 +204,7 @@ it here in the same change. Ordinary assertion verbs such as `Accepts`,
 | warmup | Traffic before the start boundary that establishes congestion windows, contracts, or route state. It must not leak into measured counters. |
 | measured payload | Bytes deliberately placed between exact start and end measurement boundaries. |
 | default resource | Normal test buffer, batch, and `GOMAXPROCS` settings. It is still a same-host userspace test. |
-| mobile surrogate | Smaller buffers/batches and paced application boundaries used as a resource constraint. It is explicitly not a physical phone, radio, battery, or thermal model. |
+| mobile surrogate | Smaller buffers/batches and a paced application boundary used as a resource constraint. One nonempty TUN read batch pays one modeled application wake before the whole batch enters Connect; the delay is not charged once per packet. It is explicitly not a physical phone, radio, battery, or thermal model. |
 | extender | Production H1/TLS forwarding hop inserted on each endpoint access path. Extender count is per user path; H3 and P2P extender routes are not implemented. |
 | single region | The named high RTT is applied to the application user's access path while the provider is colocated with the edge on a clean LAN profile. |
 | dual region | Both endpoint access paths receive the named RTT, so exchange end-to-end delay composes both access paths. |
@@ -219,7 +219,7 @@ it here in the same change. Ordinary assertion verbs such as `Accepts`,
 | RTT | Round-trip time. A profile normally stores one-way delay per direction and the path composes those delays into RTT. |
 | `rtt-Nms` | Focused profile changing the round-trip-delay axis while holding unrelated axes controlled. |
 | latency or delay | Time added before packet delivery. Processing delay is an additional configured per-direction component. |
-| jitter | Seeded bounded variation added to delay. `jitter-Nms` isolates that axis. |
+| jitter | Seeded bounded variation added to delay. `jitter-Nms` isolates that axis while preserving FIFO release order on each directional link; it does not silently add packet reordering. |
 | loss | Intentional terminal packet drop. Models include seeded independent loss, deterministic every-N loss, and seeded two-state burst loss. |
 | `loss-Nbp` | Loss probability in basis points; 100 basis points is 1 percent. |
 | duplicate | A packet is deliberately delivered more than once. Counters distinguish duplication from retransmission. |
@@ -249,6 +249,18 @@ it here in the same change. Ordinary assertion verbs such as `Accepts`,
 | coalesced | Complete ready frames are bracketed and emitted in fewer socket/TLS writes without changing their WebSocket message boundaries. |
 | batch | Bounded ordered group processed by one dispatch. A batch must preserve FIFO and explicit ownership on partial failure and cancellation. |
 | batch size | Maximum ready message count, also bounded by a byte limit. It is a cap, not a delay target; sparse traffic remains singleton. |
+| packet batch | Ordered packet list crossing one TUN, native callback, queue, or dispatch boundary. It can contain more than one flow until a five-tuple grouping boundary classifies it. |
+| directional five-tuple or exact flow | IP version, protocol, source IP/port, and destination IP/port in the packet's current direction. Reversing source and destination is a different group. ICMP uses its parser-defined flow identifier in the port fields. |
+| packet group or homogeneous group | Ordered members of one packet batch that share the same exact directional five-tuple. The group receives one policy outcome, route/update snapshot, provider selection, and logical Transfer admission; payload-aware inspection can still consume each member in order. |
+| group decision | One conservative result for a homogeneous group. A later incident or drop prevents the whole group from reaching a provider; the implementation does not split allowed and blocked members onto different routes. |
+| logical group admission | One all-or-none ownership handoff of a packet group to one selected SendSequence. Transfer may emit several bounded wire Packs afterward, but those chunks do not rerun provider selection or race independently. |
+| semantic batch | Several application frames inside one logical Connect Pack or group. Its membership survives opaque forwarding even when physical socket writes split or combine messages. |
+| physical I/O batch | Several already-complete messages or datagrams handled in one scheduling turn or syscall. It reduces dispatch/write overhead without changing their logical Pack/frame boundaries. |
+| application boundary delay or `AppDelay` | PERFVAR's modeled cost of waking and handing one nonempty TUN read batch to Connect. It is paid once per batch; placing it inside a per-packet loop creates an artificial route-independent throughput ceiling. |
+| TCP buffer default | Initial gVisor send or receive buffer for a new endpoint. It is not necessarily the endpoint's lifetime limit when auto-tuning is enabled. |
+| TCP auto-tuning | gVisor growth of a TCP send or receive buffer as congestion-window and receive-rate evidence justify it, up to the configured maximum. A test that makes default and maximum equal disables useful growth. |
+| TCP buffer maximum or window ceiling | Per-connection upper bound for an auto-tuned TCP buffer. If it is below the route's bandwidth-delay product, one flow becomes window-limited even when the carrier has unused capacity. |
+| route-independent ceiling | Similar throughput across materially different carriers because a shared endpoint, application, scheduler, or harness boundary is limiting all of them. It is evidence to inspect the common path before optimizing one carrier. |
 | read-ahead | Complete messages or packets consumed from an upstream buffer before the downstream consumer asks for each one. Ready-only read-ahead does not wait for more input, but it still transfers ownership and weakens immediate backpressure. It does not necessarily reduce socket reads when a buffered reader already fetched the bytes. |
 | channel depth or buffer depth | Maximum queued items between independently scheduled producers and consumers. It controls burst absorption, ownership memory, backpressure, and queueing latency; it is not interchangeable with a writer's per-turn batch size. |
 | write coalescing | Combining bytes from several complete logical frames into fewer lower-layer writes. Logical WebSocket or Framer boundaries remain unchanged. |

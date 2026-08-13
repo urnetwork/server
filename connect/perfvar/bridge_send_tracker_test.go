@@ -10,9 +10,45 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	clientconnect "github.com/urnetwork/connect"
 )
+
+// One native read burst opens every packet lifecycle before paying the
+// modeled application wake once, then transfers the complete burst through
+// one consuming batch call. A partial result marks every lifecycle failed:
+// the batch API has already consumed every owner, and a partial flow group is
+// not a valid performance sample.
+func sendFullTunBridgeBatch(
+	bridgeSends *fullTunBridgeSendTracker,
+	packets [][]byte,
+	appDelay time.Duration,
+	delay func(time.Duration),
+	send func([][]byte) int,
+) int {
+	if len(packets) == 0 {
+		return 0
+	}
+	bridgeEntries := bridgeSends.startPacketBatch(packets)
+	if 0 < appDelay {
+		delayStart := bridgeSends.now()
+		delay(appDelay)
+		bridgeSends.delayDurationNanoseconds.Add(
+			uint64(bridgeSends.now().Sub(delayStart)),
+		)
+	}
+	sendStart := bridgeSends.now()
+	sentPacketCount := send(packets)
+	bridgeSends.sendDurationNanoseconds.Add(
+		uint64(bridgeSends.now().Sub(sendStart)),
+	)
+	complete := sentPacketCount == len(packets)
+	for _, bridgeEntry := range bridgeEntries {
+		bridgeSends.terminal(bridgeEntry, complete)
+	}
+	return sentPacketCount
+}
 
 const (
 	fullTunBridgeSendEntryPending uint32 = iota
@@ -68,6 +104,24 @@ type fullTunBridgeFlowState struct {
 	invalid         bool
 }
 
+// A fixed histogram makes interval subtraction exact, including the maximum
+// observed read batch, without resetting counters shared by route workers.
+type fullTunBridgeBatchSnapshot struct {
+	packetCountByBatchSize [65]uint64
+	delayDuration          time.Duration
+	sendDuration           time.Duration
+}
+
+// Interval values describe the source read batches that crossed one exact
+// workload carrier window.
+type fullTunBridgeBatchObservation struct {
+	BatchCount              uint64        `json:"batch_count"`
+	PacketCount             uint64        `json:"packet_count"`
+	MaximumBatchPacketCount int           `json:"maximum_batch_packet_count"`
+	DelayDuration           time.Duration `json:"delay_duration_nanoseconds"`
+	SendDuration            time.Duration `json:"send_duration_nanoseconds"`
+}
+
 // Concurrent bridge publication and workload boundaries share one short
 // state lock; terminal state is atomic so waits never hold that lock.
 type fullTunBridgeSendTracker struct {
@@ -79,10 +133,14 @@ type fullTunBridgeSendTracker struct {
 	startedCount                 atomic.Uint64
 	publishingCount              atomic.Int64
 	failureCount                 atomic.Uint64
+	batchCountByPacketCount      [65]atomic.Uint64
+	delayDurationNanoseconds     atomic.Uint64
+	sendDurationNanoseconds      atomic.Uint64
 	progress                     chan struct{}
 	beforeStartPublishForTest    atomic.Pointer[fullTunBridgeStartTestHook]
 	beforePublisherWaitForTest   atomic.Pointer[fullTunBridgeStartTestHook]
 	beforeTerminalReleaseForTest atomic.Pointer[fullTunBridgeTerminalTestHook]
+	now                          func() time.Time
 }
 
 // An immutable optional hook exposes source entry and boundary publication.
@@ -107,6 +165,151 @@ func newFullTunBridgeSendTracker() *fullTunBridgeSendTracker {
 	return &fullTunBridgeSendTracker{
 		liveEntries: map[*fullTunBridgeSendEntry]struct{}{},
 		progress:    make(chan struct{}, 1),
+		now:         time.Now,
+	}
+}
+
+// Point-in-time monotonic counters are safe to subtract at carrier boundaries.
+func (self *fullTunBridgeSendTracker) batchSnapshot() fullTunBridgeBatchSnapshot {
+	snapshot := fullTunBridgeBatchSnapshot{
+		delayDuration: time.Duration(self.delayDurationNanoseconds.Load()),
+		sendDuration:  time.Duration(self.sendDurationNanoseconds.Load()),
+	}
+	for packetCount := range snapshot.packetCountByBatchSize {
+		snapshot.packetCountByBatchSize[packetCount] =
+			self.batchCountByPacketCount[packetCount].Load()
+	}
+	return snapshot
+}
+
+// Histogram subtraction retains an exact maximum without a racy reset.
+func observeFullTunBridgeBatches(
+	before fullTunBridgeBatchSnapshot,
+	after fullTunBridgeBatchSnapshot,
+) fullTunBridgeBatchObservation {
+	observation := fullTunBridgeBatchObservation{}
+	observation.DelayDuration = after.delayDuration - before.delayDuration
+	observation.SendDuration = after.sendDuration - before.sendDuration
+	for packetCount := range after.packetCountByBatchSize {
+		batchCount := after.packetCountByBatchSize[packetCount] -
+			before.packetCountByBatchSize[packetCount]
+		if batchCount == 0 {
+			continue
+		}
+		observation.BatchCount += batchCount
+		observation.PacketCount += uint64(packetCount) * batchCount
+		observation.MaximumBatchPacketCount = packetCount
+	}
+	return observation
+}
+
+// A mobile read burst pays one modeled application wake and crosses one
+// consuming route call. This deterministically fails the former per-packet
+// loop without comparing scheduler-dependent elapsed time.
+func TestFullTunBridgeBatchAppliesOneDelayAndOneSend(t *testing.T) {
+	tracker := newFullTunBridgeSendTracker()
+	var nowCount atomic.Uint64
+	tracker.now = func() time.Time {
+		return time.Unix(0, int64(nowCount.Add(1))*int64(time.Millisecond))
+	}
+	packets := [][]byte{
+		[]byte{1}, []byte{2}, []byte{3}, []byte{4},
+		[]byte{5}, []byte{6}, []byte{7}, []byte{8},
+	}
+	delayCount := 0
+	sendCount := 0
+	sentPacketCount := sendFullTunBridgeBatch(
+		tracker,
+		packets,
+		100*time.Microsecond,
+		func(delay time.Duration) {
+			if delay != 100*time.Microsecond {
+				t.Fatalf("application delay=%s, want %s", delay, 100*time.Microsecond)
+			}
+			delayCount += 1
+		},
+		func(observedPackets [][]byte) int {
+			sendCount += 1
+			if len(observedPackets) != len(packets) {
+				t.Fatalf("sent packets=%d, want %d", len(observedPackets), len(packets))
+			}
+			return len(observedPackets)
+		},
+	)
+	if sentPacketCount != len(packets) {
+		t.Fatalf("sent packet count=%d, want %d", sentPacketCount, len(packets))
+	}
+	if delayCount != 1 || sendCount != 1 {
+		t.Fatalf("delay/send calls=%d/%d, want 1/1", delayCount, sendCount)
+	}
+	if tracker.startedCount.Load() != uint64(len(packets)) {
+		t.Fatalf(
+			"bridge starts=%d, want %d",
+			tracker.startedCount.Load(),
+			len(packets),
+		)
+	}
+	batchObservation := observeFullTunBridgeBatches(
+		fullTunBridgeBatchSnapshot{},
+		tracker.batchSnapshot(),
+	)
+	if batchObservation.BatchCount != 1 ||
+		batchObservation.PacketCount != uint64(len(packets)) ||
+		batchObservation.MaximumBatchPacketCount != len(packets) {
+		t.Fatalf("bridge batch observation=%+v, want one %d-packet batch", batchObservation, len(packets))
+	}
+	if batchObservation.DelayDuration != time.Millisecond ||
+		batchObservation.SendDuration != time.Millisecond {
+		t.Fatalf("bridge durations=%+v, want 1ms delay and send", batchObservation)
+	}
+	tracker.stateLock.Lock()
+	liveEntryCount := len(tracker.liveEntries)
+	tracker.stateLock.Unlock()
+	if liveEntryCount != 0 || tracker.failureCount.Load() != 0 {
+		t.Fatalf(
+			"bridge live/failures=%d/%d, want 0/0",
+			liveEntryCount,
+			tracker.failureCount.Load(),
+		)
+	}
+}
+
+// Interval subtraction excludes setup bursts and retains the exact largest
+// source read without resetting a counter used by the bridge goroutine.
+func TestFullTunBridgeBatchObservationExcludesBaseline(t *testing.T) {
+	tracker := newFullTunBridgeSendTracker()
+	var nowCount atomic.Uint64
+	tracker.now = func() time.Time {
+		return time.Unix(0, int64(nowCount.Add(1))*int64(time.Millisecond))
+	}
+	sendBatch := func(packetCount int) {
+		packets := make([][]byte, packetCount)
+		for packetIndex := range packets {
+			packets[packetIndex] = []byte{byte(packetIndex)}
+		}
+		if sentPacketCount := sendFullTunBridgeBatch(
+			tracker,
+			packets,
+			0,
+			func(time.Duration) {},
+			func(observedPackets [][]byte) int { return len(observedPackets) },
+		); sentPacketCount != packetCount {
+			t.Fatalf("sent packets=%d, want %d", sentPacketCount, packetCount)
+		}
+	}
+
+	sendBatch(3)
+	before := tracker.batchSnapshot()
+	for _, packetCount := range []int{2, 8, 4} {
+		sendBatch(packetCount)
+	}
+	observation := observeFullTunBridgeBatches(before, tracker.batchSnapshot())
+	if observation.BatchCount != 3 || observation.PacketCount != 14 ||
+		observation.MaximumBatchPacketCount != 8 {
+		t.Fatalf("bridge batch observation=%+v, want 3 batches, 14 packets, maximum 8", observation)
+	}
+	if observation.DelayDuration != 0 || observation.SendDuration != 3*time.Millisecond {
+		t.Fatalf("bridge batch durations=%+v, want no delay and 3ms send time", observation)
 	}
 }
 
@@ -231,8 +434,18 @@ func (self *fullTunBridgeSendTracker) beginFlowWindow(
 // A bridge producer records matching immutable metadata before transferring
 // packet ownership to the multi-client sender.
 func (self *fullTunBridgeSendTracker) startPacket(packet []byte) *fullTunBridgeSendEntry {
+	return self.startPacketBatch([][]byte{packet})[0]
+}
+
+// One source read remains one observable batch while every packet gets its
+// own lifecycle entry. The publication counter fences the whole operation.
+func (self *fullTunBridgeSendTracker) startPacketBatch(
+	packets [][]byte,
+) []*fullTunBridgeSendEntry {
+	if len(packets) == 0 {
+		return nil
+	}
 	self.publishingCount.Add(1)
-	self.startedCount.Add(1)
 	defer func() {
 		self.publishingCount.Add(-1)
 		self.notify()
@@ -240,19 +453,28 @@ func (self *fullTunBridgeSendTracker) startPacket(packet []byte) *fullTunBridgeS
 	if hook := self.beforeStartPublishForTest.Load(); hook != nil {
 		hook.call()
 	}
+	if len(self.batchCountByPacketCount) <= len(packets) {
+		panic(fmt.Sprintf("application bridge batch has %d packets, maximum is %d", len(packets), len(self.batchCountByPacketCount)-1))
+	}
+	batchPacketCount := len(packets)
+	self.batchCountByPacketCount[batchPacketCount].Add(1)
 	windowId := self.activeWindowId.Load()
-	if windowId == 0 {
-		return self.startWithMetadata(0, fullTunBridgeFlowKey{}, clientconnect.ByteCount(len(packet)))
+	entries := make([]*fullTunBridgeSendEntry, len(packets))
+	for packetIndex, packet := range packets {
+		self.startedCount.Add(1)
+		flowKey := fullTunBridgeFlowKey{}
+		if windowId != 0 {
+			if ipPath, err := clientconnect.ParseIpPath(packet); err == nil {
+				flowKey = fullTunBridgeFlowKeyFromIpPath(ipPath)
+			}
+		}
+		entries[packetIndex] = self.startWithMetadata(
+			windowId,
+			flowKey,
+			clientconnect.ByteCount(len(packet)),
+		)
 	}
-	ipPath, err := clientconnect.ParseIpPath(packet)
-	if err != nil {
-		return self.startWithMetadata(windowId, fullTunBridgeFlowKey{}, clientconnect.ByteCount(len(packet)))
-	}
-	return self.startWithMetadata(
-		windowId,
-		fullTunBridgeFlowKeyFromIpPath(ipPath),
-		clientconnect.ByteCount(len(packet)),
-	)
+	return entries
 }
 
 // The metadata form supports deterministic lifecycle tests without building a

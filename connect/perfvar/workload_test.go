@@ -160,11 +160,13 @@ type tunPathMeasurementBoundary struct {
 
 // A resource profile changes explicit TUN capacity without claiming device fidelity.
 type tunResourceProfile struct {
-	ChannelSize int
-	TcpBuffer   int
-	UdpBuffer   int
-	BatchSize   int
-	AppDelay    time.Duration
+	ChannelSize        int
+	TcpBufferDefault   int
+	TcpBufferMax       int
+	UdpBuffer          int
+	BatchSize          int
+	AppDelay           time.Duration
+	SingularBridgeSend bool
 }
 
 // Optional seams expose exact TCP admission and latency-worker lifecycle
@@ -189,11 +191,31 @@ func defaultTunResourceProfile() tunResourceProfile {
 // The mobile surrogate deliberately shrinks queues and inserts app-boundary delay.
 func mobileTunResourceProfile() tunResourceProfile {
 	return tunResourceProfile{
-		ChannelSize: 256,
-		TcpBuffer:   256 * 1024,
-		UdpBuffer:   128 * 1024,
-		BatchSize:   8,
-		AppDelay:    100 * time.Microsecond,
+		ChannelSize:      256,
+		TcpBufferDefault: 256 * 1024,
+		TcpBufferMax:     2 * 1024 * 1024,
+		UdpBuffer:        128 * 1024,
+		BatchSize:        8,
+		AppDelay:         100 * time.Microsecond,
+	}
+}
+
+// Resource limits override production defaults while preserving a distinct
+// initial TCP window and auto-tuning ceiling.
+func applyTunResourceProfile(settings *clientconnect.TunSettings, resources tunResourceProfile) {
+	if 0 < resources.TcpBufferDefault {
+		tcpBufferMax := resources.TcpBufferDefault
+		if 0 < resources.TcpBufferMax {
+			tcpBufferMax = resources.TcpBufferMax
+		}
+		settings.TcpReceiveBuffer.Default = resources.TcpBufferDefault
+		settings.TcpReceiveBuffer.Max = tcpBufferMax
+		settings.TcpSendBuffer.Default = resources.TcpBufferDefault
+		settings.TcpSendBuffer.Max = tcpBufferMax
+	}
+	if 0 < resources.UdpBuffer {
+		settings.UdpReceiveBufferByteCount = resources.UdpBuffer
+		settings.UdpSendBufferByteCount = resources.UdpBuffer
 	}
 }
 
@@ -207,16 +229,7 @@ func newTunPath(
 	newTun := func() (*clientconnect.Tun, error) {
 		settings := clientconnect.DefaultTunSettingsWithBufferSize(resources.ChannelSize)
 		settings.Mtu = profile.InnerMtu
-		if 0 < resources.TcpBuffer {
-			settings.TcpReceiveBuffer.Default = resources.TcpBuffer
-			settings.TcpReceiveBuffer.Max = resources.TcpBuffer
-			settings.TcpSendBuffer.Default = resources.TcpBuffer
-			settings.TcpSendBuffer.Max = resources.TcpBuffer
-		}
-		if 0 < resources.UdpBuffer {
-			settings.UdpReceiveBufferByteCount = resources.UdpBuffer
-			settings.UdpSendBufferByteCount = resources.UdpBuffer
-		}
+		applyTunResourceProfile(settings, resources)
 		return clientconnect.CreateTun(pathCtx, settings)
 	}
 	left, err := newTun()
@@ -2337,7 +2350,7 @@ func TestLatencyUnderLoadUsesWinnerAfterDormantAcceptedCandidate(t *testing.T) {
 	defer harness.close()
 	var startHookCount atomic.Int64
 	resources := defaultTunResourceProfile()
-	resources.TcpBuffer = 128 * 1024
+	resources.TcpBufferDefault = 128 * 1024
 	result, err := measureLatencyUnderLoadWithFlowTestSettings(
 		ctx,
 		initialNetworkProfiles(20260811)["clean-lan"],
@@ -2462,7 +2475,7 @@ func TestLatencyUnderLoadCancellationJoinsBulkSender(t *testing.T) {
 		},
 	}
 	resources := defaultTunResourceProfile()
-	resources.TcpBuffer = 128 * 1024
+	resources.TcpBufferDefault = 128 * 1024
 	completion := make(chan error, 1)
 	go func() {
 		_, err := measureLatencyUnderLoadWithFlowTestSettings(

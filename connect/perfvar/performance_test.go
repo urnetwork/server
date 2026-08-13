@@ -933,6 +933,7 @@ type perfvarPackFailureCounts struct {
 type perfvarCarrierBoundary struct {
 	capturedAt                     time.Time
 	packFailures                   perfvarPackFailureCounts
+	bridgeBatches                  fullTunBridgeBatchSnapshot
 	links                          map[string]directionalLinkSnapshot
 	p2pNetwork                     p2pNetworkSnapshot
 	deviceP2P                      clientconnect.P2pDataPlaneStatsSnapshot
@@ -968,6 +969,9 @@ func snapshotPerfvarCarrier(path *fullTunPath) perfvarCarrierBoundary {
 		links:        path.environment.network.snapshotLinks(),
 		deviceP2P:    path.deviceStats.Snapshot(),
 		providerP2P:  path.providerStats.Snapshot(),
+	}
+	if path.bridgeSends != nil {
+		boundary.bridgeBatches = path.bridgeSends.batchSnapshot()
 	}
 	if path.p2pNetwork != nil {
 		boundary.p2pNetwork = path.p2pNetwork.snapshot()
@@ -1500,6 +1504,47 @@ func TestPerfvarCarrierGenerationStableRejectsPostBaselineSubmission(t *testing.
 	}
 }
 
+// Joined application batches are an observation, not carrier ownership. The
+// source fixed point separately compares bridge lifecycle boundaries, so a
+// monotonic batch counter must not keep a quiet carrier generation unstable.
+func TestPerfvarCarrierGenerationStableIgnoresJoinedBridgeBatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	network := newSimulatedIPNetwork(ctx)
+	defer network.close()
+	tracker := newFullTunBridgeSendTracker()
+	path := &fullTunPath{
+		t:             t,
+		ctx:           ctx,
+		environment:   &routeEnvironment{network: network},
+		deviceStats:   &clientconnect.P2pDataPlaneStats{},
+		providerStats: &clientconnect.P2pDataPlaneStats{},
+		bridgeSends:   tracker,
+	}
+	boundary, err := beginPerfvarCarrierMeasurementNow(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentPacketCount := sendFullTunBridgeBatch(
+		tracker,
+		[][]byte{{1}},
+		0,
+		func(time.Duration) {},
+		func(packets [][]byte) int { return len(packets) },
+	); sentPacketCount != 1 {
+		t.Fatalf("sent packets=%d, want 1", sentPacketCount)
+	}
+	if !perfvarCarrierGenerationStable(path, boundary) {
+		t.Fatal("joined application batch made an idle carrier generation unstable")
+	}
+	observation := observePerfvarCarrier(path, boundary)
+	if observation.BridgeBatches.BatchCount != 1 ||
+		observation.BridgeBatches.PacketCount != 1 ||
+		observation.BridgeBatches.MaximumBatchPacketCount != 1 {
+		t.Fatalf("bridge batch observation=%+v, want one singleton", observation.BridgeBatches)
+	}
+}
+
 // A canceled route-wide interval start returns a structured error so one
 // failed campaign scenario cannot abort every later repetition.
 func TestBeginPerfvarCarrierMeasurementReturnsCanceledContext(t *testing.T) {
@@ -1605,6 +1650,7 @@ func observePerfvarCarrierAt(
 	}
 	return perfvarCarrierObservation{
 		Links:                links,
+		BridgeBatches:        observeFullTunBridgeBatches(before.bridgeBatches, after.bridgeBatches),
 		P2PNetwork:           p2pNetwork,
 		DeviceP2P:            device,
 		ProviderP2P:          provider,

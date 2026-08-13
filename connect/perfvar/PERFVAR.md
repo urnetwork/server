@@ -227,7 +227,8 @@ The scheduler currently applies these operations:
 2. enforce packet and byte queue bounds;
 3. apply a live blackhole or the selected seeded loss model;
 4. calculate token-bucket serialization and burst allowance;
-5. add base delay, processing delay, and bounded uniform jitter;
+5. add base delay, processing delay, and bounded uniform jitter while
+   preserving FIFO release order on that directional link;
 6. delay selected packets for reordering and optionally schedule a duplicate;
 7. deliver through a nonblocking TUN handoff or count receiver overflow.
 
@@ -397,7 +398,7 @@ The current authoritative route restrictions are:
 | Three, five, or nine P2P hops | fast P2P only |
 | Split exchange | exchange H1 and H3 only |
 | Production extenders | one-hop exchange H1 only |
-| Reorder and jitter | All routes; every physical direction uses the seeded wrapper scheduler |
+| Reorder and jitter | All routes; every physical direction uses the seeded wrapper scheduler. Jitter alone remains FIFO; only the reorder axis creates release inversions. |
 | Queue | All routes; scheduler drops and P2P receive-credit admission are attributed separately |
 | Rate | All routes |
 | Direction asymmetry | P2P for a directional claim; applying it to both exchange access links creates the same end-to-end bottleneck in both directions |
@@ -445,10 +446,27 @@ link snapshots.
 limits:
 
 - channel capacity: 256 packets;
-- TCP send and receive buffers: 256 KiB;
+- TCP send and receive buffer default: 256 KiB;
+- TCP send and receive auto-tuning maximum: 2 MiB;
 - UDP send and receive buffers: 128 KiB;
 - application boundary batch: eight packets;
-- per-packet application-boundary delay: 100 microseconds.
+- one application-boundary delay per nonempty read batch: 100 microseconds.
+
+The application bridge preserves each read batch through one consuming
+five-tuple-group send. Run records report its batch count, packet count, and
+maximum observed batch size at the same carrier boundary as the workload.
+They also report cumulative observed application-delay time and time blocked
+inside the consuming group send, separating scheduler delay from downstream
+backpressure.
+
+The initial TCP buffer remains deliberately small, but its maximum must be
+larger. Pinning both values to 256 KiB disables gVisor's normal send/receive
+auto-tuning and creates a synthetic bandwidth-delay-product ceiling. A
+controlled 32 MiB H1 sweep measured 41.04 Mbit/s at the fixed 256 KiB bound,
+226.83 Mbit/s at 512 KiB, 372.01 Mbit/s at 1 MiB, 402.28 Mbit/s at 2 MiB, and
+416.15 Mbit/s at 4 MiB. The 2 MiB bound captures nearly all of the measured
+gain while retaining a finite per-connection limit. It also matches the
+process-budget-scaled maximum used by a 32 MiB SDK process.
 
 `default` uses a 4,096-packet channel and batches up to 64 packets while leaving
 the production TCP and UDP buffer defaults intact.
@@ -644,6 +662,7 @@ A run record includes:
 - route setup duration, tunneled/underlay efficiency, and useful/wire
   efficiency;
 - directional simulator snapshots and P2P fast/legacy carrier counters;
+- application-bridge batch count, packet count, and maximum batch size;
 - correctness, failure stage, failure reason, calibration-invalid reason, and
   process-wide goroutine point samples taken immediately before and after the
   run's synchronous lifecycle boundaries. These samples are diagnostic only;

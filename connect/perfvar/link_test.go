@@ -852,6 +852,7 @@ func (self *directionalLink) run(seed int64) {
 	defer timer.Stop()
 	var timerChannel <-chan time.Time
 	var rateCursor time.Time
+	var fifoReleaseTime time.Time
 	var orderIndex uint64
 	var pendingReorderPacket *linkPacket
 	var highestReleasedSequence uint64
@@ -974,6 +975,13 @@ func (self *directionalLink) run(seed int64) {
 		if releaseTime.Before(now) {
 			releaseTime = now
 		}
+		// One directional link is FIFO unless its explicit reorder stage
+		// selects this packet. Independent jitter varies latency without
+		// silently adding a second source of packet reordering.
+		if releaseTime.Before(fifoReleaseTime) {
+			releaseTime = fifoReleaseTime
+		}
+		fifoReleaseTime = releaseTime
 		if reorderCandidate {
 			releaseTime = releaseTime.Add(max(profile.BaseDelay/2, time.Millisecond))
 		}

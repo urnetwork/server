@@ -170,6 +170,7 @@ type perfvarTrace struct {
 // Carrier observations prove route selection and expose simulated path cost.
 type perfvarCarrierObservation struct {
 	Links                          map[string]directionalLinkSnapshot        `json:"links"`
+	BridgeBatches                  fullTunBridgeBatchObservation             `json:"bridge_batches"`
 	P2PNetwork                     p2pNetworkSnapshot                        `json:"p2p_network"`
 	DeviceP2P                      clientconnect.P2pDataPlaneStatsSnapshot   `json:"device_p2p"`
 	ProviderP2P                    clientconnect.P2pDataPlaneStatsSnapshot   `json:"provider_p2p"`

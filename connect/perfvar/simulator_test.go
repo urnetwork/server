@@ -259,6 +259,61 @@ func TestSimulatorDelayAndJitterStayBounded(t *testing.T) {
 	}
 }
 
+// Jitter varies latency within one FIFO link; only the explicit reorder axis
+// may let a later packet overtake an earlier packet.
+func TestSimulatorJitterPreservesFifoWithoutConfiguredReordering(t *testing.T) {
+	profile := simulatorTestLinkProfile()
+	profile.BaseDelay = 100 * time.Millisecond
+	profile.Jitter = 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	const packetCount = 64
+	scheduled := make(chan linkScheduleObservation, packetCount)
+	link := newDirectionalLink(ctx, profile, 20260812, func([]byte) bool { return true })
+	link.setAfterPacketScheduledForTest(func(observation linkScheduleObservation) {
+		scheduled <- observation
+	})
+	defer link.close()
+	for packetIndex := range packetCount {
+		packetBytes := make([]byte, 64)
+		binary.BigEndian.PutUint64(packetBytes, uint64(packetIndex+1))
+		if _, err := link.submit(packetBytes); err != nil {
+			t.Fatalf("submit jitter packet %d: %v", packetIndex, err)
+		}
+	}
+	var previousReleaseTime time.Time
+	observedJitter := false
+	for packetIndex := range packetCount {
+		var observation linkScheduleObservation
+		select {
+		case observation = <-scheduled:
+		case <-ctx.Done():
+			t.Fatalf("observed %d/%d jitter schedules: %v", packetIndex, packetCount, ctx.Err())
+		}
+		if observation.releaseTime.Before(previousReleaseTime) {
+			t.Fatalf(
+				"jitter reordered sequence %d: release=%s previous=%s",
+				observation.sequence,
+				observation.releaseTime,
+				previousReleaseTime,
+			)
+		}
+		if observation.releaseTime.Sub(observation.rateReadyTime) != profile.BaseDelay {
+			observedJitter = true
+		}
+		previousReleaseTime = observation.releaseTime
+	}
+	if !observedJitter {
+		t.Fatal("seeded jitter did not vary any packet delay")
+	}
+	if !link.waitIdle(ctx) {
+		t.Fatalf("jitter link did not become idle: %v", ctx.Err())
+	}
+	if reorderedPacketCount := link.snapshot().ReorderedPacketCount; reorderedPacketCount != 0 {
+		t.Fatalf("jitter-only link counted %d reordered packets", reorderedPacketCount)
+	}
+}
+
 // Every-N loss provides an exact vector for focused regressions.
 func TestSimulatorEveryNLossMatchesExpectedVector(t *testing.T) {
 	profile := simulatorTestLinkProfile()

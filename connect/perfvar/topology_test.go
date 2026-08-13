@@ -3590,16 +3590,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		p2pHopCount: p2pHopCount,
 	}
 	appSettings.DialTimeout = fullTunRouteReadinessTimeout(readinessPath)
-	if 0 < resources.TcpBuffer {
-		appSettings.TcpReceiveBuffer.Default = resources.TcpBuffer
-		appSettings.TcpReceiveBuffer.Max = resources.TcpBuffer
-		appSettings.TcpSendBuffer.Default = resources.TcpBuffer
-		appSettings.TcpSendBuffer.Max = resources.TcpBuffer
-	}
-	if 0 < resources.UdpBuffer {
-		appSettings.UdpReceiveBufferByteCount = resources.UdpBuffer
-		appSettings.UdpSendBufferByteCount = resources.UdpBuffer
-	}
+	applyTunResourceProfile(appSettings, resources)
 	appTun, err := clientconnect.CreateTun(ctx, appSettings)
 	if err != nil {
 		return nil, fmt.Errorf("create application TUN: %w", err)
@@ -3656,27 +3647,44 @@ func tryNewFullTunPathWithTopologyHooks(
 	go func() {
 		defer path.bridgeWaitGroup.Done()
 		packets := make([][]byte, max(1, resources.BatchSize))
+		sendPacketBatch := func(packetBatch [][]byte) int {
+			return multiClient.SendPacketBatch(
+				clientconnect.SourceId(deviceId),
+				protocol.ProvideMode_Network,
+				packetBatch,
+				-1,
+			)
+		}
+		if resources.SingularBridgeSend {
+			sendPacketBatch = func(packetBatch [][]byte) int {
+				sentPacketCount := 0
+				for _, packet := range packetBatch {
+					if multiClient.SendPacket(
+						clientconnect.SourceId(deviceId),
+						protocol.ProvideMode_Network,
+						packet,
+						-1,
+					) {
+						sentPacketCount += 1
+					} else {
+						clientconnect.MessagePoolReturn(packet)
+					}
+				}
+				return sentPacketCount
+			}
+		}
 		for {
 			packetCount, readErr := appTun.ReadBatch(packets)
 			if readErr != nil {
 				return
 			}
-			for _, packet := range packets[:packetCount] {
-				bridgeEntry := bridgeSends.startPacket(packet)
-				if 0 < resources.AppDelay {
-					time.Sleep(resources.AppDelay)
-				}
-				sent := multiClient.SendPacket(
-					clientconnect.SourceId(deviceId),
-					protocol.ProvideMode_Network,
-					packet,
-					-1,
-				)
-				bridgeSends.terminal(bridgeEntry, sent)
-				if !sent {
-					clientconnect.MessagePoolReturn(packet)
-				}
-			}
+			sendFullTunBridgeBatch(
+				bridgeSends,
+				packets[:packetCount],
+				resources.AppDelay,
+				time.Sleep,
+				sendPacketBatch,
+			)
 		}
 	}()
 	path.bridgeStarted = true

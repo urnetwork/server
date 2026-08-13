@@ -51,8 +51,16 @@ process. Every package test passed serially in 1,016.613 seconds. The final log
 is `/tmp/perfvar-full-serial-20260812-depth8-final.log`. Focused normal and race
 gates for the newly changed Connect and server ownership boundaries also
 passed; their logs are listed in the buffer-depth section. This second result
-is the completion gate for the exact source tree used by the next schema-3
+was the completion gate for the source tree used by the buffer-depth
 measurement campaign.
+
+After the mobile TCP auto-tuning correction and end-to-end five-tuple group
+path landed, the complete serial gate was run a third time. All 342 test
+invocations passed in 934.771 seconds with `GOMAXPROCS=10`, `-p=1`, and
+`-parallel=1`. The log is
+`/tmp/perfvar-full-serial-20260812-mobile-group-final.log`. This is the final
+correctness gate for the exact source tree used by the mobile measurements
+below.
 
 The server H1 optimization was then exercised through the production full-TUN
 exchange route. `TestFullTunExchangeH1Correctness` passed five of five normal
@@ -275,6 +283,95 @@ Focused production-bound correctness logs are
 `/tmp/connect-h1-batch-depth8-focused-race-20260812.log`,
 `/tmp/server-h1-batch-depth8-focused-normal-20260812.log`, and
 `/tmp/server-h1-batch-depth8-focused-race-20260812.log`.
+
+## 2026-08-12 mobile upload ceiling and packet grouping
+
+The previously observed route-independent mobile-surrogate upload ceiling was
+real in the harness, but it combined two independent common-path effects:
+
+1. the resource profile set both the initial and maximum gVisor TCP buffers to
+   256 KiB, disabling normal TCP buffer growth; and
+2. the application bridge preserved an eight-packet TUN read only as a loop of
+   singleton sends, repeating flow lookup, client selection, and Transfer
+   admission for every packet.
+
+The application delay itself was not the 41 Mbit/s limiter after it was moved
+to the correct boundary. A 32 MiB H1 upload formed about 3,084 application
+batches containing about 24,085 packets, or 7.81 packets per batch. Its
+cumulative 100-microsecond application delays took about 407 milliseconds and
+its packet-group send calls took about 245 milliseconds, while the transfer
+still took 6.53 seconds at the fixed 256 KiB TCP ceiling.
+
+### TCP auto-tuning sweep
+
+The initial TCP buffer remained 256 KiB while only the auto-tuning maximum was
+changed. Each entry is one correct, calibration-valid 32 MiB H1 upload with the
+same group path and all other settings held constant.
+
+| TCP buffer maximum | Goodput Mbit/s | Duration ms | Application batches | Maximum batch |
+|---:|---:|---:|---:|---:|
+| 256 KiB | 41.045 | 6,540.103 | 3,086 | 8 |
+| 512 KiB | 226.832 | 1,183.413 | 3,063 | 8 |
+| 1 MiB | 372.007 | 721.586 | 3,026 | 8 |
+| 2 MiB | 402.276 | 667.292 | 3,025 | 8 |
+| 4 MiB | 416.155 | 645.038 | 3,026 | 8 |
+
+Allowing growth to 2 MiB raised goodput by 9.80 times relative to the fixed
+256 KiB ceiling. Raising the maximum again to 4 MiB added only 3.45%, so the
+mobile surrogate now uses a 256 KiB initial value and a finite 2 MiB maximum.
+This corrects the userspace test model; it is not an application setting
+change. Physical applications already use production TCP auto-tuning, with
+the maximum scaled by their process memory budget.
+
+### Whole-group send comparison
+
+The production change preserves each exact directional-five-tuple group
+through one policy result, update lookup, provider/client selection, candidate
+race, and logical Transfer admission. It adds no send lock. Transfer can split
+the admitted group into bounded wire Packs, but those chunks stay on the same
+selected SendSequence and never rerun the client race.
+
+Five paired 32 MiB H1 comparisons alternated which mode ran first. Every group
+sample was faster than every singleton sample.
+
+| Bridge mode | Median goodput Mbit/s | Median duration ms | Median bridge-send ms | Median carrier bytes |
+|---|---:|---:|---:|---:|
+| Packet at a time | 336.497 | 797.736 | 288.611 | 79,225,056 |
+| Five-tuple packet group | 416.331 | 644.765 | 238.567 | 76,073,838 |
+
+The group path improved median goodput by 23.73%, reduced time inside the
+bridge send by 17.34%, and reduced observed carrier bytes by 3.98%. The latter
+is consistent with carrying multiple ordered provider frames through one
+logical group rather than reconstructing batches only opportunistically after
+singleton admission.
+
+### Final four-route mobile-surrogate upload
+
+The corrected 2 MiB auto-tuning maximum and production group path were then
+measured five times on every route with a 32 MiB upload. All 20 runs were
+correct and calibration-valid.
+
+| Route | Correct and valid | Median Mbit/s | p95 Mbit/s | Worst Mbit/s |
+|---|---:|---:|---:|---:|
+| P2P fast | 5/5 | 453.382 | 454.987 | 445.840 |
+| Exchange H1 | 5/5 | 412.005 | 415.503 | 382.783 |
+| P2P legacy | 5/5 | 383.776 | 388.778 | 371.458 |
+| Exchange H3 | 5/5 | 213.393 | 217.416 | 196.660 |
+
+The common 41 Mbit/s ceiling is gone. The remaining spread is route-specific:
+fast P2P is now 10.0% faster than H1 and 18.1% faster than legacy P2P, while H3
+is 48.2% slower than H1. Those differences should be investigated at their
+carrier boundaries rather than by changing the shared mobile/TUN bridge again.
+This remains a same-host userspace result, not a physical phone, radio, thermal,
+or battery measurement.
+
+Raw logs:
+
+- `/tmp/perfvar-mobile-packet-group-h1-timing-probe-32m-20260812.log`;
+- `/tmp/perfvar-mobile-tcp-window-sweep-h1-32m-20260812.log`;
+- `/tmp/perfvar-mobile-packet-group-vs-singular-h1-32m-count5-20260812.log`;
+- `/tmp/perfvar-mobile-packet-group-all-routes-32m-count5-20260812.log`; and
+- `/tmp/perfvar-mobile-tcp-autotune-2m-h1-32m-20260812.log`.
 
 ## Historical main findings
 
@@ -814,14 +911,17 @@ datagram sizes, copy counts, encryption calls, wakeups, and allocation hot
 spots. Preserve the same full-TUN workload and underlay calibration when
 testing changes so improvements cannot come from bypassing route work.
 
-### 5. Investigate the directional upload ceiling
+### 5. Profile the remaining route-specific upload costs
 
-Fast P2P improves download much more than upload: 69.3% versus legacy on
-download, but 15.8% on upload. All clean uploads are substantially below their
-corresponding downloads. Attribute the asymmetry across inner TCP flow control,
-device/provider TUN buffering, return ACK delivery, message batching, and
-shared-host scheduling. Parallel-flow and CPU/allocation profiles can separate
-a single-flow congestion-window limit from a processing limit.
+The shared 41 Mbit/s mobile-surrogate ceiling is resolved. A fixed 256 KiB TCP
+maximum had disabled auto-tuning, and singleton application sends repeated
+flow/client/Transfer work. With a 2 MiB maximum and whole-group sends, the
+four-route mobile upload matrix reaches 213–453 Mbit/s and all 20 runs are
+correct and calibration-valid. The next upload work is route-specific: profile
+H3's packet/allocation path first, then compare fast-P2P and H1 CPU, copy, ACK,
+and carrier-write costs. Physical-device runs remain necessary to find any
+mobile operating-system, radio, power, or thermal ceiling not represented by
+the same-host surrogate.
 
 ### 6. Add path-aware growth above the safe 1,280-byte baseline
 
