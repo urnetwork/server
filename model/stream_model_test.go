@@ -16,6 +16,66 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Listener shutdown joins a callback already dispatched by the poll worker so
+// an owner may use CloseAndWait as a deterministic resource boundary.
+func TestStreamHopListenerCloseAndWaitJoinsAdmittedCallback(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer testCancel()
+		callbackEntered := make(chan struct{})
+		releaseCallback := make(chan struct{})
+		callbackReturned := make(chan struct{})
+		var releaseOnce sync.Once
+		defer releaseOnce.Do(func() { close(releaseCallback) })
+		listener := NewStreamHopListener(
+			testCtx,
+			server.NewId(),
+			func(*StreamHopEvent) {
+				close(callbackEntered)
+				<-releaseCallback
+				close(callbackReturned)
+			},
+			time.Hour,
+			0,
+		)
+		listener.afterCloseWaitForTest = func() {
+			select {
+			case <-callbackReturned:
+			default:
+				t.Error("listener close wait completed before admitted callback returned")
+			}
+		}
+		listener.Resync()
+		select {
+		case <-callbackEntered:
+		case <-testCtx.Done():
+			t.Fatalf("stream hop callback did not enter: %v", testCtx.Err())
+		}
+
+		closeDone := make(chan struct{})
+		go func() {
+			listener.CloseAndWait()
+			close(closeDone)
+		}()
+		select {
+		case <-listener.ctx.Done():
+		case <-testCtx.Done():
+			t.Fatalf("stream hop listener did not close: %v", testCtx.Err())
+		}
+		releaseOnce.Do(func() { close(releaseCallback) })
+		select {
+		case <-callbackReturned:
+		case <-testCtx.Done():
+			t.Fatalf("stream hop callback did not return: %v", testCtx.Err())
+		}
+		select {
+		case <-closeDone:
+		case <-testCtx.Done():
+			t.Fatalf("stream hop listener did not join callback: %v", testCtx.Err())
+		}
+	})
+}
+
 func TestStreamKey(t *testing.T) {
 	sourceId := server.NewId()
 	destinationId := server.NewId()
@@ -154,7 +214,7 @@ func TestStream(t *testing.T) {
 			},
 		)
 		l := NewStreamHopListener(ctx, clientId, c.Event, 200*time.Millisecond, 5)
-		defer l.Close()
+		defer l.CloseAndWait()
 
 		var wg sync.WaitGroup
 
@@ -237,7 +297,7 @@ func TestStream(t *testing.T) {
 			},
 		)
 		l2 := NewStreamHopListener(ctx, clientId, c2.Event, 200*time.Millisecond, 5)
-		defer l2.Close()
+		defer l2.CloseAndWait()
 
 		// cover a full listener poll cycle (5s) so the assertion does not
 		// depend on pubsub delivery alone
@@ -415,7 +475,7 @@ func TestCompanionStreamCloseLifecycle(t *testing.T) {
 			func(hop StreamHop) {},
 		)
 		l := NewStreamHopListener(ctx, intermediaryId, c.Event, 200*time.Millisecond, 5)
-		defer l.Close()
+		defer l.CloseAndWait()
 
 		originContractId := server.NewId()
 		streamId := AddToStream(ctx, originContractId, sourceId, destinationId, []server.Id{intermediaryId})
@@ -492,7 +552,7 @@ func TestStreamHopCorrectiveReadRepairsMissedExpiry(t *testing.T) {
 			100*time.Millisecond,
 			1,
 		)
-		defer listener.Close()
+		defer listener.CloseAndWait()
 		listener.Resync()
 
 		select {
@@ -581,7 +641,7 @@ func TestStreamHopFlushRecovery(t *testing.T) {
 			func(hop StreamHop) {},
 		)
 		l := NewStreamHopListener(ctx, clientId, c.Event, 200*time.Millisecond, 5)
-		defer l.Close()
+		defer l.CloseAndWait()
 
 		// a hop involving clientId; the listener syncs it
 		contractId1 := server.NewId()

@@ -1475,10 +1475,11 @@ func TestSweepOrphanConnectionAndClientData(t *testing.T) {
 		ctx := context.Background()
 
 		location := &Location{
-			City:        "foo",
-			Region:      "bar",
-			Country:     "United States",
-			CountryCode: "us",
+			LocationType: LocationTypeCity,
+			City:         "foo",
+			Region:       "bar",
+			Country:      "United States",
+			CountryCode:  "us",
 		}
 		CreateLocation(ctx, location)
 
@@ -1801,10 +1802,11 @@ func TestRemoveDisconnectedCascadesReapedClients(t *testing.T) {
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "10.7.8.9:20000", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
-			City:        "foo",
-			Region:      "bar",
-			Country:     "United States",
-			CountryCode: "us",
+			LocationType: LocationTypeCity,
+			City:         "foo",
+			Region:       "bar",
+			Country:      "United States",
+			CountryCode:  "us",
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})

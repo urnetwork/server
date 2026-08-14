@@ -424,7 +424,7 @@ func TestReliabilityPoints(t *testing.T) {
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 			connect.AssertEqual(t, err, nil)
 			location := &Location{
-				LocationType: "",
+				LocationType: LocationTypeCity,
 				City:         fmt.Sprintf("foo-%s", clientId),
 				Region:       fmt.Sprintf("bar-%s", clientId),
 				Country:      "United States",

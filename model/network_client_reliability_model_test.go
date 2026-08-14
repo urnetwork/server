@@ -69,7 +69,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 				connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 				connect.AssertEqual(t, err, nil)
 				location := &Location{
-					LocationType: "",
+					LocationType: LocationTypeCity,
 					City:         fmt.Sprintf("foo%d", j),
 					Region:       fmt.Sprintf("bar%d", i),
 					Country:      "United States",
@@ -424,10 +424,11 @@ func TestRecordClientReliabilityStatsScores(t *testing.T) {
 		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, server.NewId())
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
-			City:        "foo",
-			Region:      "bar",
-			Country:     "United States",
-			CountryCode: "us",
+			LocationType: LocationTypeCity,
+			City:         "foo",
+			Region:       "bar",
+			Country:      "United States",
+			CountryCode:  "us",
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
@@ -478,10 +479,11 @@ func TestClientReliabilityScoreSharedIpNormalization(t *testing.T) {
 		invalidClientId := server.NewId()
 
 		location := &Location{
-			City:        "foo",
-			Region:      "bar",
-			Country:     "United States",
-			CountryCode: "us",
+			LocationType: LocationTypeCity,
+			City:         "foo",
+			Region:       "bar",
+			Country:      "United States",
+			CountryCode:  "us",
 		}
 		CreateLocation(ctx, location)
 
@@ -594,10 +596,11 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "10.5.6.7:20000", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
-			City:        "foo",
-			Region:      "bar",
-			Country:     "United States",
-			CountryCode: "us",
+			LocationType: LocationTypeCity,
+			City:         "foo",
+			Region:       "bar",
+			Country:      "United States",
+			CountryCode:  "us",
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
@@ -743,10 +746,11 @@ func TestClientReliabilityDrainGapExcused(t *testing.T) {
 		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "127.0.0.1:20000", server.NewId())
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
-			City:        "foo",
-			Region:      "bar",
-			Country:     "United States",
-			CountryCode: "us",
+			LocationType: LocationTypeCity,
+			City:         "foo",
+			Region:       "bar",
+			Country:      "United States",
+			CountryCode:  "us",
 		}
 		CreateLocation(ctx, location)
 		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})

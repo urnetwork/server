@@ -1170,6 +1170,7 @@ func PrepareNetworkPeerSnapshot(eventId int64, peers []*NetworkPeer) *NetworkPee
 type NetworkPeerListener struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
+	done          chan struct{}
 	networkId     server.Id
 	callback      func(*NetworkPeerEvent)
 	pollInterval  time.Duration
@@ -1186,6 +1187,10 @@ type NetworkPeerListener struct {
 	snapshotLock    sync.Mutex
 	pendingSnapshot *NetworkPeerSnapshot
 	snapshotReady   chan struct{}
+
+	// Nil outside package tests. The callback runs after the listener worker
+	// has joined and immediately before CloseAndWait returns.
+	afterCloseWaitForTest func()
 }
 
 // NewNetworkPeerListener polls the network's peer version counter every
@@ -1206,6 +1211,7 @@ func NewNetworkPeerListener(
 	npl := &NetworkPeerListener{
 		ctx:           cancelCtx,
 		cancel:        cancel,
+		done:          make(chan struct{}),
 		networkId:     networkId,
 		callback:      callback,
 		pollInterval:  pollInterval,
@@ -1214,7 +1220,10 @@ func NewNetworkPeerListener(
 		resync:        make(chan struct{}, 1),
 		snapshotReady: make(chan struct{}, 1),
 	}
-	go server.HandleError(npl.run)
+	go func() {
+		defer close(npl.done)
+		server.HandleError(npl.run)
+	}()
 	return npl
 }
 
@@ -1430,6 +1439,17 @@ func (self *NetworkPeerListener) run() {
 
 func (self *NetworkPeerListener) Close() {
 	self.cancel()
+}
+
+// CloseAndWait cancels the listener and joins its poll worker and any callback
+// already admitted by that worker. A listener callback must not call this
+// method because it would wait for itself; it may call the non-joining Close.
+func (self *NetworkPeerListener) CloseAndWait() {
+	self.Close()
+	<-self.done
+	if self.afterCloseWaitForTest != nil {
+		self.afterCloseWaitForTest()
+	}
 }
 
 type NetworkPeersResult struct {

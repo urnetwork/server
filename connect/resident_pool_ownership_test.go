@@ -13,6 +13,7 @@ import (
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // Retains one test-owned reference that becomes the final owner only after the
@@ -39,6 +40,150 @@ func requireResidentPoolOwnersReturned(t *testing.T, witnesses [][]byte, descrip
 			fmt.Sprintf("%s message %d", description, witnessIndex),
 		)
 	}
+}
+
+// A listener callback that loses the client-close race must return the frame
+// that the closed client refuses instead of leaving one packet-class owner.
+func TestResidentNetworkPeerSendFailureReturnsFrameOwnership(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer testCancel()
+	clientSettings := clientconnect.DefaultClientSettings()
+	clientSettings.ControlPingTimeout = 0
+	clientSettings.EncryptionSettings.Mode = clientconnect.EncryptionModeOff
+	clientSettings.Log = clientconnect.NewNoopLogger()
+	client := clientconnect.NewClient(
+		testCtx,
+		clientconnect.ControlId,
+		clientconnect.NewNoContractClientOob(),
+		clientSettings,
+	)
+	if err := client.CloseAndWait(testCtx); err != nil {
+		t.Fatalf("close resident listener client: %v", err)
+	}
+
+	resident := &Resident{
+		clientId: server.NewId(),
+		client:   client,
+	}
+	var witness []byte
+	resident.beforeListenerFrameSendForTest = func(frame *protocol.Frame) {
+		if witness != nil {
+			t.Fatal("resident emitted more than one reset frame")
+		}
+		witness = retainResidentPoolWitness(frame.MessageBytes)
+	}
+	resident.handleNetworkPeerEvent(&model.NetworkPeerEvent{
+		NetworkPeerEventType: model.NetworkPeerEventTypeReset,
+	})
+	if witness == nil {
+		t.Fatal("resident did not emit the reset frame")
+	}
+	requireResidentPoolOwnerReturned(t, witness, "refused listener frame")
+}
+
+// Resident.Run owns the stream-hop listener and does not publish completion
+// until a callback admitted by that listener has returned.
+func TestResidentRunJoinsStreamHopListenerCallback(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer testCancel()
+		residentCtx, residentCancel := context.WithCancel(testCtx)
+		settings := DefaultExchangeSettings()
+		settings.StreamHopsPollInterval = time.Hour
+		exchange := &Exchange{
+			ctx:      residentCtx,
+			cancel:   residentCancel,
+			settings: settings,
+		}
+		clientSettings := clientconnect.DefaultClientSettings()
+		clientSettings.ControlPingTimeout = 0
+		clientSettings.EncryptionSettings.Mode = clientconnect.EncryptionModeOff
+		clientSettings.Log = clientconnect.NewNoopLogger()
+		client := clientconnect.NewClient(
+			residentCtx,
+			clientconnect.ControlId,
+			clientconnect.NewNoContractClientOob(),
+			clientSettings,
+		)
+		clientId := server.NewId()
+		client.ContractManager().AddNoContractPeer(clientconnect.Id(clientId))
+		resident := &Resident{
+			ctx:        residentCtx,
+			cancel:     residentCancel,
+			exchange:   exchange,
+			clientId:   clientId,
+			client:     client,
+			transports: map[*clientTransport]bool{},
+			forwards:   map[server.Id]*ResidentForward{},
+		}
+
+		listenerStarted := make(chan struct{})
+		frameCallbackEntered := make(chan struct{})
+		releaseFrameCallback := make(chan struct{})
+		frameCallbackReturned := make(chan struct{})
+		listenerJoined := make(chan struct{})
+		var listenerStartedOnce sync.Once
+		var frameCallbackOnce sync.Once
+		var releaseFrameCallbackOnce sync.Once
+		var listenerJoinedOnce sync.Once
+		defer releaseFrameCallbackOnce.Do(func() { close(releaseFrameCallback) })
+		resident.afterStreamHopListenerStartForTest = func(listener *model.StreamHopListener) {
+			listenerStartedOnce.Do(func() { close(listenerStarted) })
+			listener.Resync()
+		}
+		resident.beforeListenerFrameSendForTest = func(*protocol.Frame) {
+			frameCallbackOnce.Do(func() {
+				close(frameCallbackEntered)
+				<-releaseFrameCallback
+				close(frameCallbackReturned)
+			})
+		}
+		resident.afterStreamHopListenerCloseWaitForTest = func() {
+			select {
+			case <-frameCallbackReturned:
+			default:
+				t.Error("resident listener join completed before its callback returned")
+			}
+			listenerJoinedOnce.Do(func() { close(listenerJoined) })
+		}
+
+		runDone := make(chan struct{})
+		go func() {
+			resident.Run()
+			close(runDone)
+		}()
+		select {
+		case <-listenerStarted:
+		case <-testCtx.Done():
+			t.Fatalf("resident did not start stream-hop listener: %v", testCtx.Err())
+		}
+		select {
+		case <-frameCallbackEntered:
+		case <-testCtx.Done():
+			t.Fatalf("resident stream-hop callback did not enter: %v", testCtx.Err())
+		}
+
+		resident.Cancel()
+		releaseFrameCallbackOnce.Do(func() { close(releaseFrameCallback) })
+		select {
+		case <-frameCallbackReturned:
+		case <-testCtx.Done():
+			t.Fatalf("resident stream-hop callback did not return: %v", testCtx.Err())
+		}
+		select {
+		case <-listenerJoined:
+		case <-testCtx.Done():
+			t.Fatalf("resident did not join stream-hop listener: %v", testCtx.Err())
+		}
+		select {
+		case <-runDone:
+		case <-testCtx.Done():
+			t.Fatalf("resident Run did not return after listener join: %v", testCtx.Err())
+		}
+		if err := resident.CloseAndWait(testCtx); err != nil {
+			t.Fatalf("close resident after listener join: %v", err)
+		}
+	})
 }
 
 // newTestingExchangeConnection creates one socket-backed connection without

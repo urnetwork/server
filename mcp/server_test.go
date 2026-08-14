@@ -287,6 +287,27 @@ func TestProvidersList(t *testing.T) {
 
 			model.SetConnectionLocation(ctx, connectionId, city.LocationId, &model.ConnectionLocationScores{})
 
+			// A provider is only advertised on current evidence that it still
+			// carries traffic, and that it egresses from the country it claims.
+			// Both are measured, so a fixture that skips them describes a
+			// provider nothing has ever probed: UpdateClientScores fails it
+			// closed and the location it sits in never meets the bar, which
+			// leaves the search with nothing to return. Measured now, because
+			// each record is only read inside its own freshness window.
+			model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+				ClientId:   clientId,
+				OKCount:    131,
+				Total:      131,
+				MeasuredAt: server.NowUtc(),
+			})
+			model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
+				ClientId:    clientId,
+				LocationId:  city.LocationId,
+				CountryCode: "us",
+				Verdict:     "verified",
+				ObservedAt:  server.NowUtc(),
+			})
+
 			// Insert speed and latency test records directly to satisfy reliability requirements
 			// UpdateClientScores penalizes clients without these tests, causing them to be excluded.
 			server.Tx(ctx, func(tx server.PgTx) {

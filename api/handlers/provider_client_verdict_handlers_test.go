@@ -35,11 +35,34 @@ func validClientVerdictBody(exitClientId server.Id) map[string]any {
 	}
 }
 
-// postClientVerdict posts as networkId, or unauthenticated when networkId is
-// the zero id.
+// verdictReporter is one reporting session. A signed token is not a session on
+// its own: the endpoint validates the token against live rows, so a reporter
+// exists as a network and its admin user before it can report anything.
+type verdictReporter struct {
+	networkId server.Id
+	userId    server.Id
+}
+
+// newVerdictReporter creates the network behind one reporting session.
+func newVerdictReporter(ctx context.Context) verdictReporter {
+	reporter := verdictReporter{
+		networkId: server.NewId(),
+		userId:    server.NewId(),
+	}
+	model.Testing_CreateNetwork(
+		ctx,
+		reporter.networkId,
+		fmt.Sprintf("verdict-%s", reporter.networkId),
+		reporter.userId,
+	)
+	return reporter
+}
+
+// postClientVerdict posts as reporter, or unauthenticated when reporter is the
+// zero value.
 func postClientVerdict(
 	t testing.TB,
-	networkId server.Id,
+	reporter verdictReporter,
 	body map[string]any,
 ) *httptest.ResponseRecorder {
 	t.Helper()
@@ -48,8 +71,8 @@ func postClientVerdict(
 		t.Fatalf("marshal body: %s", err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/network/provider-verdict", bytes.NewReader(buf))
-	if networkId != (server.Id{}) {
-		byJwt := jwt.NewByJwt(networkId, server.NewId(), "test", false, false)
+	if reporter.networkId != (server.Id{}) {
+		byJwt := jwt.NewByJwt(reporter.networkId, reporter.userId, "test", false, false)
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", byJwt.Sign()))
 	}
 	w := httptest.NewRecorder()
@@ -63,7 +86,7 @@ func TestProviderClientVerdictRejectsUnauthenticated(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		exitClientId := server.NewId()
 
-		w := postClientVerdict(t, server.Id{}, validClientVerdictBody(exitClientId))
+		w := postClientVerdict(t, verdictReporter{}, validClientVerdictBody(exitClientId))
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401 for an unauthenticated report", w.Code)
 		}
@@ -92,8 +115,8 @@ func TestProviderClientVerdictReporterComesFromTheSession(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		exitClientId := server.NewId()
-		reporterA := server.NewId()
-		reporterB := server.NewId()
+		reporterA := newVerdictReporter(ctx)
+		reporterB := newVerdictReporter(ctx)
 		liar := server.NewId()
 
 		if w := postClientVerdict(t, reporterA, validClientVerdictBody(exitClientId)); w.Code != http.StatusOK {
@@ -118,9 +141,10 @@ func TestProviderClientVerdictReporterComesFromTheSession(t *testing.T) {
 		if len(reporters) != 2 {
 			t.Fatalf("stored %d verdicts, want 2 (the lying body must not have been stored)", len(reporters))
 		}
-		if !slices.Contains(reporters, reporterA) || !slices.Contains(reporters, reporterB) {
+		if !slices.Contains(reporters, reporterA.networkId) ||
+			!slices.Contains(reporters, reporterB.networkId) {
 			t.Fatalf("reporters = %v, want exactly the two session networks %s and %s",
-				reporters, reporterA, reporterB)
+				reporters, reporterA.networkId, reporterB.networkId)
 		}
 		if slices.Contains(reporters, liar) {
 			t.Fatalf("reporters = %v: the body's reporter_network_id was honoured", reporters)
@@ -130,7 +154,7 @@ func TestProviderClientVerdictReporterComesFromTheSession(t *testing.T) {
 
 func TestProviderClientVerdictRejectsBadBodies(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		reporter := server.NewId()
+		reporter := newVerdictReporter(context.Background())
 
 		cases := []struct {
 			name   string
@@ -219,7 +243,7 @@ func TestProviderClientVerdictStoresValidReport(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		exitClientId := server.NewId()
-		reporter := server.NewId()
+		reporter := newVerdictReporter(ctx)
 
 		w := postClientVerdict(t, reporter, validClientVerdictBody(exitClientId))
 		if w.Code != http.StatusOK {
@@ -231,8 +255,12 @@ func TestProviderClientVerdictStoresValidReport(t *testing.T) {
 			t.Fatalf("stored %d verdicts, want 1", len(verdicts))
 		}
 		verdict := verdicts[0]
-		if verdict.ReporterNetworkId != reporter {
-			t.Fatalf("reporter = %s, want the session network %s", verdict.ReporterNetworkId, reporter)
+		if verdict.ReporterNetworkId != reporter.networkId {
+			t.Fatalf(
+				"reporter = %s, want the session network %s",
+				verdict.ReporterNetworkId,
+				reporter.networkId,
+			)
 		}
 		if verdict.Reason != model.ProviderClientVerdictReasonNoReceiveAck {
 			t.Fatalf("reason = %q", verdict.Reason)
@@ -328,7 +356,7 @@ func TestProviderClientVerdictQuorumMakesTheProviderDue(t *testing.T) {
 
 		// two reporters are not a quorum
 		for range 2 {
-			w := postClientVerdict(t, server.NewId(), validClientVerdictBody(reported))
+			w := postClientVerdict(t, newVerdictReporter(ctx), validClientVerdictBody(reported))
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 			}
@@ -337,7 +365,7 @@ func TestProviderClientVerdictQuorumMakesTheProviderDue(t *testing.T) {
 			t.Fatal("two reporters made the provider due, want three")
 		}
 
-		w := postClientVerdict(t, server.NewId(), validClientVerdictBody(reported))
+		w := postClientVerdict(t, newVerdictReporter(ctx), validClientVerdictBody(reported))
 		if w.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 		}
@@ -407,7 +435,7 @@ func TestProviderClientVerdictQuorumDoesNotOverrideTheAttemptBackoff(t *testing.
 		})
 
 		for range model.ProviderClientVerdictQuorum {
-			w := postClientVerdict(t, server.NewId(), validClientVerdictBody(clientId))
+			w := postClientVerdict(t, newVerdictReporter(ctx), validClientVerdictBody(clientId))
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 			}

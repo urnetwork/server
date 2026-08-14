@@ -148,16 +148,18 @@ func TestClientReliabilityRunningRollingEquivalence(t *testing.T) {
 		ReliabilityRunningRecomputeBlocks = int64(4 * time.Hour / ReliabilityBlockDuration)
 
 		us := &Location{
-			City:        "us_city",
-			Region:      "us_region",
-			Country:     "United States",
-			CountryCode: "us",
+			LocationType: LocationTypeCity,
+			City:         "us_city",
+			Region:       "us_region",
+			Country:      "United States",
+			CountryCode:  "us",
 		}
 		ca := &Location{
-			City:        "ca_city",
-			Region:      "ca_region",
-			Country:     "Canada",
-			CountryCode: "ca",
+			LocationType: LocationTypeCity,
+			City:         "ca_city",
+			Region:       "ca_region",
+			Country:      "Canada",
+			CountryCode:  "ca",
 		}
 		CreateLocation(ctx, us)
 		CreateLocation(ctx, ca)

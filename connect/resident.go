@@ -2915,6 +2915,13 @@ type Resident struct {
 	beforeForwardCloseJoinForTest func()
 	// Nil in production; tests observe the exact internal-client join boundary.
 	beforeClientCloseJoinForTest func()
+	// Nil in production; tests capture the exact listener frame before its
+	// ownership is offered to the internal client.
+	beforeListenerFrameSendForTest func(*protocol.Frame)
+	// Nil in production; tests observe construction and joined shutdown of the
+	// stream-hop listener owned by Run.
+	afterStreamHopListenerStartForTest     func(*model.StreamHopListener)
+	afterStreamHopListenerCloseWaitForTest func()
 
 	// streamHopListener *model.StreamHopListener
 }
@@ -3083,7 +3090,7 @@ func (self *Resident) Run() {
 			// added
 			streamOpen := streamHopToProtocol(hop)
 			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamOpen)
-			self.client.Send(frame, connect.Id(self.clientId), nil)
+			self.sendListenerFrame(frame)
 		},
 		func(hop model.StreamHop) {
 			// removed
@@ -3091,7 +3098,7 @@ func (self *Resident) Run() {
 				StreamId: hop.StreamId().Bytes(),
 			}
 			frame := connect.RequireToFrameWithDefaultProtocolVersion(streamClose)
-			self.client.Send(frame, connect.Id(self.clientId), nil)
+			self.sendListenerFrame(frame)
 		},
 	)
 	// the listener callback runs on the single listener goroutine
@@ -3103,7 +3110,7 @@ func (self *Resident) Run() {
 			if initialHopSync {
 				initialHopSync = false
 				frame := connect.RequireToFrameWithDefaultProtocolVersion(streamHopsToReset(event.StreamHops))
-				self.client.Send(frame, connect.Id(self.clientId), nil)
+				self.sendListenerFrame(frame)
 			}
 			// the accumulator emits adds for the first snapshot too; the
 			// client's open is idempotent for streams kept by the reset
@@ -3112,7 +3119,15 @@ func (self *Resident) Run() {
 		self.exchange.streamHopsPollInterval(),
 		self.exchange.listenerFullReadEvery(),
 	)
-	defer streamHopListener.Close()
+	if self.afterStreamHopListenerStartForTest != nil {
+		self.afterStreamHopListenerStartForTest(streamHopListener)
+	}
+	defer func() {
+		streamHopListener.CloseAndWait()
+		if self.afterStreamHopListenerCloseWaitForTest != nil {
+			self.afterStreamHopListenerCloseWaitForTest()
+		}
+	}()
 	if self.exchange.keyEventSubscriber != nil {
 		// key events are the live delivery; the poll above is the corrective
 		// backstop (PEERSSTREAMS2.md). The corrective cadence is minutes, so
@@ -3134,7 +3149,7 @@ func (self *Resident) Run() {
 			self.exchange.networkPeersPollInterval(),
 			self.exchange.listenerFullReadEvery(),
 		)
-		defer networkPeerListener.Close()
+		defer networkPeerListener.CloseAndWait()
 		if self.exchange.keyEventSubscriber != nil {
 			// key events deliver per-peer deltas; the poll above is the
 			// corrective backstop (PEERSSTREAMS2.md). The corrective cadence is
@@ -3183,7 +3198,19 @@ func (self *Resident) handleNetworkPeerEvent(event *model.NetworkPeerEvent) {
 	flush()
 
 	for _, frame := range frames {
-		self.client.Send(frame, connect.Id(self.clientId), nil)
+		self.sendListenerFrame(frame)
+	}
+}
+
+// Sends one listener-produced control frame to the resident client. A failed
+// send leaves ownership with the caller, including when listener delivery
+// loses the client-close race, so this boundary must return the pooled bytes.
+func (self *Resident) sendListenerFrame(frame *protocol.Frame) {
+	if self.beforeListenerFrameSendForTest != nil {
+		self.beforeListenerFrameSendForTest(frame)
+	}
+	if !self.client.Send(frame, connect.Id(self.clientId), nil) {
+		connect.MessagePoolReturn(frame.MessageBytes)
 	}
 }
 

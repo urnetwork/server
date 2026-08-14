@@ -163,7 +163,7 @@ func TestNetworkPeerCorrectiveReadRepairsMissedExpiry(t *testing.T) {
 			100*time.Millisecond,
 			1, // authoritative corrective read every tick
 		)
-		defer listener.Close()
+		defer listener.CloseAndWait()
 		listener.Resync()
 
 		select {
@@ -217,7 +217,7 @@ func TestNetworkPeerListenerDeltas(t *testing.T) {
 			10*time.Minute,
 			0,
 		)
-		defer listener.Close()
+		defer listener.CloseAndWait()
 
 		// force the first sync now instead of waiting a poll interval
 		listener.Resync()

@@ -777,6 +777,7 @@ type StreamHopEvent struct {
 type StreamHopListener struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
+	done          chan struct{}
 	clientId      server.Id
 	callback      func(*StreamHopEvent)
 	pollInterval  time.Duration
@@ -789,6 +790,10 @@ type StreamHopListener struct {
 	kick        chan struct{}
 	forceResync atomic.Bool
 	reconcile   atomic.Bool
+
+	// Nil outside package tests. The callback runs after the listener worker
+	// has joined and immediately before CloseAndWait returns.
+	afterCloseWaitForTest func()
 }
 
 // NewStreamHopListener polls the client's hops version counter every
@@ -802,13 +807,17 @@ func NewStreamHopListener(ctx context.Context, clientId server.Id, callback func
 	shl := &StreamHopListener{
 		ctx:           cancelCtx,
 		cancel:        cancel,
+		done:          make(chan struct{}),
 		clientId:      clientId,
 		callback:      callback,
 		pollInterval:  pollInterval,
 		fullReadEvery: fullReadEvery,
 		kick:          make(chan struct{}, 1),
 	}
-	go server.HandleError(shl.run)
+	go func() {
+		defer close(shl.done)
+		server.HandleError(shl.run)
+	}()
 	return shl
 }
 
@@ -929,6 +938,17 @@ func (self *StreamHopListener) run() {
 
 func (self *StreamHopListener) Close() {
 	self.cancel()
+}
+
+// CloseAndWait cancels the listener and joins its poll worker and any callback
+// already admitted by that worker. A listener callback must not call this
+// method because it would wait for itself; it may call the non-joining Close.
+func (self *StreamHopListener) CloseAndWait() {
+	self.Close()
+	<-self.done
+	if self.afterCloseWaitForTest != nil {
+		self.afterCloseWaitForTest()
+	}
 }
 
 type StreamHopAccumulator struct {

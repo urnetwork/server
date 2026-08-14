@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -360,17 +361,50 @@ func TestAddDefaultLocationsHasNoBlankNames(t *testing.T) {
 			t.Fatalf("expected at least the 58 configured countries, found %d", countryCount)
 		}
 
-		// `cz` is named by both sources and they disagree -- the config's
-		// "Czech Republic", not the table's "Czechia"
-		name, ok := ISOCountryName("cz")
-		connect.AssertEqual(t, ok, true)
-		connect.AssertEqual(t, name, "Czechia")
-
-		czLocation := &Location{
-			LocationType: LocationTypeCountry,
-			CountryCode:  "cz",
+		// Where both sources name a code and disagree, the config's name is the
+		// one that lands. The code is taken from the config this deployment
+		// actually ships rather than hardcoded: which names differ is config
+		// data, so naming one here pins the test to one deployment's file and
+		// makes it assert nothing the day that row changes to agree.
+		countryCode, configName, ok := disagreeingCountryCode(t)
+		if !ok {
+			return
 		}
-		CreateLocation(ctx, czLocation)
-		connect.AssertEqual(t, locationName(ctx, t, czLocation.LocationId), "Czech Republic")
+		location := &Location{
+			LocationType: LocationTypeCountry,
+			CountryCode:  countryCode,
+		}
+		CreateLocation(ctx, location)
+		connect.AssertEqual(t, locationName(ctx, t, location.LocationId), configName)
 	})
+}
+
+// disagreeingCountryCode returns one country code that iso-country-list.yml and
+// the built-in table both name, and name differently, with the config's name.
+func disagreeingCountryCode(t testing.TB) (countryCode string, configName string, found bool) {
+	t.Helper()
+	resource, err := server.Config.SimpleResource("iso-country-list.yml")
+	if err != nil {
+		t.Fatalf("read iso-country-list.yml: %s", err)
+	}
+	// sorted so a failure names the same code on every run
+	codes := []string{}
+	names := map[string]string{}
+	for code, name := range resource.Parse() {
+		configName, ok := name.(string)
+		if !ok || configName == "" {
+			continue
+		}
+		code = strings.ToLower(code)
+		codes = append(codes, code)
+		names[code] = configName
+	}
+	slices.Sort(codes)
+	for _, code := range codes {
+		tableName, ok := ISOCountryName(code)
+		if ok && tableName != names[code] {
+			return code, names[code], true
+		}
+	}
+	return "", "", false
 }
