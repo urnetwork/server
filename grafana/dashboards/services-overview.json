@@ -81,7 +81,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "process_resident_memory_bytes{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}",
+                    "expr": "sum by (service, block, host) (process_resident_memory_bytes{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"})",
                     "legendFormat": "{{service}} {{block}} {{host}}"
                 }
             ]
@@ -96,7 +96,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "go_goroutines{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}",
+                    "expr": "sum by (service, block, host) (go_goroutines{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"})",
                     "legendFormat": "{{service}} {{block}} {{host}}"
                 }
             ]
@@ -111,7 +111,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "process_open_fds{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}",
+                    "expr": "sum by (service, block, host) (process_open_fds{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"})",
                     "legendFormat": "{{service}} {{block}} {{host}}"
                 }
             ]

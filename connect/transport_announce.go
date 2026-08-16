@@ -46,6 +46,16 @@ func init() {
 	prometheus.MustRegister(drainExcusesConsumedCounter)
 }
 
+// connectionCleanupTimeout bounds the detached database/redis cleanup that
+// runs after the transport context has been canceled. Cleanup must outlive the
+// transport, but it must not be able to leave a postgres transaction waiting
+// forever if the process loses a response between UPDATE and COMMIT.
+const connectionCleanupTimeout = 30 * time.Second
+
+func connectionCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), connectionCleanupTimeout)
+}
+
 func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 	return &ConnectionAnnounceSettings{
 		SyncConnectionTimeout: model.ReliabilityBlockDuration / 2,
@@ -391,8 +401,11 @@ func (self *ConnectionAnnounce) run() {
 
 	cleanup = func() {
 		server.HandleError(func() {
-			// note use an uncanceled context for cleanup
-			cleanupCtx := context.Background()
+			// The transport is normally canceled before cleanup begins. Preserve
+			// its values but detach cancellation, then add a hard bound so a lost
+			// database response cannot strand an idle transaction indefinitely.
+			cleanupCtx, cleanupCancel := connectionCleanupContext(self.ctx)
+			defer cleanupCancel()
 			model.DisconnectNetworkClient(cleanupCtx, connectionId)
 			if verifyEgressOk {
 				model.ClearVerifyEgress(cleanupCtx, self.clientId, verifyEgressIp, verifySettings)

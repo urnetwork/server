@@ -63,27 +63,79 @@ func SchedulePendingPayments(clientSession *session.ClientSession) {
 	}
 }
 
-func SendPayments(clientSession *session.ClientSession) error {
-	plan, err := model.PlanPayments(clientSession.Ctx)
-	if err != nil {
-		return err
-	}
+// PaymentPlanSliceDuration is the preferred bound for each committed payout
+// transaction. It must remain longer than the configured minimum subsidy
+// duration: a shorter slice can commit pass-through revenue without recording a
+// subsidy epoch, leaving the bounded payout frontier unable to advance.
+const PaymentPlanSliceDuration = 4 * 24 * time.Hour
 
-	// for any newtork that is missing a wallet id, send a notice
-	for networkId, payment := range plan.NetworkPayments {
-		if payment.WalletId == nil {
-			userAuth, err := model.GetUserAuth(clientSession.Ctx, networkId)
-			if err == nil {
-				awsMessageSender := GetAWSMessageSender()
-				// TODO handler error
+const paymentPlanSliceSafetyMargin = 24 * time.Hour
 
-				awsMessageSender.SendAccountMessageTemplate(userAuth, &MissingWalletTemplate{
-					PaymentId: payment.PaymentId,
-					AmountUsd: fmt.Sprintf("%.2f", model.NanoCentsToUsd(payment.Payout)),
-				})
-			} else {
-				glog.Warningf("[%s]Missing user auth. Cannot send missing wallet notice.", networkId)
+func boundedPaymentPlanSliceDuration(minSubsidyDuration time.Duration) time.Duration {
+	return max(
+		PaymentPlanSliceDuration,
+		minSubsidyDuration+paymentPlanSliceSafetyMargin,
+	)
+}
+
+type paymentPlanLoop func(
+	context.Context,
+	time.Duration,
+	func(*model.PaymentPlan),
+) ([]*model.PaymentPlan, error)
+
+type missingWalletNotice struct {
+	paymentId server.Id
+	payout    model.NanoCents
+}
+
+func collectMissingWalletNotices(plans []*model.PaymentPlan) map[server.Id]*missingWalletNotice {
+	notices := map[server.Id]*missingWalletNotice{}
+	for _, plan := range plans {
+		for networkId, payment := range plan.NetworkPayments {
+			if payment.WalletId != nil {
+				continue
 			}
+			notice, ok := notices[networkId]
+			if !ok {
+				notice = &missingWalletNotice{paymentId: payment.PaymentId}
+				notices[networkId] = notice
+			}
+			notice.payout += payment.Payout
+		}
+	}
+	return notices
+}
+
+func SendPayments(clientSession *session.ClientSession) error {
+	return sendPaymentsWithPlanner(clientSession, model.PlanPaymentsWithMaxDurationLoop)
+}
+
+func sendPaymentsWithPlanner(clientSession *session.ClientSession, planner paymentPlanLoop) error {
+	plans, planErr := planner(
+		clientSession.Ctx,
+		boundedPaymentPlanSliceDuration(model.EnvSubsidyConfig().MinDurationPerPayout()),
+		nil,
+	)
+
+	// Several slices can include the same network. Notify it at most once per
+	// payout run instead of once per committed slice.
+	missingWalletNotices := collectMissingWalletNotices(plans)
+
+	// For any network that is missing a wallet id, send one notice carrying the
+	// total withheld across every slice in this run.
+	for networkId, notice := range missingWalletNotices {
+		userAuth, err := model.GetUserAuth(clientSession.Ctx, networkId)
+		if err == nil {
+			awsMessageSender := GetAWSMessageSender()
+			// TODO handler error
+
+			awsMessageSender.SendAccountMessageTemplate(userAuth, &MissingWalletTemplate{
+				PaymentId: notice.paymentId,
+				AmountUsd: fmt.Sprintf("%.2f", model.NanoCentsToUsd(notice.payout)),
+			})
+		} else {
+			glog.Warningf("[%s]Missing user auth. Cannot send missing wallet notice.", networkId)
 		}
 	}
 
@@ -91,7 +143,10 @@ func SendPayments(clientSession *session.ClientSession) error {
 	// and payments held from earlier plans (e.g. waiting on a valid wallet)
 	SchedulePendingPayments(clientSession)
 
-	return nil
+	// The loop can return already-committed plans together with an error from a
+	// later slice. Those durable payments were scheduled above; return the error
+	// so the payout task still retries the remaining frontier.
+	return planErr
 }
 
 // run at start

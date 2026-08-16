@@ -20,8 +20,9 @@ import (
 // diff has no parser false positives.
 //
 // Code migrations are intentionally NOT replayed: all of them are data
-// backfills with no effect on the catalog (and no-ops on an empty DB), so
-// skipping them keeps the audit from needing redis or mutating shared state.
+// backfills or database-level settings with no effect on the audited public
+// catalog. Online SQL migrations provide a transaction-safe audit equivalent,
+// so concurrent index changes remain visible to the expected schema.
 
 type auditColumn struct {
 	name       string
@@ -258,15 +259,23 @@ db: "%s"`,
 
 // applyAuditMigrations replays the SQL migrations at slice indices [0, upTo)
 // onto the database the pool currently points at. Code migrations are skipped
-// (see the package comment above).
+// (see the package comment above); online migrations use their transaction-safe
+// audit form.
 func applyAuditMigrations(ctx context.Context, upTo int) {
 	if upTo > len(migrations) {
 		upTo = len(migrations)
 	}
 	for i := 0; i < upTo; i += 1 {
-		if m, ok := migrations[i].(*SqlMigration); ok {
+		var sql string
+		switch m := migrations[i].(type) {
+		case *SqlMigration:
+			sql = m.sql
+		case *OnlineSqlMigration:
+			sql = m.auditSql
+		}
+		if sql != "" {
 			MaintenanceTx(ctx, func(tx PgTx) {
-				RaisePgResult(tx.Exec(ctx, m.sql))
+				RaisePgResult(tx.Exec(ctx, sql))
 			})
 		}
 	}

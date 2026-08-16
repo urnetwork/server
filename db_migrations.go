@@ -32,6 +32,21 @@ func newSqlMigration(sql string) *SqlMigration {
 	}
 }
 
+// OnlineSqlMigration runs catalog-changing SQL that postgres forbids inside a
+// transaction (notably CREATE/DROP INDEX CONCURRENTLY). auditSql is the
+// transaction-safe equivalent replayed into the schema audit's throwaway DB.
+// Keeping both forms in the migration stream means online production changes
+// remain part of the expected schema instead of becoming invisible code
+// migrations.
+type OnlineSqlMigration struct {
+	sql      string
+	auditSql string
+}
+
+func newOnlineSqlMigration(sql string, auditSql string) *OnlineSqlMigration {
+	return &OnlineSqlMigration{sql: sql, auditSql: auditSql}
+}
+
 // important these migration functions must be idempotent
 type CodeMigration struct {
 	callback func(context.Context)
@@ -41,6 +56,37 @@ func newCodeMigration(callback func(context.Context)) *CodeMigration {
 	return &CodeMigration{
 		callback: callback,
 	}
+}
+
+func migrationSetIdleInTransactionTimeout(ctx context.Context) {
+	MaintenanceDb(ctx, func(conn PgConn) {
+		var alterSql string
+		result, err := conn.Query(ctx, `
+			SELECT format(
+				'ALTER DATABASE %I SET idle_in_transaction_session_timeout = %L',
+				current_database(),
+				'5min'
+			)
+		`)
+		WithPgResult(result, err, func() {
+			if result.Next() {
+				Raise(result.Scan(&alterSql))
+			}
+		})
+		if alterSql == "" {
+			panic("could not resolve current database for idle transaction timeout")
+		}
+		RaisePgResult(conn.Exec(ctx, alterSql))
+	}, OptReadWrite(), OptNoRetry())
+}
+
+func migrationVacuumPendingTask(ctx context.Context) {
+	// VACUUM cannot run inside the per-migration transaction. The table is a
+	// small queue; this removes versions that became reclaimable after the idle
+	// transaction guard above and refreshes the poll index statistics.
+	MaintenanceDb(ctx, func(conn PgConn) {
+		RaisePgResult(conn.Exec(ctx, `VACUUM (ANALYZE) pending_task`))
+	}, OptReadWrite(), OptNoRetry())
 }
 
 func DbVersion(ctx context.Context) int {
@@ -120,6 +166,13 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 				}()
 				RaisePgResult(tx.Exec(ctx, v.sql))
 			})
+		case *OnlineSqlMigration:
+			if DbMigrationVerbose {
+				glog.Infof("[migrate][%d/%d]online sql = %s\n", i+1, len(migrations), v.sql)
+			}
+			MaintenanceDb(ctx, func(conn PgConn) {
+				RaisePgResult(conn.Exec(ctx, v.sql))
+			}, OptReadWrite(), OptNoRetry())
 		case *CodeMigration:
 			if DbMigrationVerbose {
 				glog.Infof("[migrate][%d/%d]code = %v\n", i+1, len(migrations), v.callback)
@@ -5540,4 +5593,36 @@ var migrations = []any{
             ADD CONSTRAINT location_name_not_blank
             CHECK (location_name <> '')
     `),
+
+	// A leaked application connection held an UPDATE transaction idle for more
+	// than 80 minutes, pinning xmin and blocking handler cleanup. New sessions
+	// inherit this database-level backstop; legitimate long-running statements
+	// are unaffected because the timer runs only while a transaction is idle.
+	newCodeMigration(migrationSetIdleInTransactionTimeout),
+
+	// pending_task has a few hundred live rows but updates its scheduling columns
+	// on every claim and heartbeat. Fixed thresholds keep vacuum cadence tied to
+	// churn rather than table size; the subsequent online vacuum clears the debt
+	// that accumulated behind the leaked xmin horizon.
+	newSqlMigration(`
+		ALTER TABLE pending_task SET (
+			autovacuum_vacuum_scale_factor = 0,
+			autovacuum_vacuum_threshold = 50,
+			autovacuum_vacuum_cost_delay = 0,
+			autovacuum_analyze_scale_factor = 0,
+			autovacuum_analyze_threshold = 50
+		)
+	`),
+	newCodeMigration(migrationVacuumPendingTask),
+
+	// Superseded companion lookup index: since the 2026-08-09 stats reset this
+	// 99GB index served only eight scans, while the hot open branch uses the
+	// narrow pair partial index and the closed branch uses destination/close_time.
+	// Drop concurrently so contract writes continue throughout the removal. The
+	// audit form is identical except for CONCURRENTLY, which is forbidden inside
+	// the audit transaction.
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_source_id_companion_contract_id`,
+		`DROP INDEX IF EXISTS transfer_contract_open_source_id_companion_contract_id`,
+	),
 }

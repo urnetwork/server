@@ -97,8 +97,12 @@ WHERE function_name LIKE '%UpdateClient%'
 ```
 - GOTCHA — long-running vs stuck: a live run shows claim_time refreshing
   every ~10s (the keepalive bumps claim_time+release_time). Frozen claim +
-  future release_time = pre-lease-fix binary or killed worker. claim age >
-  2× the task's historical duration (finished_task history) = investigate.
+  future release_time = pre-lease-fix binary or killed worker. Current workers
+  use a five-minute rolling lease, so a killed worker's claim self-releases
+  within five minutes of its final heartbeat. A direct-postgres session lock
+  still prevents duplicate execution if only the heartbeat is starved and the
+  original worker remains alive. claim age > 2× the task's historical duration
+  (finished_task history) = investigate.
 
 ### 1.3 pg idle-in-transaction count — the redis-latency mirror
 ```sql
@@ -1382,9 +1386,10 @@ uptime -s                             # the split falls exactly on boot time
 ## 12. Taskworker drain (deploy) — TASKDRAIN1
 
 The taskworker plane has no client connections; its "clients" are the chain
-cadences (contract close ×8, handler reap 60s, reliability rollup 1min,
-client scores 30s). Deploys are make-before-break over the shared pg queue,
-so a HEALTHY deploy pauses nothing. These signals catch the unhealthy paths.
+cadences (one contract-close scheduler task with an internal worker pool,
+handler reap 60s, reliability rollup 1min, client scores 30s). Deploys are
+make-before-break over the shared pg queue, so a HEALTHY deploy pauses
+nothing. These signals catch the unhealthy paths.
 
 ### 12.1 Drain outcome (log classes, service=taskworker)
 PROBE: `logs/taskworker-drain-gave-up` (tailer class; only the gave-up line is
@@ -1402,9 +1407,10 @@ The drain logs one start line and exactly one outcome line per SIGTERM:
   seconds elsewhere; their reschedule_error starts with `Drained:` and does
   NOT advance reschedule_error_count).
 - BROKEN: "drain gave up" = a ctx-ignoring task rode to SIGKILL. Its claim
-  (and EVERY claim of that container) is now leased until claim +
-  max(30s, run_max_time_seconds) — find them with 12.3 and decide whether to
-  `bringyourctl task release`. Also broken: no outcome line within
+  (and EVERY claim of that container) remains leased for at most five minutes
+  after its final heartbeat — find them with 12.3 and normally let them
+  self-release. Use `bringyourctl task release` only for verified-dead workers
+  when immediate recovery matters. Also broken: no outcome line within
   DrainFinishTimeout+DrainCancelTimeout+30s of the start line (process hung
   outside task work).
 - Metrics mirror: `urnetwork_taskworker_drain_inflight`, `_drain_seconds`,
@@ -1438,17 +1444,21 @@ WHERE now() < release_time
 ORDER BY release_time DESC;
 ```
 - HEALTHY: rows whose task genuinely runs long (compare finished_task
-  duration history, 2.5) and whose worker is alive.
-- BROKEN: lease_remaining_s ≈ run_max_time_seconds shortly AFTER a
-  taskworker kill/crash = stranded claim; the chain is paused until release.
-  DbMaintenance strands for up to 24h (skips a nightly window),
-  UpdateClientScores/UpdateReliabilities up to 2h (selection freshness, 2.8),
-  a CloseExpiredContracts slice 30min (close backlog, 2.6).
-- ACTION: verify the claiming worker is dead (deploy log / container list),
-  then `bringyourctl task release <task_id>` (immediate re-claim per run_at)
-  and/or `bringyourctl task kick <run_once_key>` (pull run_at to now).
-  Releasing a RUNNING task re-opens the duplicate-execution window — verify
-  first.
+  duration history, 2.5), whose claim_time keeps advancing, and whose worker
+  is alive.
+- BROKEN: claim_time frozen > 2m shortly AFTER a taskworker kill/crash = a
+  temporarily stranded claim. Current binaries cap release_time at five
+  minutes after the last heartbeat regardless of run_max_time_seconds, so the
+  chain self-recovers in at most five minutes instead of 30min–24h. A
+  direct-postgres session advisory lock remains held while a worker is alive,
+  so a starved heartbeat alone cannot create a duplicate; PostgreSQL drops the
+  lock with the dead worker's connection. A lease remaining far beyond five
+  minutes identifies a pre-fix claim/binary and still needs manual handling.
+- ACTION: normally observe automatic expiry. If immediate re-claim is needed,
+  verify the claiming worker is dead (deploy log / container list), then run
+  `bringyourctl task release <task_id>` and/or `bringyourctl task kick
+  <run_once_key>` (pull run_at to now). Releasing a RUNNING task re-opens the
+  duplicate-execution window — verify first.
 
 ### 12.4 Post-deploy convergence
 PROBES: `pg/task-due-lag` (oldest due-and-unclaimed > 180s sustained = the

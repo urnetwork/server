@@ -12,7 +12,7 @@
     "from": "now-3h",
     "to": "now"
   },
-  "description": "The SIGNALS.md signal catalog, charted. Panel titles carry the section numbers; panel descriptions carry the playbook pointers. Loaded by `bringyourctl grafana load-defaults`.",
+  "description": "The SIGNALS.md signal catalog plus the operator network measurements, charted. Panel titles carry the section numbers where applicable; panel descriptions carry the measurement semantics and playbook pointers. Loaded by `bringyourctl grafana load-defaults`.",
   "templating": {
     "list": [
       {
@@ -86,18 +86,18 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(rate(urnetwork_connect_connection_new{env=\"$env\"}[$__rate_interval])) * 60",
+          "expr": "sum by (excused) (rate(urnetwork_connect_connection_new{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "A",
-          "legendFormat": "fleet"
+          "legendFormat": "fleet excused={{excused}}"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (host) (rate(urnetwork_connect_connection_new{env=\"$env\"}[$__rate_interval])) * 60",
+          "expr": "sum by (host, excused) (rate(urnetwork_connect_connection_new{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "B",
-          "legendFormat": "{{host}}"
+          "legendFormat": "{{host}} excused={{excused}}"
         }
       ],
       "description": "The new-connection rate (SIGNALS.md 2.7). Two failure directions: sustained < 50% of the trailing baseline = new connects failing (auth/lb/announce); sustained > 2.5x = a RECONNECT STORM \u2014 mass simultaneous eviction (ansible unit-restart wave 8.5, simultaneous multi-block deploy). During a storm expect a plateau, a final eviction burst spike, then decay to baseline ~10 min after."
@@ -148,7 +148,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(rate(urnetwork_connect_transfer_bytes{env=\"$env\"}[$__rate_interval])) * 8",
+          "expr": "sum(rate(urnetwork_connect_transfer_bytes{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 8",
           "refId": "C",
           "legendFormat": "fleet"
         }
@@ -157,7 +157,7 @@
     },
     {
       "type": "timeseries",
-      "title": "population: connected clients",
+      "title": "population: client transport connections",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -200,7 +200,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_connect_connected_clients{env=\"$env\"})",
+          "expr": "sum(urnetwork_connect_connected_clients{env=\"$env\",instance!=\"\"})",
           "refId": "D",
           "legendFormat": "fleet"
         },
@@ -209,15 +209,16 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (host) (urnetwork_connect_connected_clients{env=\"$env\"})",
+          "expr": "sum by (host) (urnetwork_connect_connected_clients{env=\"$env\",instance!=\"\"})",
           "refId": "E",
           "legendFormat": "{{host}}"
         }
-      ]
+      ],
+      "description": "Open client transports. One distinct resident device may have multiple transports, so this is intentionally not labeled as a device count; the operator-measurements row below charts resident devices."
     },
     {
       "type": "timeseries",
-      "title": "\u00a74 contract failures / min by cause (lossless)",
+      "title": "\u00a74 contract failures / min by cause + companion (lossless)",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -260,9 +261,9 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (cause) (rate(urnetwork_connect_contract_failures_total{env=\"$env\"}[$__rate_interval])) * 60",
+          "expr": "sum by (cause, companion) (rate(urnetwork_connect_contract_failures_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "F",
-          "legendFormat": "{{cause}}"
+          "legendFormat": "{{cause}} companion={{companion}}"
         }
       ],
       "description": "urnetwork_connect_contract_failures_total \u2014 the lossless counter behind the sampled contract-error log exemplars. missing_companion_origin climbing while everything else is healthy = stale provider selection serving zombies (playbook 5.9; post-churn variant 5.9.7). insufficient_balance step-change = netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
@@ -937,6 +938,15 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
+          "expr": "sum by (service) (urnetwork_http_server_draining{env=\"$env\"})",
+          "refId": "S1",
+          "legendFormat": "http draining {{service}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "sum by (service) (urnetwork_http_server_drain_inflight{env=\"$env\"})",
           "refId": "P",
           "legendFormat": "http inflight {{service}}"
@@ -959,7 +969,8 @@
           "refId": "R",
           "legendFormat": "proxy active remaining"
         }
-      ]
+      ],
+      "description": "Live drain progress. HTTP draining counts instances in their drain sequence; the remaining series show work that still has to leave each service. Completed-drain outcomes are charted below because final gauges are brief before their process series goes stale."
     },
     {
       "type": "timeseries",
@@ -1270,13 +1281,1011 @@
     },
     {
       "type": "row",
-      "title": "coverage notes",
+      "title": "operator network measurements (public stats contract)",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 68
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "total networks",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_total_networks{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "networks"
+        }
+      ],
+      "description": "Total networks registered with this operator. The collector runs on every taskworker, so max — not sum or avg — selects the replicated measurement without replica-count or unset-gauge skew."
+    },
+    {
+      "type": "timeseries",
+      "title": "countries with a connected provider",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_countries{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "countries"
+        }
+      ],
+      "description": "Countries with at least one connected, valid public provider. This measures provider reach, not consuming-device locations."
+    },
+    {
+      "type": "timeseries",
+      "title": "connected devices (residents)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 69
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_connect_resident_clients{env=\"$env\",instance!=\"\"})",
+          "refId": "A",
+          "legendFormat": "devices"
+        }
+      ],
+      "description": "Distinct resident client devices across connect processes. This differs from connected_clients, which counts transport connections and can count one device more than once."
+    },
+    {
+      "type": "timeseries",
+      "title": "weekly users: current vs last finished block",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_users{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "current block"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_users{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "last finished block"
+        }
+      ],
+      "description": "Unique top-level identities with contract usage. The current accumulator resets at 00:00 UTC Sunday; the previous series is the final value of the last finished block and is absent until one has been observed."
+    },
+    {
+      "type": "timeseries",
+      "title": "weekly demand deposits: current vs last finished block",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: α",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_demand_deposits_alpha{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "current block"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "last finished block"
+        }
+      ],
+      "description": "Alpha demand deposits measured from the mirrored contract events for the current weekly block and the last finished block."
+    },
+    {
+      "type": "timeseries",
+      "title": "weekly miner emissions: current vs last finished block",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 77
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: α",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_emissions_alpha{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "current block"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "last finished block"
+        }
+      ],
+      "description": "Alpha miner emission captured from the mirrored contract events for the current weekly block and the last finished block."
+    },
+    {
+      "type": "timeseries",
+      "title": "cumulative alpha staked",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 85
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: α",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_staked_alpha{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "staked alpha"
+        }
+      ],
+      "description": "Cumulative alpha staked in the subnet contract (buybackTotal). No data means the chain measurement is not currently being published; it is not converted to zero."
+    },
+    {
+      "type": "timeseries",
+      "title": "alpha price (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 85
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_alpha_usd{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "alpha / USD"
+        }
+      ],
+      "description": "Alpha price in US dollars from the operator's server-side market observation. The collector retains the last good value across a transient price-source error."
+    },
+    {
+      "type": "row",
+      "title": "application correctness + resource lifecycle",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 93
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "connect control failures / s",
+      "description": "Lossless bounded-label counters for rejected control frames and resident nominations. Split control-frame failures by message and cause; split nomination refusals by cause.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 94
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (message, cause) (rate(urnetwork_connect_control_frame_failures_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "frame {{message}} / {{cause}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (cause) (rate(urnetwork_connect_nominations_refused_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "nomination / {{cause}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "authentication decisions / s",
+      "description": "JWTs rejected by bounded cause, and JWTs accepted only because a migration gate still permits a legacy condition. Legacy accepts should reach zero before the corresponding gate is removed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 94
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, cause) (rate(urnetwork_auth_jwt_rejections_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "rejected {{service}} / {{cause}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, cause) (rate(urnetwork_auth_jwt_legacy_accepts_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "legacy accepted {{service}} / {{cause}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "contract + task terminal outcomes / s",
+      "description": "Expired contracts force-closed by resolution, plus RunPost tasks whose finished-task row had already been reaped. The orphaned task outcome is a safe no-op, but any sustained rate merits retention/scheduling investigation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 94
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (resolution) (rate(urnetwork_contract_force_closed_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "force closed / {{resolution}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_task_run_post_orphaned_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "orphaned RunPost"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "FindProviders2 score-load latency",
+      "description": "Distribution of the client-score load performed by every provider search. Quantiles are computed from the merged fleet histogram, not averaged from per-process quantiles.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 102
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(urnetwork_findproviders2_load_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_findproviders2_load_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
+          "refId": "B",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_findproviders2_load_seconds_sum{env=\"$env\"}[$__rate_interval])) / sum(rate(urnetwork_findproviders2_load_seconds_count{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "mean"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "message pool lifecycle / s",
+      "description": "Pooled buffers taken, returned, and newly allocated. Taken and returned should track; created tracking taken means the pool is not reusing buffers effectively.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 102
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_message_pool_taken_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "taken"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_message_pool_returned_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "returned"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_message_pool_created_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "created"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "unpooled message allocations",
+      "description": "Oversize messages served outside the fixed-size pools, shown as messages/s and bytes/s on separate axes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 102
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "Bps"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_message_pool_unpooled_taken_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "messages / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_message_pool_unpooled_bytes_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "bytes / s"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "completed drain outcomes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 110
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "completed drain duration",
+      "description": "Duration reported at the end of each HTTP or taskworker drain. The five-minute lookback keeps the final flush visible briefly after its process series goes stale.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 111
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service, host) (max_over_time(urnetwork_http_server_drain_seconds{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "http {{service}} / {{host}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host) (max_over_time(urnetwork_taskworker_drain_seconds{env=\"$env\"}[5m]))",
+          "refId": "B",
+          "legendFormat": "taskworker / {{host}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "work interrupted at drain completion",
+      "description": "HTTP connections still open at the hard shutdown deadline and task executions canceled then rescheduled by taskworker drain. Both should normally be zero; canceled tasks are recoverable, hard-cut connections are not graceful.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 111
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (service, host) (max_over_time(urnetwork_http_server_drain_cut_connections{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "http hard-cut {{service}} / {{host}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host) (max_over_time(urnetwork_taskworker_drain_canceled{env=\"$env\"}[5m]))",
+          "refId": "B",
+          "legendFormat": "taskworker canceled / {{host}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "coverage notes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 119
       }
     },
     {
@@ -1287,7 +2296,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 120
       },
       "options": {
         "mode": "markdown",

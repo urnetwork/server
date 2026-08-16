@@ -20,15 +20,21 @@ type SchedulePayoutResult struct {
 	Success bool `json:"success"`
 }
 
-func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
-	runAt := func() time.Time {
-		now := server.NowUtc()
-		year, month, day := now.Date()
+const payoutHourUtc = 10
 
-		// run on the next Sunday
-		day += 7 - int(now.Weekday())
-		return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-	}()
+func nextPayoutTime(now time.Time) time.Time {
+	now = now.UTC()
+	year, month, day := now.Date()
+
+	// Always schedule the next Sunday, preserving the existing once-per-week
+	// cadence. 10:00 UTC is deliberately outside the 00:00 full-backup window
+	// and the 03:00/07:00 database-maintenance windows.
+	day += 7 - int(now.Weekday())
+	return time.Date(year, month, day, payoutHourUtc, 0, 0, 0, time.UTC)
+}
+
+func SchedulePayout(clientSession *session.ClientSession, tx server.PgTx) {
+	runAt := nextPayoutTime(server.NowUtc())
 	task.ScheduleTaskInTx(
 		tx,
 		Payout,

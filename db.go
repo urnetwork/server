@@ -408,6 +408,27 @@ func MaintenanceDb(ctx context.Context, callback func(PgConn), options ...any) {
 	}
 }
 
+// AcquireMaintenanceDbConn reserves one direct-postgres session until the
+// caller invokes Release (or Hijack+Close on error). It is intentionally
+// separate from MaintenanceDb's callback API for the rare case where
+// session-scoped state must remain alive across application work, such as a
+// PostgreSQL advisory lock guarding a task claim. The maintenance pool bypasses
+// transaction-pooled PgBouncer, where session locks would not be safe.
+func AcquireMaintenanceDbConn(ctx context.Context) (PgConn, error) {
+	conn, err := safeMaintenancePool.open().Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Ping(ctx); err != nil {
+		pgxConn := conn.Hijack()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), PgConnectTimeout)
+		_ = pgxConn.Close(closeCtx)
+		closeCancel()
+		return nil, err
+	}
+	return conn, nil
+}
+
 func Db(ctx context.Context, callback func(PgConn), options ...any) {
 	c := func() {
 		dbWithPool(ctx, safePool, callback, options...)

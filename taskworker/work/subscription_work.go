@@ -14,7 +14,11 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-const DefaultCloseExpiredContractsBlockSize = 8
+// ForceCloseOpenContractIds already fans the selected contracts out across its
+// internal worker pool. Multiple task-level shards each repeated the same
+// ordered 100k-row database scan before discarding 7/8 of it in Go, so keep one
+// scheduler task and let the existing in-process parallelism do the work.
+const DefaultCloseExpiredContractsBlockSize = 1
 
 type CloseExpiredContractsArgs struct {
 	BlockSize  int `json:"block_size"`

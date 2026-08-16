@@ -48,19 +48,20 @@
         {
             "id": 1,
             "type": "timeseries",
-            "title": "connected clients",
+            "title": "client transport connections",
+            "description": "Open client transports, aggregated per deploy block and host. This is not a distinct-device count: one resident device may own multiple transports. Distinct devices are charted on the signals and public network-stats boards.",
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-            "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+            "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0}, "overrides": []},
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "urnetwork_connect_connected_clients{env=\"$env\",block=~\"$block\",host=~\"$host\"}",
+                    "expr": "sum by (block, host) (urnetwork_connect_connected_clients{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
                     "legendFormat": "{{block}} {{host}}"
                 },
                 {
                     "refId": "B",
-                    "expr": "sum(urnetwork_connect_connected_clients{env=\"$env\",block=~\"$block\",host=~\"$host\"})",
+                    "expr": "sum(urnetwork_connect_connected_clients{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
                     "legendFormat": "total"
                 }
             ]
@@ -69,23 +70,24 @@
             "id": 2,
             "type": "timeseries",
             "title": "dropped messages / s",
+            "description": "Lossless drop counters by bounded drop point: destination-forward queue full, receiving resident queue full, or resident abuse validation. Rates are summed per host across the selected deploy blocks.",
             "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-            "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []},
+            "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum by (host) (rate(urnetwork_connect_forward_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "expr": "sum by (host) (rate(urnetwork_connect_forward_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
                     "legendFormat": "forward {{host}}"
                 },
                 {
                     "refId": "B",
-                    "expr": "sum by (host) (rate(urnetwork_connect_forward_receive_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "expr": "sum by (host) (rate(urnetwork_connect_forward_receive_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
                     "legendFormat": "forward receive {{host}}"
                 },
                 {
                     "refId": "C",
-                    "expr": "sum by (host) (rate(urnetwork_connect_abuse_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "expr": "sum by (host) (rate(urnetwork_connect_abuse_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
                     "legendFormat": "abuse {{host}}"
                 }
             ]

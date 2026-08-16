@@ -18,6 +18,24 @@ func testingInsertLocationReliability(
 	regionLocationId server.Id,
 	countryLocationId server.Id,
 ) {
+	testingInsertLocationReliabilityConnected(
+		ctx,
+		clientId,
+		cityLocationId,
+		regionLocationId,
+		countryLocationId,
+		true,
+	)
+}
+
+func testingInsertLocationReliabilityConnected(
+	ctx context.Context,
+	clientId server.Id,
+	cityLocationId server.Id,
+	regionLocationId server.Id,
+	countryLocationId server.Id,
+	connected bool,
+) {
 	nullable := func(id server.Id) any {
 		if id == (server.Id{}) {
 			return nil
@@ -30,15 +48,17 @@ func testingInsertLocationReliability(
 			`
 			INSERT INTO network_client_location_reliability (
 				client_id, update_block_number,
-				city_location_id, region_location_id, country_location_id
+				city_location_id, region_location_id, country_location_id,
+				client_address_hash_count, location_count, connected
 			)
-			VALUES ($1, $2, $3, $4, $5)
+			VALUES ($1, $2, $3, $4, $5, 1, 1, $6)
 			`,
 			clientId,
 			1,
 			nullable(cityLocationId),
 			nullable(regionLocationId),
 			nullable(countryLocationId),
+			connected,
 		))
 	})
 }
@@ -94,19 +114,19 @@ func TestLocationDirectoryReferencedSetMatchesUnionForm(t *testing.T) {
 		unionForm := `
 			SELECT DISTINCT city_location_id
 			FROM network_client_location_reliability
-			WHERE city_location_id IS NOT NULL
+			WHERE valid AND connected AND city_location_id IS NOT NULL
 
 			UNION
 
 			SELECT DISTINCT region_location_id
 			FROM network_client_location_reliability
-			WHERE region_location_id IS NOT NULL
+			WHERE valid AND connected AND region_location_id IS NOT NULL
 
 			UNION
 
 			SELECT DISTINCT country_location_id
 			FROM network_client_location_reliability
-			WHERE country_location_id IS NOT NULL
+			WHERE valid AND connected AND country_location_id IS NOT NULL
 		`
 		// the shape queryLocationDirectory uses
 		tripleForm := `
@@ -117,6 +137,7 @@ func TestLocationDirectoryReferencedSetMatchesUnionForm(t *testing.T) {
 					region_location_id AS r,
 					country_location_id AS n
 				FROM network_client_location_reliability
+				WHERE valid AND connected
 			) triples
 			CROSS JOIN LATERAL unnest(ARRAY[triples.c, triples.r, triples.n]) AS loc(id)
 			WHERE loc.id IS NOT NULL
@@ -140,6 +161,48 @@ func TestLocationDirectoryReferencedSetMatchesUnionForm(t *testing.T) {
 		for id := range triple {
 			if !union[id] {
 				t.Fatalf("triple form returns %s that the union form does not", id)
+			}
+		}
+	})
+}
+
+func TestLocationDirectoryExcludesDisconnectedHistory(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		live := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Live City",
+			Region:       "Live Region",
+			Country:      "Live Country",
+			CountryCode:  "LC",
+		}
+		CreateLocation(ctx, live)
+		historical := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Historical City",
+			Region:       "Historical Region",
+			Country:      "Historical Country",
+			CountryCode:  "HC",
+		}
+		CreateLocation(ctx, historical)
+
+		testingInsertLocationReliabilityConnected(
+			ctx, server.NewId(), live.CityLocationId, live.RegionLocationId, live.CountryLocationId, true,
+		)
+		testingInsertLocationReliabilityConnected(
+			ctx, server.NewId(), historical.CityLocationId, historical.RegionLocationId, historical.CountryLocationId, false,
+		)
+
+		entries := queryLocationDirectory(ctx)
+		for _, id := range []server.Id{live.CityLocationId, live.RegionLocationId, live.CountryLocationId} {
+			if _, ok := entries[id]; !ok {
+				t.Fatalf("live directory is missing %s", id)
+			}
+		}
+		for _, id := range []server.Id{historical.CityLocationId, historical.RegionLocationId, historical.CountryLocationId} {
+			if _, ok := entries[id]; ok {
+				t.Fatalf("directory retained disconnected historical location %s", id)
 			}
 		}
 	})

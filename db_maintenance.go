@@ -16,6 +16,50 @@ import (
 
 const DbReindexEpochs = uint64(8)
 
+// transfer_contract is too large to rebuild wholesale, but these small
+// high-churn partial indexes accumulate deleted pages as contracts flip from
+// open to closed. Maintain them individually so the planner's relpages cost
+// stays representative without rebuilding the table's multi-hundred-GB index
+// set.
+var priorityReindexIndexes = []string{
+	"transfer_contract_open_partial_create_time",
+	"transfer_contract_pair_open_create_time",
+	"transfer_contract_open_destination_partial",
+}
+
+func priorityReindexIndexesForEpoch(epoch uint64) []string {
+	names := []string{}
+	for _, name := range priorityReindexIndexes {
+		h := fnv.New64()
+		_, _ = h.Write([]byte(name))
+		if h.Sum64()%DbReindexEpochs == epoch%DbReindexEpochs {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// These tables are too large or too frequently updated to rebuild as a whole;
+// each has an alternate strategy (partition turnover or targeted indexes).
+var dbMaintenanceSkipReindexTables = map[string]bool{
+	"client_reliability":                  true,
+	"network_client_location_reliability": true,
+	"network_client_connection":           true,
+	"transfer_contract":                   true,
+}
+
+// Daily reliability partitions are dropped whole at retention, so their
+// indexes never live long enough to benefit from reindexing.
+var dbMaintenanceSkipReindexTablePattern = sync.OnceValue(func() *regexp.Regexp {
+	return regexp.MustCompile(`^client_reliability_p[0-9]{8}$`)
+})
+
+func dbMaintenanceShouldReindexTable(tableName string) bool {
+	return !dbMaintenanceSkipReindexTables[tableName] &&
+		!dbMaintenanceSkipReindexTablePattern().MatchString(tableName)
+}
+
 // per the posgres docs, remove indexes that end in _ccnew\d* or _ccold\d*
 var incompleteIndexNamePattern = sync.OnceValue(func() *regexp.Regexp {
 	return regexp.MustCompile("^(?:.*_ccnew\\d*|.*_ccold\\d*)$")
@@ -53,20 +97,8 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	// note `REINDEX CONCURRENTLY` can be safely run in the background
 	// see https://www.postgresql.org/docs/current/sql-reindex.html
 
-	// these tables are too large are updated too frequently to reindex regularly
-	// each table here should have some alternate management strategy
-	skipReindexTables := map[string]bool{
-		"client_reliability":                  true,
-		"network_client_location_reliability": true,
-		"network_client_connection":           true,
-	}
-	// daily partitions of client_reliability are dropped whole at retention,
-	// so their indexes never live long enough to bloat — reindexing them is
-	// wasted work that contends with the maintenance task's create/drop locks
-	skipReindexTablePattern := regexp.MustCompile(`^client_reliability_p[0-9]{8}$`)
-
 	reindex := func(conn PgConn, tableName string) {
-		if !skipReindexTables[tableName] && !skipReindexTablePattern.MatchString(tableName) {
+		if dbMaintenanceShouldReindexTable(tableName) {
 			// note "reindex concurrently" can in some rare cases cause a deadlock with autovacuum
 			// use a timeout to recover from these cases
 			// any reindex taking longer than the timeout should generally be added to `skipReindexTables`
@@ -79,6 +111,14 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				`+tableName,
 			))
 		}
+	}
+	reindexIndex := func(conn PgConn, indexName string) {
+		timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Hour)
+		defer timeoutCancel()
+		RaisePgResult(conn.Exec(
+			timeoutCtx,
+			`REINDEX INDEX CONCURRENTLY `+indexName,
+		))
 	}
 
 	cleanUpIncompleteIndexes := func(conn PgConn, tableName string) {
@@ -166,11 +206,13 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	})
 
 	slices.Sort(reindexTableNames)
+	reindexIndexNames := priorityReindexIndexesForEpoch(epoch)
 	glog.Infof(
-		"[db]maintenance %d/%d tables (in random order): %s\n",
+		"[db]maintenance %d/%d tables (in random order): %s; priority indexes: %s\n",
 		len(reindexTableNames),
 		len(tableNames),
 		strings.Join(reindexTableNames, ", "),
+		strings.Join(reindexIndexNames, ", "),
 	)
 
 	mathrand.Shuffle(len(reindexTableNames), func(i int, j int) {
@@ -204,6 +246,28 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				}, OptNoRetry())
 			})
 		}
+
+		for i, indexName := range reindexIndexNames {
+			glog.Infof(
+				"[db]maintenance priority reindex[%d/%d] %s\n",
+				i+1,
+				len(reindexIndexNames),
+				indexName,
+			)
+			HandleError(func() {
+				MaintenanceDb(ctx, func(conn PgConn) {
+					startTime := time.Now()
+					reindexIndex(conn, indexName)
+					glog.Infof(
+						"[db]maintenance priority reindex[%d/%d] %s took %.2fs\n",
+						i+1,
+						len(reindexIndexNames),
+						indexName,
+						float64(time.Since(startTime)/time.Millisecond)/1000.0,
+					)
+				}, OptNoRetry())
+			})
+		}
 	}
 
 	if opts.Cleanup {
@@ -233,6 +297,17 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	}
 
 	if opts.Analyze {
+		// The task queue is tiny but extremely update-heavy. An explicit daily
+		// vacuum bounds its poll-index debt even when normal autovacuum timing is
+		// unlucky; the database idle-transaction timeout ensures xmin cannot pin
+		// these versions indefinitely.
+		HandleError(func() {
+			MaintenanceDb(ctx, func(conn PgConn) {
+				glog.Infof("[db]maintenance vacuum analyze pending_task\n")
+				RaisePgResult(conn.Exec(ctx, `VACUUM (ANALYZE) pending_task`))
+			}, OptNoRetry())
+		})
+
 		HandleError(func() {
 			MaintenanceDb(ctx, func(conn PgConn) {
 				glog.Infof("[db]maintenance final analyze\n")

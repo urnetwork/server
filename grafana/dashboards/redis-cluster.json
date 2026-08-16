@@ -1046,6 +1046,75 @@
           }
         }
       ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "pool hits + misses / s by service",
+      "description": "go-redis pool checkouts satisfied by an idle connection (hits) versus checkouts that required a new connection (misses). A rising miss share alongside flat traffic usually means connection churn or an undersized idle pool.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (rate(urnetwork_redis_pool_hits_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "hits {{service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (service) (rate(urnetwork_redis_pool_misses_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "misses {{service}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
     }
   ]
 }

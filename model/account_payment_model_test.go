@@ -1307,6 +1307,7 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 		ctx := context.Background()
 
 		networkId := server.NewId()
+		secondNetworkId := server.NewId()
 		planId := server.NewId()
 		now := server.NowUtc()
 
@@ -1374,9 +1375,26 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 					f.contractId, f.balanceId, networkId, paymentId,
 				))
 			}
+
+			// The table's key includes network_id, so one contract/balance can
+			// legitimately have more than one payout row. The selected temp set
+			// must retain that third key column or later joins multiply both rows.
+			server.RaisePgResult(tx.Exec(ctx,
+				`
+				INSERT INTO transfer_escrow_sweep (
+					contract_id, balance_id, network_id,
+					payout_byte_count, payout_net_revenue_nano_cents
+				) VALUES ($1, $2, $3, 200, 200)
+				`,
+				fixtures[0].contractId,
+				fixtures[0].balanceId,
+				secondNetworkId,
+			))
 		})
 
-		key := func(c, b server.Id) string { return c.String() + ":" + b.String() }
+		key := func(c, b, n server.Id) string {
+			return c.String() + ":" + b.String() + ":" + n.String()
+		}
 
 		runSet := func(query string, args ...any) []string {
 			set := []string{}
@@ -1384,9 +1402,9 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 				result, err := conn.Query(ctx, query, args...)
 				server.WithPgResult(result, err, func() {
 					for result.Next() {
-						var c, b server.Id
-						server.Raise(result.Scan(&c, &b))
-						set = append(set, key(c, b))
+						var c, b, n server.Id
+						server.Raise(result.Scan(&c, &b, &n))
+						set = append(set, key(c, b, n))
 					}
 				})
 			})
@@ -1400,7 +1418,8 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 			return fmt.Sprintf(`
 				SELECT
 					transfer_escrow_sweep.contract_id,
-					transfer_escrow_sweep.balance_id
+					transfer_escrow_sweep.balance_id,
+					transfer_escrow_sweep.network_id
 				FROM transfer_escrow_sweep
 				LEFT JOIN account_payment ON
 					account_payment.payment_id = transfer_escrow_sweep.payment_id
@@ -1416,11 +1435,13 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 			return fmt.Sprintf(`
 				SELECT
 					u.contract_id,
-					u.balance_id
+					u.balance_id,
+					u.network_id
 				FROM (
 					SELECT
 						transfer_escrow_sweep.contract_id,
-						transfer_escrow_sweep.balance_id
+						transfer_escrow_sweep.balance_id,
+						transfer_escrow_sweep.network_id
 					FROM transfer_escrow_sweep
 					WHERE transfer_escrow_sweep.payment_id IS NULL
 
@@ -1428,7 +1449,8 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 
 					SELECT
 						s.contract_id,
-						s.balance_id
+						s.balance_id,
+						s.network_id
 					FROM account_payment ap
 					INNER JOIN transfer_escrow_sweep s ON
 						s.payment_id = ap.payment_id
@@ -1447,9 +1469,10 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 		expectedUnbounded := []string{}
 		for _, f := range fixtures {
 			if f.eligible {
-				expectedUnbounded = append(expectedUnbounded, key(f.contractId, f.balanceId))
+				expectedUnbounded = append(expectedUnbounded, key(f.contractId, f.balanceId, networkId))
 			}
 		}
+		expectedUnbounded = append(expectedUnbounded, key(fixtures[0].contractId, fixtures[0].balanceId, secondNetworkId))
 		slices.Sort(expectedUnbounded)
 		connect.AssertEqual(t, newUnbounded, expectedUnbounded)
 
@@ -1479,9 +1502,10 @@ func TestPlanPaymentsNeedsRepaymentSetEquivalence(t *testing.T) {
 		expectedBounded := []string{}
 		for _, f := range fixtures {
 			if f.eligible && f.closeTime.Before(upperBound) {
-				expectedBounded = append(expectedBounded, key(f.contractId, f.balanceId))
+				expectedBounded = append(expectedBounded, key(f.contractId, f.balanceId, networkId))
 			}
 		}
+		expectedBounded = append(expectedBounded, key(fixtures[0].contractId, fixtures[0].balanceId, secondNetworkId))
 		slices.Sort(expectedBounded)
 		connect.AssertEqual(t, newBounded, expectedBounded)
 	})

@@ -1,10 +1,40 @@
 package server
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/urnetwork/connect"
 )
+
+func TestPriorityReindexIndexesAreCoveredExactlyOncePerCycle(t *testing.T) {
+	if dbMaintenanceShouldReindexTable("transfer_contract") {
+		t.Fatal("transfer_contract would still be rebuilt as a whole")
+	}
+
+	seen := map[string]int{}
+	for epoch := uint64(0); epoch < DbReindexEpochs; epoch++ {
+		for _, name := range priorityReindexIndexesForEpoch(epoch) {
+			seen[name]++
+		}
+	}
+
+	for _, name := range priorityReindexIndexes {
+		if seen[name] != 1 {
+			t.Fatalf("priority index %s selected %d times in one cycle, want 1", name, seen[name])
+		}
+	}
+	if len(seen) != len(priorityReindexIndexes) {
+		extra := slices.Collect(func(yield func(string) bool) {
+			for name := range seen {
+				if !slices.Contains(priorityReindexIndexes, name) && !yield(name) {
+					return
+				}
+			}
+		})
+		t.Fatalf("unexpected priority indexes selected: %v", extra)
+	}
+}
 
 func TestIncompleteIndexName(t *testing.T) {
 

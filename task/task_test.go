@@ -373,19 +373,21 @@ func LeaseWork(
 	return &LeaseWorkResult{}, nil
 }
 
-// TestTaskLeaseNotShortenedByKeepalive guards the duplicate-execution fix: the
-// initial claim sets release_time to cover the task's declared max runtime,
-// and a keepalive beat must never SHORTEN that lease (it uses
-// GREATEST(release_time, now+ReleaseTimeout)). 2026-07-15: a plain
-// release_time = now+ReleaseTimeout let a starved extender lapse a long task's
-// lease, and another worker claimed a duplicate concurrent execution.
-func TestTaskLeaseNotShortenedByKeepalive(t *testing.T) {
+// A long task's lease is kept alive by heartbeats but is bounded independently
+// of MaxTime. This preserves duplicate protection while ensuring a killed
+// worker cannot strand a two-hour task for two hours.
+func TestTaskLeaseIsBoundedAndExtendedByKeepalive(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		// small ReleaseTimeout so keepalive beats (every ReleaseTimeout/3)
 		// fire quickly during the blocked run
 		prevRelease := ReleaseTimeout
+		prevLease := TaskLeaseTimeout
 		ReleaseTimeout = 300 * time.Millisecond
-		defer func() { ReleaseTimeout = prevRelease }()
+		TaskLeaseTimeout = 2 * time.Second
+		defer func() {
+			ReleaseTimeout = prevRelease
+			TaskLeaseTimeout = prevLease
+		}()
 
 		// fresh channels each run (the retry harness may re-enter)
 		leaseWorkStarted = make(chan struct{}, 1)
@@ -437,9 +439,9 @@ func TestTaskLeaseNotShortenedByKeepalive(t *testing.T) {
 		case <-time.After(1500 * time.Millisecond):
 		}
 
-		// the lease still covers the declared max runtime — the beats did not
-		// shorten it toward ReleaseTimeout (300ms). Without the GREATEST fix,
-		// release_time would be ~now+300ms, well under now+30s.
+		// Heartbeats keep the lease comfortably in the future, but it is not tied
+		// to the task's 60-second MaxTime. A worker death therefore recovers in
+		// roughly two seconds in this fixture, not one minute.
 		var releaseTime time.Time
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(ctx, "SELECT release_time FROM pending_task WHERE task_id = $1", taskId)
@@ -449,8 +451,12 @@ func TestTaskLeaseNotShortenedByKeepalive(t *testing.T) {
 				}
 			})
 		})
-		if !releaseTime.After(server.NowUtc().Add(30 * time.Second)) {
-			t.Fatalf("lease was shortened: release_time=%s is not > now+30s (keepalive beat reduced the claim lease)", releaseTime)
+		now := server.NowUtc()
+		if !releaseTime.After(now.Add(1 * time.Second)) {
+			t.Fatalf("heartbeat did not extend lease: release_time=%s now=%s", releaseTime, now)
+		}
+		if releaseTime.After(now.Add(5 * time.Second)) {
+			t.Fatalf("lease is still pinned to MaxTime: release_time=%s now=%s", releaseTime, now)
 		}
 
 		// release the work and stop the eval loop cleanly
@@ -461,6 +467,97 @@ func TestTaskLeaseNotShortenedByKeepalive(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatal("eval did not finish")
 		}
+	})
+}
+
+// An expired timestamp alone must not permit duplicate execution while the
+// owner's PostgreSQL session is alive. Once that session disappears (as it does
+// automatically on process death), the task becomes reclaimable without
+// waiting for its declared MaxTime.
+func TestTaskLeaseExpiryRequiresOwnerSessionLoss(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		previousLeaseTimeout := TaskLeaseTimeout
+		TaskLeaseTimeout = 500 * time.Millisecond
+		defer func() { TaskLeaseTimeout = previousLeaseTimeout }()
+
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
+
+		taskId := ScheduleTask(
+			LeaseWork,
+			&LeaseWorkArgs{},
+			clientSession,
+			RunAt(server.NowUtc().Add(-time.Minute)),
+			MaxTime(time.Hour),
+		)
+
+		firstOwner := NewTaskWorkerWithDefaults(ctx)
+		claimed, firstGuard, err := firstOwner.takeTasks(1)
+		if err != nil {
+			t.Fatalf("initial claim: %v", err)
+		}
+		if firstGuard == nil {
+			t.Fatal("initial claim has no advisory ownership guard")
+		}
+		defer firstGuard.release()
+		if _, ok := claimed[taskId]; !ok || len(claimed) != 1 {
+			t.Fatalf("initial claim = %v, want only %s", claimed, taskId)
+		}
+
+		secondOwner := NewTaskWorkerWithDefaults(ctx)
+		claimed, secondGuard, err := secondOwner.takeTasks(1)
+		if err != nil {
+			t.Fatalf("claim before lease expiry: %v", err)
+		}
+		if secondGuard != nil {
+			secondGuard.release()
+			t.Fatal("empty claim unexpectedly retained an ownership guard")
+		}
+		if len(claimed) != 0 {
+			t.Fatalf("second owner claimed live lease: %v", claimed)
+		}
+
+		// Wait beyond both the timestamp lease and the generated available_block's
+		// one-second bucket edge. The live session lock must still reject a second
+		// owner even though the timestamp heartbeat was deliberately stopped.
+		time.Sleep(2 * time.Second)
+		claimed, secondGuard, err = secondOwner.takeTasks(1)
+		if err != nil {
+			t.Fatalf("claim with expired timestamp but live owner: %v", err)
+		}
+		if secondGuard != nil {
+			secondGuard.release()
+			t.Fatal("expired timestamp bypassed live owner's advisory guard")
+		}
+		if len(claimed) != 0 {
+			t.Fatalf("second owner claimed while first owner session was live: %v", claimed)
+		}
+
+		// Simulate the process/session disappearing. PostgreSQL drops its session
+		// advisory locks, and the already-expired timestamp makes the task
+		// immediately eligible for another worker.
+		firstGuard.release()
+		deadline := time.Now().Add(4 * time.Second)
+		for time.Now().Before(deadline) {
+			claimed, secondGuard, err = secondOwner.takeTasks(1)
+			if err != nil {
+				t.Fatalf("reclaim after owner session loss: %v", err)
+			}
+			if _, ok := claimed[taskId]; ok {
+				if secondGuard == nil {
+					t.Fatal("reclaimed task has no advisory ownership guard")
+				}
+				secondGuard.release()
+				return
+			}
+			if secondGuard != nil {
+				secondGuard.release()
+				t.Fatal("empty reclaim unexpectedly retained an ownership guard")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Fatalf("task %s was not reclaimable after owner session loss", taskId)
 	})
 }
 

@@ -227,8 +227,11 @@ func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirector
 	entries := map[server.Id]*locationDirectoryEntry{}
 
 	server.Db(ctx, func(conn server.PgConn) {
-		// the seeded city list can be ~10^6 rows, so bound the directory to
-		// locations actually referenced by providers.
+		// The seeded city list can be ~10^6 rows, so bound the directory to
+		// locations referenced by providers that are usable now. Historical
+		// disconnected rows dominate this table (~58M on main) but cannot appear
+		// in a current provider result; excluding them lets the existing
+		// (valid,connected,client_id) index drive a tiny materialized set.
 		//
 		// The referenced set is collected as DISTINCT (city, region, country)
 		// TRIPLES in a single pass, then unnested. Selecting each column's
@@ -251,13 +254,16 @@ func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirector
 			FROM location
 			WHERE location.location_id IN (
 				SELECT DISTINCT loc.id
-				FROM (
-					SELECT DISTINCT
-						city_location_id AS c,
-						region_location_id AS r,
-						country_location_id AS n
-					FROM network_client_location_reliability
-				) triples
+					FROM (
+						SELECT DISTINCT
+							city_location_id AS c,
+							region_location_id AS r,
+							country_location_id AS n
+						FROM network_client_location_reliability
+						WHERE
+							network_client_location_reliability.valid = true AND
+							network_client_location_reliability.connected = true
+					) triples
 				CROSS JOIN LATERAL unnest(ARRAY[triples.c, triples.r, triples.n]) AS loc(id)
 				WHERE loc.id IS NOT NULL
 			)

@@ -22,8 +22,9 @@ import (
 //     ~ReleaseTimeout/3 (10s); a claim with a future release_time and a
 //     claim_time silent > 2 minutes means the claiming worker is gone
 //     (SIGKILL, crash) and the task — and its RunOnce chain — is blocked
-//     until claim + max time passes. A deploy cannot heal it (InitTasks
-//     never touches claims); `bringyourctl task release` can.
+//     until the bounded five-minute lease expires. A deploy does not rewrite
+//     the claim (InitTasks never touches claims); `bringyourctl task release`
+//     is available when immediate recovery is worth the operator check.
 //
 //   - pg/task-due-lag (12.4): the oldest due-and-unclaimed task. Healthy
 //     workers claim due tasks within seconds; a growing lag means no worker
@@ -71,12 +72,12 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		findings = append(findings, finding{
 			probeId: "pg/task-lease-stranded", tier: tierWarn,
 			class: "task-lease-stranded", target: target, frame: task, sustain: 2,
-			symptom: fmt.Sprintf("task %s claim keepalive silent %ss but lease held %ss more (max_time %ss) — claiming worker gone; the task and its chain are blocked until release",
+			symptom: fmt.Sprintf("task %s claim keepalive silent %ss but lease held %ss more (max_time %ss) — claiming worker likely gone; the task auto-recovers when this bounded lease expires",
 				task, r.str(1), r.str(2), r.str(3)),
-			baseline: "a running task refreshes claim_time every ~10s; silence > 2m with a live lease = stranded by a kill/crash (12.3)",
+			baseline: "a running task refreshes claim_time every ~10s; after a kill/crash its lease expires within 5m of the last heartbeat (12.3)",
 			observed: fmt.Sprintf("silent_s=%s lease_remaining_s=%s max_time_s=%s task_id=%s", r.str(1), r.str(2), r.str(3), r.str(4)),
-			context:  "correlate with taskworker deploys/kills; a cpu-starved extender can rarely mimic this — verify the claiming worker is really gone before releasing (a release of a RUNNING task re-opens the duplicate-execution window)",
-			evidence: fmt.Sprintf("recovery: bringyourctl task release %s   (then task kick <run_once_key> if the run_at is far out)", r.str(4)),
+			context:  "correlate with taskworker deploys/kills; a cpu-starved extender can rarely mimic this — wait for automatic expiry unless immediate recovery is needed and the claiming worker is confirmed gone",
+			evidence: fmt.Sprintf("automatic recovery: lease expires in %ss; immediate recovery after confirming the worker is dead: bringyourctl task release %s   (then task kick <run_once_key> if run_at is far out)", r.str(2), r.str(4)),
 			playbook: "SIGNALS.md 12.3",
 		})
 	}

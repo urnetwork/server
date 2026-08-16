@@ -4,14 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
-	// "slices"
 	// "sync"
 	"time"
 
 	// "encoding/json"
-
-	"maps"
 
 	"github.com/urnetwork/glog"
 
@@ -55,11 +51,6 @@ type PaymentPlanner struct {
 
 	// networkId -> AccountPayment
 	networkPayments map[server.Id]*AccountPayment
-
-	networkEscrowIds map[server.Id][]*EscrowId
-
-	// escrow ids -> payment id
-	escrowPaymentIds map[EscrowId]server.Id
 
 	// networkId -> parent referralNetworkId
 	referralNetworks map[server.Id]server.Id
@@ -245,11 +236,6 @@ func (self *PaymentPlanner) computePlanUpperBound() {
 }
 
 func (self *PaymentPlanner) planPayments() (returnErr error) {
-	self.networkEscrowIds = map[server.Id][]*EscrowId{}
-
-	// escrow ids -> payment id
-	self.escrowPaymentIds = map[EscrowId]server.Id{}
-
 	// networkId -> parent referralNetworkId
 	self.referralNetworks = map[server.Id]server.Id{}
 
@@ -291,8 +277,10 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	//
 	// The two arms are disjoint (payment_id NULL vs. a set pointing at a
 	// canceled payment), so UNION ALL reproduces the exact
-	// (contract_id, balance_id) multiset the old query selected, without the
-	// dedup cost of UNION. The canceled arm relies on a partial index
+	// (contract_id, balance_id, network_id) multiset the old query selected,
+	// without the dedup cost of UNION. Retaining all three key columns also
+	// prevents later joins from multiplying distinct network payouts that share
+	// one contract/balance. The canceled arm relies on a partial index
 	// `account_payment (payment_id) WHERE canceled` being added separately.
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,
@@ -303,12 +291,20 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 
         SELECT
             u.contract_id,
-            u.balance_id
+            u.balance_id,
+			u.network_id,
+			u.payout_byte_count,
+			u.payout_net_revenue_nano_cents,
+			u.sweep_time
 
         FROM (
             SELECT
                 transfer_escrow_sweep.contract_id,
-                transfer_escrow_sweep.balance_id
+                transfer_escrow_sweep.balance_id,
+				transfer_escrow_sweep.network_id,
+				transfer_escrow_sweep.payout_byte_count,
+				transfer_escrow_sweep.payout_net_revenue_nano_cents,
+				transfer_escrow_sweep.sweep_time
             FROM transfer_escrow_sweep
             WHERE transfer_escrow_sweep.payment_id IS NULL
 
@@ -316,7 +312,11 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 
             SELECT
                 s.contract_id,
-                s.balance_id
+                s.balance_id,
+				s.network_id,
+				s.payout_byte_count,
+				s.payout_net_revenue_nano_cents,
+				s.sweep_time
             FROM account_payment ap
             INNER JOIN transfer_escrow_sweep s ON
                 s.payment_id = ap.payment_id
@@ -328,46 +328,47 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 		closeTimeArgs...,
 	))
 
+	// Aggregate in postgres before crossing the client boundary. The previous
+	// shape returned one row per escrow and built two Go maps containing every
+	// (contract_id,balance_id); a weekly backlog returned 109M rows and retained
+	// the same number of map entries. The temp table remains the authoritative
+	// selected escrow set and carries the aggregate inputs, avoiding repeated
+	// joins back to the large sweep table. finalizePayments joins it set-wise to
+	// the much smaller network->payment map.
 	result, err := self.tx.Query(
 		self.ctx,
 		`
-		SELECT
-			transfer_escrow_sweep.network_id,
-			network_referral.referral_network_id,
-			transfer_escrow_sweep.contract_id,
-			transfer_escrow_sweep.balance_id,
-			transfer_escrow_sweep.payout_byte_count,
-			transfer_escrow_sweep.payout_net_revenue_nano_cents,
-			transfer_escrow_sweep.sweep_time
+			SELECT
+				temp_account_payment.network_id,
+				network_referral.referral_network_id,
+				SUM(temp_account_payment.payout_byte_count)::bigint,
+				SUM(temp_account_payment.payout_net_revenue_nano_cents)::bigint,
+				MIN(temp_account_payment.sweep_time)
 
-		FROM transfer_escrow_sweep
+			FROM temp_account_payment
 
-		LEFT JOIN network_referral
-      	ON transfer_escrow_sweep.network_id = network_referral.network_id
+			LEFT JOIN network_referral ON
+				temp_account_payment.network_id = network_referral.network_id
 
-		INNER JOIN temp_account_payment ON
-				temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
-				temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
-  		`,
+			GROUP BY
+				temp_account_payment.network_id,
+				network_referral.referral_network_id
+		`,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var networkId server.Id
 			var referralNetworkId *server.Id
-			var contractId server.Id
-			var balanceId server.Id
 			var payoutByteCount ByteCount
 			var payoutNetRevenue NanoCents
-			var sweepTime time.Time
+			var minSweepTime time.Time
 			// var walletId *server.Id
 			server.Raise(result.Scan(
 				&networkId,
 				&referralNetworkId,
-				&contractId,
-				&balanceId,
 				&payoutByteCount,
 				&payoutNetRevenue,
-				&sweepTime,
+				&minSweepTime,
 				// &walletId,
 			))
 
@@ -393,18 +394,7 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 			payment.PayoutByteCount += payoutByteCount
 			payment.Payout += payoutNetRevenue
 
-			if payment.MinSweepTime.IsZero() {
-				payment.MinSweepTime = sweepTime
-			} else {
-				payment.MinSweepTime = server.MinTime(payment.MinSweepTime, sweepTime)
-			}
-
-			escrowId := EscrowId{
-				ContractId: contractId,
-				BalanceId:  balanceId,
-			}
-			self.escrowPaymentIds[escrowId] = payment.PaymentId
-			self.networkEscrowIds[networkId] = append(self.networkEscrowIds[networkId], &escrowId)
+			payment.MinSweepTime = minSweepTime
 		}
 	})
 
@@ -438,29 +428,25 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		`
         	SELECT
             	transfer_balance.network_id AS payer_network_id,
-                transfer_escrow_sweep.network_id AS payee_network_id,
-                MIN(transfer_escrow_sweep.sweep_time) AS min_sweep_time,
-                SUM(CASE
-                	WHEN transfer_balance.paid THEN transfer_escrow_sweep.payout_byte_count
-                	ELSE 0
-                END) AS net_payout_byte_count_paid,
-                SUM(CASE
-                	WHEN NOT transfer_balance.paid THEN transfer_escrow_sweep.payout_byte_count
-                	ELSE 0
-                END) AS net_payout_byte_count_unpaid
+				temp_account_payment.network_id AS payee_network_id,
+				MIN(temp_account_payment.sweep_time) AS min_sweep_time,
+				SUM(CASE
+					WHEN transfer_balance.paid THEN temp_account_payment.payout_byte_count
+					ELSE 0
+				END) AS net_payout_byte_count_paid,
+				SUM(CASE
+					WHEN NOT transfer_balance.paid THEN temp_account_payment.payout_byte_count
+					ELSE 0
+				END) AS net_payout_byte_count_unpaid
 
-            FROM transfer_escrow_sweep
+			FROM temp_account_payment
 
-            INNER JOIN temp_account_payment ON
-                temp_account_payment.contract_id = transfer_escrow_sweep.contract_id AND
-                temp_account_payment.balance_id = transfer_escrow_sweep.balance_id
+			INNER JOIN transfer_balance ON
+				transfer_balance.balance_id = temp_account_payment.balance_id
 
-            INNER JOIN transfer_balance ON
-                transfer_balance.balance_id = transfer_escrow_sweep.balance_id
-
-            GROUP BY
-            	transfer_balance.network_id,
-            	transfer_escrow_sweep.network_id
+			GROUP BY
+				transfer_balance.network_id,
+				temp_account_payment.network_id
 
         `,
 	)
@@ -821,12 +807,6 @@ func (self *PaymentPlanner) withholdSmallPayments() {
 	}
 	removedSubsidyNetPayout := NanoCents(0)
 	for _, networkId := range self.networkIdsToRemove {
-		// remove the escrow payments for this wallet
-		// so that the contracts do not have a dangling payment_id
-		for _, escrowId := range self.networkEscrowIds[networkId] {
-			delete(self.escrowPaymentIds, *escrowId)
-		}
-
 		// note the subsidy payments for this payment plan will be dropped
 		// however, since the underlying contracts won't be marked as paid,
 		// they will be included in the next subsidy payment plan,
@@ -853,12 +833,18 @@ func (self *PaymentPlanner) withholdSmallPayments() {
 
 func (self *PaymentPlanner) setWallets() {
 
-	// fill in the payment wallet ids
-	server.CreateTempTableInTx(
+	// This small mapping replaces the former per-escrow Go map. It serves both
+	// the wallet lookup here and the set-wise escrow assignment in
+	// finalizePayments.
+	paymentNetworkIds := map[server.Id]server.Id{}
+	for networkId, payment := range self.networkPayments {
+		paymentNetworkIds[networkId] = payment.PaymentId
+	}
+	server.CreateTempJoinTableInTx(
 		self.ctx,
 		self.tx,
-		"temp_payment_network_ids(network_id uuid)",
-		slices.Collect(maps.Keys(self.networkPayments))...,
+		"temp_payment_network_ids(network_id uuid -> payment_id uuid)",
+		paymentNetworkIds,
 	)
 
 	// note `account_wallet.network_id` must match the payment network,
@@ -931,24 +917,21 @@ func (self *PaymentPlanner) finalizePayments() {
 		}
 	})
 
-	server.CreateTempJoinTableInTx(
-		self.ctx,
-		self.tx,
-		"payment_escrow_ids(contract_id uuid, balance_id uuid -> payment_id uuid)",
-		self.escrowPaymentIds,
-	)
-
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,
 		`
-            UPDATE transfer_escrow_sweep
-            SET
-                payment_id = payment_escrow_ids.payment_id
-            FROM payment_escrow_ids
-            WHERE
-                transfer_escrow_sweep.contract_id = payment_escrow_ids.contract_id AND
-                transfer_escrow_sweep.balance_id = payment_escrow_ids.balance_id
-        `,
+			UPDATE transfer_escrow_sweep AS sweep
+			SET
+				payment_id = payment_network_ids.payment_id
+			FROM
+				temp_account_payment AS selected_escrow,
+				temp_payment_network_ids AS payment_network_ids
+			WHERE
+				sweep.contract_id = selected_escrow.contract_id AND
+				sweep.balance_id = selected_escrow.balance_id AND
+				sweep.network_id = selected_escrow.network_id AND
+				sweep.network_id = payment_network_ids.network_id
+		`,
 	))
 }
 
