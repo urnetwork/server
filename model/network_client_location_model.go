@@ -1168,6 +1168,10 @@ func CreateLocation(ctx context.Context, location *Location) {
 			return
 		}
 
+		// A blank-name backfill can leave a legacy row alongside the canonical
+		// region when both full names would otherwise collide. Prefer the row
+		// that owns the normally-composed full name; the id tie-breaker keeps
+		// selection deterministic when only legacy rows exist.
 		result, err = tx.Query(
 			ctx,
 			`
@@ -1179,11 +1183,16 @@ func CreateLocation(ctx context.Context, location *Location) {
                     country_code = $2 AND
                     location_name = $3 AND
                     country_location_id = $4
+				ORDER BY
+					(location_full_name = $5) DESC,
+					location_id
+				LIMIT 1
             `,
 			LocationTypeRegion,
 			countryCode,
 			location.Region,
 			countryLocation.LocationId,
+			fmt.Sprintf("%s, %s", location.Region, countryCode),
 		)
 
 		server.WithPgResult(result, err, func() {
@@ -1251,31 +1260,45 @@ func CreateLocation(ctx context.Context, location *Location) {
 			return
 		}
 
+		// A non-conflicting legacy city may have had its full name normalized
+		// while retaining its legacy region id. The globally-unique full name is
+		// therefore a safe fallback when the canonical region lookup above does
+		// not find the city under that exact region id. Scan the stored region id
+		// so the returned hierarchy remains internally consistent.
 		result, err = tx.Query(
 			ctx,
 			`
                 SELECT 
-                    location_id
+					location_id,
+					region_location_id
                 FROM location
                 WHERE
                     location_type = $1 AND
                     country_code = $2 AND
                     location_name = $3 AND
-                    region_location_id = $4 AND
-                    country_location_id = $5
-                    
+					country_location_id = $5 AND
+					(
+						region_location_id = $4 OR
+						location_full_name = $6
+					)
+				ORDER BY
+					(region_location_id = $4) DESC,
+					location_id
+				LIMIT 1
             `,
 			LocationTypeCity,
 			countryCode,
 			location.City,
 			regionLocation.LocationId,
 			countryLocation.LocationId,
+			fmt.Sprintf("%s, %s, %s", location.City, location.Region, countryCode),
 		)
 
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				var locationId server.Id
-				server.Raise(result.Scan(&locationId))
+				var actualRegionLocationId server.Id
+				server.Raise(result.Scan(&locationId, &actualRegionLocationId))
 				cityLocation = &Location{
 					LocationType:      LocationTypeCity,
 					City:              location.City,
@@ -1284,7 +1307,7 @@ func CreateLocation(ctx context.Context, location *Location) {
 					CountryCode:       countryCode,
 					LocationId:        locationId,
 					CityLocationId:    locationId,
-					RegionLocationId:  regionLocation.LocationId,
+					RegionLocationId:  actualRegionLocationId,
 					CountryLocationId: countryLocation.LocationId,
 				}
 			}

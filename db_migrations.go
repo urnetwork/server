@@ -5250,10 +5250,12 @@ var migrations = []any{
 	//
 	// The rows come from `AddDefaultLocations`' location-group member path,
 	// which built a `Location` with only a `CountryCode` and no `Country`;
-	// `CreateLocation` wrote `location_name` straight from that empty field. On
-	// the live beta deployment that is 161 country rows and 2 region rows (`hk`,
-	// `sg`) -- 163 of 565. The creating path is fixed in the two commits before
-	// this one; this is the data those commits arrived too late to prevent.
+	// `CreateLocation` wrote `location_name` straight from that empty field. In
+	// the first beta snapshot that exposed the bug there were 161 country rows
+	// and 2 region rows (`hk`, `sg`) -- 163 of 565. A deployment can keep
+	// receiving old-writer traffic while this migration is pending, though, so
+	// the repair must handle every ISO country and must not assume those rows are
+	// the only ones present.
 	//
 	// The 249-entry mapping below is GENERATED from `model.ISOCountryName` --
 	// the same table `CreateLocation` now resolves through -- by probing all 676
@@ -5270,6 +5272,13 @@ var migrations = []any{
 	//  2. The city `location_full_name` repair must precede the region rename,
 	//     because it selects its rows by the region still being blank. Renaming
 	//     first would leave the cities holding ", ," forever.
+	//
+	// A canonical region/city may already coexist with a later blank-name row.
+	// `location_full_name` is globally unique, so blindly normalizing the later
+	// row would collide with the canonical one. In that case the legacy full
+	// name remains as its stable unique key; `location_name` is still repaired,
+	// which is the value callers display and the value constrained below. Rows
+	// without a canonical collision get the fully normalized key.
 	//
 	// Appended, never inserted: migrations here apply by slice index
 	// (`for i := DbVersion(ctx); i < upTo; i++`), so editing or reordering an
@@ -5549,29 +5558,47 @@ var migrations = []any{
             city.location_type = 'city' AND
             city.region_location_id = region.location_id AND
             region.location_type = 'region' AND
-            region.location_name = '';
+            region.location_name = '' AND
+            NOT EXISTS (
+                SELECT 1
+                FROM location AS canonical_city
+                WHERE
+                    canonical_city.location_id <> city.location_id AND
+                    canonical_city.location_full_name =
+                        city.location_name || ', ' || iso.country_name || ', ' || city.country_code
+            );
 
-        -- The 2 blank region rows are RENAMED, not deleted: each has a city child
-        -- pointing at it through region_location_id (Hong Kong under hk,
-        -- Singapore under sg), so dropping them would orphan a live city. They
-        -- exist because the geolocation database returns no subdivision for a
-        -- subdivision-less country, so the region was created with an empty name;
-        -- the only fact such a row carries is "the whole of this country", which is
-        -- why it is named after its country rather than after a subdivision that
-        -- was never in the source data. location_full_name is composed the way
-        -- the region INSERT composes it, name, code.
+        -- Blank region rows are RENAMED, not deleted: they can have city children
+        -- and live references through region_location_id, so dropping them would
+        -- orphan those references. They exist because the geolocation database
+        -- returns no subdivision for subdivision-less countries; the only fact
+        -- such a row carries is "the whole of this country", which is why it is
+        -- named after its country rather than after a subdivision that was never
+        -- in the source data. location_full_name is composed the way the region
+        -- INSERT composes it when that value is not already owned by a canonical
+        -- row.
         UPDATE location AS region
         SET
             location_name = iso.country_name,
-            location_full_name = iso.country_name || ', ' || region.country_code
+            location_full_name = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM location AS canonical_region
+                    WHERE
+                        canonical_region.location_id <> region.location_id AND
+                        canonical_region.location_full_name =
+                            iso.country_name || ', ' || region.country_code
+                ) THEN region.location_full_name
+                ELSE iso.country_name || ', ' || region.country_code
+            END
         FROM iso_country_name_backfill AS iso
         WHERE
             region.location_type = 'region' AND
             region.location_name = '' AND
             iso.country_code = region.country_code;
 
-        -- The 161 country rows. location_full_name is deliberately NOT touched:
-        -- the country INSERT writes the bare country code into it, so these rows
+        -- Blank country rows. location_full_name is deliberately NOT touched: the
+        -- country INSERT writes the bare country code into it, so these rows
         -- already hold exactly what a correctly-named country row holds. Only the
         -- name was ever missing.
         UPDATE location AS country
