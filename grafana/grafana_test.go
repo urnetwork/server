@@ -73,6 +73,15 @@ func dashboardExpressions(dashboard testDashboard) []string {
 	return expressions
 }
 
+func dashboardPanelById(dashboard testDashboard, id int) *testPanel {
+	for panelIndex := range dashboard.Panels {
+		if dashboard.Panels[panelIndex].Id == id {
+			return &dashboard.Panels[panelIndex]
+		}
+	}
+	return nil
+}
+
 func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 	entries, err := dashboardsFs.ReadDir("dashboards")
 	if err != nil {
@@ -158,13 +167,7 @@ func TestPublicNetworkStatsCoversEveryMeasurement(t *testing.T) {
 		}
 	}
 
-	var traffic *testPanel
-	for i := range dashboard.Panels {
-		if dashboard.Panels[i].Id == 1 {
-			traffic = &dashboard.Panels[i]
-			break
-		}
-	}
+	traffic := dashboardPanelById(dashboard, 1)
 	if traffic == nil || len(traffic.Targets) != 1 {
 		t.Fatal("public traffic total panel is missing")
 	}
@@ -177,6 +180,43 @@ func TestPublicNetworkStatsCoversEveryMeasurement(t *testing.T) {
 	}
 	if !slices.Contains(traffic.Options.ReduceOptions.Calcs, "lastNotNull") {
 		t.Error("traffic total must reduce its one instant value with lastNotNull")
+	}
+}
+
+func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {
+	public := readTestDashboard(t, "public-traffic.json")
+	throughput := dashboardPanelById(public, 3)
+	if throughput == nil || len(throughput.Targets) != 1 {
+		t.Fatal("public live exchange throughput panel is missing")
+	}
+	wantPublic := `sum(rate(urnetwork_connect_exchange_io_bytes_total{direction="sent",kind="data",instance!=""}[$__rate_interval])) * 8`
+	if throughput.Targets[0].Expr != wantPublic {
+		t.Errorf("public live exchange throughput query = %q, want %q", throughput.Targets[0].Expr, wantPublic)
+	}
+
+	internal := readTestDashboard(t, "connect.json")
+	for _, metric := range []string{
+		"urnetwork_connect_exchange_io_bytes_total",
+		"urnetwork_connect_exchange_io_frames_total",
+		"urnetwork_connect_exchange_active_connections",
+	} {
+		if !strings.Contains(strings.Join(dashboardExpressions(internal), "\n"), metric) {
+			t.Errorf("connect dashboard is missing %s", metric)
+		}
+	}
+
+	active := dashboardPanelById(internal, 4)
+	if active == nil || len(active.Targets) != 2 {
+		t.Fatal("current active exchange connection panel is missing")
+	}
+	for targetIndex, direction := range []string{"outbound", "inbound"} {
+		target := active.Targets[targetIndex]
+		if !strings.Contains(target.Expr, `direction="`+direction+`"`) {
+			t.Errorf("active connection target %d does not select %s: %s", targetIndex, direction, target.Expr)
+		}
+		if !target.Instant || target.Range == nil || *target.Range {
+			t.Errorf("active connection target %d must be an instant query", targetIndex)
+		}
 	}
 }
 

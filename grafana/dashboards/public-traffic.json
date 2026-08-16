@@ -106,8 +106,8 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "transfer throughput",
-      "description": "Acknowledged connect-path transfer rate across all active service processes.",
+      "title": "live exchange throughput",
+      "description": "Current completed exchange data-frame write rate across the fleet, including the fixed 4-byte exchange frame header and excluding pings and handshakes. Sent is used alone because fleet sent and received are two observations of the same inter-server traffic.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -143,7 +143,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(urnetwork_connect_transfer_bytes{instance!=\"\"}[$__rate_interval])) * 8",
+          "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
           "legendFormat": "throughput"
         }
       ]

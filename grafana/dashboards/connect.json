@@ -91,6 +91,212 @@
                     "legendFormat": "abuse {{host}}"
                 }
             ]
+        },
+        {
+            "id": 3,
+            "type": "row",
+            "title": "exchange I/O (application protocol frames)",
+            "collapsed": false,
+            "gridPos": {"h": 1, "w": 24, "x": 0, "y": 8}
+        },
+        {
+            "id": 4,
+            "type": "stat",
+            "title": "active exchange connections",
+            "description": "Post-handshake exchange socket endpoints. Outbound is the logical fleet connection count; inbound is the peer-side copy of those same sockets, so do not add the two values. A host-only selection can legitimately be asymmetric.",
+            "gridPos": {"h": 5, "w": 6, "x": 0, "y": 9},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0}, "overrides": []},
+            "options": {
+                "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "horizontal",
+                "textMode": "auto"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(urnetwork_connect_exchange_active_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"outbound\",instance!=\"\"})",
+                    "legendFormat": "outbound (logical)",
+                    "instant": true,
+                    "range": false
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum(urnetwork_connect_exchange_active_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"inbound\",instance!=\"\"})",
+                    "legendFormat": "inbound (peer copy)",
+                    "instant": true,
+                    "range": false
+                }
+            ]
+        },
+        {
+            "id": 5,
+            "type": "stat",
+            "title": "current exchange data TX",
+            "description": "Current completed exchange data-frame write rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes.",
+            "gridPos": {"h": 5, "w": 6, "x": 6, "y": 9},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "bps", "min": 0}, "overrides": []},
+            "options": {
+                "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "textMode": "value"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+                    "instant": true,
+                    "range": false
+                }
+            ]
+        },
+        {
+            "id": 6,
+            "type": "stat",
+            "title": "current exchange data RX",
+            "description": "Current completed exchange data-frame read rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes.",
+            "gridPos": {"h": 5, "w": 6, "x": 12, "y": 9},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "bps", "min": 0}, "overrides": []},
+            "options": {
+                "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "textMode": "value"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"received\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+                    "instant": true,
+                    "range": false
+                }
+            ]
+        },
+        {
+            "id": 7,
+            "type": "stat",
+            "title": "current exchange data frames / s",
+            "description": "Completed application-protocol data frames per second in each I/O direction. These are exchange packets, not kernel TCP segments; TCP segmentation and retransmission are below this measurement boundary.",
+            "gridPos": {"h": 5, "w": 6, "x": 18, "y": 9},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+            "options": {
+                "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+                "colorMode": "value",
+                "graphMode": "none",
+                "justifyMode": "auto",
+                "orientation": "horizontal",
+                "textMode": "auto"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{direction}}",
+                    "instant": true,
+                    "range": false
+                }
+            ]
+        },
+        {
+            "id": 8,
+            "type": "timeseries",
+            "title": "exchange data throughput",
+            "description": "Live exchange data-frame throughput by process-local I/O direction. Fleet TX and RX are two observations of the same inter-server traffic and should converge; never sum them into a traffic total.",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {
+                "defaults": {"unit": "bps", "min": 0, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never"}},
+                "overrides": []
+            },
+            "options": {
+                "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]},
+                "tooltip": {"mode": "multi", "sort": "desc"}
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+                    "legendFormat": "{{direction}}"
+                }
+            ]
+        },
+        {
+            "id": 9,
+            "type": "timeseries",
+            "title": "exchange protocol frames / s",
+            "description": "Completed exchange frames by direction and kind. Data is relayed traffic, ping is keepalive/control traffic, and handshake is connection setup. A frame is counted only after the complete frame succeeds.",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {
+                "defaults": {"unit": "ops", "min": 0, "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never"}},
+                "overrides": []
+            },
+            "options": {
+                "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]},
+                "tooltip": {"mode": "multi", "sort": "desc"}
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (direction, kind) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "{{direction}} {{kind}}"
+                }
+            ]
+        },
+        {
+            "id": 10,
+            "type": "timeseries",
+            "title": "average exchange data-frame payload",
+            "description": "Mean data payload bytes per completed exchange frame. The query removes the fixed 4-byte exchange header from the byte/frame ratio; compare sent and received to spot partial fleet selection or rollout skew.",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {
+                "defaults": {"unit": "bytes", "min": 0, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never"}},
+                "overrides": []
+            },
+            "options": {
+                "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]},
+                "tooltip": {"mode": "multi", "sort": "desc"}
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "clamp_min((sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) / sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval]))) - 4, 0)",
+                    "legendFormat": "{{direction}}"
+                }
+            ]
+        },
+        {
+            "id": 11,
+            "type": "timeseries",
+            "title": "active exchange connections by operation",
+            "description": "Post-handshake exchange endpoint history by socket direction and purpose. Outbound is the non-duplicated logical fleet count; inbound is retained as a symmetry and host-placement signal.",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {
+                "defaults": {"unit": "short", "decimals": 0, "min": 0, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never"}},
+                "overrides": []
+            },
+            "options": {
+                "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]},
+                "tooltip": {"mode": "multi", "sort": "desc"}
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (direction, op) (urnetwork_connect_exchange_active_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+                    "legendFormat": "{{direction}} {{op}}"
+                }
+            ]
         }
     ]
 }

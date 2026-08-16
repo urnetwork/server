@@ -95,6 +95,78 @@ var abuseDroppedCounter = prometheus.NewCounter(
 	},
 )
 
+// Exchange I/O is measured at the application framing boundary. A frame is
+// recorded only after its complete 4-byte header and payload have been read or
+// written, so retries and failed partial writes cannot inflate the totals.
+// These labels are deliberately closed sets: this is one of the hottest paths
+// in connect and must not create per-peer or per-client series.
+var exchangeIOFramesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_io_frames_total",
+		Help:      "Completed exchange protocol frames, partitioned by I/O direction and frame kind",
+	},
+	[]string{"direction", "kind"},
+)
+
+var exchangeIOBytesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_io_bytes_total",
+		Help:      "Bytes in completed exchange protocol frames, including each 4-byte frame header, partitioned by I/O direction and frame kind",
+	},
+	[]string{"direction", "kind"},
+)
+
+var exchangeActiveConnectionsGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_active_connections",
+		Help:      "Active post-handshake exchange connection endpoints, partitioned by inbound or outbound direction and operation",
+	},
+	[]string{"direction", "op"},
+)
+
+type exchangeIODirection uint8
+
+const (
+	exchangeIODirectionSent exchangeIODirection = iota
+	exchangeIODirectionReceived
+	exchangeIODirectionCount
+)
+
+type exchangeIOFrameKind uint8
+
+const (
+	exchangeIOFrameKindData exchangeIOFrameKind = iota
+	exchangeIOFrameKindPing
+	exchangeIOFrameKindHandshake
+	exchangeIOFrameKindCount
+)
+
+const exchangeIOFrameHeaderByteCount = 4
+
+var exchangeIODirectionLabels = [exchangeIODirectionCount]string{"sent", "received"}
+var exchangeIOFrameKindLabels = [exchangeIOFrameKindCount]string{"data", "ping", "handshake"}
+
+type exchangeIOCollectors struct {
+	frames prometheus.Counter
+	bytes  prometheus.Counter
+}
+
+// Pre-bind every label combination once rather than performing a CounterVec
+// lookup for every frame on this multi-billion-call path.
+var exchangeIOCollectorsByLabel [exchangeIODirectionCount][exchangeIOFrameKindCount]exchangeIOCollectors
+
+func recordExchangeIO(direction exchangeIODirection, kind exchangeIOFrameKind, payloadByteCount int) {
+	collectors := &exchangeIOCollectorsByLabel[direction][kind]
+	collectors.frames.Inc()
+	collectors.bytes.Add(float64(exchangeIOFrameHeaderByteCount + payloadByteCount))
+}
+
 // residentClientsGauge is the number of distinct connected client devices with
 // a resident on this node (one resident per client id). summed across nodes in
 // grafana it is the total active clients. kept in sync with the residents map
@@ -150,10 +222,33 @@ func init() {
 	prometheus.MustRegister(forwardDroppedCounter)
 	prometheus.MustRegister(forwardReceiveDroppedCounter)
 	prometheus.MustRegister(abuseDroppedCounter)
+	prometheus.MustRegister(exchangeIOFramesCounter)
+	prometheus.MustRegister(exchangeIOBytesCounter)
+	prometheus.MustRegister(exchangeActiveConnectionsGauge)
 	prometheus.MustRegister(residentClientsGauge)
 	prometheus.MustRegister(drainResidentsRemainingGauge)
 	prometheus.MustRegister(drainExcusesWrittenCounter)
 	prometheus.MustRegister(nominationRefusedCounter)
+
+	for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
+		for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
+			exchangeIOCollectorsByLabel[direction][kind] = exchangeIOCollectors{
+				frames: exchangeIOFramesCounter.WithLabelValues(
+					exchangeIODirectionLabels[direction],
+					exchangeIOFrameKindLabels[kind],
+				),
+				bytes: exchangeIOBytesCounter.WithLabelValues(
+					exchangeIODirectionLabels[direction],
+					exchangeIOFrameKindLabels[kind],
+				),
+			}
+		}
+	}
+	for _, direction := range []string{"inbound", "outbound"} {
+		for _, op := range []string{"transport", "forward", "unknown"} {
+			exchangeActiveConnectionsGauge.WithLabelValues(direction, op).Set(0)
+		}
+	}
 }
 
 // use 0 for deadlock testing
@@ -1029,6 +1124,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 		}
 		return
 	}
+	activeConnectionGauge := exchangeActiveConnectionsGauge.WithLabelValues("inbound", exchangeOpMetricLabel(header.Op))
+	activeConnectionGauge.Inc()
+	defer activeConnectionGauge.Dec()
 
 	go server.HandleError(func() {
 		defer handleCancel()
@@ -1773,7 +1871,11 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	headerBytes := b.Bytes()
 
 	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
-	return self.framer.Write(conn, headerBytes)
+	if err := self.framer.Write(conn, headerBytes); err != nil {
+		return err
+	}
+	recordExchangeIO(exchangeIODirectionSent, exchangeIOFrameKindHandshake, len(headerBytes))
+	return nil
 }
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
@@ -1783,6 +1885,7 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 		return nil, err
 	}
 	defer connect.MessagePoolReturn(headerBytes)
+	recordExchangeIO(exchangeIODirectionReceived, exchangeIOFrameKindHandshake, len(headerBytes))
 
 	var header ExchangeHeader
 
@@ -1800,6 +1903,9 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byte) error {
 	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 	err := self.framer.Write(conn, transferFrameBytes)
+	if err == nil {
+		recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+	}
 	connect.MessagePoolReturn(transferFrameBytes)
 	return err
 }
@@ -1835,14 +1941,14 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 
 	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 
-	headers := connect.MessagePoolGet(4 * len(transferFrameBytesBatch))
+	headers := connect.MessagePoolGet(exchangeIOFrameHeaderByteCount * len(transferFrameBytesBatch))
 	defer connect.MessagePoolReturn(headers)
 
 	self.writeBuffers = self.writeBuffers[:0]
 	for i, transferFrameBytes := range transferFrameBytesBatch {
-		header := headers[4*i : 4*i+4]
+		header := headers[exchangeIOFrameHeaderByteCount*i : exchangeIOFrameHeaderByteCount*i+exchangeIOFrameHeaderByteCount]
 		binary.BigEndian.PutUint16(header[0:2], uint16(len(transferFrameBytes)))
-		binary.BigEndian.PutUint16(header[2:4], uint16(0))
+		binary.BigEndian.PutUint16(header[2:exchangeIOFrameHeaderByteCount], uint16(0))
 		self.writeBuffers = append(self.writeBuffers, header, transferFrameBytes)
 	}
 
@@ -1850,8 +1956,15 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 	// keeps its backing for the next batch.
 	buffers := self.writeBuffers
 	n, err := buffers.WriteTo(conn)
-	_ = n // total bytes written before err (if any); WriteTo handles partials internally
+	// A writev can finish a frame prefix before a later iovec fails. Account
+	// for that completed prefix without treating the partial trailing frame as
+	// a packet.
 	for _, transferFrameBytes := range transferFrameBytesBatch {
+		frameByteCount := int64(exchangeIOFrameHeaderByteCount + len(transferFrameBytes))
+		if frameByteCount <= n {
+			recordExchangeIO(exchangeIODirectionSent, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+			n -= frameByteCount
+		}
 		connect.MessagePoolReturn(transferFrameBytes)
 	}
 	return err
@@ -1859,7 +1972,19 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
 	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
-	return self.framer.Read(self.connReader(conn))
+	transferFrameBytes, err := self.framer.Read(self.connReader(conn))
+	if err != nil {
+		return nil, err
+	}
+	recordExchangeIO(exchangeIODirectionReceived, exchangeIOMessageKind(transferFrameBytes), len(transferFrameBytes))
+	return transferFrameBytes, nil
+}
+
+func exchangeIOMessageKind(transferFrameBytes []byte) exchangeIOFrameKind {
+	if len(transferFrameBytes) == 0 {
+		return exchangeIOFrameKindPing
+	}
+	return exchangeIOFrameKindData
 }
 
 type ExchangeOp byte
@@ -1870,6 +1995,17 @@ const (
 	// forward calls `Forward` on the resident and does not use routes
 	ExchangeOpForward ExchangeOp = 0x02
 )
+
+func exchangeOpMetricLabel(op ExchangeOp) string {
+	switch op {
+	case ExchangeOpTransport:
+		return "transport"
+	case ExchangeOpForward:
+		return "forward"
+	default:
+		return "unknown"
+	}
+}
 
 type ExchangeHeader struct {
 	Version    int
@@ -1893,6 +2029,10 @@ type ExchangeConnection struct {
 	header ExchangeHeader
 	host   string
 	port   int
+
+	// Set only by NewExchangeConnection after a successful handshake. Tests
+	// that directly construct a socket worker do not own a gauge observation.
+	trackActiveMetric bool
 
 	// Test-only ownership barriers are nil in production. They run outside
 	// locks after a socket worker has taken or transferred queue ownership.
@@ -1969,19 +2109,21 @@ func NewExchangeConnection(
 
 	cancelCtx, cancel := context.WithCancel(ctx)
 	connection := &ExchangeConnection{
-		ctx:           cancelCtx,
-		cancel:        cancel,
-		done:          make(chan struct{}),
-		conn:          conn,
-		sendBuffer:    sendBuffer,
-		receiveBuffer: receiveBuffer,
-		send:          make(chan []byte, settings.ExchangeBufferSize),
-		receive:       make(chan []byte, settings.ExchangeBufferSize),
-		settings:      settings,
-		header:        header,
-		host:          host,
-		port:          port,
+		ctx:               cancelCtx,
+		cancel:            cancel,
+		done:              make(chan struct{}),
+		conn:              conn,
+		sendBuffer:        sendBuffer,
+		receiveBuffer:     receiveBuffer,
+		send:              make(chan []byte, settings.ExchangeBufferSize),
+		receive:           make(chan []byte, settings.ExchangeBufferSize),
+		settings:          settings,
+		header:            header,
+		host:              host,
+		port:              port,
+		trackActiveMetric: true,
 	}
+	exchangeActiveConnectionsGauge.WithLabelValues("outbound", exchangeOpMetricLabel(header.Op)).Inc()
 	go server.HandleError(connection.Run, cancel)
 
 	return connection, nil
@@ -2005,6 +2147,9 @@ func (self *ExchangeConnection) Run() {
 		workers.Wait()
 		returnReadyPooledMessages(self.send)
 		returnReadyPooledMessages(self.receive)
+		if self.trackActiveMetric {
+			exchangeActiveConnectionsGauge.WithLabelValues("outbound", exchangeOpMetricLabel(self.header.Op)).Dec()
+		}
 		close(self.done)
 	}()
 
