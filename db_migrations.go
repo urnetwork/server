@@ -3760,13 +3760,12 @@ var migrations = []any{
         ON verify_provider_stats (period_end)
     `),
 
-	// CancelHungAccountPayments (model/account_payment_model.go, daily): `UPDATE
-	// account_payment SET canceled = true ... WHERE NOT completed AND NOT
-	// canceled AND create_time < $1`. No index served it; it scanned the whole
-	// non-completed band, which grows monotonically (canceled rows stay
-	// completed = false and account_payment is never deleted). This partial
-	// indexes exactly the truly-pending set, ordered by create_time so the scan
-	// is a tight range that stops early.
+	// CancelHungAccountPayments (model/account_payment_model.go, daily) selects
+	// old pending rows and then filters out all Circle retry markers. No index
+	// served its create_time bound; it scanned the whole non-completed band,
+	// which grows monotonically (canceled rows stay completed = false and
+	// account_payment is never deleted). This partial index bounds that scan to
+	// pending rows and orders it by create_time so the range stops early.
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS account_payment_pending_create_time
         ON account_payment (create_time) WHERE (NOT completed AND NOT canceled)
@@ -4169,13 +4168,12 @@ var migrations = []any{
         )
     `),
 
-	// The payout planner (planPayments) re-picks sweeps whose payment was
-	// canceled (CancelHungAccountPayments sets canceled=true but does not null the
-	// sweep's payment_id). The payout query's canceled UNION arm drives from the
-	// small canceled set joined to sweeps by payment_id; this partial index over
-	// just the canceled rows makes finding those payment_ids an index-only scan
-	// instead of a seq scan of account_payment. account_payment is large: pre-
-	// create manually with CREATE INDEX CONCURRENTLY out of band; the IF NOT
+	// The payout planner (planPayments) re-picks sweeps whose payment was safely
+	// canceled and has no Circle retry markers. Its canceled UNION arm drives
+	// from the small canceled set joined to sweeps by payment_id; this partial
+	// index over canceled rows makes finding those payment_ids an indexed scan
+	// instead of a seq scan of account_payment. account_payment is large:
+	// pre-create manually with CREATE INDEX CONCURRENTLY out of band; the IF NOT
 	// EXISTS gate makes this migration a no-op once it is pre-created.
 	newSqlMigration(`
         CREATE INDEX IF NOT EXISTS account_payment_canceled_payment_id
@@ -5652,4 +5650,31 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_source_id_companion_contract_id`,
 		`DROP INDEX IF EXISTS transfer_contract_open_source_id_companion_contract_id`,
 	),
+
+	// A 30-day hung-payment sweep briefly canceled Circle retries and made their
+	// sweeps eligible for another payout. The age relationship fingerprints that
+	// sweep, and an attached sweep proves the planner has not already reassigned
+	// it. Restore only rows satisfying both; ambiguous rows remain canceled for
+	// manual reconciliation rather than risking two live payments.
+	newSqlMigration(`
+		/* restore_canceled_circle_retries */
+		UPDATE account_payment AS payment
+		SET
+			canceled = false,
+			cancel_time = NULL
+		WHERE
+			payment.canceled AND
+			NOT payment.completed AND
+			payment.cancel_time >= payment.create_time + INTERVAL '30 days' AND
+			(
+				payment.circle_idempotency_key IS NOT NULL OR
+				payment.payment_record IS NOT NULL OR
+				payment.tx_hash IS NOT NULL
+			) AND
+			EXISTS (
+				SELECT 1
+				FROM transfer_escrow_sweep AS sweep
+				WHERE sweep.payment_id = payment.payment_id
+			)
+	`),
 }

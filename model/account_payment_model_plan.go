@@ -269,14 +269,14 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	//   (a) unpaid   — the sweep was never assigned a payment (payment_id IS
 	//       NULL). btree indexes NULLs, so transfer_escrow_sweep_payment_id
 	//       seeks these directly.
-	//   (b) canceled — the sweep's payment was canceled. Canceling a payment
-	//       (CancelHungAccountPayments) sets account_payment.canceled = true but
-	//       does NOT null the sweep's payment_id, so these are found by driving
-	//       from the small canceled-payment set back to the sweeps via the
-	//       indexed payment_id.
+	//   (b) safely canceled — the sweep's payment was canceled before a Circle
+	//       submit, or after Circle explicitly reported terminal CANCELLED and
+	//       its retry markers were cleared. A canceled row that still carries an
+	//       idempotency key, payment record, or transaction hash may already have
+	//       moved funds and must never be selected for another payout.
 	//
 	// The two arms are disjoint (payment_id NULL vs. a set pointing at a
-	// canceled payment), so UNION ALL reproduces the exact
+	// safely canceled payment), so UNION ALL reproduces the exact
 	// (contract_id, balance_id, network_id) multiset the old query selected,
 	// without the dedup cost of UNION. Retaining all three key columns also
 	// prevents later joins from multiplying distinct network payouts that share
@@ -320,7 +320,12 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
             FROM account_payment ap
             INNER JOIN transfer_escrow_sweep s ON
                 s.payment_id = ap.payment_id
-            WHERE ap.canceled = true
+            WHERE
+                ap.canceled = true AND
+                NOT ap.completed AND
+                ap.circle_idempotency_key IS NULL AND
+                ap.payment_record IS NULL AND
+                ap.tx_hash IS NULL
         ) u
         %s
         %s
