@@ -18,15 +18,16 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
-
-	"github.com/urnetwork/server"
+	"time"
 )
 
 const siteMaxDepth = 24
@@ -44,9 +45,16 @@ type sitePage struct {
 
 // Site is the running fake site.
 type Site struct {
-	server *http.Server
-	addr   string
+	server    *http.Server
+	addr      string
+	done      chan struct{}
+	closeOnce sync.Once
+	errLock   sync.Mutex
+	serveErr  error
+	closeErr  error
 }
+
+const siteDrainTimeout = 15 * time.Second
 
 // NewSite starts the fake site on the given listen address (host:port, e.g.
 // 127.0.0.1:0 for an ephemeral port). Returns the bound address.
@@ -57,18 +65,53 @@ func NewSite(ctx context.Context, listenAddr string, seed int64, site SiteConfig
 	}
 	handler := &siteHandler{seed: seed, site: site}
 	httpServer := &http.Server{Handler: handler}
-	go server.HandleError(func() {
-		httpServer.Serve(listener)
-	})
+	self := &Site{server: httpServer, addr: listener.Addr().String(), done: make(chan struct{})}
+	go func() {
+		defer close(self.done)
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			self.errLock.Lock()
+			self.serveErr = err
+			self.errLock.Unlock()
+		}
+	}()
 	go func() {
 		<-ctx.Done()
-		httpServer.Close()
+		self.Close()
 	}()
-	return &Site{server: httpServer, addr: listener.Addr().String()}, nil
+	return self, nil
 }
 
 func (self *Site) Addr() string {
 	return self.addr
+}
+
+func (self *Site) Close() error {
+	self.closeOnce.Do(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), siteDrainTimeout)
+		defer cancel()
+		if err := self.server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			self.errLock.Lock()
+			self.closeErr = fmt.Errorf("site shutdown: %w", err)
+			self.errLock.Unlock()
+			if closeErr := self.server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+				self.errLock.Lock()
+				self.closeErr = errors.Join(self.closeErr, fmt.Errorf("site forced close: %w", closeErr))
+				self.errLock.Unlock()
+			}
+		}
+	})
+	self.errLock.Lock()
+	defer self.errLock.Unlock()
+	return self.closeErr
+}
+
+// Wait joins the HTTP serving goroutine and reports a non-shutdown serve
+// failure.
+func (self *Site) Wait() error {
+	<-self.done
+	self.errLock.Lock()
+	defer self.errLock.Unlock()
+	return errors.Join(self.serveErr, self.closeErr)
 }
 
 func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

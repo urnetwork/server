@@ -109,6 +109,9 @@ type ClientsConfig struct {
 	BalanceBytes int64 `yaml:"balance_bytes"`
 	// browser-like parallel connections per page crawl
 	ConnectionsPerCrawl int `yaml:"connections_per_crawl"`
+	// Optional fixed quality-window size used only for frontier calibration.
+	// Zero preserves the production client's adaptive 2..6 quality window.
+	QualityWindowSize int `yaml:"quality_window_size,omitempty"`
 }
 
 // ProvidersConfig defines the fleet size, network grouping, and the mixture.
@@ -223,6 +226,12 @@ func (self *Config) validate() error {
 	}
 	if len(self.Providers.Mixture) == 0 {
 		return fmt.Errorf("providers.mixture is empty")
+	}
+	if self.Clients.PoolSize <= 0 || self.Clients.MeanPerMinute <= 0 || self.Clients.ConnectionsPerCrawl <= 0 {
+		return fmt.Errorf("clients pool, arrival rate, and crawl connection count must be > 0")
+	}
+	if self.Clients.QualityWindowSize < 0 || 32 < self.Clients.QualityWindowSize {
+		return fmt.Errorf("clients.quality_window_size must be in 0..32")
 	}
 	return nil
 }

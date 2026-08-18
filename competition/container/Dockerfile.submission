@@ -1,0 +1,140 @@
+# The trusted worker supplies a registry-digest reference in production. The
+# local smoke test may use a trusted local image tag.
+ARG EVALUATOR_BASE_IMAGE=urnetwork/sim-latency-evaluator-base:unset
+FROM ${EVALUATOR_BASE_IMAGE} AS source-prep
+
+ARG BASE_SHA
+ARG CANDIDATE_SHA
+ARG PATCH_SHA256
+ARG POLICY_SHA256
+
+USER 0:0
+COPY --chmod=0444 canonical.patch /opt/urnetwork/submission/canonical.patch
+COPY --chmod=0444 policy.json /opt/urnetwork/submission/policy.json
+
+# Revalidate the exact bytes with the trusted base-image validator before Git
+# sees them. No submission-controlled Dockerfile, build arg, command, or URL is
+# accepted by this build.
+RUN --network=none /usr/local/libexec/competitionpatch \
+        --base-sha "${BASE_SHA}" \
+        --patch /opt/urnetwork/submission/canonical.patch \
+        --expected-patch-sha256 "${PATCH_SHA256}" \
+        --policy /opt/urnetwork/submission/policy.json \
+        --expected-policy-sha256 "${POLICY_SHA256}" \
+        > /opt/urnetwork/submission/validated-identity.json
+
+# Commit with frozen metadata. This produces a deterministic candidate Git SHA
+# and lets sim-latency retain its clean-build VCS gate inside the container.
+RUN --network=none set -eu; \
+    test "$(git rev-parse HEAD)" = "${BASE_SHA}"; \
+    test -z "$(git status --porcelain --untracked-files=all)"; \
+    git apply --check --whitespace=error-all /opt/urnetwork/submission/canonical.patch; \
+    git apply --whitespace=error-all /opt/urnetwork/submission/canonical.patch; \
+    git add --update; \
+    git diff --cached --check; \
+    test -z "$(git status --porcelain --untracked-files=all | sed -n '/^??/p')"; \
+    export GIT_AUTHOR_NAME='URnetwork Competition'; \
+    export GIT_AUTHOR_EMAIL='competition@invalid'; \
+    export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"; \
+    export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"; \
+    export GIT_AUTHOR_DATE='2000-01-01T00:00:00Z'; \
+    export GIT_COMMITTER_DATE="$GIT_AUTHOR_DATE"; \
+    git commit --no-gpg-sign -m "competition submission ${PATCH_SHA256}"; \
+    test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"; \
+    test -z "$(git status --porcelain --untracked-files=all)"
+
+# Candidate package initialization executes during `go test`, so checks must
+# never run as root in a layer inherited by the final image. This stage is both
+# unprivileged and discarded. Tests that require PostgreSQL/Redis run later in
+# the constrained Compose stage after fresh stores become healthy.
+FROM source-prep AS candidate-check
+USER 0:0
+RUN chown 65532:65532 /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v \
+    && install -d -o 65532 -g 65532 -m 0700 \
+        /opt/urnetwork/candidate-check \
+        /opt/urnetwork/candidate-check/cache \
+        /opt/urnetwork/candidate-check/tmp
+USER 65532:65532
+RUN --network=none \
+    GOCACHE=/opt/urnetwork/candidate-check/cache \
+    GOTMPDIR=/opt/urnetwork/candidate-check/tmp \
+    TMPDIR=/opt/urnetwork/candidate-check/tmp \
+    GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off \
+    go vet ./connect/...
+RUN --network=none \
+    GOCACHE=/opt/urnetwork/candidate-check/cache \
+    GOTMPDIR=/opt/urnetwork/candidate-check/tmp \
+    TMPDIR=/opt/urnetwork/candidate-check/tmp \
+    GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off \
+    go test -run '^$' ./connect/...
+USER 0:0
+RUN install -m 0444 /dev/null /opt/urnetwork/candidate-check/passed
+
+# Compile in a fresh stage that cannot inherit any filesystem or cache mutation
+# performed by candidate initialization in the check stage. `go build` compiles
+# the submitted code but does not execute package initialization.
+FROM source-prep AS candidate-binary
+ARG CANDIDATE_SHA
+USER 0:0
+COPY --from=candidate-check --chown=0:0 --chmod=0444 \
+    /opt/urnetwork/candidate-check/passed \
+    /opt/urnetwork/candidate-check.passed
+RUN test -f /opt/urnetwork/candidate-check.passed \
+    && chown 65532:65532 /opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v \
+    && install -d -o 65532 -g 65532 -m 0700 \
+        /opt/urnetwork/candidate-build \
+        /opt/urnetwork/candidate-build/cache \
+        /opt/urnetwork/candidate-build/tmp \
+        /opt/urnetwork/candidate-build/output
+USER 65532:65532
+RUN --network=none \
+    GOCACHE=/opt/urnetwork/candidate-build/cache \
+    GOTMPDIR=/opt/urnetwork/candidate-build/tmp \
+    TMPDIR=/opt/urnetwork/candidate-build/tmp \
+    GOFLAGS=-mod=readonly GOPROXY=off GOSUMDB=off \
+    go build -trimpath -o /opt/urnetwork/candidate-build/output/sim-latency ./connect/sim-latency \
+    && test "$(go version -m /opt/urnetwork/candidate-build/output/sim-latency | sed -n 's/.*vcs.revision=//p')" = "${CANDIDATE_SHA}" \
+    && test "$(go version -m /opt/urnetwork/candidate-build/output/sim-latency | sed -n 's/.*vcs.modified=//p')" = false
+
+# Start again from the authenticated, patched source stage. The sole artifact
+# crossing from candidate compilation is the simulator binary; the entire
+# candidate-check filesystem is unreachable from this final image.
+FROM source-prep AS final
+ARG BASE_SHA
+ARG CANDIDATE_SHA
+ARG PATCH_SHA256
+ARG POLICY_SHA256
+ARG BUILDER_SHA256
+ARG SUBMISSION_IDENTITY
+USER 0:0
+COPY --from=candidate-binary --chown=0:0 --chmod=0555 \
+    /opt/urnetwork/candidate-build/output/sim-latency \
+    /opt/urnetwork/bin/sim-latency
+RUN test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.revision=//p')" = "${CANDIDATE_SHA}" \
+    && test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.modified=//p')" = false \
+    && test -z "$(git status --porcelain --untracked-files=all)"
+
+RUN --network=none jq \
+        --arg build_sha "${CANDIDATE_SHA}" \
+        --arg builder_sha256 "${BUILDER_SHA256}" \
+        --arg image_key "${SUBMISSION_IDENTITY}" \
+        --arg simulator_sha256 "$(sha256sum /opt/urnetwork/bin/sim-latency | awk '{print $1}')" \
+        '. + {image_kind: "submission", build_sha: $build_sha, builder_sha256: $builder_sha256, image_key: $image_key, simulator_sha256: $simulator_sha256}' \
+        /opt/urnetwork/submission/validated-identity.json \
+        > /opt/urnetwork/image-identity.json.new \
+    && mv /opt/urnetwork/image-identity.json.new /opt/urnetwork/image-identity.json \
+    && chmod 0444 /opt/urnetwork/image-identity.json /opt/urnetwork/submission/validated-identity.json \
+    && chmod -R a-w /opt/urnetwork/submission \
+    && test -z "$(git status --porcelain --untracked-files=all)"
+
+LABEL org.opencontainers.image.title="URnetwork sim-latency submission" \
+      org.opencontainers.image.revision="${CANDIDATE_SHA}" \
+      com.urnetwork.competition.image-kind="submission" \
+      com.urnetwork.competition.base-sha="${BASE_SHA}" \
+      com.urnetwork.competition.patch-sha256="${PATCH_SHA256}" \
+      com.urnetwork.competition.policy-sha256="${POLICY_SHA256}" \
+      com.urnetwork.competition.builder-sha256="${BUILDER_SHA256}" \
+      com.urnetwork.competition.image-key="${SUBMISSION_IDENTITY}"
+
+USER 65532:65532
+CMD ["identity"]

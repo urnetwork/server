@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "status": "provisional",
+  "base_git_sha": "472e6ae1c0054452c7cf9cac9736325dfbcdd616",
+  "base_image_id": "sha256:20e5700deffad5e5f32922f2318c5f3b3670b54f0493b61f4a5196ebea600c65",
+  "target_path": "connect/resident_contract_manager.go",
+  "target_blob_sha1": "66e2d39956b958749dfdfd00f408d4c05f874833",
+  "policy_sha256": "2dba553cd94d6d901e0fc590fd147d3e39273b41c24317e987b1bbf479382460",
+  "builder_sha256": "624f52c6752c6d6119b50b8219769ba695c86cbc58fb8113d800e3781f12fdb7",
+  "local_build_verification": {
+    "status": "passed",
+    "cache_reuse": "passed",
+    "candidate_execution_isolation": "passed",
+    "protected_path_count": 6,
+    "scope": "development_host",
+    "official_host": false
+  },
+  "references": [
+    {
+      "name": "noop",
+      "path": "noop.patch",
+      "sha256": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+      "candidate_git_sha": "0f59f45b153aaa2f4b376d2322c8821658643ea9",
+      "image": "urnetwork/sim-latency-submission:62a8fe94045f8ddc407afbb9084b2c09",
+      "image_id": "sha256:c3cdba0cda79d23b2da78cf96c097b68963a35a9e37d6e006cfef04c8eaba931",
+      "image_key": "62a8fe94045f8ddc407afbb9084b2c09c2f46348cdadfe412a38fd9bdf8fbcd1",
+      "simulator_sha256": "55334563de4375feb76a438d2bc0aa1d97758a7b2f22d12291b723e1b867ffaf",
+      "expected_order": 1
+    },
+    {
+      "name": "worse",
+      "path": "worse.patch",
+      "sha256": "8748650518d2cc4b177009080613a1e30ea7239e91bc26a40df415b51133bd93",
+      "candidate_git_sha": "a5d40b6d8071c76c68f3f46fbc12046f079e9e6a",
+      "image": "urnetwork/sim-latency-submission:e8bfb1d492e8dea04ba053a7c24d8202",
+      "image_id": "sha256:d9ad4a6dd14fbca1b133656757695f0baf58b217d487ae6e6e2e0eb211ac4e2e",
+      "image_key": "e8bfb1d492e8dea04ba053a7c24d8202aa71f3ce181aa8d673c71b0930bf0006",
+      "simulator_sha256": "b2c9a61aec3d40e247e1109ec05d41259790f80510cac15a49f167c143b66168",
+      "expected_order": 2
+    },
+    {
+      "name": "better",
+      "path": "better.patch",
+      "sha256": "fa1dcc5f0a4af45886035e5cecda8b331e794891d359c78b8386eb9864dd0089",
+      "candidate_git_sha": "842793648d107e9205bc586e18d8480736f7d9f1",
+      "image": "urnetwork/sim-latency-submission:6ffc8e9295198465d2996db805310dd7",
+      "image_id": "sha256:25ba429f4b4e6eb77559334542e6af79a6c8a070bdee8b8e735306a9f3c76571",
+      "image_key": "6ffc8e9295198465d2996db805310dd7aa85a8e32889305507861cb8db049045",
+      "simulator_sha256": "15d34c7b72693c96d62b0734143a18b73cc595a3138688c59a56625d70b92094",
+      "expected_order": 0
+    }
+  ],
+  "lower_raw_score_is_better": true,
+  "official_separability": "not_run",
+  "required_correct_seed_order": "better < noop < worse",
+  "required_seed_pass_count": 19,
+  "required_seed_count": 20
+}

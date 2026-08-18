@@ -1,9 +1,11 @@
 # build + run artifacts
 sim-latency
 eval-48g/
+eval-12c/
 .sim-site/
 baseline-runs/
 baseline*.json
+!testdata/score/baseline.golden.json
 run.json
 *.csv
 providers.yml

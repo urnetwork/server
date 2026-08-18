@@ -1,15 +1,17 @@
-# EVALUATION2 — running the final clean eval-48b baseline
+# EVALUATION2 — final clean eval-48d baseline
 
-The runbook for standing up the **final evaluation environment** on the
-dedicated evaluation hardware and measuring the competition's official noise
-floor. It captures everything learned from the 2026-07-30 → 2026-08-02
-workstation campaigns (eval-48a k=12, eval-48b bring-up, and the directional
-set below) so the final run is clean on the first attempt.
+The runbook and result record for the final **local directional** eval-48d
+environment. It also carries forward the host-discipline requirements needed
+when the same workflow is repeated on dedicated official hardware. It captures
+everything learned from the 2026-07-30 through 2026-08-16 workstation and local
+Linux campaigns.
 
-Status: the 2026-08-02 workstation set is a **directional stability read**
-(wip build, daytime contention) — it validates the environment design but is
-not the official floor. The official floor is measured fresh on the final
-hardware by this runbook.
+Status: the 2026-08-16 eval-48d set is **complete: 20/20 consecutive
+authenticated runs, zero exclusions, held-out A/A indistinguishable, and all
+post-campaign verification gates passed**. It is still not the official floor:
+the host exposes 24 logical CPUs, the build is locally modified, and no
+independent-seed/reference-patch calibration or Macrocosmos acceptance exists.
+The official floor must be measured fresh on the accepted production hardware.
 
 ## 0. Fix-first blockers
 
@@ -37,6 +39,14 @@ Do these before anything else:
   other than the address `server/local/run-local.sh` manages (a dead on-link
   address blackholes dials; under load this stretched pg connects past their
   deadlines and killed runs).
+- **Resident-contract cancellation race — FIXED 2026-08-16.** A synchronous
+  `residentContractManager.HasActiveContract` cache miss could enter the DB
+  after its manager context was canceled during drain. The resulting
+  `context canceled` reached `connect.HandleError` as a frozen G5
+  `Unexpected error` and invalidated the attempt. The manager now fails closed
+  immediately after cancellation and selectively contains only lifecycle
+  `Done` errors around contract-cache work; unexpected errors still re-panic.
+  Focused normal and race tests cover the cancellation and re-panic behavior.
 
 ## 1. Hardware + OS requirements
 
@@ -45,7 +55,7 @@ Do these before anything else:
   its limits measures its own scheduling noise).
 - **≥ 10 performance cores.** The sim is CPU-bound before it is memory-bound;
   end-to-end egress degrades above ~2 k providers on 10 cores, which is why
-  eval-48b is sized at 2 k.
+  eval-48d is sized at 2 k.
 - **File descriptors**: `ulimit -n` ≥ 1,048,576 (eval-48.sh raises it; verify
   the hard limit allows it).
 - The kernel socket-buffer pool runs near its ceiling (~8 k established
@@ -75,10 +85,15 @@ pg dial starvation). Before a campaign:
   alias**, which wedges in-flight runs and fast-fails subsequent ones. Run it
   in a session that survives (its own terminal/tmux).
 
-## 3. Environment identity (eval-48b)
+## 3. Environment identity (eval-48d)
 
 The environment is pinned by `eval-48.sh` (the constants block is the
-definition). Current revision **eval-48b**:
+definition). Current revision **eval-48d** uses eval-48c's scale, mixture, and
+byte-identical workload, but pins warm clients in fixture order, assigns their
+exchange hosts by stable pool index, and retries only missing identities up to
+a small fixed bound. It therefore has a new binary/environment identity. The
+fixture hash was reproduced with both Go 1.26.5 and 1.26.6; do not mix eval-48b
+or pre-fix eval-48c artifacts into this baseline.
 
 | parameter | value |
 |---|---|
@@ -86,21 +101,21 @@ definition). Current revision **eval-48b**:
 | seed | 48 |
 | clients | 200-identity warm pool · 80 arrivals/min |
 | site | two-tier bodies: web 4–512 KiB; download 2–6 MiB on 25% of pages (seed-48 tree: 37 pages, 7 download-tier, 33 MB full-crawl) |
-| window | 30 m measured · ramp 1 m · prewarm 13 h (instant) · settle 1 m · hosts 4 · `--fleet-shards 4` · every run `--reset` |
+| window | 30 m measured · ramp 1 m · prewarm 13 h (instant) · settle 1 m · hosts 4 · `--fleet-shards 4` · every run `--reset` · 70 s inter-run quiescence |
+| service identity | `WARP_ENV=local`, `WARP_SERVICE=sim`, `WARP_BLOCK=sim`, `WARP_HOST=127.0.0.1` (the wrapper overrides inherited test labels) |
 | throughput gate | ≥ 1 MiB (`results.go throughputMinBytes`) — samples only the download tier |
-| canonical file | `eval-48g/providers-eval48b.yml`, sha256 `7851a0d0c0d2c80c4c28f0ecd752305f11a87087cf16d7056ad5ea8f027dfd26` |
+| canonical file | `eval-48g/providers-eval48d.yml`, sha256 `549ec41c033f344d6e0a6b1de82b404bb63d5a8dfb5861b6c4b6d55886cdace4` |
 
 Verify on the eval box: `./eval-48.sh init` regenerates from the seed and
-fails loudly on a sha mismatch. (`init` is deterministic; the sha above was
-produced on arm64/darwin — confirm it reproduces on the final hardware the
-first time, since `compare` refuses mismatched-sha runs.)
+fails loudly on a sha mismatch. (`init` is deterministic and `compare` refuses
+mismatched-sha runs.)
 
 **Verdict rules v2** (in `metricDefs`/`compare`): primaries `ttfb_p95_ms` +
 `throughput_p50_bytes_per_s`; guards = primaries + `fail_rate` +
 `throughput_p05_bytes_per_s`. `throughput_p95` is reported, non-gating (on
-the pre-fix build its fast tail was a run-level lottery; the 2026-08-02 build
-measured it at ~7% CV — if that holds on the final hardware, re-promoting it
-is a rules decision to revisit).
+earlier builds its fast tail was a run-level lottery, and the final eval-48d
+campaign still measured 21.33% run CV). Re-promoting it would require a rules
+decision backed by official-hardware evidence.
 
 ## 4. Procedure
 
@@ -113,29 +128,39 @@ go test -count=1 .                 # unit gate
 ./eval-48.sh run --duration 3m --meta eval-48g/smoke.run.json > eval-48g/smoke.csv \
                                    # smoke: expect 200/200 established, low fail
 
-caffeinate -i ./eval-48.sh campaign 12    # sequential A/A replicates
-./eval-48.sh baseline              # noise floor from every completed run
+caffeinate -i ./eval-48.sh campaign 13    # sequential A/A replicates
+./finalize-local-baseline.sh 20 2  # top up; summarize; held-out A/A; verify
 ```
 
-- Target **k ≥ 12 clean replicates** (15 preferred). One replicate ≈ 36 min
-  (~6 min warm-up + 30 m window); plan ~9–10 h of quiet machine time.
+- Target **k ≥ 20 clean same-seed replicates** for the Apex calibration gate.
+  One replicate ≈ 36 min (~6 min warm-up + 30 m window); plan at least 13 h of
+  quiet machine time, then extend the campaign if failures leave fewer than 20
+  authenticated completions.
 - The campaign loop is failure-tolerant: one bad replicate logs and skips; a
   wedged replicate is killed by the **55 m watchdog**; three consecutive
   failures abort (that means the environment itself is down). Progress lines
   stream to `eval-48g/campaign.log`.
+- `finalize-local-baseline.sh` does not accept a merely elapsed campaign as
+  complete. It extends the campaign until at least 20 completion markers exist,
+  authenticates them, records incomplete attempts as exclusions, produces the
+  Markdown/JSON/SVG reports, and runs two genuinely held-out A/A evaluations.
+  Its final verifier will not compile or test while any simulator is active.
 - Long unattended campaigns on a machine with background storms can use
   `eval-48g/storm-wait-resume.sh` (v5: relaunch-on-abort with cooldown) and
   `eval-48g/salvage-sidecar.sh` (reconstructs a side-car from csv + logged
   window when a post-window crash eats it — only needed while the trace.go
   blocker is unfixed). On properly prepared hardware neither should trigger.
 
-## 5. Clean-run criteria + quarantine
+## 5. Fail-closed criteria + investigation
 
-Contamination is glaring, never subtle. Quarantine (move to
-`eval-48g/runs/flagged/`) any run outside the set's own band; the workstation
-heuristic was **fail_rate < 1% and rows_in_window > 50 k**, but recalibrate
-the band from the first 3 quiet runs on the final hardware (fail-rate levels
-are build- and host-dependent). Signatures observed:
+Contamination is usually glaring rather than subtle, but outcome-dependent
+quarantine would bias the measured noise. Keep every authenticated completion
+unless a predeclared, artifact-backed infrastructure rule proves it invalid.
+Use the set's fail-rate/row-count band and the summary's robust-outlier report
+only to trigger investigation; never remove a completed run merely because its
+score is inconvenient. Warm-up failures, interrupted runs, and malformed or
+unauthenticated artifact chains fail closed and are inventoried as excluded
+attempts. Signatures observed:
 
 | signature | cause |
 |---|---|
@@ -144,27 +169,95 @@ are build- and host-dependent). Signatures observed:
 | warm-up wedge (watchdog kill at 55 m) | starved timing-gated warm-up phases |
 | fast exit-2 ~60 s (pg dial panic) | stack down / dead hosts entry / disk storm |
 
-The baseline must be computed from an explicit clean list if anything was
-flagged: `./sim-latency baseline --runs r001.csv,r003.csv,... --out
-eval-48g/baseline.json` (the `eval-48.sh baseline` subcommand includes every
-run with a side-car).
+This local workflow has no signed infrastructure-exclusion record, so do not
+move an authenticated completion to `eval-48g/runs/flagged/`; the summary fails
+closed if it sees one there. Production may support such an exclusion only
+after freezing a signed reason/evidence schema. In the normal workflow,
+`eval-48.sh baseline` includes every run with a complete sidecar and its
+authenticated completion marker; the audit refuses hidden gaps or duplicate
+attempt identities.
 
 ## 6. Deliverables of the final evaluation
 
-1. `eval-48g/baseline.json` — the official noise floor (k ≥ 12, one build,
-   one host, all-clean).
-2. Drift check across the campaign: per-metric slope vs run start-time —
-   nothing should exceed |t| ≈ 2 (workstation sets showed no significant
-   drift once contaminated runs were excluded).
-3. Convergence: `sd_by_replicates` flat over the last few k;
+1. `eval-48g/baseline.json` — the noise floor for the exact recorded
+   host/build identity (k ≥ 20 authenticated runs). It is official only when
+   collected by the accepted production-hardware runbook and accompanied by
+   the signed calibration manifest; a workstation artifact is directional.
+2. `eval-48g/baseline-summary.json`, `.md`, and
+   `eval-48g/baseline-stability.svg` — independently authenticated run
+   identities, failure-ceiling Apex raw scores, noise/drift/convergence,
+   per-run diagnostics, exclusions, decision thresholds, and local resource
+   envelope. The JSON fingerprints RSS, host, and native-service telemetry;
+   native PostgreSQL summed process RSS is explicitly observational and
+   double-counts shared pages, and any early-run coverage gap is listed rather
+   than represented as a zero measurement.
+3. Drift check across the campaign: per-metric slope vs run start-time — the
+   completed eval-48d set had no scored metric with |t| >= 2 and required no
+   outcome-based exclusions.
+4. Convergence: `sd_by_replicates` flat over the last few k;
    `min_detectable_delta_by_runs_per_side` published for m = 1..5.
-4. README noise-floor table updated (mark this file's directional table
-   superseded); the stability plot artifact refreshed (per-run series +
+5. README noise-floor table updated with the final local result; the stability
+   plot artifact refreshed (per-run series +
    threshold lines for `ttfb_p95`, `throughput_p50`, `throughput_p05`).
-5. The submission workflow sanity check: one A/A `compare` of two held-out
-   runs against the baseline must return `indistinguishable`.
+6. `eval-48g/heldout-aa-compare.json` — the submission workflow sanity check:
+   one A/A `compare` of two held-out runs against the baseline must return
+   `indistinguishable`.
+7. `eval-48g/postcampaign-verification.log` — deterministic artifact replay,
+   invariant checks, tests, race detector, vet, and repository compile gate.
 
-## 7. Directional results (2026-08-02, workstation — NOT the official floor)
+## 7. Final eval-48d results (2026-08-16, local — NOT the official floor)
+
+Host `sille` (linux/amd64, 24 logical CPUs), frozen Go 1.26.5 simulator SHA-256
+`62665d25290c9ee9e81434a542e1ccd959709eb35ccdc82fef511e33204c5b29`,
+build revision `05c745050657fdd31f908d7a0e06ef4e26f636d8` with
+`modified: true`. The post-fix campaign contains exactly 20 authenticated
+attempts (`r001`–`r020`), all 200/200 clients established, and zero excluded
+attempts. Earlier bring-up and pre-fix artifacts are archived separately.
+
+| metric | mean +/- sd | cv | minimum detectable delta, 1 run/side | 3 runs/side |
+|---|---|---:|---:|---:|
+| Apex raw score | 23,823.31 +/- 696.30 ms | 2.923% | quarter-margin floor: 11.691% | not policy-qualified |
+| `ttfb_p95_ms` (primary diagnostic) | 1,025.40 +/- 47.82 ms | 4.663% | 116.93 ms | 67.51 ms |
+| `throughput_p50_bytes_per_s` (primary diagnostic) | 290.75 +/- 8.20 kB/s | 2.819% | 20.04 kB/s | 11.57 kB/s |
+| `throughput_p05_bytes_per_s` (guard) | 84.99 +/- 2.35 kB/s | 2.765% | 5.75 kB/s | 3.32 kB/s |
+| `fail_rate` (guard) | 1.154% +/- 0.114 pp | 9.901% | — | — |
+| `total_p95_ms`, successful rows | 20,902.62 +/- 435.72 ms | 2.085% | — | — |
+| `goodput_bytes_per_s` | 41.151 +/- 0.299 MB/s | 0.727% | — | — |
+| `throughput_p95_bytes_per_s` (reported) | 11.258 +/- 2.401 MB/s | **21.330%** | — | — |
+
+All scored-metric drift statistics were below |t|=2. Robust triage flagged
+only TTFB-p95 values in `r004` and `r011`; both stay in the baseline because no
+predeclared infrastructure rule invalidated either run. The three primary
+diagnostic SD sequences satisfy the local last-five <=10% span heuristic. The
+Apex raw-score SD sequence does not (22.26% span), and some between-run SDs are
+below within-run block SE, so the noise-floor warning remains conservative.
+
+The local scalar cannot support a single-run 1% takeover. Deterministic
+median-of-R estimates remain far above 0.25% CV for all tested values: 2.863%
+(R=1), 2.020% (R=3), 1.671% (R=5), and 1.431% (R=7). Official hardware,
+independent seeds, and reference-patch separability must determine the actual
+R and takeover margin.
+
+Held-out `h001` and `h002` were collected after the baseline and both produced
+authenticated artifact chains. Their comparison verdict is
+`indistinguishable` at alpha 0.05; B-vs-A Apex raw score changed -0.653%, median
+throughput +0.625%, and TTFB p95 -2.075%, with neither primary significant
+after Holm correction.
+
+The local resource envelope was stable: peak simulator RSS 14.97 GiB, mean
+simulator CPU 10.23 logical-core equivalents, peak established sockets 26,051,
+and zero swap in every run. Host and native PostgreSQL/Redis telemetry fully
+covered all 20 windows. The matchmaking audit found 20,947 samples, zero empty
+pools, and at least 99.46% window span per run.
+
+See `eval-48g/baseline-summary.md`, `baseline-summary.json`,
+`baseline-stability.svg`, `heldout-aa-compare.json`, and
+`postcampaign-verification.log`. The verifier replayed the baseline/summary
+twice byte-identically and passed artifact invariants, normal tests, race tests,
+vet, repository compilation, shell syntax, Python syntax, and `git diff
+--check` at 2026-08-16 18:01:01 UTC.
+
+## 8. Historical directional results (2026-08-02, workstation)
 
 M1 Max MacBook Pro 10c/64 GB, build `41e966fa`+wip, **k=14 clean of 21
 attempts** over a 13.2 h daytime span; 7 flagged (contention), two side-cars
@@ -192,7 +285,7 @@ decision pending confirmation on final hardware). Watch-item:
 `throughput_p05` runs at 8.5% CV on this build (vs 2.2% pre-fix) — guard
 thresholds are correspondingly looser.
 
-## 8. Gotchas ledger (hard-won, host-portability)
+## 9. Gotchas ledger (hard-won, host-portability)
 
 - **GNU vs BSD userland**: the dev workstation's PATH serves GNU coreutils
   (`date`, `timeout`, `stat`) — BSD idioms (`date -j -f`, `stat -f`) fail,
@@ -200,11 +293,19 @@ thresholds are correspondingly looser.
   Scripts here use GNU `date -d`; on a BSD-userland host, adjust.
 - **`nc` against a blackholed address can hang** regardless of `-w`; probe
   the stack via local state instead (loopback alias present + 5432 listener).
-- **Go signal handling queues TERM during warm-up phases** (`run.go` only
-  drains the signal channel at phase boundaries) — a "stop now" needs TERM,
-  a grace period, then KILL.
+- **TERM is lifecycle-aware as of score artifact schema 2.** It cancels ramp,
+  prewarm, settle, warm-client construction, and measurement promptly, then
+  joins clients, fleet shards, services, and stats. The outer runner still uses
+  TERM followed by KILL after its frozen grace as a containment boundary; a
+  required KILL is an incomplete evaluation.
 - **`pgrep -f` observer effect**: a monitoring command whose cmdline contains
   the watched pattern trips the campaign's already-active guard. Bracket the
   pattern (`sim-latency [r]un`) in any watcher.
+- **Current identity and selection prerequisites**: JWT validation joins the
+  persisted active network/user/device/client identity, shared fleet networks
+  authenticate as their first fixture user's admin, and provider modes must be
+  acknowledged server-side. The selection pipeline also fail-closes on fresh
+  egress health/location evidence; simulation provisioning seeds deterministic
+  passing evidence because there is no external prober in this harness.
 - Ports/`TIME_WAIT` are not a concern at eval-48 scale (~37 TIME_WAIT
   between runs); the mbuf ceiling is (see §1).

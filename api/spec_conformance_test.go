@@ -35,6 +35,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/urnetwork/server/competition"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -193,18 +194,27 @@ const maxDepth = 4
 // ----------------------------------------------------------------------------
 
 type specDoc struct {
+	root    map[string]any
 	paths   map[string]any
 	schemas map[string]any
 }
 
 func loadSpec(t *testing.T) *specDoc {
+	return loadSpecAt(t, "..", "..", "connect", "api", "bringyour.yml")
+}
+
+func loadCompetitionSpec(t *testing.T) *specDoc {
+	return loadSpecAt(t, "..", "..", "sn", "api", "competition.yml")
+}
+
+func loadSpecAt(t *testing.T, pathParts ...string) *specDoc {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
 	dir := filepath.Dir(thisFile)
-	specPath := filepath.Join(dir, "..", "..", "connect", "api", "bringyour.yml")
+	specPath := filepath.Join(append([]string{dir}, pathParts...)...)
 
 	data, err := os.ReadFile(specPath)
 	if err != nil {
@@ -216,6 +226,7 @@ func loadSpec(t *testing.T) *specDoc {
 	}
 	components := asMap(root["components"])
 	return &specDoc{
+		root:    root,
 		paths:   asMap(root["paths"]),
 		schemas: asMap(components["schemas"]),
 	}
@@ -299,8 +310,11 @@ func (s *specDoc) operation(method, path string) (req, resp map[string]any) {
 		req = asMap(asMap(asMap(rb["content"])["application/json"])["schema"])
 	}
 	responses := asMap(op["responses"])
-	if r200 := asMap(responses["200"]); r200 != nil {
-		resp = asMap(asMap(asMap(r200["content"])["application/json"])["schema"])
+	for _, status := range []string{"200", "201", "202", "203", "204"} {
+		if success := asMap(responses[status]); success != nil {
+			resp = asMap(asMap(asMap(success["content"])["application/json"])["schema"])
+			break
+		}
 	}
 	return req, resp
 }
@@ -611,4 +625,83 @@ func TestSpecRoutesImplemented(t *testing.T) {
 
 	t.Logf("spec routes: %d spec endpoints, %d impl routes, %d spec endpoints unmatched, %d impl routes not in spec",
 		len(specKeys), len(implKeys), len(missing), len(extra))
+}
+
+func competitionRegistry() []specEndpoint {
+	return []specEndpoint{
+		{"GET", "/competition/healthz", nil, rt(competition.HealthResult{})},
+		{"GET", "/competition/readyz", nil, rt(competition.ReadinessResult{})},
+		{"GET", "/competition/info", nil, rt(competition.InfoResult{})},
+		{"POST", "/competition/generate-round", rt(competition.GenerateRoundArgs{}), rt(competition.RoundResult{})},
+		{"GET", "/competition/round/{roundId}/providers.yml", nil, nil},
+		{"POST", "/competition/score", rt(competition.ScoreArgs{}), rt(competition.ScoreAcceptedResult{})},
+		{"GET", "/competition/score/{jobId}", nil, rt(competition.ScoreJobResult{})},
+	}
+}
+
+func TestCompetitionSpecConformance(t *testing.T) {
+	spec := loadCompetitionSpec(t)
+	checker := &conformanceChecker{t: t, spec: spec}
+	for _, ep := range competitionRegistry() {
+		endpoint := ep.method + " " + ep.path
+		if !spec.hasOperation(ep.method, ep.path) {
+			t.Errorf("[%s] endpoint is in the registry but not found in the spec", endpoint)
+			continue
+		}
+		req, resp := spec.operation(ep.method, ep.path)
+		if ep.argType != nil && req != nil {
+			checker.check(endpoint+" (request)", "", req, ep.argType, 0)
+		}
+		if ep.resultType != nil && resp != nil {
+			checker.check(endpoint+" (response)", "", resp, ep.resultType, 0)
+		}
+	}
+}
+
+func TestCompetitionSpecRoutesImplemented(t *testing.T) {
+	spec := loadCompetitionSpec(t)
+	implKeys := implRouteKeys()
+	for path, methodsAny := range spec.paths {
+		for method := range asMap(methodsAny) {
+			switch method {
+			case "get", "post", "put", "delete", "patch":
+			default:
+				continue
+			}
+			key := strings.ToUpper(method) + " " + normalizePath(path)
+			if !implKeys[key] {
+				t.Errorf("competition spec endpoint %q has no matching route in Routes()", key)
+			}
+		}
+	}
+}
+
+func TestCompetitionSpecSecurity(t *testing.T) {
+	spec := loadCompetitionSpec(t)
+	rootSecurity := asSlice(spec.root["security"])
+	if len(rootSecurity) != 1 || asMap(rootSecurity[0])["CompetitionBearerAuth"] == nil {
+		t.Fatal("competition spec must default every operation to CompetitionBearerAuth")
+	}
+	public := map[string]bool{
+		"GET /competition/healthz":                       true,
+		"GET /competition/info":                          true,
+		"GET /competition/round/{roundId}/providers.yml": true,
+	}
+	for path, methodsAny := range spec.paths {
+		for method, operationAny := range asMap(methodsAny) {
+			if method != "get" && method != "post" {
+				continue
+			}
+			key := strings.ToUpper(method) + " " + path
+			operation := asMap(operationAny)
+			security, overrides := operation["security"]
+			if public[key] {
+				if !overrides || len(asSlice(security)) != 0 {
+					t.Errorf("public operation %s must explicitly override security with []", key)
+				}
+			} else if overrides {
+				t.Errorf("authenticated operation %s must inherit root bearer security", key)
+			}
+		}
+	}
 }

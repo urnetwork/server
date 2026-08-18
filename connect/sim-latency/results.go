@@ -26,11 +26,17 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-const runStatsSchema = 1
+// Schema 2 adds the official-evaluation lifecycle fields. CSV columns remain
+// unchanged; schema 2 is the scorer's proof that 200 responses were subjected
+// to the complete-body validation in client.go. Analysis/compare continue to
+// read schema-1 sidecars for historical local data, while the official scorer
+// rejects them fail-closed.
+const runStatsSchema = 2
 const runStatsKind = "sim-latency-run"
 
 // throughput quantiles only count transfers at least this large, so they
@@ -88,6 +94,27 @@ type RunStats struct {
 	Arch          string            `json:"arch,omitempty"`
 	NumCpu        int               `json:"num_cpu,omitempty"`
 	Flags         map[string]string `json:"flags,omitempty"`
+
+	// official evaluation identity and frozen scoring inputs
+	ScoreSchema            int    `json:"score_schema,omitempty"`
+	ScorerVersion          string `json:"scorer_version,omitempty"`
+	EvaluationId           string `json:"evaluation_id,omitempty"`
+	Official               bool   `json:"official,omitempty"`
+	RequestTimeoutMs       int64  `json:"request_timeout_ms,omitempty"`
+	StatsRoot              string `json:"stats_root,omitempty"`
+	StatsInstanceId        string `json:"stats_instance_id,omitempty"`
+	ResultsCsvSha256       string `json:"results_csv_sha256,omitempty"`
+	ResultsCsvBytes        int64  `json:"results_csv_bytes,omitempty"`
+	ResourceReport         string `json:"resource_report_path,omitempty"`
+	AccountingReport       string `json:"accounting_snapshot_path,omitempty"`
+	AccountingSource       string `json:"accounting_source_path,omitempty"`
+	AccountingSourceSha256 string `json:"accounting_source_sha256,omitempty"`
+	AccountingSourceBytes  int64  `json:"accounting_source_bytes,omitempty"`
+	FinalMarker            string `json:"final_marker_path,omitempty"`
+	CompletionState        string `json:"completion_state,omitempty"`
+	CompletedUnixMs        int64  `json:"completed_unix_ms,omitempty"`
+	IncompleteCode         string `json:"incomplete_code,omitempty"`
+	IncompleteMessage      string `json:"incomplete_message,omitempty"`
 
 	MeasureStartMs int64 `json:"measure_start_ms"`
 	MeasureEndMs   int64 `json:"measure_end_ms"`
@@ -452,7 +479,7 @@ func writeRunStats(path string, stats *RunStats) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(statsBytes, '\n'), 0o644)
+	return writeAtomicFile(path, append(statsBytes, '\n'), 0o644)
 }
 
 func readRunStats(path string) (*RunStats, error) {
@@ -467,13 +494,20 @@ func readRunStats(path string) (*RunStats, error) {
 	if stats.Kind != runStatsKind {
 		return nil, fmt.Errorf("%s: kind %q is not a %s", path, stats.Kind, runStatsKind)
 	}
+	if stats.Schema < 1 || runStatsSchema < stats.Schema {
+		return nil, fmt.Errorf("%s: unsupported run artifact schema %d", path, stats.Schema)
+	}
 	return &stats, nil
 }
 
-// sideCarPath returns the run.json path convention for a results CSV:
-// `x.csv -> x.run.json` (fallback `x.csv.run.json`).
+// Returns the run-manifest candidates for a results CSV. Official bundles use
+// `results.csv` beside `run.json`; local tools retain the older `x.run.json`
+// and `x.csv.run.json` conventions.
 func sideCarCandidates(csvPath string) []string {
 	candidates := []string{}
+	if filepath.Base(csvPath) == "results.csv" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(csvPath), "run.json"))
+	}
 	if trimmed := strings.TrimSuffix(csvPath, ".csv"); trimmed != csvPath {
 		candidates = append(candidates, trimmed+".run.json")
 	}

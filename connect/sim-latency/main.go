@@ -18,6 +18,9 @@ package main
 //             (baseline.json), from existing artifacts (--runs) or by
 //             running n fresh replicates; the error term for compare
 //   compare   decide whether run set A is statistically better than B
+//   score-baseline
+//             validate trusted same-round baseline artifacts and write the
+//             signed-manifest payload consumed by score
 //   reset     clear cross-run reliability state so runs are independent
 
 import (
@@ -43,13 +46,15 @@ func main() {
 	usage := `sim-latency: local latency/load simulation for the egress provider stack.
 
 Usage:
-  sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>]
-  sim-latency run [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>]
-  sim-latency fleet --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>]
+  sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>] [--quality-window=<n>]
+  sim-latency run [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>]
+  sim-latency fleet --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
   sim-latency analyze --run=<path> [--window=<w>] [--out=<path>] [--json]
   sim-latency baseline --runs=<paths> [--alpha=<a>] [--out=<path>]
-  sim-latency baseline [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
+  sim-latency baseline [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
+  sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
+  sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
   sim-latency reset
   sim-latency -h | --help
   sim-latency --version
@@ -57,11 +62,12 @@ Usage:
 Options:
   -h --help              Show this screen.
   --version              Show version.
-  --out=<path>           Output path (init: providers.yml; analyze: run.json; variance: environment.json).
+  --out=<path>           Output path for the selected file-producing command.
   --count=<n>            Number of providers [default: 100000].
   --clients=<n>          Client identity pool size [default: 4000].
   --rate=<m>             Mean client arrivals per minute [default: 1000].
   --seed=<s>             Master seed [default: 1].
+  --quality-window=<n>   Fixed quality-window size for frontier sweeps; 0 keeps adaptive defaults [default: 0].
   --providers=<path>     providers.yml path [default: providers.yml].
   --site-home=<dir>      Site dir for settings + stats [default: .sim-site].
   --ramp=<d>             Warm-up: fleet connect-stagger duration [default: 1m].
@@ -74,21 +80,37 @@ Options:
   --reset                Clear cross-run reliability state (local pg + redis) before the run.
   --meta=<path>          Run summary side-car (run.json) output [default: run.json].
   --duration=<d>         Measured window duration [default: 30m].
+  --request-timeout=<d>  Crawl deadline and failed-observation score ceiling [default: 2m].
   --fleet-shards=<n>     Provider fleet subprocess count (0 = in-process) [default: 0].
   --site-listen=<addr>   Fake site listen address [default: 127.0.0.1:0].
   --hosts=<n>            Exchange host/ws-port count [default: 4].
   --api-port=<p>         Api listen port [default: 7640].
+  --evaluation-id=<id>   Evaluation id included in logs and artifact metadata.
+  --official             Enforce a clean, revision-pinned official build.
+  --expected-revision=<sha>  Revision required by --official.
+  --resource-report=<path>  Resource report path recorded in run.json.
+  --accounting-report=<path>  Accounting snapshot path recorded in run.json.
+  --accounting-source=<path>  Trusted provider-counter source written by the simulator.
+  --accounting-command-fd=<n>  Parent-to-fleet accounting control descriptor (internal).
+  --accounting-response-fd=<n>  Fleet-to-parent accounting response descriptor (internal).
+  --final-marker=<path>  Completion marker path (defaults to <meta>.complete.json).
   --shard=<i/n>          Fleet shard index/count.
   --api-url=<url>        Api url (fleet).
   --ws-urls=<urls>       Comma-separated exchange ws urls (fleet).
-  --run=<path>           A run artifact: results csv (with run.json side-car) or run.json.
+  --run=<path>           A run artifact; score accepts comma-separated candidate CSV replicates.
   --runs=<paths>         Comma-separated existing replicate artifacts (csv or run.json);
                          without it, baseline measures --replicates fresh runs itself.
   --replicates=<n>       Baseline replicate runs to measure [default: 5].
   --out-dir=<dir>        Directory for measured replicate artifacts [default: baseline-runs].
   --a=<paths>            Side A run artifact(s), comma-separated.
   --b=<paths>            Side B run artifact(s), comma-separated.
-  --baseline=<path>      baseline.json noise floor written by sim-latency baseline.
+  --baseline=<path>      Compare noise floor, or signed score baseline manifest (score).
+  --round-id=<id>        Competition round id bound into a score baseline manifest.
+  --takeover-margin=<m>  Frozen fractional improvement required for takeover.
+  --stderr=<paths>       Comma-separated candidate stderr artifacts (score).
+  --accounting=<paths>   Comma-separated immutable accounting snapshots (score).
+  --samples=<paths>      Comma-separated FindProviders2 corpora (score).
+  --marker=<paths>       Comma-separated completion markers (score).
   --window=<w>           Measure window override "<startMs>,<endMs>" for a csv without run.json.
   --alpha=<a>            Significance level stored with the baseline [default: 0.05].
   --p=<a>                One-sided significance threshold [default: 0.05].
@@ -121,6 +143,10 @@ Options:
 		runBaselineCmd(opts)
 	case optBool(opts, "compare"):
 		runCompare(opts)
+	case optBool(opts, "score-baseline"):
+		runScoreBaseline(opts)
+	case optBool(opts, "score"):
+		runScore(opts)
 	case optBool(opts, "reset"):
 		requireLocalEnvironment("reset")
 		runReset()
@@ -141,15 +167,30 @@ func runInit(opts docopt.Opts) {
 	clients := optInt(opts, "--clients", 4000)
 	rate := float64(optInt(opts, "--rate", 1000))
 	seed := int64(optInt(opts, "--seed", 1))
+	qualityWindow := optInt(opts, "--quality-window", 0)
 
-	config := defaultConfig(seed, count, clients, rate)
-	if err := generateFleet(config); err != nil {
-		fatalf("generate fleet: %s", err)
+	config, err := generatedConfig(seed, count, clients, rate, qualityWindow)
+	if err != nil {
+		fatalf("invalid generated config: %s", err)
 	}
 	if err := SaveConfig(out, config); err != nil {
 		fatalf("save config: %s", err)
 	}
-	logf("wrote %s: %d providers, %d client pool, seed %d", out, count, clients, seed)
+	logf("wrote %s: %d providers, %d client pool, seed %d, quality window %d", out, count, clients, seed, qualityWindow)
+}
+
+func generatedConfig(seed int64, count int, clients int, rate float64, qualityWindow int) (*Config, error) {
+	config := defaultConfig(seed, count, clients, rate)
+	config.Clients.QualityWindowSize = qualityWindow
+	// validate requires the sampled fleet to be present. Generate it first, then
+	// validate the complete artifact that will actually be written.
+	if err := generateFleet(config); err != nil {
+		return nil, fmt.Errorf("generate fleet: %w", err)
+	}
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	return config, nil
 }
 
 func runRun(opts docopt.Opts) {
@@ -171,17 +212,25 @@ func runRun(opts docopt.Opts) {
 	servicesConfig.AnnounceTimeout = optDuration(opts, "--announce-timeout", servicesConfig.AnnounceTimeout)
 
 	options := &RunOptions{
-		ConfigPath:  providers,
-		SiteHome:    absSiteHome,
-		Ramp:        optDuration(opts, "--ramp", 1*time.Minute),
-		Prewarm:     optDuration(opts, "--prewarm", 13*time.Hour),
-		Settle:      optDuration(opts, "--settle", 1*time.Minute),
-		Duration:    optDuration(opts, "--duration", 30*time.Minute),
-		FleetShards: optInt(opts, "--fleet-shards", 0),
-		SiteListen:  optString(opts, "--site-listen", "127.0.0.1:0"),
-		Services:    servicesConfig,
-		MetaPath:    optString(opts, "--meta", "run.json"),
-		Reset:       optBool(opts, "--reset"),
+		ConfigPath:       providers,
+		SiteHome:         absSiteHome,
+		Ramp:             optDuration(opts, "--ramp", 1*time.Minute),
+		Prewarm:          optDuration(opts, "--prewarm", 13*time.Hour),
+		Settle:           optDuration(opts, "--settle", 1*time.Minute),
+		Duration:         optDuration(opts, "--duration", 30*time.Minute),
+		RequestTimeout:   optDuration(opts, "--request-timeout", 2*time.Minute),
+		FleetShards:      optInt(opts, "--fleet-shards", 0),
+		SiteListen:       optString(opts, "--site-listen", "127.0.0.1:0"),
+		Services:         servicesConfig,
+		MetaPath:         optString(opts, "--meta", "run.json"),
+		Reset:            optBool(opts, "--reset"),
+		EvaluationId:     optString(opts, "--evaluation-id", ""),
+		Official:         optBool(opts, "--official"),
+		ExpectedRevision: optString(opts, "--expected-revision", ""),
+		ResourceReport:   optString(opts, "--resource-report", ""),
+		AccountingReport: optString(opts, "--accounting-report", ""),
+		AccountingSource: optString(opts, "--accounting-source", ""),
+		FinalMarker:      optString(opts, "--final-marker", ""),
 	}
 	if err := Run(options); err != nil {
 		fatalf("run: %s", err)
@@ -194,6 +243,11 @@ func runFleet(opts docopt.Opts) {
 	apiUrl, _ := opts.String("--api-url")
 	wsUrlsStr, _ := opts.String("--ws-urls")
 	ramp := optDuration(opts, "--ramp", 10*time.Minute)
+	evaluationId := optString(opts, "--evaluation-id", "")
+	accountingCommandFd := optInt(opts, "--accounting-command-fd", 0)
+	accountingResponseFd := optInt(opts, "--accounting-response-fd", 0)
+	setLogEvaluationId(evaluationId)
+	defer setLogEvaluationId("")
 
 	index, count := parseShard(shard)
 	wsUrls := strings.Split(wsUrlsStr, ",")
@@ -209,11 +263,30 @@ func runFleet(opts docopt.Opts) {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	NewFleet(ctx, config, entries, apiUrl, wsUrls, wsPorts, ramp)
+	fleet, err := NewFleet(ctx, config, entries, apiUrl, wsUrls, wsPorts, ramp)
+	if err != nil {
+		fatalf("fleet shard %d/%d: %s", index, count, err)
+	}
+	accountingDone, err := startFleetAccountingServer(
+		ctx,
+		fleet,
+		accountingCommandFd,
+		accountingResponseFd,
+	)
+	if err != nil {
+		fatalf("fleet shard %d/%d accounting setup: %s", index, count, err)
+	}
 
 	<-ctx.Done()
 	logf("fleet shard %d/%d draining", index, count)
-	time.Sleep(1 * time.Second)
+	if err := fleet.Wait(); err != nil {
+		fatalf("fleet shard %d/%d drain: %s", index, count, err)
+	}
+	if accountingDone != nil {
+		if err := <-accountingDone; err != nil {
+			fatalf("fleet shard %d/%d accounting: %s", index, count, err)
+		}
+	}
 }
 
 // ---- env + option helpers ----

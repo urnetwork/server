@@ -1,0 +1,13 @@
+{
+  "userns-remap": "default",
+  "no-new-privileges": true,
+  "userland-proxy": false,
+  "log-driver": "local",
+  "log-opts": {
+    "max-size": "16m",
+    "max-file": "2",
+    "compress": "true"
+  },
+  "shutdown-timeout": 45,
+  "ipv6": false
+}

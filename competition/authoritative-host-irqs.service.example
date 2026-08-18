@@ -1,0 +1,15 @@
+[Unit]
+Description=URnetwork authoritative evaluator IRQ placement
+After=urnetwork-authoritative-host-controls.service local-fs.target
+Before=containerd.service docker.service competitionworker.service
+Requires=urnetwork-authoritative-host-controls.service
+ConditionFileIsExecutable=/usr/local/libexec/urnetwork/authoritative-host-irqs
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/urnetwork/authoritative-host-irqs --apply
+RemainAfterExit=yes
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

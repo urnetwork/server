@@ -100,6 +100,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 			},
 		}
 		authority := redisKeys.RequireString("authority")
+		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
 		host, _, _ := net.SplitHostPort(authority)
 		dialContext := func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			// always connect to the original host
@@ -116,7 +117,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		if cluster {
 			options := &redis.ClusterOptions{
 				Addrs:           []string{authority},
-				Password:        redisKeys.RequireString("password"),
+				Password:        password,
 				MaxRetries:      maxRetries,
 				MinIdleConns:    minConnections,
 				MaxIdleConns:    maxConnections,
@@ -143,7 +144,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 			// see https://github.com/redis/go-redis/blob/master/options.go#L31
 			options := &redis.Options{
 				Addr:     redisKeys.RequireString("authority"),
-				Password: redisKeys.RequireString("password"),
+				Password: password,
 				DB:       redisKeys.RequireInt("db"),
 				// Addr: "192.168.208.135:6379",
 				// Password: "",

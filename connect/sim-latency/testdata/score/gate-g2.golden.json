@@ -1,0 +1,103 @@
+{
+  "score_schema": 1,
+  "raw_score": 100,
+  "normalized_score": 100,
+  "placeable": false,
+  "gates": {
+    "G1_success": {
+      "passed": true,
+      "details": {
+        "absolute_min_inclusive": 0.97,
+        "baseline": 1,
+        "baseline_minus_max": 0.99,
+        "candidate": 1
+      }
+    },
+    "G2_volume": {
+      "passed": false,
+      "details": {
+        "bytes_max": 10500,
+        "bytes_min": 9500,
+        "candidate_bytes": 9400,
+        "candidate_requests": 94,
+        "request_max": 105,
+        "request_min": 95
+      }
+    },
+    "G3_path_integrity": {
+      "passed": true,
+      "details": {
+        "minimum_inclusive": 0.95,
+        "minimum_replicate_coverage": 1
+      }
+    },
+    "G4_matchmaking": {
+      "passed": true,
+      "details": {
+        "all_pools_nonempty": true,
+        "all_replicates_have_samples": true,
+        "baseline_load_p95_ms": 10,
+        "baseline_pool_p05": 100,
+        "candidate_load_p95_ms": 10,
+        "candidate_pool_p05": 100,
+        "maximum_inclusive_ms": 12.5,
+        "pool_minimum_inclusive": 90
+      }
+    },
+    "G5_stability": {
+      "passed": true,
+      "details": {
+        "all_replicates_clean": true
+      }
+    },
+    "G6_resources": {
+      "passed": true,
+      "details": {
+        "all_replicates_within_limits": true
+      }
+    }
+  },
+  "diagnostics": {
+    "round_id": "round-1",
+    "replicate_count": 1,
+    "request_timeout_ms": 1000,
+    "takeover_margin": 0.01,
+    "baseline_takeover_raw_max": 99,
+    "baseline_takeover_eligible": false,
+    "baseline": {
+      "raw_score": 100,
+      "success_rate": 1,
+      "request_count": 100,
+      "received_bytes": 10000,
+      "findproviders_load_p95_ms": 10,
+      "findproviders_pool_p05": 100
+    },
+    "candidate": {
+      "raw_score": 100,
+      "success_rate": 1,
+      "request_count": 94,
+      "received_bytes": 9400,
+      "accounting_coverage": 1,
+      "findproviders_load_p95_ms": 10,
+      "findproviders_pool_p05": 100
+    },
+    "replicates": [
+      {
+        "evaluation_id": "eval-fixture-1",
+        "raw_score": 100,
+        "success_rate": 1,
+        "request_count": 94,
+        "received_bytes": 9400,
+        "provider_egress_bytes": 9400,
+        "accounting_coverage": 1,
+        "findproviders_samples": 1,
+        "findproviders_empty_pools": 0,
+        "findproviders_load_p95_ms": 10,
+        "findproviders_pool_p05": 100,
+        "stability_findings": [],
+        "resource_findings": []
+      }
+    ]
+  },
+  "eval_error": null
+}

@@ -25,6 +25,7 @@ package stats
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,8 +55,11 @@ type Stats struct {
 	settings   *streamWriterSettings
 
 	stateLock sync.Mutex
+	closed    bool
 	// created on first append per stream
 	streamWriters map[string]*streamWriter
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 // Config overrides the defaults resolved by Enable. A nil field takes the
@@ -180,18 +184,26 @@ func (self *Stats) Append(stream string, message proto.Message) {
 	if !self.enabled {
 		return
 	}
-	writer := self.streamWriter(stream)
+
+	// Keep writer lookup/creation and the non-blocking enqueue in the same
+	// lifecycle critical section. Close can therefore establish a hard cutoff:
+	// every append before it is included in the writer snapshot, and every
+	// append after it is a no-op rather than creating an unjoined writer.
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.closed {
+		return
+	}
+	writer := self.streamWriterLocked(stream)
 	if writer == nil {
 		return
 	}
 	writer.append(message)
 }
 
-func (self *Stats) streamWriter(stream string) *streamWriter {
+// streamWriterLocked returns the named writer while stateLock is held.
+func (self *Stats) streamWriterLocked(stream string) *streamWriter {
 	stream = sanitizeLabel(stream)
-
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
 
 	if writer, ok := self.streamWriters[stream]; ok {
 		return writer
@@ -221,6 +233,15 @@ func (self *Stats) StreamDir(stream string) string {
 		return ""
 	}
 	return filepath.Join(self.root, sanitizeLabel(stream))
+}
+
+// Root returns this process's stats root. Empty when disabled. Evaluation
+// manifests record it so samples from concurrent jobs cannot be mixed.
+func (self *Stats) Root() string {
+	if !self.enabled {
+		return ""
+	}
+	return self.root
 }
 
 // LoadStream reads every frame this process has written to stream, across its
@@ -292,22 +313,28 @@ func LoadStreamTyped[T proto.Message](dir string, newMessage func() T, onMessage
 	})
 }
 
-// Close finalizes every stream's open segment and stops the writers.
-func (self *Stats) Close() {
+// Close drains every accepted frame, durably finalizes each stream's open
+// segment, and stops the writers. A non-nil error means the resulting corpus
+// is incomplete and must not be scored.
+func (self *Stats) Close() error {
 	if !self.enabled {
-		return
+		return nil
 	}
-	self.stateLock.Lock()
-	writers := make([]*streamWriter, 0, len(self.streamWriters))
-	for _, writer := range self.streamWriters {
-		writers = append(writers, writer)
-	}
-	self.streamWriters = map[string]*streamWriter{}
-	self.stateLock.Unlock()
+	self.closeOnce.Do(func() {
+		self.stateLock.Lock()
+		self.closed = true
+		writers := make([]*streamWriter, 0, len(self.streamWriters))
+		for _, writer := range self.streamWriters {
+			writers = append(writers, writer)
+		}
+		self.streamWriters = map[string]*streamWriter{}
+		self.stateLock.Unlock()
 
-	for _, writer := range writers {
-		writer.close()
-	}
+		for _, writer := range writers {
+			self.closeErr = errors.Join(self.closeErr, writer.close())
+		}
+	})
+	return self.closeErr
 }
 
 // statsHmacSalt reads the anonymization salt from the stats vault resource.

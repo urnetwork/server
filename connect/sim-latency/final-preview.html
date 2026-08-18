@@ -1,0 +1,883 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>sim-latency — final evaluation preview</title>
+  <style>
+    :root {
+      --ink: #e9f1f7;
+      --muted: #9fb1bf;
+      --dim: #6f8392;
+      --night: #071016;
+      --panel: #0c1820;
+      --panel-2: #10222c;
+      --line: #203541;
+      --cyan: #66e5d6;
+      --cyan-2: #2fb7ae;
+      --amber: #ffbd66;
+      --coral: #ff7f73;
+      --green: #91e6a7;
+      --blue: #76a9ff;
+      --shadow: 0 22px 70px rgba(0, 0, 0, .28);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 0%, rgba(47, 183, 174, .12), transparent 32rem),
+        radial-gradient(circle at 92% 8%, rgba(118, 169, 255, .09), transparent 34rem),
+        var(--night);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    a { color: var(--cyan); }
+
+    .shell {
+      width: min(1180px, calc(100% - 36px));
+      margin: 0 auto;
+    }
+
+    .masthead {
+      min-height: 520px;
+      display: grid;
+      align-content: center;
+      padding: 64px 0 48px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow, .section-number, .micro-label {
+      color: var(--cyan);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      gap: 9px;
+      align-items: center;
+      width: fit-content;
+      padding: 8px 12px;
+      border: 1px solid rgba(255, 189, 102, .38);
+      border-radius: 999px;
+      color: #ffdba8;
+      background: rgba(255, 189, 102, .08);
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .status-pill::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--amber);
+      box-shadow: 0 0 18px rgba(255, 189, 102, .7);
+      content: "";
+    }
+
+    h1 {
+      max-width: 940px;
+      margin: 24px 0 18px;
+      font-size: clamp(48px, 8vw, 98px);
+      font-weight: 780;
+      letter-spacing: -.065em;
+      line-height: .93;
+    }
+
+    h1 span { color: var(--cyan); }
+
+    .lede {
+      max-width: 780px;
+      margin: 0;
+      color: #bfd0db;
+      font-size: clamp(18px, 2.2vw, 25px);
+      letter-spacing: -.015em;
+    }
+
+    .mast-grid {
+      display: grid;
+      grid-template-columns: 1.7fr repeat(3, minmax(140px, .55fr));
+      gap: 1px;
+      margin-top: 46px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .mast-cell {
+      min-height: 112px;
+      padding: 22px;
+      background: rgba(12, 24, 32, .95);
+    }
+
+    .mast-cell strong {
+      display: block;
+      margin-top: 7px;
+      font-size: 24px;
+      letter-spacing: -.035em;
+    }
+
+    .mast-cell p {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    main { padding-bottom: 90px; }
+
+    section {
+      padding: 88px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr);
+      gap: 48px;
+      align-items: end;
+      margin-bottom: 38px;
+    }
+
+    h2 {
+      margin: 8px 0 0;
+      max-width: 760px;
+      font-size: clamp(34px, 5vw, 58px);
+      line-height: 1.02;
+      letter-spacing: -.05em;
+    }
+
+    .section-intro {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(145deg, rgba(16, 34, 44, .9), rgba(9, 21, 28, .94));
+      box-shadow: var(--shadow);
+    }
+
+    .topology {
+      padding: 26px;
+      overflow: hidden;
+    }
+
+    .topology svg, .score-plot svg, .timeline svg, .pipeline svg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .legend-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend-key {
+      display: inline-flex;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1.45fr .75fr;
+      gap: 22px;
+      align-items: stretch;
+    }
+
+    .readiness {
+      display: grid;
+      gap: 10px;
+    }
+
+    .readiness-item {
+      display: grid;
+      grid-template-columns: 12px 1fr;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: rgba(7, 16, 22, .46);
+    }
+
+    .readiness-item i {
+      width: 9px;
+      height: 9px;
+      margin-top: 7px;
+      border-radius: 50%;
+      background: var(--amber);
+      box-shadow: 0 0 14px rgba(255, 189, 102, .5);
+    }
+
+    .readiness-item.blocked i { background: var(--coral); box-shadow: 0 0 14px rgba(255, 127, 115, .45); }
+    .readiness-item.ready i { background: var(--green); box-shadow: 0 0 14px rgba(145, 230, 167, .45); }
+
+    .readiness-item strong { display: block; font-size: 14px; }
+    .readiness-item span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+
+    .callout {
+      margin-top: 18px;
+      padding: 17px 18px;
+      border-left: 3px solid var(--amber);
+      border-radius: 0 10px 10px 0;
+      color: #d9e4ea;
+      background: rgba(255, 189, 102, .07);
+      font-size: 13px;
+    }
+
+    .score-plot { padding: 26px 26px 18px; }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .metric {
+      min-height: 132px;
+      padding: 19px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(7, 16, 22, .5);
+    }
+
+    .metric .value {
+      display: block;
+      margin-top: 10px;
+      font-size: clamp(25px, 3vw, 34px);
+      font-weight: 780;
+      line-height: 1;
+      letter-spacing: -.05em;
+    }
+
+    .metric p { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+
+    .evidence-note {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 13px;
+      margin-top: 18px;
+      padding: 18px;
+      border: 1px solid rgba(255, 189, 102, .25);
+      border-radius: 14px;
+      background: rgba(255, 189, 102, .055);
+    }
+
+    .evidence-note strong {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      color: var(--night);
+      background: var(--amber);
+    }
+
+    .evidence-note p { margin: 0; color: #cad8e0; font-size: 13px; }
+
+    .timeline { padding: 28px; }
+
+    .proof-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .proof-card {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(7, 16, 22, .45);
+    }
+
+    .proof-card h3 { margin: 10px 0 8px; font-size: 18px; letter-spacing: -.025em; }
+    .proof-card p { margin: 0; color: var(--muted); font-size: 13px; }
+
+    .decision-ruler {
+      position: relative;
+      height: 74px;
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background:
+        linear-gradient(90deg, rgba(102, 229, 214, .12) 0 44%, transparent 44% 100%),
+        rgba(7, 16, 22, .45);
+      overflow: hidden;
+    }
+
+    .decision-ruler::before {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 26.89%;
+      width: 2px;
+      background: var(--cyan);
+      content: "";
+    }
+
+    .decision-ruler::after {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 80%;
+      width: 2px;
+      background: var(--amber);
+      content: "";
+    }
+
+    .ruler-label {
+      position: absolute;
+      top: 13px;
+      transform: translateX(-50%);
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .ruler-label.threshold { left: 26.89%; color: var(--cyan); }
+    .ruler-label.baseline { left: 80%; color: var(--amber); }
+    .ruler-caption { position: absolute; bottom: 11px; left: 14px; color: var(--dim); font-size: 10px; }
+
+    .operations {
+      display: grid;
+      grid-template-columns: 1.25fr .75fr;
+      gap: 22px;
+    }
+
+    .pipeline { padding: 26px; }
+
+    .status-stack { display: grid; gap: 12px; }
+
+    .status-card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(7, 16, 22, .48);
+    }
+
+    .status-card h3 { margin: 7px 0 8px; font-size: 17px; }
+    .status-card ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+    .status-card li + li { margin-top: 5px; }
+
+    .team-ask {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .ask {
+      padding: 18px;
+      border-top: 2px solid var(--blue);
+      border-radius: 2px 2px 12px 12px;
+      background: rgba(118, 169, 255, .07);
+    }
+
+    .ask strong { display: block; font-size: 14px; }
+    .ask span { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; }
+
+    .report-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 30px;
+      padding: 30px 0 50px;
+      color: var(--dim);
+      font-size: 11px;
+    }
+
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .cyan { color: var(--cyan); }
+    .amber { color: var(--amber); }
+    .coral { color: var(--coral); }
+    .green { color: var(--green); }
+
+    @media (max-width: 900px) {
+      .mast-grid, .metric-grid, .team-ask { grid-template-columns: repeat(2, 1fr); }
+      .section-head, .two-col, .operations { grid-template-columns: 1fr; }
+      .proof-grid { grid-template-columns: 1fr; }
+      .section-head { gap: 16px; }
+    }
+
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 22px, 1180px); }
+      .masthead { padding-top: 38px; }
+      .mast-grid, .metric-grid, .team-ask { grid-template-columns: 1fr; }
+      section { padding: 62px 0; }
+      .topology, .score-plot, .timeline, .pipeline { padding: 14px; }
+    }
+
+    @media print {
+      :root { color-scheme: light; }
+      body { color: #10222c; background: white; }
+      .masthead { min-height: auto; }
+      .panel, .mast-grid, .mast-cell, .metric, .proof-card, .status-card, .ask,
+      .decision-ruler { color: #10222c; background: white; box-shadow: none; }
+      .section-intro, .lede, .mast-cell p, .metric p, .proof-card p, .status-card ul,
+      .ask span, .legend-row, .report-footer { color: #425966; }
+      section { break-inside: avoid; padding: 42px 0; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="shell">
+      <div class="status-pill">Team preview · directional evidence · not launch approval</div>
+      <h1>Final evaluation<br><span>environment preview.</span></h1>
+      <p class="lede">What the sim-latency competition cell is designed to look like, what the exploratory evidence predicts, and what can—and cannot—be true by the ten-hour horizon.</p>
+
+      <div class="mast-grid" aria-label="Preview summary">
+        <div class="mast-cell">
+          <span class="micro-label">Forecast horizon</span>
+          <strong>2026-08-17 · 07:55 UTC</strong>
+          <p>Ten hours from evidence capture; this artifact is being delivered earlier and can be refreshed in place.</p>
+        </div>
+        <div class="mast-cell">
+          <span class="micro-label">Target cell</span>
+          <strong>1 × 12-core host</strong>
+          <p>10 evaluation + 2 management cores on the root-controlled authoritative evaluator.</p>
+        </div>
+        <div class="mast-cell">
+          <span class="micro-label">Final scale</span>
+          <strong>Unfrozen</strong>
+          <p>15k and 100k are sweep points, not commitments; qualified-host evidence decides.</p>
+        </div>
+        <div class="mast-cell">
+          <span class="micro-label">Launch gate</span>
+          <strong class="coral">Closed</strong>
+          <p>Reboot, Docker, firewall, source-freeze and calibration gates remain.</p>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section id="environment">
+      <div class="section-head">
+        <div>
+          <div class="section-number">01 · Environment</div>
+          <h2>One sealed cell on one authoritative host.</h2>
+        </div>
+        <p class="section-intro">The production unit is not “the simulator on a large box.” It is a controlled job boundary containing the candidate, simulator, PostgreSQL, Redis, resource accounting, and retained evidence.</p>
+      </div>
+
+      <div class="two-col">
+        <div class="panel topology" aria-label="Target evaluation topology">
+          <svg viewBox="0 0 900 520" role="img" aria-labelledby="topology-title topology-desc">
+            <title id="topology-title">Target single-host competition topology</title>
+            <desc id="topology-desc">Authenticated API feeds a single-job FIFO. One authoritative worker reserves two management cores and at least 24 GiB, derives one image per canonical patch, and runs isolated Compose stages on ten evaluation cores before offline scoring and artifact sealing.</desc>
+            <defs>
+              <linearGradient id="hostFill" x1="0" x2="1">
+                <stop offset="0" stop-color="#102b34"/>
+                <stop offset="1" stop-color="#0b1d27"/>
+              </linearGradient>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#66e5d6"/>
+              </marker>
+            </defs>
+
+            <rect x="18" y="28" width="180" height="78" rx="13" fill="#0a151d" stroke="#31505e"/>
+            <text x="108" y="58" text-anchor="middle" fill="#e9f1f7" font-size="15" font-weight="700">Submitter / miner</text>
+            <text x="108" y="81" text-anchor="middle" fill="#9fb1bf" font-size="11">screen · submit · poll</text>
+
+            <path d="M198 67 H258" stroke="#66e5d6" stroke-width="2" marker-end="url(#arrow)"/>
+            <rect x="270" y="28" width="210" height="78" rx="13" fill="#0d222b" stroke="#2fb7ae"/>
+            <text x="375" y="56" text-anchor="middle" fill="#e9f1f7" font-size="15" font-weight="700">Competition API</text>
+            <text x="375" y="79" text-anchor="middle" fill="#9fb1bf" font-size="11">auth · commitment · cache · reveal</text>
+
+            <path d="M480 67 H540" stroke="#66e5d6" stroke-width="2" marker-end="url(#arrow)"/>
+            <rect x="552" y="28" width="150" height="78" rx="13" fill="#0d222b" stroke="#2fb7ae"/>
+            <text x="627" y="57" text-anchor="middle" fill="#e9f1f7" font-size="15" font-weight="700">Global FIFO</text>
+            <text x="627" y="80" text-anchor="middle" fill="#9fb1bf" font-size="11">one job total</text>
+
+            <path d="M627 106 V142 H272 V170" fill="none" stroke="#66e5d6" stroke-width="2" marker-end="url(#arrow)"/>
+            <path d="M627 106 V142 H690 V170" fill="none" stroke="#66e5d6" stroke-width="2" marker-end="url(#arrow)"/>
+
+            <rect x="34" y="174" width="448" height="286" rx="18" fill="url(#hostFill)" stroke="#2fb7ae" stroke-width="1.5"/>
+            <text x="58" y="207" fill="#66e5d6" font-size="12" font-weight="800" letter-spacing="1.4">EVALUATION SET · UNTRUSTED</text>
+            <text x="458" y="207" text-anchor="end" fill="#9fb1bf" font-size="11">10 cores · 96 GiB stack ceilings</text>
+            <rect x="56" y="228" width="404" height="207" rx="14" fill="#071016" stroke="#31505e" stroke-dasharray="6 5"/>
+            <text x="76" y="255" fill="#9fb1bf" font-size="11">ONE DOCKER JOB BOUNDARY · CANDIDATE IMAGE</text>
+            <rect x="76" y="276" width="166" height="58" rx="10" fill="#10222c" stroke="#31505e"/>
+            <text x="159" y="300" text-anchor="middle" fill="#e9f1f7" font-size="13" font-weight="700">Offline build</text>
+            <text x="159" y="319" text-anchor="middle" fill="#9fb1bf" font-size="10">allowlist · tests · immutable SHA</text>
+            <rect x="264" y="276" width="176" height="58" rx="10" fill="#10222c" stroke="#31505e"/>
+            <text x="352" y="300" text-anchor="middle" fill="#e9f1f7" font-size="13" font-weight="700">sim-latency</text>
+            <text x="352" y="319" text-anchor="middle" fill="#9fb1bf" font-size="10">pinned run + scorer</text>
+            <rect x="76" y="352" width="112" height="56" rx="10" fill="#10222c" stroke="#31505e"/>
+            <text x="132" y="385" text-anchor="middle" fill="#e9f1f7" font-size="12">PostgreSQL</text>
+            <rect x="204" y="352" width="104" height="56" rx="10" fill="#10222c" stroke="#31505e"/>
+            <text x="256" y="385" text-anchor="middle" fill="#e9f1f7" font-size="12">Redis</text>
+            <rect x="324" y="352" width="116" height="56" rx="10" fill="#10222c" stroke="#31505e"/>
+            <text x="382" y="376" text-anchor="middle" fill="#e9f1f7" font-size="12">Accounting</text>
+            <text x="382" y="394" text-anchor="middle" fill="#9fb1bf" font-size="9">CPU · RAM · PID · IO</text>
+
+            <rect x="510" y="174" width="356" height="286" rx="18" fill="url(#hostFill)" stroke="#76a9ff" stroke-width="1.5"/>
+            <text x="534" y="207" fill="#76a9ff" font-size="12" font-weight="800" letter-spacing="1.4">MANAGEMENT SET · TRUSTED</text>
+            <text x="842" y="207" text-anchor="end" fill="#9fb1bf" font-size="11">2 cores · ≥24 GiB reserve</text>
+            <rect x="532" y="228" width="312" height="207" rx="14" fill="#071016" stroke="#31505e" stroke-dasharray="6 5"/>
+            <text x="552" y="255" fill="#9fb1bf" font-size="11">RUNNER · CLEANUP · EVIDENCE</text>
+            <circle cx="688" cy="331" r="60" fill="#10222c" stroke="#76a9ff"/>
+            <path d="M664 331 h48 M688 307 v48" stroke="#76a9ff" stroke-width="3"/>
+            <text x="688" y="414" text-anchor="middle" fill="#9fb1bf" font-size="11">kill path + heartbeat + re-baseline</text>
+
+            <path d="M482 420 H500" stroke="#31505e" stroke-width="2" stroke-dasharray="4 4"/>
+            <path d="M688 460 V490 H450" fill="none" stroke="#66e5d6" stroke-width="2" marker-end="url(#arrow)"/>
+            <rect x="292" y="474" width="158" height="35" rx="9" fill="#0d222b" stroke="#2fb7ae"/>
+            <text x="371" y="496" text-anchor="middle" fill="#e9f1f7" font-size="11" font-weight="700">Sealed artifact vault</text>
+          </svg>
+          <div class="legend-row">
+            <span class="legend-key cyan"><i class="dot"></i> authenticated control path</span>
+            <span class="legend-key" style="color:var(--blue)"><i class="dot"></i> reserved management plane</span>
+            <span class="legend-key" style="color:var(--dim)"><i class="dot"></i> default-deny job boundary</span>
+          </div>
+        </div>
+
+        <aside>
+          <div class="readiness">
+            <div class="readiness-item ready">
+              <i></i><div><strong>Repository control plane</strong><span>OpenAPI, role auth, hidden seeds, FIFO/cache/leases, worker protocol and scorer exist.</span></div>
+            </div>
+            <div class="readiness-item ready">
+              <i></i><div><strong>Container evaluator · reserved-boundary replay passed</strong><span>The rebuilt run used 1,800 providers, 200 clients and 80 arrivals/minute on ten evaluation cores while the worker stayed on two management cores. It authenticated the complete image identity, fresh stores and all 580 migrations, 15/15 security booleans, 54/54 evidence hashes, 6/6 published artifacts and zero-residual cleanup. The newer policy binds host <span class="mono">config/local</span> and <span class="mono">vault/local</span> directly and read-only, hashes both leaves, and excludes all/main/site. A pre-freeze live replay against the real leaves passed migrations, simulator, scoring, write denial and unchanged-hash checks; the clean post-freeze full-scale replay remains required.</span></div>
+            </div>
+            <div class="readiness-item ready">
+              <i></i><div><strong>Historical local 12-core affinity · 20/20 passed</strong><span><span class="mono">0,2,…,22</span> selected one thread from each physical core. The directional baseline is 27,175.78 ms and its paired significant-better threshold is 19,959.03 ms; both are now pre-reserve evidence and cannot be frozen.</span></div>
+            </div>
+            <div class="readiness-item">
+              <i></i><div><strong>Scale deliberately unfrozen</strong><span>Current directional evidence is 1,800 providers, 200 warm clients, 80 arrivals/min, 4 exchange hosts and 4 fleet shards. The 15,000-provider and 100,000-provider shapes are candidate frontier points. The final provider/client/arrival counts will be the largest economical point that passes qualified-host headroom, stability and reference separability.</span></div>
+            </div>
+            <div class="readiness-item blocked">
+              <i></i><div><strong>Production host boundary</strong><span>The live host now exposes exactly 12 physical CPUs: ten evaluation cores and two management cores, with SMT and turbo off, <span class="mono">performance</span>, <span class="mono">vm.overcommit_memory=1</span>, 96 GiB active-stack ceilings and at least 24 GiB reserve. Root-owned CPU and IRQ systemd units are installed, enabled and active; all 49 movable device IRQs are pinned to management CPUs <span class="mono">20,22</span>. A ten-core CPU bomb and production-limit 72 GiB OOM bomb cleaned every object in 1.019 s. Reboot proof, firewall qualification and Docker user-namespace activation remain open; Docker still needs a controlled restart to discard its pre-control 24-CPU view.</span></div>
+            </div>
+            <div class="readiness-item blocked">
+              <i></i><div><strong>Production deployment</strong><span>The evaluator now translates bind ownership through the live Docker UID/GID map, and production promotion rejects identity mapping. The hardened daemon config is staged but not installed; the current daemon is intentionally ineligible. No reboot-authenticated NUMA/kernel/microcode host digest, installed root-owned worker service, firewall proof, or published season evaluator digest exists yet. Resource-bounded offline builds, accounting, the 32 GiB evidence quota, typed invalid-build handling, hostile cleanup, full-scale replay and artifact authentication pass locally.</span></div>
+            </div>
+          </div>
+          <div class="callout"><strong>Current outcome:</strong> the historical 20-run campaign, hostile-job survival boundary and rebuilt full-scale evaluator replay are evidenced. The replacement boundary campaign authenticated 10 runs; attempt 13 is excluded after a stability failure whose evidence was lost by the old cleanup path. Diagnostics and retention are fixed, and the clean-source freeze/restart is paused pending main fixes.</div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="performance">
+      <div class="section-head">
+        <div>
+          <div class="section-number">02 · Performance evidence</div>
+          <h2>Local directional baseline measured. Production score still unfrozen.</h2>
+        </div>
+        <p class="section-intro">Lower raw milliseconds are better. The corrected campaign now supplies 20 authenticated local repetitions. Every baseline marker is paired with its significant-better threshold; neither line is production policy.</p>
+      </div>
+
+      <div class="panel score-plot">
+        <svg viewBox="0 0 1040 430" role="img" aria-labelledby="score-title score-desc">
+          <title id="score-title">Twenty corrected local raw scores with directional baseline and significant-better threshold</title>
+          <desc id="score-desc">Twenty authenticated scores range from 23,903 to 30,590 milliseconds. Their mean directional baseline is 27,175.78 milliseconds and the paired significant-better threshold is 19,959.03 milliseconds.</desc>
+          <rect x="86" y="60" width="888" height="280" rx="12" fill="#071016" stroke="#203541"/>
+          <rect x="86" y="300.8" width="888" height="39.2" fill="#66e5d6" opacity=".07"/>
+
+          <g stroke="#203541" stroke-width="1">
+            <path d="M86 60 H974 M86 140 H974 M86 220 H974 M86 300 H974"/>
+            <path d="M86 60 V340 M272.9 60 V340 M506.6 60 V340 M740.3 60 V340 M974 60 V340"/>
+          </g>
+          <g fill="#6f8392" font-size="10">
+            <text x="70" y="64" text-anchor="end">32 s</text>
+            <text x="70" y="144" text-anchor="end">28 s</text>
+            <text x="70" y="224" text-anchor="end">24 s</text>
+            <text x="70" y="304" text-anchor="end">20 s</text>
+            <text x="86" y="365" text-anchor="middle">run 1</text>
+            <text x="272.9" y="365" text-anchor="middle">5</text>
+            <text x="506.6" y="365" text-anchor="middle">10</text>
+            <text x="740.3" y="365" text-anchor="middle">15</text>
+            <text x="974" y="365" text-anchor="middle">20</text>
+          </g>
+
+          <path d="M86 156.5 H974" stroke="#ffbd66" stroke-width="3" stroke-dasharray="9 5"/>
+          <rect x="690" y="124" width="276" height="25" rx="7" fill="#3b2c18" stroke="#b47d37"/>
+          <text x="828" y="141" text-anchor="middle" fill="#ffbd66" font-size="10" font-weight="800">LOCAL BASELINE MEAN 27,175.78 ms</text>
+
+          <path d="M86 300.8 H974" stroke="#66e5d6" stroke-width="3"/>
+          <rect x="655" y="268" width="311" height="25" rx="7" fill="#133b3b" stroke="#2fb7ae"/>
+          <text x="810.5" y="285" text-anchor="middle" fill="#66e5d6" font-size="10" font-weight="800">SIGNIFICANT-BETTER ≤ 19,959.03 ms</text>
+
+          <polyline points="86.0,128.1 132.7,129.4 179.5,184.8 226.2,179.5 272.9,148.1 319.7,168.5 366.4,200.6 413.2,91.6 459.9,190.1 506.6,151.9 553.4,192.8 600.1,88.2 646.8,141.6 693.6,170.6 740.3,98.5 787.1,169.5 833.8,161.5 880.5,221.9 927.3,149.4 974.0,163.1" fill="none" stroke="#76a9ff" stroke-width="2.5" stroke-linejoin="round"/>
+          <g fill="#76a9ff" stroke="#071016" stroke-width="1.5">
+            <circle cx="86.0" cy="128.1" r="4.5"/><circle cx="132.7" cy="129.4" r="4.5"/>
+            <circle cx="179.5" cy="184.8" r="4.5"/><circle cx="226.2" cy="179.5" r="4.5"/>
+            <circle cx="272.9" cy="148.1" r="4.5"/><circle cx="319.7" cy="168.5" r="4.5"/>
+            <circle cx="366.4" cy="200.6" r="4.5"/><circle cx="413.2" cy="91.6" r="4.5"/>
+            <circle cx="459.9" cy="190.1" r="4.5"/><circle cx="506.6" cy="151.9" r="4.5"/>
+            <circle cx="553.4" cy="192.8" r="4.5"/><circle cx="600.1" cy="88.2" r="4.5"/>
+            <circle cx="646.8" cy="141.6" r="4.5"/><circle cx="693.6" cy="170.6" r="4.5"/>
+            <circle cx="740.3" cy="98.5" r="4.5"/><circle cx="787.1" cy="169.5" r="4.5"/>
+            <circle cx="833.8" cy="161.5" r="4.5"/><circle cx="880.5" cy="221.9" r="4.5"/>
+            <circle cx="927.3" cy="149.4" r="4.5"/><circle cx="974.0" cy="163.1" r="4.5"/>
+          </g>
+
+          <text x="86" y="407" fill="#6f8392" font-size="10">FAILURE-CHARGED RAW SCORE · LOWER IS BETTER ↓</text>
+          <g transform="translate(694 402)" font-size="9">
+            <line x1="0" y1="0" x2="28" y2="0" stroke="#76a9ff" stroke-width="2.5"/><text x="36" y="3" fill="#9fb1bf">20 runs</text>
+            <line x1="104" y1="0" x2="132" y2="0" stroke="#ffbd66" stroke-width="3"/><text x="140" y="3" fill="#9fb1bf">baseline</text>
+            <line x1="204" y1="0" x2="232" y2="0" stroke="#66e5d6" stroke-width="3"/><text x="240" y="3" fill="#9fb1bf">threshold</text>
+          </g>
+        </svg>
+
+        <div class="metric-grid">
+          <div class="metric">
+            <span class="micro-label">Local directional baseline</span>
+            <span class="value amber">27,176 ms</span>
+            <p>Mean of 20 authenticated corrected runs on this unqualified host.</p>
+          </div>
+          <div class="metric">
+            <span class="micro-label">Significant-better line</span>
+            <span class="value cyan">≤ 19,959 ms</span>
+            <p>26.556% below the paired baseline, plus every G1–G6 gate passing.</p>
+          </div>
+          <div class="metric">
+            <span class="micro-label">Observed noise</span>
+            <span class="value">6.639%</span>
+            <p>Run-to-run raw-score CV; sample SD is 1,804.19 ms.</p>
+          </div>
+          <div class="metric">
+            <span class="micro-label">Stability checkpoint</span>
+            <span class="value">20 / 20</span>
+            <p>All eligible; last-five SD-prefix span 7.260%, below the 10% heuristic.</p>
+          </div>
+        </div>
+
+        <div class="evidence-note">
+          <strong>!</strong>
+          <p><b>Interpretation boundary.</b> The corrected 20-run sequence spans 23,903.49–30,590.22 ms, with 99.107–99.815% success, 200/200 warm clients, and zero failed gates, empty pools, cleanup 401s, ENOBUFS, or swap. Its 27,175.78 ms local directional baseline is paired with a 19,959.03 ms significant-better threshold (26.556% margin from a 6.639% CV). Marker, manifest, CSV, config, seed, and binary identities authenticate all 20 runs, and two fresh summaries are byte-identical. This closes the historical local repetition task only: it predates the current 12-physical-CPU controls and direct-local-mount policy. Do not treat the 1,800/200/80 scale, three-minute duration, single replicate, baseline, or threshold as frozen production policy.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="qualification">
+      <div class="section-head">
+        <div>
+          <div class="section-number">03 · Qualification path</div>
+          <h2>Historical repetition is complete. Final-boundary proof restarts after source freeze.</h2>
+        </div>
+        <p class="section-intro">The historical 20-run directional campaign passes. The final-boundary series reached 10 authenticated runs before an excluded scoring failure; its clock restarts from the clean pushed image after pending main fixes.</p>
+      </div>
+
+      <div class="panel timeline">
+        <svg viewBox="0 0 1040 330" role="img" aria-labelledby="timeline-title timeline-desc">
+          <title id="timeline-title">Completed local preview milestones and post-provisioning qualification</title>
+          <desc id="timeline-desc">Code gates, the evaluator, provisional reference images, and twenty local repetitions are complete. Authoritative-host qualification, a fresh official frontier, twenty official same-seed runs, twenty independent seeds and reference separability follow.</desc>
+          <defs>
+            <marker id="timeline-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#31505e"/>
+            </marker>
+          </defs>
+          <text x="26" y="39" fill="#66e5d6" font-size="11" font-weight="800" letter-spacing="1.3">LOCAL · NOW → T+10H</text>
+          <path d="M50 115 H610" stroke="#2fb7ae" stroke-width="4"/>
+          <g>
+            <circle cx="70" cy="115" r="11" fill="#91e6a7"/><text x="70" y="83" text-anchor="middle" fill="#e9f1f7" font-size="11" font-weight="700">DNS root fix</text><text x="70" y="145" text-anchor="middle" fill="#9fb1bf" font-size="9">deterministic loss</text>
+            <circle cx="225" cy="115" r="11" fill="#91e6a7"/><text x="225" y="83" text-anchor="middle" fill="#e9f1f7" font-size="11" font-weight="700">Package gate</text><text x="225" y="145" text-anchor="middle" fill="#9fb1bf" font-size="9">full suite green</text>
+            <circle cx="380" cy="115" r="11" fill="#91e6a7"/><text x="380" y="83" text-anchor="middle" fill="#e9f1f7" font-size="11" font-weight="700">Evaluator E2E</text><text x="380" y="145" text-anchor="middle" fill="#9fb1bf" font-size="9">artifacts authenticated</text>
+            <circle cx="535" cy="115" r="11" fill="#91e6a7"/><text x="535" y="83" text-anchor="middle" fill="#e9f1f7" font-size="11" font-weight="700">20 clean local</text><text x="535" y="145" text-anchor="middle" fill="#9fb1bf" font-size="9">authenticated</text>
+          </g>
+          <rect x="610" y="76" width="184" height="78" rx="12" fill="#2b1718" stroke="#ff7f73"/>
+          <text x="702" y="105" text-anchor="middle" fill="#ff7f73" font-size="11" font-weight="800">EXTERNAL BOUNDARY</text>
+          <text x="702" y="128" text-anchor="middle" fill="#d9b0ae" font-size="10">1 authoritative frozen host</text>
+          <path d="M794 115 H984" stroke="#31505e" stroke-width="3" stroke-dasharray="7 6" marker-end="url(#timeline-arrow)"/>
+          <text x="890" y="91" text-anchor="middle" fill="#9fb1bf" font-size="10">official clock starts here</text>
+
+          <text x="26" y="205" fill="#76a9ff" font-size="11" font-weight="800" letter-spacing="1.3">OFFICIAL · AFTER PROVISIONING</text>
+          <path d="M50 270 H990" stroke="#31505e" stroke-width="3"/>
+          <g fill="#10222c" stroke="#76a9ff">
+            <circle cx="110" cy="270" r="12"/><circle cx="300" cy="270" r="12"/><circle cx="490" cy="270" r="12"/><circle cx="680" cy="270" r="12"/><circle cx="870" cy="270" r="12"/>
+          </g>
+          <g text-anchor="middle" font-size="10">
+            <text x="110" y="237" fill="#e9f1f7">Host identity</text><text x="110" y="301" fill="#9fb1bf">self-check + boundary</text>
+            <text x="300" y="237" fill="#e9f1f7">Scale sweep</text><text x="300" y="301" fill="#9fb1bf">impair on/off</text>
+            <text x="490" y="237" fill="#e9f1f7">20 same seed</text><text x="490" y="301" fill="#9fb1bf">σrun + resources</text>
+            <text x="680" y="237" fill="#e9f1f7">20 hidden seeds</text><text x="680" y="301" fill="#9fb1bf">round spread</text>
+            <text x="870" y="237" fill="#e9f1f7">References 19/20</text><text x="870" y="301" fill="#9fb1bf">freeze duration · R · margin</text>
+          </g>
+        </svg>
+
+        <div class="proof-grid">
+          <div class="proof-card">
+            <span class="micro-label green">Implemented</span>
+            <h3>Deterministic evaluation contract</h3>
+            <p>Complete-body success, corrected arrival/drain boundary, immutable manifests, strict scorer, G1–G6 and score-baseline builder.</p>
+          </div>
+          <div class="proof-card">
+            <span class="micro-label green">Delivered before T+10h</span>
+            <h3>Clean package + evaluator + repetitions</h3>
+            <p>The DNS fixture is deterministic, contract cleanup is joined, exact local-only mounts and failed-evidence retention pass, all three provisional reference images authenticate, and all 20 historical local repetitions pass.</p>
+          </div>
+          <div class="proof-card">
+            <span class="micro-label coral">Cannot infer locally</span>
+            <h3>Production noise and separability</h3>
+            <p>The reference inputs are built, but twenty clean official repetitions, twenty independent seeds, and their intended ordering on at least 19/20 seeds remain mandatory.</p>
+          </div>
+        </div>
+
+        <div class="decision-ruler" aria-label="Local directional baseline and significant-better threshold, normalized">
+          <span class="ruler-label threshold">significant ≤ 73.444</span>
+          <span class="ruler-label baseline">baseline = 100</span>
+          <span class="ruler-caption">normalized local directional ruler (60–110 scale) · lower is better · all validity gates still apply</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="operations">
+      <div class="section-head">
+        <div>
+          <div class="section-number">04 · Competition operations</div>
+          <h2>The service path exists. Deployment is the remaining security claim.</h2>
+        </div>
+        <p class="section-intro">The API and miner-facing workflow are implemented against <span class="mono">sn/api/competition.yml</span>. The preview distinguishes software behavior from containment that only a root-owned evaluator can prove.</p>
+      </div>
+
+      <div class="operations">
+        <div class="panel pipeline">
+          <svg viewBox="0 0 760 430" role="img" aria-labelledby="pipeline-title pipeline-desc">
+            <title id="pipeline-title">Competition API workflow</title>
+            <desc id="pipeline-desc">Operator creates hidden-seed round, submitter sends structurally screened patch, FIFO worker runs evaluator and scorer, submitter polls immutable result, then the round reveals seed and providers.</desc>
+            <defs>
+              <marker id="pipe-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#66e5d6"/>
+              </marker>
+            </defs>
+            <g font-family="ui-sans-serif, system-ui">
+              <rect x="34" y="42" width="195" height="84" rx="14" fill="#10222c" stroke="#2fb7ae"/>
+              <text x="55" y="70" fill="#66e5d6" font-size="10" font-weight="800">01 · GENERATE</text>
+              <text x="55" y="94" fill="#e9f1f7" font-size="14" font-weight="700">Hidden-seed round</text>
+              <text x="55" y="112" fill="#9fb1bf" font-size="10">commit providers SHA-256</text>
+
+              <path d="M229 84 H280" stroke="#66e5d6" stroke-width="2" marker-end="url(#pipe-arrow)"/>
+              <rect x="292" y="42" width="195" height="84" rx="14" fill="#10222c" stroke="#2fb7ae"/>
+              <text x="313" y="70" fill="#66e5d6" font-size="10" font-weight="800">02 · SUBMIT</text>
+              <text x="313" y="94" fill="#e9f1f7" font-size="14" font-weight="700">Canonical patch hash</text>
+              <text x="313" y="112" fill="#9fb1bf" font-size="10">patch bytes · no remote fetch</text>
+
+              <path d="M487 84 H538" stroke="#66e5d6" stroke-width="2" marker-end="url(#pipe-arrow)"/>
+              <rect x="550" y="42" width="176" height="84" rx="14" fill="#10222c" stroke="#2fb7ae"/>
+              <text x="571" y="70" fill="#66e5d6" font-size="10" font-weight="800">03 · FIFO</text>
+              <text x="571" y="94" fill="#e9f1f7" font-size="14" font-weight="700">Lease one worker</text>
+              <text x="571" y="112" fill="#9fb1bf" font-size="10">heartbeat · recovery</text>
+
+              <path d="M638 126 V178" stroke="#66e5d6" stroke-width="2" marker-end="url(#pipe-arrow)"/>
+              <rect x="494" y="190" width="232" height="128" rx="16" fill="#0b1d27" stroke="#76a9ff"/>
+              <text x="518" y="218" fill="#76a9ff" font-size="10" font-weight="800">04 · EVALUATE</text>
+              <text x="518" y="244" fill="#e9f1f7" font-size="15" font-weight="700">Offline build → run → score</text>
+              <text x="518" y="267" fill="#9fb1bf" font-size="10">fresh tmpfs DB + Redis · schema 580/580 verified</text>
+              <text x="518" y="286" fill="#9fb1bf" font-size="10">Compose parent + deny network + deadline</text>
+              <text x="518" y="305" fill="#9fb1bf" font-size="10">signed result + retained artifacts</text>
+
+              <path d="M494 254 H439" stroke="#66e5d6" stroke-width="2" marker-end="url(#pipe-arrow)"/>
+              <rect x="236" y="190" width="191" height="128" rx="16" fill="#10222c" stroke="#2fb7ae"/>
+              <text x="258" y="218" fill="#66e5d6" font-size="10" font-weight="800">05 · POLL</text>
+              <text x="258" y="244" fill="#e9f1f7" font-size="15" font-weight="700">Immutable terminal result</text>
+              <text x="258" y="267" fill="#9fb1bf" font-size="10">typed 4xx / retryable 5xx</text>
+              <text x="258" y="286" fill="#9fb1bf" font-size="10">active-round-safe diagnostics</text>
+
+              <path d="M236 254 H181" stroke="#66e5d6" stroke-width="2" marker-end="url(#pipe-arrow)"/>
+              <rect x="34" y="190" width="135" height="128" rx="16" fill="#10222c" stroke="#2fb7ae"/>
+              <text x="55" y="218" fill="#66e5d6" font-size="10" font-weight="800">06 · REVEAL</text>
+              <text x="55" y="244" fill="#e9f1f7" font-size="14" font-weight="700">Seed + fixture</text>
+              <text x="55" y="267" fill="#9fb1bf" font-size="10">verify commitment</text>
+              <text x="55" y="286" fill="#9fb1bf" font-size="10">release artifacts</text>
+
+              <rect x="34" y="358" width="692" height="44" rx="10" fill="#071016" stroke="#203541"/>
+              <text x="54" y="385" fill="#9fb1bf" font-size="10">PUBLIC</text>
+              <text x="110" y="385" fill="#e9f1f7" font-size="10">healthz · info · revealed providers</text>
+              <text x="385" y="385" fill="#9fb1bf" font-size="10">AUTHENTICATED</text>
+              <text x="482" y="385" fill="#e9f1f7" font-size="10">readyz · generate · score · poll</text>
+            </g>
+          </svg>
+        </div>
+
+        <aside class="status-stack">
+          <div class="status-card">
+            <span class="micro-label green">Ready in checkout</span>
+            <h3>Software contract</h3>
+            <ul>
+              <li>BringYour + competition route conformance</li>
+              <li>encrypted seeds, FIFO, cache, leases and ACLs</li>
+              <li>worker authentication and artifact sealing</li>
+              <li>read-only config/local + vault/local only; main/all absent</li>
+              <li>real local leaves replayed unchanged through run + score</li>
+              <li>sanitized failure retention tested through real evaluator EXIT</li>
+              <li>miner generator/runner/screener/normalizer</li>
+              <li>reserved-boundary protocol: 54/54 evidence, 15/15 controls, G1–G6</li>
+              <li>10+2 CPU and ≥24 GiB management reserve contract implemented</li>
+              <li>CPU + 49/49 movable IRQ controls installed, enabled and active</li>
+              <li>live UID/GID-map ownership translation; identity map rejected for production</li>
+              <li>three authenticated provisional reference images</li>
+              <li>malicious-init build isolation: 6/6 protected files unchanged</li>
+              <li>stable hardened live smoke: 2/2, 910 rows each, 100% success</li>
+            </ul>
+          </div>
+          <div class="status-card">
+            <span class="micro-label coral">Final-boundary rerun paused</span>
+            <h3>Measurement package</h3>
+            <ul>
+              <li>four prior frontier points archived, not mixed forward</li>
+              <li>double-cleanup fix verified; historical 20/20 runs passed</li>
+              <li>all manifests/CSVs authenticated; aggregate deterministic</li>
+              <li>replacement series: 10 authenticated; attempt 13 excluded</li>
+              <li>clean pushed source/image restart waits for pending main fixes</li>
+              <li>reference performance ordering deliberately not run locally</li>
+              <li>CPU/OOM cleanup gate passed; official calibration campaign pending</li>
+            </ul>
+          </div>
+          <div class="status-card">
+            <span class="micro-label coral">External / launch-blocking</span>
+            <h3>Deployment claim</h3>
+            <ul>
+              <li>one root-controlled qualified authoritative host</li>
+              <li>published evaluator/API image digests</li>
+              <li>Macrocosmos adapter and staging path</li>
+              <li>production credentials, monitoring and on-call</li>
+            </ul>
+          </div>
+        </aside>
+      </div>
+
+      <div class="team-ask" aria-label="Decisions and access needed from the team">
+        <div class="ask"><strong>Qualify host</strong><span>One authoritative 12-core box, frozen as 10 evaluation + 2 management cores with root access.</span></div>
+        <div class="ask"><strong>Choose integration</strong><span>External scoring-service adapter or dedicated-host referee profile with Macrocosmos.</span></div>
+        <div class="ask"><strong>Review policy</strong><span>Score contract, editable allowlist, reveal delay, timeout, fee, season and final rules.</span></div>
+        <div class="ask"><strong>Enable release</strong><span>Registry credentials, digest publication, staging round, handoff acceptance and on-call owner.</span></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell report-footer">
+    <div><b>sim-latency final environment preview</b><br>Evidence updated 2026-08-17 20:07 UTC · root-owned 12-core/IRQ controls active (49/49); direct read-only real-local replay and full pre-freeze regression passed; reboot, Docker remap/restart and post-freeze full-scale replay still required<br>Development base: <span class="mono">sha256:ac9f70eb…c6da5</span> · historical pre-reserve campaign: 20/20 · replacement boundary series: 10 authenticated, attempt 13 excluded · 72 GiB hostile cleanup: 1.019 s, zero residuals</div>
+    <div style="text-align:right">Sources: FINALIZE.md · FINALIZATION-STATUS.md · APEX-CALIBRATION.md · reference manifest · frontier-summary-doublecleanup.json<br>Next authoritative artifact: <span class="mono">finalize-report.html</span>, only after production calibration and launch gates close.</div>
+  </footer>
+</body>
+</html>

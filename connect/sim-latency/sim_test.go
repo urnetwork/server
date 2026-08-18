@@ -47,6 +47,7 @@ func TestGenerateFleetReproducible(t *testing.T) {
 
 func TestConfigRoundTrip(t *testing.T) {
 	config := defaultConfig(7, 100, 10, 60)
+	config.Clients.QualityWindowSize = 5
 	if err := generateFleet(config); err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -67,6 +68,9 @@ func TestConfigRoundTrip(t *testing.T) {
 	if loaded.Fleet[0] != config.Fleet[0] {
 		t.Fatalf("entry 0 changed across round-trip")
 	}
+	if loaded.Clients.QualityWindowSize != 5 {
+		t.Fatalf("quality window = %d, want 5", loaded.Clients.QualityWindowSize)
+	}
 	// sharding partitions the fleet exactly
 	seen := map[int]bool{}
 	for shard := 0; shard < 4; shard += 1 {
@@ -82,6 +86,27 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if len(seen) != len(loaded.Fleet) {
 		t.Fatalf("sharding lost entries: %d != %d", len(seen), len(loaded.Fleet))
+	}
+}
+
+func TestConfigRejectsInvalidQualityWindow(t *testing.T) {
+	config := defaultConfig(7, 100, 10, 60)
+	config.Clients.QualityWindowSize = 33
+	if err := config.validate(); err == nil {
+		t.Fatal("quality window above the calibration bound was accepted")
+	}
+}
+
+func TestGeneratedConfigBuildsFleetBeforeCompleteValidation(t *testing.T) {
+	config, err := generatedConfig(48, 25, 5, 8, 2)
+	if err != nil {
+		t.Fatalf("generated config: %v", err)
+	}
+	if len(config.Fleet) != 25 {
+		t.Fatalf("fleet size = %d, want 25", len(config.Fleet))
+	}
+	if config.Clients.QualityWindowSize != 2 {
+		t.Fatalf("quality window = %d, want 2", config.Clients.QualityWindowSize)
 	}
 }
 

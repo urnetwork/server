@@ -1,7 +1,46 @@
 package connect
 
-// "context"
-// "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/urnetwork/server"
+)
+
+func TestHandleContractManagerDoneSuppressesCancellation(t *testing.T) {
+	handleContractManagerDone(func() {
+		panic(context.Canceled)
+	})
+}
+
+func TestHandleContractManagerDoneRepanicsUnexpectedError(t *testing.T) {
+	unexpected := errors.New("unexpected contract lookup error")
+	defer func() {
+		if recovered := recover(); recovered != unexpected {
+			t.Fatalf("recovered %v, want original panic %v", recovered, unexpected)
+		}
+	}()
+	handleContractManagerDone(func() {
+		panic(unexpected)
+	})
+}
+
+func TestResidentContractManagerCanceledLookupReturnsInactive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	manager := newResidentContractManager(
+		ctx,
+		cancel,
+		server.NewId(),
+		DefaultExchangeSettings(),
+	)
+	if manager.HasActiveContract(server.NewId(), server.NewId()) {
+		t.Fatal("canceled contract lookup reported an active contract")
+	}
+}
+
 // "time"
 
 // "github.com/go-playground/assert/v2"

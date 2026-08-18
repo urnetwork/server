@@ -1,0 +1,102 @@
+# syntax=docker/dockerfile:1.7
+
+# Both upstream images are pinned Docker Official Image indexes. A season
+# release publishes the resulting evaluator image and subsequently refers to
+# it only by its registry digest.
+ARG GO_IMAGE=golang:1.26.5-bookworm@sha256:53eeac89074db483fdf0ab3be1df32bf6e47562263d2d0d6baa7f26acb4957dd
+ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+
+FROM ${GO_IMAGE} AS go-toolchain
+FROM ${RUNTIME_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    TZ=Etc/UTC \
+    PATH=/usr/local/go/bin:/opt/urnetwork/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    GOEXPERIMENT=greenteagc \
+    CGO_ENABLED=0 \
+    GOPATH=/opt/urnetwork/go \
+    GOMODCACHE=/opt/urnetwork/go/pkg/mod \
+    GOCACHE=/opt/urnetwork/go/build-cache \
+    WARP_ENV=local \
+    WARP_SERVICE=sim \
+    WARP_BLOCK=sim \
+    WARP_HOST=127.0.0.1 \
+    WARP_VERSION=0.0.0-evaluator
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        ca-certificates \
+        coreutils \
+        git \
+        iproute2 \
+        jq \
+        locales \
+        procps \
+        tini \
+        tzdata \
+    && sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+    && locale-gen en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+ARG BASE_SHA
+ARG SOURCE_LOCK_SHA256
+COPY source/server /workspace/server
+COPY source/connect /workspace/connect
+COPY source/proxy /workspace/proxy
+COPY source/sdk /workspace/sdk
+COPY source/glog /workspace/glog
+COPY source/goidenticons /workspace/goidenticons
+COPY source/userwireguard /workspace/userwireguard
+COPY source/sn /workspace/sn
+COPY source-lock.json /opt/urnetwork/source-lock.json
+COPY evaluator/entrypoint.sh /usr/local/libexec/competition-container
+COPY evaluator/official-run.sh /usr/local/libexec/competition-official-run
+
+RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
+    && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)" \
+    && test "$(sha256sum /opt/urnetwork/source-lock.json | awk '{print $1}')" = "${SOURCE_LOCK_SHA256}" \
+    && chmod -R go-w,a+rX /workspace \
+    && git config --system --add safe.directory /workspace/server \
+    && chmod 0555 /usr/local/libexec/competition-container /usr/local/libexec/competition-official-run \
+    && install -d -m 0755 /opt/urnetwork/bin /opt/urnetwork/submission /opt/urnetwork/go
+
+WORKDIR /workspace/server
+
+# This is the only networked dependency step. Its result is frozen into the
+# season base image. Every per-submission Dockerfile step uses network=none.
+RUN go mod download \
+    && GOFLAGS=-mod=readonly go list -deps -test ./connect/... >/dev/null
+RUN GOFLAGS=-mod=readonly go build -trimpath -o /usr/local/libexec/competitionpatch ./cli/competitionpatch \
+    && GOFLAGS=-mod=readonly go build -trimpath -o /usr/local/libexec/competitiondbinit ./cli/competitiondbinit \
+    && GOFLAGS=-mod=readonly go build -trimpath -o /opt/urnetwork/bin/sim-latency ./connect/sim-latency
+RUN git status --porcelain --untracked-files=all \
+    && go version -m /opt/urnetwork/bin/sim-latency \
+    && test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.revision=//p')" = "${BASE_SHA}" \
+    && test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.modified=//p')" = false
+
+RUN install -m 0444 /dev/null /opt/urnetwork/submission/canonical.patch \
+    && jq -n \
+        --arg base_sha "${BASE_SHA}" \
+        --arg source_lock_sha256 "${SOURCE_LOCK_SHA256}" \
+        --arg simulator_sha256 "$(sha256sum /opt/urnetwork/bin/sim-latency | awk '{print $1}')" \
+        '{schema: 1, image_kind: "evaluator-base", base_sha: $base_sha, build_sha: $base_sha, patch_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", policy_sha256: null, source_lock_sha256: $source_lock_sha256, simulator_sha256: $simulator_sha256, paths: []}' \
+        > /opt/urnetwork/image-identity.json \
+    && chmod 0444 /opt/urnetwork/image-identity.json /opt/urnetwork/source-lock.json \
+    && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)"
+
+LABEL org.opencontainers.image.title="URnetwork sim-latency evaluator base" \
+      org.opencontainers.image.revision="${BASE_SHA}" \
+      com.urnetwork.competition.image-kind="evaluator-base" \
+      com.urnetwork.competition.base-sha="${BASE_SHA}" \
+      com.urnetwork.competition.source-lock-sha256="${SOURCE_LOCK_SHA256}"
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/libexec/competition-container"]
+USER 65532:65532
+WORKDIR /workspace/server
+RUN --network=none test -r /workspace/server/go.mod \
+    && test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
+    && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)"
+CMD ["identity"]

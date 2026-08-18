@@ -27,12 +27,18 @@ measured numbers.
 You do not edit sim-latency itself to compete — you edit the stack. sim-latency
 is the fixed, reproducible measuring instrument.
 
-## The metric
+## Metrics and the official Apex score
 
 A run is scored on the CSV rows inside the **measured window** (after ramp +
 settle; the boundary is logged to stderr as `MEASURE WINDOW: [start, end]` and
-recorded in the run.json side-car). The metric set (computed by
-`sim-latency analyze`, decided by `sim-latency compare`):
+recorded in the run.json side-car).
+
+The official Apex scalar is defined in
+[`APEX-SCORE-SPEC.md`](APEX-SCORE-SPEC.md): p95 `total_ms`, lower better, with
+every failure or incomplete body charged at the frozen request-timeout ceiling.
+It is produced by `sim-latency score` and guarded by G1-G6. The local
+`analyze`/`baseline`/`compare` commands retain the following richer diagnostic
+metric set; their multi-metric verdict is not the Apex score:
 
 - **primary: `ttfb_p95_ms`** (tail time-to-first-byte, lower is better) and
   **`throughput_p50_bytes_per_s`** (median large-transfer throughput, higher
@@ -49,7 +55,8 @@ recorded in the run.json side-car). The metric set (computed by
   `throughput_p95_bytes_per_s` (the fast tail — reported only: per-flow
   throughput is ceilinged by the tunnel data path far below provider lane
   rates, so the fast tail is a run-level regime lottery that measures at
-  26–47% A/A CV, undecidable as a verdict), `goodput_bytes_per_s`
+  21–47% A/A CV across measured revisions, undecidable as a verdict),
+  `goodput_bytes_per_s`
 
 A standard run is a fixed `providers.yml` (which locks the fleet and all seeds),
 a fixed settle and duration, and the same server build except for the code under
@@ -60,8 +67,11 @@ workload — whether an observed difference is *real* is decided statistically
 
 ## System requirements
 
-**The official evaluation environment is [eval-48](#the-eval-48-evaluation-environment),
-sized to fit a 48 GB machine.** The full-scale configuration —
+The historical [eval-48](#the-eval-48-evaluation-environment) environment is a
+local/directional workstation profile, not the Apex production environment.
+The Apex host/runner contract is in [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md): two
+identical 12-core, 128 GB Ubuntu 24.04 machines, with scale and replicate count
+frozen only after production-box calibration. The full-scale configuration —
 **~100,000 providers, ~1,000 clients/min** — remains available for stress
 runs and targets a big-memory Linux box:
 
@@ -82,7 +92,7 @@ For development, start at `--count 2000 --hosts 2` on a laptop and scale up.
 
 ## The eval-48 evaluation environment
 
-The competition's standard environment is **eval-48**: a reduced configuration
+The historical local environment is **eval-48**: a reduced configuration
 sized so the whole stack — the run process, fleet shards, and the local
 postgres + redis — fits a **48 GB** machine with several-fold headroom. The
 sizing is deliberate: an environment near its machine's memory or CPU limits
@@ -91,10 +101,15 @@ variance and raises the smallest improvement a submission can prove. eval-48
 trades scale realism for a stable instrument.
 
 The environment is defined — and pinned — by `eval-48.sh`. The current
-revision is **eval-48b** (2026-07-31), which reshaped the throughput
-distribution so `throughput_p95` is a decidable signal (the eval-48a
-revision measured it at 47% A/A CV — a per-run warm-up lottery over a
-handful of golden hosting lanes; see the noise-floor section):
+revision is **eval-48d** (2026-08-16). It keeps the eval-48c scale and mixture,
+but freezes deterministic warm-client ordering and exchange-host assignment,
+plus a bounded retry of only identities that miss their first establishment
+attempt. This removes transient `199/200` aborts and scheduler-dependent pool
+order without changing measured request semantics. eval-48c itself kept the
+eval-48b scale and mixture, which spread fast-tier load across more lanes but
+did not make `throughput_p95` suitable as a verdict: eval-48d still measured
+that tail at 21.33% run CV (eval-48a measured 47%; see the noise-floor
+section):
 
 - **fleet**: 2,000 providers, mixture v2, **seed 48** — residential 45%,
   mobile 25%, and a continuous fast upper band holding 30% of the
@@ -107,31 +122,71 @@ handful of golden hosting lanes; see the noise-floor section):
 - **clients**: 200-identity warm pool, 80 mean arrivals/min (rebalanced for
   the heavier crawls)
 - **run shape**: 30 m measured window, `--fleet-shards 4`, warm-up defaults
-  (ramp 1 m, prewarm 13 h, settle 1 m, hosts 4, pipeline-interval 10 s)
+  (ramp 1 m, prewarm 13 h, settle 1 m, hosts 4, pipeline-interval 10 s),
+  followed by a 70 s inter-run service/connection quiescence period
 - every measured run starts from `--reset`
-- **canonical fleet file**: `eval-48g/providers-eval48b.yml`, regenerated
+- the wrapper pins the local service identity to `sim/sim`; inherited
+  `test.sh` labels are deliberately overridden because they select a different
+  stats namespace
+- **canonical fleet file**: `eval-48g/providers-eval48d.yml`, regenerated
   bit-identically from the seed; sha256
-  `7851a0d0c0d2c80c4c28f0ecd752305f11a87087cf16d7056ad5ea8f027dfd26`.
+  `549ec41c033f344d6e0a6b1de82b404bb63d5a8dfb5861b6c4b6d55886cdace4`.
   `compare` refuses to compare runs whose config sha differs, so every
-  machine evaluates the identical workload.
+  machine evaluates the identical workload. The revision was advanced because
+  the historical eval-48b pin could not be regenerated from committed source;
+  neither eval-48b nor pre-fix eval-48c artifacts may be mixed with eval-48d
+  measurements, even though eval-48c and eval-48d share this fixture hash.
 
 ```
 ./eval-48.sh init             # generate + sha-verify the canonical providers file
 ./eval-48.sh run > my.csv     # one standard evaluation run (~36 min wall)
-./eval-48.sh campaign 24      # sequential A/A replicates for 24 h → eval-48g/runs/
+./eval-48.sh campaign 13      # target >=20 sequential A/A replicates → eval-48g/runs/
 ./eval-48.sh baseline         # noise floor + convergence from the campaign runs
+./eval-48.sh summary          # authenticated Apex-score/resource summary (k>=20)
+# Or, after campaign returns, finish every remaining local gate unattended:
+./finalize-local-baseline.sh 20 2
 ```
 
 `campaign` is the long-form of `baseline --replicates`: the same sequential
 independent `run --reset` replicates, but time-bounded and failure-tolerant
 (one failed replicate is logged and skipped; a wedged replicate is killed by
-a 55 m watchdog; three consecutive failures abort as an environment outage),
+a 55 m watchdog; a frozen G5 log signature terminates the run before it can
+write a completion marker; three consecutive failures abort as an environment
+outage),
 with the stack's memory sampled to `eval-48g/campaign-rss.csv` by
-`sample-rss.sh`.
+`sample-rss.sh`. `sample-host-resources.sh` adds low-overhead CPU, available
+memory, swap, load, and TCP-socket telemetry for a local directional campaign.
+On hosts where PostgreSQL and Redis are native processes rather than the fixed
+Docker containers expected by the legacy RSS sampler,
+`sample-service-resources.sh` records process counts and explicitly labeled
+summed process RSS. PostgreSQL summed RSS double-counts shared pages and is a
+trend diagnostic, not unique-memory or cgroup accounting; missing early-run
+coverage is reported rather than interpreting Docker zeros as measurements.
+After aggregation, `summarize-baseline.py` independently authenticates every
+CSV/sidecar/marker chain, recomputes the failure-ceiling Apex raw score and
+baseline convergence arrays, records every excluded failed-closed attempt,
+measures drift, and writes `eval-48g/baseline-summary.json`, a human-readable
+Markdown summary, and `eval-48g/baseline-stability.svg`.
+
+These local files measure noise; they are not the signed
+`sim-latency-score-baseline` manifest consumed by `score`. That manifest also
+fixes an accepted takeover margin and odd replicate policy and may only be
+issued by the trusted control plane after official-hardware, independent-seed,
+and reference-separability calibration succeeds.
+
+`finalize-local-baseline.sh` tops up an underfilled campaign in two-hour chunks,
+regenerates and audits the baseline, collects two clean runs outside the
+baseline, requires their A/A verdict to be `indistinguishable`, and then invokes
+`verify-local-baseline.sh`. The refreshed JSON and Markdown summaries embed the
+held-out verdict and fingerprint its complete comparison artifact. The verifier
+refuses to run while a simulator is
+active, replays the baseline/summary twice byte-for-byte, checks hashes and
+machine-readable invariants, and runs the package, race, vet, and compile gates.
+Its unattended log belongs at `eval-48g/postcampaign-verification.log`.
 
 **An evaluation run requires an idle machine.** This is a hard requirement,
 not hygiene: machine on AC with the lid open
-(`caffeinate -i ./eval-48.sh campaign 12`), `server/local/run-local.sh` up
+(`caffeinate -i ./eval-48.sh campaign 13`), `server/local/run-local.sh` up
 for the whole campaign, and nothing else heavy on the box. **Pause Time
 Machine during campaigns** (`tmutil stopbackup`; better, exclude the Docker
 VM disk image with `sudo tmutil addexclusion` — its constant churn makes
@@ -142,26 +197,64 @@ pressure does not add mild noise — it breaks runs in obvious ways (measured
 2026-07-30 under a Spotlight/Mail indexing storm: fail_rate blowing out
 2–3×, a mid-run market collapse to 100% failures, and a warm-up wedged for
 2h — while quiet-box runs sat in a tight band). Treat any run whose
-fail_rate or row count departs the baseline band as contaminated and
-exclude it; the corruption is always glaring, never subtle.
+fail_rate or row count departs the baseline band as an investigation signal,
+not an automatic exclusion. An authenticated completion remains in the
+baseline unless a predeclared, artifact-backed infrastructure rule proves the
+run invalid; the summary reports robust outlier candidates without removing
+them. Warm-up failures and interrupted/incomplete runs fail closed and are
+inventoried separately because they never produced placeable artifacts.
 
-Measured footprint (M1 Max MacBook Pro, 10 cores, 2026-07-30 campaign): sim
-processes peak **~24 GB** during the measured window, postgres ~0.5 GB,
-redis ~0.2 GB, Docker host overhead ~1 GB — roughly **26 GB total** against
-the 48 GB budget. The sim also holds ~8 k established sockets with the
-kernel mbuf 2 KB-cluster pool near its cap (~336 MB) — the source of the
-occasional transient ramp-time `ENOBUFS`, which recovers and does not
-affect the measured window. A standard run is ~36 min wall (~6 min warm-up
-+ 30 m window), ~60–110 k measured requests, all 200 clients establishing.
+Measured eval-48d footprint (`sille`, 24 logical CPUs, 2026-08-16): simulator
+peak RSS **14.97 GiB**, mean simulator CPU **10.23 logical-core equivalents**,
+and peak established sockets **26,051**. PostgreSQL summed-process RSS peaked
+at 7.90 GiB, but that observational number double-counts shared pages; Redis
+peaked at 129.9 MiB. All 20 runs had complete host and native-service coverage,
+at least 107.37 GiB host memory available, and zero swap. A standard run is
+about 36 minutes wall (~6 minutes setup plus a 30-minute window) and produces
+roughly 83–85 k measured requests with all 200 clients established.
 
-### Measured noise floor (2026-07-31, k=4 preliminary, revision eval-48b)
+### Measured local noise floor (2026-08-16, k=20, revision eval-48d)
 
-`eval-48g/baseline.json`, from the 4 clean A/A validation replicates (the
-k≈15 extension campaign was consumed by a Time Machine/Spotlight storm —
-contaminated replicates fail loudly and were excluded). Preliminary: at k=4
-the sd estimate carries ±41% sampling error and df=3 makes the thresholds
-conservative; top-up replicates on an idle host accumulate into
-`eval-48g/runs/` and tighten every line.
+The post-fix campaign completed **20/20 consecutive authenticated attempts**
+with zero exclusions. The complete report is
+[`eval-48g/baseline-summary.md`](eval-48g/baseline-summary.md); machine-readable
+evidence is in `baseline-summary.json`, `baseline.json`, and
+`baseline-stability.svg`.
+
+| metric | role | mean +/- sd | cv | min delta, 1 run/side | 3 runs/side |
+|---|---|---|---:|---:|---:|
+| Apex raw score | official scalar | 23,823.31 +/- 696.30 ms | 2.923% | quarter-margin floor 11.691% | not policy-qualified |
+| `ttfb_p95_ms` | primary diagnostic | 1,025.40 +/- 47.82 ms | 4.663% | 116.93 ms | 67.51 ms |
+| `throughput_p50_bytes_per_s` | primary diagnostic | 290.75 +/- 8.20 kB/s | 2.819% | 20.04 kB/s | 11.57 kB/s |
+| `throughput_p05_bytes_per_s` | guard | 84.99 +/- 2.35 kB/s | 2.765% | 5.75 kB/s | 3.32 kB/s |
+| `fail_rate` | guard | 1.154% +/- 0.114 pp | 9.901% | — | — |
+| `total_p95_ms` (successful rows) | diagnostic | 20,902.62 +/- 435.72 ms | 2.085% | — | — |
+| `goodput_bytes_per_s` | diagnostic | 41.151 +/- 0.299 MB/s | 0.727% | — | — |
+| `throughput_p95_bytes_per_s` | reported only | 11.258 +/- 2.401 MB/s | **21.330%** | — | — |
+
+No scored metric had |drift t| >= 2. Robust triage flagged TTFB-p95 values in
+`r004` and `r011`; both remain included because no predeclared infrastructure
+rule invalidated them. The three primary diagnostic SD sequences meet the local
+last-five <=10% span heuristic, while the Apex raw-score sequence does not.
+Some between-run SDs are also below within-run block SE, so the generated report
+warns that the noise floor may be understated.
+
+A single-run 1% takeover is therefore unsupported. Deterministic median-of-R
+estimates remain above the required 0.25% CV at R=1,3,5,7 (2.863%, 2.020%,
+1.671%, and 1.431%). Two separately collected held-out runs returned
+`indistinguishable` at alpha 0.05; see
+[`eval-48g/heldout-aa-compare.json`](eval-48g/heldout-aa-compare.json). The final
+verifier replayed the baseline and summary twice byte-identically and passed
+artifact invariants, package tests, race tests, vet, and the repository compile
+gate. This remains a local/directional modified-build result, not an official
+signed Apex baseline.
+
+### Historical preliminary noise floor (2026-07-31, k=4, eval-48b)
+
+**Superseded by eval-48d.** This table is retained only to explain earlier
+design choices. It no longer describes `eval-48g/baseline.json`; the k=4 SD
+estimate carried about +/-41% sampling uncertainty and df=3 made its thresholds
+conservative.
 
 | metric | role | mean ± sd | cv | min Δ, 1 run/side | 3 runs/side |
 |---|---|---|---|---|---|
@@ -176,12 +269,11 @@ primary.) The per-run series and thresholds are plotted in the
 
 ### Measured noise floor (2026-07-30, k=12 clean replicates, revision eval-48a)
 
-**Superseded by eval-48b** — the mixture, site tier, arrival rate, and
-throughput gate changed, so this floor (archived as
+**Superseded first by eval-48b and now by eval-48d** — the mixture, site tier,
+arrival rate, and throughput gate changed, so this floor (archived as
 `eval-48g/baseline-eval48a.json`, runs in `eval-48g/runs-eval48a/`) applies
-only to eval-48a-sha runs; the eval-48b floor is being re-measured. From 12
-clean A/A replicates spanning 8 h (2 contended runs excluded; no significant
-drift in any metric across the span):
+only to eval-48a-sha runs. From 12 clean A/A replicates spanning 8 h (2
+contended runs excluded; no significant drift in any metric across the span):
 
 | metric | mean ± sd | cv | min Δ, 1 run/side | 3 runs/side |
 |---|---|---|---|---|
@@ -269,6 +361,13 @@ speed test, so this bounds how soon a fresh provider can be selected. A shorter
 `--pipeline-interval` propagates provider state (new tests, churn) into the
 selectable set faster.
 
+The current selection pipeline also requires fresh provider egress-health and
+egress-location evidence. Production obtains that evidence from an external
+prober; the self-contained simulator has no such process, so provisioning seeds
+one deterministic passing `sim` probe and a direct observation in the fake
+country. This is an initial condition only: the modeled latency, bandwidth,
+loss, capacity, and churn still govern the measured data path.
+
 For the fastest possible warm-up on a small fleet:
 `--ramp 10s --settle 20s --pipeline-interval 5s`.
 
@@ -279,6 +378,9 @@ Notes:
   behavior is preserved; prewarm only sets the initial established condition.
 - The measured window is logged as `MEASURE WINDOW: [start, end]`; only rows in
   it count.
+- Reaching the end stops new crawl arrivals but does not cancel in-flight
+  crawls that started inside the window. They drain up to their own request
+  deadline; an external TERM/INT still cancels the evaluation immediately.
 
 ## CSV output
 
@@ -291,8 +393,10 @@ t_start_ms,client,path,depth,status,bytes,ttfb_ms,total_ms,bytes_per_s
 - `t_start_ms` — request start (unix ms); compare against the `MEASURE WINDOW`.
 - `client` — the client id (raw in local env, so it joins to `providers.yml`).
 - `path`, `depth` — the crawled suburl and its depth in the loading tree.
-- `status` — HTTP status; `0` means the request never completed (no provider /
-  timeout).
+- `status` — HTTP status; `0` means the request did not complete (no provider,
+  timeout, malformed page header, read/close error, or a byte/Content-Length
+  mismatch). A 200 is emitted only after the declared fake-site body has been
+  received exactly.
 - `bytes`, `ttfb_ms`, `total_ms`, `bytes_per_s` — size, time to first byte,
   total time, throughput.
 
@@ -300,8 +404,16 @@ Alongside the CSV, `run` writes a **run.json side-car** (`--meta`, default
 `run.json` — name it per run, e.g. `--meta a.run.json` next to `a.csv` so the
 tools find it by convention). It records everything the statistical tooling
 needs beyond the rows: the measure window, providers.yml sha256 + seed, build
-revision, host, flags, warm-pool establishment count, and the per-metric
-summaries. `sim-latency analyze --run x.csv` recomputes the summaries from
+revision, evaluation id, request-timeout ceiling, stats root, scorer/schema
+identity, CSV SHA-256/byte identity, completion state, host, flags, warm-pool
+establishment count, and the per-metric summaries. Schema 2 proves that
+complete-body validation was active when its complete sidecar is authenticated
+by the final marker; a hand-created or incomplete schema-2 file is not
+scoreable.
+After the client/CSV drain, fleet-child reap, service shutdown, and durable
+stats close all succeed, `run` writes `<meta>.complete.json`; interrupted or
+unclean runs retain an incomplete sidecar and never receive that marker.
+`sim-latency analyze --run x.csv` recomputes the summaries from
 the rows (`--window <startMs>,<endMs>` substitutes for a missing side-car).
 
 Historical note: the sdk used to redirect stderr onto stdout at init (mobile
@@ -373,6 +485,54 @@ Caveats the tooling enforces or warns about:
   state: use `--reset` (or `sim-latency reset`) before every measured run,
   otherwise reliability history accumulates across runs and the market
   itself drifts (see the gotchas below).
+
+## Official scoring
+
+`score` is file-only and accepts one comma-separated path per candidate
+replicate for the CSV, stderr, immutable accounting snapshot, FindProviders2
+sample corpus, cgroup resource report, and completion marker, plus the signed
+same-round baseline manifest:
+
+```bash
+./sim-latency score \
+  --run r1.csv,r2.csv,r3.csv \
+  --stderr r1.stderr,r2.stderr,r3.stderr \
+  --baseline round-baseline.json \
+  --accounting r1.accounting.json,r2.accounting.json,r3.accounting.json \
+  --samples r1.stats-root,r2.stats-root,r3.stats-root \
+  --resource-report r1.resources.json,r2.resources.json,r3.resources.json \
+  --marker r1.complete.json,r2.complete.json,r3.complete.json \
+  --out score.json
+```
+
+The signed manifest determines the odd replicate count, exact run flags,
+providers SHA-256, timeout, takeover margin, and baseline replicate
+diagnostics. Candidate and baseline values aggregate by median. The output is
+deterministic `score_schema: 1` JSON with the raw/normalized score, all G1-G6
+results, diagnostics, and a typed submission or infrastructure error. Missing,
+malformed, legacy-schema, mixed-id, incomplete, OOM, panic, or unclean artifacts
+fail closed. See [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for containment and bundle
+construction.
+
+The trusted evaluator creates that manifest from its same-round baseline bundle
+with the same parsers used for candidates:
+
+```bash
+./sim-latency score-baseline \
+  --run b1.csv,b2.csv,b3.csv \
+  --stderr b1.stderr,b2.stderr,b3.stderr \
+  --accounting b1.accounting.json,b2.accounting.json,b3.accounting.json \
+  --samples b1.stats-root,b2.stats-root,b3.stats-root \
+  --resource-report b1.resources.json,b2.resources.json,b3.resources.json \
+  --marker b1.complete.json,b2.complete.json,b3.complete.json \
+  --round-id "$ROUND_ID" --takeover-margin 0.05 \
+  --out baseline.json
+```
+
+The command requires an odd positive replicate count, exact workload-contract
+agreement, distinct evaluation ids, and clean G1/G3-G6 evidence for every
+replicate. The evaluator authenticates and signs the resulting file; miners do
+not create the trusted baseline.
 
 ## providers.yml
 
@@ -509,7 +669,7 @@ reading a corpus back in code.
 ```
 sim-latency run
  ├─ apply migrations, create the zz region, write ip_overrides into site settings
- ├─ provision providers + client pool (bulk pg inserts, minted jwts)
+ ├─ provision identities, simulated egress evidence, client pool, and minted jwts
  ├─ services: N exchange hosts + connect handlers + api + reliability pipeline loop
  ├─ fake site (deterministic loading tree)
  ├─ fleet: providers connect (ramp), impaired + churning (in-process or sharded)
@@ -543,7 +703,9 @@ rows, all `independent_reliability_weight = 1.0`) and the exported
 FindProviders2 samples (`pool_count > 0`). Causes: `--prewarm 0` (cold start
 needs ~8.4h uptime); a too-short `--settle` (the pipeline hasn't re-exported the
 redis samples yet — the market needs one `--pipeline-interval` after prewarm);
-or providers not geolocated to `zz` (below).
+provider provide modes not yet acknowledged; missing/failing
+`provider_egress_health`; missing/stale `provider_egress_location`; or providers
+not geolocated to `zz` (below).
 
 **Providers must complete a speed test to be selectable.** The score gate
 excludes a provider that has no speed test (it scores at the cutoff). The

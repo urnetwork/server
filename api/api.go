@@ -22,6 +22,16 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/terms.txt", router.Txt),
 		router.NewRoute("GET", "/vdp.txt", router.Txt),
 		router.NewRoute("GET", "/status", router.WarpStatus),
+		// The sim-latency competition is a separate, fail-closed security
+		// domain served by this API process. Its health and published policy
+		// are public; round control and scoring use role-scoped opaque tokens.
+		router.NewRoute("GET", "/competition/healthz", handlers.CompetitionHealth),
+		router.NewRoute("GET", "/competition/readyz", handlers.CompetitionReady),
+		router.NewRoute("GET", "/competition/info", handlers.CompetitionInfo),
+		router.NewRoute("GET", "/competition/round/([^/]+)/providers.yml", handlers.CompetitionGetRoundWorkload),
+		router.NewRoute("POST", "/competition/generate-round", handlers.CompetitionGenerateRound),
+		router.NewRoute("POST", "/competition/score", handlers.CompetitionSubmitScore),
+		router.NewRoute("GET", "/competition/score/([^/]+)", handlers.CompetitionGetScore),
 		// /stats/last-90 stays up: it serves a redis-exported blob and does not
 		// touch the db.
 		router.NewRoute("GET", "/stats/last-90", handlers.StatsLast90),

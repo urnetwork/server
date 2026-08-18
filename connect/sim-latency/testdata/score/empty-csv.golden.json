@@ -1,0 +1,13 @@
+{
+  "score_schema": 1,
+  "raw_score": 0,
+  "normalized_score": 0,
+  "placeable": false,
+  "gates": {},
+  "diagnostics": {},
+  "eval_error": {
+    "kind": "infrastructure",
+    "code": "empty_results_csv",
+    "message": "results CSV has no measurement records"
+  }
+}

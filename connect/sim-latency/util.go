@@ -10,15 +10,30 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
 var logLock sync.Mutex
+var logEvaluationId atomic.Pointer[string]
+
+func setLogEvaluationId(evaluationId string) {
+	if evaluationId == "" {
+		logEvaluationId.Store(nil)
+		return
+	}
+	value := evaluationId
+	logEvaluationId.Store(&value)
+}
 
 func logf(format string, args ...any) {
 	logLock.Lock()
 	defer logLock.Unlock()
-	fmt.Fprintf(os.Stderr, "[sim-latency] "+format+"\n", args...)
+	prefix := "[sim-latency]"
+	if evaluationId := logEvaluationId.Load(); evaluationId != nil {
+		prefix = fmt.Sprintf("[sim-latency eval=%s]", *evaluationId)
+	}
+	fmt.Fprintf(os.Stderr, prefix+" "+format+"\n", args...)
 }
 
 func fatalf(format string, args ...any) {

@@ -5652,4 +5652,313 @@ var migrations = []any{
 		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_source_id_companion_contract_id`,
 		`DROP INDEX IF EXISTS transfer_contract_open_source_id_companion_contract_id`,
 	),
+
+	// Durable sim-latency competition control plane. The queue is deliberately
+	// independent of pending_task: untrusted submissions are claimed by a
+	// dedicated evaluator identity, and the singleton slot below makes the FIFO
+	// one-job-at-a-time invariant a database fact even during worker failover.
+	newSqlMigration(`
+		CREATE TABLE competition_round (
+			round_id uuid PRIMARY KEY,
+			competition_id varchar(128) NOT NULL,
+			workload_commitment char(64) NOT NULL UNIQUE,
+			seed_nonce bytea NOT NULL,
+			seed_ciphertext bytea NOT NULL,
+			providers_sha256 char(64) NOT NULL,
+			providers_path text NOT NULL,
+			policy_json jsonb NOT NULL,
+			opens_at timestamp NOT NULL,
+			closes_at timestamp NOT NULL,
+			reveal_at timestamp NOT NULL,
+			created_at timestamp NOT NULL,
+			canceled boolean NOT NULL DEFAULT false,
+			CONSTRAINT competition_round_times_ordered CHECK (
+				opens_at < closes_at AND closes_at <= reveal_at
+			),
+			CONSTRAINT competition_round_commitment_format CHECK (
+				workload_commitment ~ '^[0-9a-f]{64}$' AND
+				providers_sha256 ~ '^[0-9a-f]{64}$' AND
+				providers_path LIKE '/%'
+			)
+		);
+
+		CREATE INDEX competition_round_current_idx
+		ON competition_round (competition_id, opens_at DESC)
+		WHERE canceled = false;
+
+		CREATE TABLE competition_job (
+			job_id uuid PRIMARY KEY,
+			round_id uuid NOT NULL REFERENCES competition_round(round_id),
+			patch_bytes bytea NOT NULL,
+			patch_sha256 char(64) NOT NULL,
+			cache_key char(64) NOT NULL UNIQUE,
+			state varchar(16) NOT NULL,
+			submitted_at timestamp NOT NULL,
+			available_at timestamp NOT NULL,
+			started_at timestamp NULL,
+			completed_at timestamp NULL,
+			lease_owner varchar(128) NULL,
+			lease_expires_at timestamp NULL,
+			attempt_count integer NOT NULL DEFAULT 0,
+			score_json jsonb NULL,
+			eval_error_json jsonb NULL,
+			artifact_manifest_json jsonb NULL,
+			artifact_manifest_sha256 char(64) NULL,
+			artifact_retain_until timestamp NOT NULL,
+			CONSTRAINT competition_job_state CHECK (
+				state IN ('queued', 'running', 'succeeded', 'failed', 'canceled')
+			),
+			CONSTRAINT competition_job_patch_hash_format CHECK (
+				patch_sha256 ~ '^[0-9a-f]{64}$' AND cache_key ~ '^[0-9a-f]{64}$'
+			),
+			CONSTRAINT competition_job_attempt_nonnegative CHECK (0 <= attempt_count),
+			CONSTRAINT competition_job_terminal_shape CHECK (
+				(state NOT IN ('succeeded', 'failed', 'canceled')) OR completed_at IS NOT NULL
+			)
+		);
+
+		CREATE INDEX competition_job_fifo_idx
+		ON competition_job (available_at, submitted_at, job_id)
+		WHERE state = 'queued';
+
+		CREATE INDEX competition_job_expired_lease_idx
+		ON competition_job (lease_expires_at, submitted_at, job_id)
+		WHERE state = 'running';
+
+		CREATE TABLE competition_job_principal (
+			job_id uuid NOT NULL REFERENCES competition_job(job_id) ON DELETE CASCADE,
+			principal_id varchar(128) NOT NULL,
+			first_seen_at timestamp NOT NULL,
+			PRIMARY KEY (job_id, principal_id)
+		);
+
+		CREATE TABLE competition_worker_slot (
+			slot_id smallint PRIMARY KEY,
+			worker_id varchar(128) NULL,
+			job_id uuid NULL REFERENCES competition_job(job_id),
+			lease_expires_at timestamp NULL,
+			heartbeat_at timestamp NULL,
+			CONSTRAINT competition_worker_single_slot CHECK (slot_id = 1)
+		);
+		INSERT INTO competition_worker_slot (slot_id) VALUES (1);
+
+		CREATE TABLE competition_evaluator_host (
+			host_id varchar(128) PRIMARY KEY,
+			hardware_id varchar(128) NOT NULL,
+			image_digest varchar(80) NOT NULL,
+			self_check_json jsonb NOT NULL,
+			self_check_sha256 char(64) NOT NULL,
+			eligible boolean NOT NULL,
+			heartbeat_at timestamp NOT NULL,
+			CONSTRAINT competition_host_self_check_hash_format CHECK (
+				self_check_sha256 ~ '^[0-9a-f]{64}$'
+			)
+		);
+
+		CREATE INDEX competition_evaluator_host_ready_idx
+		ON competition_evaluator_host (hardware_id, image_digest, heartbeat_at DESC)
+		WHERE eligible = true;
+
+		CREATE TABLE competition_job_event (
+			event_id bigserial PRIMARY KEY,
+			job_id uuid NOT NULL REFERENCES competition_job(job_id),
+			event_at timestamp NOT NULL,
+			event_type varchar(64) NOT NULL,
+			actor_id varchar(128) NOT NULL,
+			payload_json jsonb NOT NULL,
+			payload_sha256 char(64) NOT NULL,
+			CONSTRAINT competition_event_payload_hash_format CHECK (
+				payload_sha256 ~ '^[0-9a-f]{64}$'
+			)
+		);
+
+		CREATE INDEX competition_job_event_order_idx
+		ON competition_job_event (job_id, event_id);
+
+		CREATE FUNCTION competition_round_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_guard$
+		BEGIN
+			IF OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.competition_id IS DISTINCT FROM NEW.competition_id OR
+			   OLD.workload_commitment IS DISTINCT FROM NEW.workload_commitment OR
+			   OLD.seed_nonce IS DISTINCT FROM NEW.seed_nonce OR
+			   OLD.seed_ciphertext IS DISTINCT FROM NEW.seed_ciphertext OR
+			   OLD.providers_sha256 IS DISTINCT FROM NEW.providers_sha256 OR
+			   OLD.providers_path IS DISTINCT FROM NEW.providers_path OR
+			   OLD.policy_json IS DISTINCT FROM NEW.policy_json OR
+			   OLD.opens_at IS DISTINCT FROM NEW.opens_at OR
+			   OLD.closes_at IS DISTINCT FROM NEW.closes_at OR
+			   OLD.reveal_at IS DISTINCT FROM NEW.reveal_at OR
+			   OLD.created_at IS DISTINCT FROM NEW.created_at OR
+			   (OLD.canceled AND NOT NEW.canceled)
+			THEN
+				RAISE EXCEPTION 'competition round immutable fields changed';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_guard$;
+
+		CREATE TRIGGER competition_round_immutable
+		BEFORE UPDATE ON competition_round
+		FOR EACH ROW EXECUTE FUNCTION competition_round_immutable_guard();
+
+		CREATE FUNCTION competition_job_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_job_guard$
+		BEGIN
+			IF OLD.job_id IS DISTINCT FROM NEW.job_id OR
+			   OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.patch_bytes IS DISTINCT FROM NEW.patch_bytes OR
+			   OLD.patch_sha256 IS DISTINCT FROM NEW.patch_sha256 OR
+			   OLD.cache_key IS DISTINCT FROM NEW.cache_key OR
+			   OLD.submitted_at IS DISTINCT FROM NEW.submitted_at OR
+			   OLD.artifact_retain_until IS DISTINCT FROM NEW.artifact_retain_until OR
+			   (OLD.state IN ('succeeded', 'failed', 'canceled') AND OLD.state IS DISTINCT FROM NEW.state) OR
+			   (OLD.score_json IS NOT NULL AND OLD.score_json IS DISTINCT FROM NEW.score_json) OR
+			   (OLD.artifact_manifest_json IS NOT NULL AND OLD.artifact_manifest_json IS DISTINCT FROM NEW.artifact_manifest_json) OR
+			   (OLD.artifact_manifest_sha256 IS NOT NULL AND OLD.artifact_manifest_sha256 IS DISTINCT FROM NEW.artifact_manifest_sha256)
+			THEN
+				RAISE EXCEPTION 'competition job immutable fields changed';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_job_guard$;
+
+		CREATE TRIGGER competition_job_immutable
+		BEFORE UPDATE ON competition_job
+		FOR EACH ROW EXECUTE FUNCTION competition_job_immutable_guard();
+	`),
+
+	// Harden the competition audit boundary after the initial control-plane
+	// schema. Terminal job rows and append-only audit/ACL records must remain
+	// immutable even to an accidentally over-privileged application role.
+	newSqlMigration(`
+		CREATE OR REPLACE FUNCTION competition_job_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_job_guard$
+		BEGIN
+			IF (OLD.state IN ('succeeded', 'failed', 'canceled') AND OLD IS DISTINCT FROM NEW) OR
+			   OLD.job_id IS DISTINCT FROM NEW.job_id OR
+			   OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.patch_bytes IS DISTINCT FROM NEW.patch_bytes OR
+			   OLD.patch_sha256 IS DISTINCT FROM NEW.patch_sha256 OR
+			   OLD.cache_key IS DISTINCT FROM NEW.cache_key OR
+			   OLD.submitted_at IS DISTINCT FROM NEW.submitted_at OR
+			   OLD.artifact_retain_until IS DISTINCT FROM NEW.artifact_retain_until OR
+			   NEW.attempt_count < OLD.attempt_count OR
+			   (OLD.score_json IS NOT NULL AND OLD.score_json IS DISTINCT FROM NEW.score_json) OR
+			   (OLD.eval_error_json IS NOT NULL AND OLD.eval_error_json IS DISTINCT FROM NEW.eval_error_json) OR
+			   (OLD.artifact_manifest_json IS NOT NULL AND OLD.artifact_manifest_json IS DISTINCT FROM NEW.artifact_manifest_json) OR
+			   (OLD.artifact_manifest_sha256 IS NOT NULL AND OLD.artifact_manifest_sha256 IS DISTINCT FROM NEW.artifact_manifest_sha256)
+			THEN
+				RAISE EXCEPTION 'competition job immutable fields changed';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_job_guard$;
+
+		CREATE FUNCTION competition_append_only_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_append_only_guard$
+		BEGIN
+			RAISE EXCEPTION 'competition append-only record changed';
+		END
+		$competition_append_only_guard$;
+
+		CREATE TRIGGER competition_job_event_append_only
+		BEFORE UPDATE OR DELETE ON competition_job_event
+		FOR EACH ROW EXECUTE FUNCTION competition_append_only_guard();
+
+		CREATE TRIGGER competition_job_principal_append_only
+		BEFORE UPDATE OR DELETE ON competition_job_principal
+		FOR EACH ROW EXECUTE FUNCTION competition_append_only_guard();
+
+		CREATE FUNCTION competition_retained_record_delete_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_retained_delete_guard$
+		BEGIN
+			RAISE EXCEPTION 'competition retained record cannot be deleted';
+		END
+		$competition_retained_delete_guard$;
+
+		CREATE TRIGGER competition_round_retained
+		BEFORE DELETE ON competition_round
+		FOR EACH ROW EXECUTE FUNCTION competition_retained_record_delete_guard();
+
+		CREATE TRIGGER competition_job_retained
+		BEFORE DELETE ON competition_job
+		FOR EACH ROW EXECUTE FUNCTION competition_retained_record_delete_guard();
+	`),
+
+	// Each hidden seed now has a generated, immutable providers.yml artifact.
+	// An installation that somehow created rounds with the pre-release schema
+	// must stop for operator cleanup instead of inventing a commitment after the
+	// fact.
+	newSqlMigration(`
+		ALTER TABLE competition_round
+			ADD COLUMN IF NOT EXISTS providers_sha256 char(64),
+			ADD COLUMN IF NOT EXISTS providers_path text;
+
+		DO $competition_workload_backfill_guard$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM competition_round
+				WHERE providers_sha256 IS NULL OR providers_path IS NULL
+			) THEN
+				RAISE EXCEPTION 'pre-release competition rounds must be removed before workload commitments are enabled';
+			END IF;
+		END
+		$competition_workload_backfill_guard$;
+
+		ALTER TABLE competition_round
+			ALTER COLUMN providers_sha256 SET NOT NULL,
+			ALTER COLUMN providers_path SET NOT NULL;
+
+		DO $competition_workload_constraint$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conname = 'competition_round_provider_identity_format'
+				  AND conrelid = 'competition_round'::regclass
+			) THEN
+				ALTER TABLE competition_round
+					ADD CONSTRAINT competition_round_provider_identity_format CHECK (
+						providers_sha256 ~ '^[0-9a-f]{64}$' AND
+						providers_path LIKE '/%'
+					);
+			END IF;
+		END
+		$competition_workload_constraint$;
+
+		CREATE OR REPLACE FUNCTION competition_round_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_guard$
+		BEGIN
+			IF OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.competition_id IS DISTINCT FROM NEW.competition_id OR
+			   OLD.workload_commitment IS DISTINCT FROM NEW.workload_commitment OR
+			   OLD.seed_nonce IS DISTINCT FROM NEW.seed_nonce OR
+			   OLD.seed_ciphertext IS DISTINCT FROM NEW.seed_ciphertext OR
+			   OLD.providers_sha256 IS DISTINCT FROM NEW.providers_sha256 OR
+			   OLD.providers_path IS DISTINCT FROM NEW.providers_path OR
+			   OLD.policy_json IS DISTINCT FROM NEW.policy_json OR
+			   OLD.opens_at IS DISTINCT FROM NEW.opens_at OR
+			   OLD.closes_at IS DISTINCT FROM NEW.closes_at OR
+			   OLD.reveal_at IS DISTINCT FROM NEW.reveal_at OR
+			   OLD.created_at IS DISTINCT FROM NEW.created_at OR
+			   (OLD.canceled AND NOT NEW.canceled)
+			THEN
+				RAISE EXCEPTION 'competition round immutable fields changed';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_guard$;
+	`),
 }

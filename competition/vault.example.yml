@@ -1,0 +1,11 @@
+# Secret vault/competition.yml. Store hashes, never raw bearer tokens.
+# Generate a token hash with: printf %s "$TOKEN" | sha256sum
+# Generate the seed key once with a CSPRNG and base64-encode exactly 32 bytes.
+seed_key_base64: REPLACE_WITH_32_RANDOM_BYTES_BASE64
+tokens:
+  - name: apex-submit
+    role: submitter
+    sha256: REPLACE_WITH_64_HEX
+  - name: competition-operator
+    role: operator
+    sha256: REPLACE_WITH_64_HEX

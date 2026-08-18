@@ -200,7 +200,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		postgresUrl := fmt.Sprintf(
 			"postgres://%s:%s@%s/%s?%s",
 			dbKeys.RequireString("user"),
-			dbKeys.RequireString("password"),
+			localEvaluationCredential("EVALUATION_DB_PASSWORD", dbKeys.RequireString("password")),
 			dbKeys.RequireString("authority"),
 			dbKeys.RequireString("db"),
 			optionsString,

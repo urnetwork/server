@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -45,7 +46,12 @@ func provisionRegion(ctx context.Context, region RegionConfig) (server.Id, error
 
 // provisionProviders bulk-inserts the fleet's identities. No balances (providers
 // earn), no auth rows (jwts are pre-signed).
-func provisionProviders(ctx context.Context, entries []ProviderEntry) error {
+func provisionProviders(
+	ctx context.Context,
+	entries []ProviderEntry,
+	locationId server.Id,
+	countryCode string,
+) error {
 	total := len(entries)
 	for start := 0; start < total; start += provisionBatchSize {
 		end := start + provisionBatchSize
@@ -56,8 +62,89 @@ func provisionProviders(ctx context.Context, entries []ProviderEntry) error {
 		if err := provisionIdentityBatch(ctx, batch); err != nil {
 			return err
 		}
+		if err := provisionEgressEvidenceBatch(ctx, batch, locationId, countryCode); err != nil {
+			return err
+		}
 		logf("provisioned providers %d/%d", end, total)
 	}
+	return nil
+}
+
+// provisionEgressEvidenceBatch establishes the simulated providers as usable
+// supply for the real egress-health gate. Production fills these tables from an
+// external prober, but the self-contained simulation has no external internet
+// or operator-proxy process. Its ground truth already defines each fleet entry
+// as a functioning egress with modeled latency, bandwidth, loss, and churn, so
+// one passing synthetic probe and an observation in the configured fake country
+// are part of the simulation's initial condition, like the reliability prewarm.
+func provisionEgressEvidenceBatch(
+	ctx context.Context,
+	entries []ProviderEntry,
+	locationId server.Id,
+	countryCode string,
+) error {
+	measuredAt := server.NowUtc()
+	countryCode = strings.ToLower(countryCode)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+			for _, entry := range entries {
+				clientId := server.RequireParseId(entry.ClientId)
+				batch.Queue(
+					`
+					INSERT INTO provider_egress_health (
+						client_id, measured_at, ok_count, total_count,
+						class_results, reputation_ok, reputation_total,
+						failed_names, reputation_failed_names
+					)
+					VALUES ($1, $2, 1, 1, '{"sim":{"ok":1,"total":1}}'::jsonb, 0, 0, '', '')
+					ON CONFLICT (client_id) DO UPDATE
+					SET
+						measured_at = EXCLUDED.measured_at,
+						ok_count = EXCLUDED.ok_count,
+						total_count = EXCLUDED.total_count,
+						class_results = EXCLUDED.class_results,
+						reputation_ok = EXCLUDED.reputation_ok,
+						reputation_total = EXCLUDED.reputation_total,
+						failed_names = EXCLUDED.failed_names,
+						reputation_failed_names = EXCLUDED.reputation_failed_names
+					`,
+					clientId, measuredAt,
+				)
+				batch.Queue(
+					`
+					INSERT INTO provider_egress_location (
+						client_id, location_id, country_code, asn, org,
+						hosting, proxy, mobile, city_confident,
+						observed_at, verdict, verdict_reason, assurance, update_time
+					)
+					VALUES ($1, $2, $3, 0, 'sim', $4, false, $5, false, $6, 'verified', '', 'direct', $6)
+					ON CONFLICT (client_id) DO UPDATE
+					SET
+						location_id = EXCLUDED.location_id,
+						country_code = EXCLUDED.country_code,
+						asn = EXCLUDED.asn,
+						org = EXCLUDED.org,
+						hosting = EXCLUDED.hosting,
+						proxy = EXCLUDED.proxy,
+						mobile = EXCLUDED.mobile,
+						city_confident = EXCLUDED.city_confident,
+						observed_at = EXCLUDED.observed_at,
+						verdict = EXCLUDED.verdict,
+						verdict_reason = EXCLUDED.verdict_reason,
+						assurance = EXCLUDED.assurance,
+						update_time = EXCLUDED.update_time
+					WHERE provider_egress_location.observed_at < EXCLUDED.observed_at
+					`,
+					clientId,
+					locationId,
+					countryCode,
+					entry.UserType == "hosting",
+					entry.Component == "mobile-variable",
+					measuredAt,
+				)
+			}
+		})
+	})
 	return nil
 }
 
@@ -72,9 +159,20 @@ func provisionIdentityBatch(ctx context.Context, entries []ProviderEntry) error 
 				deviceId := server.RequireParseId(entry.DeviceId)
 				clientId := server.RequireParseId(entry.ClientId)
 
-				// network.admin_user_id has no FK, so no network_user row is
-				// needed; the connection/reliability/selection path never joins
-				// it. a shared fleet network is inserted once (ON CONFLICT skips).
+				// Client JWT validation joins the network's admin to network_user.
+				// Keep every generated user available because providers in a shared
+				// fleet network retain their explicit identities in the fixture;
+				// authentication uses the first entry's user as that network's admin.
+				batch.Queue(
+					`
+					INSERT INTO network_user (user_id, user_name, auth_type, verified)
+					VALUES ($1, $2, 'guest', false)
+					ON CONFLICT (user_id) DO NOTHING
+					`,
+					userId, "sim-provider",
+				)
+				// A shared fleet network is inserted once; fixture order therefore
+				// deterministically selects its admin user.
 				batch.Queue(
 					`
 					INSERT INTO network (network_id, network_name, admin_user_id, contains_profanity)
@@ -95,7 +193,12 @@ func provisionIdentityBatch(ctx context.Context, entries []ProviderEntry) error 
 					`
 					INSERT INTO network_client (client_id, network_id, device_id, description, create_time, auth_time)
 					VALUES ($1, $2, $3, $4, $5, $5)
-					ON CONFLICT (client_id) DO NOTHING
+					ON CONFLICT (client_id) DO UPDATE
+					SET
+						network_id = EXCLUDED.network_id,
+						device_id = EXCLUDED.device_id,
+						active = true,
+						auth_time = EXCLUDED.auth_time
 					`,
 					clientId, networkId, deviceId, "sim-provider", createTime,
 				)

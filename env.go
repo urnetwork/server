@@ -697,6 +697,24 @@ func translateString(value string) string {
 	return translatedValue
 }
 
+// localEvaluationCredential keeps ordinary local and production resolution
+// unchanged while allowing the isolated evaluator to rotate its throwaway
+// PostgreSQL and Redis passwords for every stage. The container boundary sets
+// the explicit mode bit; merely defining an override variable is insufficient.
+func localEvaluationCredential(name string, configured string) string {
+	if os.Getenv("APEX_CONTAINER_EVALUATION") != "true" {
+		return configured
+	}
+	if env, err := Env(); err != nil || env != "local" {
+		panic("evaluation credential overrides require WARP_ENV=local")
+	}
+	value := os.Getenv(name)
+	if value == "" {
+		panic(fmt.Sprintf("Missing evaluation credential %s", name))
+	}
+	return value
+}
+
 func getAll[T any](obj map[string]any, objPath []string, out *[]T) {
 	values := []T{}
 

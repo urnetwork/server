@@ -217,7 +217,7 @@ func replicateRunArgs(opts docopt.Opts, metaPath string) []string {
 	args := []string{"run", "--reset", "--meta", metaPath}
 	forward := []string{
 		"--providers", "--site-home",
-		"--ramp", "--prewarm", "--settle", "--duration",
+		"--ramp", "--prewarm", "--settle", "--duration", "--request-timeout",
 		"--fleet-shards", "--site-listen", "--hosts", "--api-port",
 		"--pipeline-interval", "--test-timeout", "--announce-timeout",
 	}

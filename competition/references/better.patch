@@ -1,0 +1,34 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -61,7 +61,7 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
+ 		return false
+ 	}
+ 
+-	transferPair := model.NewTransferPair(sourceId, destinationId)
++	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
+ 
+ 	// entry is either not expired or nil
+ 	var entry *activeContractEntry
+@@ -89,13 +89,13 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
+ 		handleContractManagerDone(func() {
+ 			c := func() bool {
+-				contractIds1 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
+-				if 0 < len(contractIds1) {
+-					return true
+-				}
+-
+-				contractIds2 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId)
+-				if 0 < len(contractIds2) {
+-					return true
++				contractIdPartialCloseParties := model.GetOpenContractIdsForSourceOrDestination(
++					self.ctx,
++					sourceId,
++				)[transferPair]
++				for _, partialCloseParty := range contractIdPartialCloseParties {
++					if partialCloseParty == "" {
++						return true
++					}
+ 				}
+ 
+ 				return false

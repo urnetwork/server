@@ -18,6 +18,8 @@
 #                                   eval-48g/runs/; failure-tolerant, resumable)
 #   ./eval-48.sh baseline           compute eval-48g/baseline.json from every
 #                                   completed campaign run
+#   ./eval-48.sh summary            authenticate/recompute the completed set and
+#                                   write baseline-summary.{json,md} (requires k>=20)
 #
 # Requires server/local/run-local.sh (postgres + redis) to be up. For an
 # unattended campaign wrap it in caffeinate and keep the lid open:
@@ -26,8 +28,16 @@
 set -u -o pipefail
 cd "$(dirname "$0")"
 
-# ---- the locked environment (revision eval-48b, 2026-07-31) -----------------
-# eval-48b reshapes the throughput distribution so thr_p95 is a decidable
+# ---- the locked environment (revision eval-48d, 2026-08-16) -----------------
+# eval-48d keeps eval-48c's scale, mixture, and byte-identical workload, but
+# advances the environment identity for deterministic warm-client ordering,
+# deterministic exchange-host assignment, and bounded retries of only missing
+# warm clients. Baselines from the pre-fix eval-48c binary must not be mixed
+# with eval-48d even though the provider fixture hash is unchanged.
+# eval-48c had advanced the identity because the historical eval-48b providers
+# sha could not be regenerated from committed source. The replacement sha below
+# reproduces byte-for-byte with both Go 1.26.5 and 1.26.6.
+# eval-48b reshaped the throughput distribution so thr_p95 is a decidable
 # signal: mixture v2 (business tier + narrowed hosting + tighter caps),
 # two-tier site bodies (2-6 MiB download tier, throughput gate 1 MiB), and
 # the arrival rate rebalanced to keep the same offered-bytes regime. The
@@ -39,25 +49,45 @@ CLIENTS=200       # warm client identity pool
 RATE=80           # mean client arrivals per minute (crawl weight ~2.4x eval-48a)
 DURATION=30m      # measured window
 FLEET_SHARDS=4    # provider fleet subprocesses
+INTER_RUN_COOLDOWN=70 # quiesce PostgreSQL/Redis and connection cleanup between attempts
 # canonical fleet file: regenerated bit-identically from the seed; the sha
 # pins the exact workload (compare refuses runs of a different sha)
-PROVIDERS=eval-48g/providers-eval48b.yml
-PROVIDERS_SHA=7851a0d0c0d2c80c4c28f0ecd752305f11a87087cf16d7056ad5ea8f027dfd26
+PROVIDERS=eval-48g/providers-eval48d.yml
+PROVIDERS_SHA=549ec41c033f344d6e0a6b1de82b404bb63d5a8dfb5861b6c4b6d55886cdace4
 # everything else is the sim-latency default: ramp 1m, prewarm 13h, settle 1m,
 # hosts 4, pipeline-interval 10s, test-timeout 3s, announce-timeout 2s
 # ----------------------------------------------------------------------------
 
-export WARP_HOST="${WARP_HOST:-127.0.0.1}"
-export WARP_BLOCK="${WARP_BLOCK:-sim}"
-export WARP_SERVICE="${WARP_SERVICE:-sim}"
-export WARP_VERSION="${WARP_VERSION:-0.0.0-sim}"
+# These labels are part of the evaluation identity. In particular, do not
+# inherit test.sh's test/test labels: they select a different stats namespace
+# and can leave FindProviders2 with an empty market.
+export WARP_HOST="127.0.0.1"
+export WARP_BLOCK="sim"
+export WARP_SERVICE="sim"
+export WARP_VERSION="0.0.0-sim"
 export WARP_ENV="${WARP_ENV:-local}"
+export WARP_DOMAIN="${WARP_DOMAIN:-bringyour.com}"
 export BRINGYOUR_POSTGRES_HOSTNAME="${BRINGYOUR_POSTGRES_HOSTNAME:-local-pg.bringyour.com}"
 export BRINGYOUR_REDIS_HOSTNAME="${BRINGYOUR_REDIS_HOSTNAME:-local-redis.bringyour.com}"
 ulimit -n 1048576 2>/dev/null || true
 
-log() { printf '[eval-48] %s %s\n' "$(date '+%F %T')" "$*"; }
+log() { printf '[eval-48] %s %s\n' "$(date '+%F %T')" "$*" >&2; }
 die() { log "$*"; exit 1; }
+
+# These are the frozen scorer's G5 stderr signatures. During a campaign there
+# is no value in spending the rest of a 30-minute window after one appears: the
+# run can never be placeable or enter a clean baseline. The incremental tail
+# guard below fails it closed while the lifecycle finalizer can still write an
+# incomplete sidecar and withhold the completion marker.
+G5_LOG_PATTERN='Unexpected error:|Rescue handler panic|client driver panic:|evaluation panic:|http: panic serving|panic recovered|(^|[[:space:]])panic:|fatal error:|runtime: out of memory|out of memory: killed process|service restart|restarting service|service unavailable|service missing|unclean drain|did not drain within'
+
+attempt_stem_exists() {
+    local stem="$1"
+    [ -e "$stem.csv" ] ||
+        [ -e "$stem.log" ] ||
+        [ -e "$stem.run.json" ] ||
+        [ -e "$stem.run.json.complete.json" ]
+}
 
 require_binary() {
     [ -x ./sim-latency ] || die "./sim-latency binary missing; build with: go build -o sim-latency ."
@@ -80,7 +110,7 @@ regenerate it: rm $PROVIDERS && ./eval-48.sh init (or update PROVIDERS_SHA if th
 }
 
 standard_run_args() {
-    echo "run --reset --providers $PROVIDERS --fleet-shards $FLEET_SHARDS --site-home eval-48g/.sim-site --duration $DURATION"
+    echo "run --reset --providers $PROVIDERS --fleet-shards $FLEET_SHARDS --site-home eval-48g/.sim-site"
 }
 
 eval48_run() {
@@ -89,6 +119,10 @@ eval48_run() {
     case " ${extra[*]-} " in
         *" --meta"*) ;;
         *) extra+=("--meta" "eval-48g/run.json") ;;
+    esac
+    case " ${extra[*]-} " in
+        *" --duration"*) ;;
+        *) extra+=("--duration" "$DURATION") ;;
     esac
     # shellcheck disable=SC2046
     exec ./sim-latency $(standard_run_args) "${extra[@]}"
@@ -101,6 +135,10 @@ eval48_run() {
 # environment itself is down, e.g. the local stack stopped).
 eval48_campaign() {
     hours="${1:?usage: eval-48.sh campaign <hours>}"
+    case "$hours" in
+        *[!0-9]*) die "campaign hours must be a positive integer" ;;
+    esac
+    [ "$hours" -gt 0 ] || die "campaign hours must be a positive integer"
     eval48_init
     if pgrep -f "sim-latency run" > /dev/null 2>&1; then
         die "a sim-latency run is already active; refusing to start a campaign"
@@ -109,14 +147,31 @@ eval48_campaign() {
 
     ./sample-rss.sh eval-48g/campaign-rss.csv 30 &
     sampler_pid=$!
-    trap 'kill "$sampler_pid" 2>/dev/null' EXIT
+    run_pid=""
+    log_guard_pid=""
+    cleanup_campaign() {
+        if [ -n "$log_guard_pid" ]; then
+            kill "$log_guard_pid" 2>/dev/null || true
+            wait "$log_guard_pid" 2>/dev/null || true
+        fi
+        if [ -n "$run_pid" ]; then
+            kill -TERM "$run_pid" 2>/dev/null || true
+            wait "$run_pid" 2>/dev/null || true
+        fi
+        kill "$sampler_pid" 2>/dev/null || true
+        wait "$sampler_pid" 2>/dev/null || true
+    }
+    trap cleanup_campaign EXIT
 
     # clear any stale processes from an interrupted earlier campaign
     pkill -f "sim-latency (run|fleet)" 2>/dev/null && sleep 5
 
     deadline=$(( $(date +%s) + hours * 3600 ))
     i=1
-    while [ -e "$(printf 'eval-48g/runs/r%03d.csv' "$i")" ]; do i=$((i + 1)); done
+    while attempt_stem_exists "$(printf 'eval-48g/runs/r%03d' "$i")" ||
+        attempt_stem_exists "$(printf 'eval-48g/runs/flagged/r%03d' "$i")"; do
+        i=$((i + 1))
+    done
     log "campaign start: ${hours}h, first run r$(printf '%03d' "$i")"
 
     # per-run watchdog: a starved warm-up can wedge a replicate indefinitely
@@ -134,14 +189,52 @@ eval48_campaign() {
         tag=$(printf 'r%03d' "$i")
         csv="eval-48g/runs/$tag.csv"
         meta="eval-48g/runs/$tag.run.json"
+        marker="$meta.complete.json"
         runlog="eval-48g/runs/$tag.log"
         log "run $tag start"
         t0=$(date +%s)
+        # Run in the background so an incremental, read-only stderr follower
+        # can stop a known-unscoreable evaluation promptly. `set +o pipefail`
+        # makes the guard return grep's status: 0 only when a signature matched,
+        # 1 when tail reached normal process exit without one.
         # shellcheck disable=SC2046,SC2086
-        $watchdog ./sim-latency $(standard_run_args) --meta "$meta" > "$csv" 2> "$runlog"
+        $watchdog ./sim-latency $(standard_run_args) --duration "$DURATION" --meta "$meta" > "$csv" 2> "$runlog" &
+        run_pid=$!
+        (
+            set +o pipefail
+            tail --pid="$run_pid" -n +1 -F "$runlog" 2>/dev/null |
+                grep -Eim1 "$G5_LOG_PATTERN" >/dev/null
+        ) &
+        log_guard_pid=$!
+        g5_tainted=0
+        while kill -0 "$run_pid" 2>/dev/null; do
+            if ! kill -0 "$log_guard_pid" 2>/dev/null; then
+                if wait "$log_guard_pid"; then
+                    g5_tainted=1
+                    log "run $tag emitted a frozen G5 signature; terminating it fail-closed"
+                    kill -TERM "$run_pid" 2>/dev/null || true
+                fi
+                log_guard_pid=""
+                break
+            fi
+            sleep 1
+        done
+        wait "$run_pid"
         rc=$?
+        run_pid=""
+        if [ -n "$log_guard_pid" ]; then
+            if wait "$log_guard_pid"; then
+                g5_tainted=1
+            fi
+            log_guard_pid=""
+        fi
+        if [ "$g5_tainted" -eq 1 ] && [ -e "$marker" ]; then
+            log "campaign ABORT: G5-tainted $tag wrote a completion marker; preserve the campaign for audit"
+            exit 1
+        fi
         wall=$(( $(date +%s) - t0 ))
-        if [ "$rc" -eq 0 ] && [ -s "$meta" ]; then
+        if [ "$g5_tainted" -eq 0 ] && [ "$rc" -eq 0 ] && [ -s "$meta" ] && [ -s "$marker" ] &&
+            python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("completion_state") != "complete")' "$meta"; then
             consecutive_failures=0
             completed=$((completed + 1))
             summary=$(python3 - "$meta" <<'PY'
@@ -173,26 +266,35 @@ PY
                 log "campaign ABORT: 3 consecutive run failures; is server/local/run-local.sh still up?"
                 exit 1
             fi
-            sleep 60
         fi
         i=$((i + 1))
-        sleep 10
+        sleep "$INTER_RUN_COOLDOWN"
     done
     log "campaign complete: $completed runs completed (through $(printf 'r%03d' $((i - 1))))"
 }
 
 # baseline: the noise floor + convergence from every completed campaign run.
-# A run is complete when its run.json side-car exists (written at run end), so
-# an in-flight replicate's partial csv is never included.
+# A run is complete only when its authenticated lifecycle marker exists, so an
+# interrupted replicate's CSV/sidecar is never included.
 eval48_baseline() {
     require_binary
     runs=""
     for csv in eval-48g/runs/r*.csv; do
-        [ -s "${csv%.csv}.run.json" ] || continue
+        [ -s "${csv%.csv}.run.json.complete.json" ] || continue
         runs="${runs:+$runs,}$csv"
     done
     [ -n "$runs" ] || die "no completed campaign runs under eval-48g/runs/"
     ./sim-latency baseline --runs "$runs" --out eval-48g/baseline.json
+}
+
+eval48_summary() {
+    require_binary
+    [ -x ./summarize-baseline.py ] || die "./summarize-baseline.py is missing or not executable"
+    mkdir -p eval-48g
+    GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.5}" go build -trimpath \
+        -o eval-48g/baseline-samples ./cmd/baseline-samples || \
+        die "build baseline-samples failed"
+    ./summarize-baseline.py --sample-audit eval-48g/baseline-samples
 }
 
 case "${1:-}" in
@@ -200,5 +302,6 @@ case "${1:-}" in
     run)      shift; eval48_run "$@" ;;
     campaign) shift; eval48_campaign "$@" ;;
     baseline) eval48_baseline ;;
+    summary)  eval48_summary ;;
     *)        sed -n '2,/^$/p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'; exit 1 ;;
 esac

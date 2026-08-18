@@ -68,9 +68,13 @@ type streamWriter struct {
 	messages    chan queuedMessage
 	queuedBytes atomic.Int64
 	dropped     atomic.Uint64
+	closing     atomic.Bool
+	appendLock  sync.RWMutex
 
 	closeOnce sync.Once
 	done      chan struct{}
+	errLock   sync.Mutex
+	writeErr  error
 
 	// writer-goroutine-owned segment state
 	encoder      *zstd.Encoder
@@ -104,6 +108,12 @@ func newStreamWriter(ctx context.Context, dir string, stream string, settings *s
 // append enqueues a message, dropping (and counting) it if the queue is full.
 // Safe for concurrent use.
 func (self *streamWriter) append(message proto.Message) {
+	self.appendLock.RLock()
+	defer self.appendLock.RUnlock()
+	if self.closing.Load() {
+		self.dropped.Add(1)
+		return
+	}
 	size := int64(proto.Size(message))
 	if !self.reserveQueueBytes(size) {
 		self.dropped.Add(1)
@@ -149,16 +159,20 @@ func (self *streamWriter) run() {
 	for {
 		select {
 		case <-self.ctx.Done():
+			// Convert context cancellation into the same orderly close used by
+			// Stats.Close, then drain every message accepted before the close.
+			// Evaluation teardown relies on cancellation never dropping the tail
+			// of the FindProviders2 stream.
+			self.closeInput()
+			for queued := range self.messages {
+				self.writeQueued(queued)
+			}
 			return
 		case queued, ok := <-self.messages:
 			if !ok {
 				return
 			}
-			self.write(queued.message)
-			self.queuedBytes.Add(-queued.size)
-			if self.shouldRotate() {
-				self.finalizeSegment()
-			}
+			self.writeQueued(queued)
 		case <-ticker.C:
 			if self.file != nil && self.settings.maxSegmentAge <= time.Since(self.segmentStart) {
 				self.finalizeSegment()
@@ -167,26 +181,55 @@ func (self *streamWriter) run() {
 	}
 }
 
+func (self *streamWriter) writeQueued(queued queuedMessage) {
+	self.write(queued.message)
+	self.queuedBytes.Add(-queued.size)
+	if self.shouldRotate() {
+		self.finalizeSegment()
+	}
+}
+
+func (self *streamWriter) recordError(err error) {
+	if err == nil {
+		return
+	}
+	self.errLock.Lock()
+	defer self.errLock.Unlock()
+	if self.writeErr == nil {
+		self.writeErr = err
+	}
+}
+
+func (self *streamWriter) error() error {
+	self.errLock.Lock()
+	defer self.errLock.Unlock()
+	return self.writeErr
+}
+
 func (self *streamWriter) write(message proto.Message) {
 	messageBytes, err := proto.Marshal(message)
 	if err != nil {
 		glog.Infof("[stats]%s marshal err=%s\n", self.stream, err)
+		self.recordError(fmt.Errorf("%s: marshal: %w", self.stream, err))
 		return
 	}
 	if self.file == nil {
 		if err := self.openSegment(); err != nil {
 			glog.Infof("[stats]%s open segment err=%s\n", self.stream, err)
+			self.recordError(fmt.Errorf("%s: open segment: %w", self.stream, err))
 			return
 		}
 	}
 	binary.BigEndian.PutUint32(self.lenBuf[:], uint32(len(messageBytes)))
 	if _, err := self.encoder.Write(self.lenBuf[:]); err != nil {
 		glog.Infof("[stats]%s write len err=%s\n", self.stream, err)
+		self.recordError(fmt.Errorf("%s: write frame length: %w", self.stream, err))
 		self.discardSegment()
 		return
 	}
 	if _, err := self.encoder.Write(messageBytes); err != nil {
 		glog.Infof("[stats]%s write frame err=%s\n", self.stream, err)
+		self.recordError(fmt.Errorf("%s: write frame: %w", self.stream, err))
 		self.discardSegment()
 		return
 	}
@@ -233,18 +276,33 @@ func (self *streamWriter) finalizeSegment() {
 	ok := true
 	if err := self.encoder.Close(); err != nil {
 		glog.Infof("[stats]%s encoder close err=%s\n", self.stream, err)
+		self.recordError(fmt.Errorf("%s: encoder close: %w", self.stream, err))
 		ok = false
 	}
 	if err := self.file.Sync(); err != nil {
 		glog.Infof("[stats]%s sync err=%s\n", self.stream, err)
+		self.recordError(fmt.Errorf("%s: sync: %w", self.stream, err))
+		ok = false
 	}
 	if err := self.file.Close(); err != nil {
 		glog.Infof("[stats]%s file close err=%s\n", self.stream, err)
+		self.recordError(fmt.Errorf("%s: file close: %w", self.stream, err))
 		ok = false
 	}
 	if ok {
 		if err := os.Rename(self.partialPath, self.finalPath); err != nil {
 			glog.Infof("[stats]%s rename err=%s\n", self.stream, err)
+			self.recordError(fmt.Errorf("%s: finalize rename: %w", self.stream, err))
+			os.Remove(self.partialPath)
+		} else if dir, err := os.Open(self.dir); err != nil {
+			self.recordError(fmt.Errorf("%s: open stream directory for sync: %w", self.stream, err))
+		} else {
+			if err := dir.Sync(); err != nil {
+				self.recordError(fmt.Errorf("%s: sync stream directory: %w", self.stream, err))
+			}
+			if err := dir.Close(); err != nil {
+				self.recordError(fmt.Errorf("%s: close stream directory: %w", self.stream, err))
+			}
 		}
 	} else {
 		os.Remove(self.partialPath)
@@ -267,11 +325,26 @@ func (self *streamWriter) discardSegment() {
 	self.segmentBytes = 0
 }
 
-// close stops accepting messages and waits for the writer goroutine to
-// finalize the open segment.
-func (self *streamWriter) close() {
+func (self *streamWriter) closeInput() {
 	self.closeOnce.Do(func() {
+		self.appendLock.Lock()
+		defer self.appendLock.Unlock()
+		self.closing.Store(true)
 		close(self.messages)
 	})
+}
+
+// close stops accepting messages, waits for the writer goroutine to drain the
+// accepted queue and finalize its open segment, and reports any durability
+// failure or dropped sample.
+func (self *streamWriter) close() error {
+	self.closeInput()
 	<-self.done
+	if err := self.error(); err != nil {
+		return err
+	}
+	if dropped := self.droppedCount(); 0 < dropped {
+		return fmt.Errorf("%s: %d samples dropped", self.stream, dropped)
+	}
+	return nil
 }

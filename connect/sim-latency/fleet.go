@@ -17,11 +17,13 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"sync/atomic"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -32,6 +34,8 @@ import (
 // connection — a clean baseline for isolating impairment from the rest of the
 // stack.
 var impairEnabled = true
+
+const providerRegistrationTimeout = 15 * time.Second
 
 type simProvider struct {
 	entry    ProviderEntry
@@ -56,8 +60,17 @@ type Fleet struct {
 	wsUrls       []string
 	wsPorts      map[int]bool
 	rampDuration time.Duration
+	// The first fixture entry for a network is the admin persisted by
+	// provisionIdentityBatch. Providers grouped into that shared network must
+	// authenticate as the same admin even though each entry retains its own
+	// generated user id as ground truth.
+	networkAdminUsers map[string]string
 
 	providers []*simProvider
+	done      chan struct{}
+	closeOnce sync.Once
+	errLock   sync.Mutex
+	runErr    error
 }
 
 // NewFleet builds and starts the providers for the given entries. Providers
@@ -73,23 +86,25 @@ func NewFleet(
 	wsUrls []string,
 	wsPorts map[int]bool,
 	rampDuration time.Duration,
-) *Fleet {
+) (*Fleet, error) {
 	self := &Fleet{
-		ctx:          ctx,
-		config:       config,
-		apiUrl:       apiUrl,
-		wsUrls:       wsUrls,
-		wsPorts:      wsPorts,
-		rampDuration: rampDuration,
-		providers:    make([]*simProvider, 0, len(entries)),
+		ctx:               ctx,
+		config:            config,
+		apiUrl:            apiUrl,
+		wsUrls:            wsUrls,
+		wsPorts:           wsPorts,
+		rampDuration:      rampDuration,
+		providers:         make([]*simProvider, 0, len(entries)),
+		done:              make(chan struct{}),
+		networkAdminUsers: firstNetworkAdminUsers(config.Fleet),
 	}
 
 	now := server.NowUtc()
 	for i, entry := range entries {
 		sp, err := self.newSimProvider(entry, i)
 		if err != nil {
-			logf("provider %d create err: %s", entry.Index, err)
-			continue
+			self.closeAll()
+			return nil, fmt.Errorf("provider %d create: %w", entry.Index, err)
 		}
 		// stagger the first connect uniformly across the ramp window
 		sp.control = newRng(entry.Seed)
@@ -98,8 +113,26 @@ func NewFleet(
 		self.providers = append(self.providers, sp)
 	}
 
-	go server.HandleError(self.run)
-	return self
+	go func() {
+		defer close(self.done)
+		defer self.closeAll()
+		server.HandleError(self.run, func(err error) {
+			self.errLock.Lock()
+			self.runErr = err
+			self.errLock.Unlock()
+		})
+	}()
+	return self, nil
+}
+
+func firstNetworkAdminUsers(entries []ProviderEntry) map[string]string {
+	users := make(map[string]string)
+	for _, entry := range entries {
+		if _, ok := users[entry.NetworkId]; !ok {
+			users[entry.NetworkId] = entry.UserId
+		}
+	}
+	return users
 }
 
 func (self *Fleet) newSimProvider(entry ProviderEntry, index int) (*simProvider, error) {
@@ -107,7 +140,11 @@ func (self *Fleet) newSimProvider(entry ProviderEntry, index int) (*simProvider,
 	if err != nil {
 		return nil, err
 	}
-	userId, err := server.ParseId(entry.UserId)
+	adminUserId := entry.UserId
+	if configuredAdminUserId, ok := self.networkAdminUsers[entry.NetworkId]; ok {
+		adminUserId = configuredAdminUserId
+	}
+	userId, err := server.ParseId(adminUserId)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +198,49 @@ func (self *Fleet) newSimProvider(entry ProviderEntry, index int) (*simProvider,
 		MaxConcurrentFlows:    entry.MaxConnections,
 		Log:                   connect.NewNoopLogger(),
 	})
+
+	// UpdateClientScores now admits only providers whose Public or Network
+	// provide key has been committed server-side. SimProvider first publishes
+	// its provide frame before its platform transport exists, which can race or
+	// lose that initial send. Re-publish after NewSimProvider has connected its
+	// transport and wait for the acknowledgement before this provider
+	// participates in the fleet. The later prewarm/settle interval provides the
+	// server-side commit barrier before UpdateClientScores reads the keys.
+	registerCtx, registerCancel := context.WithTimeout(self.ctx, providerRegistrationTimeout)
+	defer registerCancel()
+	connectedTicker := time.NewTicker(10 * time.Millisecond)
+	defer connectedTicker.Stop()
+	for !provider.IsConnected() {
+		select {
+		case <-connectedTicker.C:
+		case <-registerCtx.Done():
+			provider.Close()
+			return nil, fmt.Errorf("wait for provider transport: %w", registerCtx.Err())
+		}
+	}
+	registered := make(chan error, 1)
+	provider.Client().ContractManager().SetProvideModesWithReturnTrafficWithOobAckCallback(
+		map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Network: true,
+			protocol.ProvideMode_Public:  true,
+		},
+		func(err error) {
+			select {
+			case registered <- err:
+			default:
+			}
+		},
+	)
+	select {
+	case err := <-registered:
+		if err != nil {
+			provider.Close()
+			return nil, fmt.Errorf("register provide keys: %w", err)
+		}
+	case <-registerCtx.Done():
+		provider.Close()
+		return nil, fmt.Errorf("register provide keys: %w", registerCtx.Err())
+	}
 	// providers start offline; the control loop connects them across the ramp
 	provider.SetConnected(false)
 
@@ -254,9 +334,11 @@ func (self *Fleet) regimeDwell(sp *simProvider, degraded bool) time.Duration {
 }
 
 func (self *Fleet) closeAll() {
-	for _, sp := range self.providers {
-		sp.provider.Close()
-	}
+	self.closeOnce.Do(func() {
+		for _, sp := range self.providers {
+			sp.provider.Close()
+		}
+	})
 }
 
 func (self *Fleet) ConnectedCount() int {
@@ -269,8 +351,28 @@ func (self *Fleet) ConnectedCount() int {
 	return count
 }
 
+// Returns the cumulative bytes that providers successfully handed to their
+// client-facing return path. Each provider counter is atomic; summing a live
+// fleet is a boundary snapshot rather than a transaction across providers.
+func (self *Fleet) ProviderEgressByteCount() int64 {
+	var byteCount int64
+	for _, sp := range self.providers {
+		byteCount += int64(sp.provider.PacketStats().RemoteEgressByteCount)
+	}
+	return byteCount
+}
+
+// Wait joins the fleet control goroutine after its context is canceled.
+func (self *Fleet) Wait() error {
+	<-self.done
+	self.errLock.Lock()
+	defer self.errLock.Unlock()
+	return self.runErr
+}
+
 // jwtSign mints a client jwt (network + user + device + client), the auth a
-// SimProvider/SimClient presents. Signature-validated server-side, no db.
+// SimProvider/SimClient presents. Current server validation verifies both the
+// signature and the corresponding active identity rows provisioned for the run.
 func jwtSign(networkId server.Id, userId server.Id, networkName string, deviceId server.Id, clientId server.Id) string {
 	return jwt.NewByJwt(networkId, userId, networkName, false, false).
 		Client(deviceId, clientId).Sign()

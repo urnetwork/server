@@ -12,8 +12,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,15 +31,22 @@ type Services struct {
 	apiUrl  string
 	wsUrls  []string
 	wsPorts map[int]bool
+	cancel  context.CancelFunc
 
 	httpServers []*http.Server
 	exchanges   []*connectserver.Exchange
+	wg          sync.WaitGroup
+	closeOnce   sync.Once
+	errLock     sync.Mutex
+	runErr      error
 
 	// when prewarmed, the pipeline does not recompute reliability scores (which
 	// would overwrite the prewarmed scores); it only refreshes the location
 	// reliabilities (so churn gates selection) and re-exports the redis samples.
 	prewarmed atomic.Bool
 }
+
+const servicesDrainTimeout = 15 * time.Second
 
 // SetPrewarmed switches the pipeline to prewarmed mode (see the field doc).
 func (self *Services) SetPrewarmed(prewarmed bool) {
@@ -87,6 +96,10 @@ func DefaultServicesConfig() *ServicesConfig {
 // NewServices stands up the exchanges, connect handlers, api server, and the
 // pipeline loop. It blocks until every listener is reachable.
 func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services, error) {
+	if err := validateServicesConfig(servicesConfig); err != nil {
+		return nil, err
+	}
+	serviceCtx, cancel := context.WithCancel(ctx)
 	service := "connect"
 	block := "sim"
 
@@ -101,6 +114,7 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 
 	self := &Services{
 		wsPorts: map[int]bool{},
+		cancel:  cancel,
 	}
 
 	for i := 0; i < servicesConfig.HostCount; i += 1 {
@@ -122,7 +136,7 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 		settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 10_000_000
 
 		exchange := connectserver.NewExchange(
-			ctx,
+			serviceCtx,
 			hostNames[i],
 			service,
 			block,
@@ -132,17 +146,17 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 		)
 		self.exchanges = append(self.exchanges, exchange)
 
-		connectHandler := connectserver.NewConnectHandler(ctx, server.NewId(), exchange, &settings.ConnectHandlerSettings)
+		connectHandler := connectserver.NewConnectHandler(serviceCtx, server.NewId(), exchange, &settings.ConnectHandlerSettings)
 		connectRoutes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
 			router.NewRoute("GET", "/", connectHandler.Connect),
 		}
 		httpServer := &http.Server{
 			Addr:    fmt.Sprintf("127.0.0.1:%d", wsPort),
-			Handler: router.NewRouter(ctx, connectRoutes),
+			Handler: router.NewRouter(serviceCtx, connectRoutes),
 		}
 		self.httpServers = append(self.httpServers, httpServer)
-		go server.HandleError(func() { httpServer.ListenAndServe() })
+		self.serve(httpServer)
 
 		self.wsUrls = append(self.wsUrls, fmt.Sprintf("ws://127.0.0.1:%d", wsPort))
 		self.wsPorts[wsPort] = true
@@ -150,19 +164,66 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 
 	apiServer := &http.Server{
 		Addr:    fmt.Sprintf("127.0.0.1:%d", servicesConfig.ApiPort),
-		Handler: router.NewRouter(ctx, api.Routes()),
+		Handler: router.NewRouter(serviceCtx, api.Routes()),
 	}
 	self.httpServers = append(self.httpServers, apiServer)
-	go server.HandleError(func() { apiServer.ListenAndServe() })
+	self.serve(apiServer)
 	self.apiUrl = fmt.Sprintf("http://127.0.0.1:%d", servicesConfig.ApiPort)
 
-	if err := self.waitReachable(ctx, servicesConfig); err != nil {
+	if err := self.waitReachable(serviceCtx, servicesConfig); err != nil {
+		self.Close()
 		return nil, err
 	}
 
-	go server.HandleError(func() { self.runPipeline(ctx, servicesConfig.PipelineInterval) })
+	self.wg.Add(1)
+	go func() {
+		defer self.wg.Done()
+		server.HandleError(
+			func() { self.runPipeline(serviceCtx, servicesConfig.PipelineInterval) },
+			self.recordError,
+		)
+	}()
+	go func() {
+		<-serviceCtx.Done()
+		self.Close()
+	}()
 
 	return self, nil
+}
+
+func validateServicesConfig(config *ServicesConfig) error {
+	if config == nil {
+		return errors.New("nil services config")
+	}
+	if config.HostCount <= 0 || 65535 < config.HostCount ||
+		config.ApiPort <= 0 || 65535 < config.ApiPort ||
+		config.WsPortBase <= 0 || 65535-(config.HostCount-1) < config.WsPortBase ||
+		config.ExchangePortBase <= 0 || 65535-(config.HostCount-1) < config.ExchangePortBase {
+		return errors.New("service host count or port range is invalid")
+	}
+	if config.PipelineInterval <= 0 || config.SpeedTestTimeout <= 0 || config.AnnounceTimeout <= 0 {
+		return errors.New("service timing must be positive")
+	}
+	return nil
+}
+
+func (self *Services) serve(httpServer *http.Server) {
+	self.wg.Add(1)
+	go func() {
+		defer self.wg.Done()
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			self.recordError(err)
+		}
+	}()
+}
+
+func (self *Services) recordError(err error) {
+	if err == nil {
+		return
+	}
+	self.errLock.Lock()
+	defer self.errLock.Unlock()
+	self.runErr = errors.Join(self.runErr, err)
 }
 
 func (self *Services) waitReachable(ctx context.Context, servicesConfig *ServicesConfig) error {
@@ -238,11 +299,30 @@ func (self *Services) ApiUrl() string        { return self.apiUrl }
 func (self *Services) WsUrls() []string      { return self.wsUrls }
 func (self *Services) WsPorts() map[int]bool { return self.wsPorts }
 
-func (self *Services) Close() {
-	for _, httpServer := range self.httpServers {
-		httpServer.Close()
-	}
-	for _, exchange := range self.exchanges {
-		exchange.Close()
-	}
+func (self *Services) Close() error {
+	self.closeOnce.Do(func() {
+		self.cancel()
+		drainCtx, cancel := context.WithTimeout(context.Background(), servicesDrainTimeout)
+		defer cancel()
+		for _, httpServer := range self.httpServers {
+			if err := httpServer.Shutdown(drainCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				self.recordError(fmt.Errorf("HTTP shutdown: %w", err))
+				if closeErr := httpServer.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+					self.recordError(fmt.Errorf("HTTP forced close: %w", closeErr))
+				}
+			}
+		}
+		for _, exchange := range self.exchanges {
+			exchange.Close()
+		}
+		for i, exchange := range self.exchanges {
+			if !exchange.WaitForIdle(drainCtx) {
+				self.recordError(fmt.Errorf("exchange %d did not drain within %s", i, servicesDrainTimeout))
+			}
+		}
+	})
+	self.wg.Wait()
+	self.errLock.Lock()
+	defer self.errLock.Unlock()
+	return self.runErr
 }

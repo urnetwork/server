@@ -1,0 +1,14 @@
+[Unit]
+Description=URnetwork authoritative evaluator host controls
+Before=containerd.service docker.service competitionworker.service
+After=local-fs.target
+ConditionFileIsExecutable=/usr/local/libexec/urnetwork/authoritative-host-controls
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/urnetwork/authoritative-host-controls --apply
+RemainAfterExit=yes
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

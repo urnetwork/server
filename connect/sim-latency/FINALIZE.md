@@ -1,15 +1,27 @@
 # Apex integration finalization plan
 
-Status date: 2026-08-14
+Status date: 2026-08-17
 
 This plan takes `sim-latency` from a working local benchmark to a launch-ready
-Apex competition evaluation system. It is the execution plan for the
-`ur_latency` design in [`../../../apex/PLAN.md`](../../../apex/PLAN.md).
+Apex competition evaluation system. The current public-platform mismatch and
+the integration decision required from Macrocosmos are recorded in
+[`../../competition/APEX-INTEGRATION-GAP.md`](../../competition/APEX-INTEGRATION-GAP.md).
 
 The simulator itself is substantially built. The remaining work is to freeze
 the Apex scoring contract, close correctness and anti-gaming gaps, qualify the
 harness on official hardware, build the scoring/evaluation service, and pass
 the Macrocosmos staging handoff.
+
+Local implementation update: the score contract, simulator correctness work,
+official scorer/baseline builder, fail-closed runner, competition API/control
+plane, worker protocol, host attestation, and Python miner package are
+implemented. The corrected 20-run `eval-12c` campaign and the locally built
+no-op/worse/better reference images are authenticated development evidence;
+neither is production calibration or reference separability. See
+`FINALIZATION-STATUS.md` and
+`eval-12c/frontier-summary-doublecleanup.md`. Production host qualification,
+recalibration, root-owned evaluator deployment, image publication, Macrocosmos
+integration, staging, monitoring, and ownership gates remain open.
 
 ## Current state
 
@@ -56,7 +68,7 @@ not satisfy the Apex calibration requirements.
 
 Owner: UR engineering with Macrocosmos confirmation.
 
-- [ ] Resolve the scoring mismatch between the Apex design and the current
+- [x] Resolve the scoring mismatch between the Apex design and the current
   simulator:
 
   - The Apex design specifies one lower-is-better scalar: p95 `total_ms`, with
@@ -70,7 +82,7 @@ Owner: UR engineering with Macrocosmos confirmation.
   anti-regression gates; do not silently substitute the `compare` verdict for
   Apex's scalar score.
 
-- [ ] Write `APEX-SCORE-SPEC.md` and version it as `score_schema: 1`. It must
+- [x] Write `APEX-SCORE-SPEC.md` and version it as `score_schema: 1`. It must
   define, without implementation-dependent language:
 
   - measured-window inclusion rules;
@@ -84,7 +96,7 @@ Owner: UR engineering with Macrocosmos confirmation.
   - all diagnostics returned to Apex and when they become visible;
   - typed submission errors versus infrastructure errors.
 
-- [ ] Confirm whether a crawl canceled at the two-minute crawl deadline creates
+- [x] Confirm whether a crawl canceled at the two-minute crawl deadline creates
   only rows for requests actually attempted or also synthetic failure rows for
   undiscovered descendants. Keep the volume gate consistent with that choice.
 - [ ] Confirm the initial takeover threshold and whether scoring uses one run,
@@ -106,39 +118,39 @@ Exit criteria:
 records the HTTP response status. A truncated response can therefore appear as
 a successful `200` row.
 
-- [ ] Validate the leading JSON line before recording the row.
-- [ ] Compare the received body length with the page's declared `size` and the
+- [x] Validate the leading JSON line before recording the row.
+- [x] Compare the received body length with the page's declared `size` and the
   response `Content-Length` when present.
-- [ ] Treat any header read error, body read error, invalid page header, or byte
+- [x] Treat any header read error, body read error, invalid page header, or byte
   mismatch as an incomplete request under the score specification.
-- [ ] Keep the existing CSV columns stable unless the score specification
+- [x] Keep the existing CSV columns stable unless the score specification
   requires an explicit `expected_bytes` or `complete` column. If a column is
   added, bump the artifact schema and keep legacy readers working.
-- [ ] Apply the same completeness check to warm-up requests so a partial body
+- [x] Apply the same completeness check to warm-up requests so a partial body
   cannot establish a supposedly healthy warm client.
-- [ ] Add tests for a complete response, truncated header, truncated body,
+- [x] Add tests for a complete response, truncated header, truncated body,
   incorrect content length, read error, non-200 response, and cancellation.
 
 ### 1.2 Evaluation lifecycle
 
-- [ ] Ensure TERM cancels ramp, prewarm, settle, warm-client construction, and
+- [x] Ensure TERM cancels ramp, prewarm, settle, warm-client construction, and
   the measured window promptly; the runner may still use TERM followed by KILL
   as a final containment boundary.
-- [ ] Join fleet subprocesses and all stats/client drain goroutines before
+- [x] Join fleet subprocesses and all stats/client drain goroutines before
   reporting a successful evaluation.
-- [ ] Make lingering child processes, a missing `run.json`, or a failed stats
+- [x] Make lingering child processes, a missing `run.json`, or a failed stats
   flush a typed incomplete-evaluation result.
-- [ ] Add an evaluation/run identifier to logs and artifacts so DB accounting,
+- [x] Add an evaluation/run identifier to logs and artifacts so DB accounting,
   stats samples, CSV, stderr, and resource reports cannot be mixed across jobs.
 
 ### 1.3 Artifact completeness
 
-- [ ] Extend the run manifest or sidecar with every scorer input that is not
+- [x] Extend the run manifest or sidecar with every scorer input that is not
   derivable from the CSV: request timeout, score schema, scorer version,
   expected run flags, stats root, completion state, and resource-report path.
-- [ ] Record the exact build revision and reject modified or unpinned builds in
+- [x] Record the exact build revision and reject modified or unpinned builds in
   official mode.
-- [ ] Add a machine-readable final marker only after CSV flush, sidecar write,
+- [x] Add a machine-readable final marker only after CSV flush, sidecar write,
   stats close, accounting snapshot, and child teardown have completed.
 
 Exit criteria:
@@ -153,9 +165,9 @@ Prefer a Go `sim-latency score` subcommand so it reuses the benchmark's parsers
 and can be shipped to miners as the exact official scorer. Keep evaluation
 orchestration outside the scorer.
 
-- [ ] Add a command that accepts the run CSV/sidecar, stderr, baseline manifest,
+- [x] Add a command that accepts the run CSV/sidecar, stderr, baseline manifest,
   DB accounting snapshot, FindProviders2 sample directory, and resource report.
-- [ ] Emit one versioned JSON document containing:
+- [x] Emit one versioned JSON document containing:
 
   ```json
   {
@@ -168,8 +180,8 @@ orchestration outside the scorer.
   }
   ```
 
-- [ ] Implement the raw score exactly as frozen in `APEX-SCORE-SPEC.md`.
-- [ ] Implement and test every gate:
+- [x] Implement the raw score exactly as frozen in `APEX-SCORE-SPEC.md`.
+- [x] Implement and test every gate:
 
   - **G1 success:** success rate is at least 97% and no more than one percentage
     point below the same-round baseline.
@@ -178,18 +190,19 @@ orchestration outside the scorer.
   - **G3 path integrity:** immutable server-side provider-egress/accounting bytes
     cover at least 95% of client-received bytes.
   - **G4 matchmaking:** samples exist, candidate pools are non-empty, and p95
-    FindProviders2 `load_millis` is within the allowed baseline multiplier.
+    FindProviders2 `load_millis` is within the allowed baseline multiplier;
+    candidate pool-count p05 also preserves at least 90% of baseline.
   - **G5 stability:** the run completed with no panic, restart, fatal recovery,
     missing service, or unclean drain.
   - **G6 resources:** the cgroup/resource report shows no OOM, hard kill, limit
     escape, or missing measurement.
 
-- [ ] Fail closed when any mandatory input is absent or malformed.
-- [ ] Keep scorer output deterministic for identical artifact bytes.
-- [ ] Add golden tests for baseline, genuine improvement, regression, all six
+- [x] Fail closed when any mandatory input is absent or malformed.
+- [x] Keep scorer output deterministic for identical artifact bytes.
+- [x] Add golden tests for baseline, genuine improvement, regression, all six
   individual gate failures, multiple simultaneous failures, empty CSV, legacy
   log noise, malformed samples, NaN/Inf, and boundary values.
-- [ ] Add a CLI-level parity test comparing the locally shipped scorer with the
+- [x] Add a CLI-level parity test comparing the locally shipped scorer with the
   scorer invoked by the evaluation worker.
 
 Exit criteria:
@@ -200,9 +213,11 @@ Exit criteria:
 
 ## Phase 3: qualify scale and freeze the official run
 
-All qualification must run on the exact official hardware: two identical
-circa-2017 Xeon machines, 12 cores, 128 GB ECC RAM, Ubuntu 24.04, with fixed
-microcode, kernel, SMT/NUMA placement, turbo state, and governor.
+All qualification must run on the exact authoritative hardware: one dedicated
+circa-2017 Xeon machine, 12 physical cores split into 10 evaluation + 2
+management, 128 GB ECC RAM with at least 24 GiB outside active job ceilings,
+Ubuntu 24.04, and fixed microcode, kernel, SMT/NUMA placement, turbo state, and
+governor.
 
 ### 3.1 Find the egress-establishment frontier
 
@@ -224,12 +239,14 @@ Frontier exit gate:
   threshold justified by the scoring contract.
 - No empty market or establishment anomaly.
 - No `ENOBUFS` during the measured window.
-- Baseline steady-state CPU at or below approximately 65% of the 12-core budget.
+- Baseline steady-state CPU at or below approximately 65% of the 10-core
+  evaluation budget; the other 2 host cores are reserved for management and
+  cleanup and are not part of the score environment.
 - Stable Postgres, Redis, socket, memory, and teardown behavior.
 
 ### 3.2 Freeze `official-run.sh`
 
-- [ ] Add `official-run.sh` and a runbook that pin:
+- [x] Add `official-run.sh` and a runbook that pin:
 
   - base/scorer revisions and clean-build enforcement;
   - provider/client scale and all sim flags;
@@ -242,10 +259,10 @@ Frontier exit gate:
   - TERM/KILL deadlines and cleanup checks;
   - artifact paths and checksums.
 
-- [ ] Have the script produce an immutable evaluation manifest and a complete
+- [x] Have the script produce an immutable evaluation manifest and a complete
   artifact bundle: patch, CSV, stderr, sidecar, scorer JSON, accounting snapshot,
   stats samples, resource report, and hashes.
-- [ ] Publish all non-secret run-spec fields through the scoring API `/info`
+- [x] Publish all non-secret run-spec fields through the scoring API `/info`
   endpoint and the miner README.
 
 Exit criteria:
@@ -255,16 +272,26 @@ Exit criteria:
 
 ## Phase 4: pass the noise and separability launch gate
 
-The directional workstation result for `total_p95_ms` has approximately 5%
-run-to-run CV and a one-run minimum detectable change around 12.5%. The planned
-Apex gate is at most 0.25% run noise for a 1% takeover margin. The existing data
-therefore does not support single-run 1% takeovers.
+The corrected 20-run directional workstation campaign measured 6.639%
+run-to-run CV for the failure-charged Apex scalar. Under the quarter-margin
+rule, the local scalar supports no takeover margin smaller than 26.556%. Its
+last-five SD-prefix span passes the local 10% convergence heuristic, but the SD
+relative standard-error estimate is still 16.222%. The existing data therefore
+does not support single-run 1% takeovers.
 
+- [ ] Freeze the source identity before drawing any reference-campaign seed:
+  commit every intended local change in `server`, `connect`, `sdk`, and `sn`;
+  fetch and merge each `origin/main`; rerun the affected verification; push
+  every resulting commit; require every source-lock worktree to be clean; and
+  record the complete pushed source lock in the campaign manifest. Seed
+  generation must abort if the checkout differs from that pushed identity.
 - [ ] On the production box, run at least 20 clean repetitions of one seed to
   measure `sigma_run` under the final scorer.
 - [ ] Run the baseline once on at least 20 independent CSPRNG seeds to measure
   round-to-round spread and identify pathological mixtures.
-- [ ] Create three pinned reference submissions:
+- [ ] Promote three pinned reference submissions against the frozen season
+  base. Provisional development-base patches and authenticated local images now
+  exist in `competition/references/`, but have no official performance result:
 
   - no-op baseline patch;
   - deliberately worse patch;
@@ -302,14 +329,35 @@ the simulator integration is complete.
 
 ### 5.1 Infrastructure and job runner
 
-- [ ] Provision two identical, dedicated, monitored evaluation machines.
-- [ ] Run one evaluation at a time per box through a FIFO queue.
-- [ ] Restore a migrated template database and reset Redis before every run.
+- [ ] Provision one dedicated, monitored authoritative evaluation machine.
+- [x] Run one evaluation at a time on the host through a FIFO queue.
+- [x] Wire trusted migration initialization into the fresh tmpfs PostgreSQL
+  service. Fresh per-stage PostgreSQL/Redis creation, all 580 repository
+  migrations, the migration-before-runner gate, and cleanup are live-smoke-tested.
 - [ ] Enforce cgroups, wall-clock deadlines, process cleanup, disk quotas, and
-  artifact retention for the full season.
-- [ ] Cache by `(round_id, canonical_patch_hash)` and return cached results for
+  artifact retention for the full season. The full trusted evaluator now
+  captures live cgroup counters, authenticates resource/accounting evidence,
+  enforces the deadline, removes its resolved Compose projects, and seals the
+  artifact tree in a local end-to-end pass. The complete untrusted
+  work/evidence tree now has a root-mounted 32 GiB aggregate tmpfs limit.
+  Infrastructure failures now retain a sanitized, hash-manifested diagnostic
+  tree after removing hidden inputs, every runtime/env credential path, and
+  non-regular attacker entries; a real post-mount failure test proves unmount
+  and zero-residual cleanup. Root-owned deployment and full-season retention
+  proof remain open.
+- [x] Reserve the management plane from hostile submissions in the local
+  evaluator contract: exactly 10 physical evaluation cores and 2 physical
+  management cores; 72 GiB runner, 16 GiB PostgreSQL, and 8 GiB Redis hard
+  ceilings; and at least 24 GiB host-memory reserve. The worker and cleanup
+  path re-exec on the management CPU set. A simultaneous CPU/memory-bomb gate
+  saturated exactly every evaluation CPU, drove the memory bomb to the actual
+  72 GiB no-swap runner ceiling, forced exit 137 with `OOMKilled=true`, and
+  removed every labeled container/network from the management set in 1,019 ms
+  with zero residual objects. The authoritative host must reproduce this gate
+  before qualification.
+- [x] Cache by `(round_id, canonical_patch_hash)` and return cached results for
   identical submissions.
-- [ ] Provide box self-check and same-round re-baseline jobs before failover.
+- [ ] Provide host self-check and same-round re-baseline jobs before worker recovery.
 
 ### 5.2 Patch pipeline and containment
 
@@ -317,29 +365,67 @@ the simulator integration is complete.
 - [ ] Produce an exact file allowlist after reviewing the import graph. Keep
   simulator, SDK harness, scorer, stats, accounting, contracts/payment,
   migrations, generated files, build tags, `go.mod`, `go.sum`, vendor, and CI
-  outside it.
-- [ ] Parse unified diffs structurally; reject path traversal, binary patches,
+  outside it. The pre-freeze review now pins the development policy to the
+  single literal `connect/resident_contract_manager.go` path and records its
+  dependency boundary in `../../competition/PATCH-SURFACE.md`; repeat the blob
+  and import audit against the clean pushed season base before checking this
+  item complete and publishing the policy digest.
+- [x] Parse unified diffs structurally; reject path traversal, binary patches,
   symlink/submodule changes, renames outside the allowlist, mode changes, and
   oversized submissions.
-- [ ] Re-enforce all checks server-side even if the Apex screener accepted the
+- [x] Re-enforce all checks server-side even if the Apex screener accepted the
   patch.
-- [ ] Build offline with a per-job cache and no production credentials.
-- [ ] Run `go vet`, sim-latency tests, and the frozen contract-test package set
-  before the expensive evaluation.
-- [ ] Execute on a default-deny network with only the scoring control-plane path
-  permitted. Make the host disposable and rebuildable from its image.
+- [x] Build offline with an authenticated per-submission image cache and no
+  production credentials. Candidate vet/tests execute unprivileged in a
+  discarded stage; the final image imports only a separately compiled binary.
+  A live malicious-`init()` regression proves trusted base files remain
+  byte-identical. The corrected short-run integration profile also passed two
+  consecutive full Docker/Compose lifecycle and scorer runs with 910/910
+  successful measured requests in each. The final evaluator additionally
+  re-authenticates the strict builder record, base/patch/policy/builder/image
+  key, OCI labels, image id, and runtime identity before candidate execution.
+  Offline BuildKit execution is separately cgrouped on the 10 evaluation cores,
+  limited to 12 GiB with no swap, stopped by a 600-second TERM/KILL deadline,
+  and has bounded but fully drained logs. A live cache-miss build authenticated
+  those kernel values. The rebuilt-boundary full-scale separate-stack run
+  replayed 54/54 evidence files and 6/6 published artifacts, reported all 15
+  security booleans true, cleaned all job resources, and passed G1-G6 with a
+  placeable comment-only candidate. Its baseline/candidate runners used exactly
+  10 evaluation CPUs while the worker stayed on the management set; neither was
+  OOM-killed, hard-killed, or outside its limit. This closes the local protocol
+  replay, not the official baseline/noise/separability campaign.
+- [x] Run `go vet` and compile the frozen `connect/...` test package set before
+  the expensive evaluation. Service-backed runtime tests remain part of the
+  production worker integration gate.
+- [x] Execute candidate runs on an internal-only network with no published
+  ports and execute the pristine scorer with no network namespace.
+- [x] Mount the frozen host `config/local` and `vault/local` leaf directories
+  directly, separately, and read-only. Freeze their sorted-file manifest
+  digests in policy and recheck them before/after each run. Static checks and a
+  live sentinel smoke prove that neither parent nor `main`, `all`, or `site` is
+  visible and that both mounted leaves reject writes. The full direct-mount
+  production replay remains part of the post-freeze qualification campaign.
+- [ ] Make the authoritative evaluator host disposable/rebuildable, enable
+  user-namespace remapping or rootless Docker, and verify the host firewall.
+  The root-owned CPU and IRQ controls are now installed as ordered pre-Docker
+  systemd units and pass live checks (12 physical CPUs, 10+2 split, 49/49
+  movable IRQs on the management set). The evaluator translates ownership
+  through live UID/GID maps and production promotion rejects identity mapping.
+  Reboot proof, hardened-daemon installation/restart, the actual non-identity
+  map, firewall proof, and a rebuild-from-image exercise remain open.
 - [ ] Complete the security checklist and a no-secrets audit.
 
 ### 5.3 Scoring API
 
-- [ ] Implement authenticated `/healthz`, `/readyz`, `/info`,
-  `/generate-round`, `/score`, and `/score/{job}` endpoints.
-- [ ] Store round seeds privately, generate `providers.yml`, publish its SHA-256
+- [x] Implement `/healthz`, `/readyz`, `/info`, `/generate-round`, `/score`,
+  and `/score/{job}` endpoints, with role-scoped bearer auth on every
+  non-public operation.
+- [x] Store round seeds privately, generate `providers.yml`, publish its SHA-256
   commitment, and reveal the seed/file only after the round.
 - [ ] Compute the same-round baseline using the calibrated replicate policy.
-- [ ] Keep submission faults as typed 4xx responses and infrastructure faults as
+- [x] Keep submission faults as typed 4xx responses and infrastructure faults as
   retriable 5xx responses.
-- [ ] Return only active-round-safe diagnostics; release detailed artifacts at
+- [x] Return only active-round-safe diagnostics; release detailed artifacts at
   the agreed reveal time.
 - [ ] Build and publish a digest-pinned image plus OpenAPI document.
 
@@ -353,15 +439,20 @@ Exit criteria:
 
 ## Phase 6: produce the Apex competition package
 
-- [ ] Create the no-op baseline and the two calibration reference patches.
-- [ ] Create and contract-test:
+- [ ] Promote or regenerate the provisional no-op, worse, and better reference
+  patches against the frozen season base. Their development identities and
+  locally verified image digests are pinned in
+  `competition/references/manifest.json`; official 19/20 separability is not
+  run.
+- [x] Create and contract-test:
 
   - `models.py` with no public seed field;
   - `generator.py` calling `/generate-round`;
   - submit-and-poll `runner.py`;
   - structural `screener.py`;
-  - NaN/Inf-safe `normalizer.py`;
-  - registry entry proposal.
+  - NaN/Inf-safe `normalizer.py`.
+
+- [ ] Submit and accept the registry entry proposal.
 
 - [ ] Write the miner README with:
 
@@ -431,12 +522,12 @@ Exit criteria:
 Launch gate:
 
 - [ ] Phase 0 score contract signed off.
-- [ ] Partial/incomplete responses cannot score as successes.
-- [ ] Official scorer and all G1-G6 tests pass.
+- [x] Partial/incomplete responses cannot score as successes.
+- [x] Official scorer and all G1-G6 tests pass.
 - [ ] Twenty consecutive frontier runs pass at round scale.
 - [ ] Noise and reference-separability gates pass.
 - [ ] Adversarial probe findings are closed.
-- [ ] Scoring API, runner, cache, containment, monitoring, and failover are live.
+- [ ] Scoring API, runner, cache, containment, monitoring, and recovery are live.
 - [ ] Apex contract tests and local harness pass.
 - [ ] Full staging round passes from submission through reveal.
 - [ ] Handoff is accepted and on-call ownership is active.
@@ -446,8 +537,9 @@ Launch gate:
 The following may complete after initial launch, but the fallback and rules must
 be published before launch:
 
-- [ ] Qualify the two-box topology: services/clients on box 1 and standalone
-  fleet shards on box 2.
+- [ ] Qualify the authoritative single-host full-scale topology with services,
+  clients, and fleet shards inside the same frozen 10-evaluation-core boundary;
+  keep 2 physical cores and the management-memory reserve outside the job.
 - [ ] Establish the maximum clean full-scale configuration. Target 100,000
   providers and 1,000 arrivals/minute; if unsustainable, publish the measured
   maximum rather than claiming the target.
@@ -482,4 +574,4 @@ against the pinned public base, reproduce the official scoring method locally,
 submit through Apex, and receive a cached, statistically defensible score from
 an isolated UR evaluation box; invalid or adversarial runs fail closed; a fresh
 round rotates and commits to hidden workload data; the complete staging path has
-passed; and monitoring, failover, review, and handoff ownership are operating.
+passed; and monitoring, recovery, review, and handoff ownership are operating.

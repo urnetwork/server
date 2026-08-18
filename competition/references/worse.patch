@@ -1,0 +1,14 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -58,8 +58,10 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
+ func (self *residentContractManager) HasActiveContract(sourceId server.Id, destinationId server.Id) bool {
+ 	if self.ctx.Err() != nil {
+ 		return false
+ 	}
++
++	time.Sleep(25 * time.Millisecond)
+ 
+ 	transferPair := model.NewTransferPair(sourceId, destinationId)
+ 
+ 	// entry is either not expired or nil

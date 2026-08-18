@@ -1,0 +1,103 @@
+{
+  "score_schema": 1,
+  "raw_score": 99,
+  "normalized_score": 101.01010101010101,
+  "placeable": true,
+  "gates": {
+    "G1_success": {
+      "passed": true,
+      "details": {
+        "absolute_min_inclusive": 0.97,
+        "baseline": 0.98,
+        "baseline_minus_max": 0.97,
+        "candidate": 0.97
+      }
+    },
+    "G2_volume": {
+      "passed": true,
+      "details": {
+        "bytes_max": 10500,
+        "bytes_min": 9500,
+        "candidate_bytes": 9500,
+        "candidate_requests": 95,
+        "request_max": 105,
+        "request_min": 95
+      }
+    },
+    "G3_path_integrity": {
+      "passed": true,
+      "details": {
+        "minimum_inclusive": 0.95,
+        "minimum_replicate_coverage": 0.95
+      }
+    },
+    "G4_matchmaking": {
+      "passed": true,
+      "details": {
+        "all_pools_nonempty": true,
+        "all_replicates_have_samples": true,
+        "baseline_load_p95_ms": 10,
+        "baseline_pool_p05": 100,
+        "candidate_load_p95_ms": 12.5,
+        "candidate_pool_p05": 90,
+        "maximum_inclusive_ms": 12.5,
+        "pool_minimum_inclusive": 90
+      }
+    },
+    "G5_stability": {
+      "passed": true,
+      "details": {
+        "all_replicates_clean": true
+      }
+    },
+    "G6_resources": {
+      "passed": true,
+      "details": {
+        "all_replicates_within_limits": true
+      }
+    }
+  },
+  "diagnostics": {
+    "round_id": "boundary-fixture",
+    "replicate_count": 1,
+    "request_timeout_ms": 1000,
+    "takeover_margin": 0.01,
+    "baseline_takeover_raw_max": 99,
+    "baseline_takeover_eligible": true,
+    "baseline": {
+      "raw_score": 100,
+      "success_rate": 0.98,
+      "request_count": 100,
+      "received_bytes": 10000,
+      "findproviders_load_p95_ms": 10,
+      "findproviders_pool_p05": 100
+    },
+    "candidate": {
+      "raw_score": 99,
+      "success_rate": 0.97,
+      "request_count": 95,
+      "received_bytes": 9500,
+      "accounting_coverage": 0.95,
+      "findproviders_load_p95_ms": 12.5,
+      "findproviders_pool_p05": 90
+    },
+    "replicates": [
+      {
+        "evaluation_id": "",
+        "raw_score": 0,
+        "success_rate": 0,
+        "request_count": 0,
+        "received_bytes": 0,
+        "provider_egress_bytes": 0,
+        "accounting_coverage": 0,
+        "findproviders_samples": 1,
+        "findproviders_empty_pools": 0,
+        "findproviders_load_p95_ms": 0,
+        "findproviders_pool_p05": 90,
+        "stability_findings": null,
+        "resource_findings": null
+      }
+    ]
+  },
+  "eval_error": null
+}

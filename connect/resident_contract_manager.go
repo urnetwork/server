@@ -42,9 +42,24 @@ func newResidentContractManager(
 	return residentContractManager
 }
 
+func handleContractManagerDone(do func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if !server.IsDoneError(recovered) {
+				panic(recovered)
+			}
+		}
+	}()
+	do()
+}
+
 // all other controller activity moved to `controller.resident_oob_controller` via the api
 
 func (self *residentContractManager) HasActiveContract(sourceId server.Id, destinationId server.Id) bool {
+	if self.ctx.Err() != nil {
+		return false
+	}
+
 	transferPair := model.NewTransferPair(sourceId, destinationId)
 
 	// entry is either not expired or nil
@@ -70,34 +85,36 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
 	}
 
 	next := func() (nextEntry *activeContractEntry) {
-		c := func() bool {
-			contractIds1 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
-			if 0 < len(contractIds1) {
-				return true
-			}
-
-			contractIds2 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId)
-			if 0 < len(contractIds2) {
-				return true
-			}
-
-			return false
-		}
-		hasActiveContract := c()
-
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			if hasActiveContract {
-				nextEntry = &activeContractEntry{
-					checkTime: time.Now(),
-					refresh:   false,
+		handleContractManagerDone(func() {
+			c := func() bool {
+				contractIds1 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
+				if 0 < len(contractIds1) {
+					return true
 				}
-				self.activeContracts[transferPair] = nextEntry
-			} else {
-				delete(self.activeContracts, transferPair)
+
+				contractIds2 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId)
+				if 0 < len(contractIds2) {
+					return true
+				}
+
+				return false
 			}
-		}()
+			hasActiveContract := c()
+
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				if hasActiveContract {
+					nextEntry = &activeContractEntry{
+						checkTime: time.Now(),
+						refresh:   false,
+					}
+					self.activeContracts[transferPair] = nextEntry
+				} else {
+					delete(self.activeContracts, transferPair)
+				}
+			}()
+		})
 		return
 	}
 

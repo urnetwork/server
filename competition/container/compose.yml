@@ -1,0 +1,247 @@
+name: ${COMPOSE_PROJECT_NAME:?set a unique per-stage Compose project name}
+
+x-job-labels: &job-labels
+  com.urnetwork.competition.job-id: ${EVALUATION_JOB_ID:?set EVALUATION_JOB_ID}
+  com.urnetwork.competition.stage: ${EVALUATION_STAGE:?set baseline, candidate, or score}
+  com.urnetwork.competition.round-id: ${EVALUATION_ROUND_ID:?set EVALUATION_ROUND_ID}
+
+x-job-boundary: &job-boundary
+  cgroup: private
+  cgroup_parent: ${EVALUATION_CGROUP_PARENT:?set the root-owned per-job cgroup parent}
+  cpuset: ${EVALUATION_CPUSET:?set the qualified evaluation-only CPU set}
+  restart: "no"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    profiles: [run]
+    <<: *job-boundary
+    image: postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+    pull_policy: never
+    user: "999:999"
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:?set the frozen PostgreSQL memory limit}
+    memswap_limit: ${POSTGRES_MEMORY_LIMIT:?set the frozen PostgreSQL memory limit}
+    pids_limit: ${POSTGRES_PIDS_LIMIT:?set the frozen PostgreSQL PID limit}
+    environment:
+      LANG: en_US.UTF-8
+      POSTGRES_INITDB_ARGS: --locale=en_US.UTF-8
+      POSTGRES_USER: urnetwork_evaluator_admin
+      POSTGRES_PASSWORD: ${EVALUATION_DB_ADMIN_PASSWORD:?set throwaway job DB admin password}
+      POSTGRES_DB: postgres
+      APP_DB_USER: ${EVALUATION_DB_USER:?set throwaway job DB user}
+      APP_DB_PASSWORD: ${EVALUATION_DB_PASSWORD:?set throwaway job DB password}
+      APP_DB_NAME: ${EVALUATION_DB_NAME:?set throwaway job DB name}
+      PGDATA: /var/lib/postgresql/18/docker
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:?set frozen max_connections}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:?set frozen shared_buffers}
+      - -c
+      - fsync=on
+      - -c
+      - full_page_writes=on
+    networks: [evaluation]
+    volumes:
+      - type: bind
+        source: ${EVALUATION_POSTGRES_INIT:?set the trusted PostgreSQL init script}
+        target: /docker-entrypoint-initdb.d/10-competition-app.sh
+        read_only: true
+    tmpfs:
+      - /var/lib/postgresql:rw,nosuid,nodev,noexec,uid=999,gid=999,mode=0700,size=${POSTGRES_DATA_LIMIT:?set PostgreSQL data tmpfs limit}
+      - /var/run/postgresql:rw,nosuid,nodev,noexec,uid=999,gid=999,mode=0750,size=16m
+      - /tmp:rw,nosuid,nodev,noexec,uid=999,gid=999,mode=1770,size=128m
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+      start_period: 5s
+    stop_grace_period: 30s
+    labels: *job-labels
+
+  migrate:
+    profiles: [run]
+    <<: *job-boundary
+    image: ${EVALUATOR_BASE_IMAGE:?set the digest-pinned pristine evaluator image}
+    pull_policy: never
+    user: "65532:65532"
+    mem_limit: ${MIGRATOR_MEMORY_LIMIT:?set the frozen migrator memory limit}
+    memswap_limit: ${MIGRATOR_MEMORY_LIMIT:?set the frozen migrator memory limit}
+    pids_limit: ${MIGRATOR_PIDS_LIMIT:?set the frozen migrator PID limit}
+    env_file:
+      - path: ${EVALUATION_ENV_FILE:?set the root-owned stage environment file}
+        required: true
+    environment:
+      WARP_HOME: /runtime
+      WARP_ENV: local
+      WARP_SERVICE: sim
+      WARP_BLOCK: sim
+      WARP_HOST: 127.0.0.1
+      WARP_DOMAIN: bringyour.com
+      APEX_CONTAINER_EVALUATION: "true"
+      BRINGYOUR_POSTGRES_HOSTNAME: postgres
+      BRINGYOUR_REDIS_HOSTNAME: redis
+    command: [migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: false
+    networks: [evaluation]
+    volumes:
+      - type: bind
+        source: ${EVALUATION_CONFIG_LOCAL_DIR:?set frozen direct config/local directory}
+        target: /runtime/config/local
+        read_only: true
+      - type: bind
+        source: ${EVALUATION_VAULT_LOCAL_DIR:?set frozen direct vault/local directory}
+        target: /runtime/vault/local
+        read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=1770,size=${MIGRATOR_TMP_LIMIT:?set migrator tmpfs limit}
+    ulimits:
+      nofile:
+        soft: ${EVALUATION_NOFILE:?set frozen nofile limit}
+        hard: ${EVALUATION_NOFILE:?set frozen nofile limit}
+    labels: *job-labels
+
+  redis:
+    profiles: [run]
+    <<: *job-boundary
+    image: redis:8-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78
+    pull_policy: never
+    user: "999:999"
+    mem_limit: ${REDIS_MEMORY_LIMIT:?set the frozen Redis memory limit}
+    memswap_limit: ${REDIS_MEMORY_LIMIT:?set the frozen Redis memory limit}
+    pids_limit: ${REDIS_PIDS_LIMIT:?set the frozen Redis PID limit}
+    command:
+      - redis-server
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --maxclients
+      - ${REDIS_MAX_CLIENTS:?set frozen maxclients}
+      - --tcp-backlog
+      - ${REDIS_TCP_BACKLOG:?set frozen TCP backlog}
+      - --requirepass
+      - ${EVALUATION_REDIS_PASSWORD:?set throwaway job Redis password}
+    networks: [evaluation]
+    tmpfs:
+      - /data:rw,nosuid,nodev,noexec,uid=999,gid=999,mode=0700,size=${REDIS_DATA_LIMIT:?set Redis data tmpfs limit}
+      - /tmp:rw,nosuid,nodev,noexec,uid=999,gid=999,mode=1770,size=64m
+    ulimits:
+      nofile:
+        soft: ${EVALUATION_NOFILE:?set frozen nofile limit}
+        hard: ${EVALUATION_NOFILE:?set frozen nofile limit}
+    healthcheck:
+      test: [CMD-SHELL, "redis-cli --no-auth-warning -a $$EVALUATION_REDIS_PASSWORD ping | grep -qx PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 2s
+    environment:
+      EVALUATION_REDIS_PASSWORD: ${EVALUATION_REDIS_PASSWORD:?set throwaway job Redis password}
+    stop_grace_period: 15s
+    labels: *job-labels
+
+  runner:
+    profiles: [run]
+    <<: *job-boundary
+    image: ${EVALUATION_IMAGE:?set a digest-pinned base or per-submission image}
+    pull_policy: never
+    user: "65532:65532"
+    mem_limit: ${RUNNER_MEMORY_LIMIT:?set the frozen runner memory limit}
+    memswap_limit: ${RUNNER_MEMORY_LIMIT:?set the frozen runner memory limit}
+    pids_limit: ${RUNNER_PIDS_LIMIT:?set the frozen runner PID limit}
+    env_file:
+      - path: ${EVALUATION_ENV_FILE:?set the root-owned stage environment file}
+        required: true
+    environment:
+      WARP_HOME: /runtime
+      WARP_ENV: local
+      WARP_SERVICE: sim
+      WARP_BLOCK: sim
+      WARP_HOST: 127.0.0.1
+      WARP_DOMAIN: bringyour.com
+      APEX_CONTAINER_EVALUATION: "true"
+      BRINGYOUR_POSTGRES_HOSTNAME: postgres
+      BRINGYOUR_REDIS_HOSTNAME: redis
+    command:
+      - ${EVALUATION_ACTION:?set preflight or run}
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: false
+      redis:
+        condition: service_healthy
+        restart: false
+    networks: [evaluation]
+    volumes:
+      - type: bind
+        source: ${EVALUATION_CONFIG_LOCAL_DIR:?set frozen direct config/local directory}
+        target: /runtime/config/local
+        read_only: true
+      - type: bind
+        source: ${EVALUATION_VAULT_LOCAL_DIR:?set frozen direct vault/local directory}
+        target: /runtime/vault/local
+        read_only: true
+      - type: bind
+        source: ${EVALUATION_INPUT_DIR:?set authenticated workload directory}
+        target: /input
+        read_only: true
+      - type: bind
+        source: ${EVALUATION_OUTPUT_DIR:?set empty stage artifact directory}
+        target: /artifacts
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=1770,size=${RUNNER_TMP_LIMIT:?set runner tmpfs limit}
+      - /work:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=${RUNNER_WORK_LIMIT:?set runner work tmpfs limit}
+    ulimits:
+      nofile:
+        soft: ${EVALUATION_NOFILE:?set frozen nofile limit}
+        hard: ${EVALUATION_NOFILE:?set frozen nofile limit}
+    stop_grace_period: 30s
+    labels: *job-labels
+
+  scorer:
+    profiles: [score]
+    <<: *job-boundary
+    image: ${EVALUATOR_BASE_IMAGE:?set the digest-pinned pristine evaluator image}
+    pull_policy: never
+    user: "65532:65532"
+    network_mode: none
+    mem_limit: ${SCORER_MEMORY_LIMIT:?set the frozen scorer memory limit}
+    memswap_limit: ${SCORER_MEMORY_LIMIT:?set the frozen scorer memory limit}
+    pids_limit: ${SCORER_PIDS_LIMIT:?set the frozen scorer PID limit}
+    env_file:
+      - path: ${EVALUATION_ENV_FILE:?set the root-owned score environment file}
+        required: true
+    command:
+      - ${EVALUATION_ACTION:?set baseline or score}
+    volumes:
+      - type: bind
+        source: ${EVALUATION_INPUT_DIR:?set authenticated score input directory}
+        # Run manifests authenticate their scorer inputs with absolute
+        # /artifacts paths. Preserve that namespace in the pristine scorer so
+        # its SameFile/path checks cannot be bypassed or made to fail merely by
+        # mounting the same bytes under a different spelling.
+        target: /artifacts
+        read_only: true
+      - type: bind
+        source: ${EVALUATION_OUTPUT_DIR:?set empty score output directory}
+        target: /score-output
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=1770,size=${SCORER_TMP_LIMIT:?set scorer tmpfs limit}
+    stop_grace_period: 15s
+    labels: *job-labels
+
+networks:
+  evaluation:
+    driver: bridge
+    internal: true
+    attachable: false
+    labels: *job-labels
