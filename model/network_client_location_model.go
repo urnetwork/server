@@ -1911,6 +1911,31 @@ func distinctIds(ids ...*server.Id) []server.Id {
 const minEgressHealthOKNumerator = 9
 const minEgressHealthOKDenominator = 10
 
+const providerConfigResourceName = "provider.yml"
+
+// providerEgressTestEnabled controls whether egress-test evidence is an
+// eligibility requirement. The probe pipeline can still run while this is
+// false; its results simply do not gate provider discovery or public counts.
+//
+// Defaulting to false is deliberate. A deployment can introduce the server
+// side of the probe pipeline before any prober has populated its tables. In
+// that state, treating every missing measurement as an individual failure
+// publishes an empty FindProviders2 cache even though the connected provider
+// fleet is healthy.
+func providerEgressTestEnabled() bool {
+	return providerEgressTestEnabledFromResource(
+		server.Config.SimpleResource(providerConfigResourceName),
+	)
+}
+
+func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err error) bool {
+	if err != nil || resource == nil {
+		return false
+	}
+	enabled := resource.Bool("enable_egress_test")
+	return len(enabled) == 1 && enabled[0]
+}
+
 // providerCountFilter answers one question: does this provider count as real,
 // reachable supply?
 //
@@ -2057,8 +2082,13 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	initialClientLocations := &InitialClientLocations{}
 
 	// one bulk load per pass, outside the tx: this loop runs over the whole
-	// provider population
-	countFilter := newProviderCountFilter(ctx)
+	// provider population. Do not query the probe tables when their result is
+	// not an eligibility requirement.
+	egressTestEnabled := providerEgressTestEnabled()
+	countFilter := providerCountFilter{}
+	if egressTestEnabled {
+		countFilter = newProviderCountFilter(ctx)
+	}
 
 	// An empty health OR countryCodes map means one of the two probe
 	// pipelines has told us nothing yet -- stalled job, truncated table, cold
@@ -2079,9 +2109,13 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	// This is only the input-side half of that floor: empty inputs are not the
 	// only way to reach an emptied count. See shouldRecountUngated, applied to
 	// the counted result below, for the other half.
-	skipCountGate := countFilter.shouldSkipCountGate()
+	skipCountGate := !egressTestEnabled || countFilter.shouldSkipCountGate()
 	if skipCountGate {
-		glog.Infof("[nclm]egress health or location records are empty; skipping the provider count gate for this pass\n")
+		if egressTestEnabled {
+			glog.Infof("[nclm]egress health or location records are empty; skipping the provider count gate for this pass\n")
+		} else {
+			glog.Infof("[nclm]provider egress test is disabled; skipping the provider count gate for this pass\n")
+		}
 	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -3446,7 +3480,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// advertised count can never disagree about what "healthy" means.
 	// UpdateClientScores uses passesHealth ONLY: its candidate pool is not
 	// country-scoped, so the observed-country check does not apply here.
-	countFilter := newProviderCountFilter(ctx)
+	egressTestEnabled := providerEgressTestEnabled()
+	countFilter := providerCountFilter{}
+	if egressTestEnabled {
+		countFilter = newProviderCountFilter(ctx)
+	} else {
+		glog.Infof("[nclm]provider egress test is disabled; skipping the provider score gate for this pass\n")
+	}
 
 	// migration: set each client score to the lowest lookback index index
 	migrateClientScore := func(clientScore *ClientScore) {
@@ -3473,7 +3513,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		// nothing else: it can only take a provider out of the pool, and the
 		// scaled-weight arithmetic below is untouched, so every provider that
 		// still qualifies keeps exactly the weight and ordering it has today.
-		passesHealth := countFilter.passesHealth(clientScore.ClientId)
+		passesHealth := !egressTestEnabled || countFilter.passesHealth(clientScore.ClientId)
 
 		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
 			passesMinimum := passesHealth

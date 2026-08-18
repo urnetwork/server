@@ -2794,6 +2794,40 @@ func testing_setProviderEgressHealthy(ctx context.Context, clientIds ...server.I
 	}
 }
 
+func testing_enableProviderEgressTest(t testing.TB) {
+	t.Helper()
+	t.Cleanup(server.Config.PushSimpleResource(
+		providerConfigResourceName,
+		[]byte("enable_egress_test: true\n"),
+	))
+}
+
+func TestProviderEgressTestEnabledConfiguration(t *testing.T) {
+	if providerEgressTestEnabledFromResource(nil, fmt.Errorf("missing provider config")) {
+		t.Fatal("a missing provider.yml enabled the egress-test gate")
+	}
+
+	tests := []struct {
+		name    string
+		config  string
+		enabled bool
+	}{
+		{name: "missing key", config: "unrelated: true\n", enabled: false},
+		{name: "explicit false", config: "enable_egress_test: false\n", enabled: false},
+		{name: "explicit true", config: "enable_egress_test: true\n", enabled: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pop := server.Config.PushSimpleResource(
+				providerConfigResourceName,
+				[]byte(test.config),
+			)
+			defer pop()
+			assert.Equal(t, providerEgressTestEnabled(), test.enabled)
+		})
+	}
+}
+
 // testing_connectQualifyingProviders connects n providers into one location,
 // each of which clears every minimum that existed BEFORE the health gate:
 // connected, valid, a Public provide key, and the latency and speed samples
@@ -2899,7 +2933,8 @@ func testing_selectableClientScores(
 	return clientScores
 }
 
-func testing_healthGateCity(ctx context.Context) *Location {
+func testing_healthGateCity(ctx context.Context, t testing.TB) *Location {
+	testing_enableProviderEgressTest(t)
 	city := &Location{
 		LocationType: LocationTypeCity,
 		City:         "Palo Alto",
@@ -2911,6 +2946,43 @@ func testing_healthGateCity(ctx context.Context) *Location {
 	return city
 }
 
+// A disabled gate restores the pre-egress-test selection rule. This covers
+// both missing evidence and explicit unhealthy evidence so the setting cannot
+// accidentally be implemented as only an empty-table fallback.
+func TestUpdateClientScoresDoesNotRequireEgressHealthWhenDisabled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(
+			providerConfigResourceName,
+			[]byte("enable_egress_test: false\n"),
+		))
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		measuredUnhealthy, neverMeasured := clientIds[0], clientIds[1]
+		testing_setProviderEgressHealth(ctx, measuredUnhealthy, 0, 131)
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+		if _, ok := clientScores[measuredUnhealthy]; !ok {
+			t.Fatal("a measured-unhealthy provider was gated while enable_egress_test=false")
+		}
+		if _, ok := clientScores[neverMeasured]; !ok {
+			t.Fatal("a never-measured provider was gated while enable_egress_test=false")
+		}
+	})
+}
+
 // The whole point of the feature. A provider measured 0 of 131 -- every
 // destination blackholed, the exact reading 158 seeded beta proxies gave -- must
 // not be offered to a user, while an identically-configured provider measured
@@ -2920,7 +2992,7 @@ func testing_healthGateCity(ctx context.Context) *Location {
 func TestUpdateClientScoresExcludesMeasuredUnhealthyProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
 		healthyClientId, deadClientId := clientIds[0], clientIds[1]
@@ -2950,7 +3022,7 @@ func TestUpdateClientScoresExcludesMeasuredUnhealthyProviders(t *testing.T) {
 func TestUpdateClientScoresExcludesNeverMeasuredProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
 		measuredClientId, neverMeasuredClientId := clientIds[0], clientIds[1]
@@ -2984,7 +3056,7 @@ func TestUpdateClientScoresExcludesNeverMeasuredProviders(t *testing.T) {
 func TestUpdateClientScoresHealthDoesNotRescoreQualifyingProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
 		perfectClientId, goodClientId := clientIds[0], clientIds[1]
@@ -3037,7 +3109,7 @@ func TestUpdateClientScoresHealthDoesNotRescoreQualifyingProviders(t *testing.T)
 func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
 		atBarClientId, belowBarClientId := clientIds[0], clientIds[1]
@@ -3066,7 +3138,7 @@ func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
 func TestUpdateClientScoresZeroTotalHealthDoesNotPassOrPanic(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
 		emptyRunClientId, healthyClientId := clientIds[0], clientIds[1]
@@ -3097,7 +3169,7 @@ func TestUpdateClientScoresZeroTotalHealthDoesNotPassOrPanic(t *testing.T) {
 func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 3)
 		healthyClientId, deadClientId, neverMeasuredClientId := clientIds[0], clientIds[1], clientIds[2]
@@ -3156,7 +3228,7 @@ func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 1)
 		deadClientId := clientIds[0]
@@ -3205,7 +3277,7 @@ func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 func TestUpdateClientScoresRestoresAProviderWhoseHealthRecovers(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		city := testing_healthGateCity(ctx)
+		city := testing_healthGateCity(ctx, t)
 
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 1)
 		clientId := clientIds[0]
@@ -3484,6 +3556,7 @@ func Testing_CreateProviderAtLocation(
 func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		testing_enableProviderEgressTest(t)
 
 		networkId := server.NewId()
 		countryId := server.NewId()
@@ -3579,6 +3652,43 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		// GB-egressing and NULL-claimed-country providers must not add to it
 		// either, so the total is still exactly 1.
 		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
+	})
+}
+
+// Disabling the test bypasses the per-provider egress predicate even when the
+// probe tables are partially populated. Keeping one provider healthy prevents
+// the existing all-zero output fallback from making this assertion vacuous.
+func TestUpdateClientLocationsCountIsUngatedWhenEgressTestDisabled(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(
+			providerConfigResourceName,
+			[]byte("enable_egress_test: false\n"),
+		))
+
+		networkId := server.NewId()
+		countryId := server.NewId()
+		healthy := server.NewId()
+		unhealthy := server.NewId()
+		for _, clientId := range []server.Id{healthy, unhealthy} {
+			Testing_CreateProviderAtLocation(ctx, networkId, clientId, countryId, "US")
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, CountryCode: "US",
+				Verdict: "verified", ObservedAt: server.NowUtc(),
+			})
+		}
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: healthy, OKCount: 131, Total: 131, MeasuredAt: server.NowUtc(),
+		})
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: unhealthy, OKCount: 0, Total: 131, MeasuredAt: server.NowUtc(),
+		})
+
+		UpdateClientLocations(ctx, time.Hour)
+
+		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
+		assert.Equal(t, err, nil)
+		assert.Equal(t, clientLocations[countryId].ClientCount, 2)
 	})
 }
 

@@ -579,6 +579,9 @@ func SetPaymentRecord(
 	return
 }
 
+// RemovePaymentRecord resets a processor attempt that failed before reaching
+// the chain. Once a transaction hash exists, the attempt must be reconciled and
+// cannot be erased for a fresh submission.
 func RemovePaymentRecord(
 	ctx context.Context,
 	paymentId server.Id,
@@ -590,16 +593,52 @@ func RemovePaymentRecord(
                 UPDATE account_payment
                 SET
                     payment_record = NULL,
-                    circle_idempotency_key = NULL
+                    circle_idempotency_key = NULL,
+                    payment_receipt = NULL
                 WHERE
                     payment_id = $1 AND
-                    NOT completed AND NOT canceled
+                    NOT completed AND NOT canceled AND
+                    tx_hash IS NULL
             `,
 			paymentId,
 		))
 		if tag.RowsAffected() != 1 {
 			returnErr = fmt.Errorf("Invalid payment.")
 			return
+		}
+	})
+	return
+}
+
+// UpdatePaymentProgress persists the processor response as soon as Circle has
+// assigned an on-chain transaction hash. SENT, STUCK, and CONFIRMED are still
+// retry states -- only Circle's COMPLETE state completes the payment -- but the
+// hash gives both the account holder and operators an on-chain reconciliation
+// handle while that retry continues.
+func UpdatePaymentProgress(
+	ctx context.Context,
+	paymentId server.Id,
+	paymentReceipt string,
+	txHash string,
+) (returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+                UPDATE account_payment
+                SET
+                    payment_receipt = $2,
+                    tx_hash = $3
+                WHERE
+                    payment_id = $1 AND
+                    NOT completed AND NOT canceled
+            `,
+			paymentId,
+			paymentReceipt,
+			txHash,
+		))
+		if tag.RowsAffected() != 1 {
+			returnErr = fmt.Errorf("Invalid payment.")
 		}
 	})
 	return
@@ -682,19 +721,17 @@ func CompletePayment(
 	return
 }
 
-// a planned payment that is neither completed nor canceled after this long is
-// hung and will not complete on its own; see `CancelHungAccountPayments`
+// A planned payment that has never entered the Circle retry state and remains
+// pending after this long can be canceled and re-planned. Once either the
+// stable idempotency key or processor record exists, the payment stays in retry
+// until Circle reports a terminal state; age alone must never cancel it.
 const HungPaymentExpiration = 30 * 24 * time.Hour
 
-// CancelHungAccountPayments cancels payments stuck pending for longer than
-// `HungPaymentExpiration`, which releases their sweeps back to the payout
-// planner for a fresh payment (the planner re-selects sweeps whose payment is
-// canceled). This is the first layer of straggler recovery; contracts whose
-// payments keep hanging are hard deleted at `StragglerContractExpiration` as
-// the final backstop. A canceled payment can no longer be completed
-// (CompletePayment guards NOT canceled), so a payment whose external transfer
-// was already initiated (payment_record set) is logged loudly for audit: if
-// that transfer did land out of band, the re-planned sweeps would pay again.
+// CancelHungAccountPayments releases only payments for which no Circle submit
+// can have happened. `circle_idempotency_key` is created before the external
+// call and `payment_record` is stored after it, so checking both closes the
+// crash/timeout window around that call. tx_hash is a final defensive marker
+// for legacy rows. Retry-state payments remain pending regardless of age.
 func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceledCount int64) {
 	minTime := maxTime.Add(-HungPaymentExpiration)
 
@@ -709,8 +746,11 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 			WHERE
 				NOT completed AND
 				NOT canceled AND
+				circle_idempotency_key IS NULL AND
+				payment_record IS NULL AND
+				tx_hash IS NULL AND
 				create_time < $1
-			RETURNING payment_id, payment_record IS NOT NULL
+			RETURNING payment_id
 			`,
 			minTime,
 			server.NowUtc(),
@@ -718,20 +758,18 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var paymentId server.Id
-				var hasPaymentRecord bool
-				server.Raise(result.Scan(&paymentId, &hasPaymentRecord))
+				server.Raise(result.Scan(&paymentId))
 				canceledCount += 1
-				if hasPaymentRecord {
-					glog.Infof("[pay]canceled hung payment %s WITH an initiated payment record; audit the external transfer for double payout\n", paymentId)
-				} else {
-					glog.Infof("[pay]canceled hung payment %s\n", paymentId)
-				}
+				glog.Infof("[pay]canceled unsubmitted hung payment %s\n", paymentId)
 			}
 		})
 	})
 	return
 }
 
+// CancelPayment cancels a payment only while it is still known to be
+// unsubmitted. Retry-state payments must be resolved from Circle's terminal
+// status instead; CancelPaymentAfterProcessorCancellation handles CANCELLED.
 func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
@@ -743,7 +781,10 @@ func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
                     cancel_time = $2
                 WHERE
                     payment_id = $1 AND
-                    NOT completed AND NOT canceled
+                    NOT completed AND NOT canceled AND
+                    circle_idempotency_key IS NULL AND
+                    payment_record IS NULL AND
+                    tx_hash IS NULL
             `,
 			paymentId,
 			server.NowUtc(),
@@ -751,6 +792,45 @@ func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
 		if tag.RowsAffected() != 1 {
 			returnErr = fmt.Errorf("Invalid payment.")
 			return
+		}
+	})
+	return
+}
+
+// CancelPaymentAfterProcessorCancellation moves a Circle-terminal CANCELLED
+// payment out of retry and makes its sweeps safe to re-plan. The processor
+// response is retained for audit, while the retry markers are cleared
+// atomically with cancellation. A payment with an observed transaction hash is
+// deliberately rejected: contradictory processor state must be reconciled,
+// never released for another payout. Callers must use this only after Circle
+// itself reports CANCELLED.
+func CancelPaymentAfterProcessorCancellation(
+	ctx context.Context,
+	paymentId server.Id,
+	paymentReceipt string,
+) (returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+                UPDATE account_payment
+                SET
+                    payment_record = NULL,
+                    circle_idempotency_key = NULL,
+                    payment_receipt = $2,
+                    canceled = true,
+                    cancel_time = $3
+                WHERE
+                    payment_id = $1 AND
+                    NOT completed AND NOT canceled AND
+                    tx_hash IS NULL
+            `,
+			paymentId,
+			paymentReceipt,
+			server.NowUtc(),
+		))
+		if tag.RowsAffected() != 1 {
+			returnErr = fmt.Errorf("Invalid payment.")
 		}
 	})
 	return
@@ -784,6 +864,10 @@ func PayoutPlanApplyBonus(
 	return
 }
 
+// GetNetworkPayments normally hides canceled payments because their sweeps are
+// represented by a replacement payment. A canceled row that still carries a
+// retry/on-chain marker is not safely replaceable, however, and remains visible
+// so an affected account never loses the only record of a possible transfer.
 func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, error) {
 
 	networkPayments := []*AccountPayment{}
@@ -822,7 +906,12 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 
             WHERE
                 account_payment.network_id = $1 AND
-                canceled = false
+                (
+                    NOT account_payment.canceled OR
+                    account_payment.payment_record IS NOT NULL OR
+                    account_payment.circle_idempotency_key IS NOT NULL OR
+                    account_payment.tx_hash IS NOT NULL
+                )
         `,
 			session.ByJwt.NetworkId,
 		)

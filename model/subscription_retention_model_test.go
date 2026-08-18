@@ -963,9 +963,10 @@ func TestBackfillContractReapTime(t *testing.T) {
 	})
 }
 
-// Payments stuck pending past HungPaymentExpiration are canceled, which
-// releases their sweeps back to the payout planner for a fresh payment.
-// Recent pending payments are untouched.
+// Only payments that never entered Circle retry can age out. The stable
+// idempotency key closes the pre-record submit window, payment_record covers
+// normal retries, and the planner independently refuses a legacy canceled row
+// that still has either marker.
 func TestCancelHungAccountPayments(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1026,7 +1027,9 @@ func TestCancelHungAccountPayments(t *testing.T) {
 
 		plan, err := PlanPayments(ctx)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertNotEqual(t, len(plan.NetworkPayments), 0)
+		connect.AssertEqual(t, len(plan.NetworkPayments), 1)
+		payment := plan.NetworkPayments[destinationNetworkId]
+		connect.AssertNotEqual(t, payment, nil)
 
 		// a recent pending payment is not hung
 		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
@@ -1040,13 +1043,115 @@ func TestCancelHungAccountPayments(t *testing.T) {
 			))
 		})
 
-		canceledCount := CancelHungAccountPayments(ctx, server.NowUtc())
-		connect.AssertNotEqual(t, canceledCount, int64(0))
+		// Once Circle has returned a record, age alone cannot cancel the retry.
+		connect.AssertEqual(t, SetPaymentRecord(ctx, payment.PaymentId, "USDC", 10, "circle-transaction-1"), nil)
+		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
+		connect.AssertNotEqual(t, CancelPayment(ctx, payment.PaymentId), nil)
+		retryPayment, err := GetPayment(ctx, payment.PaymentId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, retryPayment.Canceled, false)
+
+		// The active payment still owns its sweeps, so there is nothing to
+		// re-plan while Circle reconciliation continues.
+		heldPlan, err := PlanPayments(ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(heldPlan.NetworkPayments), 0)
+
+		// Reproduce the pre-fix corruption directly. Defense in depth in the
+		// planner must not pay these sweeps again, and the anomalous canceled
+		// retry remains visible to the affected account.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE account_payment SET canceled = true, cancel_time = now() WHERE payment_id = $1`,
+				payment.PaymentId,
+			))
+		})
+		legacyPlan, err := PlanPayments(ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(legacyPlan.NetworkPayments), 0)
+		visible := false
+		networkPayments, err := GetNetworkPayments(destinationSession)
+		connect.AssertEqual(t, err, nil)
+		for _, networkPayment := range networkPayments {
+			if networkPayment.PaymentId == payment.PaymentId {
+				visible = true
+				connect.AssertEqual(t, networkPayment.Canceled, true)
+				connect.AssertNotEqual(t, networkPayment.PaymentRecord, nil)
+				connect.AssertEqual(t, *networkPayment.PaymentRecord, "circle-transaction-1")
+			}
+		}
+		connect.AssertEqual(t, visible, true)
+
+		// The idempotency key is written before the external Circle call. A
+		// timeout in that window has no payment_record yet, but is still a retry
+		// and must remain attached to the original payment.
+		idempotencyKey := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE account_payment
+				SET
+					canceled = false,
+					cancel_time = NULL,
+					payment_record = NULL,
+					circle_idempotency_key = $2
+				WHERE payment_id = $1
+				`,
+				payment.PaymentId,
+				idempotencyKey,
+			))
+		})
+		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
+		retryPayment, err = GetPayment(ctx, payment.PaymentId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, retryPayment.Canceled, false)
+		connect.AssertNotEqual(t, CancelPayment(ctx, payment.PaymentId), nil)
+		retryPayment, err = GetPayment(ctx, payment.PaymentId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, retryPayment.Canceled, false)
+
+		// A legacy hash without the other markers is still conclusive evidence
+		// that this payment reached the chain and must remain held.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE account_payment
+				SET circle_idempotency_key = NULL, tx_hash = $2
+				WHERE payment_id = $1
+				`,
+				payment.PaymentId,
+				"legacy-chain-hash",
+			))
+		})
+		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(0))
+		connect.AssertNotEqual(t, CancelPayment(ctx, payment.PaymentId), nil)
+
+		// With every submit/retry marker absent, the old payment is genuinely
+		// unsubmitted and may be canceled and replaced.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE account_payment SET tx_hash = NULL WHERE payment_id = $1`,
+				payment.PaymentId,
+			))
+		})
+		connect.AssertEqual(t, CancelHungAccountPayments(ctx, server.NowUtc()), int64(1))
 
 		// the sweeps are re-planned into fresh pending payments
 		plan2, err := PlanPayments(ctx)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertNotEqual(t, len(plan2.NetworkPayments), 0)
+		connect.AssertEqual(t, len(plan2.NetworkPayments), 1)
+		connect.AssertNotEqual(t, plan2.NetworkPayments[destinationNetworkId].PaymentId, payment.PaymentId)
+
+		// Once safely canceled and replaced, the obsolete row is hidden again.
+		networkPayments, err = GetNetworkPayments(destinationSession)
+		connect.AssertEqual(t, err, nil)
+		for _, networkPayment := range networkPayments {
+			connect.AssertNotEqual(t, networkPayment.PaymentId, payment.PaymentId)
+		}
 	})
 }
 

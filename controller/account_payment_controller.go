@@ -305,36 +305,84 @@ func advancePayment(
 		txResponseBodyBytes = txResult.ResponseBodyBytes
 		status = tx.State
 
-		// Check the Circle Status of the payment
-		// INITIATED, PENDING_RISK_SCREENING, DENIED, QUEUED, SENT, CONFIRMED, COMPLETE, FAILED, CANCELLED
+		// Check the Circle status of the payment. Every non-terminal state stays
+		// in retry; age is not a cancellation condition.
 		switch strings.ToUpper(status) {
-		case "INITIATED", "PENDING_RISK_SCREENING", "QUEUED", "SENT", "CONFIRMED":
+		case "INITIATED", "PENDING_RISK_SCREENING", "CLEARED", "QUEUED":
 			// check later
+			return
+
+		case "SENT", "STUCK", "CONFIRMED":
+			// Circle has assigned a chain transaction hash by SENT. Persist it
+			// before terminal completion so a long-running retry remains
+			// externally reconcilable and visible to the account holder.
+			if tx.TxHash != "" {
+				if err := model.UpdatePaymentProgress(
+					clientSession.Ctx,
+					payment.PaymentId,
+					string(txResponseBodyBytes),
+					tx.TxHash,
+				); err != nil {
+					returnErr = fmt.Errorf("[%s]Payment progress error = %s", payment.PaymentId, err)
+				}
+			}
 			return
 
 		case "DENIED", "FAILED":
 			returnErr = fmt.Errorf("[%s]error = %s", payment.PaymentId, status)
 			// remove the payment record so it can be recreated
-			model.RemovePaymentRecord(
+			if err := model.RemovePaymentRecord(
 				clientSession.Ctx,
 				payment.PaymentId,
-			)
+			); err != nil {
+				returnErr = fmt.Errorf("[%s]error = %s; payment reset error = %s", payment.PaymentId, status, err)
+			}
 			return
 
 		case "CANCELLED":
-			model.CancelPayment(clientSession.Ctx, payment.PaymentId)
+			// A chain hash and CANCELLED are contradictory. Preserve both pieces
+			// of evidence and keep reconciling; releasing the sweeps here could
+			// pay an already-broadcast transaction twice.
+			if tx.TxHash != "" || payment.TxHash != nil {
+				txHash := tx.TxHash
+				if txHash == "" {
+					txHash = *payment.TxHash
+				}
+				if err := model.UpdatePaymentProgress(
+					clientSession.Ctx,
+					payment.PaymentId,
+					string(txResponseBodyBytes),
+					txHash,
+				); err != nil {
+					returnErr = fmt.Errorf("[%s]Payment progress error = %s", payment.PaymentId, err)
+					return
+				}
+				returnErr = fmt.Errorf("[%s]Circle returned CANCELLED for a payment with transaction hash %s", payment.PaymentId, txHash)
+				return
+			}
+			if err := model.CancelPaymentAfterProcessorCancellation(
+				clientSession.Ctx,
+				payment.PaymentId,
+				string(txResponseBodyBytes),
+			); err != nil {
+				returnErr = fmt.Errorf("[%s]Payment cancellation error = %s", payment.PaymentId, err)
+				return
+			}
 			canceled = true
 			return
 
 		case "COMPLETE":
 
 			// mark the payment complete in our DB
-			model.CompletePayment(
+			if err := model.CompletePayment(
 				clientSession.Ctx,
 				payment.PaymentId,
 				string(txResponseBodyBytes),
 				tx.TxHash,
-			)
+			); err != nil {
+				returnErr = fmt.Errorf("[%s]Payment completion error = %s", payment.PaymentId, err)
+				return
+			}
 			complete = true
 
 			userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
@@ -434,7 +482,10 @@ func advancePayment(
 			// to the payment not being large enough to cover the transfer fee.
 			glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
 
-			model.CancelPayment(clientSession.Ctx, payment.PaymentId)
+			if err := model.CancelPayment(clientSession.Ctx, payment.PaymentId); err != nil {
+				returnErr = fmt.Errorf("[%s]Payment cancellation error = %s", payment.PaymentId, err)
+				return
+			}
 			canceled = true
 			return
 		}

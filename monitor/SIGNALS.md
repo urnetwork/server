@@ -321,6 +321,79 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
 - The task-overdue signal (§7) is the leading indicator: the rebuild grinding
   past 2x its p95 is what precedes the gap.
 
+### 2.9 Provider-selection population — the fresh-but-empty cache canary
+Freshness is necessary but NOT sufficient. `UpdateClientScores` can complete
+successfully, refresh every ttl, and publish an empty provider market. Check the
+database supply and the exported cache as separate stages:
+```sql
+SELECT
+  (SELECT count(DISTINCT ncc.client_id)
+   FROM network_client_connection ncc
+   WHERE ncc.connected AND EXISTS (
+     SELECT 1 FROM provide_key pk
+     WHERE pk.client_id = ncc.client_id AND pk.provide_mode = 3
+   )) AS connected_public_clients,
+  (SELECT count(DISTINCT nclr.client_id)
+   FROM network_client_location_reliability nclr
+   WHERE nclr.connected AND nclr.valid AND EXISTS (
+     SELECT 1 FROM provide_key pk
+     WHERE pk.client_id = nclr.client_id AND pk.provide_mode = 3
+   )) AS eligible_public_providers,
+  (SELECT count(*) FROM provider_egress_health) AS egress_health_rows,
+  (SELECT count(*) FROM provider_egress_health
+   WHERE measured_at >= now() - interval '24 hours'
+     AND total_count > 0 AND 10 * ok_count >= 9 * total_count
+  ) AS fresh_passing_health_rows,
+  (SELECT count(*) FROM provider_egress_location) AS egress_location_rows;
+```
+Then inspect the SAME target/caller pair in the normal and ForceMinimum score
+caches. Resolve a country target first; `00000000-0000-0000-0000-000000000000`
+is the no-caller-location key:
+```sql
+SELECT location_id FROM location
+WHERE location_type = 'country' AND country_code = 'us';
+```
+```bash
+target=<uuid-from-sql>
+caller=00000000-0000-0000-0000-000000000000
+normal="{cs_0_q_${caller}_${target}}c_l"
+forced="{cs_1_q_${caller}_${target}}c_l"
+redis-cli -c -p <entry-port> TTL "$normal"
+redis-cli -c -p <entry-port> STRLEN "$normal"
+redis-cli -c -p <entry-port> TTL "$forced"
+redis-cli -c -p <entry-port> STRLEN "$forced"
+```
+`c_l` is Go-gob `[]int`: decode it and SUM the entries for the exact exported
+provider count. Do not use EXISTS/TTL as a population check — an encoded empty
+slice is a present, fresh key. `STRLEN` is a fast discriminator before decoding:
+on the 2026-08-17 build an empty slice was 18 bytes; the matching 74,602-provider
+ForceMinimum value was 1,142 bytes. Compare the pair rather than making 18 a
+permanent encoding contract. Repeat with rank `s` and caller=`target` if the
+incident is caller/rank-specific.
+
+- HEALTHY: normal decoded sum is nonzero and tracks the eligible supply band;
+  ForceMinimum is normally larger because it bypasses reliability/score gates.
+- GATE WIPE: connected/eligible are large, normal sum is 0, ForceMinimum is
+  large. Provider connectivity is healthy; a minimum predicate ate the market.
+  Split the predicates: reliability lookbacks, score cutoff, then egress health.
+- EGRESS-CONFIG DISCRIMINATOR: locate `provider.yml` in the DEPLOYED taskworker
+  with `find /srv/warp/config -maxdepth 2 -type f -name provider.yml -print`
+  (normally `/srv/warp/config/<version>/provider.yml`) and inspect the newest
+  resolver-visible file. Missing or `enable_egress_test: false` means egress
+  health/location evidence MUST NOT gate the export. When true, compare the two
+  egress table counts above; zero rows means the pipeline is uninitialized, not
+  that every connected provider independently failed a test.
+- UPSTREAM EMPTY: normal and ForceMinimum both decode to 0. Investigate the
+  connected/valid/provide-mode pool and target location before the minimums.
+
+2026-08-17 signature: contracts fell from ~8k/min to tens/min while new connects,
+pg, redis, and score-task freshness stayed healthy. Pg still held 100,442
+connected Public clients and 88,903 eligible Public providers. Fresh normal
+quality+speed caches decoded to 0, ForceMinimum held ~74.6k, and BOTH egress
+probe tables held 0 rows. The score writer had activated a fail-closed egress
+gate before the probe pipeline was populated. This signal, not 2.8 alone,
+localized the outage.
+
 ---
 
 ## 3. redis signal catalog
@@ -601,10 +674,14 @@ control plane and selection API work; the per-candidate contract path fails.
    Destinations that are stream-only (only sk_stream present) or
    disconnected are not cold-contractable BY DESIGN — the requester was
    handed a zombie candidate. The question becomes: who served it?
-5. Selection freshness (2.8): `UpdateClientScores` last completion vs now,
-   and cs_ key ttls. A completion gap ≈ the symptom onset = root cause:
-   apps are selecting from a pre-gap snapshot. Check task-overdue (§7) for
-   the grinding rebuild, and remember the 5h ttl cliff.
+5. Selection freshness AND population (2.8, 2.9): check
+   `UpdateClientScores` last completion, cs_ key ttls, and the decoded normal
+   vs ForceMinimum provider counts. A completion gap ≈ symptom onset means a
+   stale snapshot. A fresh normal count of 0 with a large ForceMinimum count
+   means a gate wipe — do not declare selection healthy merely because the
+   task completed and refreshed ttl. Check task-overdue (§7) for a grinding
+   rebuild, and deployed `provider.yml` plus egress-table population for a
+   fresh-but-empty one.
 6. Recovery is automatic when the rebuild completes (fresh cs_ writes, hot
    reliability nodes fall back to baseline, dots green on next app
    connect). Clients holding pre-rebuild candidate lists keep failing until
@@ -720,6 +797,7 @@ Tier-0 (page):
 | canary-dead | pg | 1.2 locations completions/3min | == 0 | last_error text of all failing tasks |
 | node-unreachable | redis | 1.4 per-node timeout PING | any, 2 probes | ip:port; ss backlog if host access |
 | cluster-state | redis | cluster_state / slots_fail | != ok / > 0 for 60s | failing node list |
+| selection-empty | pg+redis | 2.9 eligible Public providers vs decoded normal score-cache count | eligible > 1,000 AND exported == 0 for 2 probes | ForceMinimum count; egress-test config; health/location row counts; last score completion |
 | node-mem-critical | redis | used/maxmemory | > 92% for 2 min | dataset vs clients split; top families |
 | oom-writes | pg+logs | OOM class in task errors or logs | any sustained 2 min | node attribution from error text |
 | active-pileup | pg | 1.3 active client backends | > 100 for 2 min | top query_ids by count; wait-event split; db host load |

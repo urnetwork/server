@@ -4,19 +4,48 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 	// "github.com/urnetwork/connect"
 )
 
-func locationNameBackfillMigrationIndex(t testing.TB) int {
+func sqlMigrationIndex(t testing.TB, marker string) int {
 	t.Helper()
 	for i, migration := range migrations {
 		if sqlMigration, ok := migration.(*SqlMigration); ok &&
-			strings.Contains(sqlMigration.sql, "iso_country_name_backfill") {
+			strings.Contains(sqlMigration.sql, marker) {
 			return i
 		}
 	}
-	t.Fatal("location-name backfill migration not found")
+	t.Fatalf("SQL migration containing %q not found", marker)
 	return -1
+}
+
+func locationNameBackfillMigrationIndex(t testing.TB) int {
+	return sqlMigrationIndex(t, "iso_country_name_backfill")
+}
+
+func canceledCircleRetryRestoreMigrationIndex(t testing.TB) int {
+	return sqlMigrationIndex(t, "restore_canceled_circle_retries")
+}
+
+// Competition migrations were developed against an older main. They must
+// remain a contiguous suffix so every migration integrated from origin runs
+// first and retains its published version number.
+func TestCompetitionMigrationsFollowOriginMigrations(t *testing.T) {
+	markers := []string{
+		"CREATE TABLE competition_round",
+		"competition_append_only_guard",
+		"competition_workload_backfill_guard",
+	}
+	firstCompetitionIndex := len(migrations) - len(markers)
+	if firstCompetitionIndex <= canceledCircleRetryRestoreMigrationIndex(t) {
+		t.Fatalf("competition migration suffix starts at %d before latest origin migration", firstCompetitionIndex)
+	}
+	for i, marker := range markers {
+		if index := sqlMigrationIndex(t, marker); index != firstCompetitionIndex+i {
+			t.Fatalf("competition migration %q index = %d, want suffix index %d", marker, index, firstCompetitionIndex+i)
+		}
+	}
 }
 
 // A pending migration can race ahead of the runtime fix that stopped blank
@@ -149,6 +178,155 @@ func TestLocationNameBackfillHandlesCanonicalFullNameCollisions(t *testing.T) {
 		}
 		if !constraintExists {
 			t.Fatal("location_name_not_blank constraint was not added")
+		}
+		if version := DbVersion(ctx); version != migrationIndex+1 {
+			t.Fatalf("DB version = %d, want %d", version, migrationIndex+1)
+		}
+	})
+}
+
+// The one-time repair must be conservative: an incorrectly canceled Circle
+// retry is resumed only while its sweeps still prove ownership by pointing to
+// that payment. A retry whose sweeps were already reassigned is left for manual
+// reconciliation; recent and ordinary unsubmitted cancellations stay canceled.
+func TestCanceledCircleRetryRestoreMigration(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		migrationIndex := canceledCircleRetryRestoreMigrationIndex(t)
+		ApplyDbMigrationsUpTo(ctx, migrationIndex)
+
+		attachedRetryId := NewId()
+		reassignedRetryId := NewId()
+		recentRetryId := NewId()
+		replacementPaymentId := NewId()
+		unsubmittedCanceledId := NewId()
+		paymentPlanId := NewId()
+		networkId := NewId()
+		cancelTime := NowUtc()
+		createTime := cancelTime.Add(-30*24*time.Hour - time.Hour)
+		attachedRecord := "circle-attached"
+		reassignedRecord := "circle-reassigned"
+		recentRecord := "circle-recent"
+		reassignedKey := NewId()
+
+		MaintenanceTx(ctx, func(tx PgTx) {
+			for _, payment := range []struct {
+				id         Id
+				record     *string
+				key        *Id
+				createTime time.Time
+			}{
+				{
+					id:         attachedRetryId,
+					record:     &attachedRecord,
+					createTime: createTime,
+				},
+				{
+					id:         reassignedRetryId,
+					record:     &reassignedRecord,
+					key:        &reassignedKey,
+					createTime: createTime,
+				},
+				{
+					id:         recentRetryId,
+					record:     &recentRecord,
+					createTime: cancelTime.Add(-time.Hour),
+				},
+				{id: unsubmittedCanceledId, createTime: createTime},
+			} {
+				RaisePgResult(tx.Exec(ctx, `
+					INSERT INTO account_payment (
+						payment_id,
+						payment_plan_id,
+						network_id,
+						wallet_id,
+						payout_byte_count,
+						payout_nano_cents,
+						min_sweep_time,
+						create_time,
+						payment_record,
+						circle_idempotency_key,
+						canceled,
+						cancel_time
+					) VALUES ($1, $2, $3, NULL, 100, 100, $4, $5, $6, $7, true, $8)
+				`,
+					payment.id,
+					paymentPlanId,
+					networkId,
+					payment.createTime,
+					payment.createTime,
+					payment.record,
+					payment.key,
+					cancelTime,
+				))
+			}
+			RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO account_payment (
+					payment_id,
+					payment_plan_id,
+					network_id,
+					wallet_id,
+					payout_byte_count,
+					payout_nano_cents,
+					min_sweep_time
+				) VALUES ($1, $2, $3, NULL, 100, 100, $4)
+			`, replacementPaymentId, paymentPlanId, networkId, NowUtc()))
+
+			// The reassigned retry's former sweep now points to a replacement
+			// payment, exactly as the payout planner would leave it.
+			for _, paymentId := range []Id{
+				attachedRetryId,
+				recentRetryId,
+				replacementPaymentId,
+				unsubmittedCanceledId,
+			} {
+				RaisePgResult(tx.Exec(ctx, `
+					INSERT INTO transfer_escrow_sweep (
+						contract_id,
+						balance_id,
+						network_id,
+						payout_byte_count,
+						payout_net_revenue_nano_cents,
+						payment_id
+					) VALUES ($1, $2, $3, 100, 100, $4)
+				`, NewId(), NewId(), networkId, paymentId))
+			}
+		})
+
+		ApplyDbMigrationsUpTo(ctx, migrationIndex+1)
+
+		type paymentState struct {
+			canceled   bool
+			cancelTime *time.Time
+		}
+		states := map[Id]paymentState{}
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT payment_id, canceled, cancel_time
+				FROM account_payment
+				WHERE payment_id IN ($1, $2, $3, $4)
+			`, attachedRetryId, reassignedRetryId, recentRetryId, unsubmittedCanceledId)
+			WithPgResult(result, err, func() {
+				for result.Next() {
+					var paymentId Id
+					var state paymentState
+					Raise(result.Scan(&paymentId, &state.canceled, &state.cancelTime))
+					states[paymentId] = state
+				}
+			})
+		}, OptReadOnly())
+
+		if len(states) != 4 {
+			t.Fatalf("loaded %d payment states, want 4", len(states))
+		}
+		if state := states[attachedRetryId]; state.canceled || state.cancelTime != nil {
+			t.Fatalf("attached retry was not restored: %+v", state)
+		}
+		for _, paymentId := range []Id{reassignedRetryId, recentRetryId, unsubmittedCanceledId} {
+			state := states[paymentId]
+			if !state.canceled || state.cancelTime == nil {
+				t.Errorf("payment %s was unsafely restored: %+v", paymentId, state)
+			}
 		}
 		if version := DbVersion(ctx); version != migrationIndex+1 {
 			t.Fatalf("DB version = %d, want %d", version, migrationIndex+1)
