@@ -786,6 +786,7 @@ func TestResourceBombGateCoversOOMAndCleanup(t *testing.T) {
 		`memory_exit_code" -eq 137`,
 		`'{{.State.OOMKilled}}'`,
 		`[ "$observed_cpuset" = "$evaluation_cpuset" ]`,
+		`"$IMAGE" cpu "$evaluation_cpuset"`,
 		`--production-memory-limit`,
 		`'.runner_memory_limit_bytes'`,
 		`production_memory_limit:$production_memory_limit`,
@@ -795,6 +796,21 @@ func TestResourceBombGateCoversOOMAndCleanup(t *testing.T) {
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("resource bomb gate is missing %q", required)
+		}
+	}
+	fixtureBytes, err := os.ReadFile("container/testdata/resource-bomb/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := string(fixtureBytes)
+	for _, required := range []string{
+		"runtime.LockOSThread()",
+		"unix.SchedSetaffinity(0, &affinity)",
+		"unix.SYS_GETCPU",
+		`fmt.Println("cpu-bomb-ready")`,
+	} {
+		if !strings.Contains(fixture, required) {
+			t.Errorf("resource bomb fixture is missing %q", required)
 		}
 	}
 

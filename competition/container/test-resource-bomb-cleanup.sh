@@ -99,7 +99,7 @@ common_run=(
     --network "$NETWORK"
 )
 cpu_id="$(taskset -c "$management_cpuset" sudo -n docker run \
-    "${common_run[@]}" --name "$CPU_CONTAINER" "$IMAGE" cpu)"
+    "${common_run[@]}" --name "$CPU_CONTAINER" "$IMAGE" cpu "$evaluation_cpuset")"
 memory_id="$(taskset -c "$management_cpuset" sudo -n docker run \
     "${common_run[@]}" --name "$MEMORY_CONTAINER" "$IMAGE" memory)"
 

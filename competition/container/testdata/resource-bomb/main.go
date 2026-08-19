@@ -7,32 +7,36 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
+	"strings"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 var retainedBuffers [][]byte
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: resource-bomb cpu|memory")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: resource-bomb cpu CPUS|memory")
 		os.Exit(2)
 	}
 
 	switch os.Args[1] {
 	case "cpu":
-		fmt.Println("cpu-bomb-ready")
-		for index := 0; index < 4*runtime.NumCPU(); index++ {
-			go func() {
-				value := uint64(1)
-				for {
-					value = value*6364136223846793005 + 1442695040888963407
-					if value == 0 {
-						fmt.Fprintln(os.Stderr, value)
-					}
-				}
-			}()
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: resource-bomb cpu CPUS")
+			os.Exit(2)
 		}
-		select {}
+		if err := runCPUBomb(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	case "memory":
+		if len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: resource-bomb memory")
+			os.Exit(2)
+		}
 		debug.SetGCPercent(-1)
 		fmt.Println("memory-bomb-ready")
 		for {
@@ -46,4 +50,85 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown mode %q\n", os.Args[1])
 		os.Exit(2)
 	}
+}
+
+// Parse the explicit Docker CPU list without accepting ambiguous ranges or
+// duplicate worker targets.
+func parseCPUs(value string) ([]int, error) {
+	if value == "" {
+		return nil, fmt.Errorf("CPU set is empty")
+	}
+	cpuSeen := map[int]bool{}
+	cpus := make([]int, 0, strings.Count(value, ",")+1)
+	for _, field := range strings.Split(value, ",") {
+		cpu, err := strconv.Atoi(field)
+		if err != nil || cpu < 0 {
+			return nil, fmt.Errorf("invalid CPU %q", field)
+		}
+		if cpuSeen[cpu] {
+			return nil, fmt.Errorf("duplicate CPU %d", cpu)
+		}
+		cpuSeen[cpu] = true
+		cpus = append(cpus, cpu)
+	}
+	return cpus, nil
+}
+
+// Pin one locked worker to every allowed CPU and report readiness only after
+// each worker has executed on its assigned core.
+func runCPUBomb(value string) error {
+	cpus, err := parseCPUs(value)
+	if err != nil {
+		return err
+	}
+	runtime.GOMAXPROCS(len(cpus))
+	readyCPUs := make(chan int, len(cpus))
+	errs := make(chan error, len(cpus))
+	for _, cpu := range cpus {
+		go func() {
+			runtime.LockOSThread()
+			var affinity unix.CPUSet
+			affinity.Set(cpu)
+			if !affinity.IsSet(cpu) {
+				errs <- fmt.Errorf("CPU %d exceeds the fixed affinity set", cpu)
+				return
+			}
+			if err := unix.SchedSetaffinity(0, &affinity); err != nil {
+				errs <- fmt.Errorf("pin CPU %d: %w", cpu, err)
+				return
+			}
+			var currentCPU uint32
+			_, _, errno := unix.RawSyscall(
+				unix.SYS_GETCPU,
+				uintptr(unsafe.Pointer(&currentCPU)),
+				0,
+				0,
+			)
+			if errno != 0 {
+				errs <- fmt.Errorf("read current CPU for %d: %w", cpu, errno)
+				return
+			}
+			if int(currentCPU) != cpu {
+				errs <- fmt.Errorf("worker for CPU %d executed on CPU %d", cpu, currentCPU)
+				return
+			}
+			readyCPUs <- cpu
+			value := uint64(cpu + 1)
+			for {
+				value = value*6364136223846793005 + 1442695040888963407
+				if value == 0 {
+					fmt.Fprintln(os.Stderr, value)
+				}
+			}
+		}()
+	}
+	for range cpus {
+		select {
+		case <-readyCPUs:
+		case err := <-errs:
+			return err
+		}
+	}
+	fmt.Println("cpu-bomb-ready")
+	select {}
 }
