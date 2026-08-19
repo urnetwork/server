@@ -130,7 +130,7 @@ fi
 
 DOCKER_BUILDKIT=1 sudo -n docker build \
     --platform linux/amd64 \
-    --network host \
+    --network default \
     --file "$SCRIPT_DIR/Dockerfile.base" \
     --build-arg "BASE_SHA=$base_sha" \
     --build-arg "SOURCE_LOCK_SHA256=$source_lock_sha256" \

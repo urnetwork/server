@@ -416,6 +416,24 @@ func TestDockerDaemonConfigurationIsFailClosed(t *testing.T) {
 	}
 }
 
+// Daemon-wide user-namespace remapping cannot create BuildKit's host-network
+// executor mounts on the authoritative Ubuntu host. The trusted base needs
+// outbound package downloads, but it does not need the host namespace; keep it
+// on Docker's ordinary bridge while submission builds remain networkless.
+func TestEvaluatorBaseBuildAvoidsHostNetwork(t *testing.T) {
+	buildBytes, err := os.ReadFile("container/build-base.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := string(buildBytes)
+	if !strings.Contains(build, "--network default") {
+		t.Fatal("evaluator base build does not select Docker's default bridge")
+	}
+	if strings.Contains(build, "--network host") {
+		t.Fatal("evaluator base build joins the host network namespace")
+	}
+}
+
 // The season-one editable surface is a literal file list, not a directory
 // pattern. Keep this pre-freeze policy narrow while the final source identity
 // is pending, and make any later expansion require an explicit test change.
