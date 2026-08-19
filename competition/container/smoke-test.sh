@@ -256,13 +256,13 @@ sudo -n docker run --rm \
     --entrypoint /opt/urnetwork/bin/sim-latency \
     --volume "$smoke_root/input:/input" \
     "$candidate_image_id" \
-    init --out=/input/providers.yml --count=8 --clients=2 --rate=30 --seed=1 --quality-window=2
-# Keep the seeded fleet's multi-minute uptime schedule intact. Compressing all
-# eight providers to ten-second churn made this short plumbing check sensitive
-# to random outage clustering. The 30/minute arrival rate still yields hundreds
-# of real request rows while removing the former load of more than 300 times
-# the calibration profile's per-provider rate. The simulator's mandatory
-# measured-window probe exercises the real FindProviders2 path deterministically.
+    init --out=/input/providers.yml --count=32 --clients=8 --rate=16 --seed=1 --quality-window=8
+# Spread the seeded crawls across eight warm clients and eight quality lanes:
+# reusing two clients with two lanes manufactured contract contention and
+# partial responses in a test intended to validate containment. The smaller
+# rate and fleet still yield a real sample while honoring the smoke runner's
+# deliberately tight memory limit. The mandatory measured-window probe
+# exercises the real FindProviders2 path deterministically.
 sudo -n chmod 0400 "$smoke_root/input/providers.yml"
 providers_sha256="$(sudo -n sha256sum "$smoke_root/input/providers.yml" | awk '{print $1}')"
 microcode_revision="$(awk -F: '$1 ~ /^microcode/ {gsub(/[[:space:]]/, "", $2); print $2}' /proc/cpuinfo | sort -u | paste -sd, -)"

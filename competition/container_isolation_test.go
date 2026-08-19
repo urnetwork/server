@@ -65,9 +65,9 @@ func TestSubmissionDockerfileIsolatesCandidateExecution(t *testing.T) {
 }
 
 // The development smoke validates containment and scorer plumbing, not the
-// production load frontier. Keep its tiny fleet away from artificial churn,
-// scheduler-scale timeouts, and the former 120-arrival overload that made the
-// unchanged 97% scorer floor pass or fail according to runtime ordering.
+// production load frontier. Keep its small fleet away from artificial churn,
+// scheduler-scale timeouts, and client/lane reuse that manufactures contract
+// contention under the unchanged 97% scorer floor.
 func TestContainerSmokeUsesStablePlumbingProfile(t *testing.T) {
 	scriptBytes, err := os.ReadFile("container/smoke-test.sh")
 	if err != nil {
@@ -76,7 +76,10 @@ func TestContainerSmokeUsesStablePlumbingProfile(t *testing.T) {
 	script := string(scriptBytes)
 
 	requiredCounts := map[string]int{
-		"--rate=30":                      1,
+		"--count=32":                     1,
+		"--clients=8":                    1,
+		"--rate=16":                      1,
+		"--quality-window=8":             1,
 		"'APEX_TEST_TIMEOUT=3s'":         2,
 		"'APEX_ANNOUNCE_TIMEOUT=2s'":     2,
 		"'APEX_PIPELINE_INTERVAL=100ms'": 2,
@@ -87,6 +90,12 @@ func TestContainerSmokeUsesStablePlumbingProfile(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"--count=8",
+		"--clients=2",
+		"--quality-window=2",
+		"--count=128",
+		"--clients=16",
+		"--rate=30",
 		"--rate=120",
 		"APEX_TEST_TIMEOUT=10ms",
 		"APEX_ANNOUNCE_TIMEOUT=10ms",
