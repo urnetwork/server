@@ -29,9 +29,9 @@ import (
 )
 
 const (
-	perfvarSchemaVersion   = 11
+	perfvarSchemaVersion   = 13
 	perfvarTraceVersion    = 1
-	perfvarScheduleVersion = 2
+	perfvarScheduleVersion = 3
 	// The measured clean queue is 32 MiB. Keeping the accepted payload at or
 	// below it keeps the long-transfer default explicit and also leaves ample
 	// room beside the largest route-local BDP in the 256 MiB test contract.
@@ -91,31 +91,45 @@ type perfvarScenario struct {
 	Topology                string           `json:"topology"`
 	ExtenderCount           int              `json:"extender_count_per_user_path"`
 	Resource                perfvarResource  `json:"resource"`
-	Seed                    int64            `json:"seed"`
-	RunCount                int              `json:"run_count"`
-	PayloadByteCount        int64            `json:"payload_byte_count"`
-	WarmupByteCount         int64            `json:"warmup_byte_count,omitempty"`
-	FlowCount               int              `json:"flow_count"`
-	UdpDuration             time.Duration    `json:"udp_duration_nanoseconds"`
-	UdpOfferedBitRate       int64            `json:"udp_offered_bits_per_second"`
-	UdpPayloadBytes         int              `json:"udp_payload_bytes"`
+	// ApplicationMtu is the advertised VPN-interface MTU, distinct from the
+	// profile's physical-path inner limit. Recording it prevents a product MTU
+	// change from being compared under the same scenario identity.
+	ApplicationMtu   int   `json:"application_mtu"`
+	Seed             int64 `json:"seed"`
+	RunCount         int   `json:"run_count"`
+	PayloadByteCount int64 `json:"payload_byte_count"`
+	WarmupByteCount  int64 `json:"warmup_byte_count,omitempty"`
+	FlowCount        int   `json:"flow_count"`
+	// LogicalDataLaneCount is the bounded Transfer sequence fan-out used for
+	// exact five-tuple isolation. Zero is the production-compatible disabled
+	// baseline; measured candidates are 1, 4, and 8.
+	LogicalDataLaneCount int           `json:"logical_data_lane_count"`
+	UdpDuration          time.Duration `json:"udp_duration_nanoseconds"`
+	UdpOfferedBitRate    int64         `json:"udp_offered_bits_per_second"`
+	UdpPayloadBytes      int           `json:"udp_payload_bytes"`
+	// correctnessDeadlineByteCount is a test-only deadline surrogate. It may
+	// add wall-time headroom to an exact correctness gate whose production
+	// sender has a known bounded-flight ceiling; it is deliberately excluded
+	// from serialized scenario identity and never changes actual workload bytes.
+	correctnessDeadlineByteCount int64
 }
 
 // Parsed selection values are kept separate from scenario defaults.
 type perfvarConfig struct {
-	Enabled          bool
-	Routes           map[string]bool
-	Profiles         map[string]bool
-	Workloads        map[string]bool
-	Directions       map[string]bool
-	Topologies       map[string]bool
-	InternalProfiles map[string]bool
-	ExtenderCount    int
-	Resources        map[string]bool
-	Seed             int64
-	RunCount         int
-	PayloadBytes     int64
-	PayloadSet       bool
+	Enabled              bool
+	Routes               map[string]bool
+	Profiles             map[string]bool
+	Workloads            map[string]bool
+	Directions           map[string]bool
+	Topologies           map[string]bool
+	InternalProfiles     map[string]bool
+	ExtenderCount        int
+	Resources            map[string]bool
+	Seed                 int64
+	RunCount             int
+	PayloadBytes         int64
+	PayloadSet           bool
+	LogicalDataLaneCount int
 }
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
@@ -185,6 +199,8 @@ type perfvarCarrierObservation struct {
 	ProviderReceiveHandoff         perfvarReceiveHandoffObservation                    `json:"provider_receive_handoff"`
 	DeviceSendRecovery             perfvarSendRecoveryObservation                      `json:"device_send_recovery"`
 	ProviderSendRecovery           perfvarSendRecoveryObservation                      `json:"provider_send_recovery"`
+	DeviceDirectAffinity           perfvarDirectCarrierAffinityObservation             `json:"device_direct_carrier_affinity"`
+	ProviderDirectAffinity         perfvarDirectCarrierAffinityObservation             `json:"provider_direct_carrier_affinity"`
 	StreamP2PHops                  []streamP2pHopSnapshot                              `json:"stream_p2p_hops,omitempty"`
 	StreamP2PClientStats           []clientconnect.P2pDataPlaneStatsSnapshot           `json:"stream_p2p_client_stats,omitempty"`
 	StreamP2PReceiveHandoffs       []perfvarReceiveHandoffObservation                  `json:"stream_p2p_receive_handoffs,omitempty"`
@@ -420,20 +436,32 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 		}
 		extenderCount = parsed
 	}
+	logicalDataLaneCount := 0
+	if value := strings.TrimSpace(getenv("CONNECT_PERFVAR_LOGICAL_LANES")); value != "" {
+		parsed, parseErr := strconv.Atoi(value)
+		if parseErr != nil ||
+			(parsed != 0 && parsed != 1 && parsed != 4 && parsed != 8) {
+			return perfvarConfig{}, fmt.Errorf(
+				"CONNECT_PERFVAR_LOGICAL_LANES must be 0, 1, 4, or 8",
+			)
+		}
+		logicalDataLaneCount = parsed
+	}
 	return perfvarConfig{
-		Enabled:          getenv("CONNECT_PERFVAR_MEASURE") == "1",
-		Routes:           routes,
-		Profiles:         profiles,
-		Workloads:        workloads,
-		Directions:       directions,
-		Topologies:       topologies,
-		InternalProfiles: internalProfiles,
-		ExtenderCount:    extenderCount,
-		Resources:        resources,
-		Seed:             seed,
-		RunCount:         runCount,
-		PayloadBytes:     payloadBytes,
-		PayloadSet:       strings.TrimSpace(getenv("CONNECT_PERFVAR_BYTE_COUNT")) != "",
+		Enabled:              getenv("CONNECT_PERFVAR_MEASURE") == "1",
+		Routes:               routes,
+		Profiles:             profiles,
+		Workloads:            workloads,
+		Directions:           directions,
+		Topologies:           topologies,
+		InternalProfiles:     internalProfiles,
+		ExtenderCount:        extenderCount,
+		Resources:            resources,
+		Seed:                 seed,
+		RunCount:             runCount,
+		PayloadBytes:         payloadBytes,
+		PayloadSet:           strings.TrimSpace(getenv("CONNECT_PERFVAR_BYTE_COUNT")) != "",
+		LogicalDataLaneCount: logicalDataLaneCount,
 	}, nil
 }
 
@@ -468,6 +496,7 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 						workload != perfvarWorkloadTCPWarmed &&
 						workload != perfvarWorkloadTCPParallel &&
 						workload != perfvarWorkloadUDP &&
+						workload != perfvarWorkloadLatencyUnderLoad &&
 						workload != perfvarWorkloadWeb {
 						continue
 					}
@@ -527,10 +556,12 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 									Topology:              topology,
 									ExtenderCount:         config.ExtenderCount,
 									Resource:              perfvarResource(resourceName),
+									ApplicationMtu:        min(clientconnect.DefaultMtu, profile.InnerMtu),
 									Seed:                  config.Seed,
 									RunCount:              config.RunCount,
 									PayloadByteCount:      payloadByteCount,
 									FlowCount:             1,
+									LogicalDataLaneCount:  config.LogicalDataLaneCount,
 									UdpDuration:           time.Second,
 									UdpOfferedBitRate:     5_000_000,
 									UdpPayloadBytes:       1000,
@@ -819,6 +850,7 @@ func TestPerfvarRunTracePairingAndIdentity(t *testing.T) {
 		{name: "seed", mutate: func(value *perfvarScenario) { value.Seed += 1 }},
 		{name: "payload", mutate: func(value *perfvarScenario) { value.PayloadByteCount += 1 }},
 		{name: "flow count", mutate: func(value *perfvarScenario) { value.FlowCount += 1 }},
+		{name: "logical lane count", mutate: func(value *perfvarScenario) { value.LogicalDataLaneCount = 4 }},
 		{name: "UDP duration", mutate: func(value *perfvarScenario) { value.UdpDuration += time.Millisecond }},
 		{name: "UDP rate", mutate: func(value *perfvarScenario) { value.UdpOfferedBitRate += 1 }},
 		{name: "UDP payload", mutate: func(value *perfvarScenario) { value.UdpPayloadBytes += 1 }},
@@ -1277,6 +1309,64 @@ func TestPerfvarPayloadBoundProtectsOpeningContract(t *testing.T) {
 	}
 }
 
+func TestPerfvarLogicalLaneCountIsExplicitAndBounded(t *testing.T) {
+	defaultConfig, err := loadPerfvarConfig(func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultConfig.LogicalDataLaneCount != 0 {
+		t.Fatalf(
+			"default logical lane count=%d, want disabled",
+			defaultConfig.LogicalDataLaneCount,
+		)
+	}
+	for _, laneCount := range []string{"0", "1", "4", "8"} {
+		config, configErr := loadPerfvarConfig(func(name string) string {
+			if name == "CONNECT_PERFVAR_LOGICAL_LANES" {
+				return laneCount
+			}
+			return ""
+		})
+		if configErr != nil {
+			t.Errorf("logical lane count %s: %v", laneCount, configErr)
+			continue
+		}
+		want, _ := strconv.Atoi(laneCount)
+		if config.LogicalDataLaneCount != want {
+			t.Errorf(
+				"logical lane count %s resolved %d",
+				laneCount,
+				config.LogicalDataLaneCount,
+			)
+		}
+		scenarios, scenarioErr := resolvePerfvarScenarios(config)
+		if scenarioErr != nil {
+			t.Errorf("resolve logical lane count %s: %v", laneCount, scenarioErr)
+			continue
+		}
+		for _, scenario := range scenarios {
+			if scenario.LogicalDataLaneCount != want {
+				t.Errorf(
+					"scenario logical lane count=%d, want %d",
+					scenario.LogicalDataLaneCount,
+					want,
+				)
+			}
+		}
+	}
+	for _, invalid := range []string{"-1", "2", "3", "9", "many"} {
+		_, configErr := loadPerfvarConfig(func(name string) string {
+			if name == "CONNECT_PERFVAR_LOGICAL_LANES" {
+				return invalid
+			}
+			return ""
+		})
+		if configErr == nil {
+			t.Errorf("invalid logical lane count %q was accepted", invalid)
+		}
+	}
+}
+
 // The largest accepted long-transfer payload spans multiple configured BDPs
 // at both regional RTTs, while the separate default remains the 64 KiB startup
 // case. This proves one shared long-payload command can cover both profiles.
@@ -1321,6 +1411,19 @@ func TestPerfvarScenarioIdentity(t *testing.T) {
 	if firstHash == "" || firstHash != secondHash {
 		t.Fatalf("unstable scenario hashes %q %q", firstHash, secondHash)
 	}
+	withCorrectnessHeadroom := scenarios[0]
+	withCorrectnessHeadroom.correctnessDeadlineByteCount = 123456
+	headroomHash, err := withCorrectnessHeadroom.hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if headroomHash != firstHash {
+		t.Fatalf(
+			"test-only correctness deadline changed scenario identity: %q != %q",
+			headroomHash,
+			firstHash,
+		)
+	}
 }
 
 // Existing invocations retain one-hop topology, no internal segment, and the
@@ -1335,6 +1438,9 @@ func TestPerfvarDefaultTopologyCompatibility(t *testing.T) {
 	}
 	if config.PayloadBytes != 32*1024*1024 {
 		t.Fatalf("default payload=%d", config.PayloadBytes)
+	}
+	if config.LogicalDataLaneCount != 0 {
+		t.Fatalf("default logical lane count=%d", config.LogicalDataLaneCount)
 	}
 	scenarios, err := resolvePerfvarScenarios(config)
 	if err != nil {
@@ -1439,6 +1545,14 @@ func TestPerfvarCellEdgeScenarioDefaults(t *testing.T) {
 				wantPayloadByteCount,
 			)
 		}
+		if scenario.ApplicationMtu != clientconnect.DefaultMtu {
+			t.Errorf(
+				"profile %q application MTU=%d want product default=%d",
+				scenario.Profile.Name,
+				scenario.ApplicationMtu,
+				clientconnect.DefaultMtu,
+			)
+		}
 		directionalRateBitsPerSecond := scenario.Profile.Forward.RateBitsPerSecond
 		if scenario.Direction == perfvarDirectionDownload {
 			directionalRateBitsPerSecond = scenario.Profile.Reverse.RateBitsPerSecond
@@ -1452,6 +1566,36 @@ func TestPerfvarCellEdgeScenarioDefaults(t *testing.T) {
 				directionalRateBitsPerSecond,
 			)
 		}
+	}
+}
+
+// Loaded latency is a bidirectional product gate: changing the bulk direction
+// must select the opposite device access capacity instead of silently dropping
+// the download half of the requested matrix.
+func TestPerfvarLatencyUnderLoadResolvesBothDirections(t *testing.T) {
+	values := map[string]string{
+		"CONNECT_PERFVAR_ROUTE":     "exchange-h1",
+		"CONNECT_PERFVAR_PROFILE":   cellEdge1mDown250kUpName,
+		"CONNECT_PERFVAR_WORKLOAD":  string(perfvarWorkloadLatencyUnderLoad),
+		"CONNECT_PERFVAR_DIRECTION": "upload,download",
+	}
+	config, err := loadPerfvarConfig(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, err := resolvePerfvarScenarios(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scenarios) != 2 {
+		t.Fatalf("loaded-latency scenario count=%d want=2", len(scenarios))
+	}
+	seen := map[perfvarDirection]bool{}
+	for _, scenario := range scenarios {
+		seen[scenario.Direction] = true
+	}
+	if !seen[perfvarDirectionUpload] || !seen[perfvarDirectionDownload] {
+		t.Fatalf("loaded-latency directions=%v", seen)
 	}
 }
 

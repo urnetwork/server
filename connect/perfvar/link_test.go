@@ -848,9 +848,30 @@ func (self *directionalLink) run(seed int64) {
 	random := rand.New(rand.NewSource(seed))
 	packets := &scheduledPacketHeap{}
 	heap.Init(packets)
-	timer := time.NewTimer(0)
+	// Keep one explicitly disarmed timer. Resetting an expired or active timer
+	// without first stopping and draining it can lose the only wake-up for a
+	// packet that arrives after an idle interval on runtimes using asynchronous
+	// timer channels. A lost wake-up leaves the packet owned by the link forever.
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
 	defer timer.Stop()
 	var timerChannel <-chan time.Time
+	stopTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timerChannel = nil
+	}
+	resetTimer := func(wait time.Duration) {
+		stopTimer()
+		timer.Reset(max(time.Duration(0), wait))
+		timerChannel = timer.C
+	}
 	var rateCursor time.Time
 	var fifoReleaseTime time.Time
 	var orderIndex uint64
@@ -1082,10 +1103,9 @@ func (self *directionalLink) run(seed int64) {
 			releasedCount += 1
 		}
 		if 0 < packets.Len() {
-			timer.Reset(max(time.Duration(0), time.Until((*packets)[0].releaseTime)))
-			timerChannel = timer.C
+			resetTimer(time.Until((*packets)[0].releaseTime))
 		} else {
-			timerChannel = nil
+			stopTimer()
 		}
 
 		select {

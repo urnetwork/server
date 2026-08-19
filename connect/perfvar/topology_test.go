@@ -2964,8 +2964,10 @@ func fullTunClientSettings(
 	stats *clientconnect.P2pDataPlaneStats,
 	noAckSends *noAckSendTracker,
 	packSends *sendPackLifecycleTracker,
+	logicalDataLaneCount int,
 ) *clientconnect.ClientSettings {
 	settings := clientconnect.DefaultClientSettings()
+	settings.SendBufferSettings.LogicalDataLaneCount = logicalDataLaneCount
 	if noAckSends != nil {
 		settings.SendBufferSettings.NoAckSendObserver = noAckSends.newObserver()
 	}
@@ -3392,6 +3394,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		providerStats,
 		providerNoAckSends,
 		providerPackSends,
+		resources.LogicalDataLaneCount,
 	)
 	if hooks != nil && hooks.configureProviderClientSettings != nil {
 		hooks.configureProviderClientSettings(providerSettings)
@@ -3551,6 +3554,7 @@ func tryNewFullTunPathWithTopologyHooks(
 			deviceStats,
 			deviceNoAckSends,
 			devicePackSends,
+			resources.LogicalDataLaneCount,
 		)
 		if deviceSendRoutes != nil {
 			settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.RouteStateObserver =
@@ -3652,10 +3656,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		}
 	}
 	appSettings := clientconnect.DefaultTunSettingsWithBufferSize(resources.ChannelSize)
-	appSettings.Mtu = environment.profile.InnerMtu
-	if 0 < resources.ApplicationMtu {
-		appSettings.Mtu = resources.ApplicationMtu
-	}
+	appSettings.Mtu = resolvedFullTunApplicationMtu(environment.profile, resources)
 	readinessPath := &fullTunPath{
 		environment: environment,
 		route:       route,
@@ -5120,7 +5121,7 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 	}
 	settings := fullTunMultiClientSettings(path)
 	defaults := clientconnect.DefaultMultiClientSettings()
-	clientSettings := fullTunClientSettings(fullTunRouteP2pFast, nil, nil, nil)
+	clientSettings := fullTunClientSettings(fullTunRouteP2pFast, nil, nil, nil, 0)
 	clientDefaults := clientconnect.DefaultClientSettings()
 	p2pSettings := clientSettings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings
 	platformSettings := fullTunPlatformSettings(0, nil, nil)
@@ -5217,6 +5218,21 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 			allowance,
 			fixedAllowance,
 		)
+	}
+}
+
+func TestFullTunClientSettingsApplyLogicalLaneCount(t *testing.T) {
+	for _, laneCount := range []int{0, 1, 4, 8} {
+		settings := fullTunClientSettings(
+			fullTunRouteExchangeH3,
+			nil,
+			nil,
+			nil,
+			laneCount,
+		)
+		if got := settings.SendBufferSettings.LogicalDataLaneCount; got != laneCount {
+			t.Fatalf("logical lane count=%d, want %d", got, laneCount)
+		}
 	}
 }
 

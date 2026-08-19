@@ -647,7 +647,13 @@ func measurePerfvarUnderlay(
 			scenario.UdpPayloadBytes,
 		)
 	case perfvarWorkloadLatencyUnderLoad:
-		result, err = measureLatencyUnderLoad(ctx, profile, resources, scenario.PayloadByteCount)
+		result, err = measureLatencyUnderLoadDirection(
+			ctx,
+			profile,
+			resources,
+			scenario.PayloadByteCount,
+			scenario.Direction == perfvarDirectionUpload,
+		)
 	case perfvarWorkloadWeb:
 		result, err = measureWebWorkload(ctx, profile, resources)
 	default:
@@ -685,24 +691,33 @@ func measurePerfvarFullTun(
 	}
 	var result workloadResult
 	var err error
-	usesLowLevelTcpHook := scenario.ProfileSchedule != nil
+	tcpDeadlineByteCount := scenario.PayloadByteCount
+	if scenario.Workload == perfvarWorkloadTCPWarmed {
+		tcpDeadlineByteCount += scenario.WarmupByteCount
+	}
+	tcpDeadlineByteCount = max(
+		tcpDeadlineByteCount,
+		scenario.correctnessDeadlineByteCount,
+	)
+	usesLowLevelTcpPath := scenario.ProfileSchedule != nil ||
+		scenario.correctnessDeadlineByteCount > 0
 	switch scenario.Workload {
 	case perfvarWorkloadTCP:
-		if usesLowLevelTcpHook && scenario.Direction == perfvarDirectionDownload {
+		if usesLowLevelTcpPath && scenario.Direction == perfvarDirectionDownload {
 			result, err = measureFullTunDownloadWithWarmupAndStartHook(
 				ctx,
 				path,
 				0,
 				scenario.PayloadByteCount,
-				scenario.PayloadByteCount,
+				tcpDeadlineByteCount,
 				startHook,
 			)
-		} else if usesLowLevelTcpHook {
+		} else if usesLowLevelTcpPath {
 			result, err = measureFullTunUploadWithStartHook(
 				ctx,
 				path,
 				scenario.PayloadByteCount,
-				scenario.PayloadByteCount,
+				tcpDeadlineByteCount,
 				startHook,
 			)
 		} else if scenario.Direction == perfvarDirectionDownload {
@@ -711,22 +726,22 @@ func measurePerfvarFullTun(
 			result, err = measureFullTunUpload(ctx, path, scenario.PayloadByteCount)
 		}
 	case perfvarWorkloadTCPWarmed:
-		if usesLowLevelTcpHook && scenario.Direction == perfvarDirectionDownload {
+		if usesLowLevelTcpPath && scenario.Direction == perfvarDirectionDownload {
 			result, err = measureFullTunDownloadWithWarmupAndStartHook(
 				ctx,
 				path,
 				scenario.WarmupByteCount,
 				scenario.PayloadByteCount,
-				scenario.WarmupByteCount+scenario.PayloadByteCount,
+				tcpDeadlineByteCount,
 				startHook,
 			)
-		} else if usesLowLevelTcpHook {
+		} else if usesLowLevelTcpPath {
 			result, err = measureFullTunUploadWithWarmupAndStartHook(
 				ctx,
 				path,
 				scenario.WarmupByteCount,
 				scenario.PayloadByteCount,
-				scenario.WarmupByteCount+scenario.PayloadByteCount,
+				tcpDeadlineByteCount,
 				startHook,
 			)
 		} else if scenario.Direction == perfvarDirectionDownload {
@@ -762,7 +777,12 @@ func measurePerfvarFullTun(
 			scenario.UdpPayloadBytes,
 		)
 	case perfvarWorkloadLatencyUnderLoad:
-		result, err = measureFullTunLatencyUnderLoad(ctx, path, scenario.PayloadByteCount)
+		result, err = measureFullTunLatencyUnderLoadDirection(
+			ctx,
+			path,
+			scenario.PayloadByteCount,
+			scenario.Direction == perfvarDirectionUpload,
+		)
 	case perfvarWorkloadWeb:
 		result, err = measureFullTunWeb(ctx, path)
 	default:
@@ -770,7 +790,7 @@ func measurePerfvarFullTun(
 	}
 	measureErr := err
 	result, err = finishScheduledWorkload(result, measureErr, scenario.ProfileSchedule, scheduleRun)
-	if usesLowLevelTcpHook && measureErr == nil {
+	if usesLowLevelTcpPath && measureErr == nil {
 		err = errors.Join(err, path.waitForPostWorkloadBoundary(ctx))
 	}
 	return result, err
@@ -1140,9 +1160,39 @@ type perfvarPackFailureCounts struct {
 // counters cannot be mistaken for interval deltas after a client-generation
 // replacement.
 type perfvarClientReceiveBoundary struct {
-	client       *clientconnect.Client
-	stats        clientconnect.ClientReceiveStatsSnapshot
-	sendRecovery clientconnect.ClientSendRecoveryStatsSnapshot
+	client         *clientconnect.Client
+	stats          clientconnect.ClientReceiveStatsSnapshot
+	sendRecovery   clientconnect.ClientSendRecoveryStatsSnapshot
+	directAffinity clientconnect.DirectCarrierAffinityStats
+}
+
+type perfvarDirectCarrierAffinityCounters struct {
+	PreferredH1WriteCount     uint64 `json:"preferred_h1_write_count"`
+	PreferredH3WriteCount     uint64 `json:"preferred_h3_write_count"`
+	FallbackH1WriteCount      uint64 `json:"fallback_h1_write_count"`
+	FallbackH3WriteCount      uint64 `json:"fallback_h3_write_count"`
+	PreferredBlockedCount     uint64 `json:"preferred_blocked_count"`
+	ActivationCount           uint64 `json:"activation_count"`
+	RouteChangeCount          uint64 `json:"route_change_count"`
+	H1TimeoutFailoverCount    uint64 `json:"h1_timeout_failover_count"`
+	H3PreferredAfterH1Timeout bool   `json:"h3_preferred_after_h1_timeout"`
+}
+
+type perfvarDirectCarrierAffinityObservation struct {
+	Available                 bool                                 `json:"available"`
+	GenerationChanged         bool                                 `json:"generation_changed"`
+	StartLifetime             perfvarDirectCarrierAffinityCounters `json:"start_lifetime"`
+	EndLifetime               perfvarDirectCarrierAffinityCounters `json:"end_lifetime"`
+	PreferredH1WriteCount     uint64                               `json:"preferred_h1_write_count"`
+	PreferredH3WriteCount     uint64                               `json:"preferred_h3_write_count"`
+	FallbackH1WriteCount      uint64                               `json:"fallback_h1_write_count"`
+	FallbackH3WriteCount      uint64                               `json:"fallback_h3_write_count"`
+	PreferredBlockedCount     uint64                               `json:"preferred_blocked_count"`
+	ActivationCount           uint64                               `json:"activation_count"`
+	RouteChangeCount          uint64                               `json:"route_change_count"`
+	H1TimeoutFailoverCount    uint64                               `json:"h1_timeout_failover_count"`
+	H3PreferredAfterH1Timeout bool                                 `json:"h3_preferred_after_h1_timeout"`
+	H3PreferenceActivated     bool                                 `json:"h3_preference_activated"`
 }
 
 // Serialized receive admission telemetry is interval-scoped when one Client
@@ -1433,10 +1483,57 @@ func snapshotPerfvarClientReceive(client *clientconnect.Client) perfvarClientRec
 		return perfvarClientReceiveBoundary{}
 	}
 	return perfvarClientReceiveBoundary{
-		client:       client,
-		stats:        client.ReceiveStats(),
-		sendRecovery: client.SendRecoveryStats(),
+		client:         client,
+		stats:          client.ReceiveStats(),
+		sendRecovery:   client.SendRecoveryStats(),
+		directAffinity: client.RouteManager().DirectCarrierAffinityStats(),
 	}
+}
+
+func perfvarDirectCarrierAffinityCountersFor(
+	snapshot clientconnect.DirectCarrierAffinityStats,
+) perfvarDirectCarrierAffinityCounters {
+	return perfvarDirectCarrierAffinityCounters{
+		PreferredH1WriteCount:     snapshot.PreferredH1WriteCount,
+		PreferredH3WriteCount:     snapshot.PreferredH3WriteCount,
+		FallbackH1WriteCount:      snapshot.FallbackH1WriteCount,
+		FallbackH3WriteCount:      snapshot.FallbackH3WriteCount,
+		PreferredBlockedCount:     snapshot.PreferredBlockedCount,
+		ActivationCount:           snapshot.ActivationCount,
+		RouteChangeCount:          snapshot.RouteChangeCount,
+		H1TimeoutFailoverCount:    snapshot.H1TimeoutFailoverCount,
+		H3PreferredAfterH1Timeout: snapshot.H3PreferredAfterH1Timeout,
+	}
+}
+
+func subtractPerfvarDirectCarrierAffinity(
+	before perfvarClientReceiveBoundary,
+	after perfvarClientReceiveBoundary,
+) perfvarDirectCarrierAffinityObservation {
+	observation := perfvarDirectCarrierAffinityObservation{
+		Available:         before.client != nil || after.client != nil,
+		GenerationChanged: before.client != after.client,
+		StartLifetime:     perfvarDirectCarrierAffinityCountersFor(before.directAffinity),
+		EndLifetime:       perfvarDirectCarrierAffinityCountersFor(after.directAffinity),
+	}
+	if before.client == nil || before.client != after.client {
+		return observation
+	}
+	start := before.directAffinity
+	end := after.directAffinity
+	observation.PreferredH1WriteCount = end.PreferredH1WriteCount - start.PreferredH1WriteCount
+	observation.PreferredH3WriteCount = end.PreferredH3WriteCount - start.PreferredH3WriteCount
+	observation.FallbackH1WriteCount = end.FallbackH1WriteCount - start.FallbackH1WriteCount
+	observation.FallbackH3WriteCount = end.FallbackH3WriteCount - start.FallbackH3WriteCount
+	observation.PreferredBlockedCount = end.PreferredBlockedCount - start.PreferredBlockedCount
+	observation.ActivationCount = end.ActivationCount - start.ActivationCount
+	observation.RouteChangeCount = end.RouteChangeCount - start.RouteChangeCount
+	observation.H1TimeoutFailoverCount = end.H1TimeoutFailoverCount -
+		start.H1TimeoutFailoverCount
+	observation.H3PreferredAfterH1Timeout = end.H3PreferredAfterH1Timeout
+	observation.H3PreferenceActivated = !start.H3PreferredAfterH1Timeout &&
+		end.H3PreferredAfterH1Timeout
+	return observation
 }
 
 func snapshotPerfvarDeviceReceive(path *fullTunPath) perfvarClientReceiveBoundary {
@@ -1444,6 +1541,56 @@ func snapshotPerfvarDeviceReceive(path *fullTunPath) perfvarClientReceiveBoundar
 		return perfvarClientReceiveBoundary{}
 	}
 	return snapshotPerfvarClientReceive(path.deviceClient.Load())
+}
+
+func TestPerfvarDirectCarrierAffinityUsesOneClientGeneration(t *testing.T) {
+	client := &clientconnect.Client{}
+	before := perfvarClientReceiveBoundary{
+		client: client,
+		directAffinity: clientconnect.DirectCarrierAffinityStats{
+			PreferredH1WriteCount: 3,
+			PreferredH3WriteCount: 5,
+			PreferredBlockedCount: 7,
+			ActivationCount:       11,
+		},
+	}
+	after := perfvarClientReceiveBoundary{
+		client: client,
+		directAffinity: clientconnect.DirectCarrierAffinityStats{
+			PreferredH1WriteCount:     13,
+			PreferredH3WriteCount:     17,
+			FallbackH1WriteCount:      2,
+			FallbackH3WriteCount:      4,
+			PreferredBlockedCount:     19,
+			ActivationCount:           23,
+			RouteChangeCount:          6,
+			H1TimeoutFailoverCount:    8,
+			H3PreferredAfterH1Timeout: true,
+		},
+	}
+	observation := subtractPerfvarDirectCarrierAffinity(before, after)
+	if !observation.Available || observation.GenerationChanged ||
+		observation.PreferredH1WriteCount != 10 ||
+		observation.PreferredH3WriteCount != 12 ||
+		observation.FallbackH1WriteCount != 2 ||
+		observation.FallbackH3WriteCount != 4 ||
+		observation.PreferredBlockedCount != 12 ||
+		observation.ActivationCount != 12 ||
+		observation.RouteChangeCount != 6 ||
+		observation.H1TimeoutFailoverCount != 8 ||
+		!observation.H3PreferredAfterH1Timeout ||
+		!observation.H3PreferenceActivated {
+		t.Fatalf("direct-affinity observation=%+v", observation)
+	}
+
+	after.client = &clientconnect.Client{}
+	changed := subtractPerfvarDirectCarrierAffinity(before, after)
+	if !changed.Available || !changed.GenerationChanged ||
+		changed.PreferredH1WriteCount != 0 ||
+		changed.PreferredH3WriteCount != 0 ||
+		changed.RouteChangeCount != 0 {
+		t.Fatalf("cross-generation direct-affinity observation=%+v", changed)
+	}
 }
 
 func subtractPerfvarClientReceive(
@@ -2700,6 +2847,14 @@ func observePerfvarCarrierAt(
 			before.providerReceive,
 			after.providerReceive,
 		),
+		DeviceDirectAffinity: subtractPerfvarDirectCarrierAffinity(
+			before.deviceReceive,
+			after.deviceReceive,
+		),
+		ProviderDirectAffinity: subtractPerfvarDirectCarrierAffinity(
+			before.providerReceive,
+			after.providerReceive,
+		),
 		StreamP2PHops:            streamP2PHops,
 		StreamP2PClientStats:     streamClientStats,
 		StreamP2PReceiveHandoffs: streamReceiveHandoffs,
@@ -3231,13 +3386,16 @@ func measurePerfvarRun(
 		environment.providerAccessProfile = executionScenario.ProviderAccessProfile
 		closeEnvironment = environment.close
 	}
+	resources := perfvarTunResources(executionScenario.Resource)
+	resources.ApplicationMtu = executionScenario.ApplicationMtu
+	resources.LogicalDataLaneCount = executionScenario.LogicalDataLaneCount
 	path, setupErr := tryNewFullTunPathWithTopology(
 		ctx,
 		t,
 		environment,
 		executionScenario.Route,
 		executionScenario.ExtenderCount == 1,
-		perfvarTunResources(executionScenario.Resource),
+		resources,
 		p2pHopCount,
 	)
 	routeSetupDuration := time.Since(setupStart)

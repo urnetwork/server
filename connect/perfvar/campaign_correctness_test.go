@@ -563,6 +563,20 @@ func measurePerfvarFreshApplicationWorkload(
 		return perfvarCorrectnessObservation{}, err
 	}
 	observation, measureErr := fixture.measure(workload, direction, measure)
+	if measureErr != nil && (route == fullTunRouteExchangeH3 || route == fullTunRouteExchangeAuto) {
+		measureErr = fmt.Errorf(
+			"%w; device_h3=%+v provider_h3=%+v device_receive=%+v provider_receive=%+v device_packets=%+v provider_packets=%+v device_recovery=%+v provider_recovery=%+v",
+			measureErr,
+			fixture.path.deviceH3DatagramStats.Snapshot(),
+			fixture.path.providerH3DatagramStats.Snapshot(),
+			fixture.path.devicePlatformReceiveStats.Snapshot(),
+			fixture.path.providerPlatformReceiveStats.Snapshot(),
+			observation.Carrier.DevicePacketStats,
+			observation.Carrier.ProviderPacketStats,
+			observation.Carrier.DeviceSendRecovery,
+			observation.Carrier.ProviderSendRecovery,
+		)
+	}
 	fixture.close()
 	return observation, measureErr
 }
@@ -703,6 +717,26 @@ func testPerfvarApplicationWorkloads(
 		loaded.Result.IdleLatency.P50 <= 0 || loaded.Result.PostLoadLatency.P50 <= 0 ||
 		loaded.Result.LoadedProbeSuccessCount < minimumLatencyProbeSuccessCount {
 		return fmt.Errorf("latency under load result=%+v", loaded.Result)
+	}
+	loadedDownload, err := measurePerfvarFreshApplicationWorkload(
+		t,
+		route,
+		profile,
+		perfvarWorkloadLatencyUnderLoad,
+		perfvarDirectionDownload,
+		func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
+			return measureFullTunLatencyUnderLoadDirection(ctx, path, loadedByteCount, false)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("download latency under load: %w", err)
+	}
+	if loadedDownload.Result.UsefulByteCount != loadedByteCount ||
+		loadedDownload.Result.ContentHash != deterministicPayloadHash(loadedByteCount) ||
+		loadedDownload.Result.IdleLatency.P50 <= 0 ||
+		loadedDownload.Result.PostLoadLatency.P50 <= 0 ||
+		loadedDownload.Result.LoadedProbeSuccessCount < minimumLatencyProbeSuccessCount {
+		return fmt.Errorf("download latency under load result=%+v", loadedDownload.Result)
 	}
 	return nil
 }

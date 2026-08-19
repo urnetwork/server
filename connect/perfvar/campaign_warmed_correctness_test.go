@@ -21,7 +21,22 @@ func measurePerfvarExactWarmedDirection(
 	}
 	result, err := measurePerfvarFullTun(fixture.ctx, fixture.path, scenario)
 	if err != nil {
-		return err
+		deviceReceive := snapshotPerfvarDeviceReceive(fixture.path)
+		providerReceive := snapshotPerfvarClientReceive(fixture.path.providerClient)
+		return fmt.Errorf(
+			"%w; device_p2p=%+v provider_p2p=%+v device_recovery=%+v provider_recovery=%+v device_h3=%+v provider_h3=%+v device_receive=%+v provider_receive=%+v device_packets=%+v provider_packets=%+v",
+			err,
+			fixture.path.deviceStats.Snapshot(),
+			fixture.path.providerStats.Snapshot(),
+			perfvarSendRecoveryCountersFor(deviceReceive.sendRecovery),
+			perfvarSendRecoveryCountersFor(providerReceive.sendRecovery),
+			fixture.path.deviceH3DatagramStats.Snapshot(),
+			fixture.path.providerH3DatagramStats.Snapshot(),
+			fixture.path.devicePlatformReceiveStats.Snapshot(),
+			fixture.path.providerPlatformReceiveStats.Snapshot(),
+			snapshotPerfvarDevicePacketStats(fixture.path),
+			snapshotPerfvarProviderPacketStats(fixture.path),
+		)
 	}
 	if !fixture.path.hasCarrierMeasurementStart() {
 		return fmt.Errorf("warmed workload did not publish its measured carrier boundary")
@@ -100,71 +115,86 @@ func TestPerfvarRegionalWarmedTCPThirtyTwoMiBCorrectness(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
-	testEnvironment.Run(t, func(t testing.TB) {
-		cases := []struct {
-			route       fullTunRoute
-			profileName string
-			direction   perfvarDirection
-			seed        int64
-		}{
-			{
-				route:       fullTunRouteExchangeH3,
-				profileName: "single-region-500ms-rtt",
-				direction:   perfvarDirectionUpload,
-				seed:        2026081550,
+	cases := []struct {
+		route       fullTunRoute
+		profileName string
+		direction   perfvarDirection
+		seed        int64
+	}{
+		{
+			route:       fullTunRouteExchangeH3,
+			profileName: "single-region-500ms-rtt",
+			direction:   perfvarDirectionUpload,
+			seed:        2026081550,
+		},
+		{
+			route:       fullTunRouteP2pFast,
+			profileName: "single-region-1000ms-rtt",
+			direction:   perfvarDirectionDownload,
+			seed:        2026081510,
+		},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(
+			fmt.Sprintf("%s/%s/%s", testCase.route, testCase.profileName, testCase.direction),
+			func(t *testing.T) {
+				testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
+				testEnvironment.Run(t, func(t testing.TB) {
+					profiles := initialNetworkProfiles(testCase.seed)
+					profile := profiles[testCase.profileName]
+					providerProfile := profiles["clean-lan"]
+					providerProfile.SourceNote = "synthetic provider colocated with server/connect"
+					fixture, err := newPerfvarCorrectnessFixture(
+						t,
+						testCase.route,
+						profile,
+						profile,
+						providerProfile,
+						defaultTunResourceProfile(),
+						20*time.Minute,
+					)
+					if err != nil {
+						t.Fatalf("construct %s/%s: %v", testCase.route, testCase.profileName, err)
+					}
+					scenario := perfvarScenario{
+						Route:                 testCase.route,
+						Profile:               profile,
+						ProviderAccessProfile: providerProfile,
+						Workload:              perfvarWorkloadTCPWarmed,
+						Direction:             testCase.direction,
+						Topology:              perfvarTopologyOneHop,
+						Resource:              perfvarResourceDefault,
+						PayloadByteCount:      32 * 1024 * 1024,
+						FlowCount:             1,
+					}
+					scenario.WarmupByteCount = perfvarDirectionalBandwidthDelayByteCount(scenario)
+					if testCase.route == fullTunRouteP2pFast {
+						// P2P deliberately keeps 16 KiB of its bounded receive queue
+						// outside the data flight. This is an exact-delivery gate, not a
+						// throughput threshold: retain 25% deadline headroom while the
+						// measured result continues to report the actual duration.
+						baseDeadlineByteCount := scenario.WarmupByteCount + scenario.PayloadByteCount
+						scenario.correctnessDeadlineByteCount =
+							baseDeadlineByteCount + baseDeadlineByteCount/4
+					}
+					if err := validatePerfvarWarmedTCPContract(scenario); err != nil {
+						fixture.close()
+						t.Fatalf("%s/%s warmed contract: %v", testCase.route, testCase.profileName, err)
+					}
+					if err := measurePerfvarExactWarmedDirection(fixture, scenario); err != nil {
+						fixture.close()
+						t.Fatalf(
+							"%s/%s/%s warmed TCP: %v",
+							testCase.route,
+							testCase.profileName,
+							testCase.direction,
+							err,
+						)
+					}
+					fixture.close()
+				})
 			},
-			{
-				route:       fullTunRouteP2pFast,
-				profileName: "single-region-1000ms-rtt",
-				direction:   perfvarDirectionDownload,
-				seed:        2026081510,
-			},
-		}
-		for _, testCase := range cases {
-			profiles := initialNetworkProfiles(testCase.seed)
-			profile := profiles[testCase.profileName]
-			providerProfile := profiles["clean-lan"]
-			providerProfile.SourceNote = "synthetic provider colocated with server/connect"
-			fixture, err := newPerfvarCorrectnessFixture(
-				t,
-				testCase.route,
-				profile,
-				profile,
-				providerProfile,
-				defaultTunResourceProfile(),
-				20*time.Minute,
-			)
-			if err != nil {
-				t.Fatalf("construct %s/%s: %v", testCase.route, testCase.profileName, err)
-			}
-			scenario := perfvarScenario{
-				Route:                 testCase.route,
-				Profile:               profile,
-				ProviderAccessProfile: providerProfile,
-				Workload:              perfvarWorkloadTCPWarmed,
-				Direction:             testCase.direction,
-				Topology:              perfvarTopologyOneHop,
-				Resource:              perfvarResourceDefault,
-				PayloadByteCount:      32 * 1024 * 1024,
-				FlowCount:             1,
-			}
-			scenario.WarmupByteCount = perfvarDirectionalBandwidthDelayByteCount(scenario)
-			if err := validatePerfvarWarmedTCPContract(scenario); err != nil {
-				fixture.close()
-				t.Fatalf("%s/%s warmed contract: %v", testCase.route, testCase.profileName, err)
-			}
-			if err := measurePerfvarExactWarmedDirection(fixture, scenario); err != nil {
-				fixture.close()
-				t.Fatalf(
-					"%s/%s/%s warmed TCP: %v",
-					testCase.route,
-					testCase.profileName,
-					testCase.direction,
-					err,
-				)
-			}
-			fixture.close()
-		}
-	})
+		)
+	}
 }

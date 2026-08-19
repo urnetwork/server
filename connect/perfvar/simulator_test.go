@@ -113,6 +113,49 @@ func TestSimulatorRateAndBurstPaceDelivery(t *testing.T) {
 	}
 }
 
+// Every transition from an empty release heap to one scheduled packet must
+// arm a fresh timer. This repeatedly exercises the exact idle-to-single-packet
+// edge that otherwise can strand the only packet with no later ingress to wake
+// the scheduler.
+func TestSimulatorRepeatedIdleSinglePacketWakeup(t *testing.T) {
+	profile := simulatorTestLinkProfile()
+	profile.RateBitsPerSecond = 1_000_000
+	profile.BurstByteCount = 72
+	profile.BaseDelay = 100 * time.Microsecond
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var deliveredPacketCount atomic.Uint64
+	link := newDirectionalLink(ctx, profile, 20260818, func(packetBytes []byte) bool {
+		if len(packetBytes) != 72 {
+			t.Errorf("delivered packet bytes=%d, want=72", len(packetBytes))
+		}
+		deliveredPacketCount.Add(1)
+		return true
+	})
+	defer link.close()
+	for packetIndex := range 1000 {
+		if _, err := link.submit(make([]byte, 72)); err != nil {
+			t.Fatalf("submit idle packet %d: %v", packetIndex, err)
+		}
+		if !link.waitIdle(ctx) {
+			t.Fatalf(
+				"idle packet %d remained scheduled: snapshot=%+v err=%v",
+				packetIndex,
+				link.snapshot(),
+				ctx.Err(),
+			)
+		}
+		if delivered := deliveredPacketCount.Load(); delivered != uint64(packetIndex+1) {
+			t.Fatalf("idle packet %d delivery count=%d", packetIndex, delivered)
+		}
+	}
+	if snapshot := link.snapshot(); snapshot.QueuedPacketCount != 0 ||
+		snapshot.QueuedByteCount != 0 || snapshot.DeliveredPacketCount != 1000 ||
+		snapshot.ReceiverDropPacketCount != 0 || snapshot.CanceledDropPacketCount != 0 {
+		t.Fatalf("repeated idle delivery snapshot=%+v", snapshot)
+	}
+}
+
 // A focused rate-only carrier accepts its complete advertised burst without
 // introducing unconfigured loss. The held first schedule is an exact barrier:
 // every later admission remains owned by the queue until the assertion setup

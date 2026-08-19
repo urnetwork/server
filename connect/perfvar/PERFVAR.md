@@ -42,7 +42,8 @@ It cannot answer physical radio, kernel VPN API, cross-host scheduling, real
 NAT rebinding, or device thermal and battery behavior. Its transition results
 cover controlled userspace address replacement and the production
 network-change hooks; they are not measurements of every carrier or operating
-system migration mechanism.
+system migration mechanism. Physical iOS and Android packet capture is the next
+follow-up tier and is deliberately not part of this synthetic gate.
 
 ## Relationship to existing performance tools
 
@@ -388,6 +389,25 @@ the simulator's ordinary 64 KiB startup allowance from bypassing eight seconds
 of a 64 kbit/s uplink before shaping begins. These are deterministic
 engineering stress points, not claims about a carrier or signal-bar reading.
 
+The physical profile's `inner_mtu` remains the path limit used by direct
+calibration and the simulated access link. A full VPN workload separately
+advertises `application_mtu = min(connect.DefaultMtu, profile.inner_mtu)` on
+the application TUN. Schema 12 serializes that value into the scenario identity;
+the current cell-edge workloads therefore exercise the production 1,100-byte
+tunnel MTU rather than silently advertising the profile's 1,200-byte limit.
+The real inner-QUIC workload pins its Initial UDP payload at the QUIC minimum of
+1,200 bytes. It therefore must cross the production IPv4 fragment path rather
+than shrinking QUIC below its protocol floor: the application side fragments,
+Connect performs bounded complete-datagram inspection at the device and
+provider security boundaries while Transfer carries the original ordered
+fragments, and provider replies are fragmented back to the application.
+Fragmented TCP is rejected before SMTP/CFAA routing rather than inspected from
+a partial header. A handshake timeout is a correctness failure, not permission
+to raise the advertised tunnel MTU. This path uses gVisor in the same-host
+harness; whether physical iOS and Android kernels fragment the same IPv4 send
+or surface message-too-large to the application must be established separately
+on real devices.
+
 ### Dynamic cell-edge profiles
 
 Three selectable profiles start at `cell-edge-5m-down-1m-up` and replay a
@@ -459,7 +479,7 @@ TUN path and a tunneled variant through the selected production route.
 | `tcp-parallel` | Four independent exact TCP streams sharing one established route | upload, download |
 | `quic` | Real inner QUIC stream with exact content verification | upload |
 | `udp` | Sequence-numbered fixed-rate datagrams with delivery, duplicate, reorder, corruption, and same-clock latency accounting | upload, download |
-| `latency-under-load` | UDP echo latency before, during, and after a concurrent TCP upload | upload |
+| `latency-under-load` | UDP echo latency before, during, and after a concurrent TCP bulk transfer | upload, download |
 | `web` | Three fresh HTTP responses: 16 KiB, 512 KiB, and 16 KiB, with first-byte and completion timing | download |
 
 The default payload is 32 MiB. Without an explicit byte-count filter, it becomes
@@ -637,11 +657,16 @@ CONNECT_PERFVAR_RESOURCE=default|mobile-surrogate
 CONNECT_PERFVAR_SEED=<decimal integer>
 CONNECT_PERFVAR_RUN_COUNT=<positive decimal integer>
 CONNECT_PERFVAR_BYTE_COUNT=<positive decimal byte count>
+CONNECT_PERFVAR_LOGICAL_LANES=0|1|4|8
 ```
 
 Defaults are all four routes, `clean-lan`, `tcp`, both directions, `one-hop`, no
 extenders, default resources, seed `20260810`, five fresh repetitions, and a
 32 MiB payload subject to the profile-specific reductions described above.
+Logical Transfer data lanes default to `0` (disabled). A nonzero selection is
+applied to both full-TUN endpoints but not to direct underlay calibration, and
+is recorded in the scenario identity. Use `1` to isolate the cost of sequence
+negotiation from fan-out, then compare `4` and `8` for cross-flow isolation.
 
 Unknown values fail. Unsupported workload/direction pairs are skipped. An
 extender selection retains only exchange H1. If the filters leave no supported
@@ -659,7 +684,7 @@ go test -race -p=1 ./connect/perfvar -short -parallel=1 \
 ```
 
 Run the canonical production destination/stream-alias gate from the server
-repository before a schema-11 campaign:
+repository before a schema-13 campaign:
 
 ```sh
 (
@@ -677,7 +702,7 @@ go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0 -v \
   -run '^(TestFullTunConstructionRollbackClosesReady(OneHop|ThreeHop)P2pRoute|TestProductionStreamP2pExtendedTopology|TestFullTunP2pFast(OneHop|ThreeHop|FiveHop|NineHop)TopologyCorrectness|TestFullTunP2pFastThreeHopExtendedApplicationWorkloadsCorrectness)$'
 ```
 
-The schema-11 campaign blockers are also an explicit serial DB gate:
+The schema-13 campaign blockers are also an explicit serial DB gate:
 
 ```sh
 go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0 -v \
@@ -719,6 +744,12 @@ Each repetition is fresh and performs:
 9. ordered teardown, strict P2P receive-credit drain, and bounded
    handler/exchange idle checks.
 
+For `latency-under-load`, the nested bulk helper crosses its exact quiescent
+carrier-snapshot boundary and publishes its start hook before loaded probes are
+admitted. Probes therefore cannot keep that pre-load boundary perpetually busy.
+Every early-error path cancels and joins the nested bulk transfer before it
+returns.
+
 Construction is transactional. Every acquisition boundary can inject a
 failure, and rollback synchronously closes the exact partial graph while
 continuing after independent cleanup errors. Transport callbacks publish route
@@ -752,7 +783,7 @@ original aspirational two-times headroom target.
 
 ## Result format
 
-Schema version 11 emits one compact JSON record per run and one aggregate JSON
+Schema version 12 emits one compact JSON record per run and one aggregate JSON
 record per scenario. Every line begins with `[perfvar]` so records can be
 extracted from `go test -v` output.
 
@@ -763,7 +794,9 @@ interval delta. A recovery attempt is counted when Transfer tries route
 admission; a recovery write error is counted separately when that admission
 fails. This distinction prevents a frame accepted by a bounded carrier queue
 but not yet physically written at measurement completion from being
-misclassified as a successful wire retry.
+misclassified as a successful wire retry. Schema 12 records the resolved
+`application_mtu` independently from the physical profile and adds
+generation-safe device/provider direct-carrier affinity observations.
 
 A run record includes:
 
@@ -771,8 +804,8 @@ A run record includes:
   combined profile hash;
 - the per-run trace version, identity hash, and application/direct, provider,
   and internal-link seeds;
-- the complete resolved scenario, including application and provider profiles
-  and any exact dynamic schedule;
+- the complete resolved scenario, including application and provider profiles,
+  the separately resolved application TUN MTU, and any exact dynamic schedule;
 - Go, OS, architecture, CPU, `GOMAXPROCS`, race mode, server revision and dirty
   state, Connect revision and dirty state, content hashes of both complete dirty
   worktrees, and the `userspace-same-host` label;
@@ -790,6 +823,9 @@ A run record includes:
 - interval-scoped H1, H3, H3Dns, and H3DnsPump carrier-to-route queue drops,
   plus H1 reliable-control refusal, for both device and provider platform
   transports. Any such refusal invalidates a throughput sample;
+- generation-safe device/provider direct-carrier affinity, including preferred
+  and reply-affinity H1/H3 writes, preferred-route backpressure, policy
+  activation and route changes, and selector-local H1-timeout failover;
 - interval-scoped H3 lane counters for device and provider, separating
   DATAGRAM messages/fragments/bytes from reliable-stream messages/bytes and
   retaining malformed, checksum, reassembly, and send-error attribution. H3
@@ -842,11 +878,27 @@ Ordinary tests currently provide:
 - route-local bandwidth-delay-product warmup on the same TCP connection,
   followed by a fresh source-to-carrier boundary and exact measured payload;
 - warmed TCP in both directions on all four carriers, plus representative
-  32 MiB measured phases after 500 ms and 1 s route-local BDP warmups;
+  32 MiB measured phases after 500 ms and 1 s route-local BDP warmups. The H3
+  500 ms upload and P2P-fast 1 s download gates pass with exact payloads; the
+  latter retains a 256-KiB P2P carrier queue and a separate 256-KiB Client
+  ReceiveSequence handoff bound rather than converting high RTT into unbounded
+  memory;
 - exact bidirectional TCP on all four carriers with 500 ms and 1 s of
   application-user-to-`server/connect` round-trip latency;
 - clean full-TUN parallel TCP, UDP in both directions, inner QUIC, web, and
-  latency-under-load;
+  latency-under-load; inner QUIC uses a 1,200-byte Initial across the
+  1,100-byte application MTU and therefore covers IPv4 fragmentation and
+  reassembly in both tunnel directions, with complete UDP policy inspection at
+  device and provider boundaries and original-fragment delivery through
+  Transfer. Retained gVisor ID-zero fragment groups receive distinct nonzero
+  wire identities before parallel H3 routing, and an interleaving regression
+  proves both datagrams reassemble independently;
+- upload and download latency-under-load use disjoint 64-bit idle, loaded, and
+  post-load probe sequence ranges, so a long low-rate or race-instrumented
+  loaded phase cannot overlap the post-load namespace. The ordinary correctness
+  gate retains 2 MiB per loaded direction; its race tier uses 256 KiB per
+  direction to exercise the same protocol/lifecycle path without turning a
+  correctness check into a five-minute throughput limit;
 - P2P fast under the LTE loss model and exchange H3 under seeded independent
   loss;
 - exchange H3 at a 1,280-byte outer MTU and P2P fast at a 1,500-byte outer MTU;
@@ -884,6 +936,11 @@ Ordinary tests currently provide:
   backpressure below Pion's 1,024-datagram queue, no-cost generation framing,
   final direct and per-hop stream router revalidation, the post-gate receiver
   fallback, and router-pending/stale-generation snapshot boundaries;
+- P2P carrier-to-route and Client ReceiveSequence handoffs that both preserve
+  the zero-wait admission rule while separating 256-message count headroom from
+  hard 256-KiB retained-byte ceilings; the queue-derived Transfer flight leaves
+  one P2P carrier slot and 16 KiB outside its 255-message / 240-KiB destination
+  data flight;
 - every partial-construction acquisition and ready H1, H3, direct-P2P, and
   three-hop rollback, including cleanup-error continuation;
 - nonblocking route callbacks, exact FIFO publication across a linked-queue
@@ -914,7 +971,9 @@ and must not be inferred from its results:
 4. Cross-process and cross-host throughput. Split exchange uses two logical
    production edges, but every process, clock, and network scheduler still
    shares one macOS host.
-5. A physical-device, real-radio, or multi-host validation tier.
+5. A physical-device, real-radio, or multi-host validation tier. Real iOS and
+   Android capture—including application-visible behavior for a 1,200-byte
+   QUIC Initial over the 1,100-byte VPN route—is the explicit next follow-up.
 
 Two measured boundary conditions also require care:
 
@@ -985,3 +1044,8 @@ The harness is complete for its userspace single-host scope: it compares all
 four forced routes, extended P2P and exchange topologies, controlled path
 events, and explicit resource surrogates. Physical-device and multi-host work
 is a separate validation tier, not an omitted code path in this harness.
+
+The canonical current-source gate passed on 2026-08-19 with
+`go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0` in
+1,522.654 seconds. This result validates the synthetic tier only; physical iOS
+and Android radio capture remains the next follow-up.

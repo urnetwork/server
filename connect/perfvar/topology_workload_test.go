@@ -1257,6 +1257,8 @@ func TestFullTunUDPTerminalBarriersRecoverExchangeLossAndReordering(t *testing.T
 
 // Inner QUIC retains its own congestion control above the selected outer
 // Connect carrier and verifies the exact stream at host egress.
+const fullTunQUICInitialPacketSize = 1200
+
 func measureFullTunQUIC(
 	ctx context.Context,
 	path *fullTunPath,
@@ -1298,7 +1300,11 @@ func measureFullTunQUICWithStartHook(
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: max(15*time.Second, 12*roundTrip),
 		MaxIdleTimeout:       max(30*time.Second, 20*roundTrip),
-		InitialPacketSize:    uint16(min(path.environment.profile.InnerMtu, 1400)),
+		// QUIC requires a client Initial UDP datagram of at least 1,200
+		// bytes. The product VPN MTU is intentionally smaller, so the IPv4
+		// application stack must fragment this datagram into legal tunnel
+		// packets and the provider side must reassemble it before UDP egress.
+		InitialPacketSize: fullTunQUICInitialPacketSize,
 	}
 	serverTransport := &quic.Transport{Conn: serverPacketConn}
 	listener, err := serverTransport.ListenEarly(serverTlsConfig, quicConfig)
@@ -1641,13 +1647,29 @@ func hasTransferEncoding(encodings []string, want string) bool {
 }
 
 // A host UDP echo probe observes interactive RTT before, during, and after a
-// full-TUN bulk upload over the same selected route.
+// full-TUN bulk transfer over the same selected route. The compatibility entry
+// point retains the original upload direction.
 func measureFullTunLatencyUnderLoad(
 	ctx context.Context,
 	path *fullTunPath,
 	bulkByteCount int64,
 ) (workloadResult, error) {
-	result, err := measureFullTunLatencyUnderLoadWithStartHook(ctx, path, bulkByteCount, nil)
+	return measureFullTunLatencyUnderLoadDirection(ctx, path, bulkByteCount, true)
+}
+
+func measureFullTunLatencyUnderLoadDirection(
+	ctx context.Context,
+	path *fullTunPath,
+	bulkByteCount int64,
+	upload bool,
+) (workloadResult, error) {
+	result, err := measureFullTunLatencyUnderLoadDirectionWithStartHook(
+		ctx,
+		path,
+		bulkByteCount,
+		upload,
+		nil,
+	)
 	if err == nil {
 		err = path.waitForPostWorkloadBoundary(ctx)
 	}
@@ -1659,6 +1681,22 @@ func measureFullTunLatencyUnderLoadWithStartHook(
 	ctx context.Context,
 	path *fullTunPath,
 	bulkByteCount int64,
+	startHook func() error,
+) (workloadResult, error) {
+	return measureFullTunLatencyUnderLoadDirectionWithStartHook(
+		ctx,
+		path,
+		bulkByteCount,
+		true,
+		startHook,
+	)
+}
+
+func measureFullTunLatencyUnderLoadDirectionWithStartHook(
+	ctx context.Context,
+	path *fullTunPath,
+	bulkByteCount int64,
+	upload bool,
 	startHook func() error,
 ) (workloadResult, error) {
 	probeListener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -1722,7 +1760,7 @@ func measureFullTunLatencyUnderLoadWithStartHook(
 		}
 		return samples
 	}
-	idleSamples := probeMany(1, 8)
+	idleSamples := probeMany(latencyProbeIdleStartSequence, 8)
 	if err := idleSamples.validate("idle"); err != nil {
 		result := workloadResult{}
 		applyLatencyProbeSamples(&result, idleSamples, latencyProbeSamples{}, latencyProbeSamples{})
@@ -1732,15 +1770,38 @@ func measureFullTunLatencyUnderLoadWithStartHook(
 	bulkDone := make(chan workloadResult, 1)
 	bulkErrors := make(chan error, 1)
 	bulkFinished := make(chan struct{})
+	bulkStarted := make(chan struct{})
+	bulkStartHook := func() error {
+		if startHook != nil {
+			if err := startHook(); err != nil {
+				return err
+			}
+		}
+		close(bulkStarted)
+		return nil
+	}
 	go func() {
 		defer close(bulkFinished)
-		result, measureErr := measureFullTunUploadWithStartHook(
-			bulkCtx,
-			path,
-			bulkByteCount,
-			bulkByteCount,
-			startHook,
-		)
+		var result workloadResult
+		var measureErr error
+		if upload {
+			result, measureErr = measureFullTunUploadWithStartHook(
+				bulkCtx,
+				path,
+				bulkByteCount,
+				bulkByteCount,
+				bulkStartHook,
+			)
+		} else {
+			result, measureErr = measureFullTunDownloadWithWarmupAndStartHook(
+				bulkCtx,
+				path,
+				0,
+				bulkByteCount,
+				bulkByteCount,
+				bulkStartHook,
+			)
+		}
 		if measureErr != nil {
 			bulkErrors <- measureErr
 			return
@@ -1758,6 +1819,24 @@ func measureFullTunLatencyUnderLoadWithStartHook(
 		})
 	}
 	defer joinBulkUpload()
+	// The bulk helper takes its exact carrier snapshot before invoking the
+	// start hook. Loaded probes must not enter the same carrier while that
+	// snapshot is waiting for quiescence, or the probe train can make the
+	// quiescent boundary impossible to reach.
+	select {
+	case <-bulkStarted:
+	case err := <-bulkErrors:
+		result := workloadResult{}
+		applyLatencyProbeSamples(
+			&result,
+			idleSamples,
+			latencyProbeSamples{},
+			latencyProbeSamples{},
+		)
+		return result, err
+	case <-ctx.Done():
+		return workloadResult{}, ctx.Err()
+	}
 	if path.beforeLatencyLoadedProbeForTest != nil {
 		if err := path.beforeLatencyLoadedProbeForTest(); err != nil {
 			return workloadResult{}, err
@@ -1766,11 +1845,11 @@ func measureFullTunLatencyUnderLoadWithStartHook(
 	loadedSamples := runLoadedLatencyProbes(
 		ctx,
 		probeConnection,
-		1000,
+		latencyProbeLoadedStartSequence,
 		probeTimeout,
 		loadedLatencyProbeIntervalForRate(
 			bulkByteCount,
-			fullTunEffectiveRateBitsPerSecond(path, true),
+			fullTunEffectiveRateBitsPerSecond(path, upload),
 		),
 		bulkFinished,
 		nil,
@@ -1790,7 +1869,7 @@ func measureFullTunLatencyUnderLoadWithStartHook(
 		return workloadResult{}, ctx.Err()
 	}
 	joinBulkUpload()
-	postLoadSamples := probeMany(2000, 8)
+	postLoadSamples := probeMany(latencyProbePostLoadStartSequence, 8)
 	joinProbeServer()
 	applyLatencyProbeSamples(&bulkResult, idleSamples, loadedSamples, postLoadSamples)
 	if err := validateLatencyProbeSamples(idleSamples, loadedSamples, postLoadSamples); err != nil {
@@ -1904,6 +1983,42 @@ func TestFullTunLatencyUnderLoadCancelAfterBlackhole(t *testing.T) {
 	)
 }
 
+// Provider-origin bulk traffic must keep interactive UDP probes live and exact
+// through the production route just as device-origin upload traffic does.
+func TestFullTunLatencyUnderLoadDownloadCorrectness(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
+	testEnvironment.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		profile := initialNetworkProfiles(4016)["clean-lan"]
+		environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, false)
+		defer environment.close()
+		path := newFullTunPath(ctx, t, environment, fullTunRouteExchangeH1)
+		defer path.close()
+
+		const bulkByteCount = int64(2 * 1024 * 1024)
+		result, err := measureFullTunLatencyUnderLoadDirection(
+			ctx,
+			path,
+			bulkByteCount,
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.UsefulByteCount != bulkByteCount ||
+			result.ContentHash != deterministicPayloadHash(bulkByteCount) ||
+			result.IdleLatency.P50 <= 0 || result.LoadedLatency.P50 <= 0 ||
+			result.PostLoadLatency.P50 <= 0 ||
+			result.LoadedProbeSuccessCount < minimumLatencyProbeSuccessCount {
+			t.Fatalf("download latency-under-load result=%+v", result)
+		}
+	})
+}
+
 // An error from the nested upload closes the probe listener but cannot return
 // while the UDP server retains its final goroutine lifecycle credit.
 func TestFullTunLatencyUnderLoadEarlyErrorJoinsProbeServer(t *testing.T) {
@@ -1978,8 +2093,9 @@ func TestFullTunLatencyUnderLoadEarlyErrorJoinsProbeServer(t *testing.T) {
 	})
 }
 
-// A loaded-probe failure cancels the nested upload context and cannot return
-// while that upload is held at its post-handshake start boundary.
+// Loaded probes cannot run before the bulk transfer crosses its exact carrier
+// snapshot boundary. A failure at that point cancels and joins the nested bulk
+// transfer before returning.
 func TestFullTunLatencyUnderLoadEarlyErrorCancelsAndJoinsBulkUpload(t *testing.T) {
 	if testing.Short() {
 		return
@@ -1995,7 +2111,7 @@ func TestFullTunLatencyUnderLoadEarlyErrorCancelsAndJoinsBulkUpload(t *testing.T
 		defer path.close()
 
 		expectedErr := errors.New("stop before loaded full-TUN latency probe")
-		bulkUploadHeld := make(chan struct{})
+		bulkUploadStarted := make(chan struct{})
 		bulkUploadWaitReached := make(chan struct{})
 		releaseBulkUpload := make(chan struct{})
 		var releaseOnce sync.Once
@@ -2007,14 +2123,18 @@ func TestFullTunLatencyUnderLoadEarlyErrorCancelsAndJoinsBulkUpload(t *testing.T
 		defer release()
 		path.beforeLatencyLoadedProbeForTest = func() error {
 			select {
-			case <-bulkUploadHeld:
+			case <-bulkUploadStarted:
 				return expectedErr
-			case <-ctx.Done():
-				return ctx.Err()
+			default:
+				return errors.New("loaded probes entered before the bulk carrier snapshot")
 			}
 		}
 		path.beforeLatencyBulkWaitForTest = func() {
 			close(bulkUploadWaitReached)
+			select {
+			case <-releaseBulkUpload:
+			case <-ctx.Done():
+			}
 		}
 		completion := make(chan error, 1)
 		go func() {
@@ -2023,17 +2143,16 @@ func TestFullTunLatencyUnderLoadEarlyErrorCancelsAndJoinsBulkUpload(t *testing.T
 				path,
 				64*1024,
 				func() error {
-					close(bulkUploadHeld)
-					<-releaseBulkUpload
+					close(bulkUploadStarted)
 					return nil
 				},
 			)
 			completion <- err
 		}()
 		select {
-		case <-bulkUploadHeld:
+		case <-bulkUploadStarted:
 		case err := <-completion:
-			t.Fatalf("latency helper returned before bulk upload was held: %v", err)
+			t.Fatalf("latency helper returned before bulk upload started: %v", err)
 		case <-ctx.Done():
 			t.Fatalf("wait for held bulk upload: %v", ctx.Err())
 		}
@@ -2046,7 +2165,7 @@ func TestFullTunLatencyUnderLoadEarlyErrorCancelsAndJoinsBulkUpload(t *testing.T
 		}
 		select {
 		case err := <-completion:
-			t.Fatalf("latency helper returned while bulk upload was held: %v", err)
+			t.Fatalf("latency helper returned before the canceled bulk upload joined: %v", err)
 		default:
 		}
 		release()
@@ -2077,7 +2196,17 @@ func TestFullTunApplicationWorkloadsCorrectness(t *testing.T) {
 	}
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		contextTimeout := 5 * time.Minute
+		loadedByteCount := int64(2 * 1024 * 1024)
+		if perfvarRaceEnabled {
+			// The race runtime turns two back-to-back 2 MiB loaded phases into a
+			// five-minute throughput test. This gate verifies protocol, lifecycle,
+			// probe, and directional correctness; the non-race canonical gate keeps
+			// the full payload used for performance-sensitive coverage.
+			contextTimeout = 8 * time.Minute
+			loadedByteCount = 256 * 1024
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 		defer cancel()
 		profile := initialNetworkProfiles(4010)["clean-lan"]
 		environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, false)
@@ -2112,10 +2241,23 @@ func TestFullTunApplicationWorkloadsCorrectness(t *testing.T) {
 		if err != nil || webResult.UsefulByteCount == 0 || webResult.TimeToFirstByte <= 0 {
 			t.Fatalf("web result=%+v err=%v", webResult, err)
 		}
-		loadedResult, err := measureFullTunLatencyUnderLoad(ctx, path, 2*1024*1024)
-		if err != nil || loadedResult.IdleLatency.P50 <= 0 || loadedResult.PostLoadLatency.P50 <= 0 ||
+		loadedResult, err := measureFullTunLatencyUnderLoad(ctx, path, loadedByteCount)
+		if err != nil || loadedResult.UsefulByteCount != loadedByteCount ||
+			loadedResult.IdleLatency.P50 <= 0 || loadedResult.PostLoadLatency.P50 <= 0 ||
 			loadedResult.LoadedProbeSuccessCount < minimumLatencyProbeSuccessCount {
 			t.Fatalf("latency-under-load result=%+v err=%v", loadedResult, err)
+		}
+		loadedDownloadResult, err := measureFullTunLatencyUnderLoadDirection(
+			ctx,
+			path,
+			loadedByteCount,
+			false,
+		)
+		if err != nil || loadedDownloadResult.UsefulByteCount != loadedByteCount ||
+			loadedDownloadResult.IdleLatency.P50 <= 0 ||
+			loadedDownloadResult.PostLoadLatency.P50 <= 0 ||
+			loadedDownloadResult.LoadedProbeSuccessCount < minimumLatencyProbeSuccessCount {
+			t.Fatalf("download latency-under-load result=%+v err=%v", loadedDownloadResult, err)
 		}
 	})
 }

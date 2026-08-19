@@ -172,6 +172,9 @@ type tunResourceProfile struct {
 	// TUNs retain their access profile MTU so an MTU experiment cannot silently
 	// change the simulated underlay at the same time.
 	ApplicationMtu int
+	// LogicalDataLaneCount configures both endpoint Client generators in the
+	// full-TUN fixture. It does not affect direct underlay calibration.
+	LogicalDataLaneCount int
 }
 
 // Optional seams expose exact TCP admission and latency-worker lifecycle
@@ -193,6 +196,20 @@ func defaultTunResourceProfile() tunResourceProfile {
 		ChannelSize: 4096,
 		BatchSize:   64,
 	}
+}
+
+// The application side of a full tunnel models the product VPN interface,
+// whose advertised MTU cannot exceed Connect's packet boundary. Physical link
+// profiles and direct calibration retain their own inner MTU; an explicit
+// application override remains available for boundary diagnostics.
+func resolvedFullTunApplicationMtu(
+	profile networkProfile,
+	resources tunResourceProfile,
+) int {
+	if 0 < resources.ApplicationMtu {
+		return resources.ApplicationMtu
+	}
+	return min(clientconnect.DefaultMtu, profile.InnerMtu)
 }
 
 // The mobile surrogate deliberately shrinks queues and inserts app-boundary delay.
@@ -2069,6 +2086,16 @@ func validateLatencyProbeSamples(
 	return nil
 }
 
+// Keep the three phases in disjoint portions of the wire sequence space. A
+// low-rate or race-instrumented bulk transfer can offer thousands of loaded
+// probes; small decimal offsets (formerly 1, 1,000, and 2,000) eventually
+// overlapped and made a late loaded reply look like a corrupt post-load probe.
+const (
+	latencyProbeIdleStartSequence     uint64 = 1
+	latencyProbeLoadedStartSequence   uint64 = 1 << 32
+	latencyProbePostLoadStartSequence uint64 = 1 << 63
+)
+
 // One datagram probe returns its same-process round-trip latency or an error.
 func runLatencyProbe(
 	ctx context.Context,
@@ -2107,6 +2134,52 @@ func runLatencyProbe(
 			continue
 		}
 		return 0, fmt.Errorf("latency probe sequence %d was corrupted", sequence)
+	}
+}
+
+func TestLatencyProbePhaseSequencesDoNotOverlapUnderLongLoad(t *testing.T) {
+	if latencyProbeIdleStartSequence >= latencyProbeLoadedStartSequence ||
+		latencyProbeLoadedStartSequence+1_000_000 >= latencyProbePostLoadStartSequence {
+		t.Fatal("latency probe phase sequence ranges overlap")
+	}
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	serverErr := make(chan error, 1)
+	go func() {
+		var request [32]byte
+		if _, err := io.ReadFull(server, request[:]); err != nil {
+			serverErr <- err
+			return
+		}
+		var lateLoadedReply [32]byte
+		binary.BigEndian.PutUint64(
+			lateLoadedReply[:],
+			latencyProbeLoadedStartSequence+5000,
+		)
+		if _, err := server.Write(lateLoadedReply[:]); err != nil {
+			serverErr <- err
+			return
+		}
+		_, err := server.Write(request[:])
+		serverErr <- err
+	}()
+
+	latency, err := runLatencyProbe(
+		t.Context(),
+		client,
+		latencyProbePostLoadStartSequence+7,
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("post-load probe rejected a late loaded reply: %v", err)
+	}
+	if latency <= 0 {
+		t.Fatalf("post-load probe latency = %v", latency)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("serve latency probe: %v", err)
 	}
 }
 
@@ -2349,13 +2422,40 @@ func runLoadedLatencyProbes(
 }
 
 // A bulk TCP flow and a separate UDP probe share both simulated directions.
+// The compatibility entry point retains the original upload direction.
 func measureLatencyUnderLoad(
 	ctx context.Context,
 	profile networkProfile,
 	resources tunResourceProfile,
 	bulkByteCount int64,
 ) (workloadResult, error) {
-	return measureLatencyUnderLoadWithStartHook(ctx, profile, resources, bulkByteCount, nil)
+	return measureLatencyUnderLoadDirection(
+		ctx,
+		profile,
+		resources,
+		bulkByteCount,
+		true,
+	)
+}
+
+// Direction is device-oriented: forward=true loads the device upload while
+// forward=false loads the device download. The UDP echo continues to traverse
+// both directions so its RTT remains directly comparable across the pair.
+func measureLatencyUnderLoadDirection(
+	ctx context.Context,
+	profile networkProfile,
+	resources tunResourceProfile,
+	bulkByteCount int64,
+	forward bool,
+) (workloadResult, error) {
+	return measureLatencyUnderLoadWithDirectionAndStartHook(
+		ctx,
+		profile,
+		resources,
+		bulkByteCount,
+		forward,
+		nil,
+	)
 }
 
 // The optional hook gives cancellation tests a post-handshake bulk boundary.
@@ -2366,11 +2466,30 @@ func measureLatencyUnderLoadWithStartHook(
 	bulkByteCount int64,
 	startHook func(*tunPath) error,
 ) (workloadResult, error) {
-	return measureLatencyUnderLoadWithFlowTestSettings(
+	return measureLatencyUnderLoadWithDirectionAndStartHook(
 		ctx,
 		profile,
 		resources,
 		bulkByteCount,
+		true,
+		startHook,
+	)
+}
+
+func measureLatencyUnderLoadWithDirectionAndStartHook(
+	ctx context.Context,
+	profile networkProfile,
+	resources tunResourceProfile,
+	bulkByteCount int64,
+	forward bool,
+	startHook func(*tunPath) error,
+) (workloadResult, error) {
+	return measureLatencyUnderLoadWithFlowTestSettingsDirection(
+		ctx,
+		profile,
+		resources,
+		bulkByteCount,
+		forward,
 		startHook,
 		nil,
 	)
@@ -2383,6 +2502,26 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 	profile networkProfile,
 	resources tunResourceProfile,
 	bulkByteCount int64,
+	startHook func(*tunPath) error,
+	testSettings *workloadTCPFlowTestSettings,
+) (workloadResult, error) {
+	return measureLatencyUnderLoadWithFlowTestSettingsDirection(
+		ctx,
+		profile,
+		resources,
+		bulkByteCount,
+		true,
+		startHook,
+		testSettings,
+	)
+}
+
+func measureLatencyUnderLoadWithFlowTestSettingsDirection(
+	ctx context.Context,
+	profile networkProfile,
+	resources tunResourceProfile,
+	bulkByteCount int64,
+	forward bool,
 	startHook func(*tunPath) error,
 	testSettings *workloadTCPFlowTestSettings,
 ) (workloadResult, error) {
@@ -2456,7 +2595,7 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 	if err != nil {
 		return workloadResult{}, err
 	}
-	idleSamples := probeMany(1, 12)
+	idleSamples := probeMany(latencyProbeIdleStartSequence, 12)
 	if err := idleSamples.validate("idle"); err != nil {
 		forwardLink, reverseLink, boundaryErr := path.finishMeasurement(ctx, measurementStart)
 		result := workloadResult{
@@ -2470,7 +2609,17 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 		return result, err
 	}
 
-	bulkListener, err := path.right.ListenTCP(&net.TCPAddr{IP: path.endpointAddress(false), Port: 0})
+	bulkListenerTun := path.right
+	bulkDialTun := path.left
+	bulkListenerIP := path.endpointAddress(false)
+	bulkRateBitsPerSecond := profile.Forward.RateBitsPerSecond
+	if !forward {
+		bulkListenerTun = path.left
+		bulkDialTun = path.right
+		bulkListenerIP = path.endpointAddress(true)
+		bulkRateBitsPerSecond = profile.Reverse.RateBitsPerSecond
+	}
+	bulkListener, err := bulkListenerTun.ListenTCP(&net.TCPAddr{IP: bulkListenerIP, Port: 0})
 	if err != nil {
 		return workloadResult{}, err
 	}
@@ -2521,13 +2670,13 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 	if testSettings != nil && testSettings.beforeClientDialHook != nil {
 		if err := testSettings.beforeClientDialHook(
 			ctx,
-			path.left,
+			bulkDialTun,
 			bulkListener.Addr().String(),
 		); err != nil {
 			return workloadResult{}, err
 		}
 	}
-	bulkConnection, err := path.left.DialContext(ctx, "tcp", bulkListener.Addr().String())
+	bulkConnection, err := bulkDialTun.DialContext(ctx, "tcp", bulkListener.Addr().String())
 	if err != nil {
 		return workloadResult{}, err
 	}
@@ -2608,11 +2757,11 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 	loadedSamples := runLoadedLatencyProbes(
 		ctx,
 		probeConnection,
-		1000,
+		latencyProbeLoadedStartSequence,
 		probeTimeout,
 		loadedLatencyProbeIntervalForRate(
 			bulkByteCount,
-			profile.Forward.RateBitsPerSecond,
+			bulkRateBitsPerSecond,
 		),
 		bulkLoadedFinished,
 		afterLoadedProbeAttempt,
@@ -2634,7 +2783,7 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 		return workloadResult{}, contextBoundWorkloadError(ctx, err)
 	}
 	bulkDuration := time.Since(bulkStart)
-	postLoadSamples := probeMany(2000, 12)
+	postLoadSamples := probeMany(latencyProbePostLoadStartSequence, 12)
 	joinProbeServer()
 	_ = probeConnection.Close()
 	_ = bulkConnection.Close()
@@ -3289,5 +3438,21 @@ func TestWorkloadProtocolCorrectness(t *testing.T) {
 	if loadedResult.IdleLatency.P50 <= 0 || loadedResult.LoadedLatency.P50 <= 0 ||
 		loadedResult.LoadedProbeSuccessCount < minimumLatencyProbeSuccessCount {
 		t.Fatalf("latency-under-load result=%+v", loadedResult)
+	}
+	loadedDownloadResult, err := measureLatencyUnderLoadDirection(
+		ctx,
+		profile,
+		resources,
+		4*1024*1024,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("download latency-under-load workload: %v", err)
+	}
+	if loadedDownloadResult.UsefulByteCount != 4*1024*1024 ||
+		loadedDownloadResult.IdleLatency.P50 <= 0 ||
+		loadedDownloadResult.LoadedLatency.P50 <= 0 ||
+		loadedDownloadResult.LoadedProbeSuccessCount < minimumLatencyProbeSuccessCount {
+		t.Fatalf("download latency-under-load result=%+v", loadedDownloadResult)
 	}
 }

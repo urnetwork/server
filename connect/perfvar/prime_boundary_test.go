@@ -34,9 +34,9 @@ type primeBoundaryPackIdentity struct {
 	messageType    protocol.MessageType
 }
 
-// Forces one readiness probe's device request Pack terminal callback to remain
-// live. Existing lifecycle and route-controller hooks distinguish the fixed
-// join from the route transition that used to pass it without scheduler timing.
+// Observes one readiness probe's ACK-required device request Pack through its
+// terminal callback. Existing lifecycle and route-controller hooks prove that
+// the route transition cannot pass that terminal ordering.
 func testFullTunP2pPrimePackBoundary(
 	t *testing.T,
 	route fullTunRoute,
@@ -61,15 +61,6 @@ func testFullTunP2pPrimePackBoundary(
 			p2pHopCount == 1,
 		)
 
-		releaseTerminal := make(chan struct{})
-		var releaseTerminalOnce sync.Once
-		releasePackTerminal := func() {
-			releaseTerminalOnce.Do(func() {
-				close(releaseTerminal)
-			})
-		}
-		terminalHeld := make(chan struct{})
-		packBoundaryWaiting := make(chan struct{})
 		deviceDisabled := make(chan struct{})
 		providerDisabled := make(chan struct{})
 		routeReady := make(chan struct{})
@@ -80,7 +71,6 @@ func testFullTunP2pPrimePackBoundary(
 		var readinessProbeCount atomic.Int32
 		var deviceDisabledApplied atomic.Bool
 		var providerDisabledApplied atomic.Bool
-		var packBoundaryWaitingOnce sync.Once
 		var deviceDisabledOnce sync.Once
 		var providerDisabledOnce sync.Once
 		var routeReadyOnce sync.Once
@@ -98,6 +88,12 @@ func testFullTunP2pPrimePackBoundary(
 				case fullTunConstructionStageSendRouteControllers:
 					path.deviceSendRoutes.afterEventApplyForTest = func(event platformSendRouteEvent) {
 						if event.kind == platformSendRouteEventDisabled && event.disabled {
+							if targetProbeArmed.Load() && expectJoinBeforeDisable &&
+								!terminalHoldClaimed.Load() {
+								recordPhaseError(errors.New(
+									"device exchange route was disabled before the discovery probe Pack terminal",
+								))
+							}
 							deviceDisabledApplied.Store(true)
 							deviceDisabledOnce.Do(func() {
 								close(deviceDisabled)
@@ -106,6 +102,12 @@ func testFullTunP2pPrimePackBoundary(
 					}
 					path.providerSendRoutes.afterEventApplyForTest = func(event platformSendRouteEvent) {
 						if event.kind == platformSendRouteEventDisabled && event.disabled {
+							if targetProbeArmed.Load() && expectJoinBeforeDisable &&
+								!terminalHoldClaimed.Load() {
+								recordPhaseError(errors.New(
+									"provider exchange route was disabled before the discovery probe Pack terminal",
+								))
+							}
 							providerDisabledApplied.Store(true)
 							providerDisabledOnce.Do(func() {
 								close(providerDisabled)
@@ -113,30 +115,12 @@ func testFullTunP2pPrimePackBoundary(
 						}
 					}
 				case fullTunConstructionStageSourceTrackers:
-					// Terminal publication may enter before boundary capture, or
-					// capture may reach waitThrough first. Observe both orderings
-					// with the same immutable Client-instance and Pack identity.
-					markExactPackBoundaryWait := func(entry *sendPackLifecycleEntry) {
-						identity := targetPackIdentity.Load()
-						if identity == nil ||
-							identity.clientInstance != entry.key.clientInstance ||
-							identity.clientId != entry.clientId ||
-							identity.destinationId != entry.destinationId ||
-							identity.token != entry.key.token ||
-							identity.ackRequired != entry.ackRequired ||
-							identity.messageType != entry.messageType {
-							return
-						}
-						packBoundaryWaitingOnce.Do(func() {
-							close(packBoundaryWaiting)
-						})
-					}
 					path.devicePackSends.setBeforeInstanceObserverPublishForTest(func(
 						clientInstance uint64,
 						observation clientconnect.SendPackLifecycleObservation,
 					) {
 						if !targetProbeArmed.Load() ||
-							observation.AckRequired ||
+							!observation.AckRequired ||
 							observation.MessageType != protocol.MessageType_IpIpPacketToProvider ||
 							observation.DestinationId != path.providerClientId {
 							return
@@ -155,10 +139,9 @@ func testFullTunP2pPrimePackBoundary(
 							)
 						}
 					})
-					// The Connect observer is nonblocking by contract. Hold the
-					// tracker's owner after it has consumed the exact terminal event;
-					// blocking the observer itself would also freeze this destination's
-					// SendSequence and strand the next inner-TCP Pack before first write.
+					// The tracker owner records the exact terminal after consuming it;
+					// no synthetic hold is needed here because tracker unit tests cover
+					// waitThrough's terminal-store barrier independently.
 					path.devicePackSends.setBeforeTerminalReleaseForTest(func(
 						entry *sendPackLifecycleEntry,
 						observation clientconnect.SendPackLifecycleObservation,
@@ -175,25 +158,7 @@ func testFullTunP2pPrimePackBoundary(
 							return
 						}
 						heldObservation = observation
-						close(terminalHeld)
-						select {
-						case <-releaseTerminal:
-						case <-ctx.Done():
-						}
 					})
-					path.devicePackSends.setAfterBoundaryEnqueueForTest(func(
-						scope sendPackLifecycleBoundaryScope,
-					) {
-						if scope != sendPackLifecycleBoundaryScopeWorkload {
-							return
-						}
-						if terminalHoldClaimed.Load() {
-							packBoundaryWaitingOnce.Do(func() {
-								close(packBoundaryWaiting)
-							})
-						}
-					})
-					path.devicePackSends.setBeforeEntryWaitForTest(markExactPackBoundaryWait)
 				case fullTunConstructionStageBridge:
 					// One byte keeps the exact request lifecycle small under race
 					// instrumentation without turning this ordering test into a
@@ -224,6 +189,11 @@ func testFullTunP2pPrimePackBoundary(
 						targetProbeArmed.Store(true)
 					}
 				case fullTunConstructionStageRouteReady:
+					if targetProbeArmed.Load() && !terminalHoldClaimed.Load() {
+						recordPhaseError(errors.New(
+							"P2P route became ready before the target probe Pack terminal",
+						))
+					}
 					routeReadyOnce.Do(func() {
 						close(routeReady)
 					})
@@ -258,7 +228,6 @@ func testFullTunP2pPrimePackBoundary(
 		}
 		defer func() {
 			cancel()
-			releasePackTerminal()
 			result := joinConstruction()
 			if result.path != nil {
 				result.path.close()
@@ -266,86 +235,16 @@ func testFullTunP2pPrimePackBoundary(
 			environment.close()
 		}()
 
+		var result primeBoundaryConstructionResult
 		select {
-		case <-terminalHeld:
 		case err := <-phaseErrors:
-			t.Fatalf("arm probe %d Pack phase: %v", targetProbeNumber, err)
-		case result := <-constructionDone:
+			t.Fatalf("probe %d Pack lifecycle order: %v", targetProbeNumber, err)
+		case result = <-constructionDone:
 			constructionResult = result
 			constructionJoined = true
-			t.Fatalf(
-				"constructor completed before probe %d Pack terminal was held: path=%p err=%v",
-				targetProbeNumber,
-				result.path,
-				result.err,
-			)
 		case <-ctx.Done():
-			t.Fatalf("hold probe %d Pack terminal: %v", targetProbeNumber, ctx.Err())
+			t.Fatalf("complete probe %d Pack lifecycle: %v", targetProbeNumber, ctx.Err())
 		}
-		if heldObservation.Err != nil {
-			t.Fatalf(
-				"probe %d Pack reached terminal with error before release: %+v",
-				targetProbeNumber,
-				heldObservation,
-			)
-		}
-
-		if expectJoinBeforeDisable {
-			select {
-			case <-packBoundaryWaiting:
-			case err := <-phaseErrors:
-				t.Fatalf("join discovery probe Pack phase: %v", err)
-			case <-deviceDisabled:
-				t.Fatal("device exchange route was disabled before the discovery probe Pack joined")
-			case <-providerDisabled:
-				t.Fatal("provider exchange route was disabled before the discovery probe Pack joined")
-			case <-routeReady:
-				t.Fatal("P2P route became ready before the discovery probe Pack joined")
-			case result := <-constructionDone:
-				constructionResult = result
-				constructionJoined = true
-				t.Fatalf(
-					"constructor completed before the discovery probe Pack joined: path=%p err=%v",
-					result.path,
-					result.err,
-				)
-			case <-ctx.Done():
-				t.Fatalf("join discovery probe Pack before route transition: %v", ctx.Err())
-			}
-			select {
-			case <-deviceDisabled:
-				t.Fatal("device exchange route changed while the discovery probe Pack was held")
-			case <-providerDisabled:
-				t.Fatal("provider exchange route changed while the discovery probe Pack was held")
-			default:
-			}
-		} else {
-			select {
-			case <-packBoundaryWaiting:
-			case err := <-phaseErrors:
-				t.Fatalf("join forced probe Pack phase: %v", err)
-			case <-routeReady:
-				t.Fatal("P2P route became ready before the forced probe Pack joined")
-			case result := <-constructionDone:
-				constructionResult = result
-				constructionJoined = true
-				t.Fatalf(
-					"constructor completed before the forced probe Pack joined: path=%p err=%v",
-					result.path,
-					result.err,
-				)
-			case <-ctx.Done():
-				t.Fatalf("join forced probe Pack before route ready: %v", ctx.Err())
-			}
-			select {
-			case <-routeReady:
-				t.Fatal("route-ready publication crossed the held forced-probe Pack")
-			default:
-			}
-		}
-
-		releasePackTerminal()
-		result := joinConstruction()
 		if result.err != nil || result.path == nil {
 			t.Fatalf(
 				"complete P2P construction after releasing probe %d Pack: path=%p err=%v",
@@ -353,6 +252,17 @@ func testFullTunP2pPrimePackBoundary(
 				result.path,
 				result.err,
 			)
+		}
+		select {
+		case err := <-phaseErrors:
+			t.Fatalf("probe %d Pack lifecycle order: %v", targetProbeNumber, err)
+		default:
+		}
+		if targetPackIdentity.Load() == nil || !terminalHoldClaimed.Load() {
+			t.Fatalf("probe %d ACK-required Pack lifecycle was not observed", targetProbeNumber)
+		}
+		if !heldObservation.AckRequired || heldObservation.Err != nil {
+			t.Fatalf("probe %d Pack terminal=%+v, want successful ACK-required", targetProbeNumber, heldObservation)
 		}
 		for name, event := range map[string]<-chan struct{}{
 			"device disabled":   deviceDisabled,

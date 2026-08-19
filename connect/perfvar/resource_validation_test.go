@@ -99,6 +99,35 @@ func TestPerfvarMobileSurrogateResourceProfile(t *testing.T) {
 	}
 }
 
+// Full-route fixtures advertise the same MTU as the product VPN by default,
+// without conflating it with the independently modeled physical link MTU.
+func TestResolvedFullTunApplicationMtu(t *testing.T) {
+	profile := initialNetworkProfiles(20260819)["clean-lan"]
+	if got := resolvedFullTunApplicationMtu(profile, defaultTunResourceProfile()); got != clientconnect.DefaultMtu {
+		t.Fatalf("default full-TUN application MTU=%d want=%d", got, clientconnect.DefaultMtu)
+	}
+
+	smallProfile := profile
+	smallProfile.InnerMtu = clientconnect.DefaultMtu - 100
+	if got := resolvedFullTunApplicationMtu(smallProfile, defaultTunResourceProfile()); got != smallProfile.InnerMtu {
+		t.Fatalf("small-profile application MTU=%d want=%d", got, smallProfile.InnerMtu)
+	}
+
+	resources := defaultTunResourceProfile()
+	resources.ApplicationMtu = 1200
+	if got := resolvedFullTunApplicationMtu(profile, resources); got != resources.ApplicationMtu {
+		t.Fatalf("explicit application MTU=%d want=%d", got, resources.ApplicationMtu)
+	}
+
+	if fullTunQUICInitialPacketSize <= clientconnect.DefaultMtu {
+		t.Fatalf(
+			"QUIC Initial=%d must exercise IPv4 fragmentation above product MTU=%d",
+			fullTunQUICInitialPacketSize,
+			clientconnect.DefaultMtu,
+		)
+	}
+}
+
 // The constrained profile starts small but permits the same bounded TCP
 // auto-tuning available to a 32 MiB mobile process budget.
 func TestPerfvarMobileSurrogateTcpWindowRange(t *testing.T) {
