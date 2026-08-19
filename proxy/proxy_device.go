@@ -427,7 +427,7 @@ func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettin
 	return &ProxyDeviceSettings{
 		ProxyDeviceDescription: "resident proxy",
 		ProxyDeviceSpec:        "resident proxy",
-		Mtu:                    1440,
+		Mtu:                    connect.DefaultMtu,
 		ProxyDeviceIdleTimeout: 90 * time.Minute,
 		SequenceBufferSize:     bufferSize,
 	}

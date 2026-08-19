@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -47,6 +48,155 @@ var connectedGauge = prometheus.NewGauge(
 	},
 )
 
+var defaultConnectH3DatagramStats = &connect.H3DatagramStats{}
+
+// connectH3DatagramCollector exports the shared candidate-carrier counters
+// without putting Prometheus label lookup or locking on either packet pump.
+type connectH3DatagramCollector struct {
+	stats                 *connect.H3DatagramStats
+	eventDesc             *prometheus.Desc
+	byteDesc              *prometheus.Desc
+	queueMessageDesc      *prometheus.Desc
+	queueByteDesc         *prometheus.Desc
+	queueWaitDurationDesc *prometheus.Desc
+}
+
+// Creates the process-wide collector used by default ConnectHandler settings.
+func newConnectH3DatagramCollector(stats *connect.H3DatagramStats) *connectH3DatagramCollector {
+	return &connectH3DatagramCollector{
+		stats: stats,
+		eventDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_datagram_events_total",
+			"H3 DATAGRAM carrier events after authenticated capability negotiation",
+			[]string{"event"},
+			nil,
+		),
+		byteDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_datagram_bytes_total",
+			"H3 DATAGRAM envelope bytes passed to or received from quic-go",
+			[]string{"direction"},
+			nil,
+		),
+		queueMessageDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_hybrid_stream_queue_messages",
+			"Current and lifetime-maximum messages retained by bounded H3 hybrid stream handoffs",
+			[]string{"state"},
+			nil,
+		),
+		queueByteDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_hybrid_stream_queue_bytes",
+			"Current and lifetime-maximum backing bytes retained by bounded H3 hybrid stream handoffs",
+			[]string{"state"},
+			nil,
+		),
+		queueWaitDurationDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_hybrid_stream_queue_wait_seconds_total",
+			"Total time H3 lane dispatchers waited for bounded hybrid stream handoff capacity",
+			nil,
+			nil,
+		),
+	}
+}
+
+// Describe publishes the two bounded-label metric families.
+func (self *connectH3DatagramCollector) Describe(descriptions chan<- *prometheus.Desc) {
+	descriptions <- self.eventDesc
+	descriptions <- self.byteDesc
+	descriptions <- self.queueMessageDesc
+	descriptions <- self.queueByteDesc
+	descriptions <- self.queueWaitDurationDesc
+}
+
+// Collect snapshots atomics once and emits every closed-set event label.
+func (self *connectH3DatagramCollector) Collect(metrics chan<- prometheus.Metric) {
+	snapshot := self.stats.Snapshot()
+	events := []struct {
+		label string
+		value uint64
+	}{
+		{label: "sent_message", value: snapshot.SentMessageCount},
+		{label: "sent_fragment", value: snapshot.SentFragmentCount},
+		{label: "send_error", value: snapshot.SendErrorCount},
+		{label: "received_message", value: snapshot.ReceivedMessageCount},
+		{label: "received_fragment", value: snapshot.ReceivedFragmentCount},
+		{label: "duplicate_fragment", value: snapshot.DuplicateFragmentCount},
+		{label: "malformed_fragment", value: snapshot.MalformedFragmentCount},
+		{label: "checksum_failure", value: snapshot.ChecksumFailureCount},
+		{label: "reassembly_timeout", value: snapshot.ReassemblyTimeoutCount},
+		{label: "reassembly_limit", value: snapshot.ReassemblyLimitCount},
+		{label: "stream_sent_message", value: snapshot.StreamSentMessageCount},
+		{label: "stream_received_message", value: snapshot.StreamReceivedMessageCount},
+		{label: "hybrid_stream_queue_wait", value: snapshot.HybridStreamQueueWaitCount},
+		{label: "hybrid_stream_queue_oversize", value: snapshot.HybridStreamQueueOversizeCount},
+	}
+	for _, event := range events {
+		metrics <- prometheus.MustNewConstMetric(
+			self.eventDesc,
+			prometheus.CounterValue,
+			float64(event.value),
+			event.label,
+		)
+	}
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.SentByteCount),
+		"sent",
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.ReceivedByteCount),
+		"received",
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.StreamSentMessageByteCount),
+		"stream_sent",
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.StreamReceivedMessageByteCount),
+		"stream_received",
+	)
+	for _, queue := range []struct {
+		description *prometheus.Desc
+		current     uint64
+		maximum     uint64
+	}{
+		{
+			description: self.queueMessageDesc,
+			current:     snapshot.HybridStreamQueueCurrentMessageCount,
+			maximum:     snapshot.HybridStreamQueueMaximumMessageCount,
+		},
+		{
+			description: self.queueByteDesc,
+			current:     snapshot.HybridStreamQueueCurrentByteCount,
+			maximum:     snapshot.HybridStreamQueueMaximumByteCount,
+		},
+	} {
+		metrics <- prometheus.MustNewConstMetric(
+			queue.description,
+			prometheus.GaugeValue,
+			float64(queue.current),
+			"current",
+		)
+		metrics <- prometheus.MustNewConstMetric(
+			queue.description,
+			prometheus.GaugeValue,
+			float64(queue.maximum),
+			"maximum",
+		)
+	}
+	metrics <- prometheus.MustNewConstMetric(
+		self.queueWaitDurationDesc,
+		prometheus.CounterValue,
+		snapshot.HybridStreamQueueWaitDuration.Seconds(),
+	)
+}
+
 // FIXME without egress verification, we rely on the ingress address to match the egress address
 // FIXME turn this on to solve ipv6 aliasing abuse on the network
 // currently the network only supports v4 egress
@@ -58,6 +208,25 @@ const (
 	connectH3WriteBatchMaxMessageCount = 16
 	connectH3WriteBatchMaxByteCount    = 64 * 1024
 )
+
+// Mirrors the client-side pre-publication query. quic-go v0.61.0 cannot queue
+// a 2,048-byte DATAGRAM because its packet buffer is capped at 1,452 bytes, so
+// the returned DatagramTooLargeError safely exposes the current path ceiling
+// without emitting a probe message.
+func initialConnectH3DatagramPathByteCount(
+	configuredMaximum int,
+	send func([]byte) error,
+) int {
+	initialMaximum := min(configuredMaximum, connect.H3InitialDatagramByteCount)
+	var probe [2048]byte
+	err := send(probe[:])
+	var tooLargeErr *quic.DatagramTooLargeError
+	if !errors.As(err, &tooLargeErr) ||
+		int(tooLargeErr.MaxDatagramPayloadSize) <= connect.H3DatagramHeaderByteCount {
+		return initialMaximum
+	}
+	return min(configuredMaximum, int(tooLargeErr.MaxDatagramPayloadSize))
+}
 
 // Narrows Gorilla's writer to the operations shared by production and the
 // deterministic ready-batch ownership tests.
@@ -201,6 +370,7 @@ func writeConnectH1UserReadyBatch(
 
 func init() {
 	prometheus.MustRegister(connectedGauge)
+	prometheus.MustRegister(newConnectH3DatagramCollector(defaultConnectH3DatagramStats))
 }
 
 func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
@@ -224,14 +394,18 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		QuicHandshakeTimeout: 15 * time.Second,
 
 		ListenH3Port: 443,
-		// FIXME use a different port and DNAT 53->(different port) from the routers
-		ListenDnsPort:       53,
+		// Clients continue to use public UDP/53. IPv4 ingress routers DNAT it to
+		// edge UDP/8053, and nginx forwards PPv2 to this unprivileged listener.
+		ListenDnsPort:       8053,
 		EnableProxyProtocol: true,
 		// Floor the framer at the connect runtime minimum message length: every
 		// framer on the resident exchange flow must admit the handshake's TLS
 		// server flight (one ~2.2 KiB pack). Also backs the websocket read limit.
 		FramerSettings:       connect.DefaultFramerSettings(int(connect.DefaultClientSettings().MinimumMessageLenLimit())),
 		TransportTlsSettings: server.DefaultTransportTlsSettings(),
+		EnableH3Datagrams:    true,
+		H3DatagramSettings:   connect.DefaultH3DatagramSettings(),
+		H3DatagramStats:      defaultConnectH3DatagramStats,
 
 		ConnectionAnnounceTimeout:   5 * time.Second,
 		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
@@ -246,19 +420,34 @@ type ConnectHandlerSettings struct {
 	WriteTimeout     time.Duration
 	ReadTimeout      time.Duration
 	// MaximumExchangeMessageByteCount ByteCount
-	QuicConnectTimeout        time.Duration
-	QuicHandshakeTimeout      time.Duration
-	ListenH3Port              int
-	ListenDnsPort             int
-	EnableProxyProtocol       bool
-	FramerSettings            *connect.FramerSettings
-	TransportTlsSettings      *server.TransportTlsSettings
+	QuicConnectTimeout   time.Duration
+	QuicHandshakeTimeout time.Duration
+	ListenH3Port         int
+	ListenDnsPort        int
+	EnableProxyProtocol  bool
+	FramerSettings       *connect.FramerSettings
+	TransportTlsSettings *server.TransportTlsSettings
+	EnableH3Datagrams    bool
+	H3DatagramSettings   *connect.H3DatagramSettings
+	H3DatagramStats      *connect.H3DatagramStats
+	// H3QuicPacketStats enables opt-in packet/frame diagnostics without
+	// retaining qlog events or payloads. Nil keeps tracing disabled.
+	H3QuicPacketStats         *connect.H3QuicPacketStats
 	ConnectionAnnounceTimeout time.Duration
 	// per-connection latency/speed test schedule.
 	// nil selects a default based on the transport version.
 	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
+}
+
+// Keeps server-resident Transfer recovery symmetric with the client H3 path.
+func connectH3TransferCarrierProperties(useH3Datagrams bool) connect.TransferCarrierProperties {
+	return connect.TransferCarrierProperties{
+		Unreliable:              useH3Datagrams,
+		UnreliableFlowIsolation: useH3Datagrams,
+		UnreliableFlowReserve:   useH3Datagrams,
+	}
 }
 
 // Joins all per-connection workers before their handler releases shared state.
@@ -303,13 +492,21 @@ func finishConnectionAnnounce(announce *ConnectionAnnounce) {
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
 // conservative startup packet and enabled DPLPMTUD behavior.
 func newConnectQuicConfig(settings *ConnectHandlerSettings) *quic.Config {
-	return &quic.Config{
+	config := &quic.Config{
 		HandshakeIdleTimeout: settings.QuicConnectTimeout + settings.QuicHandshakeTimeout,
 		MaxIdleTimeout:       settings.MaxPingTimeout * 4,
-		KeepAlivePeriod:      0,
-		Allow0RTT:            true,
-		InitialPacketSize:    1400,
+		// Keep hybrid liveness independent from the application writer. That
+		// writer can block behind quic-go's bounded DATAGRAM queue and must not
+		// starve the only connection-level probe on a constrained uplink.
+		KeepAlivePeriod:   settings.MaxPingTimeout,
+		Allow0RTT:         true,
+		InitialPacketSize: connect.H3InitialPacketByteCount,
+		EnableDatagrams:   settings.EnableH3Datagrams,
 	}
+	if settings.H3QuicPacketStats != nil {
+		config.Tracer = settings.H3QuicPacketStats.Tracer
+	}
+	return config
 }
 
 type ConnectHandler struct {
@@ -319,10 +516,11 @@ type ConnectHandler struct {
 	exchange  *Exchange
 	settings  *ConnectHandlerSettings
 
-	transportTls          *server.TransportTls
-	serviceTransitionTime time.Time
-	h3PacketConn          net.PacketConn
-	dnsPacketConn         net.PacketConn
+	transportTls               *server.TransportTls
+	serviceTransitionTime      time.Time
+	h3PacketConn               net.PacketConn
+	dnsPacketConn              net.PacketConn
+	h3DatagramReassemblyBudget *connect.H3DatagramReassemblyBudget
 
 	activeLock  sync.Mutex
 	activeCount int
@@ -378,6 +576,17 @@ func NewConnectHandlerWithPacketConns(
 		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
 		transportTls = server.NewTransportTls(map[string]bool{}, server.DefaultTransportTlsSettings())
 	}
+	h3DatagramSettings := settings.H3DatagramSettings
+	if h3DatagramSettings == nil {
+		h3DatagramSettings = connect.DefaultH3DatagramSettings()
+	}
+	if settingsErr := h3DatagramSettings.Validate(); settingsErr != nil {
+		panic(settingsErr)
+	}
+	settings.H3DatagramSettings = h3DatagramSettings
+	if settings.H3DatagramStats == nil {
+		settings.H3DatagramStats = &connect.H3DatagramStats{}
+	}
 
 	// the announce registers the peer with the SAME ttl the resident
 	// heartbeat refreshes it (ExchangeResidentTtl); disconnect detection
@@ -403,8 +612,11 @@ func NewConnectHandlerWithPacketConns(
 		serviceTransitionTime: time.Now().Add(2 * exchange.settings.DrainAllTimeout),
 		h3PacketConn:          packetConns.H3,
 		dnsPacketConn:         packetConns.Dns,
-		activeCount:           activeCount,
-		activeZero:            activeZero,
+		h3DatagramReassemblyBudget: connect.NewH3DatagramReassemblyBudget(
+			h3DatagramSettings.ProcessReassemblyByteCount,
+		),
+		activeCount: activeCount,
+		activeZero:  activeZero,
 	}
 
 	go server.HandleError(h.run, cancel)
@@ -762,8 +974,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		workers.start(func() {
 			defer handleCancel()
 
-			readTimer := time.NewTimer(0)
-			defer readTimer.Stop()
 			var speedTest *SpeedTest
 
 			for {
@@ -828,14 +1038,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 					pingTracker.Receive()
 
-					sendResult := residentTransport.sendMessage(
+					messageByteCount := len(message)
+					sendResult := residentTransport.trySendMessage(
 						handleCtx.Done(),
 						message,
-						readTimer,
-						self.settings.ReadTimeout,
 					)
 					if sendResult == pooledMessageSendDone {
 						return
+					}
+					if sendResult == pooledMessageSendDropped {
+						recordReceiveQueueDrop(receiveQueueBoundaryConnectH1, messageByteCount)
 					}
 					if sendResult == pooledMessageSendDelivered {
 						if glog.V(2) {
@@ -1254,6 +1466,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	var clientId server.Id
 	var instanceId server.Id
 	var connectionId server.Id
+	useH3Datagrams := false
 	connectionRegistered := false
 	defer func() {
 		if connectionRegistered {
@@ -1297,8 +1510,30 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			self.exchange.registerConnection(clientId, connectionId, handleCancel)
 			connectionRegistered = true
 
+			connectionState := conn.ConnectionState()
+			authResponse, accepted := connect.AcceptH3DatagramAuthOffer(
+				auth,
+				self.settings.EnableH3Datagrams,
+				connectionState.SupportsDatagrams.Local,
+				connectionState.SupportsDatagrams.Remote,
+			)
+			useH3Datagrams = accepted
+
 			stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
-			return framer.Write(stream, authFrameBytes)
+			if !useH3Datagrams {
+				// Byte-for-byte echo preserves old-client behavior. A new client
+				// talking to an old server sees accepted_version=0 and falls back.
+				return framer.Write(stream, authFrameBytes)
+			}
+			responseBytes, responseErr := connect.EncodeFrame(
+				authResponse,
+				connect.DefaultProtocolVersion,
+			)
+			if responseErr != nil {
+				return responseErr
+			}
+			defer connect.MessagePoolReturn(responseBytes)
+			return framer.Write(stream, responseBytes)
 		},
 	)
 	if err != nil {
@@ -1325,12 +1560,36 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		)
 		defer finishConnectionAnnounce(announce)
 
-		residentTransport := NewResidentTransport(
+		residentTransport := NewResidentTransportWithProperties(
 			handleCtx,
 			self.exchange,
 			clientId,
 			instanceId,
+			connectH3TransferCarrierProperties(useH3Datagrams),
 		)
+		var datagramFragmenter *connect.H3DatagramFragmenter
+		var datagramReassembler *connect.H3DatagramReassembler
+		if useH3Datagrams {
+			var datagramErr error
+			datagramFragmenter, datagramErr = connect.NewH3DatagramFragmenter(
+				self.settings.H3DatagramSettings,
+				self.settings.H3DatagramStats,
+			)
+			if datagramErr != nil {
+				glog.Infof("[t]H3 DATAGRAM sender init error = %s\n", datagramErr)
+				return
+			}
+			datagramReassembler, datagramErr = connect.NewH3DatagramReassembler(
+				self.settings.H3DatagramSettings,
+				self.h3DatagramReassemblyBudget,
+				self.settings.H3DatagramStats,
+			)
+			if datagramErr != nil {
+				glog.Infof("[t]H3 DATAGRAM receiver init error = %s\n", datagramErr)
+				return
+			}
+			defer datagramReassembler.Close()
+		}
 		var workers connectHandlerWorkers
 		defer finishH3ConnectHandlerWorkers(&workers, func() {
 			handleCancel()
@@ -1351,55 +1610,149 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		})
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
+		deliverRoutedMessage := func(message []byte) bool {
+			// Reliability tracking remains at the complete Transfer boundary,
+			// independent of the selected hybrid lane or DATAGRAM fragments.
+			announce.ReceiveMessage(ByteCount(len(message)))
+			pingTracker.Receive()
+			messageByteCount := len(message)
+			sendResult := residentTransport.trySendMessage(
+				handleCtx.Done(),
+				message,
+			)
+			if sendResult == pooledMessageSendDone {
+				return false
+			}
+			if sendResult == pooledMessageSendDropped {
+				recordReceiveQueueDrop(receiveQueueBoundaryConnectH3, messageByteCount)
+			}
+			if sendResult == pooledMessageSendDelivered && glog.V(2) {
+				glog.Infof("[rtr] <-%s\n", clientId)
+			}
+			return true
+		}
+
+		if useH3Datagrams {
+			// Authentication, liveness, and routed frames above the negotiated
+			// hybrid threshold share this reliable stream. DATAGRAM has its own
+			// receive pump below; neither reader waits on resident admission.
+			// Clear the authentication deadline because DATAGRAM activity does
+			// not satisfy a stream read deadline. QUIC's connection-level idle
+			// timeout owns peer liveness in hybrid mode, while handler cleanup
+			// cancels the stream to unblock this reader deterministically.
+			workers.start(func() {
+				defer handleCancel()
+				if err := stream.SetReadDeadline(time.Time{}); err != nil {
+					return
+				}
+				for {
+					message, err := framer.Read(stream)
+					if err != nil {
+						return
+					}
+					if len(message) != 0 {
+						self.settings.H3DatagramStats.RecordStreamReceived(len(message))
+						if !deliverRoutedMessage(message) {
+							return
+						}
+						continue
+					}
+					announce.ReceiveMessage(0)
+					connect.MessagePoolReturn(message)
+					pingTracker.ReceivePing()
+					datagramReassembler.Expire(time.Now())
+				}
+			})
+		}
 
 		workers.start(func() {
 			defer handleCancel()
 
-			readTimer := time.NewTimer(0)
-			defer readTimer.Stop()
 			for {
-				stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
-				message, err := framer.Read(stream)
-				if err != nil {
-					if glog.V(2) {
-						glog.Infof("[tr]h3 err = %s\n", err)
+				var message []byte
+				if useH3Datagrams {
+					datagram, err := conn.ReceiveDatagram(handleCtx)
+					if err != nil {
+						return
 					}
-					return
-				}
-
-				// reliability tracking
-				announce.ReceiveMessage(ByteCount(len(message)))
-
-				if 0 == len(message) {
-					// ping
-					pingTracker.ReceivePing()
-					connect.MessagePoolReturn(message)
-					continue
-				}
-
-				pingTracker.Receive()
-
-				sendResult := residentTransport.sendMessage(
-					handleCtx.Done(),
-					message,
-					readTimer,
-					self.settings.ReadTimeout,
-				)
-				if sendResult == pooledMessageSendDone {
-					return
-				}
-				if sendResult == pooledMessageSendDelivered {
-					if glog.V(2) {
-						glog.Infof("[rtr] <-%s\n", clientId)
+					message = datagramReassembler.Accept(datagram, time.Now())
+					if message == nil {
+						continue
 					}
+				} else {
+					stream.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
+					var err error
+					message, err = framer.Read(stream)
+					if err != nil {
+						if glog.V(2) {
+							glog.Infof("[tr]h3 err = %s\n", err)
+						}
+						return
+					}
+					if 0 == len(message) {
+						// ping
+						pingTracker.ReceivePing()
+						connect.MessagePoolReturn(message)
+						continue
+					}
+				}
+
+				if !deliverRoutedMessage(message) {
+					return
 				}
 			}
 		})
 
+		// Hybrid lane dispatch occurs before either physical writer can block.
+		// Its stream handoff is bounded by retained backing bytes as well as
+		// message count. Stream-only H3 retains the resident queue and historical
+		// batching path.
+		var streamSend chan []byte
+		var streamSendBudget *connect.H3HybridStreamSendBudget
+		streamInput := (<-chan []byte)(residentTransport.receive)
+		if useH3Datagrams {
+			streamSend = make(chan []byte, connect.H3HybridStreamQueueMessageCount)
+			streamSendBudget = connect.NewH3HybridStreamSendBudget(
+				connect.H3HybridStreamQueueMessageCount,
+				connect.H3HybridStreamQueueByteCount,
+				self.settings.H3DatagramStats,
+			)
+			streamInput = streamSend
+		}
+		releaseStreamMessage := func(message []byte) {
+			if streamSendBudget != nil {
+				streamSendBudget.Release(connect.H3HybridStreamRetainedByteCount(message))
+			}
+			connect.MessagePoolReturn(message)
+		}
+		maxDatagramByteCount := initialConnectH3DatagramPathByteCount(
+			self.settings.H3DatagramSettings.TargetDatagramByteCount,
+			conn.SendDatagram,
+		)
+		sendDatagramMessage := func(message []byte) (useStream bool, sendErr error) {
+			var nextMaxDatagramByteCount int
+			useStream, nextMaxDatagramByteCount, sendErr = datagramFragmenter.SendHybrid(
+				message,
+				maxDatagramByteCount,
+				conn.SendDatagram,
+			)
+			maxDatagramByteCount = nextMaxDatagramByteCount
+			return useStream, sendErr
+		}
+
 		workers.start(func() {
 			defer handleCancel()
-			writeBatchStorage := make([]byte, connectH3WriteBatchMaxByteCount)
-
+			if streamSend != nil {
+				defer func() {
+					for message := range streamSend {
+						releaseStreamMessage(message)
+					}
+				}()
+			}
+			// Allocate the stream batch only when a large hybrid message actually
+			// selects it; a small-message-only connection retains DATAGRAM's
+			// bounded scratch profile.
+			var writeBatchStorage []byte
 			writeUserBatch := func(
 				firstMessage []byte,
 			) (receiveOpen bool, pendingMessage []byte, succeeded bool) {
@@ -1414,7 +1767,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 					case <-handleCtx.Done():
 						receiveOpen = false
 						break drainReady
-					case message, ok := <-residentTransport.receive:
+					case message, ok := <-streamInput:
 						if !ok {
 							receiveOpen = false
 							break drainReady
@@ -1431,6 +1784,9 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 					}
 				}
 
+				if writeBatchStorage == nil {
+					writeBatchStorage = make([]byte, connectH3WriteBatchMaxByteCount)
+				}
 				stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 				err := framer.WriteBatchWithStorage(
 					stream,
@@ -1440,10 +1796,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				if err == nil {
 					for _, message := range messages {
 						announce.SendMessage(ByteCount(len(message)))
+						if useH3Datagrams {
+							self.settings.H3DatagramStats.RecordStreamSent(len(message))
+						}
 					}
 				}
 				for _, message := range messages {
-					connect.MessagePoolReturn(message)
+					releaseStreamMessage(message)
 				}
 				if err != nil {
 					if glog.V(2) {
@@ -1458,9 +1817,18 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 
 			var pendingMessage []byte
+			pingTimer := time.NewTimer(0)
+			defer pingTimer.Stop()
+			resetPingTimer := func() {
+				pingTimer.Reset(max(
+					self.settings.MinPingTimeout,
+					pingTracker.MinPingTimeout(),
+				))
+			}
+			resetPingTimer()
 			defer func() {
 				if pendingMessage != nil {
-					connect.MessagePoolReturn(pendingMessage)
+					releaseStreamMessage(pendingMessage)
 				}
 			}()
 			for {
@@ -1470,12 +1838,12 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 					select {
 					case <-handleCtx.Done():
 						return
-					case nextMessage, ok := <-residentTransport.receive:
+					case nextMessage, ok := <-streamInput:
 						if !ok {
 							return
 						}
 						message = nextMessage
-					case <-time.After(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout())):
+					case <-pingTimer.C:
 						stream.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
 						err := framer.Write(stream, make([]byte, 0))
 						if err != nil {
@@ -1483,6 +1851,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 							return
 						}
 						announce.SendMessage(0)
+						resetPingTimer()
 						continue
 					}
 				}
@@ -1491,8 +1860,77 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				if !succeeded || !receiveOpen {
 					return
 				}
+				resetPingTimer()
 			}
 		})
+
+		if useH3Datagrams {
+			workers.start(func() {
+				defer handleCancel()
+				defer close(streamSend)
+				offerStream := func(message []byte) bool {
+					retainedByteCount := connect.H3HybridStreamRetainedByteCount(message)
+					if streamSendBudget.MaxByteCount() < retainedByteCount &&
+						len(message) <= streamSendBudget.MaxByteCount()-connect.MessagePoolMetaByteCount {
+						compactMessage := connect.MessagePoolCopy(message)
+						connect.MessagePoolReturn(message)
+						message = compactMessage
+						retainedByteCount = connect.H3HybridStreamRetainedByteCount(message)
+					}
+					if !streamSendBudget.Acquire(handleCtx, retainedByteCount) {
+						connect.MessagePoolReturn(message)
+						if handleCtx.Err() == nil && glog.V(2) {
+							glog.Infof(
+								"[ts]H3 hybrid stream message retained bytes %d exceed queue limit %d\n",
+								retainedByteCount,
+								streamSendBudget.MaxByteCount(),
+							)
+						}
+						return false
+					}
+					select {
+					case <-handleCtx.Done():
+						streamSendBudget.Release(retainedByteCount)
+						connect.MessagePoolReturn(message)
+						return false
+					case streamSend <- message:
+						return true
+					}
+				}
+				for {
+					select {
+					case <-handleCtx.Done():
+						return
+					case message, ok := <-residentTransport.receive:
+						if !ok {
+							return
+						}
+						useDatagram := self.settings.H3DatagramSettings.UseDatagramForPath(
+							len(message),
+							maxDatagramByteCount,
+						)
+						if useDatagram {
+							useStream, sendErr := sendDatagramMessage(message)
+							if sendErr != nil {
+								connect.MessagePoolReturn(message)
+								if glog.V(2) {
+									glog.Infof("[ts]H3 DATAGRAM error = %s\n", sendErr)
+								}
+								return
+							}
+							if !useStream {
+								announce.SendMessage(ByteCount(len(message)))
+								connect.MessagePoolReturn(message)
+								continue
+							}
+						}
+						if !offerStream(message) {
+							return
+						}
+					}
+				}
+			})
+		}
 
 		select {
 		case <-handleCtx.Done():

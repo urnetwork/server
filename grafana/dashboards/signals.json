@@ -1337,7 +1337,7 @@
           "legendFormat": "networks"
         }
       ],
-      "description": "Total networks registered with this operator. The collector runs on every taskworker, so max — not sum or avg — selects the replicated measurement without replica-count or unset-gauge skew."
+      "description": "Total networks registered with this operator. The collector runs on every taskworker, so max \u2014 not sum or avg \u2014 selects the replicated measurement without replica-count or unset-gauge skew."
     },
     {
       "type": "timeseries",
@@ -1512,7 +1512,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "suffix: α",
+          "unit": "suffix: \u03b1",
           "decimals": 2,
           "min": 0,
           "custom": {
@@ -1572,7 +1572,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "suffix: α",
+          "unit": "suffix: \u03b1",
           "decimals": 2,
           "min": 0,
           "custom": {
@@ -1632,7 +1632,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "suffix: α",
+          "unit": "suffix: \u03b1",
           "decimals": 2,
           "min": 0,
           "custom": {
@@ -1716,6 +1716,408 @@
       "description": "Alpha price in US dollars from the operator's server-side market observation. The collector retains the last good value across a transient price-source error."
     },
     {
+      "type": "timeseries",
+      "title": "online public providers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 93
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_providers{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "providers"
+        }
+      ],
+      "description": "Connected valid providers holding a public provide key \u2014 the population behind the public providers map and the public dashboard's country map. Every taskworker publishes the same measurement, so max selects it without replica skew."
+    },
+    {
+      "type": "timeseries",
+      "title": "provider reach: regions + cities",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 93
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_regions{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "regions"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_cities{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "cities"
+        }
+      ],
+      "description": "Distinct regions and cities with a connected valid public provider, from the same scan as the country count."
+    },
+    {
+      "type": "timeseries",
+      "title": "users last 24h",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 93
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_users_24h{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "users"
+        }
+      ],
+      "description": "Unique top-level identities with contract usage in the trailing 24 hours (the block users predicate over a rolling window)."
+    },
+    {
+      "type": "timeseries",
+      "title": "providers by country (top 10)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 101
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(10, max by (country_code) (urnetwork_stats_online_providers_by_country{env=\"$env\"}))",
+          "refId": "A",
+          "legendFormat": "{{country_code}}"
+        }
+      ],
+      "description": "The per-country provider gauge behind the public dashboard's map, top 10 by count. Series for a country that lost its last provider are deleted by the collector on the next refresh, so they go stale rather than pushing a stale count forever."
+    },
+    {
+      "type": "timeseries",
+      "title": "weekly miner claims: current vs last finished block",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 101
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: \u03b1",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_claims_alpha{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "current block"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miner_claims_alpha{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "last finished block"
+        }
+      ],
+      "description": "Alpha claimed by miners (MinerClaimed events in the st_event mirror) inside the weekly block window."
+    },
+    {
+      "type": "timeseries",
+      "title": "miners claiming: current vs last finished block",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 101
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miners_claimed{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "current block"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miners_claimed{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "last finished block"
+        }
+      ],
+      "description": "Distinct miner coldkeys with a MinerClaimed event inside the weekly block window."
+    },
+    {
+      "type": "timeseries",
+      "title": "subnet block clock",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 109
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_number{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "block number"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_end_seconds{env=\"$env\"}) - time()",
+          "refId": "B",
+          "legendFormat": "seconds until rollover"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_stats_block_start_seconds{env=\"$env\"})",
+          "refId": "C",
+          "legendFormat": "seconds since block open"
+        }
+      ],
+      "description": "The block clock the collector publishes for the public dashboard's progress gauge: the 1-based block number and the current block's open and close unix times (as seconds relative to now here). A flat block number with a sawtooth remaining time is healthy; a jump at any time other than Sunday 00:00 UTC is a clock or collector fault."
+    },
+    {
       "type": "row",
       "title": "application correctness + resource lifecycle",
       "collapsed": false,
@@ -1723,7 +2125,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 93
+        "y": 115
       }
     },
     {
@@ -1738,7 +2140,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 94
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -1801,7 +2203,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 94
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -1864,7 +2266,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 94
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -1927,7 +2329,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 102
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -1999,7 +2401,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 102
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2071,7 +2473,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 102
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
@@ -2147,7 +2549,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 110
+        "y": 132
       }
     },
     {
@@ -2162,7 +2564,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 111
+        "y": 133
       },
       "fieldConfig": {
         "defaults": {
@@ -2225,7 +2627,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 111
+        "y": 133
       },
       "fieldConfig": {
         "defaults": {
@@ -2285,7 +2687,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 119
+        "y": 141
       }
     },
     {
@@ -2296,7 +2698,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 120
+        "y": 142
       },
       "options": {
         "mode": "markdown",

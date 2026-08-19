@@ -943,6 +943,7 @@ func TestExchangeResidentControllerContextOutlivesTransportCancellation(t *testi
 		controlLimiter:     newLimiter(residentCtx, 0),
 		clientForwardUnsub: func() {},
 	}
+	resident.startClientCallbackWorkers()
 	resident.clientReceiveUnsub = residentClient.AddReceiveCallback(resident.handleClientReceive)
 	exchange.residents[clientId] = resident
 

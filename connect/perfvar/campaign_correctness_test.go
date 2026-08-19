@@ -15,6 +15,7 @@ import (
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	connectserver "github.com/urnetwork/server/connect"
 )
 
 const (
@@ -93,14 +94,44 @@ func newPerfvarCorrectnessFixture(
 	resources tunResourceProfile,
 	timeout time.Duration,
 ) (*perfvarCorrectnessFixture, error) {
+	return newPerfvarCorrectnessFixtureWithHooks(
+		t,
+		route,
+		directProfile,
+		deviceAccessProfile,
+		providerAccessProfile,
+		resources,
+		timeout,
+		nil,
+	)
+}
+
+// Builds the same correctness fixture while allowing a test to observe exact
+// construction seams without changing production-equivalent defaults.
+func newPerfvarCorrectnessFixtureWithHooks(
+	t testing.TB,
+	route fullTunRoute,
+	directProfile networkProfile,
+	deviceAccessProfile networkProfile,
+	providerAccessProfile networkProfile,
+	resources tunResourceProfile,
+	timeout time.Duration,
+	hooks *fullTunConstructionTestHooks,
+) (*perfvarCorrectnessFixture, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	enableNetworkPeers := route == fullTunRouteP2pFast || route == fullTunRouteP2pLegacy
-	environment := newRouteEnvironmentWithNetworkPeers(
+	var configureHandlerSettings func(*connectserver.ConnectHandlerSettings)
+	if hooks != nil {
+		configureHandlerSettings = hooks.configureConnectHandlerSettings
+	}
+	environment := newRouteEnvironmentWithNetworkPeersAndHandlerSettings(
 		ctx,
 		t,
 		directProfile,
 		enableNetworkPeers,
+		nil,
+		configureHandlerSettings,
 	)
 	environment.accessProfile = deviceAccessProfile
 	environment.deviceAccessProfile = deviceAccessProfile
@@ -111,7 +142,7 @@ func newPerfvarCorrectnessFixture(
 		environment: environment,
 	}
 	t.Cleanup(fixture.close)
-	path, err := tryNewFullTunPathWithTopology(
+	path, err := tryNewFullTunPathWithTopologyHooks(
 		ctx,
 		t,
 		environment,
@@ -119,6 +150,7 @@ func newPerfvarCorrectnessFixture(
 		false,
 		resources,
 		1,
+		hooks,
 	)
 	if err != nil {
 		fixture.close()

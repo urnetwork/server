@@ -183,6 +183,21 @@ func (self *platformTransportOwner) waitCurrentClientAfter(
 	}
 }
 
+// clientById returns the retained generated Client whose identity is exposed
+// by RemoteUserNatMultiClient.Exits. The append-only stack keeps every node
+// immutable after publication, so a lookup needs no lock and remains safe
+// while a replacement is being appended.
+func (self *platformTransportOwner) clientById(
+	clientId clientconnect.Id,
+) *clientconnect.Client {
+	for node := self.head.Load(); node != nil; node = node.next {
+		if node.client != nil && node.client.ClientId() == clientId {
+			return node.client
+		}
+	}
+	return nil
+}
+
 // closeAndWait cancels and joins every transport visible in a captured stack,
 // then repeats when publication changed while those joins were in progress.
 func (self *platformTransportOwner) closeAndWait(ctx context.Context) error {

@@ -1,12 +1,14 @@
 {
   "uid": "urnetwork-public-traffic",
   "title": "urnetwork / network stats",
-  "description": "Public network measurements. Weekly block values reset at 00:00 UTC Sunday; the previous-block values are the last finished block. A missing optional measurement is shown as no data rather than as zero.",
+  "description": "Public network measurements: live traffic and devices, the provider network by country, growth, the weekly subnet block, and alpha economics. Weekly block values reset at 00:00 UTC Sunday; the last-finished-block values are the previous block's final values. A missing optional measurement is shown as no data rather than as zero.",
   "tags": [
     "urnetwork",
     "public"
   ],
   "timezone": "utc",
+  "editable": true,
+  "graphTooltip": 1,
   "schemaVersion": 39,
   "refresh": "1m",
   "time": {
@@ -17,11 +19,10 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "data transferred in selected range",
-      "description": "Acknowledged connect-path transfer bytes in the dashboard time range. The instant query evaluates the range once; summing overlapping fixed windows would overcount.",
+      "title": "data transferred",
       "gridPos": {
-        "h": 5,
-        "w": 12,
+        "h": 4,
+        "w": 4,
         "x": 0,
         "y": 0
       },
@@ -29,10 +30,16 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Acknowledged bytes carried under transfer contracts in the dashboard time range, summed across the fleet. The instant query evaluates the range once; summing overlapping fixed windows would overcount. Change the time range (top right) to see other windows.",
       "fieldConfig": {
         "defaults": {
           "unit": "decbytes",
-          "min": 0
+          "decimals": 2,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3987e5"
+          }
         },
         "overrides": []
       },
@@ -44,14 +51,22 @@
           "fields": "",
           "values": false
         },
+        "orientation": "auto",
         "colorMode": "value",
         "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
       },
       "targets": [
         {
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "sum(increase(urnetwork_connect_transfer_bytes{instance!=\"\"}[$__range]))",
           "instant": true,
           "range": false
@@ -61,11 +76,126 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "connected devices now",
-      "description": "Distinct resident client devices across the connect fleet. A device can have more than one transport connection, so this intentionally uses resident_clients rather than connected_clients.",
+      "title": "connected devices",
       "gridPos": {
-        "h": 5,
-        "w": 12,
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Distinct client devices with a live resident on the connect fleet right now. A device can hold more than one transport connection, so this intentionally counts residents, not connections. The percentage is the change over the dashboard time range.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": true,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_connect_resident_clients{instance!=\"\"})",
+          "legendFormat": "devices",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "live throughput",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Current relay data-frame rate across the connect fleet: completed exchange data frames written per second, including the fixed 4-byte frame header and excluding pings and handshakes. Sent is used alone because sent and received are two observations of the same inter-server traffic.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "decimals": 1,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3987e5"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+          "legendFormat": "throughput",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "stat",
+      "title": "connections / min",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
         "x": 12,
         "y": 0
       },
@@ -73,11 +203,16 @@
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Fresh (not already established) client connections announced to the fleet per minute — the network's session pulse. Reconnects after a fleet redeploy show as a short spike.",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
-          "min": 0
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          }
         },
         "overrides": []
       },
@@ -89,144 +224,53 @@
           "fields": "",
           "values": false
         },
+        "orientation": "auto",
         "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(urnetwork_connect_resident_clients{instance!=\"\"})",
-          "instant": true,
-          "range": false
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_connection_new{instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "connections",
+          "instant": false,
+          "range": true
         }
       ]
     },
     {
-      "id": 3,
-      "type": "timeseries",
-      "title": "live exchange throughput",
-      "description": "Current completed exchange data-frame write rate across the fleet, including the fixed 4-byte exchange frame header and excluding pings and handshakes. Sent is used alone because fleet sent and received are two observations of the same inter-server traffic.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 5
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
-          "legendFormat": "throughput"
-        }
-      ]
-    },
-    {
-      "id": 4,
-      "type": "timeseries",
-      "title": "connected devices",
-      "description": "Distinct resident client devices, summed across the connect fleet.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 5
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 2,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(urnetwork_connect_resident_clients{instance!=\"\"})",
-          "legendFormat": "connected devices"
-        }
-      ]
-    },
-    {
-      "id": 5,
-      "type": "row",
-      "title": "network reach",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 13
-      },
-      "panels": []
-    },
-    {
-      "id": 6,
+      "id": 27,
       "type": "stat",
-      "title": "total networks",
-      "description": "Total networks registered with this operator. Every taskworker publishes the same measurement, so max selects the value without multiplying it by the replica count.",
+      "title": "online providers",
       "gridPos": {
-        "h": 5,
-        "w": 12,
-        "x": 0,
-        "y": 14
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Connected providers holding a public provide key with a valid location — the same population as the public providers map. Only a public provide key makes a provider reachable outside its own network, so this is the supply a stranger can actually use.",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
-          "min": 0
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
         },
         "overrides": []
       },
@@ -238,17 +282,26 @@
           "fields": "",
           "values": false
         },
+        "orientation": "auto",
         "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": true,
+        "percentChangeColorMode": "standard"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max(urnetwork_stats_total_networks)",
-          "instant": true,
-          "range": false
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_providers)",
+          "legendFormat": "providers",
+          "instant": false,
+          "range": true
         }
       ]
     },
@@ -256,22 +309,26 @@
       "id": 7,
       "type": "stat",
       "title": "provider countries",
-      "description": "Countries with at least one connected, valid public provider. This is provider reach, not the locations of consuming devices.",
       "gridPos": {
-        "h": 5,
-        "w": 12,
-        "x": 12,
-        "y": 14
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Countries with at least one connected, valid public provider. This is provider reach, not the locations of consuming devices.",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
-          "min": 0
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
         },
         "overrides": []
       },
@@ -283,426 +340,448 @@
           "fields": "",
           "values": false
         },
+        "orientation": "auto",
         "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
       },
       "targets": [
         {
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_countries)",
+          "legendFormat": "countries",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "total networks",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Total networks (accounts) registered with this operator. Every taskworker publishes the same measurement, so max selects the value without multiplying it by the replica count.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": true,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_total_networks)",
+          "legendFormat": "networks",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "new networks (range)",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Networks registered during the dashboard time range: the total now minus the total at the start of the range. Shows no data when the range starts before the measurement history.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_total_networks) - max(urnetwork_stats_total_networks offset $__range)",
           "instant": true,
           "range": false
         }
       ]
     },
     {
-      "id": 8,
-      "type": "timeseries",
-      "title": "total networks",
+      "id": 29,
+      "type": "stat",
+      "title": "users last 24 hours",
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 19
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 4
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Unique top-level identities that created transfer contracts (moved data) in the last 24 hours. Use by a child client, such as a hosted proxy's egress clients, counts for its top-level parent.",
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
           }
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "single"
-        }
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max(urnetwork_stats_total_networks)",
-          "legendFormat": "networks"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_users_24h)",
+          "legendFormat": "users",
+          "instant": false,
+          "range": true
         }
       ]
-    },
-    {
-      "id": 9,
-      "type": "timeseries",
-      "title": "provider countries",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 19
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_countries)",
-          "legendFormat": "countries"
-        }
-      ]
-    },
-    {
-      "id": 10,
-      "type": "row",
-      "title": "current block vs last finished block",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 27
-      },
-      "panels": []
     },
     {
       "id": 11,
       "type": "stat",
       "title": "users this block",
-      "description": "Unique top-level identities with contract usage since the current weekly block opened.",
       "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 0,
-        "y": 28
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_block_users)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "type": "stat",
-      "title": "users previous block",
-      "description": "Final unique-user count for the last finished weekly block. No data is expected until a complete block has been observed.",
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 4,
-        "y": 28
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_prev_block_users)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 13,
-      "type": "stat",
-      "title": "demand deposits this block",
-      "description": "Alpha demand deposited during the current weekly block.",
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 8,
-        "y": 28
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix: α",
-          "decimals": 2,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_block_demand_deposits_alpha)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 14,
-      "type": "stat",
-      "title": "demand deposits previous block",
-      "description": "Final alpha demand deposits for the last finished weekly block.",
-      "gridPos": {
-        "h": 5,
+        "h": 4,
         "w": 4,
         "x": 12,
-        "y": 28
+        "y": 4
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Unique top-level identities with contract usage since the current weekly block opened (00:00 UTC Sunday). Resets when the block rolls over; the last finished block's final count is under the weekly block section.",
       "fieldConfig": {
         "defaults": {
-          "unit": "suffix: α",
-          "decimals": 2,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 15,
-      "type": "stat",
-      "title": "miner emissions this block",
-      "description": "Alpha miner emission captured during the current weekly block.",
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 16,
-        "y": 28
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix: α",
-          "decimals": 2,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_block_miner_emissions_alpha)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 16,
-      "type": "stat",
-      "title": "miner emissions previous block",
-      "description": "Final alpha miner emission captured in the last finished weekly block.",
-      "gridPos": {
-        "h": 5,
-        "w": 4,
-        "x": 20,
-        "y": 28
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix: α",
-          "decimals": 2,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 17,
-      "type": "timeseries",
-      "title": "weekly users",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 33
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "decimals": 0,
           "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
           }
         },
         "overrides": []
       },
       "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_users)",
+          "legendFormat": "users",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "alpha price",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Alpha price in US dollars from the operator's server-side market observation (the subnet pool on GeckoTerminal). The percentage is the change over the dashboard time range.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": true,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_alpha_usd)",
+          "legendFormat": "α / USD",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "current block",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "The current subnet block number. Blocks are 1-based, 7 days long, and open and close at 00:00 UTC Sunday; block 1 opened 2026-06-28.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_number)",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "live traffic and devices",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "panels": []
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "live exchange throughput",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Current completed exchange data-frame write rate across the fleet, including the fixed 4-byte exchange frame header and excluding pings and handshakes. Sent is used alone because fleet sent and received are two observations of the same inter-server traffic.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3987e5"
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
         "legend": {
-          "displayMode": "list",
+          "showLegend": false,
+          "displayMode": "hidden",
           "placement": "bottom",
-          "showLegend": true
+          "calcs": []
         },
         "tooltip": {
           "mode": "multi",
@@ -712,13 +791,2126 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(urnetwork_stats_block_users)",
-          "legendFormat": "current block"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+          "legendFormat": "throughput",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "data transferred per day",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Acknowledged bytes carried under transfer contracts per complete UTC day; each bar covers the day ending at its right edge, and the current day appears once it closes. Contract bytes land when a contract closes or checkpoints.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 75,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": -1,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3987e5"
+          },
+          "decimals": 1,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(increase(urnetwork_connect_transfer_bytes{instance!=\"\"}[1d]))",
+          "legendFormat": "per day",
+          "instant": false,
+          "range": true,
+          "interval": "1d"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "connected devices",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Distinct resident client devices, summed across the connect fleet.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_connect_resident_clients{instance!=\"\"})",
+          "legendFormat": "connected devices",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "new connections per minute",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Fresh client connections announced to the fleet per minute. A spike right after a fleet redeploy is clients reconnecting to the new processes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_connect_connection_new{instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "new connections / min",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "provider network",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "panels": []
+    },
+    {
+      "id": 33,
+      "type": "geomap",
+      "title": "providers by country",
+      "gridPos": {
+        "h": 15,
+        "w": 16,
+        "x": 0,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Connected valid public providers per country. Marker size and color scale with the provider count; hover a marker for the country and its count. Countries with no connected public provider have no marker.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "providers"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "view": {
+          "id": "coords",
+          "lat": 24,
+          "lon": 8,
+          "zoom": 1.6,
+          "allLayers": true
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": false,
+          "showAttribution": true,
+          "showScale": false,
+          "showMeasure": false,
+          "showDebug": false
+        },
+        "tooltip": {
+          "mode": "details"
+        },
+        "basemap": {
+          "type": "default",
+          "name": "Basemap",
+          "config": {}
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "providers by country",
+            "config": {
+              "style": {
+                "size": {
+                  "field": "providers",
+                  "fixed": 6,
+                  "min": 6,
+                  "max": 40
+                },
+                "color": {
+                  "fixed": "#8b7be6"
+                },
+                "opacity": 0.7,
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                },
+                "symbolAlign": {
+                  "horizontal": "center",
+                  "vertical": "center"
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "offsetX": 0,
+                  "offsetY": 0,
+                  "textAlign": "center",
+                  "textBaseline": "middle"
+                },
+                "rotation": {
+                  "fixed": 0,
+                  "mode": "mod",
+                  "min": -360,
+                  "max": 360
+                }
+              },
+              "showLegend": false
+            },
+            "location": {
+              "mode": "lookup",
+              "lookup": "country_code",
+              "gazetteer": "public/gazetteer/countries.json"
+            },
+            "tooltip": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (country_code, country) (urnetwork_stats_online_providers_by_country)",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "type": "bargauge",
+      "title": "top provider countries",
+      "gridPos": {
+        "h": 15,
+        "w": 8,
+        "x": 16,
+        "y": 26
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "The 15 countries with the most connected valid public providers right now.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "continuous-purples"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "text",
+        "namePlacement": "left",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 40,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sort_desc(topk(15, max by (country) (urnetwork_stats_online_providers_by_country)))",
+          "legendFormat": "{{country}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 35,
+      "type": "piechart",
+      "title": "provider share by country",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 41
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Share of connected valid public providers in the six largest countries; every other country is folded into one slice.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "right",
+          "values": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(6, max by (country) (urnetwork_stats_online_providers_by_country))",
+          "legendFormat": "{{country}}",
+          "instant": true,
+          "range": false
         },
         {
           "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "clamp_min(sum(max by (country) (urnetwork_stats_online_providers_by_country)) - sum(topk(6, max by (country) (urnetwork_stats_online_providers_by_country))), 0)",
+          "legendFormat": "other countries",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "online providers",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 41
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Connected valid public providers over time (refreshed every five minutes).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_online_providers)",
+          "legendFormat": "providers",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "provider countries",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 41
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Countries with at least one connected, valid public provider.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_countries)",
+          "legendFormat": "countries",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "provider regions",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 49
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Distinct regions (states, provinces) with at least one connected, valid public provider.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_regions)",
+          "legendFormat": "regions",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "provider regions",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 4,
+        "y": 49
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Distinct regions with a connected valid public provider over time.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_regions)",
+          "legendFormat": "regions",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "type": "stat",
+      "title": "provider cities",
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 12,
+        "y": 49
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Distinct cities with at least one connected, valid public provider.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_cities)",
+          "legendFormat": "cities",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "provider cities",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 49
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Distinct cities with a connected valid public provider over time.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8b7be6"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_cities)",
+          "legendFormat": "cities",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "row",
+      "title": "growth",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 55
+      },
+      "panels": []
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "total networks",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Total networks registered with this operator, over time.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_total_networks)",
+          "legendFormat": "networks",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "new networks per day",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Networks registered per complete UTC day: the total at the end of each day minus the total one day earlier; each bar covers the day ending at its right edge. Empty until a full day of measurement history exists.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 75,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": -1,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_total_networks) - max(urnetwork_stats_total_networks offset 1d)",
+          "legendFormat": "new networks",
+          "instant": false,
+          "range": true,
+          "interval": "1d"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "weekly users",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Unique users per weekly block. The current block climbs from zero every Sunday 00:00 UTC; the last finished block is the stable reference and steps once per week.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_users)",
+          "legendFormat": "current block",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_prev_block_users)",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished block",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "users last 24 hours",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Unique top-level identities with contract usage in the trailing 24 hours, refreshed every five minutes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          },
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_users_24h)",
+          "legendFormat": "users",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "type": "row",
+      "title": "weekly block: current block vs last finished block",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 72
+      },
+      "panels": []
+    },
+    {
+      "id": 45,
+      "type": "gauge",
+      "title": "block progress",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 73
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "How far the current 7-day subnet block has progressed. Blocks open and close at 00:00 UTC Sunday.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#e06030",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": false,
+        "sizing": "auto",
+        "minVizWidth": 75,
+        "minVizHeight": 75
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "clamp_max(clamp_min(100 * (time() - max(urnetwork_stats_block_start_seconds)) / (max(urnetwork_stats_block_end_seconds) - max(urnetwork_stats_block_start_seconds)), 0), 100)",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "type": "stat",
+      "title": "time elapsed in block",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 73
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Time since the current block opened.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "clamp_min(time() - max(urnetwork_stats_block_start_seconds), 0)",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "type": "stat",
+      "title": "time left in block",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 73
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Time until the current block closes and the next one opens.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "clamp_min(max(urnetwork_stats_block_end_seconds) - time(), 0)",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "type": "stat",
+      "title": "next block opens (UTC)",
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 73
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "When the current block closes and the next block opens. Always a Sunday at 00:00 UTC.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_end_seconds) * 1000",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "type": "bargauge",
+      "title": "users: this block vs last block",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 79
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Unique users so far in the current block against the final count of the last finished block. The last finished block is expected to be missing until a complete block has been observed.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#199e70"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "text",
+        "namePlacement": "top",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 32,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_users)",
+          "legendFormat": "this block",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_users)",
+          "legendFormat": "last finished block",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "bargauge",
+      "title": "demand deposits: this block vs last block",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 79
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Alpha demand deposited during the current weekly block against the last finished block.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: α",
+          "decimals": 2,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "text",
+        "namePlacement": "top",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 32,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_demand_deposits_alpha)",
+          "legendFormat": "this block",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha)",
+          "legendFormat": "last finished block",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "bargauge",
+      "title": "miner emissions: this block vs last block",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 79
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Alpha miner emission captured during the current weekly block against the last finished block.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: α",
+          "decimals": 2,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "text",
+        "namePlacement": "top",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 32,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_emissions_alpha)",
+          "legendFormat": "this block",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha)",
+          "legendFormat": "last finished block",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "type": "bargauge",
+      "title": "miner claims: this block vs last block",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 85
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Alpha claimed by miners during the current weekly block against the last finished block.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: α",
+          "decimals": 2,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "text",
+        "namePlacement": "top",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 32,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_claims_alpha)",
+          "legendFormat": "this block",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miner_claims_alpha)",
+          "legendFormat": "last finished block",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "type": "bargauge",
+      "title": "miners claiming: this block vs last block",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 85
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Distinct miner coldkeys that claimed alpha during the current weekly block against the last finished block.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "text",
+        "namePlacement": "top",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "maxVizHeight": 32,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miners_claimed)",
+          "legendFormat": "this block",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miners_claimed)",
+          "legendFormat": "last finished block",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "stat",
+      "title": "this block in USD",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 85
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "The current block's demand deposits, miner emissions, and miner claims valued at the current alpha price.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value_and_name",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_demand_deposits_alpha) * max(urnetwork_stats_alpha_usd)",
+          "legendFormat": "demand deposits",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_emissions_alpha) * max(urnetwork_stats_alpha_usd)",
+          "legendFormat": "miner emissions",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_claims_alpha) * max(urnetwork_stats_alpha_usd)",
+          "legendFormat": "miner claims",
+          "instant": true,
+          "range": false
         }
       ]
     },
@@ -729,32 +2921,76 @@
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 8,
-        "y": 33
+        "x": 0,
+        "y": 91
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Alpha demand deposits per weekly block: the current block accumulates from zero every Sunday 00:00 UTC; the last finished block steps once per week.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
-          "decimals": 2,
-          "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "showPoints": "never"
-          }
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          },
+          "decimals": 2,
+          "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
+          "showLegend": true,
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "calcs": []
         },
         "tooltip": {
           "mode": "multi",
@@ -764,13 +3000,25 @@
       "targets": [
         {
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_block_demand_deposits_alpha)",
-          "legendFormat": "current block"
+          "legendFormat": "current block",
+          "instant": false,
+          "range": true
         },
         {
           "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_prev_block_demand_deposits_alpha)",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished block",
+          "instant": false,
+          "range": true
         }
       ]
     },
@@ -781,32 +3029,76 @@
       "gridPos": {
         "h": 8,
         "w": 8,
-        "x": 16,
-        "y": 33
+        "x": 8,
+        "y": 91
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Alpha miner emission captured per weekly block.",
       "fieldConfig": {
         "defaults": {
           "unit": "suffix: α",
-          "decimals": 2,
-          "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "showPoints": "never"
-          }
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          },
+          "decimals": 2,
+          "min": 0
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
+          "showLegend": true,
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "calcs": []
         },
         "tooltip": {
           "mode": "multi",
@@ -816,13 +3108,133 @@
       "targets": [
         {
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_block_miner_emissions_alpha)",
-          "legendFormat": "current block"
+          "legendFormat": "current block",
+          "instant": false,
+          "range": true
         },
         {
           "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_prev_block_miner_emissions_alpha)",
-          "legendFormat": "last finished block"
+          "legendFormat": "last finished block",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "weekly miner claims",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 91
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Alpha claimed by miners per weekly block.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: α",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          },
+          "decimals": 2,
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last finished block"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8f8f8f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_block_miner_claims_alpha)",
+          "legendFormat": "current block",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_prev_block_miner_claims_alpha)",
+          "legendFormat": "last finished block",
+          "instant": false,
+          "range": true
         }
       ]
     },
@@ -835,142 +3247,259 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 99
       },
       "panels": []
     },
     {
-      "id": 21,
+      "id": 54,
       "type": "stat",
-      "title": "total alpha staked",
-      "description": "Cumulative alpha staked in the subnet contract (buybackTotal).",
+      "title": "alpha price change (24h)",
       "gridPos": {
         "h": 5,
-        "w": 12,
+        "w": 6,
         "x": 0,
-        "y": 42
+        "y": 100
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Alpha price now against 24 hours ago, from the operator's server-side market observation. Green is up, red is down.",
       "fieldConfig": {
         "defaults": {
-          "unit": "suffix: α",
+          "unit": "percent",
           "decimals": 2,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_staked_alpha)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 22,
-      "type": "stat",
-      "title": "alpha price",
-      "description": "Alpha price in US dollars from the operator's server-side market observation.",
-      "gridPos": {
-        "h": 5,
-        "w": 12,
-        "x": 12,
-        "y": 42
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "decimals": 4,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "textMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_stats_alpha_usd)",
-          "instant": true,
-          "range": false
-        }
-      ]
-    },
-    {
-      "id": 23,
-      "type": "timeseries",
-      "title": "total alpha staked",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 47
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "suffix: α",
-          "decimals": 2,
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d9534f",
+                "value": null
+              },
+              {
+                "color": "#199e70",
+                "value": 0
+              }
+            ]
           }
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "hidden",
-          "showLegend": false
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "single"
-        }
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
       },
       "targets": [
         {
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "100 * (max(urnetwork_stats_alpha_usd) / max(urnetwork_stats_alpha_usd offset 24h) - 1)",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "total alpha staked (α)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 100
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Cumulative alpha staked in the subnet contract (buybackTotal). The percentage is the change over the dashboard time range.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": true,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_staked_alpha)",
-          "legendFormat": "staked alpha"
+          "legendFormat": "staked α",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 55,
+      "type": "stat",
+      "title": "staked value",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 100
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Total alpha staked in the subnet contract valued at the current alpha price.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_staked_alpha) * max(urnetwork_stats_alpha_usd)",
+          "legendFormat": "staked USD",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 56,
+      "type": "stat",
+      "title": "alpha price change (7d)",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 100
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Alpha price now against seven days ago. Green is up, red is down.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d9534f",
+                "value": null
+              },
+              {
+                "color": "#199e70",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "100 * (max(urnetwork_stats_alpha_usd) / max(urnetwork_stats_alpha_usd offset 7d) - 1)",
+          "instant": true,
+          "range": false
         }
       ]
     },
@@ -981,43 +3510,186 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 47
+        "x": 0,
+        "y": 105
       },
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
       },
+      "description": "Alpha price in US dollars over time, sampled every minute by the operator.",
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
-          "decimals": 4,
-          "min": 0,
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "showPoints": "never"
-          }
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          },
+          "decimals": 4
         },
         "overrides": []
       },
       "options": {
         "legend": {
+          "showLegend": false,
           "displayMode": "hidden",
-          "showLegend": false
+          "placement": "bottom",
+          "calcs": []
         },
         "tooltip": {
-          "mode": "single"
+          "mode": "multi",
+          "sort": "desc"
         }
       },
       "targets": [
         {
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
           "expr": "max(urnetwork_stats_alpha_usd)",
-          "legendFormat": "alpha / USD"
+          "legendFormat": "α / USD",
+          "instant": false,
+          "range": true
         }
       ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "total alpha staked (α)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 105
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "description": "Cumulative alpha staked in the subnet contract over time.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 22,
+            "gradientMode": "hue",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": true,
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e06030"
+          },
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": false,
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_staked_alpha)",
+          "legendFormat": "staked α",
+          "instant": false,
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 57,
+      "type": "row",
+      "title": "about these numbers",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 113
+      },
+      "panels": []
+    },
+    {
+      "id": 58,
+      "type": "text",
+      "title": "about",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 114
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**urnetwork network stats** — public, read-only, refreshed every minute from the operator's live fleet. Change the time range at the top right (up to 90 days of history are kept).\n\n- **Data transferred** counts bytes carried under transfer contracts and acknowledged by the receiving side — the same bytes the network settles on. Relayed traffic is counted per contract leg, so quote it as *bytes carried*, not bytes downloaded.\n- **Connected devices** are distinct client devices with a live resident on the fleet; **users** are unique top-level identities that moved data in the window.\n- **Providers** are devices with a public provide key, a valid location, and a live connection — the supply anyone on the network can use. Countries, regions, and cities are where those providers are, not where users are.\n- **Weekly blocks** are the subnet block clock: 7 days each, opening and closing at 00:00 UTC Sunday (block 1 opened 2026-06-28). Block values reset at rollover; the *last finished block* is the final value of the previous block.\n- **Alpha** figures come from the subnet contract and its event mirror (demand deposits, miner emissions, miner claims, staked total) and the alpha price from the subnet pool on GeckoTerminal. USD values are informational: amount × current price.\n- A measurement without a value shows *No data* rather than zero — for example the last finished block until one has been observed since deploy.\n\nThe same figures back the machine-readable [`/stats.json`](/stats.json) feed and the [public dashboards directory](/stats).\n"
+      }
     }
   ]
 }

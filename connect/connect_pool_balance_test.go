@@ -29,7 +29,7 @@ import (
 //
 // This is the server-side counterpart to the connect library's
 // TestMultiClientLifecyclePoolBalance / TestClientClosePoolBalance. The relay's
-// forward path (resident.handleClientForward) hands each frame off across goroutines
+// forward path (resident callback ingress plus its owned worker) hands each frame off across goroutines
 // and the exchange connection, so a lost MessagePoolReturn there degrades the
 // process-wide pool reuse under sustained relaying -- invisible to heap checks
 // because the GC collects the orphaned buffers. taken-returned returning to baseline
@@ -77,7 +77,8 @@ func testExchangeRelayPoolBalance(t testing.TB) {
 	exchangeSettings := DefaultExchangeSettings()
 	exchangeSettings.ExchangeBufferSize = 0
 	exchangeSettings.ForwardBufferSize = 0
-	exchangeSettings.ForwardTimeout = exchangeSettings.WriteTimeout // blocking forward: no silent drops
+	// Only the owned sender worker waits; Client callback admission stays zero-wait.
+	exchangeSettings.ForwardTimeout = exchangeSettings.WriteTimeout
 	exchangeSettings.ExchangeResidentTtl = 5 * time.Second
 	exchangeSettings.ForwardIdleTimeout = 5 * time.Second
 	exchangeSettings.FramerSettings.MaxMessageLen = framerMaxMessageLen

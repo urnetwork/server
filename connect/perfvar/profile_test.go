@@ -15,6 +15,9 @@ import (
 const (
 	singleRegionMinimumRoundTrip = 500 * time.Millisecond
 	singleRegionMaximumRoundTrip = time.Second
+	cellEdge5mDown1mUpName       = "cell-edge-5m-down-1m-up"
+	cellEdge1mDown250kUpName     = "cell-edge-1m-down-250k-up"
+	cellEdge256kDown64kUpName    = "cell-edge-256k-down-64k-up"
 )
 
 // A stable label for the loss decision applied to one link direction.
@@ -77,13 +80,13 @@ type networkProfile struct {
 
 // A live event changes one or both directions after time or byte progress.
 type profileEvent struct {
-	Name                string
-	After               time.Duration
-	AfterDeliveredBytes uint64
-	Forward             *linkProfile
-	Reverse             *linkProfile
-	Rebind              bool
-	Kick                bool
+	Name                string        `json:"name"`
+	After               time.Duration `json:"after_nanoseconds"`
+	AfterDeliveredBytes uint64        `json:"after_delivered_bytes,omitempty"`
+	Forward             *linkProfile  `json:"forward,omitempty"`
+	Reverse             *linkProfile  `json:"reverse,omitempty"`
+	Rebind              bool          `json:"rebind,omitempty"`
+	Kick                bool          `json:"kick,omitempty"`
 }
 
 // The queue target is expressed directly as a bounded bandwidth-delay product.
@@ -243,6 +246,227 @@ func initialNetworkProfiles(seed int64) map[string]networkProfile {
 	return profiles
 }
 
+// Composite device-access stress points cover the low-rate, high-delay corner
+// that independent focused axes cannot represent. Forward is device upload;
+// reverse is device download. The profiles are engineering inputs, not field
+// claims, and intentionally begin with only one outer packet of burst credit.
+func cellEdgeNetworkProfiles(seed int64) map[string]networkProfile {
+	build := func(
+		name string,
+		downRateBitsPerSecond int64,
+		upRateBitsPerSecond int64,
+		roundTrip time.Duration,
+		jitter time.Duration,
+		queueDuration time.Duration,
+		outerMtu int,
+		independentLossProbability float64,
+		burstLoss *burstLossProfile,
+	) networkProfile {
+		newDirection := func(rateBitsPerSecond int64) linkProfile {
+			profile := newLinkProfile(
+				rateBitsPerSecond,
+				roundTrip/2,
+				jitter,
+				independentLossProbability,
+				queueDuration,
+			)
+			profile.BurstByteCount = outerMtu
+			profile.QueuePacketCount = max(
+				8,
+				(profile.QueueByteCount+outerMtu-1)/outerMtu,
+			)
+			profile.OuterMtu = outerMtu
+			if burstLoss != nil {
+				resolvedBurstLoss := *burstLoss
+				profile.LossModel = lossModelBurst
+				profile.LossProbability = 0
+				profile.BurstLoss = &resolvedBurstLoss
+			}
+			return profile
+		}
+		return networkProfile{
+			Name:       name,
+			Seed:       seed,
+			InnerMtu:   outerMtu - 80,
+			Forward:    newDirection(upRateBitsPerSecond),
+			Reverse:    newDirection(downRateBitsPerSecond),
+			SourceNote: "synthetic one-device cell-edge stress profile; not a field-network claim",
+		}
+	}
+
+	return map[string]networkProfile{
+		cellEdge5mDown1mUpName: build(
+			cellEdge5mDown1mUpName,
+			5_000_000,
+			1_000_000,
+			120*time.Millisecond,
+			25*time.Millisecond,
+			100*time.Millisecond,
+			1400,
+			0.005,
+			nil,
+		),
+		cellEdge1mDown250kUpName: build(
+			cellEdge1mDown250kUpName,
+			1_000_000,
+			250_000,
+			300*time.Millisecond,
+			100*time.Millisecond,
+			500*time.Millisecond,
+			1280,
+			0,
+			&burstLossProfile{
+				GoodToBadProbability: 0.01,
+				BadToGoodProbability: 0.35,
+				GoodLossProbability:  0.002,
+				BadLossProbability:   0.65,
+			},
+		),
+		cellEdge256kDown64kUpName: build(
+			cellEdge256kDown64kUpName,
+			256_000,
+			64_000,
+			800*time.Millisecond,
+			300*time.Millisecond,
+			2*time.Second,
+			1280,
+			0,
+			&burstLossProfile{
+				GoodToBadProbability: 0.02,
+				BadToGoodProbability: 0.25,
+				GoodLossProbability:  0.001,
+				BadLossProbability:   0.65,
+			},
+		),
+	}
+}
+
+// The composite points pin directionality and every coupled impairment so a
+// future edit cannot silently turn "down/up" into two identically impaired
+// links or restore the 64 KiB token-bucket startup burst.
+func TestCellEdgeProfilesResolveExactDeviceAccessConditions(t *testing.T) {
+	type expectedProfile struct {
+		name                  string
+		downRateBitsPerSecond int64
+		upRateBitsPerSecond   int64
+		roundTrip             time.Duration
+		jitter                time.Duration
+		queueDuration         time.Duration
+		outerMtu              int
+		lossModel             lossModel
+		lossProbability       float64
+		goodToBadProbability  float64
+		badToGoodProbability  float64
+		goodLossProbability   float64
+		badLossProbability    float64
+	}
+	expectedProfiles := []expectedProfile{
+		{
+			name:                  cellEdge5mDown1mUpName,
+			downRateBitsPerSecond: 5_000_000,
+			upRateBitsPerSecond:   1_000_000,
+			roundTrip:             120 * time.Millisecond,
+			jitter:                25 * time.Millisecond,
+			queueDuration:         100 * time.Millisecond,
+			outerMtu:              1400,
+			lossModel:             lossModelIndependent,
+			lossProbability:       0.005,
+		},
+		{
+			name:                  cellEdge1mDown250kUpName,
+			downRateBitsPerSecond: 1_000_000,
+			upRateBitsPerSecond:   250_000,
+			roundTrip:             300 * time.Millisecond,
+			jitter:                100 * time.Millisecond,
+			queueDuration:         500 * time.Millisecond,
+			outerMtu:              1280,
+			lossModel:             lossModelBurst,
+			goodToBadProbability:  0.01,
+			badToGoodProbability:  0.35,
+			goodLossProbability:   0.002,
+			badLossProbability:    0.65,
+		},
+		{
+			name:                  cellEdge256kDown64kUpName,
+			downRateBitsPerSecond: 256_000,
+			upRateBitsPerSecond:   64_000,
+			roundTrip:             800 * time.Millisecond,
+			jitter:                300 * time.Millisecond,
+			queueDuration:         2 * time.Second,
+			outerMtu:              1280,
+			lossModel:             lossModelBurst,
+			goodToBadProbability:  0.02,
+			badToGoodProbability:  0.25,
+			goodLossProbability:   0.001,
+			badLossProbability:    0.65,
+		},
+	}
+
+	profiles := cellEdgeNetworkProfiles(20260817)
+	if len(profiles) != len(expectedProfiles) {
+		t.Fatalf("cell-edge profile count=%d want=%d", len(profiles), len(expectedProfiles))
+	}
+	for _, expected := range expectedProfiles {
+		profile, ok := profiles[expected.name]
+		if !ok {
+			t.Errorf("missing profile %q", expected.name)
+			continue
+		}
+		if err := profile.validate(); err != nil {
+			t.Errorf("profile %q: %v", expected.name, err)
+			continue
+		}
+		if profile.Forward.RateBitsPerSecond != expected.upRateBitsPerSecond ||
+			profile.Reverse.RateBitsPerSecond != expected.downRateBitsPerSecond {
+			t.Errorf(
+				"profile %q rates forward/reverse=%d/%d want up/down=%d/%d",
+				expected.name,
+				profile.Forward.RateBitsPerSecond,
+				profile.Reverse.RateBitsPerSecond,
+				expected.upRateBitsPerSecond,
+				expected.downRateBitsPerSecond,
+			)
+		}
+		if profile.Forward.BaseDelay+profile.Reverse.BaseDelay != expected.roundTrip ||
+			profile.Forward.Jitter != expected.jitter || profile.Reverse.Jitter != expected.jitter {
+			t.Errorf("profile %q delay/jitter=%+v", expected.name, profile)
+		}
+		if profile.InnerMtu != expected.outerMtu-80 ||
+			profile.Forward.OuterMtu != expected.outerMtu ||
+			profile.Reverse.OuterMtu != expected.outerMtu ||
+			profile.Forward.BurstByteCount != expected.outerMtu ||
+			profile.Reverse.BurstByteCount != expected.outerMtu {
+			t.Errorf("profile %q MTU/burst geometry=%+v", expected.name, profile)
+		}
+		for directionName, direction := range map[string]linkProfile{
+			"forward": profile.Forward,
+			"reverse": profile.Reverse,
+		} {
+			if direction.QueueByteCount != bandwidthDelayQueue(direction.RateBitsPerSecond, expected.queueDuration) {
+				t.Errorf("profile %q %s queue=%d", expected.name, directionName, direction.QueueByteCount)
+			}
+			if direction.LossModel != expected.lossModel ||
+				direction.LossProbability != expected.lossProbability {
+				t.Errorf("profile %q %s loss=%+v", expected.name, directionName, direction)
+			}
+			if expected.lossModel == lossModelBurst {
+				if direction.BurstLoss == nil ||
+					direction.BurstLoss.GoodToBadProbability != expected.goodToBadProbability ||
+					direction.BurstLoss.BadToGoodProbability != expected.badToGoodProbability ||
+					direction.BurstLoss.GoodLossProbability != expected.goodLossProbability ||
+					direction.BurstLoss.BadLossProbability != expected.badLossProbability {
+					t.Errorf("profile %q %s burst loss=%+v", expected.name, directionName, direction.BurstLoss)
+				}
+			} else if direction.BurstLoss != nil {
+				t.Errorf("profile %q %s retained burst loss=%+v", expected.name, directionName, direction.BurstLoss)
+			}
+		}
+		if profile.Forward.BurstLoss != nil && profile.Forward.BurstLoss == profile.Reverse.BurstLoss {
+			t.Errorf("profile %q aliases mutable burst-loss state", expected.name)
+		}
+	}
+}
+
 // The clean control can admit an entire default transfer by both byte and
 // packet bounds, so simulator recovery cannot define its measured ceiling.
 func TestCleanProfileQueueCoversDefaultBulkPayload(t *testing.T) {
@@ -267,6 +491,12 @@ func TestCleanProfileQueueCoversDefaultBulkPayload(t *testing.T) {
 // without taking a full Cartesian product of all network properties.
 func allNetworkProfiles(seed int64) map[string]networkProfile {
 	profiles := initialNetworkProfiles(seed)
+	for name, profile := range cellEdgeNetworkProfiles(seed) {
+		profiles[name] = profile
+	}
+	for name, profile := range dynamicCellEdgeNetworkProfiles(seed) {
+		profiles[name] = profile
+	}
 	for _, roundTripMilliseconds := range []int{0, 10, 25, 50, 100, 150} {
 		name := fmt.Sprintf("rtt-%dms", roundTripMilliseconds)
 		profiles[name] = focusedNetworkProfile(name, seed, func(forward *linkProfile, reverse *linkProfile) {

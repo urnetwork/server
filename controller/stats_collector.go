@@ -16,6 +16,22 @@ package controller
 //	urnetwork_stats_prev_block_demand_deposits_alpha demand deposits of the last finished block
 //	urnetwork_stats_prev_block_miner_emissions_alpha miner emission of the last finished block
 //
+// and the public grafana dashboard (grafana/dashboards/public-traffic.json)
+// additionally reads:
+//
+//	urnetwork_stats_users_24h                        unique top-level identities with contract usage in the last 24h (db)
+//	urnetwork_stats_online_providers                 connected valid public providers (db)
+//	urnetwork_stats_online_providers_by_country      the same, per country {country_code, country} (db)
+//	urnetwork_stats_provider_regions                 distinct regions with a connected valid public provider (db)
+//	urnetwork_stats_provider_cities                  distinct cities with a connected valid public provider (db)
+//	urnetwork_stats_block_number                     the current subnet block number (clock)
+//	urnetwork_stats_block_start_seconds              unix open time of the current subnet block (clock)
+//	urnetwork_stats_block_end_seconds                unix close time of the current subnet block (clock)
+//	urnetwork_stats_block_miner_claims_alpha         alpha claimed by miners this block (st_event mirror)
+//	urnetwork_stats_block_miners_claimed             distinct miner coldkeys that claimed this block (st_event mirror)
+//	urnetwork_stats_prev_block_miner_claims_alpha    alpha claimed by miners in the last finished block
+//	urnetwork_stats_prev_block_miners_claimed        distinct miner coldkeys that claimed in the last finished block
+//
 // the block accumulators reset when a block rolls over, so the feed also
 // serves the finished block as a stable reference. deposits and emissions
 // recompute exactly from the st_event mirror by chain block range; users
@@ -42,6 +58,7 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -81,6 +98,60 @@ func (self *statsGauge) set(value float64) {
 		self.registered = true
 	}
 	self.gauge.Set(value)
+}
+
+// statsGaugeVec is a labeled stats gauge with the same lazy registration.
+// each refresh replaces the whole label set: series for labels absent from
+// the new set are deleted so they go stale in the store instead of pushing
+// their last value forever. set only from the collector goroutine
+type statsGaugeVec struct {
+	gauge      *prometheus.GaugeVec
+	registered bool
+	// the label values currently set, keyed by their joined values
+	current map[string][]string
+}
+
+func newStatsGaugeVec(name string, help string, labelNames ...string) *statsGaugeVec {
+	return &statsGaugeVec{
+		gauge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "urnetwork",
+			Subsystem: "stats",
+			Name:      name,
+			Help:      help,
+		}, labelNames),
+		current: map[string][]string{},
+	}
+}
+
+// statsLabeledValue is one series of a statsGaugeVec: label values in the
+// vec's label name order and the value
+type statsLabeledValue struct {
+	labelValues []string
+	value       float64
+}
+
+func statsLabelKey(labelValues []string) string {
+	return strings.Join(labelValues, "\x00")
+}
+
+// replace sets every given series and deletes the series that were set by
+// the previous replace and are absent now
+func (self *statsGaugeVec) replace(values []statsLabeledValue) {
+	if !self.registered {
+		prometheus.MustRegister(self.gauge)
+		self.registered = true
+	}
+	next := map[string][]string{}
+	for _, value := range values {
+		self.gauge.WithLabelValues(value.labelValues...).Set(value.value)
+		next[statsLabelKey(value.labelValues)] = value.labelValues
+	}
+	for key, labelValues := range self.current {
+		if _, ok := next[key]; !ok {
+			self.gauge.DeleteLabelValues(labelValues...)
+		}
+	}
+	self.current = next
 }
 
 var statsTotalNetworksGauge = newStatsGauge(
@@ -123,6 +194,56 @@ var statsPrevBlockMinerEmissionsAlphaGauge = newStatsGauge(
 	"prev_block_miner_emissions_alpha",
 	"Alpha miner emission captured in the last finished block",
 )
+var statsUsers24hGauge = newStatsGauge(
+	"users_24h",
+	"Unique top-level clients with contract usage in the last 24 hours",
+)
+var statsOnlineProvidersGauge = newStatsGauge(
+	"online_providers",
+	"Connected valid providers holding a public provide key",
+)
+var statsOnlineProvidersByCountryGauge = newStatsGaugeVec(
+	"online_providers_by_country",
+	"Connected valid providers holding a public provide key, per country",
+	"country_code",
+	"country",
+)
+var statsProviderRegionsGauge = newStatsGauge(
+	"provider_regions",
+	"Distinct regions with a connected valid public provider",
+)
+var statsProviderCitiesGauge = newStatsGauge(
+	"provider_cities",
+	"Distinct cities with a connected valid public provider",
+)
+var statsBlockNumberGauge = newStatsGauge(
+	"block_number",
+	"The current subnet block number (1-based, 7 days per block from the genesis Sunday 00:00 UTC)",
+)
+var statsBlockStartSecondsGauge = newStatsGauge(
+	"block_start_seconds",
+	"Unix time the current subnet block opened",
+)
+var statsBlockEndSecondsGauge = newStatsGauge(
+	"block_end_seconds",
+	"Unix time the current subnet block closes and the next opens",
+)
+var statsBlockMinerClaimsAlphaGauge = newStatsGauge(
+	"block_miner_claims_alpha",
+	"Alpha claimed by miners this block",
+)
+var statsBlockMinersClaimedGauge = newStatsGauge(
+	"block_miners_claimed",
+	"Distinct miner coldkeys that claimed this block",
+)
+var statsPrevBlockMinerClaimsAlphaGauge = newStatsGauge(
+	"prev_block_miner_claims_alpha",
+	"Alpha claimed by miners in the last finished block",
+)
+var statsPrevBlockMinersClaimedGauge = newStatsGauge(
+	"prev_block_miners_claimed",
+	"Distinct miner coldkeys that claimed in the last finished block",
+)
 
 // statsRaoToAlpha converts rao (1e-9 α) to whole α
 func statsRaoToAlpha(rao *big.Int) float64 {
@@ -137,6 +258,7 @@ func StartStatsCollector(ctx context.Context) {
 	go server.HandleError(func() {
 		dbTick := 0
 		for {
+			statsRefreshBlockClock()
 			if dbTick == 0 {
 				server.HandleError(func() {
 					statsRefreshDb(ctx)
@@ -158,12 +280,46 @@ func StartStatsCollector(ctx context.Context) {
 	})
 }
 
+// statsRefreshBlockClock publishes the subnet block clock. it needs no
+// data source, so it refreshes on every tick and is the first stat a fresh
+// deploy exports
+func statsRefreshBlockClock() {
+	now := time.Now()
+	blockStart := model.SubnetBlockStart(now)
+	statsBlockNumberGauge.set(float64(model.SubnetBlockNumber(now)))
+	statsBlockStartSecondsGauge.set(float64(blockStart.Unix()))
+	statsBlockEndSecondsGauge.set(float64(blockStart.Add(model.SubnetBlockDuration).Unix()))
+}
+
 func statsRefreshDb(ctx context.Context) {
 	now := time.Now()
 	blockNumber := model.SubnetBlockNumber(now)
 
 	statsTotalNetworksGauge.set(float64(model.CountNetworks(ctx)))
-	statsCountriesGauge.set(float64(model.CountProviderCountries(ctx)))
+
+	// one scan of the connected valid public provider population gives the
+	// per-country counts, the country count, and the region and city reach
+	providerCountries := model.CountProvidersByCountry(ctx)
+	byCountry := make([]statsLabeledValue, 0, len(providerCountries))
+	var providers int64
+	var regions int64
+	var cities int64
+	for _, providerCountry := range providerCountries {
+		byCountry = append(byCountry, statsLabeledValue{
+			labelValues: []string{providerCountry.CountryCode, providerCountry.Country},
+			value:       float64(providerCountry.Count),
+		})
+		providers += providerCountry.Count
+		regions += providerCountry.RegionCount
+		cities += providerCountry.CityCount
+	}
+	statsCountriesGauge.set(float64(len(providerCountries)))
+	statsOnlineProvidersGauge.set(float64(providers))
+	statsOnlineProvidersByCountryGauge.replace(byCountry)
+	statsProviderRegionsGauge.set(float64(regions))
+	statsProviderCitiesGauge.set(float64(cities))
+
+	statsUsers24hGauge.set(float64(model.CountTopLevelClientsWithContractSince(ctx, now.Add(-24*time.Hour))))
 
 	users := model.CountTopLevelClientsWithContractSince(ctx, model.SubnetBlockStart(now))
 	statsBlockUsersGauge.set(float64(users))
@@ -213,6 +369,9 @@ func statsRefreshChain(ctx context.Context) {
 	windowStartBlock := chainBlockAt(blockStart)
 	statsBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, windowStartBlock, state.HeadBlock+1)))
 	statsBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, windowStartBlock, state.HeadBlock+1)))
+	claimsRao, minersClaimed := model.SumStMinerClaimedInBlockRange(ctx, windowStartBlock, state.HeadBlock+1)
+	statsBlockMinerClaimsAlphaGauge.set(statsRaoToAlpha(claimsRao))
+	statsBlockMinersClaimedGauge.set(float64(minersClaimed))
 
 	// the last finished block, recomputed exactly from the event mirror.
 	// block 1 has no predecessor
@@ -220,6 +379,9 @@ func statsRefreshChain(ctx context.Context) {
 		prevStartBlock := chainBlockAt(blockStart.Add(-model.SubnetBlockDuration))
 		statsPrevBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, prevStartBlock, windowStartBlock)))
 		statsPrevBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, prevStartBlock, windowStartBlock)))
+		prevClaimsRao, prevMinersClaimed := model.SumStMinerClaimedInBlockRange(ctx, prevStartBlock, windowStartBlock)
+		statsPrevBlockMinerClaimsAlphaGauge.set(statsRaoToAlpha(prevClaimsRao))
+		statsPrevBlockMinersClaimedGauge.set(float64(prevMinersClaimed))
 	}
 }
 

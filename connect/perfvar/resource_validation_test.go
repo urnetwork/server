@@ -67,6 +67,9 @@ func TestPerfvarDefaultResourceProfile(t *testing.T) {
 	if resources.AppDelay != 0 {
 		t.Errorf("application delay=%s, want none", resources.AppDelay)
 	}
+	if resources.ApplicationMtu != 0 {
+		t.Errorf("application MTU=%d, want profile default", resources.ApplicationMtu)
+	}
 }
 
 // The constrained profile pins every documented synthetic TUN and application
@@ -90,6 +93,9 @@ func TestPerfvarMobileSurrogateResourceProfile(t *testing.T) {
 	}
 	if resources.AppDelay != 100*time.Microsecond {
 		t.Errorf("application delay=%s, want %s", resources.AppDelay, 100*time.Microsecond)
+	}
+	if resources.ApplicationMtu != 0 {
+		t.Errorf("application MTU=%d, want profile default", resources.ApplicationMtu)
 	}
 }
 

@@ -32,6 +32,17 @@ config-env startup panic, 11.11 shared-datasource port drift, playbook rows
 up one per deploy while the deploy itself reports success, because the
 host-wide drain lock queued every service behind one holder; that is the
 failure 11.7 gets mistaken for, and it is why `warpctl logs` returned empty.
+Updated 2026-08-18 after a §11 audit of the live fleet found two failures the
+healthy band did not cover, both because the band only watches what the deploy
+poll watches: 11.13 (one host's loki query modules stuck in Starting for 16h
+while `up=1 front=200 graf=200 restarts=0` — the whole fleet's frontends
+dialing its ACTIVE-but-dead scheduler became ~half of every grafana container's
+log volume) and 11.14 (the log/metric shipper is a HOST unit, not a container
+child, and a failed one is permanent — edge-6 shipped nothing for 2.5 days and
+took every `redis_*` series with it). Both now have code fixes; the same pass
+corrected the stale minio data path in 11.6, the dead `[alloy]` restart counter
+in 11.1/11.2, the service-label count, and the vacuous `query=up` mimir check
+in 11.11.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -1132,10 +1143,15 @@ edge-6 `172.28.208.177`: `redis-cli -c -p 6379` (no auth). Readonly only.
 
 ## 11. Grafana / loki / mimir observability stack (the 2026-07-19 outage)
 
-The observability PLANE itself: grafana + loki + mimir + alloy behind a Go front
+The observability PLANE itself: grafana + loki + mimir behind a Go front
 (`warp/grafana/main.go`), ONE bundled service `warp-main-grafana-*` on 6-of-7
 lb/host_services hosts (edge-0/1/3/4, crisp, fireside; **edge-5 offline**). The
-front is PID1 and supervises the children via `warp.Child` (restart-on-exit).
+front is PID1 and supervises the children via `warp.Child` (restart-on-exit,
+plus restart-on-unready for loki and mimir since 2026-08-18, 11.13).
+**alloy is NOT a container child** — host-managed fluent-bit replaced it, and
+the container runs only warp-grafana + loki + grafana + mimir (`docker exec $c
+ps -eo pid,comm`). The shipper is therefore a HOST unit on every warp host,
+including the ones with no grafana bundle (11.14).
 Access: `by-pass <secmd-key> by` → per-host sudo pw, then
 `echo "$PW" | ssh by@<ip> 'sudo -S -p "" bash -s' <<'EOS' … EOS` — the `by` user
 is NOT in the docker group, so docker needs sudo. Log driver is now `local`, so
@@ -1155,24 +1171,39 @@ gw=$(ip -4 addr show warpservices | grep -oE '172\.[0-9]+\.0\.1' | head -1)
 curl -so/dev/null -w '%{http_code}' http://$gw:$(getp 80)/status              # front (warpctl's OWN poll target)
 curl ... 127.0.0.1:$(getp 3101)/ready ; :$(getp 3201)/ready ; :$(getp 3000)/api/health  # loki/mimir/grafana
 curl -sG 127.0.0.1:3100/loki/api/v1/label/service/values | grep -oE '"[^"]+"' | wc -l  # svc
+systemctl is-active fluent-bit                                                # shipper (HOST unit, 11.14)
 ```
-HEALTHY BAND: `up=1 front=200 loki=200 mimir=200 graf=200 svc>0 restarts=0/0/0`.
+HEALTHY BAND: `up=1 front=200 loki=200 mimir=200 graf=200 svc>0 restarts=0/0
+shipper=active`. **Probe the CHILD `/ready` ports, not only the front proxy**
+(11.3 sends you through the front for the bind paradox — do both). `/ready` is
+the only field that carries child MODULE state, and 11.13 is invisible without
+it: a loki whose query modules never started answers `/loki/...` 200 through
+the front for `status/buildinfo` while every actual query hangs.
 `svc` = distinct `service` labels loki knows = proof of BOTH log ingest and
 cross-host read (label fixed 2026-07-19: it is `service`, not `warp_service`;
-healthy main knows 9 — api app connect grafana lb mcp proxy taskworker web.
-The labels api defaults to a recent window: pass explicit start/end before
-reading an empty result as "nothing was ever ingested"). Any field off names
-a class below.
+healthy main knows 10 — api app config-updater connect grafana lb mcp proxy
+taskworker web. The labels api defaults to a recent window: pass explicit
+start/end before reading an empty result as "nothing was ever ingested"). Any
+field off names a class below.
 
 ### 11.2 up-count & child restarts — overlap vs crash-loop
 - `up` = running grafana containers. **`up>1` = redeploy overlap** (old container
   draining) — normal for a few minutes, STUCK for hours = the poll deadlock (11.7).
 - Child restarts from the front's supervisor:
-  `docker logs --tail 200 $c | grep -c '\[loki\]exited'` (also `[mimir]`, `[alloy]`).
+  `docker logs --tail 200 $c | grep -c '\[loki\]exited'` (also `[mimir]`).
+  **There is no `[alloy]` child** — grepping it always returns 0 and proves
+  nothing; the shipper is a host unit (11.14). Since 2026-08-18 a second line
+  also restarts a child: `[loki]unhealthy for <d>. Restarting.` (11.13) —
+  a climbing count there means loki/mimir keep failing `/ready`, not that they
+  keep exiting.
   Stable = **0**; nonzero-and-climbing = crash-loop. **CRITICAL: front + grafana
   read 200 while loki/mimir crash-loop** — the front supervises the children, so
   the container still passes its readiness poll and a broken build still
-  "deploys". Always check restarts, never trust "container Up" alone.
+  "deploys". Always check restarts, never trust "container Up" alone. This has
+  a quieter sibling: the child process is up, never exits, and only SOME of its
+  modules are dead — 11.13. `/status` gates on child readiness since 2026-08-18,
+  which closes both for new deploys, but a container that latched ready before
+  going bad still reads `front=200`.
 
 ### 11.3 The bind paradox — `ss` shows LISTEN but connect is REFUSED
 The single most misleading signal here. `ss -tlnp` shows a service `LISTEN` on
@@ -1226,12 +1257,19 @@ timeout. FIX: pin frontend+scheduler to the external port (loki `frontend.port` 
 
 ### 11.6 minio object-store persistence (edge-6)
 loki chunks + mimir blocks land in minio (`192.168.51.193:23900`, data
-`/data/minio`, on edge-6 172.28.208.177). Signals:
+**`/mnt/data/minio`**, on edge-6 172.28.208.177). Read the data dir from the
+host, never from memory — it is `MINIO_VOLUMES` in `/etc/default/minio`
+(`systemctl cat minio` shows `ExecStart=... $MINIO_VOLUMES`). This doc said
+`/data/minio` until 2026-08-18; that path does not exist, so every recipe below
+returned empty at it and read as "storage is empty" — the exact false alarm
+this section exists to prevent. A `du` that prints NOTHING (rather than `0`)
+is the tell that you have the wrong path, not an empty bucket.
 ```
-du -sh /data/minio/loki /data/minio/mimir                              # growth = writing
-find /data/minio/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
-ls /data/minio/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
-find /data/minio/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
+minio_data=$(grep ^MINIO_VOLUMES= /etc/default/minio | cut -d= -f2)     # do not hardcode
+du -sh $minio_data/loki $minio_data/mimir                              # growth = writing
+find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh mtime = live
+ls $minio_data/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
+find $minio_data/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
 ```
 loki flushes on `chunk_idle_period`/shutdown; **mimir uploads only after a ~2h
 TSDB block boundary** — an empty mimir bucket right after a healthy start is
@@ -1357,6 +1395,15 @@ redeploy. Editing services.yml alone does nothing until the units are regenerate
     host's conntrack table is full (11.12): `sysctl net.netfilter.nf_conntrack_count`
     vs `_max`. Check this BEFORE anything grafana-specific — the container is a
     victim, not the cause, and every other symptom here is downstream of it.
+11. log panels hang / Explore times out on SOME sessions while metrics render
+    everywhere, and every host logs `error sending requests to scheduler ...
+    SHUTTING_DOWN addr=<peer>:6490` → one host's loki query modules are stuck
+    Starting (11.13). The `addr=` names it. `up/front/graf/restarts` all read
+    healthy — go to the child `/ready` and `/services`, not the front proxy.
+12. a whole dashboard is blank (not just some panels), or `count by (host)` on
+    any metric is short a host → that host's fluent-bit is dead (11.14).
+    Check `systemctl is-active fluent-bit` on the hosts with NO grafana bundle
+    too (edge-6, edge-2) — they appear in no §11.1 reading.
 
 ### 11.10 grafana.yml `{{ env: }}` → fleet-wide startup panic (2026-08-11)
 A config value may thread `{{ env:KEY }}`, but the KEYs live in settings.yml
@@ -1406,9 +1453,20 @@ docker exec $c grep -A1 warp-mimir /run/warp-grafana/provisioning/datasources/lo
 - DECISIVE READ: a host whose own provisioning file says 14579 dials 14578 →
   the shared DB row overrode the local file. That is the whole bug in one line.
 - The public dashboard renders it as empty panels with no error, while
-  `/api/health`, the ui, and login all return 200 and mimir itself is fine
-  (`curl 127.0.0.1:<real port>/prometheus/api/v1/query?query=up` → 200). Do not
+  `/api/health`, the ui, and login all return 200 and mimir itself is fine. Do not
   read "no data" as an ingest or retention problem before checking this.
+- **`query=up` is NOT a mimir data check.** There is no `up` series anywhere in
+  mimir — nothing in the fluent-bit `prometheus_remote_write` path synthesizes
+  one (that is a prometheus SCRAPER artifact, and there is no prometheus here),
+  so it answers 200 with an empty result whether mimir holds data or not. Reads
+  that actually discriminate:
+```
+curl -sG 127.0.0.1:3100/prometheus/api/v1/query --data-urlencode 'query=count({__name__!=""})'
+#   healthy main: ~25000 series
+curl -sG 127.0.0.1:3100/prometheus/api/v1/query --data-urlencode 'query=count by (host)(urnetwork_build_info)'
+#   healthy main: 6 hosts (the grafana bundle hosts). node_load1 adds edge-2 = 7.
+#   a host MISSING here has a dead shipper (11.14), not a mimir problem
+```
 - Fixed 2026-08-11: the datasources address the front's stable `local_port`
   (3100) and the **loopback binding of that port** serves `/prometheus/` and
   `/loki/` reads. That port is identical on every host and every deploy, so the
@@ -1458,6 +1516,175 @@ uptime -s                             # the split falls exactly on boot time
   ordered `After=systemd-modules-load.service`, so sysctl.conf applies on every
   boot. Applied to playbook-{edges,dbs,redis-clusters,subtensor}.yml — all four
   had the identical defect.
+
+### 11.13 loki query modules stuck Starting while the ring says ACTIVE (2026-08-17)
+The quiet sibling of 11.2. The child process is UP and never exits, so the
+supervisor never restarts it; the deploy poll passes; every §11.1 field except
+`loki`/`svc` reads healthy — and the host answers no log query at all. edge-4
+ran this way for 16h40m.
+```
+curl -s 127.0.0.1:$(getp 3101)/services | sed 's/<[^>]*>/ /g'
+#   querier => Starting   query-scheduler-ring => Starting        <- the 4 stuck
+#   query-scheduler => Starting   query-frontend => Starting
+#   ingester/distributor/store/ring => Running                    <- ingest is FINE
+curl -s 127.0.0.1:$(getp 3101)/ready
+#   503 Some services are not Running: Running: 12 Starting: 4
+```
+- **DECISIVE READ** — grafana's own datasource proxy, the exact path a panel
+  takes. Metrics answer, logs hang to timeout:
+```
+ap=$(docker exec $c sed -n 's/^admin_password = """\(.*\)"""/\1/p' /run/warp-grafana/grafana.ini)
+curl -s -m 25 -o /dev/null -w 'http=%{http_code} time=%{time_total}\n' -u "admin:$ap" \
+  "http://127.0.0.1:$(getp 3000)/api/datasources/proxy/uid/warp-loki/loki/api/v1/labels"
+#   broken host: http=000 time=25.001      healthy host: http=200 time=0.071
+```
+- **INGEST IS UNAFFECTED**, which is why nothing else looks wrong: the broken
+  host's own logs are queryable *from every other host*. Only its querier is dead.
+- **FLEET-WIDE BLAST RADIUS.** The stuck host's scheduler stays `ACTIVE` in the
+  ring, so all n−1 query-frontends dial a scheduler that is not running. This
+  became ~50% of every grafana container's log volume fleet-wide:
+```
+docker logs --since 5m $c | grep -c 'error sending requests to scheduler'
+#   328 of 655 total lines on edge-0; ~66/min/host; ~95k lines/host/day
+#   err="unexpected status received for init: SHUTTING_DOWN" addr=<stuck host>:6490
+```
+  Read the `addr=` — it names the stuck host, and it is the fastest way to find
+  it from any healthy host.
+- **THE STUCK POINT** (proven 2026-08-18 by reproducing it on a restart, which
+  put the startup logs back inside docker's retention). Loki's scheduler ring
+  manager waits for its OWN instance to pass through `JOINING`, and that wait
+  never ends:
+```
+docker logs $c 2>&1 | grep -aE 'ring=scheduler|ringmanager'
+#   basic_lifecycler.go:322 msg="instance found in the ring" instance=<host>
+#     ring=scheduler state=ACTIVE registered_at="<a PREVIOUS instance's time>"
+#   ringmanager.go:186 msg="waiting until scheduler is JOINING in the ring"
+#   <nothing ever follows>
+# healthy start, for contrast — the two lines that must appear, ~3s apart:
+#   ringmanager.go:190 msg="scheduler is JOINING in the ring"
+#   ringmanager.go:203 msg="scheduler is ACTIVE in the ring"
+```
+- **WHAT DOES *NOT* CAUSE IT — do not repeat this mistake.** Finding the entry
+  already `ACTIVE` at startup is NOT sufficient, however plausible it looks.
+  Both the wedged start and the healthy start that followed it read
+  `state=ACTIVE`; the healthy one transitioned to JOINING 3.6s later anyway.
+  Any theory has to explain that pair. The same data also kills the
+  overlap-length theory: edge-3 deployed with a 4m04s gap between its old and
+  new container and was fine, while edge-4's 2m24s gap wedged.
+```
+                       wedged 07:33            healthy 07:45
+  state at startup     ACTIVE                  ACTIVE          <- identical
+  registered_at        2026-08-17 14:59:56     2026-08-18 07:43:53
+  entry was held by    a WEDGED predecessor    a HEALTHY predecessor
+```
+- **BEST-SUPPORTED EXPLANATION (not proven): the wedge is CONTAGIOUS.** The two
+  containers of one host share a ring entry (instance id = short hostname,
+  11.7b). A wedged predecessor keeps heartbeating that entry as ACTIVE while
+  its own ring module never completes, so the successor's transition to JOINING
+  never sticks; a healthy predecessor does not fight it. This fits every
+  observation above, and it explains why one bad instance survived 16h across a
+  redeploy. **What wedged the FIRST instance (edge-4, ~2026-08-17 14:59:56) is
+  still unknown** — those logs had already rotated. Do not present the
+  contagion as the origin.
+- **"Forget" alone does NOT release it.** When the entry goes missing under a
+  running instance, `basic_lifecycler.go:480` ("instance is missing in the ring
+  … registering the instance with an updated registration timestamp")
+  re-registers it while KEEPING ACTIVE. Observed: the entry was re-created with
+  a fresh timestamp and the wait still never ended.
+- **FIX (manual) — the entry must be ABSENT at registration time:**
+```
+docker stop -t 150 <container>     # loki unregisters: "ring lifecycler is shutting down ring=scheduler"
+# confirm from a PEER that the entry is gone before restarting:
+curl -s 127.0.0.1:<peer loki port>/scheduler/ring | grep -oE 'value="[a-z0-9-]+"'
+systemctl restart warp-main-grafana-<block>
+```
+  A plain `systemctl restart` on its own is NOT sufficient — it recreates the
+  overlap that causes this. The stop briefly leaves the host serving nothing
+  (~1 min); the lb has the other five. Do NOT do this on a host with a pileup
+  (11.7c says a restart ADDS to it).
+- FIXED IN CODE 2026-08-18, two halves in `warp/grafana/main.go`:
+  **(1)** `/status` no longer answers ok the moment the front binds — a
+  readiness latch holds the deploy poll until loki, mimir and grafana each
+  answer their own endpoint once, and reports `error not ready (loki: 503 …)`
+  until then, which is what `WarpStatusResponse.IsError` (`^(?i)error(\s|:)`)
+  actually fails a poll on. A container that comes up like this no longer
+  installs itself; warpctl keeps the old, working one. TRADEOFF, and it is the
+  11.10 amplifier: the poll budget is `NewContainerPollTimeout` = 120s, and on
+  poll-fail warpctl kills the NEW container (11.7) — so on a host whose old
+  container is already gone, a child that cannot start now leaves that host
+  serving nothing instead of serving 503s. The failing poll names the child in
+  the journal, which is the point: it is loud instead of silent. **(2)** `warp.Child`
+  gained an optional `HealthCheck`/`UnhealthyTimeout` (`warp/supervise.go`);
+  loki and mimir are restarted after 10 min continuously failing `/ready`, so
+  this self-heals instead of sitting for 16h. Grafana is deliberately left
+  exit-only — its health tracks the shared postgres, and restarting it does not
+  fix what it is reporting. **(2) is the half that actually breaks this
+  particular trap**, and it does so for the reason the manual fix works: it
+  SIGTERMs loki IN PLACE, so loki unregisters cleanly (verified: the entry left
+  a peer's ring in under a second) and the supervisor restarts it with no
+  competing instance holding the entry — the one sequence a container-level
+  redeploy can never produce. (1) only stops a wedged container from installing
+  itself over a working one.
+- **THE TWO HALVES ARE NOT INDEPENDENT — (1) WITHOUT (2) WOULD MAKE A HOST
+  UNDEPLOYABLE.** If the OLD container is the wedged one, the new container
+  catches the wedge, fails its readiness poll, and warpctl kills it at the 120s
+  budget (11.7) while the wedged old one keeps serving. Every retry does the
+  same. Recovery then depends entirely on the OLD container's watchdog firing
+  at 10 min and clearing its own loki. Ship them together, and if (2) is ever
+  disabled, disable (1) with it.
+- **NEITHER FIX PREVENTS THE FIRST WEDGE**, because its cause is still unknown.
+  What they change is the duration: a permanent, silent, host-wide loss of log
+  query becomes a ~10 min self-healing blip with `[loki]unhealthy for …
+  Restarting.` in the journal naming it.
+- The 10-min timeout is deliberately well above the unready window a rolling
+  fleet deploy opens: loki and mimir both gate `/ready` on their rings, which go
+  unhealthy while peers cycle. Do not shorten it without checking that.
+
+### 11.14 fluent-bit is a HOST unit, and a failed one is permanent (2026-08-15)
+alloy is gone; **host-managed fluent-bit ships every log line and every metric**,
+on every warp host — including edge-6 (redis + minio) and edge-2 (postgres),
+which run no grafana bundle at all and so appear in NO §11.1 reading. §11 had no
+signal for it until 2026-08-18, which is why edge-6 shipped nothing for 2d13h
+without anything noticing.
+```
+systemctl is-active fluent-bit                                   # per host, ALL warp hosts
+systemctl show fluent-bit -p NRestarts -p ActiveEnterTimestamp -p Result
+#   failed / NRestarts=5 / status=255/EXCEPTION
+journalctl -u fluent-bit --since '<the failure minute>' | grep -iE '\[error\]'
+#   [input collector] COLLECT_TIME registration failed
+#   [input] error starting collector #0: prometheus_scrape.29..34
+#   [sched] cannot do timeout_create()          <- out of fds, NOT a config error
+#   [output:prometheus_remote_write.34] could not create thread scheduler
+```
+- **DECISIVE READ: the SOFT fd limit, which `systemctl show` does not lead with.**
+  `LimitNOFILE` prints the HARD limit (524288, reassuringly large);
+  `LimitNOFILESoft` was still the systemd default **1024**, and the soft one is
+  what binds. fluent-bit allocates an fd per collector timer and per output
+  worker AT STARTUP, so the budget scales with INPUT/OUTPUT pairs, not traffic —
+  edge-6 renders one `prometheus_scrape` + one `prometheus_remote_write` per
+  redis instance (32 of them) and crossed 1024.
+```
+systemctl show fluent-bit -p LimitNOFILE -p LimitNOFILESoft      # read BOTH
+grep -cE '^ *name +prometheus_scrape' /etc/fluent-bit/fluent-bit.conf
+```
+- **AND IT STAYS DEAD.** systemd gives up after 5 starts in 10s
+  (`Start request repeated too quickly`) and nothing retries a failed shipper.
+  The trigger was an ansible `playbook-redis-clusters` run restarting the unit
+  mid-flight (§8.5) — visible in the same journal minute as
+  `ansible-...file .../etc/redis/redis-N.conf`.
+- WHAT GOES MISSING, and where it surfaces: **zero `redis_*` series in mimir**
+  → `grafana/dashboards/redis-cluster.json` renders blank and
+  `warp/grafana/alerting/redis-cluster.yml` (incl. the `redis_up` /
+  `redis_cluster_state` rules) cannot fire; no node metrics for that host
+  (`count by (host)(node_load1)` is short one); no logs from it in loki. A
+  dashboard that is *entirely* empty points here; a dashboard with *some* empty
+  panels is usually just undeployed metrics.
+- FIXED 2026-08-18 in `xops/main/ansible/files/fluent-bit/override.conf` (the
+  shared drop-in, so all four playbooks get it): `LimitNOFILE=65536` (a bare
+  value sets soft AND hard) and `StartLimitIntervalSec=0` + `RestartSec=10`, so
+  a failed shipper retries forever instead of needing a human `reset-failed`.
+  `xops/main/ansible/tests/test_fluent_bit_shipper.py` asserts the limit leads
+  `redis_count`, so the next time that number grows the test fails first.
 
 ---
 

@@ -314,5 +314,129 @@ func TestProviderStatsCountOnlyPublicProviders(t *testing.T) {
 		if countries != 1 {
 			t.Fatalf("CountProviderCountries() = %d, want 1 (only au has a Public provider; jp's are network-only/keyless)", countries)
 		}
+
+		// surface 3: the per-country breakdown behind the public dashboard's
+		// provider map, which must agree with the country count exactly. jp
+		// must be absent rather than present with a zero count
+		byCountry := CountProvidersByCountry(ctx)
+		if len(byCountry) != 1 {
+			t.Fatalf("CountProvidersByCountry() = %+v, want only au", byCountry)
+		}
+		connect.AssertEqual(t, byCountry[0].CountryCode, "AU")
+		connect.AssertEqual(t, byCountry[0].Country, "Australia")
+		connect.AssertEqual(t, byCountry[0].Count, int64(1))
+		connect.AssertEqual(t, byCountry[0].RegionCount, int64(1))
+		// the fixture locates providers to a region only
+		connect.AssertEqual(t, byCountry[0].CityCount, int64(0))
+	})
+}
+
+// CountProvidersByCountry drives the public dashboard's provider map, top
+// countries, and region/city reach numbers from one scan. Guards the
+// grouping (one row per country, upper-case ISO code, country name), the
+// distinct provider count per country, the distinct region and city counts,
+// and that a disconnected or invalid row does not count.
+func TestCountProvidersByCountry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		sydney := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Sydney",
+			Region:       "New South Wales",
+			Country:      "Australia",
+			CountryCode:  "au",
+		}
+		CreateLocation(ctx, sydney)
+		newcastle := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Newcastle",
+			Region:       "New South Wales",
+			Country:      "Australia",
+			CountryCode:  "au",
+		}
+		CreateLocation(ctx, newcastle)
+		melbourne := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Melbourne",
+			Region:       "Victoria",
+			Country:      "Australia",
+			CountryCode:  "au",
+		}
+		CreateLocation(ctx, melbourne)
+		tokyo := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Tokyo",
+			Region:       "Tokyo",
+			Country:      "Japan",
+			CountryCode:  "jp",
+		}
+		CreateLocation(ctx, tokyo)
+
+		// a Public provider located to a city, connected and valid unless
+		// stated otherwise. hashCount != 1 makes the generated valid column
+		// false
+		addProvider := func(city *Location, connected bool, hashCount int) {
+			clientId := server.NewId()
+			networkId := server.NewId()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						INSERT INTO network_client_location_reliability (
+							client_id,
+							network_id,
+							update_block_number,
+							city_location_id,
+							region_location_id,
+							country_location_id,
+							client_address_hash_count,
+							location_count,
+							connected
+						)
+						VALUES ($1, $2, 1, $3, $4, $5, $6, 1, $7)
+					`,
+					clientId,
+					networkId,
+					city.LocationId,
+					city.RegionLocationId,
+					city.CountryLocationId,
+					hashCount,
+					connected,
+				))
+			})
+			SetProvide(ctx, clientId, map[ProvideMode][]byte{
+				ProvideModePublic: []byte("public-secret"),
+			})
+		}
+
+		addProvider(sydney, true, 1)
+		addProvider(sydney, true, 1)
+		addProvider(newcastle, true, 1)
+		addProvider(melbourne, true, 1)
+		addProvider(melbourne, false, 1) // disconnected: must not count
+		addProvider(melbourne, true, 2)  // invalid location: must not count
+		addProvider(tokyo, true, 1)
+
+		byCountry := CountProvidersByCountry(ctx)
+		if len(byCountry) != 2 {
+			t.Fatalf("CountProvidersByCountry() = %+v, want au and jp", byCountry)
+		}
+		// ordered by country code
+		au := byCountry[0]
+		jp := byCountry[1]
+		connect.AssertEqual(t, au.CountryCode, "AU")
+		connect.AssertEqual(t, au.Country, "Australia")
+		connect.AssertEqual(t, au.Count, int64(4))
+		connect.AssertEqual(t, au.RegionCount, int64(2))
+		connect.AssertEqual(t, au.CityCount, int64(3))
+		connect.AssertEqual(t, jp.CountryCode, "JP")
+		connect.AssertEqual(t, jp.Country, "Japan")
+		connect.AssertEqual(t, jp.Count, int64(1))
+		connect.AssertEqual(t, jp.RegionCount, int64(1))
+		connect.AssertEqual(t, jp.CityCount, int64(1))
+
+		// the country count is the number of countries in the breakdown
+		connect.AssertEqual(t, CountProviderCountries(ctx), int64(2))
 	})
 }

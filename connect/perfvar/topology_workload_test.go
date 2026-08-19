@@ -43,7 +43,7 @@ func fullTunOuterRoundTrip(path *fullTunPath) time.Duration {
 		return profile.BaseDelay + profile.ProcessingDelay
 	}
 	profile := path.environment.profile
-	if path.route == fullTunRouteExchangeH1 || path.route == fullTunRouteExchangeH3 {
+	if fullTunRouteIsExchange(path.route) {
 		roundTrip := linkDelay(path.environment.deviceAccessProfile.Forward) +
 			linkDelay(path.environment.providerAccessProfile.Reverse) +
 			linkDelay(path.environment.providerAccessProfile.Forward) +
@@ -1758,39 +1758,36 @@ func measureFullTunLatencyUnderLoadWithStartHook(
 		})
 	}
 	defer joinBulkUpload()
-	loadedSamples := latencyProbeSamples{}
-	sequence := uint64(1000)
+	if path.beforeLatencyLoadedProbeForTest != nil {
+		if err := path.beforeLatencyLoadedProbeForTest(); err != nil {
+			return workloadResult{}, err
+		}
+	}
+	loadedSamples := runLoadedLatencyProbes(
+		ctx,
+		probeConnection,
+		1000,
+		probeTimeout,
+		loadedLatencyProbeIntervalForRate(
+			bulkByteCount,
+			fullTunEffectiveRateBitsPerSecond(path, true),
+		),
+		bulkFinished,
+		nil,
+	)
 	var bulkResult workloadResult
-	for bulkResult.UsefulByteCount == 0 {
-		if ctx.Err() != nil {
-			return workloadResult{}, ctx.Err()
-		}
-		select {
-		case err := <-bulkErrors:
-			applyLatencyProbeSamples(
-				&bulkResult,
-				idleSamples,
-				loadedSamples,
-				latencyProbeSamples{},
-			)
-			return bulkResult, err
-		case bulkResult = <-bulkDone:
-		default:
-			if path.beforeLatencyLoadedProbeForTest != nil {
-				if err := path.beforeLatencyLoadedProbeForTest(); err != nil {
-					applyLatencyProbeSamples(
-						&bulkResult,
-						idleSamples,
-						loadedSamples,
-						latencyProbeSamples{},
-					)
-					return bulkResult, err
-				}
-			}
-			latency, probeErr := runLatencyProbe(ctx, probeConnection, sequence, probeTimeout)
-			sequence += 1
-			loadedSamples.add(latency, probeErr)
-		}
+	select {
+	case err := <-bulkErrors:
+		applyLatencyProbeSamples(
+			&bulkResult,
+			idleSamples,
+			loadedSamples,
+			latencyProbeSamples{},
+		)
+		return bulkResult, err
+	case bulkResult = <-bulkDone:
+	case <-ctx.Done():
+		return workloadResult{}, ctx.Err()
 	}
 	joinBulkUpload()
 	postLoadSamples := probeMany(2000, 8)

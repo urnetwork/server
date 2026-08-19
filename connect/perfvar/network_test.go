@@ -44,6 +44,10 @@ type simulatedTunNode struct {
 	deliveries chan []byte
 }
 
+// A diagnostic observer borrows one complete IP packet exactly as it leaves a
+// source TUN. It must return synchronously and must not retain or mutate bytes.
+type simulatedIPPacketObserver func(sourceNode string, packet []byte)
+
 // The packet router reads real IP packets emitted by each production TUN.
 type simulatedIPNetwork struct {
 	ctx       context.Context
@@ -57,6 +61,15 @@ type simulatedIPNetwork struct {
 	links     map[tunLinkKey]*directionalLink
 
 	unknownDestinationPacketCount atomic.Uint64
+	packetObserver                atomic.Pointer[simulatedIPPacketObserver]
+}
+
+func (self *simulatedIPNetwork) setPacketObserver(observer simulatedIPPacketObserver) {
+	if observer == nil {
+		self.packetObserver.Store(nil)
+		return
+	}
+	self.packetObserver.Store(&observer)
 }
 
 // The router starts empty so callers can define topologies before traffic.
@@ -165,6 +178,9 @@ func (self *simulatedIPNetwork) readTun(node *simulatedTunNode) {
 			return
 		}
 		for _, packetBytes := range packets[:packetCount] {
+			if observer := self.packetObserver.Load(); observer != nil {
+				(*observer)(node.name, packetBytes)
+			}
 			destinationAddress, ok := ipv4Destination(packetBytes)
 			if !ok {
 				self.unknownDestinationPacketCount.Add(1)
@@ -280,19 +296,20 @@ func (self *simulatedIPNetwork) snapshotProfiles() map[string]linkProfile {
 	return profiles
 }
 
-// A route-wide scheduled update changes every existing directional link in a
-// stable order while production carrier and route objects remain live.
-func (self *simulatedIPNetwork) updateProfiles(
+// A filtered scheduled update changes selected directional links in a stable
+// order while production carrier and route objects remain live.
+func (self *simulatedIPNetwork) updateProfilesWhere(
 	ctx context.Context,
 	eventName string,
 	scheduledTime time.Time,
-	update func(linkProfile) linkProfile,
+	update func(tunLinkKey, linkProfile) (linkProfile, bool),
 ) ([]networkProfileUpdateResult, error) {
 	if update == nil {
 		return nil, fmt.Errorf("network profile update is nil")
 	}
 	type namedLink struct {
 		name string
+		key  tunLinkKey
 		link *directionalLink
 	}
 	self.stateLock.Lock()
@@ -300,6 +317,7 @@ func (self *simulatedIPNetwork) updateProfiles(
 	for key, link := range self.links {
 		links = append(links, namedLink{
 			name: fmt.Sprintf("%s->%s", key.source, key.destination),
+			key:  key,
 			link: link,
 		})
 	}
@@ -321,8 +339,12 @@ func (self *simulatedIPNetwork) updateProfiles(
 		named.link.stateLock.Lock()
 		profile := named.link.profile
 		named.link.stateLock.Unlock()
+		updatedProfile, selected := update(named.key, profile)
+		if !selected {
+			continue
+		}
 		actualTime, err := named.link.updateProfile(
-			update(profile),
+			updatedProfile,
 			eventName,
 			scheduledTime,
 		)
@@ -342,6 +364,70 @@ func (self *simulatedIPNetwork) updateProfiles(
 		}
 	}
 	return results, nil
+}
+
+// A route-wide scheduled update changes every existing directional link.
+func (self *simulatedIPNetwork) updateProfiles(
+	ctx context.Context,
+	eventName string,
+	scheduledTime time.Time,
+	update func(linkProfile) linkProfile,
+) ([]networkProfileUpdateResult, error) {
+	if update == nil {
+		return nil, fmt.Errorf("network profile update is nil")
+	}
+	return self.updateProfilesWhere(
+		ctx,
+		eventName,
+		scheduledTime,
+		func(_ tunLinkKey, profile linkProfile) (linkProfile, bool) {
+			return update(profile), true
+		},
+	)
+}
+
+// Device-oriented updates touch only links incident to one TUN node. Outbound
+// is application upload; inbound is application download. Provider and
+// internal exchange links remain unchanged.
+func (self *simulatedIPNetwork) updateNodeProfiles(
+	ctx context.Context,
+	nodeName string,
+	eventName string,
+	scheduledTime time.Time,
+	forward *linkProfile,
+	reverse *linkProfile,
+) ([]networkProfileUpdateResult, error) {
+	if nodeName == "" {
+		return nil, errors.New("network profile update node is empty")
+	}
+	return self.updateProfilesWhere(
+		ctx,
+		eventName,
+		scheduledTime,
+		func(key tunLinkKey, profile linkProfile) (linkProfile, bool) {
+			switch {
+			case key.source == nodeName && forward != nil:
+				return *forward, true
+			case key.destination == nodeName && reverse != nil:
+				return *reverse, true
+			default:
+				return profile, false
+			}
+		},
+	)
+}
+
+// Construction can recover the stable simulator node identity without relying
+// on client creation order.
+func (self *simulatedIPNetwork) nodeNameForTun(tun *clientconnect.Tun) (string, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for name, node := range self.nodes {
+		if node.tun == tun {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // The workload terminal boundary joins every current link and repeats if a
@@ -850,6 +936,47 @@ func (self *p2pNetwork) setBlackhole(forward bool, reverse bool) error {
 		update(self.forwardLink, forward),
 		update(self.reverseLink, reverse),
 	)
+}
+
+// A direct P2P live update keeps the established ICE/DTLS/SCTP objects while
+// changing both physical directions at one acknowledged boundary.
+func (self *p2pNetwork) updateProfiles(
+	ctx context.Context,
+	eventName string,
+	scheduledTime time.Time,
+	forward linkProfile,
+	reverse linkProfile,
+) ([]networkProfileUpdateResult, error) {
+	if wait := time.Until(scheduledTime); 0 < wait {
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	results := make([]networkProfileUpdateResult, 0, 2)
+	for _, update := range []struct {
+		name    string
+		link    *directionalLink
+		profile linkProfile
+	}{
+		{name: "p2p-provider-to-device", link: self.forwardLink, profile: forward},
+		{name: "p2p-device-to-provider", link: self.reverseLink, profile: reverse},
+	} {
+		actualTime, err := update.link.updateProfile(update.profile, eventName, scheduledTime)
+		if err != nil {
+			return results, fmt.Errorf("update %s: %w", update.name, err)
+		}
+		results = append(results, networkProfileUpdateResult{
+			LinkName:      update.name,
+			EventName:     eventName,
+			ScheduledTime: scheduledTime,
+			ActualTime:    actualTime,
+		})
+	}
+	return results, nil
 }
 
 // Every current direct carrier direction participates in route-wide idle.

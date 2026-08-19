@@ -12,8 +12,8 @@ network conditions. It requires no root access, network namespaces, Docker
 networking, or `CAP_NET_ADMIN`.
 
 The current implementation covers the four forced routes, seven workload shapes,
-the initial and focused link profiles, a mobile resource surrogate, one
-production extender per endpoint access path for exchange H1, bounded outage
+the initial, focused, static cell-edge, and dynamic cell-edge link profiles, a
+mobile resource surrogate, one production extender per endpoint access path for exchange H1, bounded outage
 recovery, live profile changes, direct-to-platform fallback and restoration,
 address migration, one/three/five/nine-hop P2P streams, and two-edge exchange
 routes with an independently conditioned internal link.
@@ -349,8 +349,9 @@ profiles and hash both endpoint profiles.
 
 On client-edge links, forward means client to edge and reverse means edge to
 client. The P2P fixture places the provider on `vnet`'s left side and the
-application on its right side; its calibration swaps directions so reported
-upload and download remain oriented from the application user's perspective.
+application on its right side. Construction translates that link-local
+orientation so scenario forward/reverse and direct calibration consistently
+mean device upload/download.
 
 ### Initial profiles
 
@@ -365,6 +366,47 @@ upload and download remain oriented from the application user's perspective.
 | `single-region-1000ms-rtt` | 100/100 Mbit/s | 1,000 ms application access | 0 ms | none | one RTT bandwidth-delay product |
 | `dual-region-500ms-rtt` | 100/100 Mbit/s | 500 ms on each endpoint access | 0 ms | none | one RTT bandwidth-delay product per access path |
 | `dual-region-1000ms-rtt` | 100/100 Mbit/s | 1,000 ms on each endpoint access | 0 ms | none | one RTT bandwidth-delay product per access path |
+
+### Composite cell-edge profiles
+
+These profiles combine the low-rate, high-RTT, jitter, loss, queue, and MTU
+axes that define the low-bar product scenario. Rates are written as
+download/upload; in the resolved link, forward is device upload and reverse is
+device download. Only the application device receives this impairment for an
+exchange route. Provider access remains `clean-lan`, so the result does not
+accidentally compound two cellular links. Direct P2P uses the one selected
+device-to-provider profile.
+
+| Profile | Down/up rate | RTT | Jitter | Loss | Queue | Outer/inner MTU |
+|---|---:|---:|---:|---:|---:|---:|
+| `cell-edge-5m-down-1m-up` | 5/1 Mbit/s | 120 ms | 25 ms | 0.5% independent | 100 ms | 1,400/1,320 |
+| `cell-edge-1m-down-250k-up` | 1/0.25 Mbit/s | 300 ms | 100 ms | about 2% two-state burst | 500 ms | 1,280/1,200 |
+| `cell-edge-256k-down-64k-up` | 256/64 kbit/s | 800 ms | 300 ms | about 5% two-state burst | 2,000 ms | 1,280/1,200 |
+
+Each token bucket starts with one outer packet of burst credit. This prevents
+the simulator's ordinary 64 KiB startup allowance from bypassing eight seconds
+of a 64 kbit/s uplink before shaping begins. These are deterministic
+engineering stress points, not claims about a carrier or signal-bar reading.
+
+### Dynamic cell-edge profiles
+
+Three selectable profiles start at `cell-edge-5m-down-1m-up` and replay a
+time-based device trace after the measured TCP connection is established. The
+same schedule runs in direct calibration and through H1, H3, P2P legacy, or P2P
+fast. Exchange provider access stays `clean-lan`; one-hop P2P updates both its
+device control access and established direct data carrier.
+
+| Profile | Measured-start schedule |
+|---|---|
+| `cell-edge-rate-collapse-recover` | 0.5 s: 256/64 kbit/s; 2.5 s: 1/0.25 Mbit/s; 4 s: 5/1 Mbit/s; outer MTU remains 1,400 |
+| `cell-edge-outage-1s-recover` | 0.75 s: bidirectional blackhole; 1.75 s: restore, for an exact one-second outage |
+| `cell-edge-mtu-reduction-recover` | 0.75 s: outer MTU 1,280 with expected MTU drops; 1.75 s: restore outer MTU 1,400; the advertised inner MTU does not change |
+
+These schedules support one-hop `tcp` and `tcp-warmed` with no extender. Their
+default measured payload is 2 MiB. Explicit smaller payloads are rejected when
+the direct path could finish before the final event. Every result records each
+event's requested offset, first/last acknowledged application offset, and exact
+link names; an incomplete schedule is a workload failure, not a static sample.
 
 ### Focused profiles
 
@@ -403,6 +445,7 @@ The current authoritative route restrictions are:
 | Rate | All routes |
 | Direction asymmetry | P2P for a directional claim; applying it to both exchange access links creates the same end-to-end bottleneck in both directions |
 | Outer MTU | Static `mtu-*` profiles lower the inner MTU and are correctness-gated on H3 and fast P2P; `mtu-blackhole-1280` deliberately retains the clean inner MTU to test missing dynamic path-MTU adaptation |
+| Dynamic cell edge | One-hop TCP/TCP-warmed, no extender; all four routes and direct calibration |
 
 ## Workloads
 
@@ -420,12 +463,18 @@ TUN path and a tunneled variant through the selected production route.
 | `web` | Three fresh HTTP responses: 16 KiB, 512 KiB, and 16 KiB, with first-byte and completion timing | download |
 
 The default payload is 32 MiB. Without an explicit byte-count filter, it becomes
-20 MiB for `lte` and `mobile-poor`. The two single-region profiles use 64 KiB
-for cold `tcp`; `tcp-warmed` keeps the 32 MiB measured payload so its steady-state
-sample spans many bandwidth-delay products.
+20 MiB for `lte` and `mobile-poor`. The cell-edge defaults are 1 MiB, 256 KiB,
+and 64 KiB from fastest to slowest so a correctness run remains bounded while
+still crossing several uplink bandwidth-delay products. Dynamic cell-edge
+profiles use 2 MiB so direct traffic remains active through the final event.
+The two single-region
+profiles use 64 KiB for cold `tcp`; `tcp-warmed` keeps the 32 MiB measured
+payload so its steady-state sample spans many bandwidth-delay products.
 Parallel TCP uses four flows and divides the selected payload across them, with
-a 64 KiB minimum per flow. UDP defaults to one second at 5 Mbit/s with
-1,000-byte datagrams.
+a 64 KiB minimum per flow. UDP normally defaults to one second at 5 Mbit/s with
+1,000-byte datagrams. Cell-edge UDP defaults to 75% of the selected directional
+link rate, leaving room for Transfer and carrier overhead; explicit overload
+experiments should set their offered load in the scenario code.
 
 The warmed workload derives one bandwidth-delay product from the route's
 directional bottleneck and complete physical path. It sends those warmup bytes
@@ -437,8 +486,8 @@ web and UDP shapes have their own fixed scenario settings.
 
 Workload records include useful bytes, duration, setup time where measured,
 decimal MB/s and Gbit/s, latency distributions, UDP accounting, content hash,
-allocation and garbage-collection deltas where implemented, and calibration
-link snapshots.
+allocation and garbage-collection deltas where implemented, acknowledged live
+profile events where selected, and calibration link snapshots.
 
 ## Mobile resource surrogate
 
@@ -516,11 +565,68 @@ go test ./connect/perfvar -run '^TestPerformanceVariations$' \
   -count=1 -timeout=0 -v
 ```
 
+The static low-bar baseline selects all three composite device profiles
+explicitly. Their bounded payload defaults apply when
+`CONNECT_PERFVAR_BYTE_COUNT` is absent:
+
+```sh
+CONNECT_PERFVAR_MEASURE=1 \
+CONNECT_PERFVAR_PROFILE=cell-edge-5m-down-1m-up,cell-edge-1m-down-250k-up,cell-edge-256k-down-64k-up \
+CONNECT_PERFVAR_WORKLOAD=tcp,udp,latency-under-load \
+CONNECT_PERFVAR_RESOURCE=mobile-surrogate \
+go test ./connect/perfvar -run '^TestPerformanceVariations$' \
+  -count=1 -timeout=0 -v
+```
+
+This command is a measurement campaign, not part of the ordinary correctness
+gate. Record all five traces, including failures and invalid calibrations, in
+`MEASUREMENTS.md` before drawing a transport comparison.
+
+The dynamic low-bar campaign isolates capacity, outage, and MTU transitions.
+The profiles enforce one-hop TCP/TCP-warmed semantics and their 2 MiB payload
+default when `CONNECT_PERFVAR_BYTE_COUNT` is absent:
+
+```sh
+CONNECT_PERFVAR_MEASURE=1 \
+CONNECT_PERFVAR_PROFILE=cell-edge-rate-collapse-recover,cell-edge-outage-1s-recover,cell-edge-mtu-reduction-recover \
+CONNECT_PERFVAR_WORKLOAD=tcp,tcp-warmed \
+CONNECT_PERFVAR_TOPOLOGY=one-hop \
+CONNECT_PERFVAR_EXTENDERS=0 \
+CONNECT_PERFVAR_RESOURCE=mobile-surrogate \
+go test ./connect/perfvar -run '^TestPerformanceVariations$' \
+  -count=1 -timeout=0 -v
+```
+
+The focused H3 lane-selection gate holds the seed, profile, mobile resource
+surrogate, 1,100-byte inner MTU, and exact 64 KiB upload constant. Production
+H3 permits one complete DATAGRAM fragment per message; the fragmented test
+raises the limit explicitly and is never a production-settings assertion:
+
+```sh
+go test ./connect/perfvar \
+  -run '^(TestH3LowBarFullTcp(ProductionHybridTrack|FragmentedPacketTrack|SingleDatagramMtuTrack|OneDatagramHybridTrack|LegacyStreamTrack)|TestH1LowBarFullTcpStreamTrack)$' \
+  -count=1 -timeout=10m -v
+```
+
+Run each candidate in five fresh processes for a measurement comparison. The
+ordinary multi-test command above is a correctness and lane-classification
+gate; it is not a cold-process distribution. Current measured values and the
+historical comparison boundary are recorded in `MEASUREMENTS.md`.
+
+The production-hybrid recovery line distinguishes timeout, selective-gap,
+tail, cumulative, and exact-carrier-change writes for both DeviceLocal and the
+provider. Lane classification is based on the route that accepted each exact
+Transfer frame: a hybrid stream write must not consume DATAGRAM flight, while
+withdrawal of that accepting route must produce a carrier-change recovery
+without waiting for the nested eight-second stream interval. Focused Connect
+tests separately prove that adding a sibling while the original route remains
+active does not generate a duplicate.
+
 Available controls are comma-separated sets unless stated otherwise:
 
 ```text
 CONNECT_PERFVAR_MEASURE=1
-CONNECT_PERFVAR_ROUTE=p2p-fast|p2p-legacy|exchange-h1|exchange-h3
+CONNECT_PERFVAR_ROUTE=p2p-fast|p2p-legacy|exchange-h1|exchange-h3|exchange-auto
 CONNECT_PERFVAR_PROFILE=<one or more exact profile names>
 CONNECT_PERFVAR_WORKLOAD=tcp|tcp-warmed|tcp-parallel|quic|udp|latency-under-load|web
 CONNECT_PERFVAR_DIRECTION=upload|download
@@ -540,7 +646,9 @@ extenders, default resources, seed `20260810`, five fresh repetitions, and a
 Unknown values fail. Unsupported workload/direction pairs are skipped. An
 extender selection retains only exchange H1. If the filters leave no supported
 scenario, scenario resolution fails instead of silently substituting another
-one.
+one. Dynamic cell-edge names are valid only for the application profile; they
+are rejected as `CONNECT_PERFVAR_INTERNAL_PROFILE` values because no schedule
+is applied to an internal exchange link.
 
 Performance measurements reject the race detector. The complete non-DB
 correctness and ownership tier runs under `-race` with `-short`:
@@ -551,7 +659,7 @@ go test -race -p=1 ./connect/perfvar -short -parallel=1 \
 ```
 
 Run the canonical production destination/stream-alias gate from the server
-repository before a schema-3 campaign:
+repository before a schema-11 campaign:
 
 ```sh
 (
@@ -569,7 +677,7 @@ go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0 -v \
   -run '^(TestFullTunConstructionRollbackClosesReady(OneHop|ThreeHop)P2pRoute|TestProductionStreamP2pExtendedTopology|TestFullTunP2pFast(OneHop|ThreeHop|FiveHop|NineHop)TopologyCorrectness|TestFullTunP2pFastThreeHopExtendedApplicationWorkloadsCorrectness)$'
 ```
 
-The schema-3 campaign blockers are also an explicit serial DB gate:
+The schema-11 campaign blockers are also an explicit serial DB gate:
 
 ```sh
 go test -p=1 ./connect/perfvar -parallel=1 -count=1 -timeout=0 -v \
@@ -644,9 +752,18 @@ original aspirational two-times headroom target.
 
 ## Result format
 
-Schema version 3 emits one compact JSON record per run and one aggregate JSON
+Schema version 11 emits one compact JSON record per run and one aggregate JSON
 record per scenario. Every line begins with `[perfvar]` so records can be
 extracted from `go test -v` output.
+
+Schema 10 added bounded H3 hybrid-stream queue occupancy, lifetime maxima,
+wait count/duration, and oversize-refusal counters. Schema 11 adds
+`recovery_write_error_count` to each Client recovery lifetime endpoint and
+interval delta. A recovery attempt is counted when Transfer tries route
+admission; a recovery write error is counted separately when that admission
+fails. This distinction prevents a frame accepted by a bounded carrier queue
+but not yet physically written at measurement completion from being
+misclassified as a successful wire retry.
 
 A run record includes:
 
@@ -654,14 +771,39 @@ A run record includes:
   combined profile hash;
 - the per-run trace version, identity hash, and application/direct, provider,
   and internal-link seeds;
-- the complete resolved scenario, including application and provider profiles;
+- the complete resolved scenario, including application and provider profiles
+  and any exact dynamic schedule;
 - Go, OS, architecture, CPU, `GOMAXPROCS`, race mode, server revision and dirty
   state, Connect revision and dirty state, content hashes of both complete dirty
   worktrees, and the `userspace-same-host` label;
-- untunneled and tunneled workload results;
+- untunneled and tunneled workload results, including acknowledged schedule
+  offsets and link scope when a dynamic profile is selected. Loaded-latency
+  probes use a fixed offered rate with explicit attempt, success, and failure
+  counts so timeouts cannot silently reduce demand;
 - route setup duration, tunneled/underlay efficiency, and useful/wire
   efficiency;
 - directional simulator snapshots and P2P fast/legacy carrier counters;
+- interval-scoped device and provider remote packet/byte totals, with an exact
+  per-transport partition for H1, H3, H3Dns, H3DnsPump, P2P, and unknown. The
+  top-level totals remain the aggregate; local and blocked packets do not enter
+  a carrier and therefore have no transport row;
+- interval-scoped H1, H3, H3Dns, and H3DnsPump carrier-to-route queue drops,
+  plus H1 reliable-control refusal, for both device and provider platform
+  transports. Any such refusal invalidates a throughput sample;
+- interval-scoped H3 lane counters for device and provider, separating
+  DATAGRAM messages/fragments/bytes from reliable-stream messages/bytes and
+  retaining malformed, checksum, reassembly, and send-error attribution. H3
+  hybrid-stream records also include current and lifetime-maximum queued
+  messages/bytes, wait count/duration, and oversize refusal count;
+- interval-scoped Pack/byte and ACK receive-handoff drops for the device,
+  provider, and stream-P2P intermediary Clients, with explicit generation-change
+  flags and both raw lifetime endpoints instead of subtracting unrelated
+  lifetime counters;
+- interval-scoped Transfer timeout, carrier-change, selective-gap, tail,
+  cumulative, contract, explicit NoAck admission bypass, flow-reserve
+  selection/use, and unreliable-flight recovery for the same Clients, with
+  generation-change flags and raw lifetime endpoints for maxima. Recovery
+  route-admission errors are separate from recovery attempts;
 - application-bridge batch count, packet count, and maximum batch size;
 - correctness, failure stage, failure reason, calibration-invalid reason, and
   process-wide goroutine point samples taken immediately before and after the
@@ -690,9 +832,13 @@ Ordinary tests currently provide:
 
 - deterministic simulator replay, loss, rate, queue, delay, duplication,
   reorder, MTU, update, close, receiver isolation, and batch gates;
-- clean route-level delivery for exchange H1, exchange H3, P2P legacy, and P2P
-  fast;
-- exact bidirectional full-TUN TCP for all four forced routes;
+- lock-free Client receive-handoff counter baselines, interval subtraction,
+  generation-change handling, and fixed-point crossing detection;
+- lock-free platform-carrier receive refusal baselines across replacement
+  generations, interval subtraction, and measurement invalidation;
+- clean route-level delivery for exchange H1, exchange H3, exchange Auto, P2P
+  legacy, and P2P fast;
+- exact bidirectional full-TUN TCP for all four forced routes and exchange Auto;
 - route-local bandwidth-delay-product warmup on the same TCP connection,
   followed by a fresh source-to-carrier boundary and exact measured payload;
 - warmed TCP in both directions on all four carriers, plus representative
@@ -706,6 +852,9 @@ Ordinary tests currently provide:
 - exchange H3 at a 1,280-byte outer MTU and P2P fast at a 1,500-byte outer MTU;
 - exact inner TCP recovery across a 300 ms bidirectional outage for P2P fast
   and exchange H3;
+- exact low-bar full-TUN TCP through production one-DATAGRAM/stream H3,
+  explicit fragmented H3, legacy stream H3, and H1 controls, including
+  per-lane classification and DATAGRAM integrity accounting;
 - clean, 500 ms, and 1 s production extender carrier paths plus a clean
   full-TUN exchange H1 extender path;
 - exact full-TUN TCP in both directions over one-, three-, five-, and nine-hop
@@ -717,6 +866,9 @@ Ordinary tests currently provide:
   H3 exchange;
 - a scheduled rate/delay/jitter/loss change and restoration during one live
   exchange H3 TCP stream;
+- campaign-selectable device-only rate-collapse, one-second-outage, and live
+  outer-MTU traces shared by direct calibration and all one-hop carriers, with
+  exact event-boundary/link observations and incomplete-trace rejection;
 - platform network-change reconnect, P2P-to-platform fallback and restoration,
   and controlled P2P address migration through production hooks;
 - isolated `GOMAXPROCS` sweeps and repeated goroutine, heap, and checked-out
@@ -780,6 +932,7 @@ Two measured boundary conditions also require care:
 server/connect/perfvar/
   PERFVAR.md                    implemented scope and interpretation
   profile_test.go               profiles, validation, and hashes
+  profile_schedule_test.go      dynamic profiles, replay, scope, and observations
   link_test.go                  directional scheduler and counters
   network_test.go               gVisor TUN network and Pion vnet composition
   p2p_link_net_test.go          Pion UDP scheduler and receive admission
@@ -804,6 +957,7 @@ server/connect/perfvar/
   resource_validation_test.go   scheduler and lifecycle reconciliation
   scenario_test.go              filters, metadata, schema, and aggregation
   performance_test.go           opt-in measured matrix
+  h3_full_tun_lowbar_test.go     focused H3 lane and same-profile H1 controls
   simulator_test.go             deterministic simulator validation
   race_enabled_test.go          race-build result marker
   race_disabled_test.go         ordinary-build result marker
@@ -824,7 +978,7 @@ is supplied.
 | H3 and P2P network injection | Implemented |
 | H1 and exchange integration | Implemented for one edge and two-edge split H1/H3 |
 | Full TCP, QUIC, UDP, web, parallel, and loaded-latency workloads | Implemented |
-| Path events and extended topologies | Implemented for live profile change, outage, reconnect, fallback/restore, controlled migration, multihop P2P, and split exchange |
+| Path events and extended topologies | Implemented for selectable device-only rate/outage/MTU traces, live profile change, reconnect, fallback/restore, controlled migration, multihop P2P, and split exchange |
 | Resource surrogate and baseline campaign | Mobile surrogate, isolated scheduler sweep, and lifecycle reconciliation implemented; physical devices remain external |
 
 The harness is complete for its userspace single-host scope: it compares all

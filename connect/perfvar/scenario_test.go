@@ -29,9 +29,9 @@ import (
 )
 
 const (
-	perfvarSchemaVersion   = 3
+	perfvarSchemaVersion   = 11
 	perfvarTraceVersion    = 1
-	perfvarScheduleVersion = 1
+	perfvarScheduleVersion = 2
 	// The measured clean queue is 32 MiB. Keeping the accepted payload at or
 	// below it keeps the long-transfer default explicit and also leaves ample
 	// room beside the largest route-local BDP in the 256 MiB test contract.
@@ -83,6 +83,7 @@ const (
 type perfvarScenario struct {
 	Route                   fullTunRoute     `json:"route"`
 	Profile                 networkProfile   `json:"application_access_and_p2p_profile"`
+	ProfileSchedule         *profileSchedule `json:"application_access_and_p2p_schedule,omitempty"`
 	ProviderAccessProfile   networkProfile   `json:"provider_access_profile"`
 	InternalExchangeProfile *networkProfile  `json:"internal_exchange_profile,omitempty"`
 	Workload                perfvarWorkload  `json:"workload"`
@@ -169,20 +170,51 @@ type perfvarTrace struct {
 
 // Carrier observations prove route selection and expose simulated path cost.
 type perfvarCarrierObservation struct {
-	Links                          map[string]directionalLinkSnapshot        `json:"links"`
-	BridgeBatches                  fullTunBridgeBatchObservation             `json:"bridge_batches"`
-	P2PNetwork                     p2pNetworkSnapshot                        `json:"p2p_network"`
-	DeviceP2P                      clientconnect.P2pDataPlaneStatsSnapshot   `json:"device_p2p"`
-	ProviderP2P                    clientconnect.P2pDataPlaneStatsSnapshot   `json:"provider_p2p"`
-	StreamP2PHops                  []streamP2pHopSnapshot                    `json:"stream_p2p_hops,omitempty"`
-	StreamP2PClientStats           []clientconnect.P2pDataPlaneStatsSnapshot `json:"stream_p2p_client_stats,omitempty"`
-	StreamNonAdjacentDialCount     uint64                                    `json:"stream_non_adjacent_dial_count,omitempty"`
-	StreamNonAdjacentStunDropCount uint64                                    `json:"stream_non_adjacent_stun_drop_count,omitempty"`
-	StreamNonAdjacentDataDropCount uint64                                    `json:"stream_non_adjacent_data_drop_count,omitempty"`
-	FenceInclusive                 bool                                      `json:"fence_inclusive,omitempty"`
-	FenceApplicationPacketCount    int                                       `json:"fence_application_packet_count,omitempty"`
-	Duration                       time.Duration                             `json:"duration_nanoseconds"`
-	WireByteCount                  uint64                                    `json:"wire_byte_count"`
+	Links                          map[string]directionalLinkSnapshot                  `json:"links"`
+	BridgeBatches                  fullTunBridgeBatchObservation                       `json:"bridge_batches"`
+	P2PNetwork                     p2pNetworkSnapshot                                  `json:"p2p_network"`
+	DeviceP2P                      clientconnect.P2pDataPlaneStatsSnapshot             `json:"device_p2p"`
+	ProviderP2P                    clientconnect.P2pDataPlaneStatsSnapshot             `json:"provider_p2p"`
+	DevicePacketStats              perfvarPacketStatsObservation                       `json:"device_packet_stats"`
+	ProviderPacketStats            perfvarPacketStatsObservation                       `json:"provider_packet_stats"`
+	DevicePlatformReceive          clientconnect.PlatformTransportReceiveStatsSnapshot `json:"device_platform_receive"`
+	ProviderPlatformReceive        clientconnect.PlatformTransportReceiveStatsSnapshot `json:"provider_platform_receive"`
+	DeviceH3Datagrams              h3FullTunDatagramObservation                        `json:"device_h3_datagrams"`
+	ProviderH3Datagrams            h3FullTunDatagramObservation                        `json:"provider_h3_datagrams"`
+	DeviceReceiveHandoff           perfvarReceiveHandoffObservation                    `json:"device_receive_handoff"`
+	ProviderReceiveHandoff         perfvarReceiveHandoffObservation                    `json:"provider_receive_handoff"`
+	DeviceSendRecovery             perfvarSendRecoveryObservation                      `json:"device_send_recovery"`
+	ProviderSendRecovery           perfvarSendRecoveryObservation                      `json:"provider_send_recovery"`
+	StreamP2PHops                  []streamP2pHopSnapshot                              `json:"stream_p2p_hops,omitempty"`
+	StreamP2PClientStats           []clientconnect.P2pDataPlaneStatsSnapshot           `json:"stream_p2p_client_stats,omitempty"`
+	StreamP2PReceiveHandoffs       []perfvarReceiveHandoffObservation                  `json:"stream_p2p_receive_handoffs,omitempty"`
+	StreamP2PSendRecoveries        []perfvarSendRecoveryObservation                    `json:"stream_p2p_send_recoveries,omitempty"`
+	StreamNonAdjacentDialCount     uint64                                              `json:"stream_non_adjacent_dial_count,omitempty"`
+	StreamNonAdjacentStunDropCount uint64                                              `json:"stream_non_adjacent_stun_drop_count,omitempty"`
+	StreamNonAdjacentDataDropCount uint64                                              `json:"stream_non_adjacent_data_drop_count,omitempty"`
+	FenceInclusive                 bool                                                `json:"fence_inclusive,omitempty"`
+	FenceApplicationPacketCount    int                                                 `json:"fence_application_packet_count,omitempty"`
+	Duration                       time.Duration                                       `json:"duration_nanoseconds"`
+	WireByteCount                  uint64                                              `json:"wire_byte_count"`
+}
+
+// The schema keeps only carrier-attributable remote totals. Local and blocked
+// packets never entered H1, H3, DNS, or P2P and therefore have no transport
+// partition to reconcile.
+type perfvarTransportPacketStatsObservation struct {
+	RemoteEgressPacketCount  int64 `json:"remote_egress_packet_count"`
+	RemoteEgressByteCount    int64 `json:"remote_egress_byte_count"`
+	RemoteIngressPacketCount int64 `json:"remote_ingress_packet_count"`
+	RemoteIngressByteCount   int64 `json:"remote_ingress_byte_count"`
+}
+
+type perfvarPacketStatsObservation struct {
+	Available                bool                                                                   `json:"available"`
+	RemoteEgressPacketCount  int64                                                                  `json:"remote_egress_packet_count"`
+	RemoteEgressByteCount    int64                                                                  `json:"remote_egress_byte_count"`
+	RemoteIngressPacketCount int64                                                                  `json:"remote_ingress_packet_count"`
+	RemoteIngressByteCount   int64                                                                  `json:"remote_ingress_byte_count"`
+	TransportStats           map[clientconnect.TransportType]perfvarTransportPacketStatsObservation `json:"transport_stats"`
 }
 
 // Every run contains the calibration, tunneled result, and exact identities.
@@ -288,17 +320,22 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 
 	routes, err := parseSet(
 		"CONNECT_PERFVAR_ROUTE",
-		[]string{string(fullTunRouteP2pFast), string(fullTunRouteP2pLegacy), string(fullTunRouteExchangeH1), string(fullTunRouteExchangeH3)},
+		[]string{string(fullTunRouteP2pFast), string(fullTunRouteP2pLegacy), string(fullTunRouteExchangeH1), string(fullTunRouteExchangeH3), string(fullTunRouteExchangeAuto)},
 		[]string{string(fullTunRouteP2pFast), string(fullTunRouteP2pLegacy), string(fullTunRouteExchangeH1), string(fullTunRouteExchangeH3)},
 	)
 	if err != nil {
 		return perfvarConfig{}, err
 	}
 	profileNames := make([]string, 0, len(allNetworkProfiles(1)))
+	internalProfileNames := make([]string, 0, len(allNetworkProfiles(1)))
 	for name := range allNetworkProfiles(1) {
 		profileNames = append(profileNames, name)
+		if profileScheduleForName(name, 1) == nil {
+			internalProfileNames = append(internalProfileNames, name)
+		}
 	}
 	slices.Sort(profileNames)
+	slices.Sort(internalProfileNames)
 	profiles, err := parseSet("CONNECT_PERFVAR_PROFILE", profileNames, []string{"clean-lan"})
 	if err != nil {
 		return perfvarConfig{}, err
@@ -343,7 +380,7 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 	}
 	internalProfiles, err := parseSet(
 		"CONNECT_PERFVAR_INTERNAL_PROFILE",
-		profileNames,
+		internalProfileNames,
 		[]string{"clean-lan"},
 	)
 	if err != nil {
@@ -411,13 +448,19 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 		}
 		for profileName := range config.Profiles {
 			profile := profiles[profileName]
+			profileSchedule := profileScheduleForName(profileName, config.Seed)
 			providerAccessProfile := profile
-			if strings.HasPrefix(profileName, "single-region-") {
+			if strings.HasPrefix(profileName, "single-region-") ||
+				strings.HasPrefix(profileName, "cell-edge-") {
 				providerAccessProfile = profiles["clean-lan"]
 				providerAccessProfile.SourceNote = "synthetic provider colocated with server/connect"
 			}
 			for workloadName := range config.Workloads {
 				workload := perfvarWorkload(workloadName)
+				if profileSchedule != nil &&
+					workload != perfvarWorkloadTCP && workload != perfvarWorkloadTCPWarmed {
+					continue
+				}
 				for directionName := range config.Directions {
 					direction := perfvarDirection(directionName)
 					if direction == perfvarDirectionDownload &&
@@ -432,6 +475,10 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 						continue
 					}
 					for topology := range config.Topologies {
+						if profileSchedule != nil &&
+							(topology != perfvarTopologyOneHop || config.ExtenderCount != 0) {
+							continue
+						}
 						p2pHopCount, isP2pTopology := perfvarTopologyP2pHopCount(topology)
 						if topology == perfvarTopologySplitExchange {
 							if (route != fullTunRouteExchangeH1 && route != fullTunRouteExchangeH3) ||
@@ -452,6 +499,16 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 								payloadByteCount := config.PayloadBytes
 								if !config.PayloadSet {
 									switch profileName {
+									case cellEdge5mDown1mUpName:
+										payloadByteCount = 1 * 1024 * 1024
+									case cellEdge1mDown250kUpName:
+										payloadByteCount = 256 * 1024
+									case cellEdge256kDown64kUpName:
+										payloadByteCount = 64 * 1024
+									case cellEdgeRateCollapseRecoverName,
+										cellEdgeOutage1sRecoverName,
+										cellEdgeMtuReductionRecoverName:
+										payloadByteCount = 2 * 1024 * 1024
 									case "single-region-500ms-rtt", "single-region-1000ms-rtt":
 										if workload != perfvarWorkloadTCPWarmed {
 											payloadByteCount = 64 * 1024
@@ -463,6 +520,7 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 								scenario := perfvarScenario{
 									Route:                 route,
 									Profile:               profile,
+									ProfileSchedule:       profileSchedule,
 									ProviderAccessProfile: providerAccessProfile,
 									Workload:              workload,
 									Direction:             direction,
@@ -476,6 +534,15 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 									UdpDuration:           time.Second,
 									UdpOfferedBitRate:     5_000_000,
 									UdpPayloadBytes:       1000,
+								}
+								if strings.HasPrefix(profileName, "cell-edge-") {
+									directionalRateBitsPerSecond := profile.Forward.RateBitsPerSecond
+									if direction == perfvarDirectionDownload {
+										directionalRateBitsPerSecond = profile.Reverse.RateBitsPerSecond
+									}
+									// Leave headroom for Transfer and carrier overhead instead of
+									// making the default UDP workload an accidental overload test.
+									scenario.UdpOfferedBitRate = directionalRateBitsPerSecond * 3 / 4
 								}
 								if internalProfileName != "" {
 									internalProfile := profiles[internalProfileName]
@@ -498,6 +565,9 @@ func resolvePerfvarScenarios(config perfvarConfig) ([]perfvarScenario, error) {
 									if err := validatePerfvarWarmedTCPContract(scenario); err != nil {
 										return nil, err
 									}
+								}
+								if err := validatePerfvarProfileScheduleScenario(scenario); err != nil {
+									return nil, err
 								}
 								scenarios = append(scenarios, scenario)
 							}
@@ -563,7 +633,14 @@ func (self perfvarScenario) profilesHash() (string, error) {
 	if self.InternalExchangeProfile != nil {
 		profiles = append(profiles, *self.InternalExchangeProfile)
 	}
-	encoded, err := json.Marshal(profiles)
+	identity := struct {
+		Profiles []networkProfile `json:"profiles"`
+		Schedule *profileSchedule `json:"schedule,omitempty"`
+	}{
+		Profiles: profiles,
+		Schedule: self.ProfileSchedule,
+	}
+	encoded, err := json.Marshal(identity)
 	if err != nil {
 		return "", err
 	}
@@ -1310,6 +1387,69 @@ func TestPerfvarDefaultPayloadsUseLongBulkTransfers(t *testing.T) {
 				scenario.Profile.Name,
 				scenario.PayloadByteCount,
 				wantByteCount,
+			)
+		}
+	}
+}
+
+// Composite cell-edge scenarios impair only the application device, use
+// bounded bulk sizes that finish at 64 kbit/s, and pace UDP below the selected
+// direction's link rate unless a caller explicitly chooses another workload.
+func TestPerfvarCellEdgeScenarioDefaults(t *testing.T) {
+	values := map[string]string{
+		"CONNECT_PERFVAR_ROUTE": "exchange-h1",
+		"CONNECT_PERFVAR_PROFILE": strings.Join([]string{
+			cellEdge5mDown1mUpName,
+			cellEdge1mDown250kUpName,
+			cellEdge256kDown64kUpName,
+		}, ","),
+		"CONNECT_PERFVAR_WORKLOAD":  "tcp",
+		"CONNECT_PERFVAR_DIRECTION": "upload,download",
+	}
+	config, err := loadPerfvarConfig(func(name string) string { return values[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios, err := resolvePerfvarScenarios(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPayloadByteCounts := map[string]int64{
+		cellEdge5mDown1mUpName:    1 * 1024 * 1024,
+		cellEdge1mDown250kUpName:  256 * 1024,
+		cellEdge256kDown64kUpName: 64 * 1024,
+	}
+	if len(scenarios) != 2*len(wantPayloadByteCounts) {
+		t.Fatalf("cell-edge scenario count=%d want=%d", len(scenarios), 2*len(wantPayloadByteCounts))
+	}
+	for _, scenario := range scenarios {
+		wantPayloadByteCount, ok := wantPayloadByteCounts[scenario.Profile.Name]
+		if !ok {
+			t.Fatalf("unexpected cell-edge profile %q", scenario.Profile.Name)
+		}
+		if scenario.ProviderAccessProfile.Name != "clean-lan" ||
+			!strings.Contains(scenario.ProviderAccessProfile.SourceNote, "provider colocated") {
+			t.Errorf("profile %q provider access=%+v", scenario.Profile.Name, scenario.ProviderAccessProfile)
+		}
+		if scenario.PayloadByteCount != wantPayloadByteCount {
+			t.Errorf(
+				"profile %q payload=%d want=%d",
+				scenario.Profile.Name,
+				scenario.PayloadByteCount,
+				wantPayloadByteCount,
+			)
+		}
+		directionalRateBitsPerSecond := scenario.Profile.Forward.RateBitsPerSecond
+		if scenario.Direction == perfvarDirectionDownload {
+			directionalRateBitsPerSecond = scenario.Profile.Reverse.RateBitsPerSecond
+		}
+		if scenario.UdpOfferedBitRate != directionalRateBitsPerSecond*3/4 {
+			t.Errorf(
+				"profile %q direction=%s UDP rate=%d link=%d",
+				scenario.Profile.Name,
+				scenario.Direction,
+				scenario.UdpOfferedBitRate,
+				directionalRateBitsPerSecond,
 			)
 		}
 	}

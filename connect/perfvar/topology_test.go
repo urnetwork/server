@@ -22,6 +22,7 @@ import (
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	connectserver "github.com/urnetwork/server/connect"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 )
@@ -30,13 +31,30 @@ import (
 type fullTunRoute string
 
 const (
-	fullTunRouteExchangeH1 fullTunRoute = "exchange-h1"
-	fullTunRouteExchangeH3 fullTunRoute = "exchange-h3"
-	fullTunRouteP2pLegacy  fullTunRoute = "p2p-legacy"
-	fullTunRouteP2pFast    fullTunRoute = "p2p-fast"
+	fullTunRouteExchangeH1   fullTunRoute = "exchange-h1"
+	fullTunRouteExchangeH3   fullTunRoute = "exchange-h3"
+	fullTunRouteExchangeAuto fullTunRoute = "exchange-auto"
+	fullTunRouteP2pLegacy    fullTunRoute = "p2p-legacy"
+	fullTunRouteP2pFast      fullTunRoute = "p2p-fast"
 
 	fullTunProbePayloadByteCount = 16 * 1024
 )
+
+func fullTunRouteIsExchange(route fullTunRoute) bool {
+	switch route {
+	case fullTunRouteExchangeH1, fullTunRouteExchangeH3, fullTunRouteExchangeAuto:
+		return true
+	default:
+		return false
+	}
+}
+
+// The one-hop Pion fixture is link-oriented provider-left/device-right, while
+// every scenario is application-oriented device-upload/device-download.
+func oneHopP2pNetworkProfile(profile networkProfile) networkProfile {
+	profile.Forward, profile.Reverse = profile.Reverse, profile.Forward
+	return profile
+}
 
 // The composed path owns both application and provider sides of the tunnel.
 type fullTunPath struct {
@@ -46,37 +64,42 @@ type fullTunPath struct {
 	route       fullTunRoute
 	p2pHopCount int
 
-	appTun               *clientconnect.Tun
-	providerCarrierTun   *clientconnect.Tun
-	deviceCarrierTun     *clientconnect.Tun
-	multiClient          *clientconnect.RemoteUserNatMultiClient
-	apiGenerator         *clientconnect.ApiMultiClientGenerator
-	deviceTransports     *platformTransportOwner
-	deviceClient         *atomic.Pointer[clientconnect.Client]
-	deviceClientId       clientconnect.Id
-	providerClient       *clientconnect.Client
-	providerClientId     clientconnect.Id
-	providerTransport    *clientconnect.PlatformTransport
-	providerLocalNat     *clientconnect.LocalUserNat
-	providerRemoteNat    *clientconnect.RemoteUserNatProvider
-	p2pNetwork           *p2pNetwork
-	streamP2pNetwork     *streamP2pNetwork
-	streamP2pClients     []*routeClient
-	streamP2pStats       []*clientconnect.P2pDataPlaneStats
-	streamP2pRouteTraces []*p2pRouteStateTrace
-	providerStats        *clientconnect.P2pDataPlaneStats
-	deviceStats          *clientconnect.P2pDataPlaneStats
-	providerProbeTrace   *p2pProbeEventTrace
-	deviceProbeTrace     *p2pProbeEventTrace
-	providerSendRoutes   *platformSendRouteController
-	deviceSendRoutes     *platformSendRouteController
-	platformSendRoutes   []*platformSendRouteController
-	providerNoAckSends   *noAckSendTracker
-	deviceNoAckSends     *noAckSendTracker
-	providerPackSends    *sendPackLifecycleTracker
-	devicePackSends      *sendPackLifecycleTracker
-	providerReturns      *providerReturnSendTracker
-	bridgeSends          *fullTunBridgeSendTracker
+	appTun                       *clientconnect.Tun
+	providerCarrierTun           *clientconnect.Tun
+	deviceCarrierTun             *clientconnect.Tun
+	deviceCarrierNode            string
+	multiClient                  *clientconnect.RemoteUserNatMultiClient
+	apiGenerator                 *clientconnect.ApiMultiClientGenerator
+	deviceTransports             *platformTransportOwner
+	deviceClient                 *atomic.Pointer[clientconnect.Client]
+	deviceClientId               clientconnect.Id
+	providerClient               *clientconnect.Client
+	providerClientId             clientconnect.Id
+	providerTransport            *clientconnect.PlatformTransport
+	providerPlatformReceiveStats *clientconnect.PlatformTransportReceiveStats
+	devicePlatformReceiveStats   *clientconnect.PlatformTransportReceiveStats
+	providerH3DatagramStats      *clientconnect.H3DatagramStats
+	deviceH3DatagramStats        *clientconnect.H3DatagramStats
+	providerLocalNat             *clientconnect.LocalUserNat
+	providerRemoteNat            *clientconnect.RemoteUserNatProvider
+	p2pNetwork                   *p2pNetwork
+	streamP2pNetwork             *streamP2pNetwork
+	streamP2pClients             []*routeClient
+	streamP2pStats               []*clientconnect.P2pDataPlaneStats
+	streamP2pRouteTraces         []*p2pRouteStateTrace
+	providerStats                *clientconnect.P2pDataPlaneStats
+	deviceStats                  *clientconnect.P2pDataPlaneStats
+	providerProbeTrace           *p2pProbeEventTrace
+	deviceProbeTrace             *p2pProbeEventTrace
+	providerSendRoutes           *platformSendRouteController
+	deviceSendRoutes             *platformSendRouteController
+	platformSendRoutes           []*platformSendRouteController
+	providerNoAckSends           *noAckSendTracker
+	deviceNoAckSends             *noAckSendTracker
+	providerPackSends            *sendPackLifecycleTracker
+	devicePackSends              *sendPackLifecycleTracker
+	providerReturns              *providerReturnSendTracker
+	bridgeSends                  *fullTunBridgeSendTracker
 
 	bridgeWaitGroup sync.WaitGroup
 	bridgeStarted   bool
@@ -88,6 +111,7 @@ type fullTunPath struct {
 	activePackFailureFloor  *perfvarPackFailureCounts
 	carrierFencePackets     int
 	readinessAppFence       atomic.Bool
+	readinessObservation    fullTunRouteReadinessObservation
 	// Nil test seams can hold or drop an exact terminal-marker attempt.
 	beforeUdpTerminalMarkerForTest      func(context.Context, bool, int) error
 	afterUdpTerminalCarrierForTest      func(context.Context, bool, int) error
@@ -174,10 +198,16 @@ const (
 	fullTunConstructionStageRouteReady                  fullTunConstructionStage = "route-ready"
 )
 
-// Optional hooks are used only by constructor rollback tests. A stage hook may
-// install cleanup observers on the partial path before returning its error.
+// Optional hooks expose deterministic construction and measurement seams. A
+// stage hook may install cleanup observers on the partial path before returning
+// its error; settings hooks run before their corresponding object is built.
 type fullTunConstructionTestHooks struct {
-	afterStage func(fullTunConstructionStage, *fullTunPath) error
+	afterStage                        func(fullTunConstructionStage, *fullTunPath) error
+	configureConnectHandlerSettings   func(*connectserver.ConnectHandlerSettings)
+	configureProviderClientSettings   func(*clientconnect.ClientSettings)
+	configureProviderPlatformSettings func(*clientconnect.PlatformTransportSettings)
+	configureDeviceClientSettings     func(*clientconnect.ClientSettings)
+	configureDevicePlatformSettings   func(*clientconnect.PlatformTransportSettings)
 }
 
 // The transaction owns the partial path until commit transfers every acquired
@@ -809,13 +839,16 @@ func waitForCurrentGeneratedDeviceClient(
 // One readiness trace separates connection establishment, the deliberate
 // modeled-path warmup, and the exact request/response exchange.
 type fullTunRouteReadinessObservation struct {
-	Budget         time.Duration
-	DialDuration   time.Duration
-	WarmupDuration time.Duration
-	WriteDuration  time.Duration
-	ReadDuration   time.Duration
-	ServerStage    int32
-	TotalDuration  time.Duration
+	Budget                 time.Duration
+	DialDuration           time.Duration
+	WarmupDuration         time.Duration
+	WriteDuration          time.Duration
+	ReadDuration           time.Duration
+	ServerAcceptDuration   time.Duration
+	ServerRequestDuration  time.Duration
+	ServerResponseDuration time.Duration
+	ServerStage            int32
+	TotalDuration          time.Duration
 }
 
 const p2pProbeTraceEventCapacity = 512
@@ -2898,8 +2931,10 @@ func fullTunRaceInstrumentationAllowance() time.Duration {
 func fullTunPlatformSettings(
 	h3Port int,
 	tun *clientconnect.Tun,
+	receiveStats *clientconnect.PlatformTransportReceiveStats,
 ) *clientconnect.PlatformTransportSettings {
 	settings := clientconnect.DefaultPlatformTransportSettings()
+	settings.ReceiveStats = receiveStats
 	if allowance := fullTunRaceInstrumentationAllowance(); 0 < allowance {
 		settings.HttpConnectTimeout = max(settings.HttpConnectTimeout, allowance)
 		settings.WsHandshakeTimeout = max(settings.WsHandshakeTimeout, allowance)
@@ -3015,7 +3050,7 @@ func fullTunClientSettings(
 		p2pSettings.DataPlaneMode = clientconnect.P2pDataPlaneModeFastOnly
 	case fullTunRouteP2pLegacy:
 		p2pSettings.DataPlaneMode = clientconnect.P2pDataPlaneModeLegacyOnly
-	case fullTunRouteExchangeH1, fullTunRouteExchangeH3:
+	case fullTunRouteExchangeH1, fullTunRouteExchangeH3, fullTunRouteExchangeAuto:
 		// A zero-byte admission budget deterministically refuses every WebRTC
 		// association while leaving the platform route available. Without this,
 		// an explicitly selected provider on loopback can promote to P2P even
@@ -3201,11 +3236,15 @@ func tryNewFullTunPathWithTopologyHooks(
 		return nil, fmt.Errorf("extended P2P topology supports p2p-fast, not %s", route)
 	}
 	path := &fullTunPath{
-		t:           t,
-		ctx:         ctx,
-		environment: environment,
-		route:       route,
-		p2pHopCount: p2pHopCount,
+		t:                            t,
+		ctx:                          ctx,
+		environment:                  environment,
+		route:                        route,
+		p2pHopCount:                  p2pHopCount,
+		providerPlatformReceiveStats: &clientconnect.PlatformTransportReceiveStats{},
+		devicePlatformReceiveStats:   &clientconnect.PlatformTransportReceiveStats{},
+		providerH3DatagramStats:      &clientconnect.H3DatagramStats{},
+		deviceH3DatagramStats:        &clientconnect.H3DatagramStats{},
 	}
 	owner := newFullTunConstructionOwner(path)
 	defer func() {
@@ -3276,6 +3315,11 @@ func tryNewFullTunPathWithTopologyHooks(
 		environment.deviceEdgeName,
 	)
 	path.deviceCarrierTun = deviceCarrierTun
+	deviceCarrierNode, ok := environment.network.nodeNameForTun(deviceCarrierTun)
+	if !ok {
+		return nil, errors.New("full-TUN device carrier has no simulated network node")
+	}
+	path.deviceCarrierNode = deviceCarrierNode
 	if err := afterStage(fullTunConstructionStageDeviceCarrierTun); err != nil {
 		return nil, err
 	}
@@ -3286,15 +3330,18 @@ func tryNewFullTunPathWithTopologyHooks(
 
 	isP2p := route == fullTunRouteP2pFast || route == fullTunRouteP2pLegacy
 	platformMode := clientconnect.TransportModeH1
-	if route == fullTunRouteExchangeH3 {
+	switch route {
+	case fullTunRouteExchangeH3:
 		platformMode = clientconnect.TransportModeH3
+	case fullTunRouteExchangeAuto:
+		platformMode = clientconnect.TransportModeAuto
 	}
 	var p2p *p2pNetwork
 	var streamP2p *streamP2pNetwork
 	var err error
 	if isP2p {
 		if p2pHopCount == 1 {
-			p2p, err = newP2pNetwork(environment.profile)
+			p2p, err = newP2pNetwork(oneHopP2pNetworkProfile(environment.profile))
 		} else {
 			streamP2p, err = newStreamP2pNetwork(environment.profile, p2pHopCount)
 		}
@@ -3346,6 +3393,9 @@ func tryNewFullTunPathWithTopologyHooks(
 		providerNoAckSends,
 		providerPackSends,
 	)
+	if hooks != nil && hooks.configureProviderClientSettings != nil {
+		hooks.configureProviderClientSettings(providerSettings)
+	}
 	if providerSendRoutes != nil {
 		providerSettings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.RouteStateObserver =
 			func(state clientconnect.P2pRouteState) {
@@ -3384,7 +3434,15 @@ func tryNewFullTunPathWithTopologyHooks(
 	if err := afterStage(fullTunConstructionStageProviderClient); err != nil {
 		return nil, err
 	}
-	providerPlatformSettings := fullTunPlatformSettings(environment.providerH3Port, providerTun)
+	providerPlatformSettings := fullTunPlatformSettings(
+		environment.providerH3Port,
+		providerTun,
+		path.providerPlatformReceiveStats,
+	)
+	providerPlatformSettings.H3DatagramStats = path.providerH3DatagramStats
+	if hooks != nil && hooks.configureProviderPlatformSettings != nil {
+		hooks.configureProviderPlatformSettings(providerPlatformSettings)
+	}
 	if providerSendRoutes != nil {
 		providerSendRoutes.setRouteManager(providerClient.RouteManager())
 		providerPlatformSettings.TransportGenerator = providerSendRoutes.newTransportPair
@@ -3515,12 +3573,23 @@ func tryNewFullTunPathWithTopologyHooks(
 		} else {
 			settings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
 		}
+		if hooks != nil && hooks.configureDeviceClientSettings != nil {
+			hooks.configureDeviceClientSettings(settings)
+		}
 		return settings
 	}
 	generatorSettings := clientconnect.DefaultApiMultiClientGeneratorSettings()
 	generatorSettings.PlatformTransportMode = platformMode
 	generatorSettings.PlatformTransportSettingsGenerator = func() *clientconnect.PlatformTransportSettings {
-		settings := fullTunPlatformSettings(environment.h3Port, deviceCarrierTun)
+		settings := fullTunPlatformSettings(
+			environment.h3Port,
+			deviceCarrierTun,
+			path.devicePlatformReceiveStats,
+		)
+		settings.H3DatagramStats = path.deviceH3DatagramStats
+		if hooks != nil && hooks.configureDevicePlatformSettings != nil {
+			hooks.configureDevicePlatformSettings(settings)
+		}
 		if deviceSendRoutes != nil {
 			settings.TransportGenerator = deviceSendRoutes.newTransportPair
 			settings.SendRouteObserver = deviceSendRoutes.observe
@@ -3584,6 +3653,9 @@ func tryNewFullTunPathWithTopologyHooks(
 	}
 	appSettings := clientconnect.DefaultTunSettingsWithBufferSize(resources.ChannelSize)
 	appSettings.Mtu = environment.profile.InnerMtu
+	if 0 < resources.ApplicationMtu {
+		appSettings.Mtu = resources.ApplicationMtu
+	}
 	readinessPath := &fullTunPath{
 		environment: environment,
 		route:       route,
@@ -3728,6 +3800,10 @@ func tryNewFullTunPathWithTopologyHooks(
 			)
 			return nil, setupErr
 		}
+	} else if route == fullTunRouteExchangeAuto {
+		if err := primeFullTunAuto(ctx, path, observedTransports); err != nil {
+			return nil, fmt.Errorf("prime full-TUN %s route: %w", route, err)
+		}
 	} else {
 		if err := probeFullTunPath(ctx, path); err != nil {
 			setupErr := fmt.Errorf(
@@ -3767,6 +3843,56 @@ func tryNewFullTunPathWithTopologyHooks(
 	return owner.commit(), nil
 }
 
+// Auto readiness is stronger than PlatformTransport.IsConnected: both direct
+// modes must have published a send route in both directions before a campaign
+// can attribute traffic distribution or failover. DNS transports are disabled
+// in this direct-carrier fixture and remain a separate availability gate.
+func primeFullTunAuto(
+	ctx context.Context,
+	path *fullTunPath,
+	observedTransports *platformTransportOwner,
+) error {
+	if err := probeFullTunPath(ctx, path); err != nil {
+		return err
+	}
+	if _, err := path.joinSourcePackCarrierBoundary(ctx); err != nil {
+		return fmt.Errorf("join Auto discovery probe tail: %w", err)
+	}
+	observedCtx, observedCancel := context.WithTimeout(ctx, 90*time.Second)
+	observedClient, observedErr := observedTransports.waitCurrentClient(
+		observedCtx,
+		path.deviceClient,
+	)
+	observedCancel()
+	if observedErr != nil {
+		return fmt.Errorf("current generated Auto client was not observed: %w", observedErr)
+	}
+	deviceWriter := observedClient.RouteManager().OpenMultiRouteWriter(
+		clientconnect.DestinationId(path.providerClientId),
+	)
+	defer observedClient.RouteManager().CloseMultiRouteWriter(deviceWriter)
+	providerWriter := path.providerClient.RouteManager().OpenMultiRouteWriter(
+		clientconnect.DestinationId(observedClient.ClientId()),
+	)
+	defer path.providerClient.RouteManager().CloseMultiRouteWriter(providerWriter)
+	deviceRoutes := clientconnect.TestingObserveMultiRouteWriterRouteState(deviceWriter)
+	defer deviceRoutes.Close()
+	providerRoutes := clientconnect.TestingObserveMultiRouteWriterRouteState(providerWriter)
+	defer providerRoutes.Close()
+	readinessCtx, readinessCancel := context.WithTimeout(
+		ctx,
+		max(30*time.Second, 20*fullTunOuterRoundTrip(path)),
+	)
+	defer readinessCancel()
+	if err := waitForMinimumRouteCount(readinessCtx, deviceRoutes, 2); err != nil {
+		return fmt.Errorf("wait for device H1+H3 Auto routes: %w", err)
+	}
+	if err := waitForMinimumRouteCount(readinessCtx, providerRoutes, 2); err != nil {
+		return fmt.Errorf("wait for provider H1+H3 Auto routes: %w", err)
+	}
+	return nil
+}
+
 // A small exact echo proves the lazy generated client, selected platform, NAT,
 // and return path are ready before any measurement boundary.
 func probeFullTunPath(
@@ -3776,8 +3902,17 @@ func probeFullTunPath(
 	probeStartTime := time.Now()
 	observation := fullTunRouteReadinessObservation{}
 	var serverStage atomic.Int32
-	failure := func(stage string, err error) error {
+	var serverAcceptNanos atomic.Int64
+	var serverRequestNanos atomic.Int64
+	var serverResponseNanos atomic.Int64
+	snapshotServer := func() {
+		observation.ServerAcceptDuration = time.Duration(serverAcceptNanos.Load())
+		observation.ServerRequestDuration = time.Duration(serverRequestNanos.Load())
+		observation.ServerResponseDuration = time.Duration(serverResponseNanos.Load())
 		observation.ServerStage = serverStage.Load()
+	}
+	failure := func(stage string, err error) error {
+		snapshotServer()
 		observation.TotalDuration = time.Since(probeStartTime)
 		return fmt.Errorf(
 			"%s after %s: %w; readiness=%+v",
@@ -3805,12 +3940,15 @@ func probeFullTunPath(
 		&readinessEchoServerSettings{
 			beforeSuccessfulConnectionClose: path.beforeReadinessServerCloseForTest,
 			afterCompleteRequest: func() {
+				serverRequestNanos.Store(int64(time.Since(probeStartTime)))
 				serverStage.Store(2)
 			},
 			afterCompleteResponse: func() {
+				serverResponseNanos.Store(int64(time.Since(probeStartTime)))
 				serverStage.Store(3)
 			},
 			afterAcceptForTest: func(net.Conn) {
+				serverAcceptNanos.CompareAndSwap(0, int64(time.Since(probeStartTime)))
 				serverStage.CompareAndSwap(0, 1)
 			},
 		},
@@ -3877,8 +4015,9 @@ func probeFullTunPath(
 	case <-ctx.Done():
 		return failure("join readiness server", ctx.Err())
 	}
-	observation.ServerStage = serverStage.Load()
+	snapshotServer()
 	observation.TotalDuration = time.Since(probeStartTime)
+	path.readinessObservation = observation
 	path.t.Logf("[perfvar] route-readiness route=%s observation=%+v", path.route, observation)
 	return nil
 }
@@ -4883,11 +5022,11 @@ func writeFullTunAll(connection net.Conn, payload []byte) error {
 }
 
 // The effective application-direction rate is the slowest physical segment.
-// P2P's established one-hop fixture places the application on vnet's right;
-// extended streams place it at the first link's left endpoint.
+// Scenario profile directions remain device upload/download across every
+// topology even where a link-oriented fixture places the device on the right.
 func fullTunEffectiveRateBitsPerSecond(path *fullTunPath, upload bool) int64 {
 	rates := []int64{}
-	if path.route == fullTunRouteExchangeH1 || path.route == fullTunRouteExchangeH3 {
+	if fullTunRouteIsExchange(path.route) {
 		if upload {
 			rates = append(
 				rates,
@@ -4907,16 +5046,12 @@ func fullTunEffectiveRateBitsPerSecond(path *fullTunPath, upload bool) int64 {
 				rates = append(rates, internal.Reverse.RateBitsPerSecond)
 			}
 		}
-	} else if 1 < path.p2pHopCount {
+	} else {
 		if upload {
 			rates = append(rates, path.environment.profile.Forward.RateBitsPerSecond)
 		} else {
 			rates = append(rates, path.environment.profile.Reverse.RateBitsPerSecond)
 		}
-	} else if upload {
-		rates = append(rates, path.environment.profile.Reverse.RateBitsPerSecond)
-	} else {
-		rates = append(rates, path.environment.profile.Forward.RateBitsPerSecond)
 	}
 	rateBitsPerSecond := int64(0)
 	for _, candidate := range rates {
@@ -4988,7 +5123,7 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 	clientSettings := fullTunClientSettings(fullTunRouteP2pFast, nil, nil, nil)
 	clientDefaults := clientconnect.DefaultClientSettings()
 	p2pSettings := clientSettings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings
-	platformSettings := fullTunPlatformSettings(0, nil)
+	platformSettings := fullTunPlatformSettings(0, nil, nil)
 	platformDefaults := clientconnect.DefaultPlatformTransportSettings()
 	if !perfvarRaceEnabled {
 		if settings.SendStallTimeout != defaults.SendStallTimeout ||
@@ -5095,10 +5230,10 @@ func TestFullTunEffectiveRateAndAggregateTimeout(t *testing.T) {
 		route:       fullTunRouteP2pFast,
 		p2pHopCount: 1,
 	}
-	if rate := fullTunEffectiveRateBitsPerSecond(direct, true); rate != lte.Reverse.RateBitsPerSecond {
+	if rate := fullTunEffectiveRateBitsPerSecond(direct, true); rate != lte.Forward.RateBitsPerSecond {
 		t.Fatalf("direct P2P upload rate=%d", rate)
 	}
-	if rate := fullTunEffectiveRateBitsPerSecond(direct, false); rate != lte.Forward.RateBitsPerSecond {
+	if rate := fullTunEffectiveRateBitsPerSecond(direct, false); rate != lte.Reverse.RateBitsPerSecond {
 		t.Fatalf("direct P2P download rate=%d", rate)
 	}
 	extended := &fullTunPath{
@@ -5796,19 +5931,27 @@ func TestMeasureFullTunDownloadWithWarmupAfterDormantAcceptedCandidate(t *testin
 	}
 	const warmupByteCount = 16 * 1024
 	const byteCount = 32 * 1024
+	var startHookCount atomic.Int64
 	result := testFullTunTCPWorkloadAfterDormantAcceptedCandidate(
 		t,
 		3304,
 		func(ctx context.Context, path *fullTunPath) (workloadResult, error) {
-			return measureFullTunDownloadWithWarmup(
+			return measureFullTunDownloadWithWarmupAndStartHook(
 				ctx,
 				path,
 				warmupByteCount,
 				byteCount,
 				warmupByteCount+byteCount,
+				func() error {
+					startHookCount.Add(1)
+					return nil
+				},
 			)
 		},
 	)
+	if startHookCount.Load() != 1 {
+		t.Fatalf("download start hook count=%d, want=1", startHookCount.Load())
+	}
 	if result.UsefulByteCount != byteCount ||
 		result.WarmupByteCount != warmupByteCount ||
 		result.ContentHash != deterministicPayloadHash(byteCount) {
@@ -6137,6 +6280,26 @@ func measureFullTunDownloadWithWarmup(
 	byteCount int64,
 	deadlineByteCount int64,
 ) (workloadResult, error) {
+	return measureFullTunDownloadWithWarmupAndStartHook(
+		ctx,
+		path,
+		warmupByteCount,
+		byteCount,
+		deadlineByteCount,
+		nil,
+	)
+}
+
+// The optional hook starts a live network trace after setup and any warmup,
+// immediately before the measured provider-origin payload is released.
+func measureFullTunDownloadWithWarmupAndStartHook(
+	ctx context.Context,
+	path *fullTunPath,
+	warmupByteCount int64,
+	byteCount int64,
+	deadlineByteCount int64,
+	startHook func() error,
+) (workloadResult, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return workloadResult{}, err
@@ -6304,6 +6467,14 @@ func measureFullTunDownloadWithWarmup(
 	if 0 < warmupByteCount && path.beforeWarmedTcpMeasuredForTest != nil {
 		path.beforeWarmedTcpMeasuredForTest(false)
 	}
+	if startHook != nil {
+		if err := startHook(); err != nil {
+			// Release the server-side measurement barrier before deferred
+			// connection close and flow-server join.
+			close(startMeasured)
+			return workloadResult{}, err
+		}
+	}
 	startTime := time.Now()
 	close(startMeasured)
 	actualHash := sha256.New()
@@ -6342,7 +6513,7 @@ func measureFullTunDownloadWithWarmup(
 func (self *fullTunPath) verifyRoute() error {
 	provider := self.providerStats.Snapshot()
 	device := self.deviceStats.Snapshot()
-	if self.route == fullTunRouteExchangeH1 || self.route == fullTunRouteExchangeH3 {
+	if fullTunRouteIsExchange(self.route) {
 		if provider != (clientconnect.P2pDataPlaneStatsSnapshot{}) ||
 			device != (clientconnect.P2pDataPlaneStatsSnapshot{}) {
 			return fmt.Errorf("forced exchange used P2P provider=%+v device=%+v", provider, device)
@@ -6406,6 +6577,24 @@ func testFullTunRouteCorrectness(t *testing.T, route fullTunRoute) {
 		if upload.UsefulByteCount == 0 || download.UsefulByteCount == 0 {
 			t.Fatalf("full-TUN %s empty result upload=%+v download=%+v", route, upload, download)
 		}
+		if route == fullTunRouteExchangeAuto {
+			devicePackets := path.multiClient.PacketStats()
+			providerPackets := path.providerRemoteNat.PacketStats()
+			deviceAffinity := clientconnect.DirectCarrierAffinityStats{}
+			if currentDeviceClient := path.deviceClient.Load(); currentDeviceClient != nil {
+				deviceAffinity = currentDeviceClient.RouteManager().DirectCarrierAffinityStats()
+			}
+			providerAffinity := path.providerClient.RouteManager().DirectCarrierAffinityStats()
+			t.Logf(
+				"[perfvar] auto-packet-stats device-h1=%+v device-h3=%+v provider-h1=%+v provider-h3=%+v device-affinity=%+v provider-affinity=%+v",
+				devicePackets.TransportStats[clientconnect.TransportTypeH1],
+				devicePackets.TransportStats[clientconnect.TransportTypeH3],
+				providerPackets.TransportStats[clientconnect.TransportTypeH1],
+				providerPackets.TransportStats[clientconnect.TransportTypeH3],
+				deviceAffinity,
+				providerAffinity,
+			)
+		}
 		if err := path.verifyRoute(); err != nil {
 			t.Fatal(err)
 		}
@@ -6420,6 +6609,12 @@ func TestFullTunExchangeH1Correctness(t *testing.T) {
 // Exchange H3 carries exact bidirectional full-TUN TCP traffic.
 func TestFullTunExchangeH3Correctness(t *testing.T) {
 	testFullTunRouteCorrectness(t, fullTunRouteExchangeH3)
+}
+
+// Exchange Auto keeps both equal-priority direct carriers live while carrying
+// exact bidirectional full-TUN TCP traffic.
+func TestFullTunExchangeAutoCorrectness(t *testing.T) {
+	testFullTunRouteCorrectness(t, fullTunRouteExchangeAuto)
 }
 
 // Legacy WebRTC DataChannel carries exact bidirectional full-TUN TCP traffic.

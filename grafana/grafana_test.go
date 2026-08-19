@@ -2,12 +2,12 @@ package grafana
 
 import (
 	"encoding/json"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,6 +38,14 @@ type testPanel struct {
 		ReduceOptions struct {
 			Calcs []string `json:"calcs"`
 		} `json:"reduceOptions"`
+		Layers []struct {
+			Type     string `json:"type"`
+			Location struct {
+				Mode      string `json:"mode"`
+				Lookup    string `json:"lookup"`
+				Gazetteer string `json:"gazetteer"`
+			} `json:"location"`
+		} `json:"layers"`
 	} `json:"options"`
 	Targets []testTarget `json:"targets"`
 }
@@ -46,6 +54,7 @@ type testTarget struct {
 	Expr    string `json:"expr"`
 	Instant bool   `json:"instant"`
 	Range   *bool  `json:"range"`
+	Format  string `json:"format"`
 }
 
 func readTestDashboard(t *testing.T, name string) testDashboard {
@@ -131,6 +140,11 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 	}
 }
 
+// the scalar operator network measurements (controller/stats_collector.go).
+// every taskworker publishes the same value, so a dashboard must read each
+// with max — never sum or avg — to select the measurement without replica
+// skew. the public dashboard and the internal signals dashboard must both
+// show every one of them
 var networkMeasurementMetrics = []string{
 	"urnetwork_stats_total_networks",
 	"urnetwork_stats_block_users",
@@ -142,6 +156,67 @@ var networkMeasurementMetrics = []string{
 	"urnetwork_stats_prev_block_users",
 	"urnetwork_stats_prev_block_demand_deposits_alpha",
 	"urnetwork_stats_prev_block_miner_emissions_alpha",
+	"urnetwork_stats_users_24h",
+	"urnetwork_stats_online_providers",
+	"urnetwork_stats_provider_regions",
+	"urnetwork_stats_provider_cities",
+	"urnetwork_stats_block_number",
+	"urnetwork_stats_block_start_seconds",
+	"urnetwork_stats_block_end_seconds",
+	"urnetwork_stats_block_miner_claims_alpha",
+	"urnetwork_stats_block_miners_claimed",
+	"urnetwork_stats_prev_block_miner_claims_alpha",
+	"urnetwork_stats_prev_block_miners_claimed",
+}
+
+// the labeled operator network measurements, read with max by (labels)
+var networkLabeledMeasurementMetrics = []string{
+	"urnetwork_stats_online_providers_by_country",
+}
+
+// the only metrics a public (no login) dashboard may query. everything
+// else in the registry is internal: infrastructure health, error and
+// auth taxonomies, drain and deploy state, allocator internals, and the
+// exchange mesh detail (see grafana.go). adding a metric here is a
+// publication decision, so it is deliberately an explicit list
+var publicSafeMetrics = append(append([]string{
+	"urnetwork_connect_transfer_bytes",
+	"urnetwork_connect_resident_clients",
+	"urnetwork_connect_exchange_io_bytes_total",
+	"urnetwork_connect_connection_new",
+}, networkMeasurementMetrics...), networkLabeledMeasurementMetrics...)
+
+var metricNamePattern = regexp.MustCompile(`urnetwork_[a-z0-9_]+`)
+
+// metricOccurrences returns the byte offsets at which the whole metric
+// name occurs in expression (not as a prefix of a longer name)
+func metricOccurrences(expression string, metric string) []int {
+	offsets := []int{}
+	for _, index := range metricNamePattern.FindAllStringIndex(expression, -1) {
+		if expression[index[0]:index[1]] == metric {
+			offsets = append(offsets, index[0])
+		}
+	}
+	return offsets
+}
+
+var maxByPrefixPattern = regexp.MustCompile(`max by \([a-z_, ]+\) \($`)
+
+// assertReplicaSafeReads fails unless every occurrence of metric in
+// expression is read as max(<metric>...) or max by (...) (<metric>...),
+// and, when selector is not empty, is immediately followed by it
+func assertReplicaSafeReads(t *testing.T, where string, expression string, metric string, selector string) {
+	t.Helper()
+	for _, offset := range metricOccurrences(expression, metric) {
+		before := expression[:offset]
+		if !strings.HasSuffix(before, "max(") && !maxByPrefixPattern.MatchString(before) {
+			t.Errorf("%s reads replicated measurement %s without max: %s", where, metric, expression)
+		}
+		after := expression[offset+len(metric):]
+		if selector != "" && !strings.HasPrefix(after, selector) {
+			t.Errorf("%s reads %s without the %s selector: %s", where, metric, selector, expression)
+		}
+	}
 }
 
 func TestPublicNetworkStatsCoversEveryMeasurement(t *testing.T) {
@@ -150,14 +225,17 @@ func TestPublicNetworkStatsCoversEveryMeasurement(t *testing.T) {
 		t.Fatal("public network stats dashboard lost its public tag")
 	}
 	expressions := dashboardExpressions(dashboard)
-	for _, metric := range networkMeasurementMetrics {
-		want := fmt.Sprintf("max(%s)", metric)
-		if !slices.Contains(expressions, want) {
-			t.Errorf("public network stats is missing replica-safe query %q", want)
+	joined := strings.Join(expressions, "\n")
+	for _, metric := range append(slices.Clone(networkMeasurementMetrics), networkLabeledMeasurementMetrics...) {
+		if len(metricOccurrences(joined, metric)) == 0 {
+			t.Errorf("public network stats is missing measurement %s", metric)
+		}
+		for _, expression := range expressions {
+			assertReplicaSafeReads(t, "public network stats", expression, metric, "")
 		}
 	}
-	for _, metric := range []string{"urnetwork_connect_transfer_bytes", "urnetwork_connect_resident_clients"} {
-		if !strings.Contains(strings.Join(expressions, "\n"), metric) {
+	for _, metric := range []string{"urnetwork_connect_transfer_bytes", "urnetwork_connect_resident_clients", "urnetwork_connect_connection_new"} {
+		if len(metricOccurrences(joined, metric)) == 0 {
 			t.Errorf("public network stats is missing %s", metric)
 		}
 	}
@@ -180,6 +258,75 @@ func TestPublicNetworkStatsCoversEveryMeasurement(t *testing.T) {
 	}
 	if !slices.Contains(traffic.Options.ReduceOptions.Calcs, "lastNotNull") {
 		t.Error("traffic total must reduce its one instant value with lastNotNull")
+	}
+}
+
+// a public dashboard is readable without a login, so it may query only the
+// allowlisted public metrics, and it may never break a query out by the
+// pusher's fleet labels: per-host, per-process, per-deploy-block, or
+// per-service series disclose fleet size, per-host capacity, and deploy
+// cadence even when the metric itself is public
+func TestPublicDashboardsQueryOnlyPublicSafeMetrics(t *testing.T) {
+	entries, err := dashboardsFs.ReadDir("dashboards")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleetLabelPattern := regexp.MustCompile(`by \([^)]*\b(host|instance|block|service|env)\b`)
+	public := 0
+	for _, entry := range entries {
+		dashboard := readTestDashboard(t, entry.Name())
+		if !slices.Contains(dashboard.Tags, PublicTag) {
+			continue
+		}
+		public += 1
+		for _, expression := range dashboardExpressions(dashboard) {
+			for _, metric := range metricNamePattern.FindAllString(expression, -1) {
+				if !slices.Contains(publicSafeMetrics, metric) {
+					t.Errorf("%s queries %s, which is not a public-safe metric: %s", entry.Name(), metric, expression)
+				}
+			}
+			if fleetLabelPattern.MatchString(expression) {
+				t.Errorf("%s breaks a public query out by a fleet label: %s", entry.Name(), expression)
+			}
+		}
+	}
+	if public == 0 {
+		t.Fatal("no public dashboard found")
+	}
+}
+
+// the provider map is the public dashboard's centerpiece: an instant table
+// query of the per-country gauge, placed by looking the ISO country code up
+// in grafana's bundled country gazetteer. the collector exports the code
+// upper case to match the gazetteer keys
+func TestPublicNetworkStatsProviderMap(t *testing.T) {
+	dashboard := readTestDashboard(t, "public-traffic.json")
+	var maps []testPanel
+	for _, panel := range dashboard.Panels {
+		if panel.Type == "geomap" {
+			maps = append(maps, panel)
+		}
+	}
+	if len(maps) != 1 {
+		t.Fatalf("public network stats has %d geomap panels, want 1", len(maps))
+	}
+	geomap := maps[0]
+	if len(geomap.Targets) != 1 {
+		t.Fatalf("provider map has %d targets, want 1", len(geomap.Targets))
+	}
+	target := geomap.Targets[0]
+	if target.Expr != "max by (country_code, country) (urnetwork_stats_online_providers_by_country)" {
+		t.Errorf("provider map query = %q", target.Expr)
+	}
+	if !target.Instant || target.Format != "table" {
+		t.Error("provider map must be an instant table query so the country code is a lookup field")
+	}
+	if len(geomap.Options.Layers) != 1 {
+		t.Fatalf("provider map has %d layers, want 1", len(geomap.Options.Layers))
+	}
+	layer := geomap.Options.Layers[0]
+	if layer.Type != "markers" || layer.Location.Mode != "lookup" || layer.Location.Lookup != "country_code" || layer.Location.Gazetteer != "public/gazetteer/countries.json" {
+		t.Errorf("provider map layer = %+v", layer)
 	}
 }
 
@@ -221,8 +368,9 @@ func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {
 }
 
 // registeredApplicationMetrics inventories prometheus option literals in the
-// production Go sources. The stats collector creates its gauges through a
-// small wrapper, so its string-literal call sites are handled explicitly.
+// production Go sources. The stats collector creates its gauges through
+// small wrappers (newStatsGauge, newStatsGaugeVec), so their string-literal
+// call sites are handled explicitly.
 // This makes adding a metric without placing it on an internal dashboard a
 // test failure instead of a silent observability gap.
 func registeredApplicationMetrics(t *testing.T) []string {
@@ -257,7 +405,7 @@ func registeredApplicationMetrics(t *testing.T) []string {
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok {
-				if function, ok := call.Fun.(*ast.Ident); ok && function.Name == "newStatsGauge" && 0 < len(call.Args) {
+				if function, ok := call.Fun.(*ast.Ident); ok && (function.Name == "newStatsGauge" || function.Name == "newStatsGaugeVec") && 0 < len(call.Args) {
 					if name, ok := stringLiteral(call.Args[0]); ok {
 						metrics["urnetwork_stats_"+name] = true
 					}
@@ -345,10 +493,13 @@ func TestInternalDashboardsCoverEveryApplicationMetric(t *testing.T) {
 
 func TestInternalNetworkMeasurementsAreScopedAndReplicaSafe(t *testing.T) {
 	expressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
-	for _, metric := range networkMeasurementMetrics {
-		want := fmt.Sprintf(`max(%s{env="$env"})`, metric)
-		if !slices.Contains(expressions, want) {
-			t.Errorf("internal network measurements is missing query %q", want)
+	joined := strings.Join(expressions, "\n")
+	for _, metric := range append(slices.Clone(networkMeasurementMetrics), networkLabeledMeasurementMetrics...) {
+		if len(metricOccurrences(joined, metric)) == 0 {
+			t.Errorf("internal network measurements is missing %s", metric)
+		}
+		for _, expression := range expressions {
+			assertReplicaSafeReads(t, "internal network measurements", expression, metric, `{env="$env"}`)
 		}
 	}
 }

@@ -218,6 +218,53 @@ func TestSumStDepositedRao(t *testing.T) {
 	})
 }
 
+// SumStMinerClaimedInBlockRange windows MinerClaimed events by chain block
+// (the public stats collector maps the subnet block clock to a chain block
+// range) and dedupes the claiming coldkeys. Guards the half-open block
+// range, the kind filter, the coldkey dedupe, and malformed-row skipping.
+func TestSumStMinerClaimedInBlockRange(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		UpsertStEvents(ctx, []*StChainEvent{
+			// in range: two claims by the same coldkey and one by another
+			{BlockNumber: 100, LogIndex: 0, TxHash: "0x1", Kind: "MinerClaimed", DataJson: `{"e":"7","no_id":"3","coldkey":"0xaa","share_bps":"5000","amount":"100","caller":"0x0"}`},
+			{BlockNumber: 150, LogIndex: 0, TxHash: "0x2", Kind: "MinerClaimed", DataJson: `{"e":"7","no_id":"4","coldkey":"0xaa","share_bps":"5000","amount":"250","caller":"0x0"}`},
+			{BlockNumber: 199, LogIndex: 0, TxHash: "0x3", Kind: "MinerClaimed", DataJson: `{"e":"7","no_id":"3","coldkey":"0xbb","share_bps":"5000","amount":"1000","caller":"0x0"}`},
+			// the range is half-open: block 200 belongs to the next window
+			{BlockNumber: 200, LogIndex: 0, TxHash: "0x4", Kind: "MinerClaimed", DataJson: `{"e":"8","no_id":"3","coldkey":"0xcc","share_bps":"5000","amount":"5000","caller":"0x0"}`},
+			// before the range
+			{BlockNumber: 99, LogIndex: 0, TxHash: "0x5", Kind: "MinerClaimed", DataJson: `{"e":"6","no_id":"3","coldkey":"0xdd","share_bps":"5000","amount":"7000","caller":"0x0"}`},
+			// a different kind with a claim-shaped payload must be excluded by
+			// the kind filter
+			{BlockNumber: 120, LogIndex: 0, TxHash: "0x6", Kind: "Deposited", DataJson: `{"e":"7","no_id":"3","coldkey":"0xee","amount":"9999"}`},
+			// malformed rows are skipped, not counted
+			{BlockNumber: 130, LogIndex: 0, TxHash: "0x7", Kind: "MinerClaimed", DataJson: `{"coldkey":"0xff","amount":"not-a-number"}`},
+			{BlockNumber: 131, LogIndex: 0, TxHash: "0x8", Kind: "MinerClaimed", DataJson: `not json`},
+		})
+
+		amount, miners := SumStMinerClaimedInBlockRange(ctx, 100, 200)
+		if amount.Cmp(big.NewInt(1350)) != 0 {
+			t.Fatalf("SumStMinerClaimedInBlockRange(100, 200) amount = %s, want 1350", amount.String())
+		}
+		if miners != 2 {
+			t.Fatalf("SumStMinerClaimedInBlockRange(100, 200) miners = %d, want 2 (0xaa claimed twice)", miners)
+		}
+
+		// the next window sees only its own claim
+		amount, miners = SumStMinerClaimedInBlockRange(ctx, 200, 300)
+		if amount.Cmp(big.NewInt(5000)) != 0 || miners != 1 {
+			t.Fatalf("SumStMinerClaimedInBlockRange(200, 300) = %s, %d, want 5000, 1", amount.String(), miners)
+		}
+
+		// an empty window is zero, not an error
+		amount, miners = SumStMinerClaimedInBlockRange(ctx, 1000, 2000)
+		if amount.Sign() != 0 || miners != 0 {
+			t.Fatalf("SumStMinerClaimedInBlockRange(1000, 2000) = %s, %d, want 0, 0", amount.String(), miners)
+		}
+	})
+}
+
 // testStHeadBindingRow reads the st_head_binding mirror row directly (the
 // mirror is ops/debug only — production reads replay st_event instead).
 func testStHeadBindingRow(ctx context.Context, ckey [32]byte) (active bool, updateBlock uint64, exists bool) {

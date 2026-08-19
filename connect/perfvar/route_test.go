@@ -337,6 +337,10 @@ type routeEnvironment struct {
 	handler    *connectserver.ConnectHandler
 	httpServer *http.Server
 	apiServer  *http.Server
+	// Per-environment H3 boundaries keep server-side queue admission, actual
+	// QUIC frame events, and application dequeue visible to low-bar tests.
+	h3DatagramStats   *clientconnect.H3DatagramStats
+	h3QuicPacketStats *clientconnect.H3QuicPacketStats
 
 	networkId   server.Id
 	userId      server.Id
@@ -388,6 +392,27 @@ func newRouteEnvironmentWithNetworkPeersAfterPoolBaseline(
 	enableNetworkPeers bool,
 	afterPoolBaseline func(),
 ) *routeEnvironment {
+	return newRouteEnvironmentWithNetworkPeersAndHandlerSettings(
+		ctx,
+		t,
+		profile,
+		enableNetworkPeers,
+		afterPoolBaseline,
+		nil,
+	)
+}
+
+// The handler-settings seam is used by focused transport diagnostics. It runs
+// after production-equivalent defaults are constructed and before the handler
+// starts; nil leaves qlog tracing and all other optional instrumentation off.
+func newRouteEnvironmentWithNetworkPeersAndHandlerSettings(
+	ctx context.Context,
+	t testing.TB,
+	profile networkProfile,
+	enableNetworkPeers bool,
+	afterPoolBaseline func(),
+	configureHandlerSettings func(*connectserver.ConnectHandlerSettings),
+) *routeEnvironment {
 	poolSnapshotBefore := captureRouteMessagePoolSnapshot(nil)
 	if afterPoolBaseline != nil {
 		afterPoolBaseline()
@@ -397,7 +422,10 @@ func newRouteEnvironmentWithNetworkPeersAfterPoolBaseline(
 	environmentCtx, cancel := context.WithCancel(ctx)
 	network := newSimulatedIPNetwork(environmentCtx)
 	edgeSettings := clientconnect.DefaultTunSettingsWithBufferSize(4096)
-	edgeSettings.Mtu = profile.InnerMtu
+	// The edge TUN is the physical peer of every access TUN, so it uses the
+	// same outer IP packet boundary. Applying InnerMtu here fragments server
+	// QUIC packets before the directional link can model its configured MTU.
+	edgeSettings.Mtu = carrierTunMtu(profile)
 	edgeTun, err := clientconnect.CreateTun(environmentCtx, edgeSettings)
 	if err != nil {
 		cancel()
@@ -477,6 +505,9 @@ func newRouteEnvironmentWithNetworkPeersAfterPoolBaseline(
 	handlerSettings.ConnectionAnnounceTimeout = 0
 	handlerSettings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
 	handlerSettings.ConnectionTestConfig = connectserver.V0TestConfig()
+	if configureHandlerSettings != nil {
+		configureHandlerSettings(handlerSettings)
+	}
 	announces := newRouteAsyncLifecycle()
 	handlerSettings.ConnectionAnnounceSettings.LifecycleStarted = func() {
 		if !announces.start() {
@@ -568,6 +599,8 @@ func newRouteEnvironmentWithNetworkPeersAfterPoolBaseline(
 		handler:                      handler,
 		httpServer:                   httpServer,
 		apiServer:                    apiServer,
+		h3DatagramStats:              handlerSettings.H3DatagramStats,
+		h3QuicPacketStats:            handlerSettings.H3QuicPacketStats,
 		networkId:                    networkId,
 		userId:                       userId,
 		userSession:                  userSession,
@@ -624,7 +657,11 @@ func (self *routeEnvironment) newClientNodeWithProfileAt(
 	self.stateLock.Unlock()
 	name := fmt.Sprintf("client-%d", nodeIndex)
 	settings := clientconnect.DefaultTunSettingsWithBufferSize(4096)
-	settings.Mtu = accessProfile.InnerMtu
+	// This TUN models the physical access interface, so its IP MTU is the
+	// smallest directional outer-path MTU. InnerMtu is reserved for traffic
+	// nested inside the VPN. Using it here fragments a legal 1,200-byte QUIC
+	// UDP payload before the link simulator can enforce its 1,280-byte path.
+	settings.Mtu = carrierTunMtu(accessProfile)
 	clientTun, err := clientconnect.CreateTun(self.ctx, settings)
 	if err != nil {
 		self.t.Fatalf("create %s TUN: %v", name, err)
@@ -734,6 +771,24 @@ func (self *routeEnvironment) newClientNodeWithProfileAt(
 		},
 	}
 	return clientTun, clientconnect.NewClientStrategy(self.ctx, strategySettings)
+}
+
+func carrierTunMtu(profile networkProfile) int {
+	return min(profile.Forward.OuterMtu, profile.Reverse.OuterMtu)
+}
+
+func TestCarrierTunMtuUsesSmallestOuterPacketBoundary(t *testing.T) {
+	profile := networkProfile{
+		InnerMtu: 1100,
+		Forward:  linkProfile{OuterMtu: 1400},
+		Reverse:  linkProfile{OuterMtu: 1280},
+	}
+	if got := carrierTunMtu(profile); got != 1280 {
+		t.Fatalf("carrier TUN MTU=%d want=1280", got)
+	}
+	if got := carrierTunMtu(profile); got == profile.InnerMtu {
+		t.Fatalf("carrier TUN reused nested VPN MTU=%d", got)
+	}
 }
 
 // Authentication creates the by-client JWT validated by the real handler.

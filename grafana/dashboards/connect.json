@@ -70,7 +70,7 @@
             "id": 2,
             "type": "timeseries",
             "title": "dropped messages / s",
-            "description": "Lossless drop counters by bounded drop point: destination-forward queue full, receiving resident queue full, or resident abuse validation. Rates are summed per host across the selected deploy blocks.",
+            "description": "Lossless drop counters by bounded drop point: destination-forward queue full, receiving resident queue full, resident abuse validation, or zero-wait receive queue admission (by boundary; the byte-rate query is hidden by default and can be toggled on for sizing). Rates are summed per host across the selected deploy blocks.",
             "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
@@ -89,6 +89,17 @@
                     "refId": "C",
                     "expr": "sum by (host) (rate(urnetwork_connect_abuse_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
                     "legendFormat": "abuse {{host}}"
+                },
+                {
+                    "refId": "D",
+                    "expr": "sum by (host, boundary) (rate(urnetwork_connect_receive_queue_dropped_messages{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "receive queue {{boundary}} {{host}}"
+                },
+                {
+                    "refId": "E",
+                    "expr": "sum by (host, boundary) (rate(urnetwork_connect_receive_queue_dropped_bytes{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "receive queue bytes {{boundary}} {{host}}",
+                    "hide": true
                 }
             ]
         },

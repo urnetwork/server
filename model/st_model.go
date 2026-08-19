@@ -842,6 +842,61 @@ func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, minBlock uint64,
 	return total
 }
 
+// parseMinerClaimedEvent extracts the claiming coldkey and the claimed α
+// (rao) from a MinerClaimed `st_event.data_json` (the fields written by the
+// event decoder in st_controller.go: `e`, `no_id`, `coldkey`, `share_bps`,
+// `amount`, `caller`). Returns ok=false on any malformed row.
+func parseMinerClaimedEvent(dataJson string) (coldkey string, amount *big.Int, ok bool) {
+	var data struct {
+		Coldkey string `json:"coldkey"`
+		Amount  string `json:"amount"`
+	}
+	if err := json.Unmarshal([]byte(dataJson), &data); err != nil {
+		return "", nil, false
+	}
+	if data.Coldkey == "" {
+		return "", nil, false
+	}
+	amt, amtOk := new(big.Int).SetString(data.Amount, 10)
+	if !amtOk {
+		return "", nil, false
+	}
+	return data.Coldkey, amt, true
+}
+
+// SumStMinerClaimedInBlockRange sums the α (rao) of every mirrored
+// MinerClaimed event with block_number in [minBlock, maxBlock) and counts
+// the distinct claiming coldkeys — the miner payouts claimed inside a
+// wall-clock window mapped to chain blocks (the public stats collector,
+// controller/stats_collector.go). The kind+block index covers the scan.
+func SumStMinerClaimedInBlockRange(ctx context.Context, minBlock uint64, maxBlock uint64) (amountRao *big.Int, minerCount int64) {
+	amountRao = big.NewInt(0)
+	coldkeys := map[string]bool{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT data_json
+                FROM st_event
+                WHERE kind = 'MinerClaimed' AND $1 <= block_number AND block_number < $2
+            `,
+			int64(minBlock),
+			int64(maxBlock),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var dataJson string
+				server.Raise(result.Scan(&dataJson))
+				if coldkey, amount, ok := parseMinerClaimedEvent(dataJson); ok {
+					amountRao.Add(amountRao, amount)
+					coldkeys[coldkey] = true
+				}
+			}
+		})
+	})
+	return amountRao, int64(len(coldkeys))
+}
+
 // GetStHighWaterBlock returns the next block the event sync should scan
 // from (0 when never synced).
 func GetStHighWaterBlock(ctx context.Context) uint64 {

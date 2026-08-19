@@ -95,6 +95,45 @@ var abuseDroppedCounter = prometheus.NewCounter(
 	},
 )
 
+// Receive-side queue refusals are loss signals for the end-to-end Transfer
+// recovery layer. The bounded label set identifies the exact carrier/bridge
+// boundary without creating per-client series.
+const (
+	receiveQueueBoundaryConnectH1               = "connect_h1"
+	receiveQueueBoundaryConnectH3               = "connect_h3"
+	receiveQueueBoundaryExchangeAcceptTransport = "exchange_accept_transport"
+	receiveQueueBoundaryExchangeAcceptForward   = "exchange_accept_forward"
+	receiveQueueBoundaryExchangeOutboundSocket  = "exchange_outbound_socket"
+	receiveQueueBoundaryExchangeToResident      = "exchange_to_resident"
+	receiveQueueBoundaryResidentClientControl   = "resident_client_control"
+	receiveQueueBoundaryResidentClientForward   = "resident_client_forward"
+)
+
+var receiveQueueDroppedMessagesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "receive_queue_dropped_messages",
+		Help:      "Complete Transfer messages dropped by zero-wait receive queue admission",
+	},
+	[]string{"boundary"},
+)
+
+var receiveQueueDroppedBytesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "receive_queue_dropped_bytes",
+		Help:      "Complete Transfer message bytes dropped by zero-wait receive queue admission",
+	},
+	[]string{"boundary"},
+)
+
+func recordReceiveQueueDrop(boundary string, byteCount int) {
+	receiveQueueDroppedMessagesCounter.WithLabelValues(boundary).Inc()
+	receiveQueueDroppedBytesCounter.WithLabelValues(boundary).Add(float64(max(0, byteCount)))
+}
+
 // Exchange I/O is measured at the application framing boundary. A frame is
 // recorded only after its complete 4-byte header and payload have been read or
 // written, so retries and failed partial writes cannot inflate the totals.
@@ -222,6 +261,8 @@ func init() {
 	prometheus.MustRegister(forwardDroppedCounter)
 	prometheus.MustRegister(forwardReceiveDroppedCounter)
 	prometheus.MustRegister(abuseDroppedCounter)
+	prometheus.MustRegister(receiveQueueDroppedMessagesCounter)
+	prometheus.MustRegister(receiveQueueDroppedBytesCounter)
 	prometheus.MustRegister(exchangeIOFramesCounter)
 	prometheus.MustRegister(exchangeIOBytesCounter)
 	prometheus.MustRegister(exchangeActiveConnectionsGauge)
@@ -249,6 +290,19 @@ func init() {
 			exchangeActiveConnectionsGauge.WithLabelValues(direction, op).Set(0)
 		}
 	}
+	for _, boundary := range []string{
+		receiveQueueBoundaryConnectH1,
+		receiveQueueBoundaryConnectH3,
+		receiveQueueBoundaryExchangeAcceptTransport,
+		receiveQueueBoundaryExchangeAcceptForward,
+		receiveQueueBoundaryExchangeOutboundSocket,
+		receiveQueueBoundaryExchangeToResident,
+		receiveQueueBoundaryResidentClientControl,
+		receiveQueueBoundaryResidentClientForward,
+	} {
+		receiveQueueDroppedMessagesCounter.WithLabelValues(boundary).Add(0)
+		receiveQueueDroppedBytesCounter.WithLabelValues(boundary).Add(0)
+	}
 }
 
 // use 0 for deadlock testing
@@ -265,6 +319,15 @@ const defaultExchangeBufferSize = 4096
 // use 0 for deadlock testing (see `ForwardBufferSize`).
 const defaultForwardBufferSize = 4096
 
+// Callback queues retain only bounded burst state after the shared Client
+// receive sequence returns. Forward queues are sharded by destination so one
+// slow contract lookup cannot delay unrelated destinations.
+const (
+	defaultResidentControlQueueSize       = 256
+	defaultResidentForwardQueueSize       = 4096
+	defaultResidentForwardQueueShardCount = 16
+)
+
 // message writes on all layers have a single `WriteTimeout`
 // this is because all layers have the same back pressure
 // layers may have different read timeouts because of different keep alive/ping settings
@@ -277,15 +340,18 @@ type ExchangeSettings struct {
 	// separate from `ExchangeBufferSize` so production can hold a deep queue
 	// for congestion control while deadlock tests set it to 0.
 	ForwardBufferSize int
-	// timeout for enqueuing onto a `ResidentForward` when the resident reads a
-	// message off its client receive loop and forwards it to a peer resident
-	// (`handleClientForward`). In production this is 0 (non-blocking): the
-	// receive loop must never stall on a single slow route, so a message that
-	// cannot be enqueued is dropped and the sender resends. Tests with 0-size
-	// buffers set this to `WriteTimeout` so the forward blocks instead of
-	// dropping, keeping delivery deterministic. Note `AddForward` delivery to
-	// the local client uses the normal `WriteTimeout`, not this.
+	// timeout for the owned forward worker to enqueue onto a `ResidentForward`.
+	// The Client callback always uses zero-wait ingress regardless of this
+	// value. Production uses 0; exact-delivery tests may let the sender worker
+	// wait on a zero-size forward buffer. `AddForward` delivery to the local
+	// client uses the normal `WriteTimeout`, not this.
 	ForwardTimeout time.Duration
+
+	// Total zero-wait callback ingress capacity. Forward capacity is divided
+	// across destination-stable shards.
+	ResidentControlQueueSize       int
+	ResidentForwardQueueSize       int
+	ResidentForwardQueueShardCount int
 
 	// pending messages on an exchange connection are coalesced into a single
 	// writev up to these limits, to amortize the per-message syscall cost
@@ -406,7 +472,10 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 
 		ForwardBufferSize: defaultForwardBufferSize,
 		// non-blocking receive-forward delivery in production
-		ForwardTimeout: 0,
+		ForwardTimeout:                 0,
+		ResidentControlQueueSize:       defaultResidentControlQueueSize,
+		ResidentForwardQueueSize:       defaultResidentForwardQueueSize,
+		ResidentForwardQueueShardCount: defaultResidentForwardQueueShardCount,
 
 		ExchangeWriteBatchCount:     256,
 		ExchangeWriteBatchByteCount: ByteCount(256 * 1024),
@@ -1227,11 +1296,8 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				close(receive)
 			}()
 
-			// read
-			// messages from the transport are to be received by the resident
-			// messages not destined for the control id are handled by the resident forward
-			receiveTimer := time.NewTimer(0)
-			defer receiveTimer.Stop()
+			// Messages from the transport are received by the resident; messages
+			// not destined for ControlId are handled by its forward callback.
 			for {
 				message, err := receiveBuffer.ReadMessage(conn)
 				if err != nil {
@@ -1248,32 +1314,26 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					glog.Infof("[ecrr] %s/%s waiting\n", resident.clientId, resident.residentId)
 				}
 
-				// fast path without arming a timer
-				select {
-				case receive <- message:
+				messageByteCount := len(message)
+				sendResult := trySendPooledReceive(
+					handleCtx.Done(),
+					nil,
+					receive,
+					message,
+				)
+				switch sendResult {
+				case pooledMessageSendDelivered:
 					resident.UpdateActivity()
 					if glog.V(2) {
 						glog.Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
 					}
-					continue
-				default:
-				}
-
-				receiveTimer.Reset(self.settings.WriteTimeout)
-				select {
-				case <-handleCtx.Done():
-					connect.MessagePoolReturn(message)
+				case pooledMessageSendDone:
 					return
-				case receive <- message:
-					resident.UpdateActivity()
-					if glog.V(2) {
-						glog.Infof("[ecrr] %s/%s\n", resident.clientId, resident.residentId)
-					}
-				case <-receiveTimer.C:
-					if glog.V(1) {
-						glog.Infof("[ecrr]drop %s/%s\n", resident.clientId, resident.residentId)
-					}
-					connect.MessagePoolReturn(message)
+				case pooledMessageSendDropped:
+					recordReceiveQueueDrop(
+						receiveQueueBoundaryExchangeAcceptTransport,
+						messageByteCount,
+					)
 				}
 			}
 		})
@@ -1337,11 +1397,6 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				close(forward)
 			}()
 
-			// reusable write-timeout timer (hot-path timer reuse): the slow
-			// select arms a timer per message while the forward channel is full.
-			writeTimer := time.NewTimer(0)
-			defer writeTimer.Stop()
-
 			for {
 				message, err := receiveBuffer.ReadMessage(conn)
 				if err != nil {
@@ -1354,32 +1409,26 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					continue
 				}
 
-				// fast path without arming a timer
-				select {
-				case forward <- message:
+				messageByteCount := len(message)
+				sendResult := trySendPooledReceive(
+					handleCtx.Done(),
+					nil,
+					forward,
+					message,
+				)
+				switch sendResult {
+				case pooledMessageSendDelivered:
 					resident.UpdateActivity()
 					if glog.V(2) {
 						glog.Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
 					}
-					continue
-				default:
-				}
-
-				writeTimer.Reset(self.settings.WriteTimeout)
-				select {
-				case <-handleCtx.Done():
-					connect.MessagePoolReturn(message)
+				case pooledMessageSendDone:
 					return
-				case forward <- message:
-					resident.UpdateActivity()
-					if glog.V(2) {
-						glog.Infof("[ecrf]forward %s/%s", resident.clientId, resident.residentId)
-					}
-				case <-writeTimer.C:
-					if glog.V(1) {
-						glog.Infof("[ecrf]drop %s/%s", resident.clientId, resident.residentId)
-					}
-					connect.MessagePoolReturn(message)
+				case pooledMessageSendDropped:
+					recordReceiveQueueDrop(
+						receiveQueueBoundaryExchangeAcceptForward,
+						messageByteCount,
+					)
 				}
 			}
 		})
@@ -1401,7 +1450,13 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 	switch header.Op {
 	case ExchangeOpTransport:
-		send, receive, closeTransport, err := resident.AddTransport()
+		send, receive, closeTransport, err := resident.AddTransportWithProperties(
+			connect.TransferCarrierProperties{
+				Unreliable:              header.UnreliableTransfer,
+				UnreliableFlowIsolation: header.UnreliableFlowIsolation,
+				UnreliableFlowReserve:   header.UnreliableFlowReserve,
+			},
+		)
 		if err == nil {
 			runTransport(send, receive, closeTransport)
 		} else {
@@ -2008,10 +2063,13 @@ func exchangeOpMetricLabel(op ExchangeOp) string {
 }
 
 type ExchangeHeader struct {
-	Version    int
-	ClientId   server.Id
-	ResidentId server.Id
-	Op         ExchangeOp
+	Version                 int
+	ClientId                server.Id
+	ResidentId              server.Id
+	Op                      ExchangeOp
+	UnreliableTransfer      bool
+	UnreliableFlowIsolation bool
+	UnreliableFlowReserve   bool
 }
 
 type ExchangeConnection struct {
@@ -2162,11 +2220,6 @@ func (self *ExchangeConnection) Run() {
 				close(self.receive)
 			}()
 
-			// reusable write-timeout timer (hot-path timer reuse): the slow
-			// select arms a timer per message while the receive channel is full.
-			writeTimer := time.NewTimer(0)
-			defer writeTimer.Stop()
-
 			for {
 				select {
 				case <-self.ctx.Done():
@@ -2183,32 +2236,26 @@ func (self *ExchangeConnection) Run() {
 					continue
 				}
 
-				// fast path without arming a timer
-				select {
-				case self.receive <- message:
+				messageByteCount := len(message)
+				sendResult := trySendPooledReceive(
+					self.ctx.Done(),
+					nil,
+					self.receive,
+					message,
+				)
+				switch sendResult {
+				case pooledMessageSendDelivered:
 					self.notifyReceiveEnqueuedForTest(message)
 					if glog.V(2) {
 						glog.Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
 					}
-					continue
-				default:
-				}
-
-				writeTimer.Reset(self.settings.WriteTimeout)
-				select {
-				case <-self.ctx.Done():
-					connect.MessagePoolReturn(message)
+				case pooledMessageSendDone:
 					return
-				case self.receive <- message:
-					self.notifyReceiveEnqueuedForTest(message)
-					if glog.V(2) {
-						glog.Infof("[ecr] %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
-					}
-				case <-writeTimer.C:
-					if glog.V(1) {
-						glog.Infof("[ecr]drop %s/%s@%s:%d\n", self.header.ClientId, self.header.ResidentId, self.host, self.port)
-					}
-					connect.MessagePoolReturn(message)
+				case pooledMessageSendDropped:
+					recordReceiveQueueDrop(
+						receiveQueueBoundaryExchangeOutboundSocket,
+						messageByteCount,
+					)
 				}
 			}
 		})
@@ -2520,6 +2567,41 @@ func sendPooledMessage(
 	}
 }
 
+// trySendPooledReceive transfers one complete carrier message without waiting
+// for queue capacity. It is the receive-side counterpart to sendPooledMessage:
+// sender-owned bridges may propagate backpressure, while a receiver must drop
+// immediately and let Transfer recovery discover the achievable rate.
+func trySendPooledReceive(
+	ctxDone <-chan struct{},
+	peerDone <-chan struct{},
+	destination chan<- []byte,
+	message []byte,
+) pooledMessageSendResult {
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	default:
+	}
+
+	select {
+	case <-ctxDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case <-peerDone:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDone
+	case destination <- message:
+		return pooledMessageSendDelivered
+	default:
+		connect.MessagePoolReturn(message)
+		return pooledMessageSendDropped
+	}
+}
+
 // returnReadyPooledMessages returns every pooled message currently queued on
 // a channel. The channel may be open or closed and may have another receiver
 // during teardown.
@@ -2559,8 +2641,29 @@ func NewResidentTransport(
 	clientId server.Id,
 	instanceId server.Id,
 ) *ResidentTransport {
+	return NewResidentTransportWithProperties(
+		ctx,
+		exchange,
+		clientId,
+		instanceId,
+		connect.TransferCarrierProperties{},
+	)
+}
+
+// Carries physical delivery semantics to the resident node. Gob ignores this
+// added field on old peers and decodes it as false from them.
+func NewResidentTransportWithProperties(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+	properties connect.TransferCarrierProperties,
+) *ResidentTransport {
 	header := ExchangeHeader{
-		Op: ExchangeOpTransport,
+		Op:                      ExchangeOpTransport,
+		UnreliableTransfer:      properties.Unreliable,
+		UnreliableFlowIsolation: properties.UnreliableFlowIsolation,
+		UnreliableFlowReserve:   properties.UnreliableFlowReserve,
 	}
 	return newResidentTransport(ctx, exchange, header, clientId, instanceId)
 }
@@ -2650,9 +2753,8 @@ func (self *ResidentTransport) Run() {
 				}
 			})
 
-			// read
-			readTimer := time.NewTimer(0)
-			defer readTimer.Stop()
+			// Read-side bridge: never park this connection on the resident's
+			// route queue. Transfer recovery owns a refused complete message.
 			for {
 				select {
 				case <-handleCtx.Done():
@@ -2662,21 +2764,21 @@ func (self *ResidentTransport) Run() {
 						// need a new connection
 						return
 					}
-					sendResult := sendPooledMessage(
+					messageByteCount := len(message)
+					sendResult := trySendPooledReceive(
 						handleCtx.Done(),
 						connection.Done(),
 						self.receive,
 						message,
-						readTimer,
-						self.exchange.settings.WriteTimeout,
 					)
 					if sendResult == pooledMessageSendDone {
 						return
 					}
 					if sendResult == pooledMessageSendDropped {
-						if glog.V(1) {
-							glog.Infof("[rt]drop %s->\n", self.clientId)
-						}
+						recordReceiveQueueDrop(
+							receiveQueueBoundaryExchangeToResident,
+							messageByteCount,
+						)
 					}
 				}
 			}
@@ -2780,26 +2882,22 @@ func (self *ResidentTransport) Done() <-chan struct{} {
 	return self.ctx.Done()
 }
 
-// sendMessage admits one pooled message to the resident transport queue. It
-// returns the message when the transport is already closing.
-func (self *ResidentTransport) sendMessage(
+// trySendMessage admits one socket-received message to the resident transport
+// queue without waiting. It returns ownership on refusal or teardown.
+func (self *ResidentTransport) trySendMessage(
 	ctxDone <-chan struct{},
 	message []byte,
-	timer *time.Timer,
-	timeout time.Duration,
 ) pooledMessageSendResult {
 	if !self.sendAdmission.start() {
 		connect.MessagePoolReturn(message)
 		return pooledMessageSendDone
 	}
 	defer self.sendAdmission.done()
-	return sendPooledMessage(
+	return trySendPooledReceive(
 		ctxDone,
 		self.Done(),
 		self.send,
 		message,
-		timer,
-		timeout,
 	)
 }
 
@@ -3023,7 +3121,7 @@ type Resident struct {
 	residentController      *residentController
 
 	// stateLock guards the transports and forwards maps. It is an RWMutex because
-	// the per-frame forward lookup in handleClientForward is a read; only forward
+	// the worker's per-frame forward lookup is a read; only forward
 	// create/replace and transport add/remove take the write lock.
 	stateLock sync.RWMutex
 
@@ -3037,7 +3135,16 @@ type Resident struct {
 	forwardWorkerLock    sync.Mutex
 	forwardWorkersClosed bool
 	forwardWorkers       sync.WaitGroup
-	closeOnce            sync.Once
+
+	// Client callbacks only validate and offer borrowed input to these bounded
+	// queues. Their owned workers may rate-limit, query storage, or block as a
+	// sender without parking the shared Client receive sequence.
+	controlIngressAdmission pooledMessageSendAdmission
+	forwardIngressAdmission pooledMessageSendAdmission
+	controlIngress          chan []*protocol.Frame
+	forwardIngress          []chan residentForwardIngress
+	callbackWorkers         sync.WaitGroup
+	closeOnce               sync.Once
 
 	controlLimiter *limiter
 
@@ -3130,6 +3237,7 @@ func NewResident(
 		resident.peerProfile = peerProfile
 		resident.peerCategory = category
 	}
+	resident.startClientCallbackWorkers()
 
 	clientReceiveUnsub := client.AddReceiveCallback(resident.handleClientReceive)
 	resident.clientReceiveUnsub = clientReceiveUnsub
@@ -3168,6 +3276,130 @@ func NewResident(
 	}
 
 	return resident
+}
+
+type residentForwardIngress struct {
+	path               connect.TransferPath
+	transferFrameBytes []byte
+}
+
+func shareResidentControlFrames(frames []*protocol.Frame) []*protocol.Frame {
+	shared := make([]*protocol.Frame, len(frames))
+	for frameIndex, frame := range frames {
+		shared[frameIndex] = &protocol.Frame{
+			MessageType:  frame.MessageType,
+			MessageBytes: connect.MessagePoolShareReadOnly(frame.MessageBytes),
+			Raw:          frame.Raw,
+		}
+	}
+	return shared
+}
+
+func returnResidentControlFrames(frames []*protocol.Frame) {
+	for _, frame := range frames {
+		connect.MessagePoolReturn(frame.MessageBytes)
+	}
+}
+
+func residentControlFrameByteCount(frames []*protocol.Frame) int {
+	byteCount := 0
+	for _, frame := range frames {
+		byteCount += len(frame.MessageBytes)
+	}
+	return byteCount
+}
+
+// Starts one ordered control consumer and destination-stable forward shards.
+// Channels remain open; cancellation stops each sole consumer, which then
+// drains and returns every queued pooled owner.
+func (self *Resident) startClientCallbackWorkers() {
+	settings := self.exchange.settings
+	self.controlIngress = make(chan []*protocol.Frame, max(0, settings.ResidentControlQueueSize))
+
+	shardCount := max(1, settings.ResidentForwardQueueShardCount)
+	totalForwardCapacity := max(0, settings.ResidentForwardQueueSize)
+	self.forwardIngress = make([]chan residentForwardIngress, shardCount)
+	for shardIndex := range shardCount {
+		shardCapacity := totalForwardCapacity / shardCount
+		if shardIndex < totalForwardCapacity%shardCount {
+			shardCapacity++
+		}
+		self.forwardIngress[shardIndex] = make(chan residentForwardIngress, shardCapacity)
+	}
+
+	self.callbackWorkers.Add(1)
+	go server.HandleError(func() {
+		defer self.callbackWorkers.Done()
+		self.runClientControlIngress()
+	}, self.cancel)
+	for shardIndex := range self.forwardIngress {
+		self.callbackWorkers.Add(1)
+		go server.HandleError(func() {
+			defer self.callbackWorkers.Done()
+			self.runClientForwardIngress(shardIndex)
+		}, self.cancel)
+	}
+}
+
+func (self *Resident) runClientControlIngress() {
+	defer func() {
+		for {
+			select {
+			case frames := <-self.controlIngress:
+				returnResidentControlFrames(frames)
+			default:
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-self.ctx.Done():
+			return
+		default:
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case frames := <-self.controlIngress:
+			func() {
+				defer returnResidentControlFrames(frames)
+				self.controlLimiter.delay()
+				if err := self.residentController.HandleControlFrames(frames); err != nil {
+					if glog.V(1) {
+						glog.Infof("[rr]control error = %s\n", err)
+					}
+				}
+			}()
+		}
+	}
+}
+
+func (self *Resident) runClientForwardIngress(shardIndex int) {
+	queue := self.forwardIngress[shardIndex]
+	defer func() {
+		for {
+			select {
+			case message := <-queue:
+				connect.MessagePoolReturn(message.transferFrameBytes)
+			default:
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-self.ctx.Done():
+			return
+		default:
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case message := <-queue:
+			self.processClientForward(message.path, message.transferFrameBytes)
+		}
+	}
 }
 
 func (self *Resident) chaos() {
@@ -3450,6 +3682,43 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		return
 	}
 
+	if !self.forwardIngressAdmission.start() {
+		return
+	}
+	defer self.forwardIngressAdmission.done()
+	shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
+	message := residentForwardIngress{
+		path:               path,
+		transferFrameBytes: shared,
+	}
+	shardIndex := int(destinationId[len(destinationId)-1]) % len(self.forwardIngress)
+	select {
+	case <-self.ctx.Done():
+		connect.MessagePoolReturn(shared)
+	case self.forwardIngress[shardIndex] <- message:
+		return
+	default:
+		connect.MessagePoolReturn(shared)
+		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward, len(transferFrameBytes))
+		if glog.V(1) {
+			glog.Infof("[rf]drop ingress full %s->%s\n", sourceId, destinationId)
+		}
+	}
+}
+
+// Owns one shared transfer-frame buffer after zero-wait callback admission.
+// Slow forward construction and sender backpressure run only on the
+// destination-stable worker shard.
+func (self *Resident) processClientForward(path connect.TransferPath, transferFrameBytes []byte) {
+	sourceId := server.Id(path.SourceId)
+	destinationId := server.Id(path.DestinationId)
+	messageOwned := true
+	defer func() {
+		if messageOwned {
+			connect.MessagePoolReturn(transferFrameBytes)
+		}
+	}()
+
 	// FIXME deep packet inspection to look at the contract frames and verify contracts before forwarding
 
 	initForward := func() *ResidentForward {
@@ -3566,16 +3835,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 			return false
 		}
 
-		// this is a forward callback: `transferFrameBytes` is valid only for the
-		// call, and the connect client returns it after. The bytes are retained on
-		// the forward send channel (and later written to the exchange connection,
-		// which returns them to the pool), so share for the handoff and return the
-		// share on any path that does not enqueue. The share value is a local
-		// because a select evaluates every case's send value once, regardless of
-		// which case fires — an inline share would over-share on the paths not taken.
-		shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
 		if !forward.sendAdmission.start() {
-			connect.MessagePoolReturn(shared)
 			return false
 		}
 		defer forward.sendAdmission.done()
@@ -3583,31 +3843,27 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		// fast path: enqueue without blocking
 		select {
 		case <-forward.Done():
-			connect.MessagePoolReturn(shared)
 			return false
-		case forward.send <- shared:
+		case forward.send <- transferFrameBytes:
+			messageOwned = false
 			return true
 		default:
 		}
 
-		// forwards are non blocking in production (ForwardTimeout 0) to avoid a
-		// slow forward backpressuring the transfer loop; the client-to-client
-		// connection manages its own transfer buffer, to avoid saturating the
-		// connection to the point where it needs buffering. Tests set
-		// ForwardTimeout to WriteTimeout for deterministic, reliable delivery
-		// over 0-size buffers.
+		// Forwards are nonblocking in production. A test may let this owned
+		// sender worker wait for deterministic delivery over a zero-size buffer;
+		// that wait never propagates into the Client receive callback.
 		if 0 < self.exchange.settings.ForwardTimeout {
 			select {
 			case <-forward.Done():
-				connect.MessagePoolReturn(shared)
 				return false
-			case forward.send <- shared:
+			case forward.send <- transferFrameBytes:
+				messageOwned = false
 				return true
 			case <-time.After(self.exchange.settings.ForwardTimeout):
 			}
 		}
 
-		connect.MessagePoolReturn(shared)
 		forwardDroppedCounter.Inc()
 		if glog.V(1) {
 			glog.Infof("[rf]drop full %s->%s\n", sourceId, destinationId)
@@ -3641,22 +3897,43 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	}
 
 	self.UpdateActivity()
-	self.controlLimiter.delay()
-
-	// Control errors are load-bearing (e.g. a rejected CloseContract leaks an
-	// open contract) but client-driven and unbounded in rate: a resend loop
-	// would spam the logs. Each failing frame is classified and counted at the
-	// source (urnetwork_connect_control_frame_failures_total), so the joined
-	// error here only needs the V(1) detail.
-	if err := self.residentController.HandleControlFrames(frames); err != nil {
-		if glog.V(1) {
-			glog.Infof("[rr]control error = %s\n", err)
-		}
+	if len(frames) == 0 || !self.controlIngressAdmission.start() {
+		return
+	}
+	defer self.controlIngressAdmission.done()
+	byteCount := residentControlFrameByteCount(frames)
+	shared := shareResidentControlFrames(frames)
+	select {
+	case <-self.ctx.Done():
+		returnResidentControlFrames(shared)
+	case self.controlIngress <- shared:
+		return
+	default:
+		returnResidentControlFrames(shared)
+		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientControl, byteCount)
+		// Control Transfer delivery has already reached its final application
+		// callback, so silently skipping a frame can acknowledge durable state
+		// that was never applied. Retire the resident generation and let normal
+		// reconnect/control sync replay it.
+		self.Cancel()
 	}
 }
 
 // The caller removes the returned transport after its socket workers stop.
 func (self *Resident) AddTransport() (
+	send chan []byte,
+	receive chan []byte,
+	closeTransport func(),
+	returnErr error,
+) {
+	return self.AddTransportWithProperties(connect.TransferCarrierProperties{})
+}
+
+// Publishes one resident route with the delivery semantics negotiated by its
+// edge connection.
+func (self *Resident) AddTransportWithProperties(
+	properties connect.TransferCarrierProperties,
+) (
 	send chan []byte,
 	receive chan []byte,
 	closeTransport func(),
@@ -3673,7 +3950,11 @@ func (self *Resident) AddTransport() (
 	}
 
 	routeManager := self.client.RouteManager()
-	routeManager.UpdateTransport(transport.sendTransport, []connect.Route{send})
+	routeManager.UpdateTransportWithProperties(
+		transport.sendTransport,
+		[]connect.Route{send},
+		properties,
+	)
 	routeManager.UpdateTransport(transport.receiveTransport, []connect.Route{receive})
 
 	func() {
@@ -3857,6 +4138,8 @@ func (self *Resident) cancelForwards() {
 // Stops admission and requests shutdown without waiting for owned workers.
 func (self *Resident) Close() {
 	self.closeOnce.Do(func() {
+		self.controlIngressAdmission.close()
+		self.forwardIngressAdmission.close()
 		self.forwardWorkerLock.Lock()
 		self.forwardWorkersClosed = true
 		self.forwardWorkerLock.Unlock()
@@ -3881,6 +4164,9 @@ func (self *Resident) CloseAndWait(ctx context.Context) error {
 		self.beforeClientCloseJoinForTest()
 	}
 	clientErr := self.client.CloseAndWait(ctx)
+	self.controlIngressAdmission.wait()
+	self.forwardIngressAdmission.wait()
+	callbackErr := waitForWorkerGroup(ctx, &self.callbackWorkers, "resident callback workers")
 	if self.residentController != nil {
 		self.residentController.Close()
 	}
@@ -3888,7 +4174,7 @@ func (self *Resident) CloseAndWait(ctx context.Context) error {
 	// after the first snapshot. The client join makes this second sweep final.
 	self.cancelForwards()
 	forwardErr := waitForWorkerGroup(ctx, &self.forwardWorkers, "resident forward workers")
-	return errors.Join(clientErr, forwardErr)
+	return errors.Join(clientErr, callbackErr, forwardErr)
 }
 
 type clientTransport struct {

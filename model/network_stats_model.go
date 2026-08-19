@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,9 +73,9 @@ func GetBlockUsersSnapshot(ctx context.Context, block int) (int64, bool) {
 
 // CountProviderCountries returns the number of countries with a connected,
 // valid provider holding a Public provide key — the same population the public
-// providers map and /network/provider-locations draw from.
-// The (connected, valid, country_location_id) index covers the scan; joining
-// location dedupes any non-canonical country location rows by country code.
+// providers map and /network/provider-locations draw from. It is the number
+// of countries in CountProvidersByCountry, so the two public numbers can
+// never disagree.
 //
 // The Public-only predicate is the same one UpdateClientLocations applies
 // (network_client_location_model.go). This is a public stat, so it must answer
@@ -85,12 +86,47 @@ func GetBlockUsersSnapshot(ctx context.Context, block int) (int64, bool) {
 // usable only inside its own network and is effectively private. Counting
 // those here would report countries with no pickable supply at all.
 func CountProviderCountries(ctx context.Context) int64 {
-	var count int64
+	return int64(len(CountProvidersByCountry(ctx)))
+}
+
+// ProviderCountryCount is the connected, valid, Public provider population
+// located in one country (see CountProvidersByCountry).
+type ProviderCountryCount struct {
+	// upper-case ISO 3166-1 alpha-2 country code
+	CountryCode string
+	// the country name from the canonical country location row
+	Country string
+	// distinct providers in the country
+	Count int64
+	// distinct located regions (states, provinces) with a provider
+	RegionCount int64
+	// distinct located cities with a provider
+	CityCount int64
+}
+
+// CountProvidersByCountry returns the connected, valid, Public provider
+// count per country — the same population and predicate as
+// CountProviderCountries and the public providers map
+// (GetProvidersMap), grouped by country code — with the distinct region
+// and city counts of that population. Region and city location ids are
+// scoped to their country, so summing the per-country region (city) counts
+// gives the distinct region (city) count of the whole population. Country
+// codes are stored lower case; they are returned upper case, the ISO form
+// map gazetteers key on. Countries with no such provider are absent, so a
+// consumer that keeps per-country state must treat absence as zero. The
+// result is ordered by country code.
+func CountProvidersByCountry(ctx context.Context) []ProviderCountryCount {
+	counts := []ProviderCountryCount{}
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-                SELECT COUNT(DISTINCT location.country_code)
+                SELECT
+                    location.country_code,
+                    MIN(location.location_name),
+                    COUNT(DISTINCT network_client_location_reliability.client_id),
+                    COUNT(DISTINCT network_client_location_reliability.region_location_id),
+                    COUNT(DISTINCT network_client_location_reliability.city_location_id)
                 FROM network_client_location_reliability
                 INNER JOIN location ON
                     location.location_id = network_client_location_reliability.country_location_id
@@ -103,16 +139,27 @@ func CountProviderCountries(ctx context.Context) int64 {
                             provide_key.client_id = network_client_location_reliability.client_id AND
                             provide_key.provide_mode = $1
                     )
+                GROUP BY location.country_code
+                ORDER BY location.country_code
             `,
 			ProvideModePublic,
 		)
 		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&count))
+			for result.Next() {
+				var count ProviderCountryCount
+				server.Raise(result.Scan(
+					&count.CountryCode,
+					&count.Country,
+					&count.Count,
+					&count.RegionCount,
+					&count.CityCount,
+				))
+				count.CountryCode = strings.ToUpper(strings.TrimSpace(count.CountryCode))
+				counts = append(counts, count)
 			}
 		})
 	})
-	return count
+	return counts
 }
 
 // A block user is a top-level client identity with contract-creating

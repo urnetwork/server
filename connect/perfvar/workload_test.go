@@ -42,40 +42,41 @@ type latencyDistribution struct {
 
 // Workload observations are route-neutral and feed scenario result records.
 type workloadResult struct {
-	UsefulByteCount            int64                   `json:"useful_byte_count"`
-	WarmupByteCount            int64                   `json:"warmup_byte_count,omitempty"`
-	WarmupDuration             time.Duration           `json:"warmup_duration_nanoseconds,omitempty"`
-	OfferedPacketCount         int64                   `json:"offered_packet_count,omitempty"`
-	DeliveredPacketCount       int64                   `json:"delivered_packet_count,omitempty"`
-	DuplicatePacketCount       int64                   `json:"duplicate_packet_count,omitempty"`
-	ReorderedPacketCount       int64                   `json:"reordered_packet_count,omitempty"`
-	CorruptPacketCount         int64                   `json:"corrupt_packet_count,omitempty"`
-	Duration                   time.Duration           `json:"duration_nanoseconds"`
-	SetupDuration              time.Duration           `json:"setup_duration_nanoseconds,omitempty"`
-	TimeToFirstByte            time.Duration           `json:"time_to_first_byte_nanoseconds,omitempty"`
-	GoodputMegabytes           float64                 `json:"goodput_megabytes_per_second"`
-	GoodputGigabits            float64                 `json:"goodput_gigabits_per_second"`
-	Latency                    latencyDistribution     `json:"latency"`
-	IdleLatency                latencyDistribution     `json:"idle_latency"`
-	LoadedLatency              latencyDistribution     `json:"loaded_latency"`
-	PostLoadLatency            latencyDistribution     `json:"post_load_latency"`
-	IdleProbeAttemptCount      int                     `json:"idle_probe_attempt_count,omitempty"`
-	IdleProbeSuccessCount      int                     `json:"idle_probe_success_count,omitempty"`
-	IdleProbeFailureCount      int                     `json:"idle_probe_failure_count,omitempty"`
-	LoadedProbeAttemptCount    int                     `json:"loaded_probe_attempt_count,omitempty"`
-	LoadedProbeSuccessCount    int                     `json:"loaded_probe_success_count,omitempty"`
-	LoadedProbeFailureCount    int                     `json:"loaded_probe_failure_count,omitempty"`
-	PostLoadProbeAttemptCount  int                     `json:"post_load_probe_attempt_count,omitempty"`
-	PostLoadProbeSuccessCount  int                     `json:"post_load_probe_success_count,omitempty"`
-	PostLoadProbeFailureCount  int                     `json:"post_load_probe_failure_count,omitempty"`
-	TerminalMarkerAttemptCount int                     `json:"terminal_marker_attempt_count,omitempty"`
-	AllocatedByteCount         uint64                  `json:"allocated_byte_count"`
-	AllocationCount            uint64                  `json:"allocation_count"`
-	GarbageCollectionCount     uint32                  `json:"garbage_collection_count"`
-	GarbageCollectionPause     time.Duration           `json:"garbage_collection_pause_nanoseconds"`
-	ContentHash                string                  `json:"content_hash,omitempty"`
-	ForwardLink                directionalLinkSnapshot `json:"forward_link"`
-	ReverseLink                directionalLinkSnapshot `json:"reverse_link"`
+	UsefulByteCount            int64                     `json:"useful_byte_count"`
+	WarmupByteCount            int64                     `json:"warmup_byte_count,omitempty"`
+	WarmupDuration             time.Duration             `json:"warmup_duration_nanoseconds,omitempty"`
+	OfferedPacketCount         int64                     `json:"offered_packet_count,omitempty"`
+	DeliveredPacketCount       int64                     `json:"delivered_packet_count,omitempty"`
+	DuplicatePacketCount       int64                     `json:"duplicate_packet_count,omitempty"`
+	ReorderedPacketCount       int64                     `json:"reordered_packet_count,omitempty"`
+	CorruptPacketCount         int64                     `json:"corrupt_packet_count,omitempty"`
+	Duration                   time.Duration             `json:"duration_nanoseconds"`
+	SetupDuration              time.Duration             `json:"setup_duration_nanoseconds,omitempty"`
+	TimeToFirstByte            time.Duration             `json:"time_to_first_byte_nanoseconds,omitempty"`
+	GoodputMegabytes           float64                   `json:"goodput_megabytes_per_second"`
+	GoodputGigabits            float64                   `json:"goodput_gigabits_per_second"`
+	Latency                    latencyDistribution       `json:"latency"`
+	IdleLatency                latencyDistribution       `json:"idle_latency"`
+	LoadedLatency              latencyDistribution       `json:"loaded_latency"`
+	PostLoadLatency            latencyDistribution       `json:"post_load_latency"`
+	IdleProbeAttemptCount      int                       `json:"idle_probe_attempt_count,omitempty"`
+	IdleProbeSuccessCount      int                       `json:"idle_probe_success_count,omitempty"`
+	IdleProbeFailureCount      int                       `json:"idle_probe_failure_count,omitempty"`
+	LoadedProbeAttemptCount    int                       `json:"loaded_probe_attempt_count,omitempty"`
+	LoadedProbeSuccessCount    int                       `json:"loaded_probe_success_count,omitempty"`
+	LoadedProbeFailureCount    int                       `json:"loaded_probe_failure_count,omitempty"`
+	PostLoadProbeAttemptCount  int                       `json:"post_load_probe_attempt_count,omitempty"`
+	PostLoadProbeSuccessCount  int                       `json:"post_load_probe_success_count,omitempty"`
+	PostLoadProbeFailureCount  int                       `json:"post_load_probe_failure_count,omitempty"`
+	TerminalMarkerAttemptCount int                       `json:"terminal_marker_attempt_count,omitempty"`
+	AllocatedByteCount         uint64                    `json:"allocated_byte_count"`
+	AllocationCount            uint64                    `json:"allocation_count"`
+	GarbageCollectionCount     uint32                    `json:"garbage_collection_count"`
+	GarbageCollectionPause     time.Duration             `json:"garbage_collection_pause_nanoseconds"`
+	ContentHash                string                    `json:"content_hash,omitempty"`
+	ProfileEvents              []profileEventObservation `json:"profile_events,omitempty"`
+	ForwardLink                directionalLinkSnapshot   `json:"forward_link"`
+	ReverseLink                directionalLinkSnapshot   `json:"reverse_link"`
 }
 
 // A deadline setter covers TCP, UDP, and QUIC stream I/O uniformly.
@@ -167,17 +168,23 @@ type tunResourceProfile struct {
 	BatchSize          int
 	AppDelay           time.Duration
 	SingularBridgeSend bool
+	// ApplicationMtu overrides only the full-route device-facing TUN. Carrier
+	// TUNs retain their access profile MTU so an MTU experiment cannot silently
+	// change the simulated underlay at the same time.
+	ApplicationMtu int
 }
 
 // Optional seams expose exact TCP admission and latency-worker lifecycle
 // boundaries to deterministic workload regressions.
 type workloadTCPFlowTestSettings struct {
-	flowServerSettings        *logicalTCPFlowServerSettings
-	beforeClientDialHook      func(context.Context, *clientconnect.Tun, string) error
-	beforeProbeServerDoneHook func()
-	beforeProbeServerWaitHook func()
-	beforeBulkSenderDoneHook  func()
-	beforeBulkSenderWaitHook  func()
+	flowServerSettings          *logicalTCPFlowServerSettings
+	beforeClientDialHook        func(context.Context, *clientconnect.Tun, string) error
+	beforeProbeServerDoneHook   func()
+	beforeProbeServerWaitHook   func()
+	beforeBulkSenderDoneHook    func()
+	beforeBulkSenderWaitHook    func()
+	beforeBulkReceiverDoneHook  func()
+	afterLoadedProbeAttemptHook func(int)
 }
 
 // Default resources retain production settings with enough ring space for calibration.
@@ -1943,7 +1950,41 @@ func measureWebWorkload(
 
 const minimumLatencyProbeSuccessCount = 3
 
+const (
+	// A fixed offered rate makes two carrier variants carry the same interactive
+	// demand. The former closed loop issued fewer probes when a path timed out,
+	// which made that path look cheaper during the bulk comparison.
+	loadedLatencyProbeMinimumInterval = time.Millisecond
+	loadedLatencyProbeMaximumInterval = 500 * time.Millisecond
+	loadedLatencyProbeReadInterval    = 100 * time.Millisecond
+	loadedLatencyProbeTargetCount     = 12
+)
+
 var errInsufficientLatencyProbeSamples = errors.New("insufficient successful latency probes")
+
+var errLoadedLatencyProbeIncomplete = errors.New("loaded latency probe incomplete when bulk ended")
+
+// Targets a stable sample count on fast paths while capping impaired paths at
+// two offered probes per second so the measurement is not its own bottleneck.
+func loadedLatencyProbeIntervalForRate(
+	bulkByteCount int64,
+	rateBitsPerSecond int64,
+) time.Duration {
+	if bulkByteCount <= 0 || rateBitsPerSecond <= 0 {
+		return loadedLatencyProbeMaximumInterval
+	}
+	expectedDuration := time.Duration(
+		float64(time.Second) * float64(bulkByteCount*8) /
+			float64(rateBitsPerSecond),
+	)
+	return min(
+		loadedLatencyProbeMaximumInterval,
+		max(
+			loadedLatencyProbeMinimumInterval,
+			expectedDuration/loadedLatencyProbeTargetCount,
+		),
+	)
+}
 
 // Probe accounting keeps timeouts visible instead of silently shrinking a
 // percentile sample until it no longer represents the selected phase.
@@ -2035,25 +2076,276 @@ func runLatencyProbe(
 	sequence uint64,
 	timeout time.Duration,
 ) (time.Duration, error) {
-	packetBytes := make([]byte, 32)
-	binary.BigEndian.PutUint64(packetBytes, sequence)
+	var packet [32]byte
+	binary.BigEndian.PutUint64(packet[:], sequence)
 	startTime := time.Now()
 	stopInterrupt := interruptDeadlineOnContext(ctx, connection)
 	defer stopInterrupt()
 	if err := connection.SetDeadline(boundedWorkloadDeadline(ctx, timeout)); err != nil {
 		return 0, contextBoundWorkloadError(ctx, err)
 	}
-	if _, err := connection.Write(packetBytes); err != nil {
+	if _, err := connection.Write(packet[:]); err != nil {
 		return 0, contextBoundWorkloadError(ctx, err)
 	}
-	responseBytes := make([]byte, len(packetBytes))
-	if _, err := io.ReadFull(connection, responseBytes); err != nil {
-		return 0, contextBoundWorkloadError(ctx, err)
-	}
-	if !bytes.Equal(responseBytes, packetBytes) {
+	var response [len(packet)]byte
+	for {
+		if _, err := io.ReadFull(connection, response[:]); err != nil {
+			return 0, contextBoundWorkloadError(ctx, err)
+		}
+		if bytes.Equal(response[:], packet[:]) {
+			return time.Since(startTime), nil
+		}
+
+		// A timed-out UDP echo can arrive after its caller has moved to the
+		// next sequence. Ignore a well-formed older reply within this probe's
+		// original deadline; treating it as corruption poisons every later
+		// phase while the socket drains the delayed backlog one item at a time.
+		responseSequence := binary.BigEndian.Uint64(response[:])
+		var stale [len(packet)]byte
+		binary.BigEndian.PutUint64(stale[:], responseSequence)
+		if responseSequence < sequence && bytes.Equal(response[:], stale[:]) {
+			continue
+		}
 		return 0, fmt.Errorf("latency probe sequence %d was corrupted", sequence)
 	}
-	return time.Since(startTime), nil
+}
+
+// Tracks a fixed offered probe train independently from response timing. It is
+// owned by the workload goroutine; the reader only publishes complete replies.
+type loadedLatencyProbeState struct {
+	samples latencyProbeSamples
+	pending map[uint64]time.Time
+	timeout time.Duration
+}
+
+func newLoadedLatencyProbeState(timeout time.Duration) *loadedLatencyProbeState {
+	return &loadedLatencyProbeState{
+		pending: map[uint64]time.Time{},
+		timeout: timeout,
+	}
+}
+
+// Records one offered slot whether or not the local write was accepted.
+func (self *loadedLatencyProbeState) attempt(
+	sequence uint64,
+	sendTime time.Time,
+	err error,
+) {
+	self.samples.attemptCount += 1
+	if err != nil {
+		self.samples.failureCount += 1
+		if self.samples.firstFailure == nil {
+			self.samples.firstFailure = err
+		}
+		return
+	}
+	self.pending[sequence] = sendTime
+}
+
+// Matches replies out of order; expired or duplicate sequences are harmless.
+func (self *loadedLatencyProbeState) receive(
+	packet [32]byte,
+	receiveTime time.Time,
+) {
+	sequence := binary.BigEndian.Uint64(packet[:])
+	var expected [len(packet)]byte
+	binary.BigEndian.PutUint64(expected[:], sequence)
+	if packet != expected {
+		if self.samples.firstFailure == nil {
+			self.samples.firstFailure = fmt.Errorf("loaded latency probe response was corrupted")
+		}
+		return
+	}
+	sendTime, ok := self.pending[sequence]
+	if !ok {
+		return
+	}
+	delete(self.pending, sequence)
+	if receiveTime.Before(sendTime) {
+		if self.samples.firstFailure == nil {
+			self.samples.firstFailure = fmt.Errorf("loaded latency probe response preceded its send")
+		}
+		self.samples.failureCount += 1
+		return
+	}
+	latency := receiveTime.Sub(sendTime)
+	if self.timeout < latency {
+		self.samples.failureCount += 1
+		if self.samples.firstFailure == nil {
+			self.samples.firstFailure = context.DeadlineExceeded
+		}
+		return
+	}
+	self.samples.latencies = append(
+		self.samples.latencies,
+		latency,
+	)
+}
+
+// Converts every elapsed pending probe into one explicit timeout.
+func (self *loadedLatencyProbeState) expire(currentTime time.Time) {
+	for sequence, sendTime := range self.pending {
+		if currentTime.Sub(sendTime) < self.timeout {
+			continue
+		}
+		delete(self.pending, sequence)
+		self.samples.failureCount += 1
+		if self.samples.firstFailure == nil {
+			self.samples.firstFailure = context.DeadlineExceeded
+		}
+	}
+}
+
+// Closes the measurement boundary without letting post-load replies improve
+// the loaded phase retroactively.
+func (self *loadedLatencyProbeState) finish() {
+	for sequence := range self.pending {
+		delete(self.pending, sequence)
+		self.samples.failureCount += 1
+		if self.samples.firstFailure == nil {
+			self.samples.firstFailure = errLoadedLatencyProbeIncomplete
+		}
+	}
+}
+
+// One complete loaded-probe read is timestamped before the bounded handoff.
+type loadedLatencyProbeResponse struct {
+	packet      [32]byte
+	receiveTime time.Time
+	err         error
+}
+
+// Offers probes at a fixed rate until the bulk goroutine exits. Multiple UDP
+// requests may be outstanding, so a timeout never suppresses later demand.
+func runLoadedLatencyProbes(
+	ctx context.Context,
+	connection net.Conn,
+	startSequence uint64,
+	timeout time.Duration,
+	interval time.Duration,
+	workloadDone <-chan struct{},
+	afterAttempt func(int),
+) latencyProbeSamples {
+	select {
+	case <-ctx.Done():
+		return latencyProbeSamples{}
+	case <-workloadDone:
+		return latencyProbeSamples{}
+	default:
+	}
+
+	probeCtx, probeCancel := context.WithCancel(ctx)
+	responses := make(chan loadedLatencyProbeResponse, 64)
+	responseInput := (<-chan loadedLatencyProbeResponse)(responses)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer close(responses)
+		for {
+			if err := connection.SetReadDeadline(
+				time.Now().Add(loadedLatencyProbeReadInterval),
+			); err != nil {
+				select {
+				case responses <- loadedLatencyProbeResponse{err: err}:
+				case <-probeCtx.Done():
+				}
+				return
+			}
+			var packet [32]byte
+			_, err := io.ReadFull(connection, packet[:])
+			if err != nil {
+				if probeCtx.Err() != nil {
+					return
+				}
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					continue
+				}
+				select {
+				case responses <- loadedLatencyProbeResponse{err: err}:
+				case <-probeCtx.Done():
+				}
+				return
+			}
+			response := loadedLatencyProbeResponse{
+				packet:      packet,
+				receiveTime: time.Now(),
+			}
+			select {
+			case responses <- response:
+			case <-probeCtx.Done():
+				return
+			}
+		}
+	}()
+
+	state := newLoadedLatencyProbeState(timeout)
+	nextSequence := startSequence
+	writeProbe := func() {
+		sequence := nextSequence
+		nextSequence += 1
+		var packet [32]byte
+		binary.BigEndian.PutUint64(packet[:], sequence)
+		sendTime := time.Now()
+		err := connection.SetWriteDeadline(boundedWorkloadDeadline(ctx, timeout))
+		if err == nil {
+			var writeByteCount int
+			writeByteCount, err = connection.Write(packet[:])
+			if err == nil && writeByteCount != len(packet) {
+				err = io.ErrShortWrite
+			}
+		}
+		state.attempt(sequence, sendTime, err)
+		if afterAttempt != nil {
+			afterAttempt(state.samples.attemptCount)
+		}
+	}
+	writeProbe()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	responsesOpen := true
+	for {
+		select {
+		case <-ctx.Done():
+			responsesOpen = false
+		case <-workloadDone:
+			responsesOpen = false
+		case response, ok := <-responseInput:
+			if !ok {
+				responseInput = nil
+				continue
+			}
+			if response.err != nil {
+				if state.samples.firstFailure == nil {
+					state.samples.firstFailure = response.err
+				}
+				continue
+			}
+			state.receive(response.packet, response.receiveTime)
+		case currentTime := <-ticker.C:
+			state.expire(currentTime)
+			writeProbe()
+		}
+		if !responsesOpen {
+			break
+		}
+	}
+
+	probeCancel()
+	_ = connection.SetReadDeadline(time.Now())
+	<-readerDone
+	for response := range responses {
+		if response.err == nil {
+			state.receive(response.packet, response.receiveTime)
+		} else if state.samples.firstFailure == nil {
+			state.samples.firstFailure = response.err
+		}
+	}
+	state.expire(time.Now())
+	state.finish()
+	_ = connection.SetDeadline(time.Time{})
+	return state.samples
 }
 
 // A bulk TCP flow and a separate UDP probe share both simulated directions.
@@ -2187,6 +2479,7 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 		calibrationWorkloadTimeout(profile, bulkByteCount),
 	)
 	bulkReceiverReady := make(chan struct{})
+	bulkReceiverFinished := make(chan struct{})
 	var flowServerSettings *logicalTCPFlowServerSettings
 	if testSettings != nil {
 		flowServerSettings = testSettings.flowServerSettings
@@ -2207,11 +2500,24 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 			}
 			close(bulkReceiverReady)
 			_, copyErr := io.CopyN(io.Discard, connection, bulkByteCount)
+			if copyErr == nil && testSettings != nil &&
+				testSettings.beforeBulkReceiverDoneHook != nil {
+				testSettings.beforeBulkReceiverDoneHook()
+			}
+			close(bulkReceiverFinished)
 			return copyErr
 		},
 		flowServerSettings,
 	)
 	defer flowServer.CloseAndWait()
+	bulkLoadedFinished := make(chan struct{})
+	go func() {
+		select {
+		case <-bulkReceiverFinished:
+		case <-flowServer.Done():
+		}
+		close(bulkLoadedFinished)
+	}()
 	if testSettings != nil && testSettings.beforeClientDialHook != nil {
 		if err := testSettings.beforeClientDialHook(
 			ctx,
@@ -2271,6 +2577,7 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 			writtenByteCount, writeErr := bulkConnection.Write(chunk)
 			remaining -= int64(writtenByteCount)
 			if writeErr != nil {
+				_ = bulkConnection.Close()
 				if ctx.Err() != nil {
 					publishResult(ctx.Err())
 					return
@@ -2294,24 +2601,33 @@ func measureLatencyUnderLoadWithFlowTestSettings(
 		})
 	}
 	defer joinBulkSender(true)
-	loadedSamples := latencyProbeSamples{}
-	sequence := uint64(1000)
-	bulkDone := false
-	for !bulkDone {
-		if ctx.Err() != nil {
-			return workloadResult{}, ctx.Err()
-		}
-		select {
-		case bulkErr := <-bulkSenderDone:
-			if bulkErr != nil {
-				return workloadResult{}, contextBoundWorkloadError(ctx, bulkErr)
-			}
-			bulkDone = true
-		default:
-			latency, probeErr := runLatencyProbe(ctx, probeConnection, sequence, probeTimeout)
-			sequence += 1
-			loadedSamples.add(latency, probeErr)
-		}
+	var afterLoadedProbeAttempt func(int)
+	if testSettings != nil {
+		afterLoadedProbeAttempt = testSettings.afterLoadedProbeAttemptHook
+	}
+	loadedSamples := runLoadedLatencyProbes(
+		ctx,
+		probeConnection,
+		1000,
+		probeTimeout,
+		loadedLatencyProbeIntervalForRate(
+			bulkByteCount,
+			profile.Forward.RateBitsPerSecond,
+		),
+		bulkLoadedFinished,
+		afterLoadedProbeAttempt,
+	)
+	var bulkErr error
+	select {
+	case bulkErr = <-bulkSenderDone:
+	case <-ctx.Done():
+		// Do not wait for the sender's result publication before entering the
+		// deferred join. Closing the connection is what interrupts a blocked
+		// write; the join then owns the sender until its terminal publication.
+		return workloadResult{}, ctx.Err()
+	}
+	if bulkErr != nil {
+		return workloadResult{}, contextBoundWorkloadError(ctx, bulkErr)
 	}
 	joinBulkSender(false)
 	if err := flowServer.Wait(); err != nil {
@@ -2445,6 +2761,84 @@ func TestLatencyUnderLoadEarlyErrorJoinsProbeServer(t *testing.T) {
 		}
 	case <-safetyCtx.Done():
 		t.Fatalf("latency helper did not return after probe-server release: %v", safetyCtx.Err())
+	}
+}
+
+// Loaded probes remain active after the sender fills its socket until the
+// receiver has consumed the complete bulk payload.
+func TestLatencyUnderLoadLoadedProbesFollowReceiverCompletion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	bulkSenderDone := make(chan struct{})
+	bulkReceiverHeld := make(chan struct{})
+	fifthLoadedAttempt := make(chan struct{})
+	releaseReceiver := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseReceiver)
+		})
+	}
+	defer release()
+	testSettings := &workloadTCPFlowTestSettings{
+		beforeBulkSenderDoneHook: func() {
+			close(bulkSenderDone)
+		},
+		beforeBulkReceiverDoneHook: func() {
+			close(bulkReceiverHeld)
+			<-releaseReceiver
+		},
+		afterLoadedProbeAttemptHook: func(attemptCount int) {
+			if attemptCount == 5 {
+				close(fifthLoadedAttempt)
+			}
+		},
+	}
+	completion := make(chan struct {
+		result workloadResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := measureLatencyUnderLoadWithFlowTestSettings(
+			ctx,
+			initialNetworkProfiles(20260818)["clean-lan"],
+			defaultTunResourceProfile(),
+			64*1024,
+			nil,
+			testSettings,
+		)
+		completion <- struct {
+			result workloadResult
+			err    error
+		}{result: result, err: err}
+	}()
+	for name, boundary := range map[string]<-chan struct{}{
+		"bulk sender completion":   bulkSenderDone,
+		"held receiver completion": bulkReceiverHeld,
+		"fifth loaded probe":       fifthLoadedAttempt,
+	} {
+		select {
+		case <-boundary:
+		case completed := <-completion:
+			t.Fatalf("latency helper returned before %s: %v", name, completed.err)
+		case <-ctx.Done():
+			t.Fatalf("wait for %s: %v", name, ctx.Err())
+		}
+	}
+	release()
+	select {
+	case completed := <-completion:
+		if completed.err != nil {
+			t.Fatal(completed.err)
+		}
+		if completed.result.LoadedProbeAttemptCount < 5 {
+			t.Fatalf(
+				"loaded attempts=%d want at least 5",
+				completed.result.LoadedProbeAttemptCount,
+			)
+		}
+	case <-ctx.Done():
+		t.Fatalf("latency helper completion: %v", ctx.Err())
 	}
 }
 

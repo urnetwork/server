@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"runtime"
 	"slices"
@@ -16,6 +17,26 @@ import (
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
+
+// Reports whether every physical segment that contributes a limiting queue
+// property permits congestion loss. A larger, faster segment cannot be the
+// source represented by the collapsed link's earlier queue boundary and must
+// not veto an otherwise attributable calibration drop. Equal minima remain
+// ambiguous and therefore require both segments to permit queue loss.
+func combinedExchangeQueueDropsAllowed(first linkProfile, second linkProfile) bool {
+	firstLimits := first.RateBitsPerSecond <= second.RateBitsPerSecond ||
+		first.BurstByteCount <= second.BurstByteCount ||
+		first.QueueByteCount <= second.QueueByteCount ||
+		first.QueuePacketCount <= second.QueuePacketCount ||
+		first.OuterMtu <= second.OuterMtu
+	secondLimits := second.RateBitsPerSecond <= first.RateBitsPerSecond ||
+		second.BurstByteCount <= first.BurstByteCount ||
+		second.QueueByteCount <= first.QueueByteCount ||
+		second.QueuePacketCount <= first.QueuePacketCount ||
+		second.OuterMtu <= first.OuterMtu
+	return (!firstLimits || first.AllowQueueDrops) &&
+		(!secondLimits || second.AllowQueueDrops)
+}
 
 // Exchange calibration combines one user-to-edge forward segment and one
 // edge-to-provider reverse segment into each end-to-end direction.
@@ -30,10 +51,7 @@ func combinedExchangeLink(forward linkProfile, reverse linkProfile) linkProfile 
 	combined.ProcessingDelay = forward.ProcessingDelay + reverse.ProcessingDelay
 	combined.OuterMtu = min(forward.OuterMtu, reverse.OuterMtu)
 	combined.Blackhole = forward.Blackhole || reverse.Blackhole
-	// A collapsed calibration link cannot attribute one overflow back to its
-	// physical segment. Treat it as intentional only when every segment permits
-	// queue loss, so a permissive segment cannot hide a drop-free bottleneck.
-	combined.AllowQueueDrops = forward.AllowQueueDrops && reverse.AllowQueueDrops
+	combined.AllowQueueDrops = combinedExchangeQueueDropsAllowed(forward, reverse)
 	combined.AllowMtuDrops =
 		(forward.OuterMtu > reverse.OuterMtu || forward.AllowMtuDrops) &&
 			(reverse.OuterMtu > forward.OuterMtu || reverse.AllowMtuDrops)
@@ -49,29 +67,42 @@ func combinedExchangeLink(forward linkProfile, reverse linkProfile) linkProfile 
 	return combined
 }
 
-// A permissive segment cannot excuse ambiguous calibration loss at a strict
-// segment, while the uniquely limiting MTU retains its explicit policy.
+// A strict segment vetoes queue loss only when it defines one of the collapsed
+// bottlenecks. A non-limiting clean segment cannot invalidate an attributable
+// cell-edge drop, while ties retain the conservative policy. The uniquely
+// limiting MTU retains its independent explicit policy.
 func TestCombinedExchangeLinkRetainsStrictDropPolicies(t *testing.T) {
-	forward := newLinkProfile(1_000_000_000, 0, 0, 0, time.Millisecond)
-	reverse := forward
+	forward := newLinkProfile(1_000_000_000, 0, 0, 0, time.Second)
+	forward.BurstByteCount = 256 * 1024
+	forward.QueueByteCount = 32 * 1024 * 1024
+	forward.QueuePacketCount = 64 * 1024
+	forward.OuterMtu = 1500
 	forward.AllowQueueDrops = false
+	reverse := newLinkProfile(250_000, 0, 0, 0, 500*time.Millisecond)
+	reverse.BurstByteCount = 1280
+	reverse.QueuePacketCount = 13
+	reverse.OuterMtu = 1280
 	reverse.AllowQueueDrops = true
 	reverse.AllowMtuDrops = true
-	reverse.OuterMtu = 1280
 	combined := combinedExchangeLink(forward, reverse)
-	if combined.AllowQueueDrops || !combined.AllowMtuDrops {
-		t.Fatalf("combined drop policies=%+v", combined)
+	if !combined.AllowQueueDrops || !combined.AllowMtuDrops {
+		t.Fatalf("non-limiting strict segment vetoed attributable drop policies=%+v", combined)
 	}
+	forward.RateBitsPerSecond = reverse.RateBitsPerSecond
+	combined = combinedExchangeLink(forward, reverse)
+	if combined.AllowQueueDrops {
+		t.Fatalf("strict tied-rate segment did not veto ambiguous queue loss: %+v", combined)
+	}
+	forward.RateBitsPerSecond = 1_000_000_000
 	forward.AllowQueueDrops = true
 	combined = combinedExchangeLink(forward, reverse)
 	if !combined.AllowQueueDrops {
-		t.Fatalf("fully permissive queue composition was tightened: %+v", combined)
+		t.Fatalf("fully permissive limiting segments were tightened: %+v", combined)
 	}
-	forward.AllowQueueDrops = false
 	reverse.AllowMtuDrops = false
 	combined = combinedExchangeLink(forward, reverse)
-	if combined.AllowQueueDrops || combined.AllowMtuDrops {
-		t.Fatalf("drop-free composition was weakened: %+v", combined)
+	if !combined.AllowQueueDrops || combined.AllowMtuDrops {
+		t.Fatalf("independent queue/MTU drop policies diverged: %+v", combined)
 	}
 }
 
@@ -113,8 +144,9 @@ func combineRepeatedPerfvarLink(profile linkProfile, count int) linkProfile {
 	return combined
 }
 
-// Calibration orients the left endpoint as the application user. The P2P
-// fixture places that user on vnet's right side, so its directions are swapped.
+// Calibration orients the left endpoint as the application user. Scenario
+// directions are device upload/download for every topology; fixture-local
+// endpoint orientation is translated only at construction.
 func perfvarCalibrationProfile(scenario perfvarScenario) networkProfile {
 	profile := scenario.Profile
 	if scenario.Route == fullTunRouteP2pFast || scenario.Route == fullTunRouteP2pLegacy {
@@ -124,8 +156,6 @@ func perfvarCalibrationProfile(scenario perfvarScenario) networkProfile {
 			profile.SourceNote += fmt.Sprintf("; %d adjacent P2P links composed", hopCount)
 			return profile
 		}
-		profile.Forward, profile.Reverse = profile.Reverse, profile.Forward
-		profile.SourceNote += "; oriented application-user to provider"
 		return profile
 	}
 	if scenario.Topology == perfvarTopologySplitExchange && scenario.InternalExchangeProfile != nil {
@@ -223,14 +253,15 @@ func TestPerfvarDirectionalBandwidthDelayByteCount(t *testing.T) {
 	}
 	scenario.Route = fullTunRouteP2pFast
 	scenario.Direction = perfvarDirectionUpload
-	// One-hop P2P reverses the fixture orientation. Its 11 ms RTT uses the
-	// device reverse rate for upload and device forward rate for download.
-	if byteCount := perfvarDirectionalBandwidthDelayByteCount(scenario); byteCount != 27_500 {
-		t.Fatalf("P2P upload BDP=%d, want=27500", byteCount)
+	// Scenario directions remain device-oriented for every topology. The P2P
+	// fixture translates its local endpoint orientation during construction;
+	// that implementation detail must not reverse calibration or warmup sizing.
+	if byteCount := perfvarDirectionalBandwidthDelayByteCount(scenario); byteCount != 110_000 {
+		t.Fatalf("P2P upload BDP=%d, want=110000", byteCount)
 	}
 	scenario.Direction = perfvarDirectionDownload
-	if byteCount := perfvarDirectionalBandwidthDelayByteCount(scenario); byteCount != 110_000 {
-		t.Fatalf("P2P download BDP=%d, want=110000", byteCount)
+	if byteCount := perfvarDirectionalBandwidthDelayByteCount(scenario); byteCount != 27_500 {
+		t.Fatalf("P2P download BDP=%d, want=27500", byteCount)
 	}
 }
 
@@ -391,6 +422,40 @@ func perfvarReceiveCreditReason(direction string, snapshot p2pReceiveCreditSnaps
 	return ""
 }
 
+func perfvarPlatformReceiveFailureReason(
+	endpoint string,
+	snapshot clientconnect.PlatformTransportReceiveStatsSnapshot,
+) string {
+	for _, mode := range []struct {
+		name  string
+		stats clientconnect.PlatformTransportReceiveModeStatsSnapshot
+	}{
+		{name: "h1", stats: snapshot.H1},
+		{name: "h3", stats: snapshot.H3},
+		{name: "h3dns", stats: snapshot.H3Dns},
+		{name: "h3dnspump", stats: snapshot.H3DnsPump},
+	} {
+		if mode.stats.QueueDropMessageCount != 0 || mode.stats.QueueDropByteCount != 0 {
+			return fmt.Sprintf(
+				"%s %s receive queue refused %d message(s) / %d byte(s)",
+				endpoint,
+				mode.name,
+				mode.stats.QueueDropMessageCount,
+				mode.stats.QueueDropByteCount,
+			)
+		}
+	}
+	if snapshot.H1ControlRefusalCount != 0 || snapshot.H1ControlRefusalBytes != 0 {
+		return fmt.Sprintf(
+			"%s h1 control queue refused %d message(s) / %d byte(s)",
+			endpoint,
+			snapshot.H1ControlRefusalCount,
+			snapshot.H1ControlRefusalBytes,
+		)
+	}
+	return ""
+}
+
 // Observable receiver overflow is always a harness failure. Each simulated
 // segment carries its own queue policy so split paths are classified exactly.
 func perfvarHarnessDropReason(
@@ -413,6 +478,18 @@ func perfvarHarnessDropReason(
 		if reason := perfvarLinkDropReason(name, carrier.Links[name]); reason != "" {
 			return reason
 		}
+	}
+	if reason := perfvarPlatformReceiveFailureReason(
+		"device platform",
+		carrier.DevicePlatformReceive,
+	); reason != "" {
+		return reason
+	}
+	if reason := perfvarPlatformReceiveFailureReason(
+		"provider platform",
+		carrier.ProviderPlatformReceive,
+	); reason != "" {
+		return reason
 	}
 	directionalMtuDropCount := carrier.P2PNetwork.ForwardMtuDropCount +
 		carrier.P2PNetwork.ReverseMtuDropCount
@@ -496,27 +573,58 @@ func measurePerfvarUnderlay(
 ) (workloadResult, error) {
 	profile := perfvarCalibrationProfile(scenario)
 	resources := perfvarTunResources(scenario.Resource)
+	var scheduleRun *profileScheduleRun
+	startHook := func(path *tunPath) error {
+		if scenario.ProfileSchedule == nil {
+			return nil
+		}
+		if scheduleRun != nil {
+			return errors.New("underlay profile schedule started more than once")
+		}
+		scheduleRun = startProfileScheduleRun(
+			ctx,
+			*scenario.ProfileSchedule,
+			func(
+				eventCtx context.Context,
+				event profileEvent,
+				scheduledTime time.Time,
+			) ([]networkProfileUpdateResult, error) {
+				calibrationEvent, err := perfvarCalibrationProfileEvent(scenario, event)
+				if err != nil {
+					return nil, err
+				}
+				return applyTunPathProfileEvent(eventCtx, path, calibrationEvent, scheduledTime)
+			},
+		)
+		return nil
+	}
+	var result workloadResult
+	var err error
 	switch scenario.Workload {
 	case perfvarWorkloadTCP:
-		return measureTCPWorkload(
+		result, err = measureTCPWorkloadWithStartHook(
 			ctx,
 			profile,
 			resources,
 			scenario.Direction == perfvarDirectionUpload,
 			1,
 			scenario.PayloadByteCount,
+			startHook,
 		)
 	case perfvarWorkloadTCPWarmed:
-		return measureWarmedTCPWorkload(
+		result, err = measureTCPWorkloadWithWarmupAndStartHook(
 			ctx,
 			profile,
 			resources,
 			scenario.Direction == perfvarDirectionUpload,
+			1,
 			scenario.WarmupByteCount,
 			scenario.PayloadByteCount,
+			nil,
+			startHook,
 		)
 	case perfvarWorkloadTCPParallel:
-		return measureTCPWorkload(
+		result, err = measureTCPWorkload(
 			ctx,
 			profile,
 			resources,
@@ -525,12 +633,12 @@ func measurePerfvarUnderlay(
 			scenario.PayloadByteCount,
 		)
 	case perfvarWorkloadQUIC:
-		return measureQUICWorkload(ctx, profile, resources, scenario.PayloadByteCount)
+		result, err = measureQUICWorkload(ctx, profile, resources, scenario.PayloadByteCount)
 	case perfvarWorkloadUDP:
 		if scenario.Direction == perfvarDirectionDownload {
 			profile.Forward, profile.Reverse = profile.Reverse, profile.Forward
 		}
-		return measureUDPWorkload(
+		result, err = measureUDPWorkload(
 			ctx,
 			profile,
 			resources,
@@ -539,12 +647,13 @@ func measurePerfvarUnderlay(
 			scenario.UdpPayloadBytes,
 		)
 	case perfvarWorkloadLatencyUnderLoad:
-		return measureLatencyUnderLoad(ctx, profile, resources, scenario.PayloadByteCount)
+		result, err = measureLatencyUnderLoad(ctx, profile, resources, scenario.PayloadByteCount)
 	case perfvarWorkloadWeb:
-		return measureWebWorkload(ctx, profile, resources)
+		result, err = measureWebWorkload(ctx, profile, resources)
 	default:
 		return workloadResult{}, fmt.Errorf("unknown PERFVAR workload %q", scenario.Workload)
 	}
+	return finishScheduledWorkload(result, err, scenario.ProfileSchedule, scheduleRun)
 }
 
 // The route workload always enters the app TUN and exits through provider NAT.
@@ -553,36 +662,98 @@ func measurePerfvarFullTun(
 	path *fullTunPath,
 	scenario perfvarScenario,
 ) (workloadResult, error) {
+	var scheduleRun *profileScheduleRun
+	startHook := func() error {
+		if scenario.ProfileSchedule == nil {
+			return nil
+		}
+		if scheduleRun != nil {
+			return errors.New("full-TUN profile schedule started more than once")
+		}
+		scheduleRun = startProfileScheduleRun(
+			ctx,
+			*scenario.ProfileSchedule,
+			func(
+				eventCtx context.Context,
+				event profileEvent,
+				scheduledTime time.Time,
+			) ([]networkProfileUpdateResult, error) {
+				return applyFullTunProfileEvent(eventCtx, path, event, scheduledTime)
+			},
+		)
+		return nil
+	}
+	var result workloadResult
+	var err error
+	usesLowLevelTcpHook := scenario.ProfileSchedule != nil
 	switch scenario.Workload {
 	case perfvarWorkloadTCP:
-		if scenario.Direction == perfvarDirectionDownload {
-			return measureFullTunDownload(ctx, path, scenario.PayloadByteCount)
+		if usesLowLevelTcpHook && scenario.Direction == perfvarDirectionDownload {
+			result, err = measureFullTunDownloadWithWarmupAndStartHook(
+				ctx,
+				path,
+				0,
+				scenario.PayloadByteCount,
+				scenario.PayloadByteCount,
+				startHook,
+			)
+		} else if usesLowLevelTcpHook {
+			result, err = measureFullTunUploadWithStartHook(
+				ctx,
+				path,
+				scenario.PayloadByteCount,
+				scenario.PayloadByteCount,
+				startHook,
+			)
+		} else if scenario.Direction == perfvarDirectionDownload {
+			result, err = measureFullTunDownload(ctx, path, scenario.PayloadByteCount)
+		} else {
+			result, err = measureFullTunUpload(ctx, path, scenario.PayloadByteCount)
 		}
-		return measureFullTunUpload(ctx, path, scenario.PayloadByteCount)
 	case perfvarWorkloadTCPWarmed:
-		if scenario.Direction == perfvarDirectionDownload {
-			return measureFullTunWarmedDownload(
+		if usesLowLevelTcpHook && scenario.Direction == perfvarDirectionDownload {
+			result, err = measureFullTunDownloadWithWarmupAndStartHook(
+				ctx,
+				path,
+				scenario.WarmupByteCount,
+				scenario.PayloadByteCount,
+				scenario.WarmupByteCount+scenario.PayloadByteCount,
+				startHook,
+			)
+		} else if usesLowLevelTcpHook {
+			result, err = measureFullTunUploadWithWarmupAndStartHook(
+				ctx,
+				path,
+				scenario.WarmupByteCount,
+				scenario.PayloadByteCount,
+				scenario.WarmupByteCount+scenario.PayloadByteCount,
+				startHook,
+			)
+		} else if scenario.Direction == perfvarDirectionDownload {
+			result, err = measureFullTunWarmedDownload(
+				ctx,
+				path,
+				scenario.WarmupByteCount,
+				scenario.PayloadByteCount,
+			)
+		} else {
+			result, err = measureFullTunWarmedUpload(
 				ctx,
 				path,
 				scenario.WarmupByteCount,
 				scenario.PayloadByteCount,
 			)
 		}
-		return measureFullTunWarmedUpload(
-			ctx,
-			path,
-			scenario.WarmupByteCount,
-			scenario.PayloadByteCount,
-		)
 	case perfvarWorkloadTCPParallel:
 		if scenario.Direction == perfvarDirectionDownload {
-			return measureFullTunParallelDownloads(ctx, path, scenario.FlowCount, scenario.PayloadByteCount)
+			result, err = measureFullTunParallelDownloads(ctx, path, scenario.FlowCount, scenario.PayloadByteCount)
+		} else {
+			result, err = measureFullTunParallelUploads(ctx, path, scenario.FlowCount, scenario.PayloadByteCount)
 		}
-		return measureFullTunParallelUploads(ctx, path, scenario.FlowCount, scenario.PayloadByteCount)
 	case perfvarWorkloadQUIC:
-		return measureFullTunQUIC(ctx, path, scenario.PayloadByteCount)
+		result, err = measureFullTunQUIC(ctx, path, scenario.PayloadByteCount)
 	case perfvarWorkloadUDP:
-		return measureFullTunUDPDirection(
+		result, err = measureFullTunUDPDirection(
 			ctx,
 			path,
 			scenario.Direction == perfvarDirectionUpload,
@@ -591,12 +762,18 @@ func measurePerfvarFullTun(
 			scenario.UdpPayloadBytes,
 		)
 	case perfvarWorkloadLatencyUnderLoad:
-		return measureFullTunLatencyUnderLoad(ctx, path, scenario.PayloadByteCount)
+		result, err = measureFullTunLatencyUnderLoad(ctx, path, scenario.PayloadByteCount)
 	case perfvarWorkloadWeb:
-		return measureFullTunWeb(ctx, path)
+		result, err = measureFullTunWeb(ctx, path)
 	default:
 		return workloadResult{}, fmt.Errorf("unknown PERFVAR workload %q", scenario.Workload)
 	}
+	measureErr := err
+	result, err = finishScheduledWorkload(result, measureErr, scenario.ProfileSchedule, scheduleRun)
+	if usesLowLevelTcpHook && measureErr == nil {
+		err = errors.Join(err, path.waitForPostWorkloadBoundary(ctx))
+	}
+	return result, err
 }
 
 // Monotonic counters are subtracted at the workload boundary. Queue maxima
@@ -914,8 +1091,39 @@ func subtractP2pStats(
 		LegacySendByteCount:       after.LegacySendByteCount - before.LegacySendByteCount,
 		LegacyReceiveMessageCount: after.LegacyReceiveMessageCount - before.LegacyReceiveMessageCount,
 		LegacyReceiveByteCount:    after.LegacyReceiveByteCount - before.LegacyReceiveByteCount,
-		FastFallbackCount:         after.FastFallbackCount - before.FastFallbackCount,
-		FastDropCount:             after.FastDropCount - before.FastDropCount,
+		LegacyReceiveQueueDropCount: after.LegacyReceiveQueueDropCount -
+			before.LegacyReceiveQueueDropCount,
+		LegacyReceiveQueueDropByteCount: after.LegacyReceiveQueueDropByteCount -
+			before.LegacyReceiveQueueDropByteCount,
+		FastReceiveQueueDropCount: after.FastReceiveQueueDropCount -
+			before.FastReceiveQueueDropCount,
+		FastReceiveQueueDropByteCount: after.FastReceiveQueueDropByteCount -
+			before.FastReceiveQueueDropByteCount,
+		FastFallbackCount: after.FastFallbackCount - before.FastFallbackCount,
+		FastDropCount:     after.FastDropCount - before.FastDropCount,
+	}
+}
+
+func subtractPlatformTransportReceiveStats(
+	before clientconnect.PlatformTransportReceiveStatsSnapshot,
+	after clientconnect.PlatformTransportReceiveStatsSnapshot,
+) clientconnect.PlatformTransportReceiveStatsSnapshot {
+	subtractMode := func(
+		start clientconnect.PlatformTransportReceiveModeStatsSnapshot,
+		end clientconnect.PlatformTransportReceiveModeStatsSnapshot,
+	) clientconnect.PlatformTransportReceiveModeStatsSnapshot {
+		return clientconnect.PlatformTransportReceiveModeStatsSnapshot{
+			QueueDropMessageCount: end.QueueDropMessageCount - start.QueueDropMessageCount,
+			QueueDropByteCount:    end.QueueDropByteCount - start.QueueDropByteCount,
+		}
+	}
+	return clientconnect.PlatformTransportReceiveStatsSnapshot{
+		H1:                    subtractMode(before.H1, after.H1),
+		H3:                    subtractMode(before.H3, after.H3),
+		H3Dns:                 subtractMode(before.H3Dns, after.H3Dns),
+		H3DnsPump:             subtractMode(before.H3DnsPump, after.H3DnsPump),
+		H1ControlRefusalCount: after.H1ControlRefusalCount - before.H1ControlRefusalCount,
+		H1ControlRefusalBytes: after.H1ControlRefusalBytes - before.H1ControlRefusalBytes,
 	}
 }
 
@@ -928,6 +1136,90 @@ type perfvarPackFailureCounts struct {
 	providerFailureCount uint64
 }
 
+// A boundary retains Client identity so lifetime receive and send-recovery
+// counters cannot be mistaken for interval deltas after a client-generation
+// replacement.
+type perfvarClientReceiveBoundary struct {
+	client       *clientconnect.Client
+	stats        clientconnect.ClientReceiveStatsSnapshot
+	sendRecovery clientconnect.ClientSendRecoveryStatsSnapshot
+}
+
+// Serialized receive admission telemetry is interval-scoped when one Client
+// owns both boundaries. Generation changes are explicit and never subtracted.
+type perfvarReceiveHandoffCounters struct {
+	PackHandoffDropCount     uint64 `json:"pack_handoff_drop_count"`
+	PackHandoffDropByteCount uint64 `json:"pack_handoff_drop_byte_count"`
+	AckHandoffDropCount      uint64 `json:"ack_handoff_drop_count"`
+}
+
+type perfvarReceiveHandoffObservation struct {
+	Available                bool                          `json:"available"`
+	GenerationChanged        bool                          `json:"generation_changed"`
+	StartLifetime            perfvarReceiveHandoffCounters `json:"start_lifetime"`
+	EndLifetime              perfvarReceiveHandoffCounters `json:"end_lifetime"`
+	PackHandoffDropCount     uint64                        `json:"pack_handoff_drop_count"`
+	PackHandoffDropByteCount uint64                        `json:"pack_handoff_drop_byte_count"`
+	AckHandoffDropCount      uint64                        `json:"ack_handoff_drop_count"`
+}
+
+// Lifetime recovery counters include maxima so a generation replacement can
+// be diagnosed without subtracting unrelated Clients. The flattened fields on
+// perfvarSendRecoveryObservation are only monotonic interval deltas; lifetime
+// maxima remain explicitly scoped to StartLifetime / EndLifetime.
+type perfvarSendRecoveryCounters struct {
+	TimeoutResendWriteCount               uint64        `json:"timeout_resend_write_count"`
+	CarrierChangeWriteCount               uint64        `json:"carrier_change_write_count"`
+	SelectiveGapWriteCount                uint64        `json:"selective_gap_write_count"`
+	AckTailProbeWriteCount                uint64        `json:"ack_tail_probe_write_count"`
+	CumulativeProbeWriteCount             uint64        `json:"cumulative_probe_write_count"`
+	RecoveryWriteErrorCount               uint64        `json:"recovery_write_error_count"`
+	MissingContractWriteCount             uint64        `json:"missing_contract_write_count"`
+	MissingContractRequestCount           uint64        `json:"missing_contract_request_count"`
+	CompactRecoveryAckCount               uint64        `json:"compact_recovery_ack_count"`
+	CompactRecoveryContractCount          uint64        `json:"compact_recovery_contract_count"`
+	UnreliableFlowIsolationBypassCount    uint64        `json:"unreliable_flow_isolation_bypass_count"`
+	UnreliableNoAckAdmissionBypassCount   uint64        `json:"unreliable_noack_admission_bypass_count"`
+	UnreliableFlowReserveSelectionCount   uint64        `json:"unreliable_flow_reserve_selection_count"`
+	UnreliableFlowReserveUseCount         uint64        `json:"unreliable_flow_reserve_use_count"`
+	UnreliableFlightWaitCount             uint64        `json:"unreliable_flight_wait_count"`
+	UnreliableFlightWaitDuration          time.Duration `json:"unreliable_flight_wait_duration_nanoseconds"`
+	UnreliableFlightMaximumWaitDuration   time.Duration `json:"unreliable_flight_maximum_wait_duration_nanoseconds"`
+	UnreliableFlightGapCount              uint64        `json:"unreliable_flight_gap_count"`
+	UnreliableFlightTimeoutCount          uint64        `json:"unreliable_flight_timeout_count"`
+	UnreliableFlightReductionCount        uint64        `json:"unreliable_flight_reduction_count"`
+	UnreliableFlightMaximumByteCount      uint64        `json:"unreliable_flight_maximum_byte_count"`
+	UnreliableFlightMaximumLimitByteCount uint64        `json:"unreliable_flight_maximum_limit_byte_count"`
+	UnreliableFlightMaximumMessageCount   uint64        `json:"unreliable_flight_maximum_message_count"`
+	UnreliableFlightMaximumMessageLimit   uint64        `json:"unreliable_flight_maximum_message_limit"`
+}
+
+type perfvarSendRecoveryObservation struct {
+	Available                           bool                        `json:"available"`
+	GenerationChanged                   bool                        `json:"generation_changed"`
+	StartLifetime                       perfvarSendRecoveryCounters `json:"start_lifetime"`
+	EndLifetime                         perfvarSendRecoveryCounters `json:"end_lifetime"`
+	TimeoutResendWriteCount             uint64                      `json:"timeout_resend_write_count"`
+	CarrierChangeWriteCount             uint64                      `json:"carrier_change_write_count"`
+	SelectiveGapWriteCount              uint64                      `json:"selective_gap_write_count"`
+	AckTailProbeWriteCount              uint64                      `json:"ack_tail_probe_write_count"`
+	CumulativeProbeWriteCount           uint64                      `json:"cumulative_probe_write_count"`
+	RecoveryWriteErrorCount             uint64                      `json:"recovery_write_error_count"`
+	MissingContractWriteCount           uint64                      `json:"missing_contract_write_count"`
+	MissingContractRequestCount         uint64                      `json:"missing_contract_request_count"`
+	CompactRecoveryAckCount             uint64                      `json:"compact_recovery_ack_count"`
+	CompactRecoveryContractCount        uint64                      `json:"compact_recovery_contract_count"`
+	UnreliableFlowIsolationBypassCount  uint64                      `json:"unreliable_flow_isolation_bypass_count"`
+	UnreliableNoAckAdmissionBypassCount uint64                      `json:"unreliable_noack_admission_bypass_count"`
+	UnreliableFlowReserveSelectionCount uint64                      `json:"unreliable_flow_reserve_selection_count"`
+	UnreliableFlowReserveUseCount       uint64                      `json:"unreliable_flow_reserve_use_count"`
+	UnreliableFlightWaitCount           uint64                      `json:"unreliable_flight_wait_count"`
+	UnreliableFlightWaitDuration        time.Duration               `json:"unreliable_flight_wait_duration_nanoseconds"`
+	UnreliableFlightGapCount            uint64                      `json:"unreliable_flight_gap_count"`
+	UnreliableFlightTimeoutCount        uint64                      `json:"unreliable_flight_timeout_count"`
+	UnreliableFlightReductionCount      uint64                      `json:"unreliable_flight_reduction_count"`
+}
+
 // A carrier boundary snapshots every route-specific counter at one instant so
 // setup and teardown traffic cannot be mistaken for workload traffic.
 type perfvarCarrierBoundary struct {
@@ -938,11 +1230,538 @@ type perfvarCarrierBoundary struct {
 	p2pNetwork                     p2pNetworkSnapshot
 	deviceP2P                      clientconnect.P2pDataPlaneStatsSnapshot
 	providerP2P                    clientconnect.P2pDataPlaneStatsSnapshot
+	devicePacketStats              perfvarPacketStatsObservation
+	providerPacketStats            perfvarPacketStatsObservation
+	devicePlatformReceive          clientconnect.PlatformTransportReceiveStatsSnapshot
+	providerPlatformReceive        clientconnect.PlatformTransportReceiveStatsSnapshot
+	deviceH3Datagrams              clientconnect.H3DatagramStatsSnapshot
+	providerH3Datagrams            clientconnect.H3DatagramStatsSnapshot
+	deviceReceive                  perfvarClientReceiveBoundary
+	providerReceive                perfvarClientReceiveBoundary
 	streamP2PHops                  []streamP2pHopSnapshot
 	streamP2PClientStats           []clientconnect.P2pDataPlaneStatsSnapshot
+	streamP2PReceive               []perfvarClientReceiveBoundary
 	streamNonAdjacentDialCount     uint64
 	streamNonAdjacentStunDropCount uint64
 	streamNonAdjacentDataDropCount uint64
+}
+
+func snapshotPerfvarPacketStats(
+	stats *clientconnect.PacketStats,
+) perfvarPacketStatsObservation {
+	if stats == nil {
+		return perfvarPacketStatsObservation{}
+	}
+	snapshot := perfvarPacketStatsObservation{
+		Available:                true,
+		RemoteEgressPacketCount:  stats.RemoteEgressPacketCount,
+		RemoteEgressByteCount:    int64(stats.RemoteEgressByteCount),
+		RemoteIngressPacketCount: stats.RemoteIngressPacketCount,
+		RemoteIngressByteCount:   int64(stats.RemoteIngressByteCount),
+		TransportStats:           map[clientconnect.TransportType]perfvarTransportPacketStatsObservation{},
+	}
+	for _, transportType := range clientconnect.TransportTypes() {
+		transportStats := stats.TransportStats[transportType]
+		if transportStats == nil {
+			snapshot.TransportStats[transportType] = perfvarTransportPacketStatsObservation{}
+			continue
+		}
+		snapshot.TransportStats[transportType] = perfvarTransportPacketStatsObservation{
+			RemoteEgressPacketCount:  transportStats.RemoteEgressPacketCount,
+			RemoteEgressByteCount:    int64(transportStats.RemoteEgressByteCount),
+			RemoteIngressPacketCount: transportStats.RemoteIngressPacketCount,
+			RemoteIngressByteCount:   int64(transportStats.RemoteIngressByteCount),
+		}
+	}
+	return snapshot
+}
+
+func snapshotPerfvarDevicePacketStats(path *fullTunPath) perfvarPacketStatsObservation {
+	if path == nil || path.multiClient == nil {
+		return perfvarPacketStatsObservation{}
+	}
+	return snapshotPerfvarPacketStats(path.multiClient.PacketStats())
+}
+
+func snapshotPerfvarProviderPacketStats(path *fullTunPath) perfvarPacketStatsObservation {
+	if path == nil || path.providerRemoteNat == nil {
+		return perfvarPacketStatsObservation{}
+	}
+	return snapshotPerfvarPacketStats(path.providerRemoteNat.PacketStats())
+}
+
+func snapshotPerfvarH3Datagrams(
+	stats *clientconnect.H3DatagramStats,
+) clientconnect.H3DatagramStatsSnapshot {
+	if stats == nil {
+		return clientconnect.H3DatagramStatsSnapshot{}
+	}
+	return stats.Snapshot()
+}
+
+func subtractPerfvarPacketStats(
+	before perfvarPacketStatsObservation,
+	after perfvarPacketStatsObservation,
+) perfvarPacketStatsObservation {
+	if !before.Available || !after.Available {
+		return perfvarPacketStatsObservation{}
+	}
+	observation := perfvarPacketStatsObservation{
+		Available:                true,
+		RemoteEgressPacketCount:  after.RemoteEgressPacketCount - before.RemoteEgressPacketCount,
+		RemoteEgressByteCount:    after.RemoteEgressByteCount - before.RemoteEgressByteCount,
+		RemoteIngressPacketCount: after.RemoteIngressPacketCount - before.RemoteIngressPacketCount,
+		RemoteIngressByteCount:   after.RemoteIngressByteCount - before.RemoteIngressByteCount,
+		TransportStats:           map[clientconnect.TransportType]perfvarTransportPacketStatsObservation{},
+	}
+	for _, transportType := range clientconnect.TransportTypes() {
+		start := before.TransportStats[transportType]
+		end := after.TransportStats[transportType]
+		observation.TransportStats[transportType] = perfvarTransportPacketStatsObservation{
+			RemoteEgressPacketCount:  end.RemoteEgressPacketCount - start.RemoteEgressPacketCount,
+			RemoteEgressByteCount:    end.RemoteEgressByteCount - start.RemoteEgressByteCount,
+			RemoteIngressPacketCount: end.RemoteIngressPacketCount - start.RemoteIngressPacketCount,
+			RemoteIngressByteCount:   end.RemoteIngressByteCount - start.RemoteIngressByteCount,
+		}
+	}
+	return observation
+}
+
+func perfvarPacketStatsEqual(
+	a perfvarPacketStatsObservation,
+	b perfvarPacketStatsObservation,
+) bool {
+	if a.Available != b.Available ||
+		a.RemoteEgressPacketCount != b.RemoteEgressPacketCount ||
+		a.RemoteEgressByteCount != b.RemoteEgressByteCount ||
+		a.RemoteIngressPacketCount != b.RemoteIngressPacketCount ||
+		a.RemoteIngressByteCount != b.RemoteIngressByteCount {
+		return false
+	}
+	for _, transportType := range clientconnect.TransportTypes() {
+		if a.TransportStats[transportType] != b.TransportStats[transportType] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestSubtractPerfvarPacketStatsRetainsExactTransportIntervals(t *testing.T) {
+	packetStats := func(
+		egressPackets int64,
+		egressBytes int64,
+		ingressPackets int64,
+		ingressBytes int64,
+		h1 perfvarTransportPacketStatsObservation,
+		h3 perfvarTransportPacketStatsObservation,
+	) *clientconnect.PacketStats {
+		return &clientconnect.PacketStats{
+			RemoteEgressPacketCount:  egressPackets,
+			RemoteEgressByteCount:    clientconnect.ByteCount(egressBytes),
+			RemoteIngressPacketCount: ingressPackets,
+			RemoteIngressByteCount:   clientconnect.ByteCount(ingressBytes),
+			TransportStats: map[clientconnect.TransportType]*clientconnect.PacketStats{
+				clientconnect.TransportTypeH1: {
+					RemoteEgressPacketCount:  h1.RemoteEgressPacketCount,
+					RemoteEgressByteCount:    clientconnect.ByteCount(h1.RemoteEgressByteCount),
+					RemoteIngressPacketCount: h1.RemoteIngressPacketCount,
+					RemoteIngressByteCount:   clientconnect.ByteCount(h1.RemoteIngressByteCount),
+				},
+				clientconnect.TransportTypeH3: {
+					RemoteEgressPacketCount:  h3.RemoteEgressPacketCount,
+					RemoteEgressByteCount:    clientconnect.ByteCount(h3.RemoteEgressByteCount),
+					RemoteIngressPacketCount: h3.RemoteIngressPacketCount,
+					RemoteIngressByteCount:   clientconnect.ByteCount(h3.RemoteIngressByteCount),
+				},
+			},
+		}
+	}
+	before := snapshotPerfvarPacketStats(packetStats(
+		3,
+		300,
+		4,
+		400,
+		perfvarTransportPacketStatsObservation{1, 100, 3, 300},
+		perfvarTransportPacketStatsObservation{2, 200, 1, 100},
+	))
+	after := snapshotPerfvarPacketStats(packetStats(
+		13,
+		1300,
+		24,
+		2400,
+		perfvarTransportPacketStatsObservation{5, 500, 15, 1500},
+		perfvarTransportPacketStatsObservation{8, 800, 9, 900},
+	))
+	delta := subtractPerfvarPacketStats(before, after)
+	if !delta.Available || delta.RemoteEgressPacketCount != 10 ||
+		delta.RemoteEgressByteCount != 1000 || delta.RemoteIngressPacketCount != 20 ||
+		delta.RemoteIngressByteCount != 2000 {
+		t.Fatalf("packet interval=%+v", delta)
+	}
+	h1 := delta.TransportStats[clientconnect.TransportTypeH1]
+	h3 := delta.TransportStats[clientconnect.TransportTypeH3]
+	if h1 != (perfvarTransportPacketStatsObservation{4, 400, 12, 1200}) ||
+		h3 != (perfvarTransportPacketStatsObservation{6, 600, 8, 800}) {
+		t.Fatalf("transport interval h1=%+v h3=%+v", h1, h3)
+	}
+	var partition perfvarTransportPacketStatsObservation
+	for _, transportType := range clientconnect.TransportTypes() {
+		row := delta.TransportStats[transportType]
+		partition.RemoteEgressPacketCount += row.RemoteEgressPacketCount
+		partition.RemoteEgressByteCount += row.RemoteEgressByteCount
+		partition.RemoteIngressPacketCount += row.RemoteIngressPacketCount
+		partition.RemoteIngressByteCount += row.RemoteIngressByteCount
+	}
+	if partition != (perfvarTransportPacketStatsObservation{
+		delta.RemoteEgressPacketCount,
+		delta.RemoteEgressByteCount,
+		delta.RemoteIngressPacketCount,
+		delta.RemoteIngressByteCount,
+	}) {
+		t.Fatalf("transport partition=%+v aggregate=%+v", partition, delta)
+	}
+	if missing := subtractPerfvarPacketStats(
+		perfvarPacketStatsObservation{},
+		after,
+	); missing.Available || missing.TransportStats != nil {
+		t.Fatalf("one-sided packet interval=%+v", missing)
+	}
+}
+
+func snapshotPerfvarClientReceive(client *clientconnect.Client) perfvarClientReceiveBoundary {
+	if client == nil {
+		return perfvarClientReceiveBoundary{}
+	}
+	return perfvarClientReceiveBoundary{
+		client:       client,
+		stats:        client.ReceiveStats(),
+		sendRecovery: client.SendRecoveryStats(),
+	}
+}
+
+func snapshotPerfvarDeviceReceive(path *fullTunPath) perfvarClientReceiveBoundary {
+	if path.deviceClient == nil {
+		return perfvarClientReceiveBoundary{}
+	}
+	return snapshotPerfvarClientReceive(path.deviceClient.Load())
+}
+
+func subtractPerfvarClientReceive(
+	before perfvarClientReceiveBoundary,
+	after perfvarClientReceiveBoundary,
+) perfvarReceiveHandoffObservation {
+	counters := func(snapshot clientconnect.ClientReceiveStatsSnapshot) perfvarReceiveHandoffCounters {
+		return perfvarReceiveHandoffCounters{
+			PackHandoffDropCount:     snapshot.PackHandoffDropCount,
+			PackHandoffDropByteCount: snapshot.PackHandoffDropByteCount,
+			AckHandoffDropCount:      snapshot.AckHandoffDropCount,
+		}
+	}
+	observation := perfvarReceiveHandoffObservation{
+		Available:         before.client != nil || after.client != nil,
+		GenerationChanged: before.client != after.client,
+		StartLifetime:     counters(before.stats),
+		EndLifetime:       counters(after.stats),
+	}
+	if before.client == nil || before.client != after.client {
+		return observation
+	}
+	observation.PackHandoffDropCount = after.stats.PackHandoffDropCount -
+		before.stats.PackHandoffDropCount
+	observation.PackHandoffDropByteCount = after.stats.PackHandoffDropByteCount -
+		before.stats.PackHandoffDropByteCount
+	observation.AckHandoffDropCount = after.stats.AckHandoffDropCount -
+		before.stats.AckHandoffDropCount
+	return observation
+}
+
+func perfvarSendRecoveryCountersFor(
+	snapshot clientconnect.ClientSendRecoveryStatsSnapshot,
+) perfvarSendRecoveryCounters {
+	return perfvarSendRecoveryCounters{
+		TimeoutResendWriteCount:               snapshot.TimeoutResendWriteCount,
+		CarrierChangeWriteCount:               snapshot.CarrierChangeWriteCount,
+		SelectiveGapWriteCount:                snapshot.SelectiveGapWriteCount,
+		AckTailProbeWriteCount:                snapshot.AckTailProbeWriteCount,
+		CumulativeProbeWriteCount:             snapshot.CumulativeProbeWriteCount,
+		RecoveryWriteErrorCount:               snapshot.RecoveryWriteErrorCount,
+		MissingContractWriteCount:             snapshot.MissingContractWriteCount,
+		MissingContractRequestCount:           snapshot.MissingContractRequestCount,
+		CompactRecoveryAckCount:               snapshot.CompactRecoveryAckCount,
+		CompactRecoveryContractCount:          snapshot.CompactRecoveryContractCount,
+		UnreliableFlowIsolationBypassCount:    snapshot.UnreliableFlowIsolationBypassCount,
+		UnreliableNoAckAdmissionBypassCount:   snapshot.UnreliableNoAckAdmissionBypassCount,
+		UnreliableFlowReserveSelectionCount:   snapshot.UnreliableFlowReserveSelectionCount,
+		UnreliableFlowReserveUseCount:         snapshot.UnreliableFlowReserveUseCount,
+		UnreliableFlightWaitCount:             snapshot.UnreliableFlightWaitCount,
+		UnreliableFlightWaitDuration:          snapshot.UnreliableFlightWaitDuration,
+		UnreliableFlightMaximumWaitDuration:   snapshot.UnreliableFlightMaximumWaitDuration,
+		UnreliableFlightGapCount:              snapshot.UnreliableFlightGapCount,
+		UnreliableFlightTimeoutCount:          snapshot.UnreliableFlightTimeoutCount,
+		UnreliableFlightReductionCount:        snapshot.UnreliableFlightReductionCount,
+		UnreliableFlightMaximumByteCount:      snapshot.UnreliableFlightMaximumByteCount,
+		UnreliableFlightMaximumLimitByteCount: snapshot.UnreliableFlightMaximumLimitByteCount,
+		UnreliableFlightMaximumMessageCount:   snapshot.UnreliableFlightMaximumMessageCount,
+		UnreliableFlightMaximumMessageLimit:   snapshot.UnreliableFlightMaximumMessageLimit,
+	}
+}
+
+func subtractPerfvarClientSendRecovery(
+	before perfvarClientReceiveBoundary,
+	after perfvarClientReceiveBoundary,
+) perfvarSendRecoveryObservation {
+	observation := perfvarSendRecoveryObservation{
+		Available:         before.client != nil || after.client != nil,
+		GenerationChanged: before.client != after.client,
+		StartLifetime:     perfvarSendRecoveryCountersFor(before.sendRecovery),
+		EndLifetime:       perfvarSendRecoveryCountersFor(after.sendRecovery),
+	}
+	if before.client == nil || before.client != after.client {
+		return observation
+	}
+	start := before.sendRecovery
+	end := after.sendRecovery
+	observation.TimeoutResendWriteCount = end.TimeoutResendWriteCount - start.TimeoutResendWriteCount
+	observation.CarrierChangeWriteCount = end.CarrierChangeWriteCount - start.CarrierChangeWriteCount
+	observation.SelectiveGapWriteCount = end.SelectiveGapWriteCount - start.SelectiveGapWriteCount
+	observation.AckTailProbeWriteCount = end.AckTailProbeWriteCount - start.AckTailProbeWriteCount
+	observation.CumulativeProbeWriteCount = end.CumulativeProbeWriteCount - start.CumulativeProbeWriteCount
+	observation.RecoveryWriteErrorCount = end.RecoveryWriteErrorCount - start.RecoveryWriteErrorCount
+	observation.MissingContractWriteCount = end.MissingContractWriteCount - start.MissingContractWriteCount
+	observation.MissingContractRequestCount = end.MissingContractRequestCount - start.MissingContractRequestCount
+	observation.CompactRecoveryAckCount = end.CompactRecoveryAckCount - start.CompactRecoveryAckCount
+	observation.CompactRecoveryContractCount = end.CompactRecoveryContractCount - start.CompactRecoveryContractCount
+	observation.UnreliableFlowIsolationBypassCount = end.UnreliableFlowIsolationBypassCount - start.UnreliableFlowIsolationBypassCount
+	observation.UnreliableNoAckAdmissionBypassCount = end.UnreliableNoAckAdmissionBypassCount - start.UnreliableNoAckAdmissionBypassCount
+	observation.UnreliableFlowReserveSelectionCount = end.UnreliableFlowReserveSelectionCount - start.UnreliableFlowReserveSelectionCount
+	observation.UnreliableFlowReserveUseCount = end.UnreliableFlowReserveUseCount - start.UnreliableFlowReserveUseCount
+	observation.UnreliableFlightWaitCount = end.UnreliableFlightWaitCount - start.UnreliableFlightWaitCount
+	observation.UnreliableFlightWaitDuration = end.UnreliableFlightWaitDuration - start.UnreliableFlightWaitDuration
+	observation.UnreliableFlightGapCount = end.UnreliableFlightGapCount - start.UnreliableFlightGapCount
+	observation.UnreliableFlightTimeoutCount = end.UnreliableFlightTimeoutCount - start.UnreliableFlightTimeoutCount
+	observation.UnreliableFlightReductionCount = end.UnreliableFlightReductionCount - start.UnreliableFlightReductionCount
+	return observation
+}
+
+func TestSubtractPerfvarClientReceiveRequiresStableGeneration(t *testing.T) {
+	client := new(clientconnect.Client)
+	before := perfvarClientReceiveBoundary{
+		client: client,
+		stats: clientconnect.ClientReceiveStatsSnapshot{
+			PackHandoffDropCount:     3,
+			PackHandoffDropByteCount: 30,
+			AckHandoffDropCount:      4,
+		},
+	}
+	after := perfvarClientReceiveBoundary{
+		client: client,
+		stats: clientconnect.ClientReceiveStatsSnapshot{
+			PackHandoffDropCount:     8,
+			PackHandoffDropByteCount: 90,
+			AckHandoffDropCount:      6,
+		},
+	}
+	observation := subtractPerfvarClientReceive(before, after)
+	if !observation.Available || observation.GenerationChanged ||
+		observation.PackHandoffDropCount != 5 ||
+		observation.PackHandoffDropByteCount != 60 ||
+		observation.AckHandoffDropCount != 2 {
+		t.Fatalf("stable receive-handoff interval=%+v", observation)
+	}
+	after.client = new(clientconnect.Client)
+	observation = subtractPerfvarClientReceive(before, after)
+	if !observation.Available || !observation.GenerationChanged ||
+		observation.StartLifetime.PackHandoffDropCount != 3 ||
+		observation.EndLifetime.PackHandoffDropCount != 8 ||
+		observation.PackHandoffDropCount != 0 ||
+		observation.PackHandoffDropByteCount != 0 ||
+		observation.AckHandoffDropCount != 0 {
+		t.Fatalf("changed receive-handoff generation=%+v", observation)
+	}
+	if observation := subtractPerfvarClientReceive(
+		perfvarClientReceiveBoundary{},
+		perfvarClientReceiveBoundary{},
+	); observation.Available || observation.GenerationChanged {
+		t.Fatalf("missing receive-handoff clients=%+v", observation)
+	}
+}
+
+func TestSubtractPerfvarClientSendRecoveryRequiresStableGeneration(t *testing.T) {
+	client := new(clientconnect.Client)
+	before := perfvarClientReceiveBoundary{
+		client: client,
+		sendRecovery: clientconnect.ClientSendRecoveryStatsSnapshot{
+			TimeoutResendWriteCount:             3,
+			CarrierChangeWriteCount:             4,
+			RecoveryWriteErrorCount:             2,
+			UnreliableFlowIsolationBypassCount:  1,
+			UnreliableNoAckAdmissionBypassCount: 2,
+			UnreliableFlowReserveSelectionCount: 3,
+			UnreliableFlowReserveUseCount:       2,
+			UnreliableFlightWaitCount:           5,
+			UnreliableFlightWaitDuration:        6 * time.Millisecond,
+			UnreliableFlightMaximumByteCount:    700,
+			UnreliableFlightMaximumMessageCount: 8,
+		},
+	}
+	after := perfvarClientReceiveBoundary{
+		client: client,
+		sendRecovery: clientconnect.ClientSendRecoveryStatsSnapshot{
+			TimeoutResendWriteCount:             10,
+			CarrierChangeWriteCount:             6,
+			SelectiveGapWriteCount:              2,
+			RecoveryWriteErrorCount:             5,
+			UnreliableFlowIsolationBypassCount:  5,
+			UnreliableNoAckAdmissionBypassCount: 8,
+			UnreliableFlowReserveSelectionCount: 8,
+			UnreliableFlowReserveUseCount:       7,
+			UnreliableFlightWaitCount:           9,
+			UnreliableFlightWaitDuration:        16 * time.Millisecond,
+			UnreliableFlightMaximumByteCount:    900,
+			UnreliableFlightMaximumMessageCount: 12,
+		},
+	}
+	observation := subtractPerfvarClientSendRecovery(before, after)
+	if !observation.Available || observation.GenerationChanged ||
+		observation.TimeoutResendWriteCount != 7 ||
+		observation.CarrierChangeWriteCount != 2 ||
+		observation.SelectiveGapWriteCount != 2 ||
+		observation.RecoveryWriteErrorCount != 3 ||
+		observation.UnreliableFlowIsolationBypassCount != 4 ||
+		observation.UnreliableNoAckAdmissionBypassCount != 6 ||
+		observation.UnreliableFlowReserveSelectionCount != 5 ||
+		observation.UnreliableFlowReserveUseCount != 5 ||
+		observation.UnreliableFlightWaitCount != 4 ||
+		observation.UnreliableFlightWaitDuration != 10*time.Millisecond ||
+		observation.StartLifetime.UnreliableFlightMaximumByteCount != 700 ||
+		observation.EndLifetime.UnreliableFlightMaximumByteCount != 900 ||
+		observation.EndLifetime.UnreliableFlightMaximumMessageCount != 12 {
+		t.Fatalf("stable send-recovery interval=%+v", observation)
+	}
+	after.client = new(clientconnect.Client)
+	observation = subtractPerfvarClientSendRecovery(before, after)
+	if !observation.Available || !observation.GenerationChanged ||
+		observation.StartLifetime.TimeoutResendWriteCount != 3 ||
+		observation.EndLifetime.TimeoutResendWriteCount != 10 ||
+		observation.TimeoutResendWriteCount != 0 ||
+		observation.CarrierChangeWriteCount != 0 ||
+		observation.RecoveryWriteErrorCount != 0 ||
+		observation.UnreliableFlightWaitDuration != 0 {
+		t.Fatalf("changed send-recovery generation=%+v", observation)
+	}
+	if observation := subtractPerfvarClientSendRecovery(
+		perfvarClientReceiveBoundary{},
+		perfvarClientReceiveBoundary{},
+	); observation.Available || observation.GenerationChanged {
+		t.Fatalf("missing send-recovery clients=%+v", observation)
+	}
+}
+
+func TestObservePerfvarCarrierIncludesReceiveHandoffIntervals(t *testing.T) {
+	device := new(clientconnect.Client)
+	provider := new(clientconnect.Client)
+	stream := new(clientconnect.Client)
+	startTime := time.Now()
+	before := perfvarCarrierBoundary{
+		capturedAt: startTime,
+		devicePlatformReceive: clientconnect.PlatformTransportReceiveStatsSnapshot{
+			H3Dns: clientconnect.PlatformTransportReceiveModeStatsSnapshot{
+				QueueDropMessageCount: 2,
+				QueueDropByteCount:    20,
+			},
+		},
+		providerPlatformReceive: clientconnect.PlatformTransportReceiveStatsSnapshot{
+			H1ControlRefusalCount: 3,
+			H1ControlRefusalBytes: 30,
+		},
+		deviceH3Datagrams: clientconnect.H3DatagramStatsSnapshot{
+			SentMessageCount: 2,
+		},
+		providerH3Datagrams: clientconnect.H3DatagramStatsSnapshot{
+			StreamSentMessageCount: 3,
+		},
+		devicePacketStats: perfvarPacketStatsObservation{
+			Available:               true,
+			RemoteEgressPacketCount: 2,
+			TransportStats: map[clientconnect.TransportType]perfvarTransportPacketStatsObservation{
+				clientconnect.TransportTypeH3: {RemoteEgressPacketCount: 2},
+			},
+		},
+		providerPacketStats: perfvarPacketStatsObservation{
+			Available:                true,
+			RemoteIngressPacketCount: 3,
+			TransportStats: map[clientconnect.TransportType]perfvarTransportPacketStatsObservation{
+				clientconnect.TransportTypeH1: {RemoteIngressPacketCount: 3},
+			},
+		},
+		deviceReceive: perfvarClientReceiveBoundary{
+			client: device,
+			stats:  clientconnect.ClientReceiveStatsSnapshot{PackHandoffDropCount: 2},
+			sendRecovery: clientconnect.ClientSendRecoveryStatsSnapshot{
+				TimeoutResendWriteCount: 4,
+			},
+		},
+		providerReceive: perfvarClientReceiveBoundary{
+			client: provider,
+			stats:  clientconnect.ClientReceiveStatsSnapshot{AckHandoffDropCount: 3},
+			sendRecovery: clientconnect.ClientSendRecoveryStatsSnapshot{
+				CarrierChangeWriteCount: 5,
+			},
+		},
+		streamP2PReceive: []perfvarClientReceiveBoundary{{
+			client: stream,
+			stats:  clientconnect.ClientReceiveStatsSnapshot{PackHandoffDropByteCount: 40},
+			sendRecovery: clientconnect.ClientSendRecoveryStatsSnapshot{
+				SelectiveGapWriteCount: 6,
+			},
+		}},
+	}
+	after := before
+	after.devicePacketStats.TransportStats = maps.Clone(before.devicePacketStats.TransportStats)
+	after.providerPacketStats.TransportStats = maps.Clone(before.providerPacketStats.TransportStats)
+	after.capturedAt = startTime.Add(time.Second)
+	after.devicePlatformReceive.H3Dns.QueueDropMessageCount = 7
+	after.devicePlatformReceive.H3Dns.QueueDropByteCount = 90
+	after.providerPlatformReceive.H1ControlRefusalCount = 5
+	after.providerPlatformReceive.H1ControlRefusalBytes = 80
+	after.deviceH3Datagrams.SentMessageCount = 7
+	after.providerH3Datagrams.StreamSentMessageCount = 9
+	after.devicePacketStats.RemoteEgressPacketCount = 7
+	deviceH3 := after.devicePacketStats.TransportStats[clientconnect.TransportTypeH3]
+	deviceH3.RemoteEgressPacketCount = 7
+	after.devicePacketStats.TransportStats[clientconnect.TransportTypeH3] = deviceH3
+	after.providerPacketStats.RemoteIngressPacketCount = 8
+	providerH1 := after.providerPacketStats.TransportStats[clientconnect.TransportTypeH1]
+	providerH1.RemoteIngressPacketCount = 8
+	after.providerPacketStats.TransportStats[clientconnect.TransportTypeH1] = providerH1
+	after.deviceReceive.stats.PackHandoffDropCount = 7
+	after.deviceReceive.sendRecovery.TimeoutResendWriteCount = 11
+	after.providerReceive.stats.AckHandoffDropCount = 5
+	after.providerReceive.sendRecovery.CarrierChangeWriteCount = 8
+	after.streamP2PReceive = append([]perfvarClientReceiveBoundary(nil), before.streamP2PReceive...)
+	after.streamP2PReceive[0].stats.PackHandoffDropByteCount = 100
+	after.streamP2PReceive[0].sendRecovery.SelectiveGapWriteCount = 10
+	observation := observePerfvarCarrierAt(&fullTunPath{}, before, after)
+	if observation.DevicePlatformReceive.H3Dns.QueueDropMessageCount != 5 ||
+		observation.DevicePlatformReceive.H3Dns.QueueDropByteCount != 70 ||
+		observation.ProviderPlatformReceive.H1ControlRefusalCount != 2 ||
+		observation.ProviderPlatformReceive.H1ControlRefusalBytes != 50 ||
+		observation.DeviceH3Datagrams.SentMessageCount != 5 ||
+		observation.ProviderH3Datagrams.StreamSentMessageCount != 6 ||
+		observation.DevicePacketStats.RemoteEgressPacketCount != 5 ||
+		observation.DevicePacketStats.TransportStats[clientconnect.TransportTypeH3].RemoteEgressPacketCount != 5 ||
+		observation.ProviderPacketStats.RemoteIngressPacketCount != 5 ||
+		observation.ProviderPacketStats.TransportStats[clientconnect.TransportTypeH1].RemoteIngressPacketCount != 5 ||
+		observation.DeviceReceiveHandoff.PackHandoffDropCount != 5 ||
+		observation.ProviderReceiveHandoff.AckHandoffDropCount != 2 ||
+		observation.DeviceSendRecovery.TimeoutResendWriteCount != 7 ||
+		observation.ProviderSendRecovery.CarrierChangeWriteCount != 3 ||
+		len(observation.StreamP2PReceiveHandoffs) != 1 ||
+		observation.StreamP2PReceiveHandoffs[0].PackHandoffDropByteCount != 60 ||
+		len(observation.StreamP2PSendRecoveries) != 1 ||
+		observation.StreamP2PSendRecoveries[0].SelectiveGapWriteCount != 4 {
+		t.Fatalf("carrier receive-handoff observation=%+v", observation)
+	}
 }
 
 // Nil trackers are valid in small carrier-only unit fixtures.
@@ -965,10 +1784,18 @@ var errPerfvarCarrierStartCrossed = errors.New("carrier activity crossed the bas
 // provider, making each intermediary's forwarding work independently visible.
 func snapshotPerfvarCarrier(path *fullTunPath) perfvarCarrierBoundary {
 	boundary := perfvarCarrierBoundary{
-		packFailures: snapshotPerfvarPackFailures(path),
-		links:        path.environment.network.snapshotLinks(),
-		deviceP2P:    path.deviceStats.Snapshot(),
-		providerP2P:  path.providerStats.Snapshot(),
+		packFailures:            snapshotPerfvarPackFailures(path),
+		links:                   path.environment.network.snapshotLinks(),
+		deviceP2P:               path.deviceStats.Snapshot(),
+		providerP2P:             path.providerStats.Snapshot(),
+		devicePacketStats:       snapshotPerfvarDevicePacketStats(path),
+		providerPacketStats:     snapshotPerfvarProviderPacketStats(path),
+		devicePlatformReceive:   path.devicePlatformReceiveStats.Snapshot(),
+		providerPlatformReceive: path.providerPlatformReceiveStats.Snapshot(),
+		deviceH3Datagrams:       snapshotPerfvarH3Datagrams(path.deviceH3DatagramStats),
+		providerH3Datagrams:     snapshotPerfvarH3Datagrams(path.providerH3DatagramStats),
+		deviceReceive:           snapshotPerfvarDeviceReceive(path),
+		providerReceive:         snapshotPerfvarClientReceive(path.providerClient),
 	}
 	if path.bridgeSends != nil {
 		boundary.bridgeBatches = path.bridgeSends.batchSnapshot()
@@ -988,6 +1815,13 @@ func snapshotPerfvarCarrier(path *fullTunPath) perfvarCarrierBoundary {
 		)
 		for clientIndex, stats := range path.streamP2pStats {
 			boundary.streamP2PClientStats[clientIndex] = stats.Snapshot()
+		}
+		boundary.streamP2PReceive = make(
+			[]perfvarClientReceiveBoundary,
+			len(path.streamP2pClients),
+		)
+		for clientIndex, client := range path.streamP2pClients {
+			boundary.streamP2PReceive[clientIndex] = snapshotPerfvarClientReceive(client.client)
 		}
 	}
 	boundary.capturedAt = time.Now()
@@ -1031,10 +1865,18 @@ func beginPerfvarCarrierMeasurementNow(
 		path.afterAccessCarrierStartForTest()
 	}
 	boundary := perfvarCarrierBoundary{
-		packFailures: snapshotPerfvarPackFailures(path),
-		links:        links,
-		deviceP2P:    path.deviceStats.Snapshot(),
-		providerP2P:  path.providerStats.Snapshot(),
+		packFailures:            snapshotPerfvarPackFailures(path),
+		links:                   links,
+		deviceP2P:               path.deviceStats.Snapshot(),
+		providerP2P:             path.providerStats.Snapshot(),
+		devicePacketStats:       snapshotPerfvarDevicePacketStats(path),
+		providerPacketStats:     snapshotPerfvarProviderPacketStats(path),
+		devicePlatformReceive:   path.devicePlatformReceiveStats.Snapshot(),
+		providerPlatformReceive: path.providerPlatformReceiveStats.Snapshot(),
+		deviceH3Datagrams:       snapshotPerfvarH3Datagrams(path.deviceH3DatagramStats),
+		providerH3Datagrams:     snapshotPerfvarH3Datagrams(path.providerH3DatagramStats),
+		deviceReceive:           snapshotPerfvarDeviceReceive(path),
+		providerReceive:         snapshotPerfvarClientReceive(path.providerClient),
 	}
 	if path.p2pNetwork != nil {
 		p2pNetwork, p2pOk := path.p2pNetwork.beginMeasurementSnapshot(path.ctx)
@@ -1065,6 +1907,13 @@ func beginPerfvarCarrierMeasurementNow(
 		)
 		for clientIndex, stats := range path.streamP2pStats {
 			boundary.streamP2PClientStats[clientIndex] = stats.Snapshot()
+		}
+		boundary.streamP2PReceive = make(
+			[]perfvarClientReceiveBoundary,
+			len(path.streamP2pClients),
+		)
+		for clientIndex, client := range path.streamP2pClients {
+			boundary.streamP2PReceive[clientIndex] = snapshotPerfvarClientReceive(client.client)
 		}
 	}
 	boundary.capturedAt = time.Now()
@@ -1116,13 +1965,22 @@ func perfvarCarrierBaselinePassStable(
 		}
 	}
 	if before.packFailures != after.packFailures ||
+		before.deviceReceive != after.deviceReceive ||
+		before.providerReceive != after.providerReceive ||
+		before.devicePlatformReceive != after.devicePlatformReceive ||
+		before.providerPlatformReceive != after.providerPlatformReceive ||
+		before.deviceH3Datagrams != after.deviceH3Datagrams ||
+		before.providerH3Datagrams != after.providerH3Datagrams ||
+		!perfvarPacketStatsEqual(before.devicePacketStats, after.devicePacketStats) ||
+		!perfvarPacketStatsEqual(before.providerPacketStats, after.providerPacketStats) ||
 		normalizeP2pNetwork(before.p2pNetwork) != normalizeP2pNetwork(after.p2pNetwork) ||
 		subtractP2pStats(before.deviceP2P, after.deviceP2P) !=
 			(clientconnect.P2pDataPlaneStatsSnapshot{}) ||
 		subtractP2pStats(before.providerP2P, after.providerP2P) !=
 			(clientconnect.P2pDataPlaneStatsSnapshot{}) ||
 		len(before.streamP2PHops) != len(after.streamP2PHops) ||
-		len(before.streamP2PClientStats) != len(after.streamP2PClientStats) {
+		len(before.streamP2PClientStats) != len(after.streamP2PClientStats) ||
+		len(before.streamP2PReceive) != len(after.streamP2PReceive) {
 		return false
 	}
 	for hopIndex, start := range before.streamP2PHops {
@@ -1136,6 +1994,11 @@ func perfvarCarrierBaselinePassStable(
 			return false
 		}
 	}
+	for clientIndex, start := range before.streamP2PReceive {
+		if start != after.streamP2PReceive[clientIndex] {
+			return false
+		}
+	}
 	return before.streamNonAdjacentDialCount == after.streamNonAdjacentDialCount &&
 		before.streamNonAdjacentStunDropCount == after.streamNonAdjacentStunDropCount &&
 		before.streamNonAdjacentDataDropCount == after.streamNonAdjacentDataDropCount
@@ -1146,6 +2009,9 @@ func perfvarCarrierBaselinePassStable(
 func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 	linkEpoch := &directionalLinkMaximumEpoch{}
 	creditEpoch := &p2pReceiveCreditMaximumEpoch{}
+	deviceReceiveClient := new(clientconnect.Client)
+	providerReceiveClient := new(clientconnect.Client)
+	streamReceiveClient := new(clientconnect.Client)
 	link := directionalLinkSnapshot{
 		AdmittedPacketCount:         1,
 		WireByteCount:               100,
@@ -1173,6 +2039,38 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 		providerP2P: clientconnect.P2pDataPlaneStatsSnapshot{
 			FastReceiveMessageCount: 1,
 		},
+		devicePacketStats: perfvarPacketStatsObservation{
+			Available:               true,
+			RemoteEgressPacketCount: 1,
+			TransportStats: map[clientconnect.TransportType]perfvarTransportPacketStatsObservation{
+				clientconnect.TransportTypeH3: {RemoteEgressPacketCount: 1},
+			},
+		},
+		providerPacketStats: perfvarPacketStatsObservation{
+			Available:                true,
+			RemoteIngressPacketCount: 1,
+			TransportStats: map[clientconnect.TransportType]perfvarTransportPacketStatsObservation{
+				clientconnect.TransportTypeH3: {RemoteIngressPacketCount: 1},
+			},
+		},
+		devicePlatformReceive: clientconnect.PlatformTransportReceiveStatsSnapshot{
+			H3: clientconnect.PlatformTransportReceiveModeStatsSnapshot{QueueDropMessageCount: 1},
+		},
+		providerPlatformReceive: clientconnect.PlatformTransportReceiveStatsSnapshot{
+			H1ControlRefusalCount: 1,
+		},
+		deviceReceive: perfvarClientReceiveBoundary{
+			client: deviceReceiveClient,
+			stats: clientconnect.ClientReceiveStatsSnapshot{
+				PackHandoffDropCount: 1,
+			},
+		},
+		providerReceive: perfvarClientReceiveBoundary{
+			client: providerReceiveClient,
+			stats: clientconnect.ClientReceiveStatsSnapshot{
+				AckHandoffDropCount: 1,
+			},
+		},
 		streamP2PHops: []streamP2pHopSnapshot{{
 			HopIndex: 0,
 			Forward: streamP2pDirectionSnapshot{
@@ -1187,6 +2085,12 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 		streamP2PClientStats: []clientconnect.P2pDataPlaneStatsSnapshot{{
 			LegacySendMessageCount: 1,
 		}},
+		streamP2PReceive: []perfvarClientReceiveBoundary{{
+			client: streamReceiveClient,
+			stats: clientconnect.ClientReceiveStatsSnapshot{
+				PackHandoffDropByteCount: 10,
+			},
+		}},
 		streamNonAdjacentDialCount:     1,
 		streamNonAdjacentStunDropCount: 2,
 		streamNonAdjacentDataDropCount: 3,
@@ -1197,10 +2101,16 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 		for name, snapshot := range source.links {
 			cloned.links[name] = snapshot
 		}
+		cloned.devicePacketStats.TransportStats = maps.Clone(source.devicePacketStats.TransportStats)
+		cloned.providerPacketStats.TransportStats = maps.Clone(source.providerPacketStats.TransportStats)
 		cloned.streamP2PHops = append([]streamP2pHopSnapshot(nil), source.streamP2PHops...)
 		cloned.streamP2PClientStats = append(
 			[]clientconnect.P2pDataPlaneStatsSnapshot(nil),
 			source.streamP2PClientStats...,
+		)
+		cloned.streamP2PReceive = append(
+			[]perfvarClientReceiveBoundary(nil),
+			source.streamP2PReceive...,
 		)
 		return cloned
 	}
@@ -1254,6 +2164,38 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 		{name: "provider P2P stats", mutate: func(boundary *perfvarCarrierBoundary) {
 			boundary.providerP2P.FastReceiveMessageCount += 1
 		}},
+		{name: "device platform receive", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.devicePlatformReceive.H3.QueueDropMessageCount += 1
+		}},
+		{name: "provider platform receive", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.providerPlatformReceive.H1ControlRefusalCount += 1
+		}},
+		{name: "device H3 DATAGRAM lane", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.deviceH3Datagrams.SentMessageCount += 1
+		}},
+		{name: "provider H3 stream lane", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.providerH3Datagrams.StreamSentMessageCount += 1
+		}},
+		{name: "device aggregate packet stats", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.devicePacketStats.RemoteEgressPacketCount += 1
+		}},
+		{name: "provider transport packet stats", mutate: func(boundary *perfvarCarrierBoundary) {
+			row := boundary.providerPacketStats.TransportStats[clientconnect.TransportTypeH3]
+			row.RemoteIngressPacketCount += 1
+			boundary.providerPacketStats.TransportStats[clientconnect.TransportTypeH3] = row
+		}},
+		{name: "device receive handoff", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.deviceReceive.stats.PackHandoffDropCount += 1
+		}},
+		{name: "device send recovery", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.deviceReceive.sendRecovery.TimeoutResendWriteCount += 1
+		}},
+		{name: "provider receive generation", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.providerReceive.client = new(clientconnect.Client)
+		}},
+		{name: "provider send recovery", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.providerReceive.sendRecovery.CarrierChangeWriteCount += 1
+		}},
 		{name: "stream link", mutate: func(boundary *perfvarCarrierBoundary) {
 			boundary.streamP2PHops[0].Forward.Link.WireByteCount += 1
 		}},
@@ -1262,6 +2204,12 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 		}},
 		{name: "stream client stats", mutate: func(boundary *perfvarCarrierBoundary) {
 			boundary.streamP2PClientStats[0].LegacySendMessageCount += 1
+		}},
+		{name: "stream receive handoff", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.streamP2PReceive[0].stats.AckHandoffDropCount += 1
+		}},
+		{name: "stream send recovery", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.streamP2PReceive[0].sendRecovery.SelectiveGapWriteCount += 1
 		}},
 		{name: "nonadjacent dial", mutate: func(boundary *perfvarCarrierBoundary) {
 			boundary.streamNonAdjacentDialCount += 1
@@ -1327,6 +2275,30 @@ func perfvarCarrierSnapshotInstability(
 			before.packFailures,
 			after.packFailures,
 		)
+	}
+	if before.deviceReceive != after.deviceReceive {
+		return "device receive/recovery stats or Client generation changed"
+	}
+	if before.providerReceive != after.providerReceive {
+		return "provider receive/recovery stats or Client generation changed"
+	}
+	if before.devicePlatformReceive != after.devicePlatformReceive {
+		return "device platform receive stats changed"
+	}
+	if before.providerPlatformReceive != after.providerPlatformReceive {
+		return "provider platform receive stats changed"
+	}
+	if before.deviceH3Datagrams != after.deviceH3Datagrams {
+		return "device H3 lane stats changed"
+	}
+	if before.providerH3Datagrams != after.providerH3Datagrams {
+		return "provider H3 lane stats changed"
+	}
+	if !perfvarPacketStatsEqual(before.devicePacketStats, after.devicePacketStats) {
+		return "device packet stats changed"
+	}
+	if !perfvarPacketStatsEqual(before.providerPacketStats, after.providerPacketStats) {
+		return "provider packet stats changed"
 	}
 	linkStable := func(
 		start directionalLinkSnapshot,
@@ -1418,6 +2390,13 @@ func perfvarCarrierSnapshotInstability(
 			len(after.streamP2PClientStats),
 		)
 	}
+	if len(before.streamP2PReceive) != len(after.streamP2PReceive) {
+		return fmt.Sprintf(
+			"stream P2P receive/recovery client count changed from %d to %d",
+			len(before.streamP2PReceive),
+			len(after.streamP2PReceive),
+		)
+	}
 	for hopIndex, start := range before.streamP2PHops {
 		end := after.streamP2PHops[hopIndex]
 		if start.HopIndex != end.HopIndex {
@@ -1439,6 +2418,11 @@ func perfvarCarrierSnapshotInstability(
 	for clientIndex, start := range before.streamP2PClientStats {
 		if !p2pStatsStable(start, after.streamP2PClientStats[clientIndex]) {
 			return fmt.Sprintf("stream P2P client %d data-plane stats changed", clientIndex)
+		}
+	}
+	for clientIndex, start := range before.streamP2PReceive {
+		if start != after.streamP2PReceive[clientIndex] {
+			return fmt.Sprintf("stream P2P client %d receive/recovery stats changed", clientIndex)
 		}
 	}
 	if !p2pStatsStable(before.deviceP2P, after.deviceP2P) {
@@ -1620,6 +2604,30 @@ func observePerfvarCarrierAt(
 	links := subtractLinkSnapshots(before.links, after.links, duration)
 	device := subtractP2pStats(before.deviceP2P, after.deviceP2P)
 	provider := subtractP2pStats(before.providerP2P, after.providerP2P)
+	devicePacketStats := subtractPerfvarPacketStats(
+		before.devicePacketStats,
+		after.devicePacketStats,
+	)
+	providerPacketStats := subtractPerfvarPacketStats(
+		before.providerPacketStats,
+		after.providerPacketStats,
+	)
+	devicePlatformReceive := subtractPlatformTransportReceiveStats(
+		before.devicePlatformReceive,
+		after.devicePlatformReceive,
+	)
+	providerPlatformReceive := subtractPlatformTransportReceiveStats(
+		before.providerPlatformReceive,
+		after.providerPlatformReceive,
+	)
+	deviceH3Datagrams := subtractH3FullTunDatagrams(
+		before.deviceH3Datagrams,
+		after.deviceH3Datagrams,
+	)
+	providerH3Datagrams := subtractH3FullTunDatagrams(
+		before.providerH3Datagrams,
+		after.providerH3Datagrams,
+	)
 	streamClientStats := make(
 		[]clientconnect.P2pDataPlaneStatsSnapshot,
 		len(after.streamP2PClientStats),
@@ -1630,6 +2638,22 @@ func observePerfvarCarrierAt(
 			start = before.streamP2PClientStats[clientIndex]
 		}
 		streamClientStats[clientIndex] = subtractP2pStats(start, end)
+	}
+	streamReceiveHandoffs := make(
+		[]perfvarReceiveHandoffObservation,
+		len(after.streamP2PReceive),
+	)
+	streamSendRecoveries := make(
+		[]perfvarSendRecoveryObservation,
+		len(after.streamP2PReceive),
+	)
+	for clientIndex, end := range after.streamP2PReceive {
+		start := perfvarClientReceiveBoundary{}
+		if clientIndex < len(before.streamP2PReceive) {
+			start = before.streamP2PReceive[clientIndex]
+		}
+		streamReceiveHandoffs[clientIndex] = subtractPerfvarClientReceive(start, end)
+		streamSendRecoveries[clientIndex] = subtractPerfvarClientSendRecovery(start, end)
 	}
 	var wireByteCount uint64
 	for _, snapshot := range links {
@@ -1649,13 +2673,37 @@ func observePerfvarCarrierAt(
 		}
 	}
 	return perfvarCarrierObservation{
-		Links:                links,
-		BridgeBatches:        observeFullTunBridgeBatches(before.bridgeBatches, after.bridgeBatches),
-		P2PNetwork:           p2pNetwork,
-		DeviceP2P:            device,
-		ProviderP2P:          provider,
-		StreamP2PHops:        streamP2PHops,
-		StreamP2PClientStats: streamClientStats,
+		Links:                   links,
+		BridgeBatches:           observeFullTunBridgeBatches(before.bridgeBatches, after.bridgeBatches),
+		P2PNetwork:              p2pNetwork,
+		DeviceP2P:               device,
+		ProviderP2P:             provider,
+		DevicePacketStats:       devicePacketStats,
+		ProviderPacketStats:     providerPacketStats,
+		DevicePlatformReceive:   devicePlatformReceive,
+		ProviderPlatformReceive: providerPlatformReceive,
+		DeviceH3Datagrams:       deviceH3Datagrams,
+		ProviderH3Datagrams:     providerH3Datagrams,
+		DeviceReceiveHandoff: subtractPerfvarClientReceive(
+			before.deviceReceive,
+			after.deviceReceive,
+		),
+		ProviderReceiveHandoff: subtractPerfvarClientReceive(
+			before.providerReceive,
+			after.providerReceive,
+		),
+		DeviceSendRecovery: subtractPerfvarClientSendRecovery(
+			before.deviceReceive,
+			after.deviceReceive,
+		),
+		ProviderSendRecovery: subtractPerfvarClientSendRecovery(
+			before.providerReceive,
+			after.providerReceive,
+		),
+		StreamP2PHops:            streamP2PHops,
+		StreamP2PClientStats:     streamClientStats,
+		StreamP2PReceiveHandoffs: streamReceiveHandoffs,
+		StreamP2PSendRecoveries:  streamSendRecoveries,
 		StreamNonAdjacentDialCount: after.streamNonAdjacentDialCount -
 			before.streamNonAdjacentDialCount,
 		StreamNonAdjacentStunDropCount: after.streamNonAdjacentStunDropCount -
@@ -1925,6 +2973,10 @@ func verifyPerfvarTopologyCarrier(
 		}
 		for clientIndex, stats := range carrier.StreamP2PClientStats {
 			if stats.LegacySendMessageCount != 0 || stats.LegacyReceiveMessageCount != 0 ||
+				stats.LegacyReceiveQueueDropCount != 0 ||
+				stats.LegacyReceiveQueueDropByteCount != 0 ||
+				stats.FastReceiveQueueDropCount != 0 ||
+				stats.FastReceiveQueueDropByteCount != 0 ||
 				stats.FastFallbackCount != 0 || stats.FastDropCount != 0 {
 				return fmt.Errorf("%s stream client %d used the wrong data plane: %+v", scenario.Topology, clientIndex, stats)
 			}
@@ -1990,8 +3042,12 @@ func verifyPerfvarOneHopP2pLane(
 	requireSend bool,
 	requireReceive bool,
 ) error {
-	if stats.FastFallbackCount != 0 || stats.FastDropCount != 0 {
-		return fmt.Errorf("one-hop P2P %s had fast-path failures: %+v", endpointName, stats)
+	if stats.FastFallbackCount != 0 || stats.FastDropCount != 0 ||
+		stats.LegacyReceiveQueueDropCount != 0 ||
+		stats.LegacyReceiveQueueDropByteCount != 0 ||
+		stats.FastReceiveQueueDropCount != 0 ||
+		stats.FastReceiveQueueDropByteCount != 0 {
+		return fmt.Errorf("one-hop P2P %s had data-plane failures: %+v", endpointName, stats)
 	}
 	if route == fullTunRouteP2pFast {
 		if (requireSend && (stats.FastSendMessageCount == 0 || stats.FastSendByteCount == 0)) ||
@@ -2459,6 +3515,58 @@ func TestPerfvarHarnessClassifiesEveryLinkQueueIndependently(t *testing.T) {
 	}
 }
 
+func TestPerfvarHarnessRejectsEveryPlatformReceiveRefusal(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*clientconnect.PlatformTransportReceiveStatsSnapshot)
+	}{
+		{name: "h1 data", mutate: func(snapshot *clientconnect.PlatformTransportReceiveStatsSnapshot) {
+			snapshot.H1.QueueDropMessageCount = 1
+			snapshot.H1.QueueDropByteCount = 10
+		}},
+		{name: "h3 data", mutate: func(snapshot *clientconnect.PlatformTransportReceiveStatsSnapshot) {
+			snapshot.H3.QueueDropMessageCount = 1
+		}},
+		{name: "h3 DNS data", mutate: func(snapshot *clientconnect.PlatformTransportReceiveStatsSnapshot) {
+			snapshot.H3Dns.QueueDropByteCount = 10
+		}},
+		{name: "h3 DNS pump data", mutate: func(snapshot *clientconnect.PlatformTransportReceiveStatsSnapshot) {
+			snapshot.H3DnsPump.QueueDropMessageCount = 1
+		}},
+		{name: "h1 control", mutate: func(snapshot *clientconnect.PlatformTransportReceiveStatsSnapshot) {
+			snapshot.H1ControlRefusalCount = 1
+			snapshot.H1ControlRefusalBytes = 10
+		}},
+	}
+	for _, testCase := range cases {
+		carrier := perfvarCarrierObservation{}
+		testCase.mutate(&carrier.DevicePlatformReceive)
+		if reason := perfvarHarnessDropReason(
+			perfvarScenario{},
+			workloadResult{},
+			carrier,
+		); reason == "" {
+			t.Errorf("%s device platform refusal remained valid", testCase.name)
+		}
+		carrier.DevicePlatformReceive = clientconnect.PlatformTransportReceiveStatsSnapshot{}
+		testCase.mutate(&carrier.ProviderPlatformReceive)
+		if reason := perfvarHarnessDropReason(
+			perfvarScenario{},
+			workloadResult{},
+			carrier,
+		); reason == "" {
+			t.Errorf("%s provider platform refusal remained valid", testCase.name)
+		}
+	}
+	if reason := perfvarHarnessDropReason(
+		perfvarScenario{},
+		workloadResult{},
+		perfvarCarrierObservation{},
+	); reason != "" {
+		t.Fatalf("empty platform receive telemetry was rejected: %s", reason)
+	}
+}
+
 // Calibration loss is rejected from its exact direction unless that packet's
 // scheduling policy explicitly allowed loss.
 func TestPerfvarHarnessRejectsUnconfiguredCalibrationLoss(t *testing.T) {
@@ -2811,10 +3919,11 @@ func perfvarMeasurementOrder(scenarios []perfvarScenario, runIndex int) ([]int, 
 		comparisonKeys[scenarioIndex] = comparisonPrefix(scenario) + "/" + trace.IdentityHash
 	}
 	routeRanks := map[fullTunRoute]int{
-		fullTunRouteExchangeH1: 0,
-		fullTunRouteExchangeH3: 1,
-		fullTunRouteP2pFast:    2,
-		fullTunRouteP2pLegacy:  3,
+		fullTunRouteExchangeAuto: 0,
+		fullTunRouteExchangeH1:   1,
+		fullTunRouteExchangeH3:   2,
+		fullTunRouteP2pFast:      3,
+		fullTunRouteP2pLegacy:    4,
 	}
 	slices.SortFunc(indices, func(leftIndex int, rightIndex int) int {
 		left := scenarios[leftIndex]

@@ -17,12 +17,12 @@ The clean table below is the original 8 MiB schema-1 baseline. It remains
 useful as historical evidence, but 8 MiB can sit largely inside transport and
 test buffers. It also predates exact provider-return recovery ownership and the
 P2P receive-admission credit guard, so it does not describe the final source
-tree. The schema-3 campaign therefore uses 32 MiB for clean, Wi-Fi,
+tree. The current schema-9 campaign therefore uses 32 MiB for clean, Wi-Fi,
 and WAN controls and 20 MiB for LTE and poor-mobile profiles. The two extreme
 single-region cold cases remain 64 KiB because they deliberately measure
 startup and short-transfer behavior. A separate warmed workload sends one
 route-local bandwidth-delay product on the same TCP connection before timing a
-32 MiB payload. New schema-3 results will not be mixed into the older tables
+32 MiB payload. New schema-9 results will not be mixed into the older tables
 without an explicit side-by-side label.
 
 An exploratory 32 MiB LTE calibration exposed the old fixed-duration boundary:
@@ -31,6 +31,328 @@ seconds. The incomplete run is not a throughput sample. It motivated
 context-bound, rate-scaled workload deadlines, a 12–45 minute per-run bound,
 structured calibration failures, and the 20 MiB impaired-profile payload. The
 replacement long-transfer campaign is recorded separately below once complete.
+
+## 2026-08-18 focused low-bar H3 lane selection
+
+This focused campaign uses seed `20260817`, the
+`cell-edge-1m-down-250k-up` device profile, clean provider access, the mobile
+resource surrogate, a 1,100-byte inner MTU, and an exact 64 KiB full-TUN TCP
+upload. Every current control ran cold in a separate process, kept TCP under
+Transfer acknowledgement, and verified the complete content hash. The
+approximately 26.17-second / 393 KiB row is an older compact/full-TUN
+reference, not part of the new five-run distribution.
+
+| Carrier policy | Cold runs | Median transfer | Median wire bytes | Interpretation |
+|---|---:|---:|---:|---|
+| Historical H3 reference | 1 approximate reference | 26.17 s | 393 KiB | Original comparison point only |
+| H3, fragmented DATAGRAM control | 5 | 8.413 s | 266,629 B | Full-MTU frames may use two DATAGRAM fragments |
+| H3, one-DATAGRAM/stream hybrid | 5 | 6.793 s | 243,633 B | Production candidate; every DATAGRAM message is complete in one fragment |
+| H3, lane-accurate production hybrid | 5 | 4.060 s | 208,684 B | Only actual DATAGRAM writes use unreliable flight; hybrid stream retry is deferred |
+| H3, post exact-route failover correction | 5 | 5.000 s | 209,654 B | Current-tree validation; a withdrawn hybrid route retries immediately |
+| H1 reliable stream | 5 | 5.180 s | 307,814 B | Same-profile Auto companion |
+| Legacy H3 reliable stream | 5 | 3.995 s | 339,130 B | Same-profile H3 control without DATAGRAM negotiation |
+
+The hybrid completed its five runs in 6.117--8.333 seconds and used
+226,561--263,847 wire bytes. It is 19.3% faster and uses 8.6% fewer bytes than
+the same-worktree fragmented H3 control; relative to the historical reference,
+its median is about 74% faster and 39% lower-byte. Every hybrid run exercised
+both classified IP lanes, emitted exactly one fragment per DATAGRAM message,
+and recorded zero malformed-envelope, checksum, or reassembly failures.
+
+The first lane-accurate campaign completed in 3.305--4.144 seconds and used
+203,021--212,482 bytes. Its 4.060-second / 208,684-byte median is 40.2% faster
+and 14.3% lower-byte than the earlier one-DATAGRAM hybrid. The implementation
+classifies the exact selected route and message after a successful write,
+initializes its live DATAGRAM ceiling before route publication, and applies the
+unreliable flight only to actual DATAGRAM messages. Reliable hybrid-stream
+messages retain their Transfer ACK but allow QUIC up to eight seconds to
+recover instead of starting a parallel two-second Transfer retry train.
+
+The exact-route failover correction immediately reschedules those deferred
+items if their accepting QUIC route is withdrawn; publishing a sibling while
+the original remains active does not cause a duplicate. Its five new cold runs
+spanned 3.662--5.173 seconds and 204,672--210,175 bytes, with a 5.000-second /
+209,654-byte median. All exact hashes passed. This current-tree median remains
+40.6% faster and 21.4% lower-byte than fragmented H3, but the timing shift and
+one run with 63 rather than 62 stream sends remain variance/recovery evidence
+to investigate rather than discard.
+
+`DefaultH3DatagramSettings` now limits production selection to one fragment:
+a complete Transfer message either fits one current-path DATAGRAM or uses the
+reliable stream. Multi-fragment framing remains an explicit test and benchmark
+control. H1 stays active at equal Auto priority. Dynamic path loss, broader
+workloads and directions, mixed Auto operation, and physical-radio validation
+remain open gates; the latest single-profile result is not a mobile rollout
+claim.
+
+### Loaded-latency flow admission
+
+A separate schema-9 campaign used seed `20260818`, the same constrained
+device profile and provider access, a 256 KiB upload, and fixed-rate UDP echo
+probes before, during, and after the upload. All ten paired candidate runs
+delivered the exact TCP payload. Medians below include every correct run;
+calibration validity is listed separately because several tunneled samples ran
+within 10% of their same-process underlay control.
+
+| Scheduler/admission policy | Correct | Calibration-valid | Median bulk time | Loaded probes | Median p50 / p95 | Median wire bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Flow-fair, NoAck selected through the bounded flow reserve | 5/5 | 3/5 | 13.669 s | 137/157 (87.3%) | 0.879 / 1.823 s | 855,869 B |
+| Flow-fair, explicit contract-safe NoAck bypass, ACK reserve disabled | 5/5 | 4/5 | 14.764 s | 145/164 (88.4%) | 0.885 / 1.885 s | 844,047 B |
+
+The explicit NoAck version improved aggregate probe delivery by 1.15
+percentage points, successful probes per second by 1.42%, and wire bytes per
+successful probe by about 5.1%. It also made median bulk completion 8.0%
+slower, median loaded p95 3.4% slower, and mean wire bytes 0.4% higher. That is
+not a sufficient performance win by itself. The important correctness result
+is that requested NoAck messages using an already-acknowledged, generation-
+matching contract no longer borrow permission from the ACK recovery window.
+If the contract changes or the exact next bounded logical-group chunk no longer
+fits, the message returns to ordinary admission before serialization.
+
+The retained source combines those semantics with the one bounded ACK reserve.
+Five fresh processes completed in 12.669--14.510 seconds and 820,723--887,071
+wire bytes, with 13.270-second / 832,234-byte medians. They delivered 138/154
+loaded probes (89.6%); median loaded p50/p95 were 0.974/1.902 seconds. Relative
+to reserve-selected NoAck, bulk time improved 2.9%, median bytes improved 2.8%,
+and probe delivery improved 2.35 percentage points. Relative to the disabled-
+reserve explicit-NoAck candidate, bulk time improved 10.1%, median bytes 1.4%,
+and probe delivery 1.20 points. Successful probes per elapsed second were 5.0%
+above the reserve-selected baseline and 3.5% above the disabled-reserve
+candidate.
+
+All five exact payloads passed. The provider recorded 116 committed NoAck
+admission bypasses with zero reserve selections or uses; the reserve simply was
+not needed by this one-bulk-flow workload. Across the set, provider small
+traffic used 1,275 H3 DATAGRAM messages while the device's large upload used
+1,264 stream messages. Residual provider recovery remains material: 872 flight
+waits totaling 60.39 seconds and 93 timeout rewrites. Every calibration missed
+only the conservative rule requiring underlay to be at least 10% faster than
+the tunnel, so these raw paired values are comparative diagnostics rather than
+a release-grade throughput claim.
+
+A follow-up disabled ready-stream batching only for hybrid H3, attempting to
+yield to the packet lane after each stream message. Two exact runs regressed to
+18.374/19.576 seconds, 901,528/907,662 bytes, and loaded p95 values of
+2.625/2.410 seconds. The candidate is rejected and removed. quic-go already
+packs a queued DATAGRAM before stream data; the remaining investigation is the
+shared FIFO before messages reach the two QUIC lanes, not the retained
+stream-only batching policy itself.
+
+### Equal-priority Auto route affinity
+
+This campaign used Connect `c3bc4472b34a` and server `af8117e380a1` plus the
+recorded working trees, seed `20260810`, `cell-edge-1m-down-250k-up`, clean
+provider access, one hop, the mobile resource surrogate, `tcp-warmed`, upload,
+and an exact 256 KiB measured payload. Each entry came from a fresh process and
+passed the complete payload hash. H1 and H3 were both connected at equal Auto
+priority; DNS modes remained lower-priority fallbacks.
+
+| Route policy | Five durations | Five wire-byte counts | Five queue-drop counts | Median |
+| --- | --- | --- | --- | --- |
+| Original frame-shuffling Auto reference | 27.780 s | 1,502,911 B | 158 | Single reference |
+| Auto, strict destination-sequence affinity | 14.933, 14.883, 15.190, 15.657, 15.618 s | 850,490, 864,267, 881,204, 850,432, 874,519 B | 68, 29, 40, 29, 46 | 15.190 s / 864,267 B / 40 drops |
+| Forced H1 | 26.570, 24.461, 21.042, 28.103, 23.021 s | 1,893,204, 1,861,026, 1,730,011, 1,861,999, 1,683,980 B | 40, 35, 47, 52, 30 | 24.461 s / 1,861,026 B / 40 drops |
+| Forced H3 | 15.043, 12.985, 16.994, 12.931, 13.044 s | 828,609, 796,009, 827,363, 797,068, 784,498 B | 29, 19, 21, 18, 16 | 13.044 s / 797,068 B / 19 drops |
+
+Strict Auto is 45.3% faster, 42.5% lower-byte, and has 74.7% fewer queue
+drops than the original mixed-carrier reference. It is 37.9% faster and 53.6%
+lower-byte than forced H1, with the same median queue drops. Forced H3 is still
+the better control: Auto is 16.5% slower, uses 8.4% more bytes, and has 110.5%
+more median queue drops. All five measured Auto upload sequences selected H3;
+this is observed selection, not a preference encoded in Auto.
+
+The retained policy makes one destination-keyed ordered Transfer sequence
+sticky to its first healthy equal-priority H1 or H3 route. A full preferred
+queue backpressures the sender instead of spilling onto the sibling congestion
+controller. Withdrawing that route wakes the exact blocked writer and promotes
+the surviving route. H1 and H3 remain connected, and different sequences can
+choose different first routes. Three fresh full-TUN Auto correctness runs
+confirmed that behavior in both directions with zero fallback writes.
+
+Two alternatives were rejected. Trying the preferred route first but spilling
+on queue pressure still divided one ordered sequence across both congestion
+controllers. A client-wide first-route choice consistently selected H1 because
+H1 completed setup first, violating the intended equal precedence and reducing
+the low-bar result to the slower H1 policy.
+
+Most records were excluded only by the conservative calibration rule requiring
+the untunneled control to be at least 10% faster. The tunneled payload hashes
+and route accounting are correct, so the raw values remain diagnostic, but
+they are not aggregate-valid release results. Physical one-bar radio tests and
+flow-identity propagation through Transfer remain open.
+
+### Refreshed static matrix and native-P2P receive bound
+
+A subsequent complete static matrix used server revision `af8117e380a1` with
+working-state hash `fcbcc99d`, Connect revision `c3bc4472b34a` with
+working-state hash `8bba31c9`, Go 1.26.6, Apple M1 Max, and `GOMAXPROCS=10`.
+Each carrier ran five times in a fresh process with seed `20260810`,
+`cell-edge-1m-down-250k-up`, clean provider access, `tcp-warmed`, upload, one
+hop, the mobile resource surrogate, and an exact 256-KiB measured payload.
+
+The medians below include every exact-payload result. This is intentionally
+different from PERFVAR's aggregate record, which excludes a correct run when
+the direct calibration is not at least 10% faster than the tunnel.
+
+| Route | Correct | Calibration-valid | All-correct median | Maximum | Median wire bytes | Median route setup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Auto | 5/5 | 3/5 | 14.983 s | 17.889 s | 876,468 B | 7.292 s |
+| H3 | 5/5 | 2/5 | 15.268 s | 15.690 s | 818,234 B | 5.311 s |
+| H1 | 5/5 | 4/5 | 30.285 s | 34.329 s | 1,976,566 B | 5.761 s |
+| P2P fast, initial | 1/5 | 1/5 | 44.646 s across all attempts | 53.484 s | 561,768 B across all attempts | 14.874 s |
+
+H3 was 49.6% faster and 58.6% lower-byte than H1 by the all-correct medians.
+Auto was 50.5% faster and 55.7% lower-byte than H1. Auto remained H3-affine
+for payload: it was 1.9% faster than forced H3 in this distribution but used
+7.1% more bytes. This does not make Auto an adaptive fastest-carrier selector;
+it confirms that equal-priority parallel health plus per-sequence affinity did
+not regress the constrained upload.
+
+The initial P2P result exposed an adjacent correctness issue. Native RTP/SRTP
+is lossy, but its route was published with reliable zero-valued carrier
+properties, and the endpoint-readiness rematch erased any properties published
+at connection time. Transfer ACKs still existed, but its bounded unreliable
+flight never activated. The sender admitted 692--820 fast messages while the
+old four-entry receive route dropped small bursts in four runs: 7, 2, 0, 1,
+and 2 messages (1,251, 368, 0, 89, and 430 bytes).
+
+The retained correction publishes unreliable semantics through both route
+updates and separates the receiver's message and byte bounds. Carrier readers
+offer without waiting under a 16-message total that includes the forwarding
+worker, with a hard 256-KiB aggregate payload ceiling. This preserves the former
+four-by-64-KiB worst-case payload retention while admitting small ACK/control
+bursts. Transfer's P2P data flight is capped at 15 messages so one queue slot
+remains for untracked ACK/control traffic.
+
+| Corrected P2P run | Duration | Wire bytes | Device/provider fast sends | Device/provider receive-queue drops |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 23.806 s | 478,585 B | 415 / 390 | 0 / 0 |
+| 2 | 21.611 s | 475,321 B | 413 / 385 | 0 / 0 |
+| 3 | 22.921 s | 485,332 B | 425 / 381 | 0 / 0 |
+| 4 | 23.551 s | 488,146 B | 433 / 388 | 0 / 0 |
+| 5 | 22.682 s | 466,703 B | 421 / 379 | 0 / 0 |
+
+All five corrected results were exact and calibration-valid. The
+22.921-second / 478,585-byte median is 48.7% faster and 14.8% lower-byte than
+the initial all-attempt P2P medians; maximum completion fell 55.5%, from
+53.484 to 23.806 seconds. A count-only four-message cap still dropped one
+91-byte provider message and took 26.66--27.30 seconds. Reserving still more
+headroom with a three-message cap removed the drop but regressed the first run
+to 35.348 seconds / 502,865 bytes. Both alternatives were rejected.
+
+A separate alternating five-pair cold 64-KiB control with seed `20260817`, the
+same profile, and a 1,100-byte MTU measured H3 at 4.242 seconds / 215,626 bytes
+median versus H1 at 5.127 seconds / 319,611 bytes. H3 was 17.3% faster and
+32.5% lower-byte. Its 6.674-second maximum coincided with 72 stream messages
+rather than the usual 62 and remains useful tail-attribution evidence.
+
+Post-campaign validation passed the changed P2P ownership/policy boundaries
+under the race detector, repeated the final-drain and byte/count bounds 20
+times, passed the complete Connect short suite in 206.863 seconds, and passed
+the non-short main package in 459.346 seconds. The SDK's one-minute synthetic
+DeviceLocal + DeviceRemote + RPC memory soak completed 95 realistic cycles:
+9.1-MiB peak heap, 24.3-MiB peak runtime memory, 4.7--6.8-MiB recovered heap,
+and 4.1 MiB / 12 goroutines / 13 file descriptors / zero outstanding pooled
+buffers after teardown. This is same-host memory evidence, not iOS Network
+Extension RSS or physical-radio validation.
+
+The final source then tightened the message count so it includes the item held
+off-channel by the forwarding worker. The count/byte/refusal/final-drain
+selection passed 20 repetitions and `-race`; the broad P2P selection passed in
+1.078 seconds. The complete short suite passed again in 209.460 seconds and
+the non-short Connect package in 468.173 seconds. A final isolated SDK soak
+passed 94 cycles in 62.09 seconds with 9.3-MiB peak heap, 24.1-MiB peak runtime
+memory, 4.7--7.0-MiB recovered heap, and 4.2 MiB / 12 goroutines / 13 file
+descriptors / zero pooled buffers after teardown.
+
+### Dynamic one-second-outage attribution
+
+Schema 6 records interval-scoped Transfer recovery for the exact DeviceLocal
+and provider Client identities. The following are diagnostic single traces,
+not a five-run dynamic baseline. Each used the same 2 MiB upload, one-hop
+topology, mobile resource surrogate, and `cell-edge-outage-1s-recover`
+schedule; every hash and both scheduled events passed.
+
+| Variant | Tunneled time | Carrier bytes | Provider timeout writes | Provider flight waits | Interpretation |
+|---|---:|---:|---:|---:|---|
+| Current H3 control | 43.298 s | 6,097,889 B | 17 | 137 / 18.212 s | H3 reference for recovery experiments |
+| Current H1 control | 46.462 s | 6,023,722 B | 17 | n/a | Also emitted 99 device timeout writes |
+| H3, 12-message cold / 4-message floor, run 1 | 45.118 s | 6,145,020 B | 14 | 22 / 3.464 s | Fewer waits did not improve completion |
+| H3, 12-message cold / 4-message floor, run 2 | 44.887 s | 6,047,656 B | 35 | 117 / 19.213 s | Wait reduction was not stable |
+| H3, eight-frame ready-drain coalescing | 43.262 s | 6,071,794 B | 16 | 161 / 19.085 s | End-to-end neutral; provider barrier unchanged |
+| H3, +2 additive message recovery | 45.772 s | 6,108,202 B | 19 | 168 / 20.909 s | 18 selective gaps and 225 queue drops |
+
+The current H3 trace is 6.8% faster than H1 but uses 1.23% more carrier
+bytes. Its 137 provider waits identify a real small-message recovery cost, yet
+the A/Bs show that simply enlarging, combining, or regrowing that flight moves
+congestion rather than removing it. Production remains at an eight-message
+cold limit, four-message floor, two-Pack opportunistic coalescer, and +1
+additive message recovery.
+
+### Rejected small-message recovery experiments
+
+The 12/4 flight candidate's five static H3 runs completed in 3.572--4.591
+seconds and used 205,437--212,021 bytes, for a 3.933-second / 209,524-byte
+median. Raising its loss floor to eight was not safe: one immediate control
+used 257,383 bytes, emitted 74 stream writes, and triggered 30 inner-TCP
+retransmits.
+
+An eight-frame no-wait coalescer produced a 3.345-second / 209,166-byte H3
+median across five cold runs, but its 6.151-second tail and one 29-retransmit
+run exposed correlated loss of several inner TCP ACK packets in one DATAGRAM.
+The same code changed H1 from the prior 5.180-second / 307,814-byte median to
+4.968 seconds / 316,607 bytes: slightly faster, but 2.9% more bytes. Reducing
+the coalescer to four frames did not fix the mechanism; two runs used 225,844
+and 243,973 bytes with 29 and 25 retransmits. Both coalescers and every flight
+growth candidate were removed.
+
+### Dynamic rate-collapse attribution
+
+The current hybrid H3 and H1 controls were each exercised through the exact
+`cell-edge-rate-collapse-recover` schedule: 256/64 kbit/s after 0.5 seconds,
+1/0.25 Mbit/s after 2.5 seconds, and 5/1 Mbit/s after 4 seconds. Exact payload
+hashes and all scheduled events passed.
+
+| Workload / route | Duration (s) | Carrier bytes | Forward queue drops | Device timeout rewrites | Provider flight waits / wait time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cold TCP / H3 | 49.373 | 6,199,953 | 232 | 2 | 103 / 14.484 s |
+| Cold TCP / H1 | 49.678 | 6,150,535 | 326 | 164 | n/a |
+| Warmed TCP / H3 | 44.832 | 6,063,883 | 201 | 2 | 171 / 24.542 s |
+| Warmed TCP / H1 | 53.775 | 6,805,198 | 364 | 390 | n/a |
+
+The cold pair is effectively tied: H3 is 0.6% faster and uses 0.8% more
+bytes. The first warmed pair is materially favorable: H3 is 16.6% faster,
+uses 10.9% fewer bytes, and records 44.8% fewer forward-queue drops. Its
+provider flight barrier remains active, but it replaces the much larger H1
+nested timeout train. This is a diagnostic one-pair result, not a frozen
+five-run baseline.
+
+### Dynamic live-MTU attribution
+
+The exact `cell-edge-mtu-reduction-recover` schedule reduced the device-side
+outer path from 1,400 to 1,280 bytes at 0.75 seconds and restored it at 1.75
+seconds. Cold and warmed 2 MiB uploads each passed their exact hash and both
+scheduled events.
+
+| Workload / route | Duration (s) | Carrier bytes | Forward queue drops | Forward MTU drops / maximum submitted bytes | Device timeout rewrites | Provider timeout rewrites / flight waits |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Cold TCP / H3 | 38.136 | 5,898,076 | 153 | 0 / 1,228 | 0 | 44 / 163 |
+| Cold TCP / H1 | 48.555 | 6,074,454 | 309 | 10 / 1,384 | 117 | 21 / n/a |
+| Warmed TCP / H3 | 37.404 | 5,884,945 | 131 | 0 / 1,228 | 2 | 40 / 97 |
+| Warmed TCP / H1 | 49.385 | 6,365,014 | 266 | 16 / 1,384 | 229 | 27 / n/a |
+
+H3 is 21.5% faster and 2.9% lower-byte on the cold pair, and 24.3% faster and
+7.5% lower-byte on the warmed pair. It also records about half the forward
+queue drops. The one-complete-DATAGRAM hybrid never exceeds 1,228 carrier
+bytes during the 1,280-byte interval, while H1's 1,384-byte writes produce
+10--16 expected MTU drops and a larger nested timeout train.
+
+The warmed H3 record is correctness-valid but excluded from the aggregate by
+the conservative calibration rule: its 37.404-second tunneled result is only
+5.5% slower than the 35.345-second underlay, rather than the required 10%.
+The cold H3 and both H1 records are aggregate-valid. These two pairs establish
+directional evidence and no current live-MTU regression, not a frozen
+five-run release baseline.
 
 ## 2026-08-12 exact-tree correctness and socket follow-up
 
@@ -798,7 +1120,7 @@ provider access profiles. The clean route semantics are unchanged because both
 segments use `clean-lan`, but comparisons must use the resolved fields and
 hashes rather than assuming schema-1 and schema-2 scenario hashes match.
 
-Schema 3 is used for new measurements. It adds extended-topology identity and
+Schema 3 introduced extended-topology identity and
 observations, explicit valid-run counts, long-payload bounds, structured
 calibration failure records, and latency-probe accounting. Its numeric
 aggregates include only runs that are both correct and calibration-valid;
@@ -825,6 +1147,35 @@ position rotated on each repetition. P2P delay, jitter, loss, reorder, rate,
 queue, and MTU behavior use the deterministic directional scheduler rather than
 Pion router randomness. If future analysis needs identical post-setup stochastic
 decisions, the harness can add an explicit measurement-epoch scheduler reset.
+
+Schema 4 added a hash-visible dynamic device
+profile schedule plus acknowledged per-event offsets/link scope in both direct
+and tunneled workload records. Schedule version 2 also corrects the one-hop P2P
+fixture's profile orientation: scenario forward/reverse now mean device
+upload/download on every topology. Schema-3 and schema-4-or-later directional
+P2P values must therefore not be combined. It also records interval-scoped nonblocking
+receive-handoff drops for device, provider, and stream-intermediary Clients,
+with an explicit flag when a Client generation changes. Static profile
+definitions remain unchanged.
+
+Schema 5 additionally records interval-scoped
+carrier-to-route queue drops for H1, H3, H3Dns, and H3DnsPump, plus H1 control
+refusal, on both device and provider platform transports. The counters are
+shared across replacement transport generations, participate in the exact
+measurement boundary, and invalidate a throughput sample when nonzero.
+
+Schema 6 adds interval-scoped Transfer
+timeout, exact-carrier-change, selective-gap, tail, cumulative, contract, and
+unreliable-flight recovery for device, provider, and stream-intermediary
+Clients. Each record retains both Client identity and raw lifetime endpoints;
+generation replacement is explicit and counters from unrelated Clients are
+never subtracted.
+
+Schema 7 is the current record format. It adds interval-scoped device and
+provider packet totals partitioned by transport type (`h1`, `h3`, `h3dns`,
+`h3dnspump`, `p2p`, and `unknown`). The top-level remote ingress and egress
+packet/byte totals remain the aggregate, and the transport rows must reconcile
+exactly to those totals. Local and blocked packets have no carrier partition.
 
 ### Common test environment
 
@@ -1208,7 +1559,7 @@ current harness uses explicit route/probe boundaries, truthful child joins,
 and corrected return-route ownership. Its serial correctness run passed the
 500 ms, 1 s, legacy-P2P, forced-probe, and H1-extender gates. The defect is no
 longer reproducible in the deterministic suite. The next step is a new
-five-sample schema-3 throughput campaign; the historical conditional values
+five-sample schema-11 throughput campaign; the historical conditional values
 must not be relabeled as post-fix performance.
 
 ### 2. Compare short-transfer startup with steady-state high-BDP throughput
@@ -1275,6 +1626,88 @@ calibration transport. A comparison is invalid until the untunneled path has
 at least 10% headroom. Keep incorrect runs out of throughput aggregates and
 show the number of correct and valid samples exactly as this report does.
 
+## 2026-08-18 bounded H3 split-lane loaded latency
+
+This campaign isolates the retained H3 split between QUIC DATAGRAM and the
+reliable stream under the production-shaped `cell-edge-1m-down-250k-up`
+profile. Every process used seed `20260818`, a 256 KiB
+`latency-under-load` upload, one hop, no extenders, and the mobile resource
+surrogate. The immediate pre-split control is frozen binary
+`2dec572e9a2a3296abd5700a13c9933436899adba5a7c21217e8860a82c20e6b`;
+the exact retained, race-repaired source is frozen binary
+`fb9907a00f08ad14b1bbec6bccb1cad8a3201739f157be1ebf11fecd59c59163`.
+
+Five new pairs ran in separate processes. The first position alternated
+baseline/final and final/baseline so neither candidate systematically received
+the warmer host position. All ten payload hashes were exact and no run was
+discarded.
+
+| Metric | Pre-split v10 | Final schema 11 | Change |
+|---|---:|---:|---:|
+| Median bulk completion | 13.531 s | 12.593 s | **6.93% faster** |
+| Completion range | 13.201--15.166 s | 12.302--13.649 s | Final won 5/5 pairs |
+| Median carrier wire bytes | 836,233 B | 862,065 B | **3.09% higher** |
+| Carrier wire range | 821,164--853,039 B | 831,447--895,176 B | Final won 1/5 pairs |
+| Loaded probes delivered | 137/157 (87.26%) | 135/142 (95.07%) | **+7.81 points** |
+| Loaded successes per bulk second | 1.9580 | 2.1057 | **7.54% higher** |
+| Median loaded p50 | 1.065 s | 0.572 s | **46.22% lower** |
+| Median loaded p95 | 2.147 s | 1.453 s | **32.33% lower** |
+| Access-link queue drops, total | 168 | 101 | **39.88% fewer** |
+| Provider unreliable-flight waits | 822 / 60.290 s | 640 / 41.810 s | 22.14% / 30.65% lower |
+| Provider timeout rewrites | 80 | 68 | **15.0% fewer** |
+| Recovery route-write errors | 0 | 0 | No failed recovery admissions |
+
+Final completion improved in all five pairs. Final p50, p95, probe delivery,
+and queue drops improved in four; the fifth queue-drop pair tied. Wire bytes
+improved in only one pair and the median regressed, so the retained result is a
+latency/delivery improvement with a small wire-cost regression, not a win on
+every axis.
+
+The final H3 reliable-stream queue reached its hard 32-message / 65,920-byte
+bound, returned to zero after every trace, and recorded zero oversize
+admissions. It waited 46 times for 25.012 seconds across both endpoints. This
+is bounded backpressure, not retained growth. The device sent 599 DATAGRAM and
+1,273 stream messages; the provider sent 1,377 DATAGRAM messages and no stream
+messages.
+
+Four final calibrations and three controls missed the conservative rule that
+untunneled calibration must be at least 10% faster. These raw paired
+latency-under-load results are valid for candidate comparison because exact
+workload inputs, order rotation, payload correctness, and carrier counters are
+preserved, but they are not a release-throughput threshold or a physical-radio
+claim.
+
+An earlier bounded five-run cohort measured 12.814 s / 834,493 B with 94.41%
+probe delivery, 0.775/1.847 s p50/p95, and 87 queue drops. A final-only
+five-run reproduction measured 12.683 s / 839,864 B with 89.58% delivery,
+0.640/1.802 s p50/p95, and 144 queue drops. A later paired cohort measured a
+16.35% completion and 4.06% wire-byte win, but the broad race gate then found
+that a terminal raw `SendPack` was touched after it entered its reuse pool.
+That cohort remains variance evidence, not final-source evidence. The repaired
+source removed every post-publication access; its raw lifecycle tests passed
+20 repetitions under `-race`, the exact P2P-fast reproducer passed in 58.481
+seconds, and the complete PERFVAR short race tier passed in 398.440 seconds.
+The contemporaneous, order-rotated repaired-source cohort above is the
+authoritative incremental result.
+
+The isolated 64-kbit/s Transfer-carrier gate also now distinguishes a recovery
+attempt from a physical carrier write and from an admitted frame drained at
+teardown. On the retained policy, legacy stream completed in 10.092 s / 91,846
+forward bytes and hybrid H3 in 8.399 s / 56,481 bytes: 16.78% faster and 38.51%
+lower-byte, with exact payload delivery and exact retry accounting. Local
+zero-wait receive refusals are counted, as required by `connect/CODESTYLE.md`;
+they are not silently reclassified as wire loss.
+
+Two attempts to apply the H3 reliable-stream recovery delay to H1 were
+rejected. A fixed eight-second delay looked strong in the isolated carrier,
+but the ten-pair full H1 workload improved median time only 6.1% and wire bytes
+2.5% while total bytes rose 1.6%, drops rose 7.2%, and device/provider timeout
+writes rose 6.5%/16.0%; only six time pairs and five byte pairs won. Scaling the
+normal four-second delay to eight seconds then regressed the five-pair full H1
+median 38.4%, wire bytes 10.8%, and queue drops 90%. Both branches were removed.
+Only negotiated H3 hybrid-stream writes retain the delayed nested-recovery
+policy; TCP Transfer ACK remains enabled on every carrier.
+
 ## Coverage and remaining runs
 
 This historical baseline exercised all four routes with full-TUN TCP, both clean
@@ -1289,7 +1722,15 @@ and should not be inferred from the tables above:
 
 - `wifi-good`, `lte`, `mobile-poor`, and `wan` five-run throughput;
 - focused loss, rate, queue, jitter, reorder, and non-blackhole MTU sweeps;
-- UDP, inner QUIC, web, parallel TCP, and latency-under-load workloads;
+- all three composite `cell-edge-*` profiles across directions and workloads.
+  The 1/0.25-Mbit/s profile now has the exact five-run warmed-upload
+  H1/H3/Auto/P2P matrix above; the other profiles and workload cells do not;
+- the three dynamic cell-edge rate-collapse, one-second-outage, and live-MTU
+  schedules (definitions, timing, device-only scope, P2P directionality,
+  underlay replay, and race coverage are checked in; no authoritative five-run
+  transport result yet);
+- UDP, inner QUIC, web, parallel TCP, and the remaining routes/profiles for
+  latency-under-load. The exact one-bar H3 upload cohort above is recorded;
 - the mobile resource surrogate;
 - warmed regional TCP on the final source tree.
 
@@ -1302,6 +1743,18 @@ throughput aggregates.
 
 | Log | Use |
 |---|---|
+| `/tmp/lowbar-openloop-v20-paired-baseline-{1..5}.log` | Order-rotated pre-split half of the authoritative repaired-source loaded-latency A/B |
+| `/tmp/lowbar-openloop-v20-paired-final-{1..5}.log` | Exact race-repaired source half of the authoritative loaded-latency A/B |
+| `/tmp/perfvar-short-race-v17-final-rerun.json` | Complete passing 398.440-second PERFVAR short race tier after terminal raw-Pack repair |
+| `/tmp/lowbar-openloop-v18-paired-baseline-{1..5}.log` | Pre-race-repair paired control retained as variance evidence |
+| `/tmp/lowbar-openloop-v18-paired-final-{1..5}.log` | Pre-race-repair paired candidate; not final-source evidence |
+| `/tmp/lowbar-openloop-v17-final-{1..5}.log` | Final-only schema-11 reproduction and variance check |
+| `/tmp/lowbar-openloop-v14-split-bounded-{1..5}.log` | Earlier retained bounded split-lane cohort |
+| `/tmp/lowbar-h3-reliable-retry-ab-5x.log` | Isolated fixed-delay carrier experiment; not retained for H1 |
+| `/tmp/lowbar-h1-reliable-retry-v14-{1..10}.log` | H1 full-workload fixed-delay controls |
+| `/tmp/lowbar-h1-reliable-retry-v15-{1..10}.log` | Rejected H1 fixed-delay candidates |
+| `/tmp/lowbar-h1-scaled-retry-v14-{1..5}.log` | H1 full-workload scaled-delay controls |
+| `/tmp/lowbar-h1-scaled-retry-v16-{1..5}.log` | Rejected H1 scaled-delay candidates |
 | `/tmp/perfvar-clean-matrix-5-v2.log` | Authoritative clean five-run matrix |
 | `/tmp/perfvar-regional-single-500-all-record5.log` | Authoritative 500 ms five-run matrix |
 | `/tmp/perfvar-regional-single-1000-h3-record5.log` | Authoritative 1 s H3 upload records |
@@ -1352,3 +1805,8 @@ throughput aggregates.
 | `/tmp/urnetwork-p2p-fast-path-mtu-growth-20260813.log` | Synthetic fast-P2P 1,280/1,400/1,500-byte geometry comparison |
 | `/tmp/perfvar-p2p-fast-pmtu-baseline-20260813.log` | Three-run fixed-1,280-byte full-TUN P2P-fast control |
 | `/tmp/perfvar-p2p-fast-pmtu-final-20260813.log` | Three-run upward-probing full-TUN P2P-fast candidate; rejected |
+| `lowbar-auto-matrix.ipiedL.log` (local temporary artifact) | Refreshed five-run static H1/H3/Auto and initial P2P matrix |
+| `lowbar-p2p-flight-v2.Ie0qSF.log` (local temporary artifact) | Correct P2P carrier classification before the final receive-bound shape |
+| `lowbar-p2p-flight-cap.KGWFRJ.log` (local temporary artifact) | Rejected four-message P2P flight cap |
+| `lowbar-p2p-flight-reserve.kPSp5m.log` (local temporary artifact) | Rejected three-message P2P flight reserve |
+| `lowbar-p2p-byte-queue.1coBYz.log` (local temporary artifact) | Retained five-run P2P count-plus-byte-bounded campaign |
