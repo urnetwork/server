@@ -25,7 +25,10 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-const provisionBatchSize = 2000
+const (
+	provisionBatchSize       = 2000
+	clientIdentitySeedDomain = int64(0x434c49454e5453) // "CLIENTS"
+)
 
 // provisionRegion creates the sim country/region/city and returns the country
 // location id (used as the client provider spec).
@@ -213,16 +216,7 @@ func provisionIdentityBatch(ctx context.Context, entries []ProviderEntry) error 
 func provisionClientPool(ctx context.Context, config *Config) ([]ClientIdentity, error) {
 	pool := make([]ClientIdentity, 0, config.Clients.PoolSize)
 
-	entries := make([]ProviderEntry, 0, config.Clients.PoolSize)
-	for i := 0; i < config.Clients.PoolSize; i += 1 {
-		entries = append(entries, ProviderEntry{
-			Index:     i,
-			NetworkId: server.NewId().String(),
-			UserId:    server.NewId().String(),
-			DeviceId:  server.NewId().String(),
-			ClientId:  server.NewId().String(),
-		})
-	}
+	entries := generatedClientPoolEntries(config)
 
 	// reuse the bulk identity insert
 	if err := provisionIdentityBatch(ctx, entries); err != nil {
@@ -250,6 +244,25 @@ func provisionClientPool(ctx context.Context, config *Config) ([]ClientIdentity,
 
 	logf("provisioned client pool: %d", len(pool))
 	return pool, nil
+}
+
+// generatedClientPoolEntries derives the client identities from the fixture
+// seed. The domain separator keeps this stream independent of the provider
+// identity stream while making a clean reset replay the same client networks,
+// devices, clients, and simulated source addresses.
+func generatedClientPoolEntries(config *Config) []ProviderEntry {
+	r := newRng(config.Seed ^ clientIdentitySeedDomain)
+	entries := make([]ProviderEntry, 0, config.Clients.PoolSize)
+	for i := 0; i < config.Clients.PoolSize; i += 1 {
+		entries = append(entries, ProviderEntry{
+			Index:     i,
+			NetworkId: r.id().String(),
+			UserId:    r.id().String(),
+			DeviceId:  r.id().String(),
+			ClientId:  r.id().String(),
+		})
+	}
+	return entries
 }
 
 // provisionPrewarm establishes the market so providers are immediately

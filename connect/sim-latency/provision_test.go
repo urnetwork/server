@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -19,6 +20,54 @@ func TestFirstNetworkAdminUsersUsesFirstFixtureEntry(t *testing.T) {
 	}
 	if got := users["singleton"]; got != "only" {
 		t.Fatalf("singleton admin = %q, want only fixture user", got)
+	}
+}
+
+func TestGeneratedClientPoolEntriesReplayFixtureSeed(t *testing.T) {
+	config := &Config{
+		Seed: 48,
+		Clients: ClientsConfig{
+			PoolSize: 64,
+		},
+	}
+	first := generatedClientPoolEntries(config)
+	second := generatedClientPoolEntries(config)
+	if len(first) != config.Clients.PoolSize {
+		t.Fatalf("entry count = %d, want %d", len(first), config.Clients.PoolSize)
+	}
+
+	seen := map[string]string{}
+	for index, entry := range first {
+		if entry != second[index] {
+			t.Fatalf("entry %d differs for identical fixture seed:\n first=%+v\nsecond=%+v", index, entry, second[index])
+		}
+		if entry.Index != index {
+			t.Fatalf("entry %d index = %d", index, entry.Index)
+		}
+		for kind, id := range map[string]string{
+			"network": entry.NetworkId,
+			"user":    entry.UserId,
+			"device":  entry.DeviceId,
+			"client":  entry.ClientId,
+		} {
+			if _, err := server.ParseId(id); err != nil {
+				t.Fatalf("entry %d %s id %q is invalid: %v", index, kind, id, err)
+			}
+			if previous, ok := seen[id]; ok {
+				t.Fatalf("entry %d %s id duplicates %s", index, kind, previous)
+			}
+			seen[id] = fmt.Sprintf("entry %d %s id", index, kind)
+		}
+	}
+
+	other := generatedClientPoolEntries(&Config{
+		Seed: config.Seed + 1,
+		Clients: ClientsConfig{
+			PoolSize: config.Clients.PoolSize,
+		},
+	})
+	if first[0] == other[0] {
+		t.Fatal("different fixture seeds produced the same first client identity")
 	}
 }
 
