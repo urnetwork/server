@@ -489,7 +489,9 @@ log "redis:    $REDIS_HOST -> $LOCAL_HOST_IP:$REDIS_PORT"
 # Prime sudo up front and keep the credential warm so the edits (and the
 # restore-on-exit) don't block waiting for a password.
 log "requesting sudo (needed for Docker on Linux, /etc/hosts, host networking, and the loopback alias)"
-sudo -v || die "sudo is required for Docker on Linux, $HOSTS_FILE, host networking, and the loopback interface"
+if ! sudo -n true 2>/dev/null; then
+  sudo -v || die "sudo is required for Docker on Linux, $HOSTS_FILE, host networking, and the loopback interface"
+fi
 ( while kill -0 "$MAIN_PID" 2>/dev/null; do sudo -n true 2>/dev/null || exit; sleep 30; done ) &
 SUDO_KEEPALIVE_PID=$!
 
