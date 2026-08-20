@@ -38,6 +38,16 @@ type matureProviderReliability struct {
 	reliabilityWeight float64
 }
 
+// A fixture provider's deterministic initial performance evidence. Connection
+// tests belong to short-lived platform transports, so an active-connection
+// snapshot can legitimately contain no completed test even though the fixture
+// already defines the provider's network performance.
+type matureProviderPerformance struct {
+	clientId                 server.Id
+	minRelativeLatencyMillis int64
+	maxBytesPerSecond        int64
+}
+
 // provisionRegion creates the sim country/region/city and returns the country
 // location id (used as the client provider spec).
 func provisionRegion(ctx context.Context, region RegionConfig) (server.Id, error) {
@@ -280,13 +290,14 @@ func generatedClientPoolEntries(config *Config) []ProviderEntry {
 // established providers, not the onboarding period.
 //
 // Rather than backfill raw reliability blocks (which would have to satisfy the
-// intricate running-window/shift/degraded maintenance), it materializes the
-// location-reliability rows from the connected+tested fleet and then writes the
-// final reliability scores directly for every score lookback. Each provider's
-// weight is its seeded long-run uptime fraction, so the mature initial market
-// preserves the fixture's reliability ranking instead of treating a mobile
-// churn profile and business fiber as equally perfect. Providers must be
-// connected and latency/speed-tested first; the caller runs this after the ramp.
+// intricate running-window/shift/degraded maintenance), it seeds deterministic
+// performance tests on each active connection, materializes the derived
+// location-reliability rows, and writes the final reliability scores directly
+// for every score lookback. Each provider's weight is its seeded long-run uptime
+// fraction, so the mature initial market preserves the fixture's reliability
+// ranking instead of treating a mobile churn profile and business fiber as
+// equally perfect. Providers must be connected first; the caller runs this
+// after the ramp.
 //
 // The pipeline must run in prewarmed mode afterwards (Services.SetPrewarmed),
 // so the periodic reliability-score recompute does not overwrite these rows;
@@ -294,6 +305,10 @@ func generatedClientPoolEntries(config *Config) []ProviderEntry {
 // selection) and re-exporting the redis samples.
 func provisionPrewarm(ctx context.Context, lookback time.Duration, entries []ProviderEntry) error {
 	reliabilities, err := matureProviderReliabilities(entries)
+	if err != nil {
+		return err
+	}
+	performances, err := matureProviderPerformances(entries)
 	if err != nil {
 		return err
 	}
@@ -311,7 +326,7 @@ func provisionPrewarm(ctx context.Context, lookback time.Duration, entries []Pro
 	backoff := 3 * time.Second
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt += 1 {
-		if err := prewarmOnce(ctx, lookback, reliabilities); err != nil {
+		if err := prewarmOnce(ctx, lookback, reliabilities, performances); err != nil {
 			lastErr = err
 			logf("prewarm attempt %d/%d failed: %s", attempt, attempts, err)
 			select {
@@ -359,16 +374,46 @@ func matureProviderReliabilities(entries []ProviderEntry) ([]matureProviderRelia
 	return reliabilities, nil
 }
 
+// Converts the fixture's one-way link latency and throughput into the fields
+// produced by connection tests. The latency test is a round trip through the
+// impaired transport, while its minimum sample removes seeded positive jitter.
+func matureProviderPerformances(entries []ProviderEntry) ([]matureProviderPerformance, error) {
+	performances := make([]matureProviderPerformance, 0, len(entries))
+	for _, entry := range entries {
+		clientId, err := server.ParseId(entry.ClientId)
+		if err != nil {
+			return nil, fmt.Errorf("provider %d client id: %w", entry.Index, err)
+		}
+		if math.IsNaN(entry.LatencyMillis) || math.IsInf(entry.LatencyMillis, 0) || entry.LatencyMillis < 0 {
+			return nil, fmt.Errorf("provider %d latency must be finite and non-negative", entry.Index)
+		}
+		roundTripLatencyMillis := math.Round(2 * entry.LatencyMillis)
+		if math.MaxInt32 < roundTripLatencyMillis {
+			return nil, fmt.Errorf("provider %d round-trip latency exceeds the database range", entry.Index)
+		}
+		if entry.BandwidthBps <= 0 {
+			return nil, fmt.Errorf("provider %d bandwidth must be positive", entry.Index)
+		}
+		performances = append(performances, matureProviderPerformance{
+			clientId:                 clientId,
+			minRelativeLatencyMillis: int64(roundTripLatencyMillis),
+			maxBytesPerSecond:        entry.BandwidthBps,
+		})
+	}
+	return performances, nil
+}
+
 // prewarmOnce runs the DB-heavy prewarm a single time, converting the deep
 // `dbWithPool` panic (raised when postgres is unreachable after its own connect
-// retries) into a returned error so the caller can retry or fail cleanly. Both
-// steps are individually idempotent, so retrying after a partial failure is
-// safe: UpdateClientLocationReliabilities rebuilds nclr, and the score write
-// upserts (ON CONFLICT DO UPDATE).
+// retries) into a returned error so the caller can retry or fail cleanly. Every
+// step is idempotent, so retrying after a partial failure is safe: performance
+// writes and score writes upsert, and UpdateClientLocationReliabilities rebuilds
+// nclr.
 func prewarmOnce(
 	ctx context.Context,
 	lookback time.Duration,
 	reliabilities []matureProviderReliability,
+	performances []matureProviderPerformance,
 ) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -380,9 +425,83 @@ func prewarmOnce(
 
 	// build network_client_location_reliability from the currently connected,
 	// latency/speed-tested providers
+	writeMatureProviderPerformances(ctx, performances)
 	model.UpdateClientLocationReliabilities(ctx, now.Add(-lookback), now)
 	writeMatureReliabilityScores(ctx, now, lookback, reliabilities)
 	return nil
+}
+
+// Seeds deterministic test evidence on the currently active connections before
+// building the location-reliability snapshot. Completed tests belong to a
+// specific platform transport, so relying on an earlier transport's tests made
+// a newly active connection look untested and excluded it from matchmaking.
+// Writing the connection tables, instead of only the derived snapshot, also
+// makes later pipeline refreshes preserve the prewarmed evidence.
+func writeMatureProviderPerformances(
+	ctx context.Context,
+	performances []matureProviderPerformance,
+) {
+	clientIds := make([]server.Id, 0, len(performances))
+	minRelativeLatencyMillisValues := make([]int64, 0, len(performances))
+	maxBytesPerSecondValues := make([]int64, 0, len(performances))
+	for _, performance := range performances {
+		clientIds = append(clientIds, performance.clientId)
+		minRelativeLatencyMillisValues = append(minRelativeLatencyMillisValues, performance.minRelativeLatencyMillis)
+		maxBytesPerSecondValues = append(maxBytesPerSecondValues, performance.maxBytesPerSecond)
+	}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		server.RaisePgResult(conn.Exec(
+			ctx,
+			`
+			WITH mature_performance AS (
+				SELECT client_id, min_relative_latency_ms
+				FROM unnest($1::uuid[], $2::bigint[])
+					AS mature(client_id, min_relative_latency_ms)
+			)
+			INSERT INTO network_client_latency (connection_id, latency_ms, sample_count)
+			SELECT
+				network_client_connection.connection_id,
+				(mature.min_relative_latency_ms + network_client_connection.expected_latency_ms)::integer,
+				1
+			FROM mature_performance mature
+			INNER JOIN network_client_connection ON
+				network_client_connection.client_id = mature.client_id AND
+				network_client_connection.connected = true
+			ON CONFLICT (connection_id) DO UPDATE
+			SET
+				latency_ms = EXCLUDED.latency_ms,
+				sample_count = EXCLUDED.sample_count
+			`,
+			clientIds,
+			minRelativeLatencyMillisValues,
+		))
+		server.RaisePgResult(conn.Exec(
+			ctx,
+			`
+			WITH mature_performance AS (
+				SELECT client_id, max_bytes_per_second
+				FROM unnest($1::uuid[], $2::bigint[])
+					AS mature(client_id, max_bytes_per_second)
+			)
+			INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count)
+			SELECT
+				network_client_connection.connection_id,
+				mature.max_bytes_per_second,
+				1
+			FROM mature_performance mature
+			INNER JOIN network_client_connection ON
+				network_client_connection.client_id = mature.client_id AND
+				network_client_connection.connected = true
+			ON CONFLICT (connection_id) DO UPDATE
+			SET
+				bytes_per_second = EXCLUDED.bytes_per_second,
+				sample_count = EXCLUDED.sample_count
+			`,
+			clientIds,
+			maxBytesPerSecondValues,
+		))
+	})
 }
 
 // Writes the seeded mature reliability beside the real connected/location and

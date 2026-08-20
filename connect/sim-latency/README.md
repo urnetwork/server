@@ -331,15 +331,15 @@ Or use the convenience wrapper that sets the local env:
 ## The warm-up period
 
 Before the measured window, the run goes through a **warm-up** that brings the
-market to a stable state: the fleet connects, providers are latency/speed
-tested, reliability scores are established, the selectable set is exported, and
-the complete client pool proves every parallel HTTP lane. Providers carry their
-base network impairment during this setup but remain connected and in their base
-regime. Seeded churn and degraded-regime schedules start at the authenticated
-measurement boundary. Variable client-pool construction time therefore cannot
-phase-shift an otherwise identical workload. Only after the complete pool has
-been revalidated do measured arrivals start, so every request runs against a
-settled market with warm reusable lanes.
+market to a stable state: the fleet connects, fixture-derived latency/speed
+evidence and mature reliability scores are established, the selectable set is
+exported, and the complete client pool proves every parallel HTTP lane.
+Providers carry their base network impairment during this setup but remain
+connected and in their base regime. Seeded churn and degraded-regime schedules
+start at the authenticated measurement boundary. Variable client-pool
+construction time therefore cannot phase-shift an otherwise identical
+workload. Only after the complete pool has been revalidated do measured arrivals
+start, so every request runs against a settled market with warm reusable lanes.
 
 Why warm-up is needed: `FindProviders2` gates on the real reliability weights,
 and the binding one is the **12-hour lookback ≥ 0.7** — a weight is
@@ -353,19 +353,20 @@ The warm-up phases and the knobs that make it **as fast as possible**:
 | Phase | What it does | Knob (default) |
 |---|---|---|
 | ramp | stagger provider connects | `--ramp 1m` |
-| prewarm | establish reliability scores for the connected fleet (instant) | `--prewarm 13h` |
-| tests | latency + synthetic speed test each provider | `--test-timeout 3s`, `--announce-timeout 2s` |
+| prewarm | establish fixture performance evidence and mature reliability scores (instant) | `--prewarm 13h` |
 | settle | let the pipeline propagate scores → selectable set | `--settle 1m`, `--pipeline-interval 10s` |
 | client pool | establish and revalidate every quality exit and parallel HTTP lane | `--client-warmup-timeout 20m` |
 
-`--prewarm` writes the final reliability scores directly for every connected
-provider using its seeded uptime duty cycle, rather than replaying ~8.4h of
-history, so it is effectively instant regardless of the window value;
-`--prewarm 0` restores the true cold start. The synthetic speed test defaults to
-60s in production; the sim drops it to `--test-timeout` (3s) because the score
-gate requires a completed speed test, so this bounds how soon a fresh provider
-can be selected. A shorter `--pipeline-interval` propagates provider state (new
-tests, churn) into the selectable set faster.
+`--prewarm` writes the fixture's round-trip latency and bandwidth evidence onto
+each active connection, then writes the final reliability scores for every
+connected provider using its seeded uptime duty cycle, rather than replaying
+~8.4h of history. Attaching the evidence to the active connection makes later
+pipeline snapshots preserve it; tests belong to one transport, so a replacement
+transport can otherwise make an established provider look untested.
+`--prewarm 0` restores
+the true cold start and live connection-test behavior. A shorter
+`--pipeline-interval` propagates provider state (new tests, churn) into the
+selectable set faster.
 
 The current selection pipeline also requires fresh provider egress-health and
 egress-location evidence. Production obtains that evidence from an external
@@ -711,32 +712,32 @@ replicates should always start from a reset.)
 check the stderr `prewarm complete; running pipeline` line appeared. Diagnose by
 looking at `client_connection_reliability_score` (should be `providers × 3`
 rows for connected, valid providers, with each weight equal to that fixture
-provider's seeded uptime duty cycle) and the exported FindProviders2 samples
-(`pool_count > 0`). Causes: `--prewarm 0` (cold start needs ~8.4h uptime); a
-too-short `--settle` (the pipeline hasn't re-exported the redis samples yet —
+provider's seeded uptime duty cycle),
+`network_client_location_reliability` (fixture providers should have both test
+flags and nonzero performance values), and the exported FindProviders2 samples
+(`pool_count > 0`). Causes: `--prewarm 0` (cold start needs ~8.4h uptime and
+completed live tests); a too-short `--settle` (the pipeline hasn't re-exported
+the redis samples yet —
 the market needs one `--pipeline-interval` after prewarm); provider provide
 modes not yet acknowledged; missing/failing
 `provider_egress_health`; missing/stale `provider_egress_location`; or providers
 not geolocated to `zz` (below).
 
-**Providers must complete a speed test to be selectable.** The score gate
-excludes a provider that has no speed test (it scores at the cutoff). The
-synthetic speed test fires `--test-timeout` after connect (3s default, 60s in
-production). If you raise `--test-timeout` above the warm-up budget, providers
+**Providers need speed evidence to be selectable.** The score gate excludes a
+provider that has none (it scores at the cutoff). Prewarmed runs derive this
+evidence from the deterministic fixture; `--prewarm 0` instead depends on the
+live synthetic/passive test. If that test timeout exceeds the warm-up budget,
+providers
 won't be selectable in time. Confirm with the `network_client_speed` row count.
 
-**Egress establishment under the single in-process exchange is the current
-scaling frontier.** `FindProviders2` selection is solid (it returns full
-candidate pools), but the client→provider→site data path does not yet establish
-reliably when many clients come up at once: each client opens a *window* of
-2–6 provider connections (`WindowSizeMin/Max`), each needing a Public-mode
-contract, so a pool of N clients hits the in-process exchange with ~6N
-simultaneous connection+contract setups and the window-client auths time out.
-Verified with `--no-impair`: the impairment is **not** the cause (a clean
-baseline fails the same way), so this is per-connection harness capacity, not
-the algorithms under test. Levers: fewer clients (`clients.pool_size` in
-providers.yml), more exchange hosts (`--hosts`), or a smaller multi-client
-window. `--no-impair` runs a clean impairment-free baseline.
+**Egress establishment fails closed before measurement.** Each client opens a
+quality window of provider connections, each needing a Public-mode contract.
+The warm pool establishes only four client identities at once and must prove
+every configured exit and HTTP lane before arrivals start. If it remains
+incomplete, inspect the FindProviders2 corpus first: an empty candidate pool is
+a scoring/prewarm failure, while a nonempty pool with auth timeouts is an
+exchange-capacity boundary. `--no-impair` distinguishes transport impairment
+from the rest of the stack.
 
 **`ip_overrides` must be present before the first connection geolocates.** `run`
 writes the site `settings.yml` before starting services, so this holds; if you
@@ -753,8 +754,9 @@ burst (not per frame — per-frame collapses throughput); packet loss is modeled
 as an occasional retransmit-sized stall (a reliable ws stream cannot drop
 bytes); and because `expected_latency_ms` is a server-side FIXME (always 0),
 "relative latency" equals absolute latency — fine in a single-region sim. The
-measured latency tracks the impairment's one-way value, not a full RTT. Use
-`--no-impair` for an impairment-free baseline.
+prewarmed ranking seed uses the connection test's round-trip convention (twice
+the fixture's one-way latency); request-path impairment still applies on each
+read/write direction. Use `--no-impair` for an impairment-free baseline.
 
 **Reproducibility.** A given `providers.yml` fully locks a run (fleet, ids,
 impairments, site tree, client arrivals, all seeded). `init` is also

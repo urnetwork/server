@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 func TestFirstNetworkAdminUsersUsesFirstFixtureEntry(t *testing.T) {
@@ -168,6 +170,239 @@ func TestMatureProviderReliabilitiesRejectInvalidGroundTruth(t *testing.T) {
 			t.Errorf("%s error = %v, want containing %q", test.name, err, test.want)
 		}
 	}
+}
+
+func TestMatureProviderPerformancesUseFixtureRoundTrip(t *testing.T) {
+	clientId := server.NewId()
+	performances, err := matureProviderPerformances([]ProviderEntry{
+		{
+			Index:         7,
+			ClientId:      clientId.String(),
+			LatencyMillis: 12.75,
+			BandwidthBps:  8 * 1024 * 1024,
+		},
+	})
+	if err != nil {
+		t.Fatalf("matureProviderPerformances: %v", err)
+	}
+	if len(performances) != 1 {
+		t.Fatalf("performance count = %d, want 1", len(performances))
+	}
+	performance := performances[0]
+	if performance.clientId != clientId {
+		t.Fatalf("performance client = %s, want %s", performance.clientId, clientId)
+	}
+	if performance.minRelativeLatencyMillis != 26 {
+		t.Fatalf("round-trip latency = %dms, want 26ms", performance.minRelativeLatencyMillis)
+	}
+	if performance.maxBytesPerSecond != 8*1024*1024 {
+		t.Fatalf("performance bandwidth = %d, want %d", performance.maxBytesPerSecond, 8*1024*1024)
+	}
+}
+
+func TestMatureProviderPerformancesRejectInvalidGroundTruth(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry ProviderEntry
+		want  string
+	}{
+		{
+			name: "client id",
+			entry: ProviderEntry{
+				Index:         1,
+				ClientId:      "invalid",
+				LatencyMillis: 1,
+				BandwidthBps:  1,
+			},
+			want: "client id",
+		},
+		{
+			name: "latency",
+			entry: ProviderEntry{
+				Index:         2,
+				ClientId:      server.NewId().String(),
+				LatencyMillis: math.NaN(),
+				BandwidthBps:  1,
+			},
+			want: "latency",
+		},
+		{
+			name: "bandwidth",
+			entry: ProviderEntry{
+				Index:         3,
+				ClientId:      server.NewId().String(),
+				LatencyMillis: 1,
+				BandwidthBps:  0,
+			},
+			want: "bandwidth",
+		},
+	}
+	for _, test := range tests {
+		_, err := matureProviderPerformances([]ProviderEntry{test.entry})
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("%s error = %v, want containing %q", test.name, err, test.want)
+		}
+	}
+}
+
+func TestWriteMatureProviderPerformancesRestoresMatchmakingPool(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		providerNetworkId := server.NewId()
+		providerClientId := server.NewId()
+		entry := ProviderEntry{
+			Index:           0,
+			NetworkId:       providerNetworkId.String(),
+			UserId:          server.NewId().String(),
+			DeviceId:        server.NewId().String(),
+			ClientId:        providerClientId.String(),
+			LatencyMillis:   15,
+			BandwidthBps:    20 * 1024 * 1024,
+			UptimeSeconds:   3600,
+			DowntimeSeconds: 0,
+		}
+		locationId, err := provisionRegion(ctx, RegionConfig{
+			Country:     "Simulation Performance Country",
+			CountryCode: "zp",
+			Region:      "Simulation Performance Region",
+			City:        "Simulation Performance City",
+		})
+		if err != nil {
+			t.Fatalf("provisionRegion: %v", err)
+		}
+		if err := provisionProviders(ctx, []ProviderEntry{entry}, locationId, "ZP"); err != nil {
+			t.Fatalf("provisionProviders: %v", err)
+		}
+		model.SetProvide(ctx, providerClientId, map[model.ProvideMode][]byte{
+			model.ProvideModePublic: make([]byte, 32),
+		})
+		handlerId := model.CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := model.ConnectNetworkClient(
+			ctx,
+			providerClientId,
+			"127.0.0.1:20000",
+			handlerId,
+		)
+		if err != nil {
+			t.Fatalf("ConnectNetworkClient: %v", err)
+		}
+		if err := model.SetConnectionLocation(
+			ctx,
+			connectionId,
+			locationId,
+			&model.ConnectionLocationScores{},
+		); err != nil {
+			t.Fatalf("SetConnectionLocation: %v", err)
+		}
+		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
+		var hasLatencyTestBefore bool
+		var hasSpeedTestBefore bool
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT has_latency_test, has_speed_test
+				FROM network_client_location_reliability
+				WHERE client_id = $1
+				`,
+				providerClientId,
+			)
+			server.WithPgResult(result, err, func() {
+				if !result.Next() {
+					t.Fatal("provider reliability row not found before performance prewarm")
+				}
+				server.Raise(result.Scan(&hasLatencyTestBefore, &hasSpeedTestBefore))
+			})
+		})
+		if hasLatencyTestBefore || hasSpeedTestBefore {
+			t.Fatalf(
+				"fresh connection unexpectedly had test evidence: latency=%t speed=%t",
+				hasLatencyTestBefore,
+				hasSpeedTestBefore,
+			)
+		}
+
+		reliabilities, err := matureProviderReliabilities([]ProviderEntry{entry})
+		if err != nil {
+			t.Fatalf("matureProviderReliabilities: %v", err)
+		}
+		writeMatureReliabilityScores(ctx, server.NowUtc(), 13*time.Hour, reliabilities)
+		callerSession := session.Testing_CreateClientSession(
+			ctx,
+			jwt.NewByJwt(server.NewId(), server.NewId(), "sim-caller", false, false),
+		)
+		findProviders := func() *model.FindProviders2Result {
+			if err := model.UpdateClientScores(ctx, 5*time.Second, 1); err != nil {
+				t.Fatalf("UpdateClientScores: %v", err)
+			}
+			result, err := model.FindProviders2(&model.FindProviders2Args{
+				Specs:    []*model.ProviderSpec{{LocationId: &locationId}},
+				Count:    1,
+				RankMode: model.RankModeQuality,
+			}, callerSession)
+			if err != nil {
+				t.Fatalf("FindProviders2: %v", err)
+			}
+			return result
+		}
+
+		before := findProviders()
+		if len(before.Providers) != 0 {
+			t.Fatalf("provider without performance evidence entered matchmaking: %d", len(before.Providers))
+		}
+		performances, err := matureProviderPerformances([]ProviderEntry{entry})
+		if err != nil {
+			t.Fatalf("matureProviderPerformances: %v", err)
+		}
+		writeMatureProviderPerformances(ctx, performances)
+		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
+		after := findProviders()
+		if len(after.Providers) != 1 || after.Providers[0].ClientId != providerClientId {
+			t.Fatalf("matchmaking providers = %+v, want %s", after.Providers, providerClientId)
+		}
+		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
+		afterRefresh := findProviders()
+		if len(afterRefresh.Providers) != 1 || afterRefresh.Providers[0].ClientId != providerClientId {
+			t.Fatalf("providers after pipeline refresh = %+v, want %s", afterRefresh.Providers, providerClientId)
+		}
+
+		var hasLatencyTest bool
+		var hasSpeedTest bool
+		var relativeLatencyMillis int
+		var maxBytesPerSecond int64
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT has_latency_test, has_speed_test,
+					min_relative_latency_ms, max_bytes_per_second
+				FROM network_client_location_reliability
+				WHERE client_id = $1
+				`,
+				providerClientId,
+			)
+			server.WithPgResult(result, err, func() {
+				if !result.Next() {
+					t.Fatal("provider performance row not found")
+				}
+				server.Raise(result.Scan(
+					&hasLatencyTest,
+					&hasSpeedTest,
+					&relativeLatencyMillis,
+					&maxBytesPerSecond,
+				))
+			})
+		})
+		if !hasLatencyTest || !hasSpeedTest || relativeLatencyMillis != 30 || maxBytesPerSecond != entry.BandwidthBps {
+			t.Fatalf(
+				"performance evidence = latency:%t/%d speed:%t/%d",
+				hasLatencyTest,
+				relativeLatencyMillis,
+				hasSpeedTest,
+				maxBytesPerSecond,
+			)
+		}
+	})
 }
 
 func TestWriteMatureReliabilityScoresPersistsFixtureWeights(t *testing.T) {

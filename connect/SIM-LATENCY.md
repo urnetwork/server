@@ -89,23 +89,30 @@ the speed test scores at the cutoff and is excluded).
 
 No sim can wait 8.4h. `run` therefore has a configurable **warm-up** that brings
 the market to a stable state before clients start: ramp (connect) → prewarm
-(establish scores) → tests (latency/speed) → settle (pipeline propagates). All
+(establish performance and reliability evidence) → settle (pipeline
+propagates). All
 tunable to be as fast as possible: `--ramp`, `--prewarm`, `--settle`,
 `--pipeline-interval`, `--test-timeout`, `--announce-timeout`.
 
 `provisionPrewarm` establishes the market directly: it materializes
-`network_client_location_reliability` from the connected, tested fleet and then
-writes the final `client_connection_reliability_score` rows for every score
-lookback — rather than backfilling raw reliability blocks, which fought the
-running-window/shift/degraded maintenance. Each row uses the fixture provider's
-seeded `uptime / (uptime + downtime)` duty cycle, so a mature mobile churn
-profile does not rank as perfectly reliable. The provider's quality/speed score
-still comes from its real tests. The pipeline then runs in prewarmed mode
+the active connection-test records from the fixture's deterministic performance
+evidence (round-trip link latency and bytes/second), materializes
+`network_client_location_reliability` from the connected fleet, and writes the
+final `client_connection_reliability_score` rows
+for every score lookback — rather than backfilling raw reliability blocks,
+which fought the running-window/shift/degraded maintenance. The performance
+evidence is attached to the current connection so later pipeline refreshes keep
+seeing it; connection tests belong to a particular platform transport, and a
+new active transport can otherwise make the entire fixture look untested. Each
+reliability row uses the fixture provider's seeded
+`uptime / (uptime + downtime)` duty cycle, so a mature mobile churn profile does
+not rank as perfectly reliable. The pipeline then runs in prewarmed mode
 (`Services.SetPrewarmed`): it keeps refreshing the location reliabilities (so
 current churn still gates selection) and re-exports the redis samples, but does
 not recompute reliability scores (which would wipe the prewarm). `--prewarm 0`
-restores the true cold start. Verified end to end: providers become selectable
-in seconds and tunneled requests return 200.
+restores the true cold start and its live connection-test dependency. Verified
+end to end: providers become selectable in seconds and tunneled requests return
+200.
 
 ### Impairment model note
 
