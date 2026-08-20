@@ -229,10 +229,8 @@ func TestVerifyControllerFullTrailFlow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		finalDigest := connect.VerifyFinalDigest(finalMessage)
-		effortDigest := connect.VerifyEffortDigest(finalDigest, proof.Coverage)
-		if !connect.VerifyVerifyMessageSignature(serverPub, effortDigest[:], proof.FinalSig) {
-			t.Fatal("final signature must verify over the coverage-bound effort digest")
+		if !connect.VerifyVerifyMessageSignature(serverPub, finalMessage, proof.FinalSig) {
+			t.Fatal("final signature must verify over the canonical FINAL message")
 		}
 
 		// durable publication (§6.2)

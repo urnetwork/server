@@ -9,7 +9,9 @@ import (
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -27,6 +29,39 @@ func makeTestVerifyKey(serverKeyId byte, fill byte) *VerifyServerKey {
 	return &VerifyServerKey{
 		ServerKeyId: serverKeyId,
 		PrivateKey:  ed25519.NewKeyFromSeed(seed),
+	}
+}
+
+func TestVerifyEvidenceRangeIsBounded(t *testing.T) {
+	to := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	from, gotTo, limit, err := verifyEvidenceRange(&GetVerifyEvidenceArgs{To: to}, 100, 1000)
+	if err != nil || !gotTo.Equal(to) || !from.Equal(to.Add(-31*24*time.Hour)) || limit != 100 {
+		t.Fatalf("from=%s to=%s limit=%d err=%v", from, gotTo, limit, err)
+	}
+	if _, _, _, err := verifyEvidenceRange(&GetVerifyEvidenceArgs{From: to.Add(-94 * 24 * time.Hour), To: to}, 1, 10); err == nil {
+		t.Fatal("unbounded public evidence range accepted")
+	}
+	if _, _, _, err := verifyEvidenceRange(&GetVerifyEvidenceArgs{From: to.Add(-time.Hour), To: to, Limit: 11}, 1, 10); err == nil {
+		t.Fatal("oversize public evidence limit accepted")
+	}
+}
+
+func TestVerifyKeyRotationSignsNewestAndPublishesHistoricalKeys(t *testing.T) {
+	saved := verifyServerKeysInstance
+	defer SetVerifyServerKeys(saved)
+	oldKey := makeTestVerifyKey(0, 0x31)
+	newKey := makeTestVerifyKey(1, 0x32)
+	SetVerifyServerKeys([]*VerifyServerKey{newKey, oldKey})
+
+	if verifySigningKey() != newKey || verifyServerKeyById(0) != oldKey || verifyServerKeyById(1) != newKey || verifyServerKeyById(99) != newKey {
+		t.Fatal("verify key rotation selection did not preserve newest/historical semantics")
+	}
+	result, err := GetVerifyKeys(nil)
+	if err != nil || len(result.Keys) != 2 || result.Keys[0].ServerKeyId != 1 || result.Keys[1].ServerKeyId != 0 {
+		t.Fatalf("published keys = %+v, %v", result, err)
+	}
+	if string(result.Keys[0].PublicKey) != string(newKey.PrivateKey.Public().(ed25519.PublicKey)) || string(result.Keys[1].PublicKey) != string(oldKey.PrivateKey.Public().(ed25519.PublicKey)) {
+		t.Fatal("published rotation keys do not match the configured signing keys")
 	}
 }
 
@@ -82,24 +117,25 @@ func TestVerifySyntheticSeedId(t *testing.T) {
 }
 
 // TestVerifySourceIpPrecedence pins the source-ip precedence the whole /verify
-// subsystem's soundness rests on (V11). ClientAddress must resolve from
-// X-UR-Forwarded-For, else X-Forwarded-For + X-Forwarded-Source-Port, else
-// RemoteAddr. nginx force-overwrites these with $remote_addr:$remote_port at
-// ingress (warp/warpctl/config.go), so a normal-ingress caller cannot spoof the
-// source; this test guards the app-side precedence against silent regression.
-// It does not (and cannot) test nginx — that stays a deploy/runbook check.
+// subsystem's soundness rests on. Forwarded headers are honored only for an
+// explicitly trusted immediate peer; nginx also force-overwrites them at the
+// edge, giving attribution two independent boundaries.
 func TestVerifySourceIpPrecedence(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.9.9.9/32")}
 	newReq := func() *http.Request {
 		req := httptest.NewRequest("POST", "/verify", nil)
 		req.RemoteAddr = "10.9.9.9:5555"
 		return req
 	}
-	addr := func(req *http.Request) string {
-		cs, err := session.NewClientSessionFromRequest(req)
+	addr := func(req *http.Request) (string, error) {
+		return session.ResolveClientAddress(req, trusted)
+	}
+	mustAddr := func(req *http.Request) string {
+		address, err := addr(req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return cs.ClientAddress
+		return address
 	}
 
 	// 1. X-UR-Forwarded-For wins over everything
@@ -107,7 +143,7 @@ func TestVerifySourceIpPrecedence(t *testing.T) {
 	req.Header.Set("X-UR-Forwarded-For", "203.0.113.1:1111")
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := addr(req); got != "203.0.113.1:1111" {
+	if got := mustAddr(req); got != "203.0.113.1:1111" {
 		t.Fatalf("X-UR-Forwarded-For must win, got %q", got)
 	}
 
@@ -115,22 +151,29 @@ func TestVerifySourceIpPrecedence(t *testing.T) {
 	req = newReq()
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := addr(req); got != "198.51.100.2:2222" {
+	if got := mustAddr(req); got != "198.51.100.2:2222" {
 		t.Fatalf("X-Forwarded-For+port expected, got %q", got)
 	}
 
-	// 3. X-Forwarded-For WITHOUT the source port does not take effect: the code
-	// requires both, so it falls through to RemoteAddr rather than trusting a
-	// partial spoofed header
+	// 3. A trusted proxy sending a partial identity is rejected, never silently
+	// re-attributed to the proxy itself.
 	req = newReq()
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
-	if got := addr(req); got != "10.9.9.9:5555" {
-		t.Fatalf("X-Forwarded-For without port must fall through to RemoteAddr, got %q", got)
+	if _, err := addr(req); err == nil {
+		t.Fatal("partial forwarded source must be rejected")
 	}
 
 	// 4. no forwarding headers → RemoteAddr
-	if got := addr(newReq()); got != "10.9.9.9:5555" {
+	if got := mustAddr(newReq()); got != "10.9.9.9:5555" {
 		t.Fatalf("RemoteAddr fallback expected, got %q", got)
+	}
+
+	// 5. an untrusted direct caller cannot spoof either forwarding form.
+	req = newReq()
+	req.RemoteAddr = "198.18.0.4:4444"
+	req.Header.Set("X-UR-Forwarded-For", "203.0.113.99:1")
+	if got, err := session.ResolveClientAddress(req, trusted); err != nil || got != "198.18.0.4:4444" {
+		t.Fatalf("untrusted forwarding spoof resolved as %q, %v", got, err)
 	}
 }
 

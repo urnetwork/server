@@ -1,6 +1,7 @@
 package st
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -105,5 +106,61 @@ func TestConnectionMissingHostname(t *testing.T) {
 	conn, err := connectionFromResource(res)
 	if err == nil {
 		t.Fatalf("expected error for missing authority, got %+v", conn)
+	}
+}
+
+func TestTestnetProfileNeverFallsBackToMainnet(t *testing.T) {
+	res := &fakeResource{
+		strings: map[string]string{
+			"authority":         "mainnet.internal:9944",
+			"testnet-authority": "testnet.internal:9944",
+		},
+		lists: map[string][]string{
+			"rpc_urls":         {"https://mainnet.invalid"},
+			"testnet-rpc_urls": {"https://testnet.example"},
+		},
+	}
+	conn, err := connectionFromResourceProfile(res, ProfileTestnet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conn.RpcUrls) != 1 || conn.RpcUrls[0] != "https://testnet.example" {
+		t.Fatalf("testnet rpc urls = %v", conn.RpcUrls)
+	}
+	if conn.Authority != "testnet.internal:9944" {
+		t.Fatalf("testnet authority = %q", conn.Authority)
+	}
+}
+
+func TestTestnetProfileMissingKeysDoesNotUseMainnet(t *testing.T) {
+	res := &fakeResource{
+		strings: map[string]string{"authority": "mainnet.internal:9944"},
+		lists:   map[string][]string{"rpc_urls": {"https://mainnet.invalid"}},
+	}
+	if conn, err := connectionFromResourceProfile(res, ProfileTestnet); err == nil {
+		t.Fatalf("missing testnet keys unexpectedly resolved %+v", conn)
+	}
+}
+
+func TestActiveProfileIsExplicit(t *testing.T) {
+	old, had := os.LookupEnv(ProfileEnvironment)
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(ProfileEnvironment, old)
+		} else {
+			_ = os.Unsetenv(ProfileEnvironment)
+		}
+	})
+	_ = os.Unsetenv(ProfileEnvironment)
+	if _, err := ActiveProfile(); err == nil {
+		t.Fatal("missing profile accepted")
+	}
+	_ = os.Setenv(ProfileEnvironment, ProfileTestnet)
+	if got, err := ActiveProfile(); err != nil || got != ProfileTestnet {
+		t.Fatalf("profile = %q, %v", got, err)
+	}
+	_ = os.Setenv(ProfileEnvironment, "staging")
+	if _, err := ActiveProfile(); err == nil {
+		t.Fatal("unknown profile accepted")
 	}
 }

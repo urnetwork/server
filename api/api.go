@@ -165,10 +165,17 @@ func Routes() []*router.Route {
 		// Ed25519 signatures, not a JWT — see handlers.Verify
 		router.NewRoute("POST", "/verify", handlers.Verify),
 		router.NewRoute("GET", "/verify/keys", handlers.GetVerifyKeys),
+		router.NewRoute("GET", "/verify/stats", handlers.GetVerifyStats),
+		router.NewRoute("GET", "/verify/proofs", handlers.GetVerifyProofs),
 		// subnet control plane (sn/PLAN.md §5, D-13)
 		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
+		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
+		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),
+		router.NewRoute("GET", "/sn/evidence", handlers.SnEvidence),
+		router.NewRoute("POST", "/sn/evidence", handlers.SnEvidence),
+		router.NewRoute("GET", "/sn/evidence/history", handlers.SnEvidenceHistory),
 		router.NewRoute("GET", "/hello", handlers.Hello),
 		router.NewRoute("POST", "/account/api-key", handlers.CreateApiKey),
 		router.NewRoute("POST", "/account/api-key/remove", handlers.DeleteApiKey),

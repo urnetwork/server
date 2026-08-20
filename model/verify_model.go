@@ -14,9 +14,9 @@ package model
 //	{vtr_<trailId>}pending  the pending hop record (json) awaiting arrival
 //	{vtr_<trailId>}resp     last response (json) for idempotent retries (§4.3)
 //	verify_reap             zset trailId -> step deadline unix ms (reaper index)
-//	verify_egress_<ip>      egress index: ip -> clientId, or `!` if ambiguous (§8.1)
-//	{vce_<clientId>}        reverse egress hash: ip -> entry expiry unix ms (§8.2)
-//	verify_eligible         set of currently eligible provider clientIds (§5.1)
+//	verify_egress_v2_<ip>   exact-address index: ip -> clientId, or `!` if ambiguous (§8.1)
+//	{vce2_<clientId>}       reverse exact-address hash: ip -> entry expiry unix ms (§8.2)
+//	verify_eligible_v2      set of currently eligible provider clientIds (§5.1)
 //	{velig_<clientId>}      eligibility token spend counter (INCR+EXPIRE, §5.3)
 //	{vstat_<clientId>}p<t>  per-period stats hash: assignments, confirmations,
 //	                        log-spaced latency buckets lb_<i> (§7)
@@ -38,7 +38,9 @@ package model
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -102,6 +104,7 @@ func DefaultVerifySettings() *VerifySettings {
 		ActiveTrailsSoftLimit:  8,
 		ActiveTrailsHardLimit:  32,
 		StatsPeriod:            15 * time.Minute,
+		ReliabilityAMin:        8,
 		SampleCandidateCount:   16,
 		SampleMaxAttempts:      8,
 		SweepLimit:             1000,
@@ -146,10 +149,13 @@ type VerifySettings struct {
 	// the eligibility burst (a provider is the confirming hop only for trails it
 	// was assigned to), so this is set generously — it exists to shed a
 	// single-ip flood of the mutating path, not to shape normal traffic.
-	ExtendRateHardLimit    int64
-	ActiveTrailsSoftLimit  int64
-	ActiveTrailsHardLimit  int64
-	StatsPeriod            time.Duration
+	ExtendRateHardLimit   int64
+	ActiveTrailsSoftLimit int64
+	ActiveTrailsHardLimit int64
+	StatsPeriod           time.Duration
+	// ReliabilityAMin is the Wilson denominator floor published with audit
+	// rollups and used by the payout artifact builder.
+	ReliabilityAMin        int64
 	SampleCandidateCount   int
 	SampleMaxAttempts      int
 	SweepLimit             int
@@ -160,6 +166,11 @@ type VerifySettings struct {
 	// default /29 v4, /48 v6.
 	EgressHashV4Prefix int
 	EgressHashV6Prefix int
+	// EgressHashKey is shared by authorized operators and validators under a
+	// versioned subnet policy. It must never appear in public artifacts; only
+	// EgressHashKeyId is published.
+	EgressHashKey   []byte
+	EgressHashKeyId string
 }
 
 // TrailTtl is the redis lifetime of one trail's state (VALIDATOR.md §5.5:
@@ -229,24 +240,25 @@ func verifyTrailLockKey(trailId server.Id) string {
 
 const verifyReapKey = "verify_reap"
 
-// keyed by the peppered subnet-bucket hash (VerifyEgressIpHash), never the
-// raw ip: the validator scores ip subnet blocks, not individual addresses, so
-// the index needs no more granularity than the hash — and this removes the
-// only raw client-ip-at-rest in redis. the hex form doubles as the reverse
-// hash's field name so both directions key identically.
+// Keyed by the peppered exact-address hash (VerifyEgressIndexHashWithSettings),
+// never the raw IP. Eligibility is an address-level bijection; the separately
+// signed trail hash is deliberately coarser (/29 or /48) so different eligible
+// providers can contribute one shared prefix that head scoring splits between
+// fleets. v2 key names prevent a rolling upgrade from mixing the old
+// prefix-keyed reverse entries with exact-address entries during their TTL.
 func verifyEgressKey(egressHash [32]byte) string {
 	return verifyEgressKeyFromHex(hex.EncodeToString(egressHash[:]))
 }
 
 func verifyEgressKeyFromHex(egressHashHex string) string {
-	return fmt.Sprintf("verify_egress_%s", egressHashHex)
+	return fmt.Sprintf("verify_egress_v2_%s", egressHashHex)
 }
 
 func verifyClientEgressKey(clientId server.Id) string {
-	return fmt.Sprintf("{vce_%s}", clientId)
+	return fmt.Sprintf("{vce2_%s}", clientId)
 }
 
-const verifyEligibleKey = "verify_eligible"
+const verifyEligibleKey = "verify_eligible_v2"
 
 // refreshed on every eligibility grant; see updateVerifyEligibleMembership
 const verifyEligibleKeyTtl = 30 * 24 * time.Hour
@@ -304,10 +316,43 @@ func VerifyEgressIpHash(ip netip.Addr, v4Prefix int, v6Prefix int) [32]byte {
 	return server.ClientIpHashForAddrPrefix(ip, v4Prefix, v6Prefix)
 }
 
+func VerifyEgressIpHashWithSettings(ip netip.Addr, settings *VerifySettings) [32]byte {
+	if len(settings.EgressHashKey) == 0 {
+		return VerifyEgressIpHash(ip, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
+	}
+	ip = ip.Unmap()
+	if ip.Is4() {
+		ip = netip.PrefixFrom(ip, settings.EgressHashV4Prefix).Masked().Addr()
+	} else if ip.Is6() {
+		ip = netip.PrefixFrom(ip, settings.EgressHashV6Prefix).Masked().Addr()
+	}
+	h := hmac.New(sha256.New, settings.EgressHashKey)
+	h.Write([]byte("urnetwork/egress-prefix/v1"))
+	h.Write(ip.AsSlice())
+	return [32]byte(h.Sum(nil))
+}
+
+// VerifyEgressIndexHashWithSettings is the privacy-preserving exact-address
+// identity used only by the server's eligibility bijection. It must not use
+// the subnet scoring prefix: two distinct addresses in one /29 or /48 are two
+// independently attributable providers but intentionally produce one shared
+// VerifyEgressIpHashWithSettings value in a signed trail. Domain separation
+// also prevents an index key from being confused with a published score hash.
+func VerifyEgressIndexHashWithSettings(ip netip.Addr, settings *VerifySettings) [32]byte {
+	ip = ip.Unmap()
+	if len(settings.EgressHashKey) == 0 {
+		return server.ClientIpHashForAddrPrefix(ip, 32, 128)
+	}
+	h := hmac.New(sha256.New, settings.EgressHashKey)
+	h.Write([]byte("urnetwork/egress-address-index/v1"))
+	h.Write(ip.AsSlice())
+	return [32]byte(h.Sum(nil))
+}
+
 // FeedVerifyEgress is the single bijection-gated egress-index feeder (§8.1,
 // §8.2). Both feeders (observed connection source ips and proxy-allocated
 // egresses) call this. It:
-//  1. claims/refreshes the forward `verify_egress_<ip>` entry, atomically
+//  1. claims/refreshes the forward `verify_egress_v2_<ip>` entry, atomically
 //     downgrading the ip to ambiguous if another client already backs it,
 //  2. records the ip in the client's reverse hash with an entry expiry, and
 //  3. recomputes the client's eligible-set membership: eligible iff the
@@ -328,7 +373,7 @@ func FeedVerifyEgress(
 		return
 	}
 	ip = ip.Unmap()
-	egressHash := VerifyEgressIpHash(ip, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
+	egressHash := VerifyEgressIndexHashWithSettings(ip, settings)
 	egressHashHex := hex.EncodeToString(egressHash[:])
 	nowMs := uint64(server.NowUtc().UnixMilli())
 	ttlSeconds := int64(settings.EgressTtl / time.Second)
@@ -381,7 +426,7 @@ func ClearVerifyEgress(
 		return
 	}
 	ip = ip.Unmap()
-	egressHash := VerifyEgressIpHash(ip, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
+	egressHash := VerifyEgressIndexHashWithSettings(ip, settings)
 	server.Redis(ctx, func(r server.RedisClient) {
 		r.HDel(ctx, verifyClientEgressKey(clientId), hex.EncodeToString(egressHash[:]))
 		server.RedisRemoveIfEqual(r, ctx, verifyEgressKey(egressHash), []byte(clientId.String()))
@@ -500,7 +545,7 @@ func ResolveVerifyEgress(
 		return
 	}
 	ip = ip.Unmap()
-	egressHash := VerifyEgressIpHash(ip, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
+	egressHash := VerifyEgressIndexHashWithSettings(ip, settings)
 	egressHashHex := hex.EncodeToString(egressHash[:])
 	nowMs := uint64(server.NowUtc().UnixMilli())
 
@@ -1365,6 +1410,37 @@ func GetVerifyTrailRow(
 	return
 }
 
+// ListVerifyTrailRows exposes the durable, non-poison proof history in stable
+// order for the public audit API. Limits are mandatory at the model boundary
+// so an unauthenticated caller cannot trigger an unbounded scan.
+func ListVerifyTrailRows(ctx context.Context, minTime, maxTime time.Time, limit int) (rows []*VerifyTrailRow) {
+	if limit <= 0 || limit > 10_000 {
+		panic(fmt.Errorf("verify proof history limit out of range: %d", limit))
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `
+			SELECT trail_id, vpk, server_key_id, server_nonce, depth, status,
+				hops_json, final_sig, verifier_sig, create_time, complete_time
+			FROM verify_trail
+			WHERE create_time >= $1 AND create_time < $2
+			ORDER BY create_time, trail_id
+			LIMIT $3
+		`, minTime.UTC(), maxTime.UTC(), limit)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				row := &VerifyTrailRow{}
+				var serverKeyId int16
+				server.Raise(result.Scan(&row.TrailId, &row.Vpk, &serverKeyId,
+					&row.ServerNonce, &row.Depth, &row.Status, &row.HopsJson,
+					&row.FinalSig, &row.VerifierSig, &row.CreateTime, &row.CompleteTime))
+				row.ServerKeyId = byte(serverKeyId)
+				rows = append(rows, row)
+			}
+		})
+	})
+	return
+}
+
 // SweepExpiredVerifyTrails is the trail reaper (§4.4, §6.1): it walks the
 // reap registry for trails whose pending step deadline has passed, marks them
 // expired, and persists the expired record for real (non-poison) trails. The
@@ -1654,6 +1730,35 @@ func GetVerifyProviderStats(
 					&row.LatencyP90Ms,
 					&row.LatencyP99Ms,
 				))
+				rows = append(rows, row)
+			}
+		})
+	})
+	return
+}
+
+// ListVerifyProviderStats returns all provider rows overlapping a bounded
+// time range. It backs the public reproducibility API; scoring continues to
+// use validator-local observations, never this operator-supplied index.
+func ListVerifyProviderStats(ctx context.Context, minTime, maxTime time.Time, limit int) (rows []*VerifyProviderStatsRow) {
+	if limit <= 0 || limit > 100_000 {
+		panic(fmt.Errorf("verify stats history limit out of range: %d", limit))
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `
+			SELECT period_start, period_end, client_id, assignments, confirmations,
+				latency_p50_ms, latency_p90_ms, latency_p99_ms
+			FROM verify_provider_stats
+			WHERE period_end > $1 AND period_start < $2
+			ORDER BY period_start, client_id
+			LIMIT $3
+		`, minTime.UTC(), maxTime.UTC(), limit)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				row := &VerifyProviderStatsRow{}
+				server.Raise(result.Scan(&row.PeriodStart, &row.PeriodEnd, &row.ClientId,
+					&row.Assignments, &row.Confirmations, &row.LatencyP50Ms,
+					&row.LatencyP90Ms, &row.LatencyP99Ms))
 				rows = append(rows, row)
 			}
 		})

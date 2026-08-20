@@ -60,9 +60,25 @@ func (self *stubStClient) BlockTime(ctx context.Context, block uint64) (time.Tim
 	return stEstimateBlockTime(self.state.HeadBlock, self.state.HeadBlockTime, block, stDefaultBlockSeconds), nil
 }
 
+func (self *stubStClient) FinalizedHead(context.Context) (uint64, [32]byte, time.Time, error) {
+	return self.state.HeadBlock, [32]byte{1}, self.state.HeadBlockTime, nil
+}
+
+func (self *stubStClient) BlockHash(context.Context, uint64) ([32]byte, error) {
+	return [32]byte{1}, nil
+}
+
 func (self *stubStClient) RollEpochs(ctx context.Context) (string, error) {
 	self.rollCount += 1
 	return "0xstubroll", nil
+}
+
+func (self *stubStClient) CloseOperatorEpoch(context.Context, uint64, uint64) (string, error) {
+	return "0xstubclose", nil
+}
+
+func (self *stubStClient) DeferMissedEmission(context.Context, uint64, uint64) (string, error) {
+	return "0xstubdefer", nil
 }
 
 func (self *stubStClient) DepositPush(ctx context.Context, alphaRao *big.Int) (string, error) {
@@ -103,6 +119,18 @@ func (self *stubStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 
 func (self *stubStClient) PoolState(ctx context.Context, epoch uint64, noId uint64) (*StPoolState, error) {
 	return self.pool, nil
+}
+
+func (self *stubStClient) BindingAt(context.Context, [16]byte, uint64) (*StFleetBindingState, error) {
+	return &StFleetBindingState{}, nil
+}
+
+func (self *stubStClient) EpochDeposit(context.Context, uint64, uint64) (*big.Int, error) {
+	return big.NewInt(0), nil
+}
+
+func (self *stubStClient) ConvictionBeforeEpoch(context.Context, uint64, uint64) (*big.Int, error) {
+	return big.NewInt(0), nil
 }
 
 // the stub must keep satisfying the full StClient surface

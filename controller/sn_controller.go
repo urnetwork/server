@@ -15,9 +15,14 @@ package controller
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
+	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/ss58"
@@ -25,10 +30,16 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/startifact"
 )
 
 type SnSetWalletArgs struct {
 	ColdkeySs58 string `json:"coldkey_ss58"`
+	// ClientId is optional for backward compatibility. A client-scoped JWT
+	// automatically selects its own client id; an explicit id must belong to
+	// the caller's network. Release 1.0 settlement uses this provider-level
+	// history, while the network wallet remains available for old epochs.
+	ClientId *server.Id `json:"client_id,omitempty"`
 }
 
 type SnSetWalletError struct {
@@ -57,12 +68,20 @@ func SnSetWallet(
 		}, nil
 	}
 
-	model.SetStWallet(
-		clientSession.Ctx,
-		clientSession.ByJwt.NetworkId,
-		setWallet.ColdkeySs58,
-		coldkeyPubkey,
-	)
+	clientId := setWallet.ClientId
+	if clientId == nil {
+		clientId = clientSession.ByJwt.ClientId
+	}
+	if clientId != nil {
+		networkId, findErr := model.FindClientNetwork(clientSession.Ctx, *clientId)
+		if findErr != nil || networkId != clientSession.ByJwt.NetworkId {
+			return &SnSetWalletResult{Error: &SnSetWalletError{Message: "Client does not belong to this network."}}, nil
+		}
+	}
+	model.SetStWallet(clientSession.Ctx, clientSession.ByJwt.NetworkId, setWallet.ColdkeySs58, coldkeyPubkey)
+	if clientId != nil {
+		model.SetStProviderWallet(clientSession.Ctx, *clientId, clientSession.ByJwt.NetworkId, setWallet.ColdkeySs58, coldkeyPubkey)
+	}
 
 	return &SnSetWalletResult{}, nil
 }
@@ -87,16 +106,19 @@ type SnPoolClaimError struct {
 // claimable; it is additive relative to the connect binding, which ignores
 // unknown fields.
 type SnPoolClaimResult struct {
-	Epoch           uint64            `json:"epoch"`
-	NoId            []byte            `json:"no_id"`
-	Coldkey         []byte            `json:"coldkey"`
-	ShareBps        int               `json:"share_bps"`
-	Proof           [][]byte          `json:"proof"`
-	PayoutRoot      []byte            `json:"payout_root"`
-	ContractAddress string            `json:"contract_address"`
-	ChainId         uint64            `json:"chain_id"`
-	ClaimOpenBlock  uint64            `json:"claim_open_block"`
-	Error           *SnPoolClaimError `json:"error,omitempty"`
+	Epoch                  uint64            `json:"epoch"`
+	NoId                   []byte            `json:"no_id"`
+	Coldkey                []byte            `json:"coldkey"`
+	ShareBps               int               `json:"share_bps"`
+	Proof                  [][]byte          `json:"proof"`
+	PayoutRoot             []byte            `json:"payout_root"`
+	ContractAddress        string            `json:"contract_address"`
+	ChainId                uint64            `json:"chain_id"`
+	ClaimOpenBlock         uint64            `json:"claim_open_block"`
+	ArtifactHash           string            `json:"artifact_hash,omitempty"`
+	ArtifactUri            string            `json:"artifact_uri,omitempty"`
+	SettlementVaultAddress string            `json:"settlement_vault_address,omitempty"`
+	Error                  *SnPoolClaimError `json:"error,omitempty"`
 }
 
 // SnPoolClaim rebuilds the caller network's merkle pool claim for an epoch:
@@ -109,16 +131,6 @@ func SnPoolClaim(
 	clientSession *session.ClientSession,
 ) (*SnPoolClaimResult, error) {
 	ctx := clientSession.Ctx
-
-	wallet := model.GetStWallet(ctx, clientSession.ByJwt.NetworkId)
-	if wallet == nil {
-		return &SnPoolClaimResult{
-			Error: &SnPoolClaimError{
-				Message: "No subnet wallet set for this network. Set an ss58 coldkey with POST /sn/wallet.",
-			},
-		}, nil
-	}
-
 	var stEpoch *model.StEpoch
 	if poolClaim.Epoch != nil {
 		stEpoch = model.GetStEpoch(ctx, *poolClaim.Epoch)
@@ -147,22 +159,63 @@ func SnPoolClaim(
 		}, nil
 	}
 
-	coldkey := wallet.ColdkeyPubkey
-
-	noId, ok := getStPayoutNoIdForColdkey(ctx, stEpoch.Epoch, coldkey)
-	if !ok {
-		// the coldkey has no leaf: the provider earned nothing this epoch
-		return &SnPoolClaimResult{
-			Epoch:   stEpoch.Epoch,
-			Coldkey: coldkey[:],
-		}, nil
+	var leaf *model.StPayoutLeaf
+	var artifactRecord *model.StPayoutArtifact
+	if cfg := stConfig(); cfg != nil {
+		artifactRecord = model.GetStPayoutArtifact(ctx, stEpoch.Epoch, cfg.NoId)
 	}
-
-	leaf := model.GetStPayoutLeafForColdkey(ctx, stEpoch.Epoch, noId, coldkey)
+	// Provider identity, payout ownership, and head exclusion are all frozen in
+	// the immutable epoch artifact. Never apply the caller's current wallet to
+	// an old epoch after a rotation.
+	if clientSession.ByJwt.ClientId != nil && artifactRecord != nil {
+		store, available := server.LoadBlobStore()
+		if !available {
+			return nil, fmt.Errorf("payout artifact store unavailable")
+		}
+		reader, readErr := store.Get(ctx, artifactRecord.ContentKey)
+		if readErr != nil {
+			return nil, readErr
+		}
+		bytes, readErr := io.ReadAll(io.LimitReader(reader, 32<<20))
+		reader.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		var artifact startifact.Artifact
+		if json.Unmarshal(bytes, &artifact) != nil || startifact.Verify(&artifact) != nil || !strings.EqualFold(artifact.ContentHash, artifactRecord.ContentHash) {
+			return nil, fmt.Errorf("payout artifact integrity failure")
+		}
+		clientId := stId16(*clientSession.ByJwt.ClientId)
+		for _, provider := range artifact.Providers {
+			if provider.ClientID != clientId {
+				continue
+			}
+			for _, candidate := range model.GetStPayoutLeaves(ctx, stEpoch.Epoch, artifact.NoID) {
+				if candidate.Coldkey == provider.Coldkey {
+					leaf = candidate
+					break
+				}
+			}
+			break
+		}
+	}
+	// Backward-compatible lookup for a network-scoped JWT/legacy epoch.
 	if leaf == nil {
-		// unreachable: noId was derived from this coldkey's leaf row
-		return nil, fmt.Errorf("payout leaf missing for epoch %d no_id %d", stEpoch.Epoch, noId)
+		if wallet := model.GetStWallet(ctx, clientSession.ByJwt.NetworkId); wallet != nil {
+			if noId, ok := getStPayoutNoIdForColdkey(ctx, stEpoch.Epoch, wallet.ColdkeyPubkey); ok {
+				leaf = model.GetStPayoutLeafForColdkey(ctx, stEpoch.Epoch, noId, wallet.ColdkeyPubkey)
+			}
+		}
 	}
+	if leaf == nil {
+		result := &SnPoolClaimResult{Epoch: stEpoch.Epoch}
+		if artifactRecord != nil {
+			result.ArtifactHash = artifactRecord.ContentHash
+			result.ArtifactUri = "/sn/artifact?hash=" + artifactRecord.ContentHash
+		}
+		return result, nil
+	}
+	coldkey, noId := leaf.Coldkey, leaf.NoId
 
 	leaves := model.GetStPayoutLeaves(ctx, stEpoch.Epoch, noId)
 	root, proof, err := snPoolClaimProof(leaves, coldkey, leaf.ShareBps)
@@ -180,11 +233,22 @@ func SnPoolClaim(
 		PayoutRoot:     root[:],
 		ClaimOpenBlock: stEpoch.FinalizeBlock,
 	}
+	if artifactRecord != nil {
+		result.ArtifactHash = artifactRecord.ContentHash
+		result.ArtifactUri = "/sn/artifact?hash=" + artifactRecord.ContentHash
+	}
+	if cfg := stConfig(); cfg != nil && cfg.SettlementVault != (common.Address{}) {
+		result.ContractAddress = cfg.SettlementVault.Hex()
+		result.SettlementVaultAddress = cfg.SettlementVault.Hex()
+		result.ChainId = cfg.ChainId
+	}
 	// contract coordinates ride along from the hot epoch mirror; on a cache
 	// miss they are zero and the claimant falls back to its own config
 	if summary := model.GetStEpochSummaryCache(ctx); summary != nil {
-		result.ContractAddress = summary.ContractAddress
-		result.ChainId = summary.ChainId
+		if result.ContractAddress == "" {
+			result.ContractAddress = summary.ContractAddress
+			result.ChainId = summary.ChainId
+		}
 	}
 	return result, nil
 }

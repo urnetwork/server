@@ -18,9 +18,11 @@ package controller
 // whose caller is unknown/ineligible/softly-over-limit, still creates a
 // normal-looking trail with valid ASSIGNs, carried all the way to depth M
 // with server-stamped times, then a normal-looking signed proof — but the
-// trail is never written to `verify_trail` and never touches real providers
-// (assigned hops are synthetic ids; no tokens are spent; no stats are
-// recorded, with pad writes keeping the response timing envelope close).
+// trail is never written to `verify_trail`. Its pending hops are selected
+// from the same eligible, routable provider set as a real trail (a shadow
+// route), but no provider statistics are changed; pad writes keep response
+// timing close. A synthetic id is used only for an already-confirmed,
+// unresolved seed or when the routable population is empty.
 // Only past the hard rate limits (the DoS bound on state creation) is a
 // request refused outright.
 
@@ -34,9 +36,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/glog"
@@ -72,10 +76,15 @@ var verifyServerKeysFromVault = sync.OnceValue(func() []*VerifyServerKey {
 	}
 	res.UnmarshalYaml(&conf)
 	keys := []*VerifyServerKey{}
+	seenIds := map[int]bool{}
 	for _, confKey := range conf.Keys {
 		if confKey.ServerKeyId < 0 || 255 < confKey.ServerKeyId {
 			panic(fmt.Errorf("verify.yml server_key_id out of range: %d", confKey.ServerKeyId))
 		}
+		if seenIds[confKey.ServerKeyId] {
+			panic(fmt.Errorf("verify.yml reuses server_key_id %d", confKey.ServerKeyId))
+		}
+		seenIds[confKey.ServerKeyId] = true
 		seed, err := base64.StdEncoding.DecodeString(confKey.Seed)
 		if err != nil {
 			panic(fmt.Errorf("verify.yml bad key seed: %s", err))
@@ -177,14 +186,75 @@ func verifyServerKeyById(serverKeyId byte) *VerifyServerKey {
 
 // verifySettingsInstance holds the protocol parameters (§5.5). Swappable for
 // tests via `SetVerifySettings`.
-var verifySettingsInstance = model.DefaultVerifySettings()
+var verifySettingsInstance *model.VerifySettings
+
+var verifySettingsFromVault = sync.OnceValue(func() *model.VerifySettings {
+	res := server.Vault.RequireSimpleResource("verify.yml")
+	var conf struct {
+		Profile       string `yaml:"profile"`
+		PolicyHash    string `yaml:"policy_hash"`
+		EgressHashKey string `yaml:"egress_hash_key"`
+		Settings      struct {
+			StepTimeoutSeconds           int64  `yaml:"step_timeout_seconds"`
+			StepTimeoutGraceSeconds      int64  `yaml:"step_timeout_grace_seconds"`
+			TrailTtlGraceSeconds         int64  `yaml:"trail_ttl_grace_seconds"`
+			EgressTtlSeconds             int64  `yaml:"egress_ttl_seconds"`
+			EgressRefreshSeconds         int64  `yaml:"egress_refresh_seconds"`
+			ReliabilityAMin              int64  `yaml:"reliability_a_min"`
+			StatsPeriodSeconds           int64  `yaml:"stats_period_seconds"`
+			EgressIpv4Prefix             int    `yaml:"egress_ipv4_prefix"`
+			EgressIpv6Prefix             int    `yaml:"egress_ipv6_prefix"`
+			EgressHashKeyId              string `yaml:"egress_hash_key_id"`
+			SoftGuardrailsEnabled        bool   `yaml:"soft_guardrails_enabled"`
+			HardSeedPerMinutePerSource   int64  `yaml:"hard_seed_per_minute_per_source"`
+			HardExtendPerMinutePerSource int64  `yaml:"hard_extend_per_minute_per_source"`
+			HardActiveTrailsPerSource    int64  `yaml:"hard_active_trails_per_source"`
+		} `yaml:"settings"`
+	}
+	res.UnmarshalYaml(&conf)
+	if conf.Profile != "testnet" && conf.Profile != "mainnet" {
+		panic(fmt.Errorf("verify.yml profile must be testnet or mainnet"))
+	}
+	if cfg := stConfig(); cfg != nil {
+		if cfg.Profile != conf.Profile || !strings.EqualFold(conf.PolicyHash, fmt.Sprintf("0x%x", cfg.PolicyHash)) {
+			panic(fmt.Errorf("verify.yml profile/policy_hash does not match st.yml"))
+		}
+	}
+	key, err := base64.StdEncoding.DecodeString(conf.EgressHashKey)
+	if err != nil || len(key) != 32 {
+		panic(fmt.Errorf("verify.yml egress_hash_key must be base64 32 bytes"))
+	}
+	s := model.DefaultVerifySettings()
+	v := conf.Settings
+	if v.StepTimeoutSeconds <= 0 || v.StepTimeoutGraceSeconds < 0 || v.TrailTtlGraceSeconds <= 0 ||
+		v.EgressTtlSeconds <= 0 || v.EgressRefreshSeconds <= 0 || v.StatsPeriodSeconds <= 0 || v.ReliabilityAMin <= 0 ||
+		v.EgressIpv4Prefix < 0 || v.EgressIpv4Prefix > 32 || v.EgressIpv6Prefix < 0 || v.EgressIpv6Prefix > 128 ||
+		v.EgressHashKeyId == "" || v.HardSeedPerMinutePerSource <= 0 || v.HardExtendPerMinutePerSource <= 0 || v.HardActiveTrailsPerSource <= 0 {
+		panic(fmt.Errorf("verify.yml settings are incomplete or invalid"))
+	}
+	s.StepTimeout = time.Duration(v.StepTimeoutSeconds) * time.Second
+	s.StepTimeoutGrace = time.Duration(v.StepTimeoutGraceSeconds) * time.Second
+	s.TrailTtlGrace = time.Duration(v.TrailTtlGraceSeconds) * time.Second
+	s.EgressTtl = time.Duration(v.EgressTtlSeconds) * time.Second
+	s.EgressRefreshInterval = time.Duration(v.EgressRefreshSeconds) * time.Second
+	s.StatsPeriod = time.Duration(v.StatsPeriodSeconds) * time.Second
+	s.ReliabilityAMin = v.ReliabilityAMin
+	s.EgressHashV4Prefix, s.EgressHashV6Prefix = v.EgressIpv4Prefix, v.EgressIpv6Prefix
+	s.EgressHashKey, s.EgressHashKeyId = append([]byte(nil), key...), v.EgressHashKeyId
+	s.SoftLimitsEnabled = v.SoftGuardrailsEnabled
+	s.SeedRateHardLimit, s.ExtendRateHardLimit, s.ActiveTrailsHardLimit = v.HardSeedPerMinutePerSource, v.HardExtendPerMinutePerSource, v.HardActiveTrailsPerSource
+	return s
+})
 
 func SetVerifySettings(settings *model.VerifySettings) {
 	verifySettingsInstance = settings
 }
 
 func verifySettings() *model.VerifySettings {
-	return verifySettingsInstance
+	if verifySettingsInstance != nil {
+		return verifySettingsInstance
+	}
+	return verifySettingsFromVault()
 }
 
 // VerifyArgs is the decoded `POST /verify` body — the superset of the two
@@ -405,7 +475,7 @@ func verifySeed(
 		// the seed request's source ip is the seed provider's egress ip;
 		// record its egress-IP-hash at the configured granularity (§8.1, D27).
 		// sourceIp is valid here — seedClientId resolved from it.
-		seedHopEgressHash = model.VerifyEgressIpHash(sourceIp, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix)
+		seedHopEgressHash = model.VerifyEgressIpHashWithSettings(sourceIp, settings)
 	} else {
 		// synthetic: never touches a real provider (§9). deterministic per
 		// source ip (V2) so repeated identical seeds return a STABLE trail[0],
@@ -418,29 +488,33 @@ func verifySeed(
 		seedHopEgressHash = verifySyntheticEgressIpHash(sourceIpStr)
 	}
 
-	// §4.1 step 6: sample the next hop (§5.1); poison samples synthetically
+	// §4.1 step 6: both normal and poison trails sample a real routable next
+	// hop. Poison replaces only the provider-stat mutation with a timing pad.
 	var nextHopClientId server.Id
 	var assignN int
-	if !poison {
-		nextHop, n := model.SampleVerifyNextHop(
-			ctx,
-			[]server.Id{seedHopClientId, verify.ClientId},
-			settings,
-		)
-		if nextHop == nil {
+	nextHop, n := model.SampleVerifyNextHop(
+		ctx,
+		[]server.Id{seedHopClientId, verify.ClientId},
+		settings,
+	)
+	if nextHop == nil {
+		if !poison {
 			// no eligible provider to assign: degrade to poison so the
 			// response stays indistinguishable from the working network case
 			poison = true
-		} else {
-			nextHopClientId = *nextHop
-			assignN = n
-			model.RecordVerifyAssignment(ctx, nextHopClientId, now, settings)
 		}
-	}
-	if poison {
 		assignN = model.PadVerifySample(ctx, settings)
 		nextHopClientId = server.NewId()
 		model.IncrVerifyPoisonCounter(ctx, "assign")
+	} else {
+		nextHopClientId = *nextHop
+		assignN = n
+		if poison {
+			model.PadVerifySample(ctx, settings)
+			model.IncrVerifyPoisonCounter(ctx, "assign")
+		} else {
+			model.RecordVerifyAssignment(ctx, nextHopClientId, now, settings)
+		}
 	}
 
 	signingKey := verifySigningKey()
@@ -509,14 +583,9 @@ func verifySeed(
 
 // verifyExtend implements the §4.2 EXTEND checklist plus the §4.3 idempotent
 // replay and §4.4 failure handling. Poison trails run the identical path
-// except: provider stats are padded instead of written, and the next hop is
-// sampled synthetically. The source-ip-matches-pending check (§4.2 step 5) now
-// applies to BOTH real and poison trails (V1): a poison pending hop is a
-// synthetic, unroutable id, so a real source can never equal it — poison and
-// real therefore fail step 5 identically, closing the cheap 2-request
-// real-vs-poison oracle. (Full depth-M poison indistinguishability for a
-// routing-capable caller is a larger design item — synthetic hops are
-// unroutable — and is out of scope here.)
+// except that provider-stat writes are replaced by pads. Pending poison hops
+// are real eligible providers selected by the same sampler, so source
+// attribution and the complete depth-M routing path remain executable.
 func verifyExtend(
 	verify *VerifyArgs,
 	clientSession *session.ClientSession,
@@ -644,15 +713,8 @@ func verifyExtend(
 		return nil, fmt.Errorf("400 trail failed")
 	}
 
-	// §4.2 step 5 (V1): the request truly egressed from the assigned provider.
-	// this check applies to BOTH real and poison trails — no observable branch
-	// on `poison`. a poison trail's pending hop is always a synthetic,
-	// unroutable id (server.NewId()), so a real source can never equal it: a
-	// direct-submission EXTEND therefore fails here identically for poison and
-	// real, closing the cheap 2-request real-vs-poison oracle. (Full depth-M
-	// poison indistinguishability for a routing-capable caller — who could in
-	// principle egress from the assigned real hop — is a larger design item,
-	// since synthetic hops are unroutable; out of scope here.)
+	// §4.2 step 5: the request truly egressed from the assigned provider. This
+	// check applies identically to normal and poison shadow routes.
 	if sourceClientId == nil || *sourceClientId != trail.Pending.ClientId {
 		verifyFailTrail(ctx, trail)
 		return nil, fmt.Errorf("400 trail failed")
@@ -670,7 +732,7 @@ func verifyExtend(
 		// granularity (§8.1, §3.3, D27). Computed unconditionally: a poison
 		// trail's synthetic pending fails step 5 before here, so there is no
 		// observable branch on poison.
-		EgressIpHash: model.VerifyEgressIpHash(sourceIp, settings.EgressHashV4Prefix, settings.EgressHashV6Prefix),
+		EgressIpHash: model.VerifyEgressIpHashWithSettings(sourceIp, settings),
 	}
 	if !trail.Poison {
 		latencyMs := int64(confirmedHop.ConfirmedMs - confirmedHop.AssignedMs)
@@ -717,16 +779,10 @@ func verifyExtend(
 			return nil, fmt.Errorf("400 trail M must be at least 1")
 		}
 		coverage := uint64(trail.M - 1)
-		// FINAL is signed over the effort digest — sha256(finalDigest ‖
-		// uint256_be(coverage)) — not the bare final digest, so the server
-		// attests this completed trail's coverage: the coverage a subnet effort
-		// leaf claims is bound into final_sig and can no longer be forged
-		// (review A2). The effort digest is still a 32-byte message the on-chain
-		// 0x402 precompile can verify in an effort-leaf dispute, and the
-		// validator co-signs / the contract recomputes this same digest.
-		finalDigest := connect.VerifyFinalDigest(finalMessage)
-		effortDigest := connect.VerifyEffortDigest(finalDigest, coverage)
-		finalSig := connect.SignVerifyMessage(serverKey.PrivateKey, effortDigest[:])
+		// Release 1.0 signs the canonical FINAL bytes directly. Coverage is
+		// deterministic M-1 measurement metadata; the parked effort-bounty
+		// digest is not part of the active protocol.
+		finalSig := connect.SignVerifyMessage(serverKey.PrivateKey, finalMessage)
 
 		proof := &connect.VerifyProof{
 			Header: connect.VerifyProofHeader{
@@ -737,7 +793,7 @@ func verifyExtend(
 			},
 			Hops:        proofHops,
 			ServerKeyId: serverKey.ServerKeyId,
-			// the server's coverage attestation, bound into final_sig above
+			// deterministic measurement metadata (seed excluded)
 			Coverage: coverage,
 			FinalSig: finalSig,
 			// the depth-M EXTEND endorses the entire path (§3.2); its wire
@@ -786,17 +842,21 @@ func verifyExtend(
 	}
 
 	// sample the next hop (§5.1): without replacement within the trail,
-	// excluding the validator's own client id
+	// excluding the validator's own client id. Poison uses the same routable
+	// population and substitutes a pad for the stats write.
 	var nextHopClientId server.Id
 	var assignN int
 	sampled := false
-	if !trail.Poison {
-		excludeClientIds := append(slices.Clone(confirmedHopIds), trail.ClientId)
-		nextHop, n := model.SampleVerifyNextHop(ctx, excludeClientIds, settings)
-		if nextHop != nil {
-			nextHopClientId = *nextHop
-			assignN = n
-			sampled = true
+	excludeClientIds := append(slices.Clone(confirmedHopIds), trail.ClientId)
+	nextHop, n := model.SampleVerifyNextHop(ctx, excludeClientIds, settings)
+	if nextHop != nil {
+		nextHopClientId = *nextHop
+		assignN = n
+		sampled = true
+		if trail.Poison {
+			model.PadVerifySample(ctx, settings)
+			model.IncrVerifyPoisonCounter(ctx, "assign")
+		} else {
 			model.RecordVerifyAssignment(ctx, nextHopClientId, now, settings)
 		}
 	}
@@ -881,6 +941,136 @@ type VerifyKey struct {
 // across rotations (§3.5). Unauthenticated by design.
 type GetVerifyKeysResult struct {
 	Keys []*VerifyKey `json:"keys"`
+}
+
+type GetVerifyEvidenceArgs struct {
+	From  time.Time
+	To    time.Time
+	Limit int
+}
+
+type PublicVerifyStatsRow struct {
+	PeriodStart    time.Time `json:"period_start"`
+	PeriodEnd      time.Time `json:"period_end"`
+	ClientId       server.Id `json:"client_id"`
+	Assignments    uint64    `json:"assignments"`
+	Confirmations  uint64    `json:"confirmations"`
+	ReliabilityPPM uint32    `json:"reliability_ppm"`
+	LatencyP50Ms   *int      `json:"latency_p50_ms,omitempty"`
+	LatencyP90Ms   *int      `json:"latency_p90_ms,omitempty"`
+	LatencyP99Ms   *int      `json:"latency_p99_ms,omitempty"`
+}
+
+type GetVerifyStatsResult struct {
+	Schema          string                  `json:"schema"`
+	Profile         string                  `json:"profile"`
+	PolicyHash      string                  `json:"policy_hash"`
+	EgressHashKeyId string                  `json:"egress_hash_key_id"`
+	Rows            []*PublicVerifyStatsRow `json:"rows"`
+}
+
+type PublicVerifyProofRow struct {
+	TrailId      server.Id       `json:"trail_id"`
+	Vpk          []byte          `json:"vpk"`
+	ServerKeyId  byte            `json:"server_key_id"`
+	ServerNonce  []byte          `json:"server_nonce"`
+	Depth        int             `json:"depth"`
+	Status       int             `json:"status"`
+	Hops         json.RawMessage `json:"hops"`
+	FinalSig     []byte          `json:"final_sig,omitempty"`
+	VerifierSig  []byte          `json:"verifier_sig,omitempty"`
+	CreateTime   time.Time       `json:"create_time"`
+	CompleteTime *time.Time      `json:"complete_time,omitempty"`
+}
+
+type GetVerifyProofsResult struct {
+	Schema     string                  `json:"schema"`
+	Profile    string                  `json:"profile"`
+	PolicyHash string                  `json:"policy_hash"`
+	Rows       []*PublicVerifyProofRow `json:"rows"`
+}
+
+func verifyEvidenceRange(args *GetVerifyEvidenceArgs, defaultLimit, maxLimit int) (time.Time, time.Time, int, error) {
+	if args == nil {
+		args = &GetVerifyEvidenceArgs{}
+	}
+	to := args.To.UTC()
+	if to.IsZero() {
+		to = server.NowUtc()
+	}
+	from := args.From.UTC()
+	if from.IsZero() {
+		from = to.Add(-31 * 24 * time.Hour)
+	}
+	if !from.Before(to) || to.Sub(from) > 93*24*time.Hour {
+		return time.Time{}, time.Time{}, 0, fmt.Errorf("400 evidence range must be positive and at most 93 days")
+	}
+	limit := args.Limit
+	if limit == 0 {
+		limit = defaultLimit
+	}
+	if limit < 1 || limit > maxLimit {
+		return time.Time{}, time.Time{}, 0, fmt.Errorf("400 evidence limit must be 1..%d", maxLimit)
+	}
+	return from, to, limit, nil
+}
+
+// GetVerifyStats exposes operator-observed rollups for audit/reconstruction.
+// Validators intentionally do not consume this endpoint for Q_n.
+func GetVerifyStats(args *GetVerifyEvidenceArgs, clientSession *session.ClientSession) (*GetVerifyStatsResult, error) {
+	from, to, limit, err := verifyEvidenceRange(args, 10_000, 100_000)
+	if err != nil {
+		return nil, err
+	}
+	settings := verifySettings()
+	result := &GetVerifyStatsResult{Schema: "urnetwork-verify-stats-index-v1", EgressHashKeyId: settings.EgressHashKeyId}
+	if cfg := stConfig(); cfg != nil {
+		result.Profile = cfg.Profile
+		result.PolicyHash = fmt.Sprintf("0x%x", cfg.PolicyHash)
+	}
+	for _, row := range model.ListVerifyProviderStats(clientSession.Ctx, from, to, limit) {
+		assignments, confirmations := uint64(0), uint64(0)
+		if row.Assignments > 0 {
+			assignments = uint64(row.Assignments)
+		}
+		if row.Confirmations > 0 {
+			confirmations = uint64(row.Confirmations)
+		}
+		result.Rows = append(result.Rows, &PublicVerifyStatsRow{
+			PeriodStart: row.PeriodStart.UTC(), PeriodEnd: row.PeriodEnd.UTC(), ClientId: row.ClientId,
+			Assignments: assignments, Confirmations: confirmations,
+			ReliabilityPPM: protocol.ReliabilityPPM(confirmations, assignments, uint64(settings.ReliabilityAMin)),
+			LatencyP50Ms:   row.LatencyP50Ms, LatencyP90Ms: row.LatencyP90Ms, LatencyP99Ms: row.LatencyP99Ms,
+		})
+	}
+	return result, nil
+}
+
+// GetVerifyProofs exposes signed, non-poison FINAL/expired records. Each
+// completed row is independently verifiable with /verify/keys.
+func GetVerifyProofs(args *GetVerifyEvidenceArgs, clientSession *session.ClientSession) (*GetVerifyProofsResult, error) {
+	from, to, limit, err := verifyEvidenceRange(args, 1_000, 10_000)
+	if err != nil {
+		return nil, err
+	}
+	result := &GetVerifyProofsResult{Schema: "urnetwork-verify-proof-index-v1"}
+	if cfg := stConfig(); cfg != nil {
+		result.Profile = cfg.Profile
+		result.PolicyHash = fmt.Sprintf("0x%x", cfg.PolicyHash)
+	}
+	for _, row := range model.ListVerifyTrailRows(clientSession.Ctx, from, to, limit) {
+		hops := json.RawMessage(row.HopsJson)
+		if !json.Valid(hops) {
+			return nil, fmt.Errorf("stored verify proof %s has invalid hops JSON", row.TrailId)
+		}
+		result.Rows = append(result.Rows, &PublicVerifyProofRow{
+			TrailId: row.TrailId, Vpk: row.Vpk, ServerKeyId: row.ServerKeyId,
+			ServerNonce: row.ServerNonce, Depth: row.Depth, Status: row.Status, Hops: hops,
+			FinalSig: row.FinalSig, VerifierSig: row.VerifierSig,
+			CreateTime: row.CreateTime.UTC(), CompleteTime: row.CompleteTime,
+		})
+	}
+	return result, nil
 }
 
 func GetVerifyKeys(

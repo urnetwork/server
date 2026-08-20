@@ -103,6 +103,8 @@ var realApiRoutes = [][2]string{
 	{"POST", "/sn/wallet"},
 	{"GET", "/sn/pool/claim"},
 	{"GET", "/sn/epoch"},
+	{"GET", "/sn/artifact"},
+	{"GET", "/sn/artifacts"},
 	{"GET", "/hello"},
 	{"POST", "/account/api-key"},
 	{"POST", "/account/api-key/remove"},

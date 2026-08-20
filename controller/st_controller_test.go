@@ -2,24 +2,137 @@ package controller
 
 // st_controller_test.go — offline unit tests for the pure st computation
 // helpers (no pg/redis/chain): the payout-share computation (per-coldkey
-// aggregation, a_min reliability damping, bps flooring + on-chain rollover
-// remainder), the deposit sizing against the D-3 per-epoch cap, the
+// aggregation, a_min reliability damping, and exact largest-remainder bps),
+// the deposit sizing against the D-3 per-epoch cap, the
 // block -> wall-clock estimate, and the payout tree/proof round trip
 // against sn/merkle.
 
 import (
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/urnetwork/connect"
 
 	"github.com/urfoundation/sn/merkle"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	stconn "github.com/urnetwork/server/st"
 )
+
+func releaseStVaultFile() stVaultFile {
+	return stVaultFile{
+		TestnetEnabled: true, TestnetChainId: 945,
+		TestnetGenesisHash:  "0x" + strings.Repeat("11", 32),
+		TestnetDeploymentId: "test-release", TestnetPolicyHash: "0x" + strings.Repeat("22", 32),
+		TestnetContractAddress: "0x0000000000000000000000000000000000000011",
+		TestnetSettlementVault: "0x0000000000000000000000000000000000000022",
+		TestnetReserveSink:     "0x0000000000000000000000000000000000000033",
+		TestnetNetuid:          7, TestnetNoId: 1, TestnetDepositHotkey: "0x" + strings.Repeat("44", 32),
+		TestnetDepositKey:           "01" + strings.Repeat("00", 31),
+		TestnetRootKey:              "02" + strings.Repeat("00", 31),
+		TestnetArtifactKey:          "03" + strings.Repeat("00", 31),
+		TestnetDepositRateNumerator: 1_000_000, TestnetDepositRateDenominator: 1,
+		TestnetDepositTiers: []StDepositTier{
+			{MinConvictionRao: 0, RateNumerator: 1_000_000, RateDenominator: 1},
+			{MinConvictionRao: 1_000_000_000, RateNumerator: 800_000, RateDenominator: 1},
+		},
+		TestnetDepositEpochCapRao: 1000, TestnetBlockSeconds: 12, TestnetDeployBlock: 50,
+	}
+}
+
+func TestStConfigRejectsInvalidDepositTierSchedules(t *testing.T) {
+	tests := []struct {
+		name  string
+		tiers []StDepositTier
+	}{
+		{"missing zero baseline", []StDepositTier{{MinConvictionRao: 1, RateNumerator: 1, RateDenominator: 1}}},
+		{"duplicate threshold", []StDepositTier{{RateNumerator: 1, RateDenominator: 1}, {RateNumerator: 1, RateDenominator: 1}}},
+		{"zero numerator", []StDepositTier{{RateNumerator: 0, RateDenominator: 1}}},
+		{"zero denominator", []StDepositTier{{RateNumerator: 1, RateDenominator: 0}}},
+		{"rate increases", []StDepositTier{{RateNumerator: 1, RateDenominator: 2}, {MinConvictionRao: 1, RateNumerator: 2, RateDenominator: 3}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := releaseStVaultFile()
+			f.TestnetDepositTiers = test.tiers
+			if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
+				t.Fatal("invalid deposit tier schedule accepted")
+			}
+		})
+	}
+}
+
+func TestStConfigTestnetNamespaceIsStrict(t *testing.T) {
+	f := releaseStVaultFile()
+	f.ChainId = 964
+	f.ContractAddress = "0x0000000000000000000000000000000000000099"
+	cfg, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ChainId != 945 || cfg.ContractAddress != common.HexToAddress(f.TestnetContractAddress) {
+		t.Fatalf("testnet selected mainnet values: %+v", cfg)
+	}
+	f.TestnetContractAddress = ""
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
+		t.Fatal("missing testnet coordinator fell back to mainnet")
+	}
+}
+
+func TestStConfigMainnetNamespaceIsStrict(t *testing.T) {
+	f := releaseStVaultFile()
+	f.Enabled = true
+	f.ChainId = 964
+	f.GenesisHash = "0x" + strings.Repeat("55", 32)
+	f.DeploymentId = "main-release"
+	f.PolicyHash = "0x" + strings.Repeat("66", 32)
+	f.ContractAddress = "0x0000000000000000000000000000000000000051"
+	f.SettlementVault = "0x0000000000000000000000000000000000000052"
+	f.ReserveSink = "0x0000000000000000000000000000000000000053"
+	f.Netuid, f.NoId, f.DeployBlock = 8, 1, 60
+	f.DepositHotkey = "0x" + strings.Repeat("77", 32)
+	f.DepositKey = "04" + strings.Repeat("00", 31)
+	f.RootKey = "05" + strings.Repeat("00", 31)
+	f.ArtifactKey = "06" + strings.Repeat("00", 31)
+	f.DepositRateNumerator, f.DepositRateDenominator = 1_000_000, 1
+	f.DepositEpochCapRao = 1000
+
+	cfg, err := stConfigForProfile(stconn.ProfileMainnet, f, []string{"http://mainnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ChainId != 964 || cfg.ContractAddress != common.HexToAddress(f.ContractAddress) {
+		t.Fatalf("mainnet selected testnet values: %+v", cfg)
+	}
+	f.LegacyContractAddress = f.ContractAddress
+	f.ContractAddress = ""
+	if _, err := stConfigForProfile(stconn.ProfileMainnet, f, []string{"http://mainnet"}); err == nil {
+		t.Fatal("missing mainnet coordinator fell back to legacy contract_address")
+	}
+	f.ContractAddress = "0x0000000000000000000000000000000000000051"
+	f.OpsKey, f.RootKey = f.RootKey, ""
+	if _, err := stConfigForProfile(stconn.ProfileMainnet, f, []string{"http://mainnet"}); err == nil {
+		t.Fatal("missing mainnet root signer fell back to legacy ops_key")
+	}
+}
+
+func TestStConfigRejectsRoleKeyReuseAndZeroDeploymentBoundary(t *testing.T) {
+	f := releaseStVaultFile()
+	f.TestnetArtifactKey = f.TestnetRootKey
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
+		t.Fatal("role key reuse accepted")
+	}
+	f = releaseStVaultFile()
+	f.TestnetDeployBlock = 0
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
+		t.Fatal("zero deployment block accepted")
+	}
+}
 
 // testStColdkey builds a distinct coldkey from a marker byte.
 func testStColdkey(marker byte) [32]byte {
@@ -72,16 +185,17 @@ func TestStComputePayoutSharesReliabilityAMin(t *testing.T) {
 	}
 	shares := stComputePayoutShares(entries, 8)
 
-	// weights 1000 and 500: floor(10000×2/3)=6666, floor(10000×1/3)=3333
+	// Floors are 6666/3333 and the larger fractional remainder awards the
+	// final basis point to the first coldkey.
 	connect.AssertEqual(t, 2, len(shares))
-	connect.AssertEqual(t, 6666, shares[0].ShareBps)
+	connect.AssertEqual(t, 6667, shares[0].ShareBps)
 	connect.AssertEqual(t, 3333, shares[1].ShareBps)
-	connect.AssertEqual(t, true, shares[0].ShareBps+shares[1].ShareBps <= 10000)
+	connect.AssertEqual(t, 10000, shares[0].ShareBps+shares[1].ShareBps)
 }
 
-func TestStComputePayoutSharesFloorRollover(t *testing.T) {
-	// three equal weights floor to 3333 each; the 1 bps remainder stays in
-	// the pool (rolls over on chain by design)
+func TestStComputePayoutSharesLargestRemainder(t *testing.T) {
+	// Three equal weights floor to 3333 each. The deterministic coldkey
+	// tie-break awards the remaining basis point to the first leaf.
 	entries := []*StShareEntry{}
 	for i := byte(1); i <= 3; i += 1 {
 		entries = append(entries, &StShareEntry{
@@ -96,11 +210,15 @@ func TestStComputePayoutSharesFloorRollover(t *testing.T) {
 
 	connect.AssertEqual(t, 3, len(shares))
 	bpsTotal := 0
-	for _, share := range shares {
-		connect.AssertEqual(t, 3333, share.ShareBps)
+	for i, share := range shares {
+		want := 3333
+		if i == 0 {
+			want = 3334
+		}
+		connect.AssertEqual(t, want, share.ShareBps)
 		bpsTotal += share.ShareBps
 	}
-	connect.AssertEqual(t, 9999, bpsTotal)
+	connect.AssertEqual(t, 10000, bpsTotal)
 }
 
 func TestStComputePayoutSharesSingle(t *testing.T) {
@@ -136,15 +254,15 @@ func TestStComputePayoutSharesSkips(t *testing.T) {
 	connect.AssertEqual(t, 5000, shares[0].ShareBps)
 	connect.AssertEqual(t, 5000, shares[1].ShareBps)
 
-	// a sub-bps weight floors to zero and is dropped (the contract rejects
-	// shareBps == 0 claims)
+	// A provider below one basis point can still receive zero after largest
+	// remainder; omit that zero-share leaf and award the full 10,000 bps.
 	shares = stComputePayoutShares([]*StShareEntry{
 		{NetworkId: server.NewId(), Coldkey: testStColdkey(6), UsageBytes: 1, Assignments: 1, Confirmations: 1},
 		{NetworkId: server.NewId(), Coldkey: testStColdkey(7), UsageBytes: 100000, Assignments: 1, Confirmations: 1},
 	}, 1)
 	connect.AssertEqual(t, 1, len(shares))
 	connect.AssertEqual(t, testStColdkey(7), shares[0].Coldkey)
-	connect.AssertEqual(t, 9999, shares[0].ShareBps)
+	connect.AssertEqual(t, 10000, shares[0].ShareBps)
 }
 
 func TestStComputePayoutSharesDeterministic(t *testing.T) {
@@ -171,7 +289,7 @@ func TestStComputePayoutSharesDeterministic(t *testing.T) {
 		connect.AssertEqual(t, forwardShares[i].NetworkId, reversedShares[i].NetworkId)
 		bpsTotal += forwardShares[i].ShareBps
 	}
-	connect.AssertEqual(t, true, bpsTotal <= 10000)
+	connect.AssertEqual(t, 10000, bpsTotal)
 }
 
 func TestStBuildShareEntriesExcludesHeadBound(t *testing.T) {
@@ -210,7 +328,7 @@ func TestStBuildShareEntriesExcludesHeadBound(t *testing.T) {
 	}
 
 	// the promoted coldkey earns no leaf; the remaining two split the whole
-	// pool (usage is redistributed, not burned) and Σ shares stays <= 10000
+	// pool (usage is redistributed, not burned) and Σ shares is exactly 10000
 	shares := stComputePayoutShares(entries, 1)
 	connect.AssertEqual(t, 2, len(shares))
 	bpsTotal := 0
@@ -220,7 +338,7 @@ func TestStBuildShareEntriesExcludesHeadBound(t *testing.T) {
 	}
 	connect.AssertEqual(t, 5000, shares[0].ShareBps)
 	connect.AssertEqual(t, 5000, shares[1].ShareBps)
-	connect.AssertEqual(t, true, bpsTotal <= 10000)
+	connect.AssertEqual(t, 10000, bpsTotal)
 
 	// control: with no active head bindings every network contributes, and a
 	// nil ckey map is safe
@@ -232,27 +350,50 @@ func TestStBuildShareEntriesExcludesHeadBound(t *testing.T) {
 		allTotal += share.ShareBps
 	}
 	connect.AssertEqual(t, 3, len(allShares))
-	connect.AssertEqual(t, true, allTotal <= 10000)
+	connect.AssertEqual(t, 10000, allTotal)
 }
 
 func TestStDepositSizeRao(t *testing.T) {
 	gib := int64(1) << 30
 
 	// zero usage, zero rate, or a zero cap all disable the deposit
-	connect.AssertEqual(t, "0", stDepositSizeRao(0, 1000, 1000000).String())
-	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 0, 1000000).String())
-	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 1000, 0).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(0, 1000, 1, 1000000).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 0, 1, 1000000).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 1000, 0, 1000000).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 1000, 1, 0).String())
 
 	// rate applies per GiB, flooring sub-rao remainders
-	connect.AssertEqual(t, "1000", stDepositSizeRao(gib, 1000, 1000000).String())
-	connect.AssertEqual(t, "4", stDepositSizeRao(3*(gib/2), 3, 1000000).String())
+	connect.AssertEqual(t, "1000", stDepositSizeRao(gib, 1000, 1, 1000000).String())
+	connect.AssertEqual(t, "4", stDepositSizeRao(3*(gib/2), 3, 1, 1000000).String())
+	connect.AssertEqual(t, "2", stDepositSizeRao(3*(gib/2), 3, 2, 1000000).String())
 
 	// the per-epoch cap is the custody blast-radius control (D-3): the
 	// deposit never exceeds it even when usage says otherwise
-	connect.AssertEqual(t, "500", stDepositSizeRao(10*gib, 100, 500).String())
+	connect.AssertEqual(t, "500", stDepositSizeRao(10*gib, 100, 1, 500).String())
 
 	// usage × rate beyond uint64 still clamps exactly to the cap
-	connect.AssertEqual(t, "12345", stDepositSizeRao(math.MaxInt64, math.MaxUint64, 12345).String())
+	connect.AssertEqual(t, "12345", stDepositSizeRao(math.MaxInt64, math.MaxUint64, math.MaxUint64, 12345).String())
+}
+
+func TestStDepositRateForConvictionUsesPreEpochTierExactly(t *testing.T) {
+	tiers := []StDepositTier{
+		{MinConvictionRao: 0, RateNumerator: 10, RateDenominator: 3},
+		{MinConvictionRao: 100, RateNumerator: 7, RateDenominator: 4},
+		{MinConvictionRao: 1_000, RateNumerator: 1, RateDenominator: 2},
+	}
+	for _, test := range []struct {
+		conviction  uint64
+		numerator   uint64
+		denominator uint64
+	}{{0, 10, 3}, {99, 10, 3}, {100, 7, 4}, {999, 7, 4}, {1_000, 1, 2}} {
+		n, d, err := stDepositRateForConviction(tiers, new(big.Int).SetUint64(test.conviction))
+		if err != nil || n != test.numerator || d != test.denominator {
+			t.Fatalf("conviction %d rate = %d/%d, %v", test.conviction, n, d, err)
+		}
+	}
+	if _, _, err := stDepositRateForConviction([]StDepositTier{{MinConvictionRao: 1, RateNumerator: 1, RateDenominator: 1}}, big.NewInt(0)); err == nil {
+		t.Fatal("tier schedule without zero baseline accepted")
+	}
 }
 
 func TestStEstimateBlockTime(t *testing.T) {

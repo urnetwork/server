@@ -2615,6 +2615,19 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 // cascade delete statement.
 const removeCascadeChunkCount = 10000
 
+type releasedProxyEgress struct {
+	ClientID server.Id
+	IPv4     *int64
+}
+
+func clearReleasedProxyEgress(ctx context.Context, released []releasedProxyEgress) {
+	for _, item := range released {
+		if item.IPv4 != nil {
+			ClearVerifyEgress(ctx, item.ClientID, IntToIpv4(*item.IPv4), DefaultVerifySettings())
+		}
+	}
+}
+
 // removeProxyDeviceConfigsForClientIds deletes the proxy device configs of the
 // given clients and their redis mirrors, returning the removed proxy ids.
 func removeProxyDeviceConfigsForClientIds(ctx context.Context, clientIds []server.Id) []server.Id {
@@ -2664,16 +2677,27 @@ func removeProxyDeviceConfigsForClientIds(ctx context.Context, clientIds []serve
 // stays bounded.
 func removeProxyClientData(ctx context.Context, proxyIds []server.Id) {
 	for chunk := range slices.Chunk(proxyIds, removeCascadeChunkCount) {
+		var released []releasedProxyEgress
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
+			released = nil
+			result, err := tx.Query(
 				ctx,
 				`
 				DELETE FROM proxy_client
 				WHERE proxy_id = ANY($1::uuid[])
+				RETURNING client_id, client_ipv4
 				`,
 				idStrings(chunk),
-			))
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var item releasedProxyEgress
+					server.Raise(result.Scan(&item.ClientID, &item.IPv4))
+					released = append(released, item)
+				}
+			})
 		}, server.TxReadCommitted)
+		clearReleasedProxyEgress(ctx, released)
 
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
@@ -2914,36 +2938,75 @@ func SweepOrphanNetworkClientData(ctx context.Context, sliceSize int) (removedCo
 		}
 	}
 
-	// proxy clients whose config is gone (covers configs deleted outside the
-	// reap, e.g. RemoveProxyDeviceConfig), keyed by proxy_id
-	removedCount += sweepOrphanTable(
-		ctx,
-		sliceSize,
-		`
-		WITH slice AS (
-			SELECT proxy_id
-			FROM proxy_client
-			WHERE ($1 OR proxy_id > $2)
-			ORDER BY proxy_id
-			LIMIT $3
-		), del AS (
-			DELETE FROM proxy_client
-			USING slice
-			WHERE
-				proxy_client.proxy_id = slice.proxy_id AND
-				NOT EXISTS (
-					SELECT 1 FROM proxy_device_config
-					WHERE proxy_device_config.proxy_id = proxy_client.proxy_id
-				)
-			RETURNING 1
-		), bound AS (
-			SELECT proxy_id FROM slice ORDER BY proxy_id DESC LIMIT 1
-		)
-		SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.proxy_id
-		FROM bound
-		`,
-		func() []any { return []any{new(server.Id)} },
-	)
+	// Proxy clients whose config is gone (including historical/manual
+	// deletion paths), keyed by proxy_id. This custom cursor mirrors the normal
+	// deletion path and returns the released egress identity before the row is
+	// gone; a generic count-only orphan sweep would leave it until TTL.
+	{
+		var cursor server.Id
+		firstSlice := true
+		for {
+			var released []releasedProxyEgress
+			var sliceCount, deletedCount int64
+			var maxProxyID server.Id
+			gotBound := false
+			server.MaintenanceTx(ctx, func(tx server.PgTx) {
+				released = nil
+				sliceCount, deletedCount, gotBound = 0, 0, false
+				result, err := tx.Query(ctx, `
+					WITH slice AS (
+						SELECT proxy_id
+						FROM proxy_client
+						WHERE ($1 OR proxy_id > $2)
+						ORDER BY proxy_id
+						LIMIT $3
+					), del AS (
+						DELETE FROM proxy_client
+						USING slice
+						WHERE proxy_client.proxy_id = slice.proxy_id
+							AND NOT EXISTS (
+								SELECT 1 FROM proxy_device_config
+								WHERE proxy_device_config.proxy_id = proxy_client.proxy_id
+							)
+						RETURNING proxy_client.proxy_id, proxy_client.client_id, proxy_client.client_ipv4
+					), bound AS (
+						SELECT proxy_id FROM slice ORDER BY proxy_id DESC LIMIT 1
+					)
+					SELECT true, (SELECT count(*) FROM slice), NULL::bigint,
+						bound.proxy_id, NULL::uuid, NULL::bigint
+					FROM bound
+					UNION ALL
+					SELECT false, NULL, 1, del.proxy_id, del.client_id, del.client_ipv4
+					FROM del
+				`, firstSlice, cursor, sliceSize)
+				server.WithPgResult(result, err, func() {
+					for result.Next() {
+						var isBound bool
+						var scanned, deleted *int64
+						var proxyID server.Id
+						var clientID *server.Id
+						var ipv4 *int64
+						server.Raise(result.Scan(&isBound, &scanned, &deleted, &proxyID, &clientID, &ipv4))
+						if isBound {
+							gotBound, maxProxyID = true, proxyID
+							if scanned != nil {
+								sliceCount = *scanned
+							}
+						} else if clientID != nil {
+							deletedCount++
+							released = append(released, releasedProxyEgress{ClientID: *clientID, IPv4: ipv4})
+						}
+					}
+				})
+			}, server.TxReadCommitted)
+			clearReleasedProxyEgress(ctx, released)
+			removedCount += deletedCount
+			if !gotBound || sliceCount < int64(sliceSize) {
+				break
+			}
+			cursor, firstSlice = maxProxyID, false
+		}
+	}
 
 	// change rows whose proxy client is gone, keyed by (proxy_host, block,
 	// change_id)

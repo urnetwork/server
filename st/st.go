@@ -17,6 +17,7 @@ package st
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -26,6 +27,13 @@ import (
 // VaultResourceName is the vault resource holding the ST subsystem config,
 // including the threaded subtensor `authority` (vault/<env>/st.yml).
 const VaultResourceName = "st.yml"
+
+const ProfileEnvironment = "URNETWORK_ST_PROFILE"
+
+const (
+	ProfileTestnet = "testnet"
+	ProfileMainnet = "mainnet"
+)
 
 // DefaultGatewayPort is the subtensor RPC gateway port assumed when st.yml's
 // authority omits one (the nginx gateway on snow — xops/main/ansible).
@@ -64,8 +72,33 @@ var resolveConnection = sync.OnceValues(func() (*Connection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("st.yml unavailable: %w", err)
 	}
-	return connectionFromResource(res)
+	profile, err := ActiveProfile()
+	if err != nil {
+		return nil, err
+	}
+	return connectionFromResourceProfile(res, profile)
 })
+
+// ActiveProfile is deliberately explicit. Testnet services may only read
+// testnet-* keys, while mainnet services may only read the unprefixed keys.
+// Requiring the environment variable prevents a testnet process from silently
+// inheriting funded mainnet credentials when a rendered setting is missing.
+func ActiveProfile() (string, error) {
+	profile := strings.TrimSpace(os.Getenv(ProfileEnvironment))
+	switch profile {
+	case ProfileTestnet, ProfileMainnet:
+		return profile, nil
+	default:
+		return "", fmt.Errorf("%s must be exactly testnet or mainnet", ProfileEnvironment)
+	}
+}
+
+func profileKey(profile, key string) string {
+	if profile == ProfileTestnet {
+		return "testnet-" + key
+	}
+	return key
+}
 
 // connectionFromResource derives the subtensor endpoints from an st.yml resource.
 // It is pure over the resource (no OnceValues cache) so it can be unit-tested,
@@ -73,6 +106,13 @@ var resolveConnection = sync.OnceValues(func() (*Connection, error) {
 // (which the {{ env: }} interpolation panics on, server/env.go) yields an error
 // rather than a crash.
 func connectionFromResource(res stResource) (conn *Connection, err error) {
+	return connectionFromResourceProfile(res, ProfileMainnet)
+}
+
+func connectionFromResourceProfile(res stResource, profile string) (conn *Connection, err error) {
+	if profile != ProfileTestnet && profile != ProfileMainnet {
+		return nil, fmt.Errorf("unknown st profile %q", profile)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			conn = nil
@@ -83,7 +123,7 @@ func connectionFromResource(res stResource) (conn *Connection, err error) {
 	// scheme: the LAN gateway is plain http/ws (xops/main/ansible — no TLS);
 	// set `tls: true` in st.yml for an https/wss endpoint.
 	scheme, wsScheme := "http", "ws"
-	if tls := res.Bool("tls"); len(tls) == 1 && tls[0] {
+	if tls := res.Bool(profileKey(profile, "tls")); len(tls) == 1 && tls[0] {
 		scheme, wsScheme = "https", "wss"
 	}
 
@@ -91,10 +131,10 @@ func connectionFromResource(res stResource) (conn *Connection, err error) {
 
 	// An explicit `rpc_urls` list overrides the authority-derived default and
 	// does not require the threaded host to be set.
-	if urls := trimAll(res.StringList("rpc_urls")); len(urls) > 0 {
+	if urls := trimAll(res.StringList(profileKey(profile, "rpc_urls"))); len(urls) > 0 {
 		conn.RpcUrls = urls
-		conn.Authority = authorityBestEffort(res)
-		if ws := trimAll(res.StringList("ws_url")); len(ws) > 0 {
+		conn.Authority = authorityBestEffortProfile(res, profile)
+		if ws := trimAll(res.StringList(profileKey(profile, "ws_url"))); len(ws) > 0 {
 			conn.WsUrl = ws[0]
 		} else if conn.Authority != "" {
 			conn.WsUrl = fmt.Sprintf("%s://%s", wsScheme, conn.Authority)
@@ -105,7 +145,7 @@ func connectionFromResource(res stResource) (conn *Connection, err error) {
 	// Standard path: derive the endpoints from the threaded authority.
 	// RequireString interpolates {{ env:BRINGYOUR_SUBTENSOR_HOSTNAME }}
 	// (UnmarshalYaml does not — server/env.go), and panics if the var is unset.
-	authority := withDefaultPort(strings.TrimSpace(res.RequireString("authority")))
+	authority := withDefaultPort(strings.TrimSpace(res.RequireString(profileKey(profile, "authority"))))
 	if authority == "" {
 		return nil, fmt.Errorf("st.yml authority is empty")
 	}
@@ -143,8 +183,12 @@ func Authority() string {
 // authorityBestEffort reads `authority` without letting a missing threaded host
 // abort an otherwise-valid explicit rpc_urls config.
 func authorityBestEffort(res stResource) (authority string) {
+	return authorityBestEffortProfile(res, ProfileMainnet)
+}
+
+func authorityBestEffortProfile(res stResource, profile string) (authority string) {
 	defer func() { _ = recover() }()
-	return withDefaultPort(strings.TrimSpace(res.RequireString("authority")))
+	return withDefaultPort(strings.TrimSpace(res.RequireString(profileKey(profile, "authority"))))
 }
 
 // withDefaultPort appends DefaultGatewayPort when the authority has a bare host.

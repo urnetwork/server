@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"os"
 
 	// "strconv"
 	// "crypto/sha256"
@@ -11,6 +13,7 @@ import (
 	// "regexp"
 	// "strconv"
 	"strings"
+	"sync"
 	// "sync"
 
 	// "bytes"
@@ -50,18 +53,10 @@ type ClientSession struct {
 func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	cancelCtx, cancel := context.WithCancel(req.Context())
 
-	clientAddress := req.Header.Get("X-UR-Forwarded-For")
-
-	if clientAddress == "" {
-		clientIpStr := req.Header.Get("X-Forwarded-For")
-		clientPortStr := req.Header.Get("X-Forwarded-Source-Port")
-		if clientIpStr != "" && clientPortStr != "" {
-			clientAddress = fmt.Sprintf("%s:%s", clientIpStr, clientPortStr)
-		}
-	}
-
-	if clientAddress == "" {
-		clientAddress = req.RemoteAddr
+	clientAddress, err := ResolveClientAddress(req, trustedProxyPrefixes())
+	if err != nil {
+		cancel()
+		return nil, err
 	}
 
 	return &ClientSession{
@@ -70,6 +65,110 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 		ClientAddress: clientAddress,
 		Header:        map[string][]string(req.Header),
 	}, nil
+}
+
+const trustedProxyCidrsEnvironment = "BRINGYOUR_TRUSTED_PROXY_CIDRS"
+
+var trustedProxyPrefixes = sync.OnceValue(func() []netip.Prefix {
+	raw := strings.TrimSpace(os.Getenv(trustedProxyCidrsEnvironment))
+	if raw == "" {
+		// The local warp/nginx sidecar is the safe portable default. A remote
+		// proxy must be explicitly enumerated by the deployment.
+		raw = "127.0.0.0/8,::1/128"
+	}
+	prefixes, err := ParseTrustedProxyPrefixes(raw)
+	if err != nil {
+		panic(err)
+	}
+	return prefixes
+})
+
+func ParseTrustedProxyPrefixes(raw string) ([]netip.Prefix, error) {
+	parts := strings.Split(raw, ",")
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains invalid CIDR %q: %w", trustedProxyCidrsEnvironment, part, err)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	if len(prefixes) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one CIDR", trustedProxyCidrsEnvironment)
+	}
+	return prefixes, nil
+}
+
+func parseRequestAddress(raw string) (netip.AddrPort, error) {
+	if addrPort, err := netip.ParseAddrPort(raw); err == nil {
+		return addrPort, nil
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	portNumber, err := net.LookupPort("tcp", port)
+	if err != nil || portNumber < 0 || portNumber > 65535 {
+		return netip.AddrPort{}, fmt.Errorf("invalid source port %q", port)
+	}
+	return netip.AddrPortFrom(addr.Unmap(), uint16(portNumber)), nil
+}
+
+func proxyIsTrusted(remote netip.Addr, trusted []netip.Prefix) bool {
+	remote = remote.Unmap()
+	for _, prefix := range trusted {
+		if prefix.Contains(remote) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveClientAddress honors forwarding headers only when the immediate TCP
+// peer is in an explicit trusted CIDR. This makes source attribution an
+// application invariant instead of relying solely on an ingress rewrite.
+func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, error) {
+	remote, err := parseRequestAddress(req.RemoteAddr)
+	if err != nil {
+		return "", fmt.Errorf("invalid remote address %q: %w", req.RemoteAddr, err)
+	}
+	if !proxyIsTrusted(remote.Addr(), trusted) {
+		return remote.String(), nil
+	}
+
+	forwarded := strings.TrimSpace(req.Header.Get("X-UR-Forwarded-For"))
+	if forwarded != "" {
+		if strings.Contains(forwarded, ",") {
+			return "", fmt.Errorf("invalid X-UR-Forwarded-For chain")
+		}
+		address, err := parseRequestAddress(forwarded)
+		if err != nil {
+			return "", fmt.Errorf("invalid X-UR-Forwarded-For: %w", err)
+		}
+		return address.String(), nil
+	}
+
+	forwardedIp := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
+	forwardedPort := strings.TrimSpace(req.Header.Get("X-Forwarded-Source-Port"))
+	if forwardedIp == "" && forwardedPort == "" {
+		return remote.String(), nil
+	}
+	if forwardedIp == "" || forwardedPort == "" || strings.Contains(forwardedIp, ",") {
+		return "", fmt.Errorf("forwarded source requires one IP and one port")
+	}
+	address, err := parseRequestAddress(net.JoinHostPort(strings.Trim(forwardedIp, "[]"), forwardedPort))
+	if err != nil {
+		return "", fmt.Errorf("invalid forwarded source: %w", err)
+	}
+	return address.String(), nil
 }
 
 func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt.ByJwt) *ClientSession {

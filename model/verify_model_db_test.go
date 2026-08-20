@@ -577,10 +577,10 @@ func TestSampleVerifyNextHop(t *testing.T) {
 	})
 }
 
-// The egress index must never hold a raw client ip — keys and reverse-hash
-// fields are the peppered subnet-bucket hash (VerifyEgressIpHash). The
-// validator scores subnet blocks, not individual addresses, so two ips in
-// one bucket are one egress identity.
+// The egress index must never hold a raw client IP. Its keys and reverse-hash
+// fields use a peppered exact-address hash, while the public trail score uses
+// a separate coarser prefix hash. This lets two exact-address-bijective
+// providers share one scored /29 without either becoming ambiguous.
 func TestVerifyEgressIndexStoresNoRawIp(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -619,14 +619,24 @@ func TestVerifyEgressIndexStoresNoRawIp(t *testing.T) {
 			}
 		})
 
-		// same /29 bucket (default v4 prefix): .72 and .73 are one identity.
-		// the same client feeding both keeps exactly one live bucket, so it
-		// stays eligible-shaped (one egress), and both addresses resolve.
-		c2 := server.NewId()
-		FeedVerifyEgress(ctx, c2, netip.MustParseAddr("198.51.100.88"), settings)
-		FeedVerifyEgress(ctx, c2, netip.MustParseAddr("198.51.100.89"), settings)
-		if got := ResolveVerifyEgress(ctx, netip.MustParseAddr("198.51.100.89"), settings); got == nil || *got != c2 {
-			t.Fatalf("same-bucket second ip did not resolve to the claimant: %v", got)
+		// Same /29, different exact IPs and different clients: both remain
+		// independently eligible, while their signed score hash is identical.
+		c2, c3 := server.NewId(), server.NewId()
+		ip2 := netip.MustParseAddr("198.51.100.88")
+		ip3 := netip.MustParseAddr("198.51.100.89")
+		FeedVerifyEgress(ctx, c2, ip2, settings)
+		FeedVerifyEgress(ctx, c3, ip3, settings)
+		if got := ResolveVerifyEgress(ctx, ip2, settings); got == nil || *got != c2 {
+			t.Fatalf("first same-prefix address did not resolve to c2: %v", got)
+		}
+		if got := ResolveVerifyEgress(ctx, ip3, settings); got == nil || *got != c3 {
+			t.Fatalf("second same-prefix address did not resolve to c3: %v", got)
+		}
+		if VerifyEgressIndexHashWithSettings(ip2, settings) == VerifyEgressIndexHashWithSettings(ip3, settings) {
+			t.Fatal("exact-address index hashes collided inside one /29")
+		}
+		if VerifyEgressIpHashWithSettings(ip2, settings) != VerifyEgressIpHashWithSettings(ip3, settings) {
+			t.Fatal("same-/29 providers did not share the public score hash")
 		}
 		server.Redis(ctx, func(r server.RedisClient) {
 			entries, err := r.HGetAll(ctx, verifyClientEgressKey(c2)).Result()
@@ -634,16 +644,16 @@ func TestVerifyEgressIndexStoresNoRawIp(t *testing.T) {
 				t.Fatal(err)
 			}
 			if len(entries) != 1 {
-				t.Fatalf("same-bucket ips should collapse to one reverse entry, got %d", len(entries))
+				t.Fatalf("c2 exact-address reverse entries = %d, want 1", len(entries))
 			}
 		})
 
-		// a different client feeding an ip in the SAME bucket contends: the
-		// bucket goes ambiguous and resolves to nobody (never guess)
-		c3 := server.NewId()
-		FeedVerifyEgress(ctx, c3, netip.MustParseAddr("198.51.100.90"), settings)
-		if got := ResolveVerifyEgress(ctx, netip.MustParseAddr("198.51.100.88"), settings); got != nil {
-			t.Fatalf("contended bucket resolved to %v, want nil", got)
+		// A different client feeding the exact SAME address still contends:
+		// the exact address goes ambiguous and resolves to nobody (never guess).
+		c4 := server.NewId()
+		FeedVerifyEgress(ctx, c4, ip2, settings)
+		if got := ResolveVerifyEgress(ctx, ip2, settings); got != nil {
+			t.Fatalf("contended exact address resolved to %v, want nil", got)
 		}
 	})
 }

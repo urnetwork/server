@@ -391,7 +391,12 @@ func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDevice
 }
 
 func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
+	var released []releasedProxyEgress
 	server.Tx(ctx, func(tx server.PgTx) {
+		// A proxy allocation is a verification identity input. Capture the
+		// exact client/ip pair in the same transaction that releases the row so
+		// its Redis indexes can be removed immediately after commit.
+		released = nil
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -405,14 +410,22 @@ func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
 		// the config, so a removed config never leaves a stale peer for the
 		// instance startup restore. Orphans from any other path are caught by
 		// the daily SweepOrphanNetworkClientData safety net.
-		server.RaisePgResult(tx.Exec(
+		result, err := tx.Query(
 			ctx,
 			`
 			DELETE FROM proxy_client
 			WHERE proxy_id = $1
+			RETURNING client_id, client_ipv4
 			`,
 			proxyId,
-		))
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var item releasedProxyEgress
+				server.Raise(result.Scan(&item.ClientID, &item.IPv4))
+				released = append(released, item)
+			}
+		})
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -423,6 +436,7 @@ func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
 			proxyId,
 		))
 	})
+	clearReleasedProxyEgress(ctx, released)
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		// a silently failed Del would leave a stale mirror serving a removed
@@ -857,16 +871,9 @@ PersistentKeepalive = 25`,
 		// the allocation exists, so it ages out after release (§8.2).
 		if proxyClient.WgConfig != nil {
 			FeedVerifyEgress(ctx, clientId, proxyClient.WgConfig.ClientIpv4, DefaultVerifySettings())
-			// TODO(verify §8.2): clear egress on proxy release; currently ages
-			// out via EgressTtl. There is no clean single release site to hook:
-			// proxy_client rows are freed only by the bulk cascade DELETE in
-			// RemoveDisconnectedNetworkClients (network_client_model.go), which
-			// drops rows without loading their client_id/client_ipv4. The common
-			// case (client fully reaped) is already covered — that path calls
-			// RemoveVerifyEgressForClient(clientId), which clears every egress ip
-			// for the client, including this one. The residual gap (a proxy_client
-			// freed while its network_client persists) is bounded by the read-time
-			// reverse-bijection re-check in ResolveVerifyEgress (LOW).
+			// Every proxy_client deletion returns (client_id, client_ipv4) and
+			// synchronously calls ClearVerifyEgress after commit. TTL remains only
+			// a crash safety net, never the normal release mechanism.
 		}
 	}
 
