@@ -371,6 +371,32 @@ func TestWarmupRequestCohortRejectsOneIncompleteLane(t *testing.T) {
 	}
 }
 
+func TestWarmupRequestAttemptInitiatesLazyWindowBeforeReadinessCheck(t *testing.T) {
+	ready := false
+	events := []string{}
+	got := warmupRequestAttempt(
+		context.Background(),
+		func(context.Context) bool {
+			events = append(events, "cohort")
+			if ready {
+				t.Fatal("quality window was ready before its initiating cohort")
+			}
+			ready = true
+			return true
+		},
+		func() bool {
+			events = append(events, "readiness")
+			return ready
+		},
+	)
+	if !got {
+		t.Fatal("complete cohort did not establish its lazy quality window")
+	}
+	if len(events) != 2 || events[0] != "cohort" || events[1] != "readiness" {
+		t.Fatalf("warm-up ordering = %v, want [cohort readiness]", events)
+	}
+}
+
 func TestValidateWarmClientPoolRetriesOnlyUnreadyClients(t *testing.T) {
 	clients := []*pooledClient{{label: "0"}, {label: "1"}, {label: "2"}}
 	attemptCounts := make([]int, len(clients))

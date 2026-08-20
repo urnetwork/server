@@ -737,8 +737,20 @@ func warmupRequestCohort(
 	return true
 }
 
-// Waits for the complete quality window, then proves every measured lane with
-// a bounded request cohort. The post-request readiness check closes the race
+// Initiates the request cohort before checking the quality-window level. The
+// window expands lazily on the first dial, so a readiness precheck would wait
+// forever for the very exits the cohort creates.
+func warmupRequestAttempt(
+	ctx context.Context,
+	requestCohort func(context.Context) bool,
+	ready func() bool,
+) bool {
+	complete := requestCohort(ctx)
+	return complete && ready()
+}
+
+// Proves every measured lane with a bounded request cohort, then requires the
+// complete quality window. The post-request readiness check closes the race
 // where a provider starts draining while its last response is in flight.
 func (self *ClientDriver) warmupTunnel(
 	ctx context.Context,
@@ -750,18 +762,24 @@ func (self *ClientDriver) warmupTunnel(
 	requestUrl := fmt.Sprintf("http://%s/", self.siteAddr)
 	qualityWindowSize := self.qualityWindowSize()
 	for warmupCtx.Err() == nil {
-		if qualityWindowReady(simClient.MultiClient().Exits(), qualityWindowSize) {
-			attemptCtx, cancelAttempt := context.WithTimeout(warmupCtx, warmupCohortTimeout)
-			complete := warmupRequestCohort(
-				attemptCtx,
-				httpClient,
-				requestUrl,
-				self.config.Clients.ConnectionsPerCrawl,
-			)
-			cancelAttempt()
-			if complete && qualityWindowReady(simClient.MultiClient().Exits(), qualityWindowSize) {
-				return true
-			}
+		attemptCtx, cancelAttempt := context.WithTimeout(warmupCtx, warmupCohortTimeout)
+		ready := warmupRequestAttempt(
+			attemptCtx,
+			func(requestCtx context.Context) bool {
+				return warmupRequestCohort(
+					requestCtx,
+					httpClient,
+					requestUrl,
+					self.config.Clients.ConnectionsPerCrawl,
+				)
+			},
+			func() bool {
+				return qualityWindowReady(simClient.MultiClient().Exits(), qualityWindowSize)
+			},
+		)
+		cancelAttempt()
+		if ready {
+			return true
 		}
 		select {
 		case <-warmupCtx.Done():
