@@ -202,6 +202,88 @@ func TestConnectHandlerQuicInitializationErrorClosesPreboundPacketConn(t *testin
 	rebound.Close()
 }
 
+func TestConnectHandlerSupervisesListenerBindFailureUntilReady(t *testing.T) {
+	blockedConn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedPort := blockedConn.LocalAddr().(*net.UDPAddr).Port
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	settings := DefaultConnectHandlerSettings()
+	settings.ListenerRestartInitialDelay = 5 * time.Millisecond
+	settings.ListenerRestartMaxDelay = 20 * time.Millisecond
+	settings.EnableProxyProtocol = false
+	settings.TransportTlsSettings.EnableSelfSign = true
+	settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
+	key := connectListenerKey{transport: connectListenerTransportH3, port: blockedPort}
+	handler := &ConnectHandler{
+		ctx:            ctx,
+		cancel:         cancel,
+		settings:       settings,
+		transportTls:   server.NewTransportTls(map[string]bool{}, settings.TransportTlsSettings),
+		listenerStates: map[connectListenerKey]bool{key: false},
+	}
+	done := make(chan struct{})
+	go func() {
+		handler.superviseQuicListener(connectPacketEndpoint{key: key})
+		close(done)
+	}()
+
+	// The reserved port forces at least one bind failure. Releasing it lets a
+	// supervised retry recover without replacing the process.
+	time.Sleep(30 * time.Millisecond)
+	if err := blockedConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readyDeadline := time.Now().Add(3 * time.Second)
+	for handler.ListenerReady() != nil && time.Now().Before(readyDeadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := handler.ListenerReady(); err != nil {
+		t.Fatalf("listener did not recover after bind became available: %v", err)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("listener supervisor did not stop with its context")
+	}
+	if handler.ListenerReady() == nil {
+		t.Fatal("canceled listener remained ready")
+	}
+}
+
+func TestConnectHandlerListenerReadyUdpPortsAreExplicitAndSorted(t *testing.T) {
+	handler := &ConnectHandler{
+		listenerStates: map[connectListenerKey]bool{
+			{transport: connectListenerTransportH3Dns, port: 8053}: true,
+			{transport: connectListenerTransportH3, port: 443}:     true,
+			{transport: connectListenerTransportH3Dns, port: 4053}: true,
+		},
+	}
+	ports, err := handler.ListenerReadyUdpPorts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int{443, 4053, 8053}
+	if len(ports) != len(want) {
+		t.Fatalf("listener ports=%v want=%v", ports, want)
+	}
+	for i := range want {
+		if ports[i] != want[i] {
+			t.Fatalf("listener ports=%v want=%v", ports, want)
+		}
+	}
+
+	handler.listenerStates[connectListenerKey{transport: connectListenerTransportH3Dns, port: 4053}] = false
+	if ports, err := handler.ListenerReadyUdpPorts(); err == nil || ports != nil {
+		t.Fatalf("down allocation reported ready ports=%v err=%v", ports, err)
+	}
+}
+
 // Verifies one production transport finisher retains idle until a locally
 // dequeued or pending pooled message has been returned.
 func testConnectHandlerWorkersJoinPooledOwnership(

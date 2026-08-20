@@ -17,6 +17,7 @@ import (
 	// "runtime/debug"
 	"encoding/binary"
 	mathrand "math/rand"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -46,6 +47,36 @@ var connectedGauge = prometheus.NewGauge(
 		Name:      "connected_clients",
 		Help:      "Number of connected clients",
 	},
+)
+
+var h3ListenerUpGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "h3_listener_up",
+		Help:      "1 while an enabled QUIC listener is accepting connections, 0 otherwise",
+	},
+	[]string{"transport", "port"},
+)
+
+var h3ListenerRestartsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "h3_listener_restarts_total",
+		Help:      "Unexpected QUIC listener exits followed by a supervised restart",
+	},
+	[]string{"transport", "port"},
+)
+
+var h3ListenerFailuresCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "h3_listener_failures_total",
+		Help:      "QUIC listener failures by transport and lifecycle stage",
+	},
+	[]string{"transport", "stage"},
 )
 
 var defaultConnectH3DatagramStats = &connect.H3DatagramStats{}
@@ -370,6 +401,9 @@ func writeConnectH1UserReadyBatch(
 
 func init() {
 	prometheus.MustRegister(connectedGauge)
+	prometheus.MustRegister(h3ListenerUpGauge)
+	prometheus.MustRegister(h3ListenerRestartsCounter)
+	prometheus.MustRegister(h3ListenerFailuresCounter)
 	prometheus.MustRegister(newConnectH3DatagramCollector(defaultConnectH3DatagramStats))
 }
 
@@ -394,10 +428,14 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		QuicHandshakeTimeout: 15 * time.Second,
 
 		ListenH3Port: 443,
-		// Clients continue to use public UDP/53. IPv4 ingress routers DNAT it to
-		// edge UDP/8053, and nginx forwards PPv2 to this unprivileged listener.
-		ListenDnsPort:       8053,
-		EnableProxyProtocol: true,
+		// Clients continue to use public UDP/53. New LBs forward it to private
+		// UDP/4053. Keep 8053 only when WARP_PORTS explicitly allocates it so a
+		// rolling Connect-first / LB-second migration has no compatibility hole.
+		ListenDnsPort:               4053,
+		ListenDnsCompatibilityPorts: []int{8053},
+		ListenerRestartInitialDelay: 100 * time.Millisecond,
+		ListenerRestartMaxDelay:     5 * time.Second,
+		EnableProxyProtocol:         true,
 		// Floor the framer at the connect runtime minimum message length: every
 		// framer on the resident exchange flow must admit the handshake's TLS
 		// server flight (one ~2.2 KiB pack). Also backs the websocket read limit.
@@ -420,16 +458,19 @@ type ConnectHandlerSettings struct {
 	WriteTimeout     time.Duration
 	ReadTimeout      time.Duration
 	// MaximumExchangeMessageByteCount ByteCount
-	QuicConnectTimeout   time.Duration
-	QuicHandshakeTimeout time.Duration
-	ListenH3Port         int
-	ListenDnsPort        int
-	EnableProxyProtocol  bool
-	FramerSettings       *connect.FramerSettings
-	TransportTlsSettings *server.TransportTlsSettings
-	EnableH3Datagrams    bool
-	H3DatagramSettings   *connect.H3DatagramSettings
-	H3DatagramStats      *connect.H3DatagramStats
+	QuicConnectTimeout          time.Duration
+	QuicHandshakeTimeout        time.Duration
+	ListenH3Port                int
+	ListenDnsPort               int
+	ListenDnsCompatibilityPorts []int
+	ListenerRestartInitialDelay time.Duration
+	ListenerRestartMaxDelay     time.Duration
+	EnableProxyProtocol         bool
+	FramerSettings              *connect.FramerSettings
+	TransportTlsSettings        *server.TransportTlsSettings
+	EnableH3Datagrams           bool
+	H3DatagramSettings          *connect.H3DatagramSettings
+	H3DatagramStats             *connect.H3DatagramStats
 	// H3QuicPacketStats enables opt-in packet/frame diagnostics without
 	// retaining qlog events or payloads. Nil keeps tracing disabled.
 	H3QuicPacketStats         *connect.H3QuicPacketStats
@@ -520,7 +561,11 @@ type ConnectHandler struct {
 	serviceTransitionTime      time.Time
 	h3PacketConn               net.PacketConn
 	dnsPacketConn              net.PacketConn
+	packetEndpoints            []connectPacketEndpoint
 	h3DatagramReassemblyBudget *connect.H3DatagramReassemblyBudget
+
+	listenerStateLock sync.RWMutex
+	listenerStates    map[connectListenerKey]bool
 
 	activeLock  sync.Mutex
 	activeCount int
@@ -535,6 +580,79 @@ type ConnectHandler struct {
 type ConnectHandlerPacketConns struct {
 	H3  net.PacketConn
 	Dns net.PacketConn
+}
+
+const (
+	connectListenerTransportH3    = "h3"
+	connectListenerTransportH3Dns = "h3dns"
+)
+
+type connectListenerKey struct {
+	transport string
+	port      int
+}
+
+type connectPacketEndpoint struct {
+	key        connectListenerKey
+	packetConn net.PacketConn
+}
+
+func connectHandlerExplicitPortEnabled(port int) bool {
+	if port <= 0 {
+		return false
+	}
+	hostPorts, err := server.HostPorts()
+	if err != nil {
+		return false
+	}
+	_, ok := hostPorts[port]
+	return ok
+}
+
+func connectHandlerPacketEndpoints(
+	settings *ConnectHandlerSettings,
+	packetConns ConnectHandlerPacketConns,
+) []connectPacketEndpoint {
+	endpoints := []connectPacketEndpoint{}
+	if connectHandlerPacketEndpointEnabled(settings.ListenH3Port, packetConns.H3) {
+		endpoints = append(endpoints, connectPacketEndpoint{
+			key: connectListenerKey{
+				transport: connectListenerTransportH3,
+				port:      settings.ListenH3Port,
+			},
+			packetConn: packetConns.H3,
+		})
+	}
+
+	if connectHandlerPacketEndpointEnabled(settings.ListenDnsPort, packetConns.Dns) {
+		endpoints = append(endpoints, connectPacketEndpoint{
+			key: connectListenerKey{
+				transport: connectListenerTransportH3Dns,
+				port:      settings.ListenDnsPort,
+			},
+			packetConn: packetConns.Dns,
+		})
+	}
+	// Compatibility ports are deliberately enabled only by an explicit Warp
+	// allocation. Local/test servers without WARP_PORTS get one DNS listener,
+	// and removing the old allocation later removes the old listener without a
+	// second server rollout.
+	if 0 < settings.ListenDnsPort {
+		seen := map[int]bool{settings.ListenDnsPort: true}
+		for _, port := range settings.ListenDnsCompatibilityPorts {
+			if seen[port] || !connectHandlerExplicitPortEnabled(port) {
+				continue
+			}
+			seen[port] = true
+			endpoints = append(endpoints, connectPacketEndpoint{
+				key: connectListenerKey{
+					transport: connectListenerTransportH3Dns,
+					port:      port,
+				},
+			})
+		}
+	}
+	return endpoints
 }
 
 func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exchange *Exchange) *ConnectHandler {
@@ -559,16 +677,19 @@ func NewConnectHandlerWithPacketConns(
 	packetConns ConnectHandlerPacketConns,
 ) *ConnectHandler {
 	cancelCtx, cancel := context.WithCancel(ctx)
+	packetEndpoints := connectHandlerPacketEndpoints(settings, packetConns)
 	activeZero := make(chan struct{})
-	activeCount := 0
-	if connectHandlerPacketEndpointEnabled(settings.ListenH3Port, packetConns.H3) {
-		activeCount += 1
-	}
-	if connectHandlerPacketEndpointEnabled(settings.ListenDnsPort, packetConns.Dns) {
-		activeCount += 1
-	}
+	activeCount := len(packetEndpoints)
 	if activeCount == 0 {
 		close(activeZero)
+	}
+	listenerStates := make(map[connectListenerKey]bool, len(packetEndpoints))
+	for _, endpoint := range packetEndpoints {
+		listenerStates[endpoint.key] = false
+		h3ListenerUpGauge.WithLabelValues(
+			endpoint.key.transport,
+			strconv.Itoa(endpoint.key.port),
+		).Set(0)
 	}
 
 	transportTls, err := server.NewTransportTlsFromConfig(settings.TransportTlsSettings)
@@ -612,6 +733,8 @@ func NewConnectHandlerWithPacketConns(
 		serviceTransitionTime: time.Now().Add(2 * exchange.settings.DrainAllTimeout),
 		h3PacketConn:          packetConns.H3,
 		dnsPacketConn:         packetConns.Dns,
+		packetEndpoints:       packetEndpoints,
+		listenerStates:        listenerStates,
 		h3DatagramReassemblyBudget: connect.NewH3DatagramReassemblyBudget(
 			h3DatagramSettings.ProcessReassemblyByteCount,
 		),
@@ -628,21 +751,151 @@ func (self *ConnectHandler) run() {
 	defer self.cancel()
 	defer self.markClosing()
 
-	if connectHandlerPacketEndpointEnabled(self.settings.ListenH3Port, self.h3PacketConn) {
+	for _, endpoint := range self.packetEndpoints {
+		endpoint := endpoint
 		go func() {
 			defer self.endHandle()
-			server.HandleError(self.runH3, self.cancel)
-		}()
-	}
-	if connectHandlerPacketEndpointEnabled(self.settings.ListenDnsPort, self.dnsPacketConn) {
-		go func() {
-			defer self.endHandle()
-			server.HandleError(self.runH3Dns, self.cancel)
+			self.superviseQuicListener(endpoint)
 		}()
 	}
 
 	select {
 	case <-self.ctx.Done():
+	}
+}
+
+type connectListenerError struct {
+	stage string
+	err   error
+}
+
+func (self *connectListenerError) Error() string {
+	return fmt.Sprintf("%s: %s", self.stage, self.err)
+}
+
+func (self *connectListenerError) Unwrap() error {
+	return self.err
+}
+
+func runConnectListener(run func() error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &connectListenerError{
+				stage: "panic",
+				err:   fmt.Errorf("%v", recovered),
+			}
+		}
+	}()
+	return run()
+}
+
+func (self *ConnectHandler) setListenerUp(key connectListenerKey, up bool) {
+	self.listenerStateLock.Lock()
+	if _, enabled := self.listenerStates[key]; enabled {
+		self.listenerStates[key] = up
+	}
+	self.listenerStateLock.Unlock()
+
+	value := float64(0)
+	if up {
+		value = 1
+	}
+	h3ListenerUpGauge.WithLabelValues(key.transport, strconv.Itoa(key.port)).Set(value)
+}
+
+// ListenerReadyUdpPorts reports the dynamic state and logical UDP ports of
+// every listener enabled by the current WARP_PORTS allocation. The explicit
+// port list lets an LB prove that a newly forwarded service port (for example
+// 4053) exists, instead of accepting readiness from a stale unit that only
+// allocated an older compatibility port.
+func (self *ConnectHandler) ListenerReadyUdpPorts() ([]int, error) {
+	self.listenerStateLock.RLock()
+	down := make([]string, 0, len(self.listenerStates))
+	ports := make([]int, 0, len(self.listenerStates))
+	for key, up := range self.listenerStates {
+		if !up {
+			down = append(down, fmt.Sprintf("%s/%d", key.transport, key.port))
+		} else {
+			ports = append(ports, key.port)
+		}
+	}
+	self.listenerStateLock.RUnlock()
+	if len(down) == 0 {
+		sort.Ints(ports)
+		return ports, nil
+	}
+	sort.Strings(down)
+	return nil, fmt.Errorf("QUIC listener down: %s", strings.Join(down, ", "))
+}
+
+// ListenerReady is the allocation-wide readiness predicate used by local
+// callers that don't need the port capability list.
+func (self *ConnectHandler) ListenerReady() error {
+	_, err := self.ListenerReadyUdpPorts()
+	return err
+}
+
+func (self *ConnectHandler) superviseQuicListener(endpoint connectPacketEndpoint) {
+	delay := self.settings.ListenerRestartInitialDelay
+	if delay <= 0 {
+		delay = 100 * time.Millisecond
+	}
+	maxDelay := self.settings.ListenerRestartMaxDelay
+	if maxDelay < delay {
+		maxDelay = delay
+	}
+	portLabel := strconv.Itoa(endpoint.key.port)
+
+	for {
+		err := runConnectListener(func() error {
+			switch endpoint.key.transport {
+			case connectListenerTransportH3:
+				return self.listenH3(endpoint.key, endpoint.packetConn)
+			case connectListenerTransportH3Dns:
+				return self.listenH3Dns(endpoint.key, endpoint.packetConn)
+			default:
+				return &connectListenerError{
+					stage: "configure",
+					err:   fmt.Errorf("unknown transport %q", endpoint.key.transport),
+				}
+			}
+		})
+		self.setListenerUp(endpoint.key, false)
+		if self.ctx.Err() != nil {
+			return
+		}
+
+		stage := "exit"
+		var listenerErr *connectListenerError
+		if errors.As(err, &listenerErr) {
+			stage = listenerErr.stage
+		}
+		if err == nil {
+			err = errors.New("listener exited without an error")
+		}
+		h3ListenerFailuresCounter.WithLabelValues(endpoint.key.transport, stage).Inc()
+		h3ListenerRestartsCounter.WithLabelValues(endpoint.key.transport, portLabel).Inc()
+		glog.Errorf(
+			"[c]h3 listener %s/%d failed stage=%s err=%s; restart in %s\n",
+			endpoint.key.transport,
+			endpoint.key.port,
+			stage,
+			err,
+			delay,
+		)
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-self.ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if delay < maxDelay/2 {
+			delay *= 2
+		} else {
+			delay = maxDelay
+		}
 	}
 }
 
@@ -1240,9 +1493,22 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 // all tls is handled by this server
 
 func (self *ConnectHandler) runH3() {
-	self.listenQuic(
-		self.settings.ListenH3Port,
+	_ = self.listenH3(
+		connectListenerKey{
+			transport: connectListenerTransportH3,
+			port:      self.settings.ListenH3Port,
+		},
 		self.h3PacketConn,
+	)
+}
+
+func (self *ConnectHandler) listenH3(
+	key connectListenerKey,
+	preboundPacketConn net.PacketConn,
+) error {
+	return self.listenQuic(
+		key,
+		preboundPacketConn,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
 			if self.settings.EnableProxyProtocol {
 				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
@@ -1253,9 +1519,22 @@ func (self *ConnectHandler) runH3() {
 }
 
 func (self *ConnectHandler) runH3Dns() {
-	self.listenQuic(
-		self.settings.ListenDnsPort,
+	_ = self.listenH3Dns(
+		connectListenerKey{
+			transport: connectListenerTransportH3Dns,
+			port:      self.settings.ListenDnsPort,
+		},
 		self.dnsPacketConn,
+	)
+}
+
+func (self *ConnectHandler) listenH3Dns(
+	key connectListenerKey,
+	preboundPacketConn net.PacketConn,
+) error {
+	return self.listenQuic(
+		key,
+		preboundPacketConn,
 		func(packetConn net.PacketConn) (net.PacketConn, error) {
 			if self.settings.EnableProxyProtocol {
 				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
@@ -1274,10 +1553,10 @@ func (self *ConnectHandler) runH3Dns() {
 }
 
 func (self *ConnectHandler) listenQuic(
-	port int,
+	key connectListenerKey,
 	preboundPacketConn net.PacketConn,
 	connTransform func(net.PacketConn) (net.PacketConn, error),
-) {
+) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 
 	defer handleCancel()
@@ -1297,7 +1576,7 @@ func (self *ConnectHandler) listenQuic(
 	serverConn := preboundPacketConn
 	listenAddress := ""
 	if serverConn == nil {
-		listenIpv4, _, listenPort := server.RequireListenIpPort(port)
+		listenIpv4, _, listenPort := server.RequireListenIpPort(key.port)
 		listenAddress = net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort))
 
 		reusePort := false
@@ -1313,18 +1592,15 @@ func (self *ConnectHandler) listenQuic(
 			listenAddress,
 		)
 		if err != nil {
-			return
+			return &connectListenerError{stage: "bind", err: err}
 		}
 	} else {
 		listenAddress = serverConn.LocalAddr().String()
 	}
-	if glog.V(2) {
-		glog.Infof("[c]h3 listen %s\n", listenAddress)
-	}
 	defer serverConn.Close()
 	packetConn, err := connTransform(serverConn)
 	if err != nil {
-		return
+		return &connectListenerError{stage: "transform", err: err}
 	}
 	defer packetConn.Close()
 	quicTransport := &quic.Transport{
@@ -1332,12 +1608,15 @@ func (self *ConnectHandler) listenQuic(
 		// createdConn: true,
 		// isSingleUse: true,
 	}
+	defer quicTransport.Close()
 	listener, err := quicTransport.ListenEarly(tlsConfig, quicConfig)
 	if err != nil {
-		glog.Infof("[c]h3 listen %s err = %s\n", listenAddress, err)
-		return
+		return &connectListenerError{stage: "listen_early", err: err}
 	}
 	defer listener.Close()
+	self.setListenerUp(key, true)
+	defer self.setListenerUp(key, false)
+	glog.Infof("[c]h3 listener up transport=%s port=%d address=%s\n", key.transport, key.port, listenAddress)
 
 	for {
 		if glog.V(2) {
@@ -1345,8 +1624,7 @@ func (self *ConnectHandler) listenQuic(
 		}
 		conn, err := listener.Accept(handleCtx)
 		if err != nil {
-			glog.Infof("[c]h3 accept connection %s err = %s\n", listenAddress, err)
-			return
+			return &connectListenerError{stage: "accept", err: err}
 		}
 
 		glog.Infof("[c]h3 accept connection %s\n", listenAddress)
@@ -1361,7 +1639,7 @@ func (self *ConnectHandler) listenQuic(
 			}
 		}) {
 			conn.CloseWithError(0, "")
-			return
+			return handleCtx.Err()
 		}
 	}
 }

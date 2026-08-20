@@ -57,9 +57,8 @@ Options:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	routes := []*router.Route{
-		router.NewRoute("GET", "/status", router.WarpStatus),
-	}
+	routes := []*router.Route{}
+	statusHandler := router.WarpStatus
 
 	// one-shot readiness latch before listen (same pattern as api/taskworker,
 	// TASKDRAIN1 §2.2 / APIDRAIN1 §2.1): a container that cannot reach
@@ -77,6 +76,7 @@ Options:
 		defer exchange.Close()
 
 		connectRouter := connectserver.NewConnectRouterWithDefaults(ctx, cancel, exchange)
+		statusHandler = connectRouter.Status
 		routes = append(routes,
 			router.NewRoute("GET", "/", connectRouter.Connect),
 			// router.NewRoute("CONNECT", "", connectRouter.ProxyConnect),
@@ -84,6 +84,10 @@ Options:
 
 		server.Warmup()
 	}
+	routes = append(
+		[]*router.Route{router.NewRoute("GET", "/status", statusHandler)},
+		routes...,
+	)
 
 	// drain on sigterm
 	go server.HandleError(func() {

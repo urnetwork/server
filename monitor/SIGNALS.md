@@ -43,6 +43,33 @@ took every `redis_*` series with it). Both now have code fixes; the same pass
 corrected the stale minio data path in 11.6, the dead `[alloy]` restart counter
 in 11.1/11.2, the service-label count, and the vacuous `query=up` mimir check
 in 11.11.
+Updated 2026-08-19 after the public connect H3 rollout: the connect build was
+ready for QUIC, but the serving LB still emitted legacy PROXY protocol and the
+replacement LB initially crash-looped because its newly generated UDP/8053
+listener was paired with stale systemd units that did not allocate 8053 or
+carry the UDP/53 forward alias. Section 16 records the PPv2, actual-generation,
+QUIC-accept, conntrack, and public return-tuple signals that separated those
+two failures from the historical UDP reply-SNAT failure. A forced-mode audit
+the same night added the DNS/WhoDis split: both DNS envelope codecs worked on
+forwarded interfaces, while the matrix exposed interfaces whose upstream
+firewall did not deliver UDP/53 and two blocks whose exhausted LB port pools
+prevented the new generation and its port-53 alias from becoming live. The
+`.82`-through-`.85` upstream UDP/53 delivery fault was fixed on 2026-08-20;
+§16.6 retains it as a resolved historical discriminator, not current state.
+A follow-up direct-443 audit found a different failure: malformed PROXY
+traffic can terminate one connect block's QUIC listener without terminating
+the healthy container, leaving nginx to send most new sessions to closed UDP
+ports. §16.5 records the socket, `UdpNoPorts`, LB `ECONNREFUSED`, conntrack,
+raw-client, and qlog signals that localize that apparent packet loss.
+Updated 2026-08-20 with the durable transport remediation: PP datagram
+rejections are non-fatal and counted, QUIC listeners are supervised with
+dynamic readiness, client PTO/no-response handshakes are counted separately,
+and an LB must prove the exact UDP listener set on every Connect block before
+activation. The WhoDis private service port moves from 8053 to collision-free
+4053 while 8053 remains a rolling compatibility listener. §16.7 records the
+second root cause found during that move: Warp retained withdrawn Grafana DNAT
+rules at 7178–7182 even though Grafana's live allocation had moved, so the old
+rules could steal Connect traffic indefinitely.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -542,6 +569,13 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | `connect: connection refused` | Port closed: process dead or bound to wrong interface after manual restart. | `ss -lntp` on the host: absent → restart; bound 127.0.0.1-only → restart with correct conf. |
 | `connect: cannot assign requested address` | CLIENT-side ephemeral-port exhaustion (redial storm to one dst). | Fix the target node; storm self-drains ≤60s after; do NOT restart the client fleet. |
+| `Proxy protocol header must be UDP` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="transport_family"}` | The UDP backend received a PROXY header whose address family is not UDP, observed when legacy `proxy_protocol on`/PPv1 traffic overlaps PPv2. Pre-hardening Connect returned this error to quic-go and could kill the shared listener; current Connect drops and counts only that datagram. | Inspect the ACTUAL LB generations and require `proxy_protocol v2`. Page if the PP-drop rate is sustained or `h3_listener_up` falls; a legacy error followed by a missing socket means a pre-fix image is still serving. See §16.2/§16.5. |
+| `proxy protocol header required but not found` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="missing_header"}` | A previously unseen LB source tuple sent a headerless datagram: a bypassing/old LB path or broken UDP pseudo-session/header behavior. Current Connect drops it inside `PpPacketConn`; it does not escape as a listener-fatal `ReadFrom` error. | Correlate the exact Connect/LB rollout boundary and remove the incompatible sender. Verify listener gauges and sockets instead of inferring death from one rejected datagram. Do not diagnose JWT/auth or SNAT first. See §16.2/§16.5. |
+| `[c]h3 listener <transport>/<port> failed stage=<stage> ... restart in ...` | A supervised QUIC listener exited or failed bind/transform/ListenEarly/accept. `/status` is 503 and `h3_listener_up=0` until the retry succeeds. | Use `stage`, `h3_listener_failures_total`, and `h3_listener_restarts_total`; fix persistent bind/allocation or transform errors. Warp must not activate an LB while any required listener is down. |
+| `recv()` / `sendmsg() failed (111: Connection refused) while proxying ... upstream` on an nginx UDP stream | Host DNAT selected a connect allocation with no UDP listener. QUIC Initials reached nginx, but the kernel returned ICMP port-unreachable before connect could answer. | Map the logged logical upstream through the current host DNAT to its connect block/allocation; verify `WARP_PORTS`, `ss -lunp`, that block's last H3 listener-exit line, and `UdpNoPorts`. See §16.5. |
+| `[c]h3 handshake no response mode=... sent_packets=N pto=M ...` | The client emitted QUIC packets but received zero packets before handshake failure. This is the Initial-blackhole signal that `PacketLost` misses; PTOs are counted separately. | Pin the resolved public tuple, then split public DNAT/conntrack, LB backend socket, and return path with §16.5/§16.6. Do not interpret `q_lost=0` as health. |
+| `[c]h3 connect err = ... context deadline exceeded` | No valid QUIC response reached the client. This is below auth but otherwise ambiguous: direct UDP/443, DNS-envelope creation, public UDP/53 delivery, LB/PP/DNS decode, and the return tuple can all cause it. | Record the mode and resolved IP. For direct H3, split public ingress from backend-listener loss with §16.5. For `h3dns`/`h3dnspump`, prove raw envelopes were sent and compare the exact port-53 DNAT delta: zero is upstream delivery, no rule is LB activation, and a rise without a 4053 (or migration 8053) accept is LB/PP/decode (§16.6). |
+| `panic: Missing host port for service port <port>` (LB startup) | The image's nginx config contains a logical listener absent from runtime `WARP_PORTS`; usually services.yml/image generation is newer than the systemd unit's baked `--portblocks`/`--forwardports`. The desired LB version may look deployed while the new container is Exited(2) and the old LB keeps serving. | Compare `systemctl cat`, container `WARP_PORTS`, and baked nginx listeners; regenerate and deploy units (§11.8), then require the new LB to stay `Up` before evaluating its behavior. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
@@ -1361,17 +1395,31 @@ lsof /srv/warp/<env>/warpctl-host-drain*.lock    # W = the holder, plain u = que
   (11.7b). Queries reach a single instance and `warpctl logs <env> <service>`
   returns EMPTY. Metrics survive it; logs do not.
 
-### 11.8 systemd unit port baking (WARP_PORTS staleness)
-`warpctl service run` reads ports from `--portblocks` BAKED into the unit at
-`create-units` time, NOT live services.yml. Symptom: front panics
-`ring port 6490 must be declared ... Missing host port for 6490` because WARP_PORTS
-still has the old ports.
+### 11.8 systemd unit port/forward-alias baking (WARP_PORTS staleness)
+`warpctl service run` reads ports from `--portblocks` and aliases from
+`--forwardports` BAKED into the unit at `create-units` time, NOT live
+services.yml. Symptoms: grafana front panics `ring port 6490 must be declared
+... Missing host port for 6490`, or LB panics `Missing host port for service
+port 8053` while converting the historical nginx config that first added
+UDP/8053. During the v21 migration the equivalent mismatch names 4053 and the
+stale unit lacks `--forwardports=udp:53:4053`, so even a listener that started
+would not receive the public alias.
 ```
-grep -o 'portblocks=[^ ]*' /etc/systemd/system/warp-main-grafana-g1.service  # baked ports
+systemctl cat warp-main-lb-eno2np1.service | grep -E 'portblocks|forwardports'
 docker inspect $c --format '{{range .Config.Env}}{{println .}}{{end}}' | grep WARP_PORTS  # what the container got
 ```
 FIX: `warpctl service create-units main` → commit the regenerated `xops` units →
 redeploy. Editing services.yml alone does nothing until the units are regenerated.
+
+A correct, restarted unit is still not proof that a forward alias is live.
+`warpctl` installs the interface-scoped public DNAT in `redirect()` only after
+it assigns one free host port for every LB service and deploys the replacement
+container. If any 30-port pool is exhausted by accumulated old LB containers,
+the worker loops `netstat -tuln` / `Found occupied port`, the old generation
+keeps serving, and there is no UDP/53 rule despite the running process showing
+`--forwardports=udp:53:4053`. Require all three: correct process args, an Up
+replacement with `WARP_PORTS` including 4053 (and 8053 during migration), and
+the exact live DNAT rule.
 
 ### 11.9 Playbook: grafana/loki/mimir "no data / 502 / stuck deploy"
 1. `up>1` for hours or `Poll …` looping in the journal → deadlock (11.7): clear stale container + reboot.
@@ -1995,3 +2043,725 @@ Rollout note: hosted proxy providers begin publishing (and answering
 handshakes) once the server vendors the provider-side-enabled sdk; app
 providers as their updates land. Until then 15.1 sits at ~0 (probe unarmed)
 and 15.2/15.3 are silent.
+
+---
+
+## 16. Connect H3 / QUIC over public UDP — H3TRANSPORT1
+
+Project terminology: connect "H3" is the custom connect carrier over QUIC on
+UDP/443. It is not an HTTP/3 endpoint. `curl --http3`, HTTP `Alt-Svc`, and an
+HTTP response are therefore not valid health probes. A valid probe must run a
+QUIC handshake with SNI `connect.bringyour.com`; an authenticated connect
+client is the strongest end-to-end probe.
+
+The packet path has five independently observable boundaries:
+```
+client -> public interface IP:443/udp -> host DNAT -> nginx UDP listener
+       -> PROXY v2 + connect backend -> PpPacketConn -> quic-go/auth
+reply  <- reverse conntrack NAT       <- nginx         <- connect
+```
+Do not jump from "UDP arrived" to an SNAT conclusion. On a pre-hardening
+Connect image a PP parse failure could close the backend before it emitted any
+QUIC packet; current images drop/count that datagram and keep the shared socket
+alive. In either case an `[UNREPLIED]` conntrack row says only that no reply was
+seen and says nothing yet about the return-NAT implementation.
+
+### 16.1 Generation and listener contract — desired is not live
+
+The LB image contains generated nginx listeners, while the host-network port
+mapping and public aliases come from arguments baked into systemd units. All
+three views must agree:
+```
+# publish-side intent (useful, but insufficient)
+warpctl ls versions main lb
+warpctl ls versions main connect
+
+# edge-side truth
+systemctl cat warp-main-lb-<interface>.service
+sudo docker ps -a --filter name=main-lb --format '{{.Names}}|{{.Image}}|{{.Status}}'
+sudo docker inspect <lb-container> \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^WARP_PORTS='
+```
+
+During the 4053 migration, the LB unit must carry logical UDP/4053 and the
+compatibility UDP/8053 allocation plus `--forwardports="udp:53:4053"`;
+Connect `WARP_PORTS` must contain 443, 4053, and 8053. The old 8053 path remains
+only so the prior LB generation can drain. After no old LB can select 8053, a
+later services version removes 8053 from both sides. Exact allocated host ports
+vary by interface and generation; monitor service-port presence, not a fixed
+internal number.
+
+- BROKEN: new LB containers are `Exited (2)` with `Missing host port for
+  service port 4053` or `8053`, while an old LB remains `Up`. The new tag is
+  published but its forwarding behavior is not serving.
+- HEALTHY: the intended LB container stays `Up`, its status endpoint passes,
+  and its `WARP_PORTS` covers every `listen` port in the baked nginx config.
+- ACTION: compare §11.8's unit args to the container env; regenerate/deploy
+  systemd units before changing connect or nginx.
+
+An ansible unit rollout restarts the observability units too (§8.5), so
+`warpctl logs` may return 502 during precisely this window. Fall back to
+`sudo docker logs --since <boundary> <actual-container>` on the edge. Keep the
+rollout boundary in UTC so pre-fix PP errors are not counted against the new
+generation.
+
+### 16.2 UDP PROXY v2 provenance and parse signals
+
+The live LB—not the repository—must prove that it can emit PPv2 to a UDP
+upstream:
+```
+sudo docker exec <lb-container> nginx -V
+sudo docker exec <lb-container> nginx -T 2>&1 \
+  | grep -E 'listen (443|4053|8053)|proxy_protocol|proxy_timeout|proxy_requests'
+```
+
+Current healthy provenance/config:
+
+- nginx build string contains pinned commit
+  `11d11b5f0d3d8ace5215e1a77918e9dc219ce7db` (the first upstream build used
+  here with UDP-upstream PPv2 support);
+- UDP listeners use `udp reuseport`, `proxy_protocol v2`,
+  `proxy_timeout 30s`, and `proxy_requests 0`;
+- connect has `EnableProxyProtocol=true`, so its `PpPacketConn` requires a
+  header on a proxy address's first datagram.
+
+Read actual connect container stdout from the same post-rollout window:
+```
+sudo docker logs --since <boundary> <connect-container> 2>&1 \
+  | grep -Ei 'h3|proxy protocol|quic'
+```
+
+- `urnetwork_connect_pp_dropped_packets_total{reason="transport_family"}` =
+  wrong PP transport family, historically logged as `Proxy protocol header
+  must be UDP`. Failure is before QUIC and auth.
+- `...{reason="missing_header"}` = a headerless first datagram from an
+  old/bypassing LB path or broken UDP pseudo-session. Other closed reasons are
+  `malformed_header`, `proxy_address_family`, and `address_family`.
+- Current `PpPacketConn.ReadFrom` loops until it receives a valid datagram or
+  the underlying socket itself fails. A malformed/headerless/wrong-family
+  datagram is dropped and counted inside the wrapper and is never returned to
+  quic-go. Any legacy PP error escaping through an H3 accept loop identifies a
+  pre-hardening Connect generation.
+- Every enabled listener is supervised with bounded exponential backoff.
+  Bind, transform, `ListenEarly`, accept, and panic exits increment
+  `urnetwork_connect_h3_listener_failures_total{transport,stage}`; restarts
+  increment `urnetwork_connect_h3_listener_restarts_total{transport,port}`.
+  `urnetwork_connect_h3_listener_up{transport,port}` is 1 only while the
+  listener is accepting. `/status` returns 503 while any enabled listener is
+  down.
+- `[c]h3 accept connection <backend-listen-address>` with no PP error = QUIC
+  completed far enough for quic-go's listener to accept. Repeated accepts
+  immediately after the new boundary are the behavior signal that PPv2 is
+  actually live.
+- `[c]h3 connection exited ... err = <auth/frame error>` is above transport;
+  PP, QUIC handshake, and return routing already worked. A clean exit is an
+  ordinary client close.
+
+HEALTHY is not merely zero PP errors (there might be zero attempts). Require
+at least one post-boundary H3 accept from a real or synthetic QUIC client, and
+require the socket for every enabled allocation to remain bound. Derive the
+port from each current container rather than hard-coding a generation's port:
+```
+sudo docker inspect <connect-container> \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^WARP_PORTS='
+sudo ss -lunpH | grep -E '172[.]18[.]0[.]1:<allocated-443-4053-or-8053>\b'
+```
+During migration, a five-block edge expects five direct-443, five DNS/4053,
+and five compatibility DNS/8053 sockets. A missing socket with an `Up`
+container is BROKEN. A ready status also carries
+`X-UR-Connect-Listeners-Ready: 1` and a sorted
+`X-UR-Connect-UDP-Listeners: 443,4053,8053`; Warp requires the exact ports,
+so a stale 443/8053 unit cannot authorize a 53→4053 LB activation.
+
+### 16.3 Authenticated H3 carrier traffic — handshake vs actual use
+
+Connect exports closed-label counters that advance only after authenticated
+H3 DATAGRAM capability negotiation. They distinguish "QUIC can handshake"
+from "the app is routing messages on H3":
+```promql
+sum by (host, block, event) (
+  increase(urnetwork_connect_h3_datagram_events_total[5m])
+)
+```
+
+The positive-path events are `received_message`, `sent_message`,
+`received_fragment`, `sent_fragment`, `stream_received_message`, and
+`stream_sent_message`. Stream events are not an H1 fallback: hybrid H3 keeps a
+reliable QUIC stream lane for messages above the DATAGRAM threshold. Error
+events (`send_error`, `malformed_fragment`, `checksum_failure`,
+`reassembly_timeout`, `reassembly_limit`, queue oversize/wait) should remain
+zero or at their established near-zero baseline.
+
+Use `increase`, not a raw fleet sum: every process has a random `instance`
+label, and old/new connect generations push concurrently during a drain. A raw
+total retains stale old instances and resets per process. Interpret with a
+known traffic stimulus:
+
+- H3 accepts + rising received/sent events = auth, negotiation, and routed app
+  traffic are all using H3. This is the strongest server-side success signal.
+- H3 accepts + flat events while a test client sends known routed messages =
+  handshake/auth only; inspect client Auto-mode election and route selection.
+- Flat events with no known traffic is inconclusive, not broken.
+- Rising error events identify the post-auth DATAGRAM/reassembly layer; they
+  are not PP or SNAT failures.
+
+### 16.4 Public ingress and return-SNAT invariant
+
+Resolve immediately before probing: Route53 health rotation can change both
+the IP and interface during a rollout. Record the tuple and pin the probe to it
+rather than attributing counters from a prior DNS answer.
+```
+dig +short A connect.bringyour.com
+dig +short AAAA connect.bringyour.com
+
+# On the host/interface owning the selected address. NAT counters reset when
+# warpctl recreates its chains, so compare deltas around one probe.
+sudo iptables-save -t nat -c | grep -E -- '--dport 443|dpt:443'
+sudo ip6tables-save -t nat -c | grep -E -- '--dport 443|dpt:443'
+sudo conntrack -L -f ipv4 -p udp --dport 443
+sudo conntrack -L -f ipv6 -p udp --dport 443
+```
+
+For a probe to public `P:443`, the successful invariant is:
+
+1. the selected public-interface DNAT counter increments;
+2. connect emits a post-boundary H3 accept (and, for the full probe, auth
+   succeeds);
+3. the matching conntrack entry becomes `[ASSURED]`, not only `[UNREPLIED]`;
+4. a client-side packet observer sees every server datagram sourced from the
+   exact selected `P:443` tuple.
+
+Conntrack displays the pre-reverse-NAT reply tuple (for example an internal LB
+address and allocated port); that is normal. Its original tuple retains
+`dst=P dport=443`, and the established NAT mapping rewrites the reply back to
+`src=P sport=443`. Pair `[ASSURED]` with a successful QUIC handshake for the
+practical proof: packets traveled both directions and quic-go accepted them as
+belonging to the connection addressed to `P:443`. A client-side source-tuple
+capture remains the strongest regression probe.
+
+- Mostly `[UNREPLIED]` plus PP errors: fix PP/listener generation first; SNAT
+  has not been exercised.
+- H3 accept plus `[ASSURED]`: ingress, backend PPv2, QUIC response, and reverse
+  NAT work. If the app still reports H1, inspect client mode election/auth
+  above transport.
+- Backend sends but the client observes a different source IP or port (or QUIC
+  times out while a separate reply flow appears): UDP return-SNAT regression.
+  Inspect the interface-scoped POSTROUTING rules and whether another LB block's
+  cleanup removed this block's SNAT state; do not paper over it in the client.
+
+### 16.5 Direct UDP/443 loss — localize before calling it QUIC loss
+
+An H3 timeout can be a real lossy path, but it can also be deterministic
+blackholing inside the edge. Separate these cases in this order:
+
+1. pin one public `P:443` target and observe the raw client socket;
+2. prove the first flow reached that interface with its DNAT delta and exact
+   conntrack row;
+3. map nginx's current logical upstreams through host DNAT to every connect
+   block's allocated port;
+4. require an actual UDP socket at every allocated port, then correlate nginx
+   `ECONNREFUSED`, kernel `UdpNoPorts`, and per-block H3 accepts;
+5. only on a bidirectional, accepted flow interpret qlog loss/drop events and
+   authenticated H3 DATAGRAM counters as transport quality.
+
+Useful edge-side split:
+```
+sudo nstat -az UdpNoPorts UdpInErrors UdpRcvbufErrors
+sudo ss -lunpH
+sudo iptables-save -t nat -c \
+  | grep -E -- '--dport <logical-upstream>|dpt:<logical-upstream>'
+sudo docker logs --since <boundary> <lb-container> 2>&1 \
+  | grep -E 'recv\(\)|sendmsg\(\).*111: Connection refused'
+sudo docker logs --since <boundary> <connect-container> 2>&1 \
+  | grep -E '\[c\]h3 (accept connection|connection exited)'
+```
+
+Interpretation:
+
+- A public DNAT counter is a **new-flow** signal, not a packet counter. After
+  conntrack creates the mapping, later datagrams bypass the nat table. A +1
+  delta proves the first Initial reached the host rule; it does not prove all
+  retransmissions arrived.
+- Exact `[UNREPLIED]` conntrack plus a DNAT delta and zero raw client reads
+  proves ingress to the host but no response through that mapping. If the
+  selected backend port has no socket and nginx logs `ECONNREFUSED`, the loss
+  boundary is nginx-to-connect. Return SNAT has not been exercised.
+- `UdpNoPorts` rising during the probe is the kernel signature for datagrams
+  delivered to closed UDP allocations. Pair it with the current host DNAT
+  mapping; a fleet-wide raw value alone includes unrelated UDP traffic.
+- `UdpRcvbufErrors`/`UdpInErrors`, NIC missed/error counters, qdisc drops, and
+  conntrack occupancy are the competing host-capacity signals. Flat values
+  while `UdpNoPorts` and LB `ECONNREFUSED` rise rule out receive-buffer,
+  physical-link, and conntrack pressure.
+- A successful handshake with every raw reply sourced from exact `P:443`
+  proves reverse conntrack NAT/SNAT for that flow. Do not infer a return-SNAT
+  regression from another flow that never got a backend response.
+
+Client qlog needs one important qualification. `LostPacketCount` counts
+quic-go `PacketLost` events, not every missing response. Initial PTO probes can
+be sent repeatedly without a loss declaration before the handshake deadline.
+Therefore `q_lost=0`, many raw writes, zero raw reads, and a handshake timeout
+is a blackhole, not a clean path. Use qlog loss percentage to characterize an
+already established flow; use handshake duration, PTO-shaped raw write count,
+and raw reads to characterize startup. Healthy startup is a tight latency
+cluster with an immediate raw response, not merely zero declared loss. Current
+client stats expose `ProbeTimeoutCount`, `HandshakeAttemptCount`,
+`HandshakeSuccessCount`, `HandshakeFailureCount`, and
+`HandshakeSentWithoutResponseCount`; the last counter requires sent>0 and
+received=0 for the individual attempt. `DialEarly` 0-RTT readiness is not
+counted as success: the attempt remains open until QUIC handshake completion.
+
+The backend-listener health gate is:
+
+- every current connect block's `WARP_PORTS` 443 allocation has one bound UDP
+  socket;
+- `urnetwork_connect_h3_listener_up{transport="h3",port="443"}=1` for every
+  block, with no restart/failure growth during the probe;
+- PP-drop counters are flat or explainable and never coincide with a missing
+  listener (§16.2);
+- nginx emits no UDP-upstream `ECONNREFUSED`, and `UdpNoPorts` is flat under a
+  pinned probe;
+- every weighted public target completes repeated handshakes without a PTO
+  staircase; and
+- a paced established-flow probe has zero/near-baseline qlog loss/drop and all
+  replies use the selected public tuple.
+
+2026-08-20 incident baseline: 250 paced 1,000-byte DATAGRAM frames at 8 ms were
+lossless after connection establishment on `.41`, `.62`, `.70`, `.71`,
+`.82`, `.83`, `.84`, and `.85`: qlog reported no lost or dropped packets and
+the raw socket saw replies only from the pinned public tuple. This ruled out a
+broad QUIC, MTU, checksum, or return-SNAT problem. `.40` and `.42` gave no raw
+reply at all and were a separate stale-LB/activation failure despite remaining
+low-weight DNS answers.
+
+Repeated handshakes exposed the high-weight split. Edge-4 `.82` and `.83`
+passed 20/20 with maxima of 90 ms and 74 ms. Edge-3 `.84` passed only 14/20;
+8 successes took at least 1 s and the maximum was 3.071 s. `.85` passed 19/20;
+12 successes took at least 1 s and the maximum was 6.271 s. Failures still
+incremented the exact public DNAT rule and left an exact `[UNREPLIED]` row,
+with 12 raw Initial/PTO writes and zero reads.
+
+The edge-3 fanout explained the distribution. Nginx assigned direct H3 with
+weights beta/g1/g2/g3/g4 = `1/24/25/25/25`, but only beta and g4 had their
+allocated UDP/443 sockets. Host DNAT counters showed traffic continuing to
+g1-g3, nginx logged UDP-upstream `Connection refused`, and `UdpNoPorts` rose
+from 63,841 to 66,922 during the investigation while `UdpRcvbufErrors` stayed
+at 26. Thus 74% of first backend choices hit a closed port. ICMP
+port-unreachable closed those nginx UDP pseudo-sessions; later QUIC PTOs could
+create a new pseudo-session and randomly reach beta/g4, producing the observed
+~0.7/1.5/3.1/6.3-second staircase instead of uniform random packet loss.
+
+The missing sockets were a listener-lifecycle failure. New g1, g2, and g3
+started at `03:16:30Z`, `03:16:35Z`, and `03:16:51Z`; each then logged exactly
+one listener exit (`header required but not found`, `header must be UDP`, and
+`header required but not found`) at `03:16:52Z`, `03:16:51Z`, and `03:17:06Z`.
+The old PP-incompatible LB generation continued draining while the new LBs
+started at `03:16:51Z` and `03:16:59Z`, so incompatible UDP pseudo-sessions
+overlapped the new connect listeners. G4 started at `03:17:11Z`, survived, and
+continued accepting. All five DNS/8053 sockets remained bound, which is why
+direct H3 could be broken independently of WhoDis. The immediate recovery is
+to recreate the missing connect listeners after the incompatible LB traffic
+is gone; the durable requirements are a non-fatal malformed-datagram path or
+a supervised listener restart, logged bind failures, and readiness/monitoring
+that fails when any enabled allocation disappears.
+
+### 16.6 WhoDis DNS carriers — public UDP/53 to private UDP/4053
+
+`H3Dns` and `H3DnsPump` are QUIC wrapped in DNS TXT request/response
+envelopes, not DNS resolvers and not HTTP/3. The client keeps SNI
+`connect.bringyour.com`, but the destination lookup differs:
+
+- `h3dns` resolves `connect.bringyour.com:<DnsPort>`;
+- `h3dnspump` resolves the explicit `whodis.bringyour.com:<DnsPort>` discovery
+  endpoint and continuously supplies requests against which replies can be
+  paired. The packet envelope still uses the configured canonical `ur.xyz.`
+  TLD; the destination hostname is deliberately independent of that codec
+  value.
+
+Both names are weighted and their eligible address sets can overlap. Never
+infer a fixed address pool from the mode or from one resolver's cached answer.
+An ordinary HTTP status health check can keep an interface in Route53 while
+its UDP/53 path is broken. Enumerate/pin the returned address immediately
+before the transport probe; the fleet gate is **every eligible weighted target
+passes**, not "one target worked."
+
+The intended IPv4 path is:
+```
+client DNS envelope -> public P:53/udp -> interface-scoped warp DNAT
+                    -> LB logical UDP/4053 -> nginx PPv2
+                    -> connect UDP/4053 -> PP decode -> DNS decode -> QUIC
+reply              <- reverse conntrack NAT                    <-
+```
+
+Policy invariants:
+
+- UDP/53 is an IPv4-only forward alias to service port 4053. Absence of an
+  IPv6 port-53 alias is intentional until product policy changes.
+- UDP/4053 must stay private: there must be no direct public 4053 rule.
+- UDP/8053 is a private compatibility listener only during the rolling
+  migration. It must have no direct public rule and must be removed after old
+  LBs have drained.
+- TCP/53 is unrelated and must not be created by this mapping.
+- The server transform order is PPv2 first, DNS `decode53` second, then QUIC.
+
+Inspect one selected interface around one forced-mode attempt:
+```
+dig +short A connect.bringyour.com
+dig +short A whodis.bringyour.com
+
+sudo iptables-save -t nat -c \
+  | grep -E -- '--dport (53|4053|8053)|dpt:(53|4053|8053)'
+sudo ip6tables-save -t nat -c \
+  | grep -E -- '--dport (53|4053|8053)|dpt:(53|4053|8053)'
+sudo conntrack -L -f ipv4 -p udp --dport 53
+sudo docker logs --since <boundary> <connect-container> 2>&1 \
+  | grep -E '\[c\]h3 accept connection|proxy protocol'
+```
+
+A plain `dig` is only an ingress-counter stimulus. `decode53` deliberately
+does not answer ordinary non-transport questions, so a DNS timeout is expected
+and cannot test WhoDis. The positive probe must encode real QUIC packets in
+each mode. It should also observe the raw socket beneath packet translation so
+it can prove requests were emitted and all replies came from the exact
+selected `P:53` tuple.
+
+For a successful forced probe to `P:53`, require all of:
+
+1. raw DNS envelopes were sent to `P:53`;
+2. the exact IPv4 DNAT counter increments;
+3. connect logs an H3 accept on its **4053 allocation**, not the direct-443
+   allocation (an 8053 accept is expected only from a draining old LB);
+4. the flow is `[ASSURED]` in conntrack;
+5. every client-observed DNS response is sourced from `P:53`;
+6. for the full health probe, auth and a routed connect message succeed.
+
+The boundary split is unusually sharp:
+
+- Raw requests sent, but DNAT stays at zero: traffic did not reach that host
+  rule. Capture on the public NIC and inspect raw/nft/filter rules. No ingress
+  capture plus no earlier host drop is an upstream firewall/routing failure;
+  changing connect or nginx cannot fix it.
+- The unit/process contains UDP/4053 and `--forwardports`, but the interface
+  has no port-53 rule: the LB activation never reached `redirect()`. Inspect
+  the actual LB generation and `WARP_PORTS`. A worker repeatedly scanning
+  occupied ports while an old LB owns every slot is port-pool/drain starvation,
+  not a firewall rule-generation bug (§11.7c, §11.8).
+- DNAT rises, but there is no H3 accept on a 4053 allocation: inspect the
+  running nginx UDP/4053 listener, PPv2 errors, backend selection, and DNS
+  decode. This is ingress/LB/decode, not client auth.
+- H3 accepts and conntrack is `[ASSURED]`, but the raw client sees another
+  source address/port: return-SNAT regression.
+- Handshake and tuple proof pass, but authenticated traffic does not: move up
+  to auth, mode election, and application routing (§16.3).
+
+Historical 2026-08-19/20 8053 baseline: forced `h3dns` and `h3dnspump`
+handshakes to a known
+forwarded target (`65.19.157.62:53`) completed in about 0.4s, produced 21 DNS
+responses from that exact public tuple, logged accepts on the connect 8053
+allocation, and left `[ASSURED]` conntrack rows. Pump-mode probes also passed
+on `.41`, `.70`, and `.71`. This proves both codecs, PPv2/DNS decode, QUIC,
+and return-SNAT before the private-port move. The post-migration acceptance
+gate is the same matrix with accepts on 4053 for every eligible target.
+
+The same matrix exposed two independent partial failures. `.42` and `.40`
+had correct restarted unit arguments but no live port-53 DNAT: their LB
+workers were still scanning fully occupied old port pools, so no new LB had
+deployed and `redirect()` had not run. More importantly, all four directly
+addressed targets `.82` through `.85` had exact host DNAT rules and healthy
+new LBs, but forced clients sent 120 envelopes per target with no response and
+every DNAT counter stayed zero. UFW was inactive, no earlier host raw/filter
+drop existed, and an edge-4 capture saw no external probe packets. The fault
+was upstream UDP/53 delivery. At that time Route53 continued returning those
+high-weight addresses because their ordinary status health checks passed, so
+the production hostnames were probabilistically broken even though selected
+legacy targets worked. The `.82`-through-`.85` upstream delivery fault was
+fixed on 2026-08-20. Retain this paragraph only as the historical signature;
+it is not current failure state. Forced `h3dns` and `h3dnspump` probes pinned
+to every eligible target remain the post-fix acceptance gate.
+
+A client-side preflight has its own sharp signature. If forced
+`h3dnspump` reports zero QUIC connections, zero handshake attempts, and a
+resolver error for `zone-ur-xyz-.bringyour.com`, no packet reached UDP/53.
+The canonical codec TLD (`ur.xyz.`) was incorrectly copied into a DNS label
+with its trailing dot and the `connect` label was incorrectly removed from
+the platform hostname. The fixed client no longer derives infrastructure
+names from codec data: it resolves the explicit `whodis.bringyour.com` alias
+while retaining `connect.bringyour.com` for QUIC SNI/auth. Keep this separate
+from the server-side zero-DNAT signal: both have zero edge counters, but only
+this case has a local name-resolution error and zero raw writes.
+
+The `whodis.bringyour.com` discovery record was deployed on 2026-08-20 at
+07:25:35Z as an IPv4-only Route53 weighted alias (`main-lb`, weight 100) to
+`main-lb.bringyour.com`, with target-health evaluation enabled (change
+`C0194887P6U8F3TB0CUC`). Route53 reached `INSYNC`, and all four authoritative
+servers returned an eligible edge IPv4 address. The absence of an AAAA record
+is deliberate because public UDP/53 is IPv4-only. Immediately after creating
+a previously nonexistent name, recursive resolvers can retain the old negative
+answer until its cache expires; distinguish that propagation window from a bad
+record by querying an authoritative server directly. Do not release a client
+that requires this name until its deployment resolvers return an A answer.
+
+### 16.7 2026-08-20 root causes, allocation move, and rollout gate
+
+The high apparent UDP/443 loss was not a broad lossy link and was not the
+historical reply-SNAT bug. A malformed/headerless/wrong-family PROXY datagram
+escaped `PpPacketConn.ReadFrom` after the discard budget, quic-go terminated
+the block's shared listener, and the healthy HTTP container stayed `Up`.
+Nginx continued selecting the closed allocation, producing `ECONNREFUSED`,
+`UdpNoPorts`, `[UNREPLIED]` flows, and PTO staircases. Recycling edge-3 g1–g3
+restored the sockets after the incompatible LB generation drained. The
+durable correction is the non-fatal PP path plus supervised/dynamically-ready
+listeners in §16.2.
+
+WhoDis then exposed a separate Warp allocation-lifecycle bug. Grafana's
+running processes and current units already used external 7183–7190, but its
+iptables chain still held withdrawn DNAT rules at 7176–7182. `redirect()` only
+reconciled ports present in the new allocation; it never deleted an external
+or internal port that disappeared entirely. Those stale same-chain rules
+overlapped Connect's 8053 logical allocations at 7178–7182 and stole packets
+before Connect. This was not a PP socket defect and was not UDP return SNAT.
+
+The 2026-08-20 emergency recovery removed only Grafana's stale unscoped UDP
+DNAT rules for external ports 7178–7182 on reachable edge-0, edge-1, edge-3,
+and edge-4. It did not touch TCP, Grafana's withdrawn 7176/7177 rules, Connect
+DNAT, units, containers, or listeners. Post-change every repaired host had
+zero matching Grafana UDP rules, all five Connect 8053 DNAT rules, and all
+five Connect 8053 sockets. Edge-5 (`172.28.208.176`) was unreachable over SSH
+and was not mutated. This is an operational hotfix, not the durable allocator
+repair below.
+
+Post-hotfix forced `h3dns` and fixed-client `h3dnspump` QUIC handshakes passed
+on `65.49.70.82` through `.85` in roughly 0.23–0.28 seconds. The exact public
+UDP/53 DNAT counters rose and matching conntrack entries were `[ASSURED]`, so
+the repaired path exercised ingress, DNS decode, PPv2, QUIC reply, and reverse
+NAT rather than merely proving that an iptables rule existed.
+
+Warp now:
+
+- removes unscoped DNAT/REDIRECT rules absent from the block's complete current
+  external+internal allocation, while preserving draining-generation ports and
+  interface-scoped public aliases;
+- refuses activation if any desired external or internal port is still owned
+  by another `WARP-<ENV>-*` chain; and
+- before an LB with UDP aliases activates, polls every Connect block directly,
+  requires HTTP success, `X-UR-Connect-Listeners-Ready: 1`, and an exact
+  `X-UR-Connect-UDP-Listeners` set containing all required service ports.
+
+Services version v21 allocates the new path without reusing a live number:
+
+- LB service UDP/4053: a host/interface-specific external allocation (for
+  example 7191–7192 on edge-3; never hard-code this fleet-wide);
+- Connect UDP/4053: external 7193–7197, internal 15058–15207;
+- compatibility Connect UDP/8053 remains external 7178–7182, internal
+  14578–14727 until old LBs drain; and
+- public IPv4 UDP/53 forwards to logical 4053, never directly to those host
+  allocation numbers.
+
+Rollout order is correctness-sensitive:
+
+1. install the new Warp binary and generated v21 units;
+2. reconcile/redeploy Grafana first so its withdrawn 7176–7182 rules disappear;
+3. deploy Connect and require every block status to report 443,4053,8053;
+4. deploy/redeploy the LBs, which changes public UDP/53 to logical 4053 and is
+   blocked by the per-port Connect readiness gate; and
+5. after every pre-v21 LB has drained, create a later services version without
+   8053 and remove the compatibility listeners.
+
+Do not deploy the LB first: it would send port 53 to a service port absent from
+old Connect units. Do not deploy Connect before the Grafana reconciliation
+while 8053 compatibility is present: the cross-chain ownership guard will
+correctly refuse the collision rather than silently overlap it.
+
+Pre-Connect-image checkpoint at 2026-08-20 09:21Z: the published/running
+Connect generation was still `2026.8.19+1023689220`, so the four reachable
+five-block edges correctly exposed TCP/80, UDP/443, and compatibility UDP/8053
+on all 20 current blocks, but exposed UDP/4053 on 0/20 and returned HTTP 200
+without either listener-readiness header. Do not classify that exact shape as
+a listener regression before the new Connect image is published. The v21 LB
+candidates had 443/4053/8053 plus the 53-to-4053 alias, saw the missing
+readiness header, refused activation, and left the old public DNAT generation
+serving. This is the intended rollout gate.
+
+At the same checkpoint, pinned QUIC handshakes for direct H3, `h3dns`, and
+`h3dnspump` all passed on eight public targets (`.62`, `.71`, `.70`, `.41`,
+`.82`–`.85`) with replies from the exact requested public source port. All
+three modes timed out with zero received datagrams on `.40` and `.42`, even
+though every block's HTTPS status path and the HTTP-only Route53 health checks
+passed there. Those two interfaces were still serving port-pool-starved old LB
+generations and had no current UDP/53 alias; HTTP target health therefore must
+not be used as UDP eligibility. Edge-5 `.91` failed both
+HTTP and all three QUIC modes and Route53 correctly marked it unhealthy. Until
+`.40` and `.42` are recovered or withdrawn, main is partially available—not
+fleet healthy—for H3 and both WhoDis carriers. The successful DNS probes still used
+the legacy 8053 backend; repeat the full pinned matrix after the new Connect
+image makes 4053 ready and the gated LB generation activates.
+
+The `.40`/`.42` pool exhaustion was a Warp lifecycle leak, not ordinary QUIC
+packet loss. Each affected LB block had all 30 internal-port generations still
+`Up`; exactly one newest old container owned every target referenced by the
+live DNAT chain and the other 29 owned distinct, unreferenced port tuples. A
+failed deployment previously launched its candidate stop in a goroutine, and
+successful deployment launched old-generation drains the same way. A worker
+process exit could kill either cleanup before Docker stopped the container;
+the next worker then allocated another tuple until no complete tuple remained.
+`assignDeployPorts` could only log occupied ports and wait forever.
+
+The durable Warp behavior is restart-safe: a failed candidate is stopped
+synchronously before `deploy()` returns, and a host-networked worker startup
+inspects same-block containers plus its live DNAT chain. It preserves every
+container that owns any active target, resumes graceful drain for only the
+unreferenced containers, and refuses cleanup if inspection is malformed, the
+chain has no target, or no running container owns a target. This recovery must
+run before allocation so a full pool can free a complete tuple without an
+operator deleting containers or guessing which generation is serving.
+
+The manual `.40`/`.42` recovery exposed two more lifecycle defects. First,
+`assignDeployPorts()` waited inside `deploy()` while retaining the version that
+was current when the pool became full. Once an operator freed a tuple, that old
+call resumed immediately and started the captured 2026-08-19 image even though
+2026-08-20 was then desired. Allocation is now a single attempt: an occupied
+pool returns to the outer watcher, which repolls image and config versions
+before every retry.
+
+Second, both replacement workers crashed during the IPv6 half of `redirect()`.
+These interfaces have a dual-stack Warp Docker bridge but no IPv6 public
+routing-table interface. The UDP SNAT branch checked the aggregate
+`self.routingTable`, then dereferenced the nil family-specific
+`networkConfig.routingTable` after DNAT was partly changed. The worker restart
+created another candidate and repeated the partial transition. SNAT is now
+entered only when the current address family has a routing-table interface; a
+regression test retains private IPv6 DNAT while proving that family gets no
+public SNAT.
+
+At the 2026-08-20 09:53Z recovery checkpoint, the old 30-container pools and
+all crash-loop candidates were removed. `.40` retained only current LB
+`0f347fd2033c`; `.42` retained only current LB `219fc9d9833b` after deleting one
+stale, lower-priority TCP/443 DNAT to `beaea8ee28cb` and gracefully stopping
+that duplicate. No live rule referenced a removed tuple. The two affected
+warpctl units remain intentionally stopped until the corrected Warp binary is
+deployed; the retained Docker LBs continue serving. Pinned client handshakes
+then passed on both `65.19.157.40` and `.42`: direct H3 in 74–105 ms,
+`h3dns` in 275–287 ms, and `h3dnspump` in 292–301 ms. H1 also reached both in
+about 0.25 seconds and returned the expected unauthenticated HTTP 403. Do not
+confuse these targets with the same suffixes in the `65.49.70.64/27` range.
+
+At the 2026-08-20 post-deployment verification checkpoint, edge-0, edge-1,
+edge-3, and edge-4 all ran the same new warpctl binary (SHA-256
+`8890e7146b6165c0a11a342b2a9c8b790a1591924a3515e5f65a9b1a916d97b3`).
+Every main Connect and LB unit was active with zero systemd restarts, and the
+deployment window contained no panic, deploy-failure, reconcile-failure,
+pool-occupied, or listener-readiness-failure log. The `.40` and `.42` workers
+successfully restarted under this binary.
+
+All 20 current Connect blocks returned HTTP 200 with
+`X-UR-Connect-Listeners-Ready: 1`, advertised exactly UDP 443, 4053, and 8053,
+and owned each corresponding allocated socket. Every current LB owned its
+allocated 443/4053/8053 sockets, and every reachable interface had exactly one
+public UDP/53 DNAT to its latest LB's logical 4053 target. Forced probes against
+all ten reachable public IPv4 interface addresses passed H1, direct H3,
+`h3dns`, and `h3dnspump`; the raw QUIC probes both transmitted and received and
+verified the exact selected public reply address and port. Connect accepts on
+the 4053 allocation proved that the DNS carriers used the new path rather than
+compatibility 8053.
+
+No Connect or LB block had more than the current generation plus one old
+graceful-drain generation, and some old Connect generations had already
+exited. This bounded two-generation shape is expected during deployment and is
+not the old orphan leak; treat a third running generation or unbounded growth
+as the regression signal.
+
+Two fleet exceptions remain. Edge-5 (`172.28.208.176`, public `.91`) was
+unreachable from management and from every other reachable edge; H1 and all
+three QUIC modes timed out, and Route53 health checks correctly excluded it.
+Only three of nine configured public IPv6 interfaces passed forced H1 and H3:
+edge-0 eno4, edge-1 eno3, and edge-4 eno4. Route53 health checks excluded the
+other six and authoritative AAAA answers contained only those three healthy
+addresses. Thus the eligible serving set is healthy, but the complete physical
+edge/interface inventory is not.
+
+The rollout also exposed a policy error independent of QUIC health: current LB
+chains directly publish both TCP and UDP service port 8053 on every reachable
+interface. UDP/4053 remains private and public UDP/53 correctly aliases 4053,
+but compatibility 8053 is required to remain private too. Warp's
+`publicPortServiceTargets()` currently suppresses only the present forward
+target, so changing `udp:53` from 8053 to 4053 made 8053 public again. A direct
+public 8053 rule is therefore a failed policy check even when transport probes
+pass.
+
+At the 2026-08-20 17:16Z follow-up, all ten reachable IPv4 interfaces again
+passed direct H3, `h3dns`, and `h3dnspump` with exact return tuples. All 20
+Connect status endpoints still returned HTTP 200, listener-ready 1, and the
+exact UDP listener set 443,4053,8053. The four reachable hosts still ran the
+same warpctl hash, all 30 current Connect/LB units had zero systemd restarts,
+and the recent lifecycle-error search was empty. Edge-5 and `.91` remained
+unreachable and had 0/16 successful Route53 health-check observations.
+
+The old generation drains were bounded but not complete. Process inspection
+found 4 LB masters across edge-0's 3 blocks, 6 across edge-1's 3, 4 across
+edge-3's 2, and 4 across edge-4's 2. Connect process counts were respectively
+5, 5, 6, and 7 for five blocks per host. This is still at most one predecessor
+per block and is shrinking from the earlier two-generation shape. Each host
+had an active `docker container stop -t 3600` owned by the correct warpctl
+worker (edge-4 had one LB and one Connect stop); remaining blocks wait behind
+the per-service host drain lock. That is the expected staggered one-hour drain,
+not an orphan or port-pool leak.
+
+IPv6 availability narrowed from three interfaces to two: edge-0 eno4
+(`2001:470:99:57:e643:4bff:fe23:a343`) began refusing H1 and timing out on H3.
+Its Route53 health check also changed to 0/16 successes, so authoritative AAAA
+selection excluded it. Edge-1 eno3 and edge-4 eno4 remained 16/16 healthy and
+passed the pinned H1/H3 probes. The eligible serving set therefore remained
+healthy despite the additional physical-interface failure.
+
+The 8053 policy fix now carries the immediately previous services version's
+forward target into generated LB units as `--privateports`. Runtime public-rule
+selection suppresses both current forward targets and those rolling private
+ports across TCP, UDP, IPv4, and IPv6. Regression coverage verifies the v20
+53-to-8053 to v21 53-to-4053 unit rendering and starts from stale public TCP
+and UDP rules for both 4053 and 8053, requiring their deletion while preserving
+only public UDP/53 to private 4053. The full Warp suite and the focused race
+suite pass. This source fix is not deployed yet: current units have no
+`--privateports`, and host journals show the old warpctl inserting public 8053
+DNAT. Direct public-8053 QUIC probes time out only because the upstream firewall
+blocks that port; regenerate the units and deploy the rebuilt warpctl to remove
+the host rules themselves.
+
+### 16.8 Incident-shaped playbook
+
+1. Resolve A/AAAA; map the selected public address to one edge/interface.
+2. Record desired connect/LB versions, then read actual containers and status.
+3. Compare the LB unit's baked `--portblocks`/`--forwardports`, container
+   `WARP_PORTS`, and nginx `listen` ports. An Exited(2) replacement means the
+   old generation still defines behavior.
+4. Prove nginx provenance and `proxy_protocol v2` from the running container.
+5. Derive every connect block's 443/4053/8053 migration allocation from current
+   `WARP_PORTS` and require each expected UDP socket in `ss`. Also require the
+   readiness headers to list those exact ports. An `Up` container is not this
+   check.
+6. Start one real H3 attempt pinned to the recorded public tuple. For WhoDis,
+   force each of `h3dns` and `h3dnspump`; a plain DNS query is insufficient.
+7. Read direct connect logs and PP/listener counters from the same UTC window.
+   Current PP rejects are per-datagram drops; if a legacy PP error escaped on
+   the listener's accept line, use the listener gauge/socket and later restart
+   log to determine whether that pre-fix allocation exited.
+8. Compare public DNAT counter deltas and the exact conntrack row. Require
+   `[ASSURED]`; capture the client-observed source tuple when testing SNAT.
+   A zero UDP/53 delta after confirmed raw sends is an ingress-firewall split,
+   while a missing rule despite correct args is an LB-activation split.
+   For direct H3, `[UNREPLIED]` plus LB `ECONNREFUSED` and rising `UdpNoPorts`
+   is a closed connect allocation (§16.5).
+9. Only after H3 accept + bidirectional tuple proof, move upward to auth,
+   DATAGRAM negotiation, client transport availability/election, and routed
+   traffic.
+
+2026-08-19 baseline: the old serving nginx 1.30.4 config used
+`proxy_protocol on` and connect logged both PP classes above. The PPv2-capable
+LB replacement first exited with `Missing host port for service port 8053`
+because `xops/main/ansible/run-edges.sh` had deployed stale systemd units.
+After regenerated units supplied UDP/8053 and `udp:53:8053`, the pinned nginx
+1.31.4 LB stayed up, connect logged repeated H3 accepts, and public IPv4
+UDP/443 flows reached `[ASSURED]`. The new edge-3 g4 counters then rose by
+thousands of received/sent H3 DATAGRAM messages with zero carrier errors,
+proving routed app traffic rather than handshake-only success. That sequence
+is the known-good recovery shape for direct H3. The DNS-carrier matrix and
+failure split are recorded in §16.6.

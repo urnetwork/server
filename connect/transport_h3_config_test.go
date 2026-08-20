@@ -81,7 +81,10 @@ func TestConnectQuicConfigEnablesPathMtuDiscovery(t *testing.T) {
 // The server binds the unprivileged post-DNAT port rather than public UDP/53.
 func TestDefaultConnectHandlerDnsListenerUsesInternalPort(t *testing.T) {
 	settings := DefaultConnectHandlerSettings()
-	if settings.ListenDnsPort != 8053 {
-		t.Fatalf("DNS-encoded QUIC listener port=%d want=8053", settings.ListenDnsPort)
+	if settings.ListenDnsPort != 4053 {
+		t.Fatalf("DNS-encoded QUIC listener port=%d want=4053", settings.ListenDnsPort)
+	}
+	if len(settings.ListenDnsCompatibilityPorts) != 1 || settings.ListenDnsCompatibilityPorts[0] != 8053 {
+		t.Fatalf("DNS-encoded QUIC compatibility ports=%v want=[8053]", settings.ListenDnsCompatibilityPorts)
 	}
 }

@@ -3,6 +3,7 @@ package connect
 import (
 	"bytes"
 	"container/heap"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mailgun/proxyproto"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // proxy protocol suppport from nginx to transports
@@ -73,15 +75,49 @@ func DefaultWarpPpSettings() *PpSettings {
 	return &PpSettings{
 		MaxPacketSize: 1500,
 		// **important** this must be > proxy_timeout set in the nginx stream
-		ProxyTimeout:      45 * time.Second,
-		MaxDiscardPackets: 10,
+		ProxyTimeout: 45 * time.Second,
 	}
 }
 
 type PpSettings struct {
-	MaxPacketSize     int
-	ProxyTimeout      time.Duration
-	MaxDiscardPackets int
+	MaxPacketSize int
+	ProxyTimeout  time.Duration
+	// DropObserver is an optional test/diagnostic hook. Production accounting
+	// always goes through ppDroppedPacketsCounter as well.
+	DropObserver func(reason string)
+}
+
+const (
+	ppDropMalformedHeader    = "malformed_header"
+	ppDropMissingHeader      = "missing_header"
+	ppDropProxyAddressFamily = "proxy_address_family"
+	ppDropTransportFamily    = "transport_family"
+	ppDropAddressFamily      = "address_family"
+)
+
+var ppDroppedPacketsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "pp_dropped_packets_total",
+		Help:      "UDP packets rejected by the Proxy Protocol socket before QUIC",
+	},
+	[]string{"reason"},
+)
+
+func init() {
+	// Bind the closed label set at startup so malformed traffic never performs
+	// first-use metric allocation on the packet path.
+	for _, reason := range []string{
+		ppDropMalformedHeader,
+		ppDropMissingHeader,
+		ppDropProxyAddressFamily,
+		ppDropTransportFamily,
+		ppDropAddressFamily,
+	} {
+		ppDroppedPacketsCounter.WithLabelValues(reason)
+	}
+	prometheus.MustRegister(ppDroppedPacketsCounter)
 }
 
 // implements `net.PacketConn`
@@ -111,13 +147,44 @@ func NewPpPacketConn(conn net.PacketConn, settings *PpSettings) *PpPacketConn {
 	}
 }
 
+func (self *PpPacketConn) drop(reason string) {
+	ppDroppedPacketsCounter.WithLabelValues(reason).Inc()
+	if self.settings.DropObserver != nil {
+		self.settings.DropObserver(reason)
+	}
+}
+
+func validPpUdpAddressFamily(source *net.UDPAddr, destination *net.UDPAddr) bool {
+	if source == nil || destination == nil || source.IP == nil || destination.IP == nil {
+		return false
+	}
+	sourceV4 := source.IP.To4() != nil
+	destinationV4 := destination.IP.To4() != nil
+	if sourceV4 != destinationV4 {
+		return false
+	}
+	if sourceV4 {
+		return true
+	}
+	return source.IP.To16() != nil && destination.IP.To16() != nil
+}
+
 func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	buffer := self.readBuffer
 
-	for range self.settings.MaxDiscardPackets + 1 {
+	// A validation failure is a property of one datagram, not of the shared
+	// socket. Never return it to quic-go: doing so terminates the listener and
+	// blackholes every client assigned to the block. Keep reading until a valid
+	// packet arrives or the underlying socket itself fails/closes.
+	for {
 		n, addr, err = self.conn.ReadFrom(buffer)
 		if err != nil {
 			return
+		}
+		proxyAddr, ok := addr.(*net.UDPAddr)
+		if !ok {
+			self.drop(ppDropProxyAddressFamily)
+			continue
 		}
 
 		// the packet may contain a proxy protocol header at any time
@@ -126,73 +193,76 @@ func (self *PpPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		// otherwise the header is discarded because we can't tell if header is from our proxy or the user
 		h, header, ppErr := parsePpHeaderPacket(buffer[0:n])
 		if ppErr != nil {
-			// not a pp packet
-			err = ppErr
-		} else {
-			err = func() error {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
+			self.drop(ppDropMalformedHeader)
+			continue
+		}
 
-				now := time.Now()
-				expireTime := now.Add(-self.settings.ProxyTimeout)
-				for 0 < self.proxyQueue.Len() && self.proxyQueue.PeekFirst().lastUpdateTime.Before(expireTime) {
-					self.proxyQueue.RemoveFirst()
+		var packetErr error
+		packetErr = func() error {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+
+			now := time.Now()
+			expireTime := now.Add(-self.settings.ProxyTimeout)
+			for 0 < self.proxyQueue.Len() && self.proxyQueue.PeekFirst().lastUpdateTime.Before(expireTime) {
+				self.proxyQueue.RemoveFirst()
+			}
+
+			s := self.proxyQueue.GetByProxyAddr(proxyAddr.AddrPort())
+			if s == nil {
+				if header == nil {
+					return errors.New(ppDropMissingHeader)
 				}
 
-				s := self.proxyQueue.GetByProxyAddr(addr.(*net.UDPAddr).AddrPort())
-				if s == nil {
-					if header == nil {
-						// not a pp packet
-						return fmt.Errorf("proxy protocol header required but not found")
-					}
+				realAddr, ok := header.Source.(*net.UDPAddr)
+				if !ok {
+					return errors.New(ppDropTransportFamily)
+				}
+				destinationAddr, ok := header.Destination.(*net.UDPAddr)
+				if !ok {
+					return errors.New(ppDropTransportFamily)
+				}
+				if !validPpUdpAddressFamily(realAddr, destinationAddr) {
+					return errors.New(ppDropAddressFamily)
+				}
 
-					realAddr, ok := header.Source.(*net.UDPAddr)
-					if !ok {
-						return fmt.Errorf("Proxy protocol header must be UDP")
-					}
+				realAddrPort := realAddr.AddrPort()
+				s = &proxyState{
+					proxyAddr:      proxyAddr,
+					proxyAddrPort:  proxyAddr.AddrPort(),
+					realAddr:       realAddr,
+					realAddrPort:   realAddrPort,
+					lastUpdateTime: now,
+				}
+				self.proxyQueue.Add(s)
 
-					realAddrPort := realAddr.AddrPort()
-					s = &proxyState{
-						proxyAddr:      addr,
-						proxyAddrPort:  addr.(*net.UDPAddr).AddrPort(),
-						realAddr:       realAddr,
-						realAddrPort:   realAddrPort,
-						lastUpdateTime: now,
-					}
-					self.proxyQueue.Add(s)
+				buffer = buffer[h:n]
+				n -= h
+			} else {
+				self.proxyQueue.Update(s, now)
 
+				// *important* the header can be either from our proxy or the user
+				//             do not use or store the header value. Just discard it.
+				if 0 < h {
 					buffer = buffer[h:n]
 					n -= h
-				} else {
-					self.proxyQueue.Update(s, now)
-
-					// *important* the header can be either from our proxy or the user
-					//             do not use or store the header value. Just discard it.
-					if 0 < h {
-						buffer = buffer[h:n]
-						n -= h
-					}
-					// else this is the common case - no proxy protocol
-					// note if the input buffer was over-allocated,
-					// we could ready directly into the output buffer for the common case
 				}
+				// else this is the common case - no proxy protocol
+				// note if the input buffer was over-allocated,
+				// we could ready directly into the output buffer for the common case
+			}
 
-				addr = s.realAddr
-				return nil
-			}()
+			addr = s.realAddr
+			return nil
+		}()
+		if packetErr != nil {
+			self.drop(packetErr.Error())
+			continue
 		}
 
-		if err == nil {
-			break
-		}
+		n = copy(p, buffer[:n])
+		return n, addr, nil
 	}
-
-	if err != nil {
-		return
-	}
-
-	copy(p[0:n], buffer[0:n])
-	return
 }
 
 func (self *PpPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
