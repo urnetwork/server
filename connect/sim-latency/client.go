@@ -608,17 +608,7 @@ func (self *ClientDriver) newWarmClient(warmupCtx context.Context, identity Clie
 	extraHeaders.Set("X-UR-Forwarded-For", self.clientForwardedFor(identity.ClientId))
 
 	specLocationId := self.locationId
-	multiClientSettings := connect.DefaultMultiClientSettings()
-	multiClientSettings.TcpSequenceIdleTimeout = warmClientTCPIdleTimeout
-	if windowSize := self.config.Clients.QualityWindowSize; 0 < windowSize {
-		quality := multiClientSettings.WindowSizes[connect.WindowTypeQuality]
-		quality.WindowSizeMin = windowSize
-		quality.WindowSizeMax = windowSize
-		quality.WindowSizeHardMax = windowSize
-		quality.FixedWindowSize = windowSize
-		quality.WindowSizeReconnectScale = 1
-		multiClientSettings.WindowSizes[connect.WindowTypeQuality] = quality
-	}
+	multiClientSettings := newWarmMultiClientSettings(self.config.Clients.QualityWindowSize)
 	simClient, err := sdk.NewSimClient(self.ctx, &sdk.SimClientConfig{
 		ApiUrl:            self.apiUrl,
 		PlatformUrl:       self.wsUrls[poolIndex%len(self.wsUrls)],
@@ -651,6 +641,31 @@ func (self *ClientDriver) newWarmClient(warmupCtx context.Context, identity Clie
 		return nil
 	}
 	return &pooledClient{simClient: simClient, httpClient: httpClient, label: identity.ClientId.String()}
+}
+
+// Builds the simulator's client policy. An explicit calibration size fixes the
+// active profile too: the fake site uses an ephemeral HTTP port, which auto
+// mode otherwise routes through the speed window while readiness inspects the
+// unused quality window. Zero retains the production auto policy.
+func newWarmMultiClientSettings(qualityWindowSize int) *connect.MultiClientSettings {
+	multiClientSettings := connect.DefaultMultiClientSettings()
+	multiClientSettings.TcpSequenceIdleTimeout = warmClientTCPIdleTimeout
+	if qualityWindowSize <= 0 {
+		return multiClientSettings
+	}
+
+	qualityWindow := multiClientSettings.WindowSizes[connect.WindowTypeQuality]
+	qualityWindow.WindowSizeMin = qualityWindowSize
+	qualityWindow.WindowSizeMax = qualityWindowSize
+	qualityWindow.WindowSizeHardMax = qualityWindowSize
+	qualityWindow.FixedWindowSize = qualityWindowSize
+	qualityWindow.WindowSizeReconnectScale = 1
+	multiClientSettings.WindowSizes[connect.WindowTypeQuality] = qualityWindow
+	multiClientSettings.DefaultPerformanceProfile = &connect.PerformanceProfile{
+		WindowType: connect.WindowTypeQuality,
+		WindowSize: qualityWindow,
+	}
+	return multiClientSettings
 }
 
 // Keeps every measured HTTP/1 lane idle and reusable for the lifetime of its

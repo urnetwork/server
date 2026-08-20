@@ -104,6 +104,38 @@ func TestWarmClientPoolDeadlineAcceptsCompletePool(t *testing.T) {
 	}
 }
 
+func TestWarmMultiClientSettingsPinsExplicitQualityWindow(t *testing.T) {
+	const qualityWindowSize = 2
+	settings := newWarmMultiClientSettings(qualityWindowSize)
+	windowType, windowSize, fixed := settings.DefaultPerformanceProfile.FixedWindow()
+	if !fixed {
+		t.Fatal("explicit calibration window left simulator routing in auto mode")
+	}
+	if windowType != connect.WindowTypeQuality {
+		t.Fatalf("fixed window type = %v, want %v", windowType, connect.WindowTypeQuality)
+	}
+	if windowSize.WindowSizeMin != qualityWindowSize ||
+		windowSize.WindowSizeMax != qualityWindowSize ||
+		windowSize.WindowSizeHardMax != qualityWindowSize ||
+		windowSize.FixedWindowSize != qualityWindowSize {
+		t.Fatalf("fixed quality window = %+v, want every bound %d", windowSize, qualityWindowSize)
+	}
+	if got := settings.WindowSizes[connect.WindowTypeQuality]; got != windowSize {
+		t.Fatalf("quality map window = %+v, want fixed profile window %+v", got, windowSize)
+	}
+}
+
+func TestWarmMultiClientSettingsPreservesProductionAutoPolicy(t *testing.T) {
+	settings := newWarmMultiClientSettings(0)
+	if _, _, fixed := settings.DefaultPerformanceProfile.FixedWindow(); fixed {
+		t.Fatal("zero calibration window unexpectedly fixed simulator routing")
+	}
+	want := connect.DefaultMultiClientSettings().WindowSizes[connect.WindowTypeQuality]
+	if got := settings.WindowSizes[connect.WindowTypeQuality]; got != want {
+		t.Fatalf("adaptive quality window = %+v, want production default %+v", got, want)
+	}
+}
+
 func TestBuildWarmClientPoolDeadlineStopsQueuedBuilders(t *testing.T) {
 	pool := make([]ClientIdentity, warmupConcurrency+1)
 	for index := range pool {
