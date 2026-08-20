@@ -110,7 +110,7 @@ type ClientsConfig struct {
 	// browser-like parallel connections per page crawl
 	ConnectionsPerCrawl int `yaml:"connections_per_crawl"`
 	// Optional fixed quality-window size used only for frontier calibration.
-	// Zero preserves the production client's adaptive 2..6 quality window.
+	// Zero preserves the production client's adaptive quality-window policy.
 	QualityWindowSize int `yaml:"quality_window_size,omitempty"`
 }
 

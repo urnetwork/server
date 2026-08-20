@@ -125,6 +125,14 @@ const (
 	// deliberately small so an unhealthy exchange still fails closed promptly.
 	warmupAttempts   = 3
 	warmupRetryDelay = 2 * time.Second
+	// A parallel cohort can legitimately take longer than the old single-flow
+	// probe under impairment, while the outer minute still bounds recovery.
+	warmupCohortTimeout = 30 * time.Second
+
+	// Warmed HTTP connections are owned by the evaluation context and closed
+	// explicitly. Keep their underlying TCP flows beyond any qualification
+	// window so a low arrival rate cannot turn the last pool slots cold again.
+	warmClientTCPIdleTimeout = 24 * time.Hour
 
 	resultCSVHeader = "t_start_ms,client,path,depth,status,bytes,ttfb_ms,total_ms,bytes_per_s"
 )
@@ -283,8 +291,28 @@ func (self *ClientDriver) Warmup(ctx context.Context) error {
 		warmupRetryDelay,
 		self.newWarmClient,
 	)
-	logf("warm client pool ready: %d/%d clients", len(self.clients), len(self.pool))
-	return warmClientPoolError(ctx, len(self.clients), len(self.pool))
+	if err := warmClientPoolError(ctx, len(self.clients), len(self.pool)); err != nil {
+		logf("warm client pool incomplete: %d/%d clients", len(self.clients), len(self.pool))
+		return err
+	}
+	logf("warm client pool built: %d/%d clients; validating the measurement boundary", len(self.clients), len(self.pool))
+	validated := validateWarmClientPool(
+		ctx,
+		self.clients,
+		warmupAttempts,
+		warmupRetryDelay,
+		func(validateCtx context.Context, client *pooledClient, _ int) bool {
+			return self.warmupTunnel(validateCtx, client.simClient, client.httpClient)
+		},
+		func(client *pooledClient) bool {
+			return client != nil && client.simClient != nil && qualityWindowReady(
+				client.simClient.MultiClient().Exits(),
+				self.qualityWindowSize(),
+			)
+		},
+	)
+	logf("warm client pool ready: %d/%d clients", validated, len(self.pool))
+	return warmClientPoolError(ctx, validated, len(self.pool))
 }
 
 // A deadline racing with the final successful builder must not invalidate a
@@ -432,6 +460,86 @@ func buildWarmClientPool(
 	return clients
 }
 
+// Rechecks every established client after pool construction, when the oldest
+// clients have been idle the longest. Successful slots retain their live HTTP
+// lanes; only a slot that failed its request cohort or lost its complete
+// quality window is retried.
+func validateWarmClientPool(
+	ctx context.Context,
+	clients []*pooledClient,
+	attempts int,
+	retryDelay time.Duration,
+	validate func(context.Context, *pooledClient, int) bool,
+	ready func(*pooledClient) bool,
+) int {
+	if attempts < 1 {
+		attempts = 1
+	}
+	validated := make([]bool, len(clients))
+	sem := make(chan struct{}, warmupConcurrency)
+
+	for attempt := 1; attempt <= attempts && ctx.Err() == nil; attempt++ {
+		var wg sync.WaitGroup
+		for index, client := range clients {
+			if validated[index] {
+				continue
+			}
+			index := index
+			client := client
+			wg.Add(1)
+			go server.HandleError(func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					return
+				}
+				if ctx.Err() == nil && client != nil {
+					validated[index] = validate(ctx, client, index)
+				}
+			})
+		}
+		wg.Wait()
+
+		validatedCount := 0
+		for index, client := range clients {
+			// Readiness is a level, not merely the edge observed when the
+			// request cohort completed. Rescan it after the whole batch so a
+			// window lost during validation cannot cross into measurement.
+			if validated[index] && !ready(client) {
+				validated[index] = false
+			}
+			if validated[index] {
+				validatedCount++
+			}
+		}
+		if validatedCount == len(clients) || attempt == attempts || ctx.Err() != nil {
+			return validatedCount
+		}
+		logf(
+			"warm client validation attempt %d/%d left %d/%d unready; retrying only unready clients",
+			attempt,
+			attempts,
+			len(clients)-validatedCount,
+			len(clients),
+		)
+		select {
+		case <-ctx.Done():
+			return validatedCount
+		case <-time.After(retryDelay):
+		}
+	}
+
+	validatedCount := 0
+	for _, ok := range validated {
+		if ok {
+			validatedCount++
+		}
+	}
+	return validatedCount
+}
+
 // StopArrivals closes the admission boundary exactly once. It deliberately
 // does not cancel the driver context: Run drains all crawls admitted before
 // this boundary using their original request deadlines.
@@ -501,6 +609,7 @@ func (self *ClientDriver) newWarmClient(warmupCtx context.Context, identity Clie
 
 	specLocationId := self.locationId
 	multiClientSettings := connect.DefaultMultiClientSettings()
+	multiClientSettings.TcpSequenceIdleTimeout = warmClientTCPIdleTimeout
 	if windowSize := self.config.Clients.QualityWindowSize; 0 < windowSize {
 		quality := multiClientSettings.WindowSizes[connect.WindowTypeQuality]
 		quality.WindowSizeMin = windowSize
@@ -531,21 +640,12 @@ func (self *ClientDriver) newWarmClient(warmupCtx context.Context, identity Clie
 		return nil
 	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			DialContext:         simClient.DialContext,
-			MaxIdleConns:        4 * self.config.Clients.ConnectionsPerCrawl,
-			MaxConnsPerHost:     4 * self.config.Clients.ConnectionsPerCrawl,
-			IdleConnTimeout:     60 * time.Second,
-			DisableCompression:  true,
-			TLSHandshakeTimeout: 10 * time.Second,
-		},
-	}
+	httpClient := newWarmHTTPClient(simClient.DialContext, self.config.Clients.ConnectionsPerCrawl)
 
-	// establish the provider path once (a single dial-until-ready, not a retry
-	// storm across many clients), so measured crawls reflect steady-state
-	// request latency rather than the one-time cold start.
-	if !self.warmupTunnel(warmupCtx, httpClient) {
+	// Establish the same parallel HTTP/1 lane cohort a measured crawl uses.
+	// One successful request is insufficient: it leaves the other lanes cold.
+	if !self.warmupTunnel(warmupCtx, simClient, httpClient) {
+		httpClient.CloseIdleConnections()
 		simClient.Close()
 		logf("client %s did not establish a provider path", identity.ClientId)
 		return nil
@@ -553,40 +653,136 @@ func (self *ClientDriver) newWarmClient(warmupCtx context.Context, identity Clie
 	return &pooledClient{simClient: simClient, httpClient: httpClient, label: identity.ClientId.String()}
 }
 
-// warmupTunnel establishes a provider path by dialing the site root until it
-// succeeds or the deadline passes. Each attempt has its own short timeout so a
-// slow/failed attempt does not consume the whole budget — the multi-client
-// needs several tries to discover, connect, and contract a provider.
-func (self *ClientDriver) warmupTunnel(ctx context.Context, httpClient *http.Client) bool {
-	deadline := time.Now().Add(60 * time.Second)
-	requestUrl := fmt.Sprintf("http://%s/", self.siteAddr)
-	attempt := 0
-	for time.Now().Before(deadline) && ctx.Err() == nil {
-		attempt += 1
-		ok := func() bool {
-			attemptCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-			defer cancel()
-			req, err := http.NewRequestWithContext(attemptCtx, "GET", requestUrl, nil)
+// Keeps every measured HTTP/1 lane idle and reusable for the lifetime of its
+// pool client. MaxIdleConns alone is not sufficient: without the per-host
+// value, net/http silently retains only two of the six crawl connections.
+func newWarmHTTPClient(
+	dialContext func(context.Context, string, string) (net.Conn, error),
+	connectionsPerCrawl int,
+) *http.Client {
+	if connectionsPerCrawl < 1 {
+		connectionsPerCrawl = 1
+	}
+	maxConnections := 4 * connectionsPerCrawl
+	transport := &http.Transport{
+		DialContext:           dialContext,
+		MaxIdleConns:          maxConnections,
+		MaxIdleConnsPerHost:   maxConnections,
+		MaxConnsPerHost:       maxConnections,
+		IdleConnTimeout:       0,
+		DisableCompression:    true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 0,
+	}
+	return &http.Client{Transport: transport}
+}
+
+// Requires distinct, usable quality exits. A warning, quarantine, completed,
+// or peer-only channel cannot carry a new measured public-network flow.
+func qualityWindowReady(exits []*connect.ExitInfo, required int) bool {
+	if required < 1 {
+		required = 1
+	}
+	readyClientIds := map[connect.Id]bool{}
+	for _, exit := range exits {
+		if exit == nil || exit.WindowType != connect.WindowTypeQuality ||
+			exit.Warning || exit.Quarantined || exit.Done || exit.P2pOnly {
+			continue
+		}
+		readyClientIds[exit.ClientId] = true
+	}
+	return required <= len(readyClientIds)
+}
+
+// Exercises all lanes concurrently and accepts the cohort only after every
+// response is complete. Serial requests could all reuse one healthy flow and
+// leave the parallel crawl path untested.
+func warmupRequestCohort(
+	ctx context.Context,
+	httpClient *http.Client,
+	requestUrl string,
+	requestCount int,
+) bool {
+	if requestCount < 1 {
+		requestCount = 1
+	}
+	complete := make([]bool, requestCount)
+	var wg sync.WaitGroup
+	for index := 0; index < requestCount; index++ {
+		index := index
+		wg.Add(1)
+		go server.HandleError(func() {
+			defer wg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			req, err := http.NewRequestWithContext(ctx, "GET", requestUrl, nil)
 			if err != nil {
-				return false
+				return
 			}
 			response, err := httpClient.Do(req)
 			if err != nil {
-				return false
+				return
 			}
 			result, err := readSiteResponse(response)
-			return err == nil && result.complete
-		}()
-		if ok {
-			return true
+			complete[index] = err == nil && result.complete
+		})
+	}
+	wg.Wait()
+	for _, ok := range complete {
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// Waits for the complete quality window, then proves every measured lane with
+// a bounded request cohort. The post-request readiness check closes the race
+// where a provider starts draining while its last response is in flight.
+func (self *ClientDriver) warmupTunnel(
+	ctx context.Context,
+	simClient *sdk.SimClient,
+	httpClient *http.Client,
+) bool {
+	warmupCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	requestUrl := fmt.Sprintf("http://%s/", self.siteAddr)
+	qualityWindowSize := self.qualityWindowSize()
+	for warmupCtx.Err() == nil {
+		if qualityWindowReady(simClient.MultiClient().Exits(), qualityWindowSize) {
+			attemptCtx, cancelAttempt := context.WithTimeout(warmupCtx, warmupCohortTimeout)
+			complete := warmupRequestCohort(
+				attemptCtx,
+				httpClient,
+				requestUrl,
+				self.config.Clients.ConnectionsPerCrawl,
+			)
+			cancelAttempt()
+			if complete && qualityWindowReady(simClient.MultiClient().Exits(), qualityWindowSize) {
+				return true
+			}
 		}
 		select {
-		case <-ctx.Done():
+		case <-warmupCtx.Done():
 			return false
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 	return false
+}
+
+// Uses the fixed official size when present and otherwise the production
+// quality-window floor cloned into each simulator client.
+func (self *ClientDriver) qualityWindowSize() int {
+	if 0 < self.config.Clients.QualityWindowSize {
+		return self.config.Clients.QualityWindowSize
+	}
+	windowSize := connect.DefaultMultiClientSettings().WindowSizes[connect.WindowTypeQuality].WindowSizeMin
+	if windowSize < 1 {
+		return 1
+	}
+	return windowSize
 }
 
 // crawl fetches "/" then walks discovered suburls with a bounded worker pool.
@@ -798,6 +994,9 @@ func (self *ClientDriver) flush() error {
 func (self *ClientDriver) Close() {
 	self.close.Do(func() {
 		for _, client := range self.clients {
+			if client != nil && client.httpClient != nil {
+				client.httpClient.CloseIdleConnections()
+			}
 			if client != nil && client.simClient != nil {
 				client.simClient.Close()
 			}

@@ -1,6 +1,6 @@
 # sim-latency finalization status
 
-Status date: 2026-08-17
+Status date: 2026-08-20
 
 Topology decision: production qualification uses one authoritative evaluator
 host. A second image-identical host is not a launch gate. All containment,
@@ -18,10 +18,16 @@ completed its baseline and A/A executions but failed baseline scoring because
 replicate 7 had a G5 stability finding; the then-current failure cleanup erased
 its tmpfs evidence, so the entire attempt is excluded. The scorer now reports
 sanitized finding codes and the evaluator retains sanitized failed evidence,
-but this lost finding cannot be reconstructed. The source freeze and rebuilt
-20-run clock are paused at the user's request until pending main-branch fixes
-are ready. Neither historical result substitutes for production-host
-calibration or reference separability.
+but this lost finding cannot be reconstructed. The pending main-branch changes
+have since landed and the repositories were synchronized. A new frontier pass
+then exposed a separate measurement-boundary instability: at q4/r6, identical
+seed/config pristine and no-op runs produced 95.170% and 98.768% success. Their
+setup paths took different amounts of time, so provider churn/degraded schedules
+entered measurement at different phases; the HTTP warm-up also retained only
+two of six parallel lanes by default. Both root causes are now corrected and
+deterministically regression-tested, but the post-fix frontier replay remains
+the next calibration gate. Neither historical result substitutes for the
+post-fix production-host calibration or reference separability.
 The integration is
 **not Apex launch-finalized**: this checkout has neither the accepted
 production-hardware calibration nor the root-owned authoritative-host evaluator
@@ -59,6 +65,16 @@ remain explicit rather than being replaced with workstation evidence.
   simulated egress-health/location evidence required by fail-closed selection.
 - Deterministic warm-client fixture order and exchange-host assignment, bounded
   retries of only missing identities, and fail-closed CSV flush/marker behavior.
+- The warm-client measurement boundary now proves and retains every parallel
+  HTTP/1 lane, requires a complete usable quality window, keeps simulator-owned
+  TCP flows alive until explicit teardown, and revalidates the entire pool after
+  construction. Provider churn and degraded-regime schedules begin only at the
+  authenticated measurement boundary, so variable pool-build time cannot
+  phase-shift identical seeded runs. Deterministic barrier/schedule tests pass
+  100 iterations, the complete package passes normally and under `-race`, both
+  database-backed provisioning fixtures pass 10 iterations, and `go vet`
+  passes. The rejected pre-fix q4/r6 evaluator retained 36 sanitized artifacts;
+  every manifest hash reverified and cleanup left zero job objects.
 - The resident-contract lifecycle race found during bring-up is fixed:
   cancellation can no longer turn a synchronous cache miss into a frozen G5
   `Unexpected error: context canceled`. Selective lifecycle-error recovery is

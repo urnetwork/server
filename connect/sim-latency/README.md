@@ -332,9 +332,14 @@ Or use the convenience wrapper that sets the local env:
 
 Before the measured window, the run goes through a **warm-up** that brings the
 market to a stable state: the fleet connects, providers are latency/speed
-tested, reliability scores are established, and the selectable set is exported.
-Only after warm-up do clients start, so every measured request runs against a
-settled market.
+tested, reliability scores are established, the selectable set is exported, and
+the complete client pool proves every parallel HTTP lane. Providers carry their
+base network impairment during this setup but remain connected and in their base
+regime. Seeded churn and degraded-regime schedules start at the authenticated
+measurement boundary. Variable client-pool construction time therefore cannot
+phase-shift an otherwise identical workload. Only after the complete pool has
+been revalidated do measured arrivals start, so every request runs against a
+settled market with warm reusable lanes.
 
 Why warm-up is needed: `FindProviders2` gates on the real reliability weights,
 and the binding one is the **12-hour lookback ≥ 0.7** — a weight is
@@ -351,6 +356,7 @@ The warm-up phases and the knobs that make it **as fast as possible**:
 | prewarm | establish reliability scores for the connected fleet (instant) | `--prewarm 13h` |
 | tests | latency + synthetic speed test each provider | `--test-timeout 3s`, `--announce-timeout 2s` |
 | settle | let the pipeline propagate scores → selectable set | `--settle 1m`, `--pipeline-interval 10s` |
+| client pool | establish and revalidate every quality exit and parallel HTTP lane | `--client-warmup-timeout 20m` |
 
 `--prewarm` writes the final reliability scores directly for every connected
 provider using its seeded uptime duty cycle, rather than replaying ~8.4h of
@@ -610,9 +616,12 @@ connect service measures latency (ws ping RTT) and speed (timed transfer) over
 that same connection, the server-side scores reflect the impairment with no fake
 reporting, and the rate limiter's backpressure produces realistic queuing under
 load. A fleet control loop modulates each provider between a base and a degraded
-regime over the run. The model is intentionally cheap (inline, no per-connection
-goroutine) so 100k connections are affordable — it trades emulation fidelity for
-scale, which is the right call for comparing algorithms.
+regime during the measured run. Its seeded churn and regime schedules are
+anchored to the measurement boundary, not fleet construction, while base
+impairment remains active during warm-up. The model is intentionally cheap
+(inline, no per-connection goroutine) so 100k connections are affordable — it
+trades emulation fidelity for scale, which is the right call for comparing
+algorithms.
 
 ## FindProviders2 stats samples
 
@@ -673,8 +682,9 @@ sim-latency run
  ├─ provision identities, simulated egress evidence, client pool, and minted jwts
  ├─ services: N exchange hosts + connect handlers + api + reliability pipeline loop
  ├─ fake site (deterministic loading tree)
- ├─ fleet: providers connect (ramp), impaired + churning (in-process or sharded)
- └─ client driver: warm pool of SimClients (built during warm-up), then Poisson
+ ├─ fleet: providers connect + settle at base impairment; measurement starts
+ │          seeded churn + degraded regimes (in-process or sharded)
+ └─ client driver: revalidated warm pool with every crawl lane, then Poisson
                     arrivals → crawl through a pooled client → tun → provider
                     egress → site → per-request CSV (stdout)
 ```

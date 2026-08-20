@@ -67,10 +67,16 @@ type Fleet struct {
 	networkAdminUsers map[string]string
 
 	providers []*simProvider
-	done      chan struct{}
-	closeOnce sync.Once
-	errLock   sync.Mutex
-	runErr    error
+	// Provider churn and degraded-regime changes begin only after the parent
+	// crosses the measurement boundary. Ramp still connects the fleet during
+	// setup, but variable client-warmup duration cannot advance the seeded
+	// workload to a different phase in an otherwise identical run.
+	dynamicsStart   chan chan struct{}
+	dynamicsStarted bool
+	done            chan struct{}
+	closeOnce       sync.Once
+	errLock         sync.Mutex
+	runErr          error
 }
 
 // NewFleet builds and starts the providers for the given entries. Providers
@@ -95,6 +101,7 @@ func NewFleet(
 		wsPorts:           wsPorts,
 		rampDuration:      rampDuration,
 		providers:         make([]*simProvider, 0, len(entries)),
+		dynamicsStart:     make(chan chan struct{}),
 		done:              make(chan struct{}),
 		networkAdminUsers: firstNetworkAdminUsers(config.Fleet),
 	}
@@ -109,7 +116,6 @@ func NewFleet(
 		// stagger the first connect uniformly across the ramp window
 		sp.control = newRng(entry.Seed)
 		sp.nextChurn = now.Add(time.Duration(sp.control.float64() * float64(self.rampDuration)))
-		sp.nextRegime = now.Add(self.regimeDwell(sp, false))
 		self.providers = append(self.providers, sp)
 	}
 
@@ -275,6 +281,11 @@ func (self *Fleet) run() {
 		case <-self.ctx.Done():
 			self.closeAll()
 			return
+		case started := <-self.dynamicsStart:
+			if !self.dynamicsStarted {
+				self.startDynamicsAt(server.NowUtc())
+			}
+			close(started)
 		case <-ticker.C:
 			self.tick()
 		}
@@ -285,29 +296,111 @@ func (self *Fleet) tick() {
 	now := server.NowUtc()
 	connectedCount := 0
 	for _, sp := range self.providers {
-		if !now.Before(sp.nextChurn) {
-			sp.connected = !sp.connected
+		if self.advanceProviderState(sp, now) {
 			sp.provider.SetConnected(sp.connected)
-			if sp.connected {
-				sp.nextChurn = now.Add(secondsDur(sp.entry.UptimeSeconds, sp.control))
-			} else {
-				sp.nextChurn = now.Add(secondsDur(sp.entry.DowntimeSeconds, sp.control))
-			}
-		}
-		if !now.Before(sp.nextRegime) {
-			sp.inDegraded = !sp.inDegraded
-			if sp.inDegraded {
-				sp.params.Store(sp.degraded)
-			} else {
-				sp.params.Store(sp.base)
-			}
-			sp.nextRegime = now.Add(self.regimeDwell(sp, sp.inDegraded))
 		}
 		if sp.connected {
 			connectedCount += 1
 		}
 	}
 	logf("fleet tick: %d/%d providers connected", connectedCount, len(self.providers))
+}
+
+// Applies one control-loop tick. Before measurement it performs only each
+// provider's one-way ramp transition. Once dynamics start, it advances churn
+// and degraded regimes from the measurement-anchored seeded schedule.
+func (self *Fleet) advanceProviderState(sp *simProvider, now time.Time) bool {
+	wasConnected := sp.connected
+	if !self.dynamicsStarted {
+		if !sp.connected && !now.Before(sp.nextChurn) {
+			sp.connected = true
+			sp.nextChurn = time.Time{}
+		}
+		return wasConnected != sp.connected
+	}
+
+	if !now.Before(sp.nextChurn) {
+		sp.connected = !sp.connected
+		if sp.connected {
+			sp.nextChurn = now.Add(secondsDur(sp.entry.UptimeSeconds, sp.control))
+		} else {
+			sp.nextChurn = now.Add(secondsDur(sp.entry.DowntimeSeconds, sp.control))
+		}
+	}
+	if !sp.nextRegime.IsZero() && !now.Before(sp.nextRegime) {
+		sp.inDegraded = !sp.inDegraded
+		if sp.inDegraded {
+			sp.params.Store(sp.degraded)
+		} else {
+			sp.params.Store(sp.base)
+		}
+		sp.nextRegime = now.Add(self.regimeDwell(sp, sp.inDegraded))
+	}
+	return wasConnected != sp.connected
+}
+
+// Anchors seeded churn and degradation to measurement rather than fleet
+// construction. Initial degradation is sampled from its stationary fraction,
+// with a uniform residual dwell so providers do not change regime in lockstep.
+func (self *Fleet) startDynamicsAt(now time.Time) {
+	self.dynamicsStarted = true
+	for _, sp := range self.providers {
+		if !sp.connected {
+			sp.connected = true
+			sp.provider.SetConnected(true)
+		}
+		sp.nextChurn = now.Add(secondsDur(sp.entry.UptimeSeconds, sp.control))
+
+		degradedFraction := sp.entry.DegradedFraction
+		if degradedFraction <= 0 {
+			sp.inDegraded = false
+			sp.params.Store(sp.base)
+			sp.nextRegime = time.Time{}
+			continue
+		}
+		if 0.99 < degradedFraction {
+			degradedFraction = 0.99
+		}
+		sp.inDegraded = sp.control.float64() < degradedFraction
+		if sp.inDegraded {
+			sp.params.Store(sp.degraded)
+		} else {
+			sp.params.Store(sp.base)
+		}
+		regimeRemaining := time.Duration(
+			sp.control.float64() * float64(self.regimeDwell(sp, sp.inDegraded)),
+		)
+		if regimeRemaining < time.Second {
+			regimeRemaining = time.Second
+		}
+		sp.nextRegime = now.Add(regimeRemaining)
+	}
+	logf("provider dynamics started at the measurement boundary")
+}
+
+// Starts measurement dynamics exactly once and waits for the fleet control
+// goroutine to apply the boundary. Repeated requests are acknowledged without
+// drawing another seeded schedule.
+func (self *Fleet) StartDynamics(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("provider dynamics context is nil")
+	}
+	started := make(chan struct{})
+	select {
+	case self.dynamicsStart <- started:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-self.done:
+		return fmt.Errorf("provider fleet stopped before dynamics started")
+	}
+	select {
+	case <-started:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-self.done:
+		return fmt.Errorf("provider fleet stopped while dynamics started")
+	}
 }
 
 // regimeDwell returns how long a provider stays in the given regime, so the

@@ -499,6 +499,9 @@ func Run(options *RunOptions) (retErr error) {
 	}
 
 	// client driver, measured window
+	if err := startProviderDynamics(ctx, fleet, fleetProcs); err != nil {
+		return incompleteError("provider_dynamics_start_failed", "measurement setup", err)
+	}
 	providerEgressStart, err = providerEgressSnapshot(fleet, fleetProcs)
 	if err != nil {
 		return incompleteError("accounting_start_failed", "measurement setup", err)
@@ -888,29 +891,40 @@ func logRunSummary(stats *RunStats) {
 }
 
 const fleetAccountingSnapshotCommand = "snapshot"
+const fleetDynamicsStartCommand = "start-dynamics"
 const fleetAccountingSnapshotTimeout = 5 * time.Second
 
-// Serves a private parent/child pipe used only for measurement-boundary
-// snapshots. A request never resets counters, so a retry cannot double count.
+// Serves the private parent/child measurement-control pipe. Snapshot never
+// resets counters, and repeated dynamics starts are idempotent, so retrying a
+// command cannot redraw workload state or double count bytes.
 func serveFleetAccounting(
 	commandReader io.Reader,
 	responseWriter io.Writer,
 	snapshot func() int64,
+	startDynamics func() error,
 ) error {
-	if commandReader == nil || responseWriter == nil || snapshot == nil {
+	if commandReader == nil || responseWriter == nil || snapshot == nil || startDynamics == nil {
 		return errors.New("fleet accounting protocol is incomplete")
 	}
 	scanner := bufio.NewScanner(commandReader)
 	writer := bufio.NewWriter(responseWriter)
 	for scanner.Scan() {
-		if scanner.Text() != fleetAccountingSnapshotCommand {
+		var response int64
+		switch scanner.Text() {
+		case fleetAccountingSnapshotCommand:
+			response = snapshot()
+			if response < 0 {
+				return errors.New("fleet accounting counter is negative")
+			}
+		case fleetDynamicsStartCommand:
+			if err := startDynamics(); err != nil {
+				return fmt.Errorf("start fleet dynamics: %w", err)
+			}
+			response = 0
+		default:
 			return fmt.Errorf("unknown fleet accounting command %q", scanner.Text())
 		}
-		byteCount := snapshot()
-		if byteCount < 0 {
-			return errors.New("fleet accounting counter is negative")
-		}
-		if _, err := fmt.Fprintf(writer, "%d\n", byteCount); err != nil {
+		if _, err := fmt.Fprintf(writer, "%d\n", response); err != nil {
 			return err
 		}
 		if err := writer.Flush(); err != nil {
@@ -950,7 +964,12 @@ func startFleetAccountingServer(
 		defer close(done)
 		defer commandFile.Close()
 		defer responseFile.Close()
-		err := serveFleetAccounting(commandFile, responseFile, fleet.ProviderEgressByteCount)
+		err := serveFleetAccounting(
+			commandFile,
+			responseFile,
+			fleet.ProviderEgressByteCount,
+			func() error { return fleet.StartDynamics(ctx) },
+		)
 		if errors.Is(err, io.EOF) || (err == nil && ctx.Err() != nil) {
 			err = nil
 		}
@@ -1069,6 +1088,48 @@ func providerEgressSnapshot(fleet *Fleet, procs []*fleetProcess) (int64, error) 
 		}
 	}
 	return totalByteCount, nil
+}
+
+// Crosses the dynamics boundary in-process or on every shard before either
+// accounting or the measured clock starts. All shard commands are sent first
+// so their schedules begin within one control round trip rather than serially.
+func startProviderDynamics(ctx context.Context, fleet *Fleet, procs []*fleetProcess) error {
+	if fleet != nil {
+		if 0 < len(procs) {
+			return errors.New("both in-process and sharded fleets are active")
+		}
+		return fleet.StartDynamics(ctx)
+	}
+	if len(procs) == 0 {
+		return errors.New("provider fleet is unavailable")
+	}
+	for _, proc := range procs {
+		if proc.finished() {
+			return fmt.Errorf("fleet shard %d exited before dynamics start", proc.index)
+		}
+		if _, err := io.WriteString(proc.accountingCommandWriter, fleetDynamicsStartCommand+"\n"); err != nil {
+			return fmt.Errorf("request fleet shard %d dynamics start: %w", proc.index, err)
+		}
+	}
+	for _, proc := range procs {
+		select {
+		case response, ok := <-proc.accountingResponses:
+			if !ok {
+				return fmt.Errorf("fleet shard %d accounting pipe closed", proc.index)
+			}
+			if response.err != nil {
+				return fmt.Errorf("fleet shard %d dynamics response: %w", proc.index, response.err)
+			}
+			if response.byteCount != 0 {
+				return fmt.Errorf("fleet shard %d returned invalid dynamics acknowledgement %d", proc.index, response.byteCount)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(fleetAccountingSnapshotTimeout):
+			return fmt.Errorf("fleet shard %d dynamics start timed out", proc.index)
+		}
+	}
+	return nil
 }
 
 // spawnFleetShards launches the fleet as N subprocesses, each connecting to

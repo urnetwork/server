@@ -25,7 +25,7 @@ func TestFleetAccountingProtocolReturnsIndependentSnapshots(t *testing.T) {
 		value := snapshots[index]
 		index += 1
 		return value
-	})
+	}, func() error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,8 +34,34 @@ func TestFleetAccountingProtocolReturnsIndependentSnapshots(t *testing.T) {
 	}
 }
 
+func TestFleetAccountingProtocolStartsDynamicsAndReturnsSnapshots(t *testing.T) {
+	commands := strings.NewReader("start-dynamics\nsnapshot\n")
+	var responses bytes.Buffer
+	started := 0
+	err := serveFleetAccounting(
+		commands,
+		&responses,
+		func() int64 { return 17 },
+		func() error {
+			started++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if responses.String() != "0\n17\n" || started != 1 {
+		t.Fatalf("fleet control responses=%q dynamics starts=%d", responses.String(), started)
+	}
+}
+
 func TestFleetAccountingProtocolRejectsUnknownCommand(t *testing.T) {
-	err := serveFleetAccounting(strings.NewReader("reset\n"), io.Discard, func() int64 { return 1 })
+	err := serveFleetAccounting(
+		strings.NewReader("reset\n"),
+		io.Discard,
+		func() int64 { return 1 },
+		func() error { return nil },
+	)
 	if err == nil || !strings.Contains(err.Error(), "unknown fleet accounting command") {
 		t.Fatalf("unknown command error=%v", err)
 	}
@@ -60,7 +86,12 @@ func TestProviderEgressSnapshotAggregatesShards(t *testing.T) {
 		}
 		go proc.readAccountingResponses()
 		go func() {
-			_ = serveFleetAccounting(commandReader, responseWriter, func() int64 { return byteCount })
+			_ = serveFleetAccounting(
+				commandReader,
+				responseWriter,
+				func() int64 { return byteCount },
+				func() error { return nil },
+			)
 			commandReader.Close()
 			responseWriter.Close()
 		}()
@@ -77,6 +108,58 @@ func TestProviderEgressSnapshotAggregatesShards(t *testing.T) {
 	}
 	if byteCount != 42 {
 		t.Fatalf("provider egress bytes=%d, want 42", byteCount)
+	}
+}
+
+func TestStartProviderDynamicsCommandsEveryShard(t *testing.T) {
+	const shardCount = 2
+	started := make(chan int, shardCount)
+	procs := make([]*fleetProcess, 0, shardCount)
+	for index := 0; index < shardCount; index++ {
+		commandReader, commandWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		responseReader, responseWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		proc := &fleetProcess{
+			index:                    index,
+			done:                     make(chan struct{}),
+			accountingCommandWriter:  commandWriter,
+			accountingResponseReader: responseReader,
+			accountingResponses:      make(chan fleetAccountingResponse, 2),
+		}
+		go proc.readAccountingResponses()
+		go func(index int) {
+			_ = serveFleetAccounting(
+				commandReader,
+				responseWriter,
+				func() int64 { return 0 },
+				func() error {
+					started <- index
+					return nil
+				},
+			)
+			commandReader.Close()
+			responseWriter.Close()
+		}(index)
+		procs = append(procs, proc)
+		t.Cleanup(func() {
+			proc.closeAccountingCommand()
+			responseReader.Close()
+		})
+	}
+	if err := startProviderDynamics(context.Background(), nil, procs); err != nil {
+		t.Fatal(err)
+	}
+	startedIndexes := map[int]bool{}
+	for index := 0; index < shardCount; index++ {
+		startedIndexes[<-started] = true
+	}
+	if len(startedIndexes) != shardCount {
+		t.Fatalf("fleet shards started = %v, want every shard", startedIndexes)
 	}
 }
 
