@@ -353,13 +353,13 @@ The warm-up phases and the knobs that make it **as fast as possible**:
 | settle | let the pipeline propagate scores → selectable set | `--settle 1m`, `--pipeline-interval 10s` |
 
 `--prewarm` writes the final reliability scores directly for every connected
-provider (weight 1.0), rather than replaying ~8.4h of history, so it is
-effectively instant regardless of the window value; `--prewarm 0` restores the
-true cold start. The synthetic speed test defaults to 60s in production; the sim
-drops it to `--test-timeout` (3s) because the score gate requires a completed
-speed test, so this bounds how soon a fresh provider can be selected. A shorter
-`--pipeline-interval` propagates provider state (new tests, churn) into the
-selectable set faster.
+provider using its seeded uptime duty cycle, rather than replaying ~8.4h of
+history, so it is effectively instant regardless of the window value;
+`--prewarm 0` restores the true cold start. The synthetic speed test defaults to
+60s in production; the sim drops it to `--test-timeout` (3s) because the score
+gate requires a completed speed test, so this bounds how soon a fresh provider
+can be selected. A shorter `--pipeline-interval` propagates provider state (new
+tests, churn) into the selectable set faster.
 
 The current selection pipeline also requires fresh provider egress-health and
 egress-location evidence. Production obtains that evidence from an external
@@ -373,9 +373,10 @@ For the fastest possible warm-up on a small fleet:
 
 Notes:
 
-- Churny providers (short uptimes in the mixture) still fall out of the market
-  live over the run as their reliability degrades — the intended selection
-  behavior is preserved; prewarm only sets the initial established condition.
+- Churny providers carry their mature uptime duty cycle in every reliability
+  lookback and still fall out of the market while disconnected. Prewarmed mode
+  keeps those mature weights fixed; `--prewarm 0` exercises the live reliability
+  history pipeline instead.
 - The measured window is logged as `MEASURE WINDOW: [start, end]`; only rows in
   it count.
 - Reaching the end stops new crawl arrivals but does not cancel in-flight
@@ -699,11 +700,12 @@ replicates should always start from a reset.)
 `FindProviders2` gates. With the default `--prewarm` this should not happen;
 check the stderr `prewarm complete; running pipeline` line appeared. Diagnose by
 looking at `client_connection_reliability_score` (should be `providers × 3`
-rows, all `independent_reliability_weight = 1.0`) and the exported
-FindProviders2 samples (`pool_count > 0`). Causes: `--prewarm 0` (cold start
-needs ~8.4h uptime); a too-short `--settle` (the pipeline hasn't re-exported the
-redis samples yet — the market needs one `--pipeline-interval` after prewarm);
-provider provide modes not yet acknowledged; missing/failing
+rows for connected, valid providers, with each weight equal to that fixture
+provider's seeded uptime duty cycle) and the exported FindProviders2 samples
+(`pool_count > 0`). Causes: `--prewarm 0` (cold start needs ~8.4h uptime); a
+too-short `--settle` (the pipeline hasn't re-exported the redis samples yet —
+the market needs one `--pipeline-interval` after prewarm); provider provide
+modes not yet acknowledged; missing/failing
 `provider_egress_health`; missing/stale `provider_egress_location`; or providers
 not geolocated to `zz` (below).
 

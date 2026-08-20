@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,13 @@ const (
 	provisionBatchSize       = 2000
 	clientIdentitySeedDomain = int64(0x434c49454e5453) // "CLIENTS"
 )
+
+// A fixture provider's mature-market reliability. The synthetic prewarm uses
+// this instead of claiming that every seeded churn profile is perfectly up.
+type matureProviderReliability struct {
+	clientId          server.Id
+	reliabilityWeight float64
+}
 
 // provisionRegion creates the sim country/region/city and returns the country
 // location id (used as the client provider spec).
@@ -274,18 +282,22 @@ func generatedClientPoolEntries(config *Config) []ProviderEntry {
 // Rather than backfill raw reliability blocks (which would have to satisfy the
 // intricate running-window/shift/degraded maintenance), it materializes the
 // location-reliability rows from the connected+tested fleet and then writes the
-// final reliability SCORES directly with a passing weight (1.0) for every score
-// lookback. The provider's quality/speed score still comes from its real
-// latency/speed tests (via network_client_location_reliability), so ranking
-// among providers is unaffected — only the reliability-history requirement is
-// short-circuited. Providers must be connected and latency/speed-tested first;
-// the caller runs this after the ramp.
+// final reliability scores directly for every score lookback. Each provider's
+// weight is its seeded long-run uptime fraction, so the mature initial market
+// preserves the fixture's reliability ranking instead of treating a mobile
+// churn profile and business fiber as equally perfect. Providers must be
+// connected and latency/speed-tested first; the caller runs this after the ramp.
 //
 // The pipeline must run in prewarmed mode afterwards (Services.SetPrewarmed),
 // so the periodic reliability-score recompute does not overwrite these rows;
 // it keeps refreshing the location reliabilities (so churn still gates
 // selection) and re-exporting the redis samples.
-func provisionPrewarm(ctx context.Context, lookback time.Duration) error {
+func provisionPrewarm(ctx context.Context, lookback time.Duration, entries []ProviderEntry) error {
+	reliabilities, err := matureProviderReliabilities(entries)
+	if err != nil {
+		return err
+	}
+
 	// The prewarm is DB-heavy (a fleet-wide reliability rebuild plus a score
 	// upsert). With a very large fleet connected, postgres can be transiently
 	// saturated, and `dbWithPool`/`MaintenanceTx` panics once its own connect
@@ -299,7 +311,7 @@ func provisionPrewarm(ctx context.Context, lookback time.Duration) error {
 	backoff := 3 * time.Second
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt += 1 {
-		if err := prewarmOnce(ctx, lookback); err != nil {
+		if err := prewarmOnce(ctx, lookback, reliabilities); err != nil {
 			lastErr = err
 			logf("prewarm attempt %d/%d failed: %s", attempt, attempts, err)
 			select {
@@ -320,13 +332,44 @@ func provisionPrewarm(ctx context.Context, lookback time.Duration) error {
 	)
 }
 
+// Converts fixture churn into the reliability weights a mature history would
+// converge toward. Invalid ground truth fails before any database mutation.
+func matureProviderReliabilities(entries []ProviderEntry) ([]matureProviderReliability, error) {
+	reliabilities := make([]matureProviderReliability, 0, len(entries))
+	for _, entry := range entries {
+		clientId, err := server.ParseId(entry.ClientId)
+		if err != nil {
+			return nil, fmt.Errorf("provider %d client id: %w", entry.Index, err)
+		}
+		if math.IsNaN(entry.UptimeSeconds) || math.IsInf(entry.UptimeSeconds, 0) || entry.UptimeSeconds <= 0 {
+			return nil, fmt.Errorf("provider %d uptime must be finite and positive", entry.Index)
+		}
+		if math.IsNaN(entry.DowntimeSeconds) || math.IsInf(entry.DowntimeSeconds, 0) || entry.DowntimeSeconds < 0 {
+			return nil, fmt.Errorf("provider %d downtime must be finite and non-negative", entry.Index)
+		}
+		totalSeconds := entry.UptimeSeconds + entry.DowntimeSeconds
+		if math.IsInf(totalSeconds, 0) {
+			return nil, fmt.Errorf("provider %d churn cycle must be finite", entry.Index)
+		}
+		reliabilities = append(reliabilities, matureProviderReliability{
+			clientId:          clientId,
+			reliabilityWeight: entry.UptimeSeconds / totalSeconds,
+		})
+	}
+	return reliabilities, nil
+}
+
 // prewarmOnce runs the DB-heavy prewarm a single time, converting the deep
 // `dbWithPool` panic (raised when postgres is unreachable after its own connect
 // retries) into a returned error so the caller can retry or fail cleanly. Both
 // steps are individually idempotent, so retrying after a partial failure is
 // safe: UpdateClientLocationReliabilities rebuilds nclr, and the score write
 // upserts (ON CONFLICT DO UPDATE).
-func prewarmOnce(ctx context.Context, lookback time.Duration) (err error) {
+func prewarmOnce(
+	ctx context.Context,
+	lookback time.Duration,
+	reliabilities []matureProviderReliability,
+) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("prewarm db op failed (postgres likely unreachable): %v", r)
@@ -338,15 +381,38 @@ func prewarmOnce(ctx context.Context, lookback time.Duration) (err error) {
 	// build network_client_location_reliability from the currently connected,
 	// latency/speed-tested providers
 	model.UpdateClientLocationReliabilities(ctx, now.Add(-lookback), now)
+	writeMatureReliabilityScores(ctx, now, lookback, reliabilities)
+	return nil
+}
+
+// Writes the seeded mature reliability beside the real connected/location and
+// latency/speed evidence. An inner join keeps disconnected providers out.
+func writeMatureReliabilityScores(
+	ctx context.Context,
+	now time.Time,
+	lookback time.Duration,
+	reliabilities []matureProviderReliability,
+) {
+	clientIds := make([]server.Id, 0, len(reliabilities))
+	reliabilityWeights := make([]float64, 0, len(reliabilities))
+	for _, reliability := range reliabilities {
+		clientIds = append(clientIds, reliability.clientId)
+		reliabilityWeights = append(reliabilityWeights, reliability.reliabilityWeight)
+	}
 
 	block := now.UTC().UnixMilli() / int64(model.ReliabilityBlockDuration/time.Millisecond)
 
-	// write a passing score for every score lookback (see ClientLookbacks:
-	// indices 0,1,2) for every valid connected provider, joined to its location.
+	// Write every score lookback (see ClientLookbacks: indices 0,1,2) for each
+	// valid connected provider, joined to its fixture reliability and location.
 	server.Db(ctx, func(conn server.PgConn) {
 		server.RaisePgResult(conn.Exec(
 			ctx,
 			`
+			WITH mature_reliability AS (
+				SELECT client_id, reliability_weight
+				FROM unnest($3::uuid[], $4::double precision[])
+					AS mature(client_id, reliability_weight)
+			)
 			INSERT INTO client_connection_reliability_score (
 				client_id, lookback_index,
 				independent_reliability_score, independent_reliability_weight,
@@ -356,22 +422,26 @@ func prewarmOnce(ctx context.Context, lookback time.Duration) (err error) {
 			)
 			SELECT
 				nclr.client_id, lb.lookback_index,
-				1.0, 1.0, 1.0, 1.0,
+				mature.reliability_weight, mature.reliability_weight,
+				mature.reliability_weight, mature.reliability_weight,
 				$1::bigint - $2::bigint, $1::bigint,
 				nclr.city_location_id, nclr.region_location_id, nclr.country_location_id
 			FROM network_client_location_reliability nclr
+			INNER JOIN mature_reliability mature ON mature.client_id = nclr.client_id
 			CROSS JOIN (VALUES (0), (1), (2)) AS lb(lookback_index)
 			WHERE nclr.connected AND nclr.valid
 			ON CONFLICT (client_id, lookback_index) DO UPDATE
 			SET
-				independent_reliability_weight = 1.0,
-				reliability_weight = 1.0,
+				independent_reliability_score = EXCLUDED.independent_reliability_score,
+				independent_reliability_weight = EXCLUDED.independent_reliability_weight,
+				reliability_score = EXCLUDED.reliability_score,
+				reliability_weight = EXCLUDED.reliability_weight,
 				max_block_number = EXCLUDED.max_block_number
 			`,
 			block, int64(lookback/model.ReliabilityBlockDuration),
+			clientIds, reliabilityWeights,
 		))
 	})
-	return nil
 }
 
 // writeSiteSettings writes the site settings.yml the in-process server reads:

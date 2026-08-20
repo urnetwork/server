@@ -95,17 +95,17 @@ tunable to be as fast as possible: `--ramp`, `--prewarm`, `--settle`,
 
 `provisionPrewarm` establishes the market directly: it materializes
 `network_client_location_reliability` from the connected, tested fleet and then
-writes the final `client_connection_reliability_score` rows with a passing
-weight (1.0) for every score lookback — rather than backfilling raw reliability
-blocks, which fought the running-window/shift/degraded maintenance. The
-provider's quality/speed score still comes from its real tests, so ranking is
-unaffected; only the reliability-history requirement is short-circuited. The
-pipeline then runs in prewarmed mode (`Services.SetPrewarmed`): it keeps
-refreshing the location reliabilities (so churn still gates selection) and
-re-exports the redis samples, but does not recompute reliability scores (which
-would wipe the prewarm). `--prewarm 0` restores the true cold start. Verified
-end to end: providers become selectable in seconds and tunneled requests return
-200.
+writes the final `client_connection_reliability_score` rows for every score
+lookback — rather than backfilling raw reliability blocks, which fought the
+running-window/shift/degraded maintenance. Each row uses the fixture provider's
+seeded `uptime / (uptime + downtime)` duty cycle, so a mature mobile churn
+profile does not rank as perfectly reliable. The provider's quality/speed score
+still comes from its real tests. The pipeline then runs in prewarmed mode
+(`Services.SetPrewarmed`): it keeps refreshing the location reliabilities (so
+current churn still gates selection) and re-exports the redis samples, but does
+not recompute reliability scores (which would wipe the prewarm). `--prewarm 0`
+restores the true cold start. Verified end to end: providers become selectable
+in seconds and tunneled requests return 200.
 
 ### Impairment model note
 

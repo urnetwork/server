@@ -440,7 +440,7 @@ func Run(options *RunOptions) (retErr error) {
 	if 0 < options.Prewarm {
 		logf("prewarming: establishing the connected fleet (~%s reliability window)", options.Prewarm)
 		services.SetPrewarmed(true)
-		if err := provisionPrewarm(ctx, options.Prewarm); err != nil {
+		if err := provisionPrewarm(ctx, options.Prewarm, config.Fleet); err != nil {
 			return phaseError(ctx, "prewarm_failed", "prewarm", err)
 		}
 		logf("prewarm complete; running pipeline")
