@@ -360,8 +360,8 @@ The warm-up phases and the knobs that make it **as fast as possible**:
 `--prewarm` writes the fixture's round-trip latency and bandwidth evidence onto
 each active connection, then writes the final reliability scores for every
 connected provider using its seeded uptime duty cycle, rather than replaying
-~8.4h of history. Attaching the evidence to the active connection makes later
-pipeline snapshots preserve it; tests belong to one transport, so a replacement
+~8.4h of history. Prewarmed pipeline refreshes restore that evidence on the
+provider-scoped snapshot; tests belong to one transport, so a replacement
 transport can otherwise make an established provider look untested.
 `--prewarm 0` restores
 the true cold start and live connection-test behavior. A shorter

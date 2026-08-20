@@ -245,7 +245,7 @@ func TestMatureProviderPerformancesRejectInvalidGroundTruth(t *testing.T) {
 	}
 }
 
-func TestWriteMatureProviderPerformancesRestoresMatchmakingPool(t *testing.T) {
+func TestPrewarmedPipelineRestoresPerformanceAfterTransportReplacement(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		providerNetworkId := server.NewId()
@@ -354,13 +354,39 @@ func TestWriteMatureProviderPerformancesRestoresMatchmakingPool(t *testing.T) {
 		if err != nil {
 			t.Fatalf("matureProviderPerformances: %v", err)
 		}
-		writeMatureProviderPerformances(ctx, performances)
+		writeMatureProviderConnectionPerformances(ctx, performances)
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
+		writeMatureProviderPerformanceSnapshot(ctx, performances)
 		after := findProviders()
 		if len(after.Providers) != 1 || after.Providers[0].ClientId != providerClientId {
 			t.Fatalf("matchmaking providers = %+v, want %s", after.Providers, providerClientId)
 		}
+		model.DisconnectNetworkClient(ctx, connectionId)
+		replacementConnectionId, _, _, _, err := model.ConnectNetworkClient(
+			ctx,
+			providerClientId,
+			"127.0.0.2:20001",
+			model.CreateNetworkClientHandler(ctx),
+		)
+		if err != nil {
+			t.Fatalf("replacement ConnectNetworkClient: %v", err)
+		}
+		if err := model.SetConnectionLocation(
+			ctx,
+			replacementConnectionId,
+			locationId,
+			&model.ConnectionLocationScores{},
+		); err != nil {
+			t.Fatalf("replacement SetConnectionLocation: %v", err)
+		}
 		model.UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-13*time.Hour), server.NowUtc())
+		withoutRestore := findProviders()
+		if len(withoutRestore.Providers) != 0 {
+			t.Fatalf("untested replacement entered matchmaking: %+v", withoutRestore.Providers)
+		}
+		services := &Services{}
+		services.SetPrewarmed(performances)
+		services.RunPipelineOnce(ctx)
 		afterRefresh := findProviders()
 		if len(afterRefresh.Providers) != 1 || afterRefresh.Providers[0].ClientId != providerClientId {
 			t.Fatalf("providers after pipeline refresh = %+v, want %s", afterRefresh.Providers, providerClientId)

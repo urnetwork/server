@@ -301,9 +301,15 @@ func generatedClientPoolEntries(config *Config) []ProviderEntry {
 //
 // The pipeline must run in prewarmed mode afterwards (Services.SetPrewarmed),
 // so the periodic reliability-score recompute does not overwrite these rows;
-// it keeps refreshing the location reliabilities (so churn still gates
-// selection) and re-exporting the redis samples.
-func provisionPrewarm(ctx context.Context, lookback time.Duration, entries []ProviderEntry) error {
+// it refreshes connected/location state, restores provider-scoped fixture
+// performance after mechanical transport replacement, and re-exports the
+// redis samples (so churn still gates selection).
+func provisionPrewarm(
+	ctx context.Context,
+	lookback time.Duration,
+	entries []ProviderEntry,
+	services *Services,
+) error {
 	reliabilities, err := matureProviderReliabilities(entries)
 	if err != nil {
 		return err
@@ -312,6 +318,7 @@ func provisionPrewarm(ctx context.Context, lookback time.Duration, entries []Pro
 	if err != nil {
 		return err
 	}
+	services.SetPrewarmed(performances)
 
 	// The prewarm is DB-heavy (a fleet-wide reliability rebuild plus a score
 	// upsert). With a very large fleet connected, postgres can be transiently
@@ -425,8 +432,9 @@ func prewarmOnce(
 
 	// build network_client_location_reliability from the currently connected,
 	// latency/speed-tested providers
-	writeMatureProviderPerformances(ctx, performances)
+	writeMatureProviderConnectionPerformances(ctx, performances)
 	model.UpdateClientLocationReliabilities(ctx, now.Add(-lookback), now)
+	writeMatureProviderPerformanceSnapshot(ctx, performances)
 	writeMatureReliabilityScores(ctx, now, lookback, reliabilities)
 	return nil
 }
@@ -435,9 +443,9 @@ func prewarmOnce(
 // building the location-reliability snapshot. Completed tests belong to a
 // specific platform transport, so relying on an earlier transport's tests made
 // a newly active connection look untested and excluded it from matchmaking.
-// Writing the connection tables, instead of only the derived snapshot, also
-// makes later pipeline refreshes preserve the prewarmed evidence.
-func writeMatureProviderPerformances(
+// The provider-scoped snapshot restoration below handles later transport
+// replacement and pipeline refreshes.
+func writeMatureProviderConnectionPerformances(
 	ctx context.Context,
 	performances []matureProviderPerformance,
 ) {
@@ -499,6 +507,50 @@ func writeMatureProviderPerformances(
 				sample_count = EXCLUDED.sample_count
 			`,
 			clientIds,
+			maxBytesPerSecondValues,
+		))
+	})
+}
+
+// Restores provider-scoped mature-market performance after a location refresh.
+// A fixture provider can replace its platform transport before the new
+// connection finishes tests; the derived snapshot would otherwise discard the
+// provider's established evidence and collapse the matchmaking pool.
+func writeMatureProviderPerformanceSnapshot(
+	ctx context.Context,
+	performances []matureProviderPerformance,
+) {
+	clientIds := make([]server.Id, 0, len(performances))
+	minRelativeLatencyMillisValues := make([]int64, 0, len(performances))
+	maxBytesPerSecondValues := make([]int64, 0, len(performances))
+	for _, performance := range performances {
+		clientIds = append(clientIds, performance.clientId)
+		minRelativeLatencyMillisValues = append(minRelativeLatencyMillisValues, performance.minRelativeLatencyMillis)
+		maxBytesPerSecondValues = append(maxBytesPerSecondValues, performance.maxBytesPerSecond)
+	}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		server.RaisePgResult(conn.Exec(
+			ctx,
+			`
+			WITH mature_performance AS (
+				SELECT client_id, min_relative_latency_ms, max_bytes_per_second
+				FROM unnest($1::uuid[], $2::bigint[], $3::bigint[])
+					AS mature(client_id, min_relative_latency_ms, max_bytes_per_second)
+			)
+			UPDATE network_client_location_reliability
+			SET
+				min_relative_latency_ms = mature.min_relative_latency_ms::integer,
+				max_bytes_per_second = mature.max_bytes_per_second,
+				has_latency_test = true,
+				has_speed_test = true
+			FROM mature_performance mature
+			WHERE
+				network_client_location_reliability.client_id = mature.client_id AND
+				network_client_location_reliability.connected = true
+			`,
+			clientIds,
+			minRelativeLatencyMillisValues,
 			maxBytesPerSecondValues,
 		))
 	})

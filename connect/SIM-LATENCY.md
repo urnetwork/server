@@ -101,9 +101,10 @@ evidence (round-trip link latency and bytes/second), materializes
 final `client_connection_reliability_score` rows
 for every score lookback — rather than backfilling raw reliability blocks,
 which fought the running-window/shift/degraded maintenance. The performance
-evidence is attached to the current connection so later pipeline refreshes keep
-seeing it; connection tests belong to a particular platform transport, and a
-new active transport can otherwise make the entire fixture look untested. Each
+evidence is attached to the current connection, and prewarmed pipeline refreshes
+restore it on the provider-scoped derived snapshot; connection tests belong to a
+particular platform transport, and a new active transport can otherwise make
+the entire fixture look untested. Each
 reliability row uses the fixture provider's seeded
 `uptime / (uptime + downtime)` duty cycle, so a mature mobile churn profile does
 not rank as perfectly reliable. The pipeline then runs in prewarmed mode

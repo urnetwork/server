@@ -439,8 +439,7 @@ func Run(options *RunOptions) (retErr error) {
 	// propagate the redis sample export.
 	if 0 < options.Prewarm {
 		logf("prewarming: establishing the connected fleet (~%s reliability window)", options.Prewarm)
-		services.SetPrewarmed(true)
-		if err := provisionPrewarm(ctx, options.Prewarm, config.Fleet); err != nil {
+		if err := provisionPrewarm(ctx, options.Prewarm, config.Fleet, services); err != nil {
 			return phaseError(ctx, "prewarm_failed", "prewarm", err)
 		}
 		logf("prewarm complete; running pipeline")

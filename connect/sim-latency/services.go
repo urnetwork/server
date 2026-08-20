@@ -41,16 +41,32 @@ type Services struct {
 	runErr      error
 
 	// when prewarmed, the pipeline does not recompute reliability scores (which
-	// would overwrite the prewarmed scores); it only refreshes the location
-	// reliabilities (so churn gates selection) and re-exports the redis samples.
+	// would overwrite the prewarmed scores); it refreshes connected/location
+	// state, restores provider-scoped fixture performance, and re-exports the
+	// redis samples (so churn still gates selection).
 	prewarmed atomic.Bool
+
+	prewarmedPerformancesLock sync.RWMutex
+	prewarmedPerformances     []matureProviderPerformance
 }
 
 const servicesDrainTimeout = 15 * time.Second
 
-// SetPrewarmed switches the pipeline to prewarmed mode (see the field doc).
-func (self *Services) SetPrewarmed(prewarmed bool) {
-	self.prewarmed.Store(prewarmed)
+// SetPrewarmed switches the pipeline to prewarmed mode and freezes the fixture
+// performance evidence that each location refresh must restore. The pipeline
+// can already be running when warm-up reaches this point, so publish the copied
+// evidence before exposing the mode change.
+func (self *Services) SetPrewarmed(performances []matureProviderPerformance) {
+	self.prewarmedPerformancesLock.Lock()
+	self.prewarmedPerformances = append([]matureProviderPerformance(nil), performances...)
+	self.prewarmedPerformancesLock.Unlock()
+	self.prewarmed.Store(true)
+}
+
+func (self *Services) prewarmedPerformanceSnapshot() []matureProviderPerformance {
+	self.prewarmedPerformancesLock.RLock()
+	defer self.prewarmedPerformancesLock.RUnlock()
+	return append([]matureProviderPerformance(nil), self.prewarmedPerformances...)
 }
 
 // ServicesConfig configures the in-process environment.
@@ -281,9 +297,14 @@ func (self *Services) RunPipelineOnce(ctx context.Context) {
 	now := server.NowUtc()
 	if self.prewarmed.Load() {
 		// keep the location reliabilities fresh (churn -> connected state), then
-		// re-export the redis samples from the prewarmed scores. Do not recompute
-		// reliability scores (that would wipe the prewarm).
-		server.HandleError(func() { model.UpdateClientLocationReliabilities(ctx, now.Add(-12*time.Hour), now) })
+		// restore the fixture's initial performance evidence. Tests are attached
+		// to one short-lived platform transport, while the mature-market score is
+		// provider-scoped and must survive mechanical transport replacement. Do
+		// not recompute reliability scores (that would wipe the prewarm).
+		server.HandleError(func() {
+			model.UpdateClientLocationReliabilities(ctx, now.Add(-12*time.Hour), now)
+			writeMatureProviderPerformanceSnapshot(ctx, self.prewarmedPerformanceSnapshot())
+		})
 	} else {
 		server.HandleError(func() { model.RollupClientReliabilityStats(ctx, now) })
 		server.HandleError(func() { model.UpdateClientReliabilityScores(ctx, now, true) })
