@@ -47,11 +47,11 @@ func main() {
 
 Usage:
   sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>] [--quality-window=<n>]
-  sim-latency run [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>]
+  sim-latency run [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>]
   sim-latency fleet --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
   sim-latency analyze --run=<path> [--window=<w>] [--out=<path>] [--json]
   sim-latency baseline --runs=<paths> [--alpha=<a>] [--out=<path>]
-  sim-latency baseline [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
+  sim-latency baseline [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
@@ -73,6 +73,7 @@ Options:
   --ramp=<d>             Warm-up: fleet connect-stagger duration [default: 1m].
   --prewarm=<d>          Warm-up: establish providers (reliability window; 0 = cold ~8.4h warm-up) [default: 13h].
   --settle=<d>           Warm-up: stabilization after prewarm, before measurement [default: 1m].
+  --client-warmup-timeout=<d>  Maximum wall time to establish the complete client pool [default: 30m].
   --pipeline-interval=<d>  Warm-up: reliability/score/sample refresh cadence [default: 10s].
   --test-timeout=<d>     Warm-up: synthetic speed-test trigger delay [default: 3s].
   --announce-timeout=<d>  Warm-up: connection register/test delay [default: 2s].
@@ -212,25 +213,26 @@ func runRun(opts docopt.Opts) {
 	servicesConfig.AnnounceTimeout = optDuration(opts, "--announce-timeout", servicesConfig.AnnounceTimeout)
 
 	options := &RunOptions{
-		ConfigPath:       providers,
-		SiteHome:         absSiteHome,
-		Ramp:             optDuration(opts, "--ramp", 1*time.Minute),
-		Prewarm:          optDuration(opts, "--prewarm", 13*time.Hour),
-		Settle:           optDuration(opts, "--settle", 1*time.Minute),
-		Duration:         optDuration(opts, "--duration", 30*time.Minute),
-		RequestTimeout:   optDuration(opts, "--request-timeout", 2*time.Minute),
-		FleetShards:      optInt(opts, "--fleet-shards", 0),
-		SiteListen:       optString(opts, "--site-listen", "127.0.0.1:0"),
-		Services:         servicesConfig,
-		MetaPath:         optString(opts, "--meta", "run.json"),
-		Reset:            optBool(opts, "--reset"),
-		EvaluationId:     optString(opts, "--evaluation-id", ""),
-		Official:         optBool(opts, "--official"),
-		ExpectedRevision: optString(opts, "--expected-revision", ""),
-		ResourceReport:   optString(opts, "--resource-report", ""),
-		AccountingReport: optString(opts, "--accounting-report", ""),
-		AccountingSource: optString(opts, "--accounting-source", ""),
-		FinalMarker:      optString(opts, "--final-marker", ""),
+		ConfigPath:          providers,
+		SiteHome:            absSiteHome,
+		Ramp:                optDuration(opts, "--ramp", 1*time.Minute),
+		Prewarm:             optDuration(opts, "--prewarm", 13*time.Hour),
+		Settle:              optDuration(opts, "--settle", 1*time.Minute),
+		ClientWarmupTimeout: optDuration(opts, "--client-warmup-timeout", 30*time.Minute),
+		Duration:            optDuration(opts, "--duration", 30*time.Minute),
+		RequestTimeout:      optDuration(opts, "--request-timeout", 2*time.Minute),
+		FleetShards:         optInt(opts, "--fleet-shards", 0),
+		SiteListen:          optString(opts, "--site-listen", "127.0.0.1:0"),
+		Services:            servicesConfig,
+		MetaPath:            optString(opts, "--meta", "run.json"),
+		Reset:               optBool(opts, "--reset"),
+		EvaluationId:        optString(opts, "--evaluation-id", ""),
+		Official:            optBool(opts, "--official"),
+		ExpectedRevision:    optString(opts, "--expected-revision", ""),
+		ResourceReport:      optString(opts, "--resource-report", ""),
+		AccountingReport:    optString(opts, "--accounting-report", ""),
+		AccountingSource:    optString(opts, "--accounting-source", ""),
+		FinalMarker:         optString(opts, "--final-marker", ""),
 	}
 	if err := Run(options); err != nil {
 		fatalf("run: %s", err)

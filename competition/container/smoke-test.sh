@@ -295,6 +295,7 @@ printf '%s\n' \
     'APEX_RAMP=0s' \
     'APEX_PREWARM=5s' \
     'APEX_SETTLE=0s' \
+    'APEX_CLIENT_WARMUP_TIMEOUT=1m' \
     'APEX_FLEET_SHARDS=0' \
     'APEX_HOSTS=1' \
     'APEX_PIPELINE_INTERVAL=100ms' \
@@ -505,6 +506,7 @@ write_scorer_common_env() {
         'APEX_RAMP=0s' \
         'APEX_PREWARM=5s' \
         'APEX_SETTLE=0s' \
+        'APEX_CLIENT_WARMUP_TIMEOUT=1m' \
         'APEX_FLEET_SHARDS=0' \
         'APEX_HOSTS=1' \
         'APEX_PIPELINE_INTERVAL=100ms' \

@@ -22,7 +22,7 @@ func TestBuildWarmClientPoolRetriesMissingAndPreservesOrder(t *testing.T) {
 		pool,
 		3,
 		0,
-		func(identity ClientIdentity, poolIndex int) *pooledClient {
+		func(_ context.Context, identity ClientIdentity, poolIndex int) *pooledClient {
 			attemptLock.Lock()
 			attemptCounts[poolIndex]++
 			attempt := attemptCounts[poolIndex]
@@ -69,12 +69,64 @@ func TestBuildWarmClientPoolHonorsCanceledContext(t *testing.T) {
 		[]ClientIdentity{{ClientId: server.NewId()}},
 		3,
 		0,
-		func(ClientIdentity, int) *pooledClient {
+		func(context.Context, ClientIdentity, int) *pooledClient {
 			called = true
 			return &pooledClient{}
 		},
 	)
 	if called || len(clients) != 0 {
 		t.Fatalf("canceled warmup called builder=%t, clients=%d", called, len(clients))
+	}
+}
+
+func TestWarmClientPoolDeadlineAcceptsCompletePool(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := warmClientPoolError(ctx, 200, 200); err != nil {
+		t.Fatalf("complete pool at deadline: %s", err)
+	}
+	if err := warmClientPoolError(ctx, 199, 200); err != context.Canceled {
+		t.Fatalf("incomplete pool at deadline = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestBuildWarmClientPoolDeadlineStopsQueuedBuilders(t *testing.T) {
+	pool := make([]ClientIdentity, warmupConcurrency+1)
+	for index := range pool {
+		pool[index].ClientId = server.NewId()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan int, warmupConcurrency)
+	done := make(chan []*pooledClient, 1)
+	go func() {
+		done <- buildWarmClientPool(
+			ctx,
+			pool,
+			1,
+			0,
+			func(buildCtx context.Context, _ ClientIdentity, poolIndex int) *pooledClient {
+				started <- poolIndex
+				<-buildCtx.Done()
+				return nil
+			},
+		)
+	}()
+
+	startedIndexes := map[int]bool{}
+	for index := 0; index < warmupConcurrency; index++ {
+		startedIndexes[<-started] = true
+	}
+	cancel()
+	clients := <-done
+	if len(clients) != 0 {
+		t.Fatalf("deadline warm clients = %d, want 0", len(clients))
+	}
+	if len(startedIndexes) != warmupConcurrency {
+		t.Fatalf("builders started = %d, want %d", len(startedIndexes), warmupConcurrency)
+	}
+	select {
+	case poolIndex := <-started:
+		t.Fatalf("builder %d started after every warm-up slot was occupied", poolIndex)
+	default:
 	}
 }

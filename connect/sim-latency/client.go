@@ -274,16 +274,30 @@ func readBoundedHeaderLine(reader *bufio.Reader, maxBytes int) ([]byte, int64, e
 // measured window) so pool-setup time is not counted in the measurement.
 // Clients establish in small concurrent batches so their window-client auths
 // do not overwhelm the exchange.
-func (self *ClientDriver) Warmup() {
+func (self *ClientDriver) Warmup(ctx context.Context) error {
 	self.writeCsvHeader()
 	self.clients = buildWarmClientPool(
-		self.ctx,
+		ctx,
 		self.pool,
 		warmupAttempts,
 		warmupRetryDelay,
 		self.newWarmClient,
 	)
 	logf("warm client pool ready: %d/%d clients", len(self.clients), len(self.pool))
+	return warmClientPoolError(ctx, len(self.clients), len(self.pool))
+}
+
+// A deadline racing with the final successful builder must not invalidate a
+// complete pool. An incomplete pool still preserves the context cause so the
+// caller can distinguish an exhausted retry budget from its hard deadline.
+func warmClientPoolError(ctx context.Context, established int, requested int) error {
+	if established == requested {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return fmt.Errorf("established %d/%d warm clients", established, requested)
 }
 
 // Make one real quality-ranked discovery call under a pool identity. Warm
@@ -347,7 +361,7 @@ func buildWarmClientPool(
 	pool []ClientIdentity,
 	attempts int,
 	retryDelay time.Duration,
-	build func(ClientIdentity, int) *pooledClient,
+	build func(context.Context, ClientIdentity, int) *pooledClient,
 ) []*pooledClient {
 	if attempts < 1 {
 		attempts = 1
@@ -375,7 +389,7 @@ func buildWarmClientPool(
 				if ctx.Err() != nil {
 					return
 				}
-				slots[index] = build(identity, index)
+				slots[index] = build(ctx, identity, index)
 			})
 		}
 		wg.Wait()
@@ -479,7 +493,7 @@ func (self *ClientDriver) Run() error {
 	}
 }
 
-func (self *ClientDriver) newWarmClient(identity ClientIdentity, poolIndex int) *pooledClient {
+func (self *ClientDriver) newWarmClient(warmupCtx context.Context, identity ClientIdentity, poolIndex int) *pooledClient {
 	// present a client-subnet ip as the forwarded-for address so the caller
 	// geolocates to the sim region; the spec also targets the region directly
 	extraHeaders := http.Header{}
@@ -531,7 +545,7 @@ func (self *ClientDriver) newWarmClient(identity ClientIdentity, poolIndex int) 
 	// establish the provider path once (a single dial-until-ready, not a retry
 	// storm across many clients), so measured crawls reflect steady-state
 	// request latency rather than the one-time cold start.
-	if !self.warmupTunnel(simClient, httpClient) {
+	if !self.warmupTunnel(warmupCtx, httpClient) {
 		simClient.Close()
 		logf("client %s did not establish a provider path", identity.ClientId)
 		return nil
@@ -543,14 +557,14 @@ func (self *ClientDriver) newWarmClient(identity ClientIdentity, poolIndex int) 
 // succeeds or the deadline passes. Each attempt has its own short timeout so a
 // slow/failed attempt does not consume the whole budget — the multi-client
 // needs several tries to discover, connect, and contract a provider.
-func (self *ClientDriver) warmupTunnel(simClient *sdk.SimClient, httpClient *http.Client) bool {
+func (self *ClientDriver) warmupTunnel(ctx context.Context, httpClient *http.Client) bool {
 	deadline := time.Now().Add(60 * time.Second)
 	requestUrl := fmt.Sprintf("http://%s/", self.siteAddr)
 	attempt := 0
-	for time.Now().Before(deadline) && self.ctx.Err() == nil {
+	for time.Now().Before(deadline) && ctx.Err() == nil {
 		attempt += 1
 		ok := func() bool {
-			attemptCtx, cancel := context.WithTimeout(self.ctx, 8*time.Second)
+			attemptCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
 			req, err := http.NewRequestWithContext(attemptCtx, "GET", requestUrl, nil)
 			if err != nil {
@@ -567,7 +581,7 @@ func (self *ClientDriver) warmupTunnel(simClient *sdk.SimClient, httpClient *htt
 			return true
 		}
 		select {
-		case <-self.ctx.Done():
+		case <-ctx.Done():
 			return false
 		case <-time.After(500 * time.Millisecond):
 		}

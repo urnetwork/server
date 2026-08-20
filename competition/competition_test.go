@@ -9,8 +9,10 @@ import (
 	"errors"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -54,11 +56,11 @@ func validSettings() *Settings {
 			ProviderCount: 1800, ClientPoolSize: 200, ArrivalsPerMinute: 80,
 			QualityWindowSize: 0, ExchangeHosts: 4, FleetShards: 4,
 			SiteListen: "127.0.0.1:0", ApiPort: 7640,
-			RampMs: 60000, PrewarmMs: 46800000, SettleMs: 60000,
+			RampMs: 60000, PrewarmMs: 46800000, SettleMs: 60000, ClientWarmupTimeoutMs: 1200000,
 			DurationMs: 1800000, RequestTimeoutMs: 120000, Replicates: 3,
 			PipelineIntervalMs: 10000, TestTimeoutMs: 3000, AnnounceTimeoutMs: 2000,
 			ImpairmentEnabled: true,
-			TakeoverMargin:    .12, QueueLimit: 16, ScoreTimeoutSeconds: 14400,
+			TakeoverMargin:    .12, QueueLimit: 16, ScoreTimeoutSeconds: 28800,
 		},
 		ArtifactRoot:         "/var/lib/urnetwork/competition",
 		ConfigLocalDirectory: "/srv/warp/config/local",
@@ -78,6 +80,41 @@ func validSettings() *Settings {
 		},
 		SeedKey:           []byte("0123456789abcdef0123456789abcdef"),
 		workloadGenerator: fakeWorkloadGenerator{},
+	}
+}
+
+func TestTimeoutBudgetMatchesEvaluator(t *testing.T) {
+	p := validSettings().EvaluationPolicy
+	args := []string{
+		strconv.FormatInt(p.RampMs, 10),
+		strconv.FormatInt(p.SettleMs, 10),
+		strconv.FormatInt(p.ClientWarmupTimeoutMs, 10),
+		strconv.FormatInt(p.DurationMs, 10),
+		strconv.FormatInt(p.RequestTimeoutMs, 10),
+	}
+	stageOut, err := exec.Command("container/timeout-budget.sh", append([]string{"stage"}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("stage timeout calculator: %s", err)
+	}
+	stageSeconds, err := strconv.ParseInt(strings.TrimSpace(string(stageOut)), 10, 64)
+	if err != nil {
+		t.Fatalf("parse stage timeout: %s", err)
+	}
+	if want := evaluationStageTimeoutSeconds(p); stageSeconds != want {
+		t.Fatalf("shell stage timeout = %d, Go = %d", stageSeconds, want)
+	}
+
+	scoreArgs := append([]string{"score", strconv.Itoa(p.Replicates)}, args...)
+	scoreOut, err := exec.Command("container/timeout-budget.sh", scoreArgs...).Output()
+	if err != nil {
+		t.Fatalf("score timeout calculator: %s", err)
+	}
+	scoreSeconds, err := strconv.ParseInt(strings.TrimSpace(string(scoreOut)), 10, 64)
+	if err != nil {
+		t.Fatalf("parse score timeout: %s", err)
+	}
+	if want := minimumScoreTimeoutSeconds(p); scoreSeconds != want {
+		t.Fatalf("shell score timeout = %d, Go = %d", scoreSeconds, want)
 	}
 }
 
@@ -131,9 +168,16 @@ func TestSettingsValidateFrozenPolicy(t *testing.T) {
 		t.Fatal("unfrozen direct config/local digest accepted")
 	}
 	settings = validSettings()
-	settings.EvaluationPolicy.ScoreTimeoutSeconds = 100
+	p := settings.EvaluationPolicy
+	oldPerRunMs := p.RampMs + p.SettleMs + p.DurationMs + p.RequestTimeoutMs
+	settings.EvaluationPolicy.ScoreTimeoutSeconds = int((2*int64(p.Replicates)*oldPerRunMs + 999) / 1000)
 	if err := settings.Validate(); err == nil {
-		t.Fatal("score timeout shorter than the frozen replicate windows accepted")
+		t.Fatal("score timeout that omits client warm-up accepted")
+	}
+	settings = validSettings()
+	settings.EvaluationPolicy.ClientWarmupTimeoutMs = 0
+	if err := settings.Validate(); err == nil {
+		t.Fatal("unfrozen client warm-up timeout accepted")
 	}
 	settings = validSettings()
 	settings.Tokens[0].Name = "bad token"

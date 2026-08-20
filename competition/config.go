@@ -15,7 +15,11 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const ResourceName = "competition.yml"
+const (
+	ResourceName                   = "competition.yml"
+	evaluationStageOverheadSeconds = int64(600)
+	evaluationJobOverheadSeconds   = int64(1200)
+)
 
 var (
 	sha256Pattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -196,6 +200,7 @@ func (s *Settings) Validate() error {
 		return errors.New("site_listen and api_port must be valid loopback endpoints")
 	}
 	if p.RampMs < 0 || p.PrewarmMs < 0 || p.SettleMs < 0 ||
+		p.ClientWarmupTimeoutMs <= 0 || 24*time.Hour.Milliseconds() < p.ClientWarmupTimeoutMs ||
 		p.PipelineIntervalMs <= 0 || p.TestTimeoutMs <= 0 || p.AnnounceTimeoutMs <= 0 {
 		return errors.New("evaluation timing policy is invalid")
 	}
@@ -208,8 +213,7 @@ func (s *Settings) Validate() error {
 	if math.IsNaN(p.TakeoverMargin) || math.IsInf(p.TakeoverMargin, 0) || p.TakeoverMargin <= 0 || .5 < p.TakeoverMargin {
 		return errors.New("evaluation_policy.takeover_margin must be finite and in (0, 0.5]")
 	}
-	perRunMs := p.RampMs + p.SettleMs + p.DurationMs + p.RequestTimeoutMs
-	minimumScoreSeconds := (2*int64(p.Replicates)*perRunMs + 999) / 1000
+	minimumScoreSeconds := minimumScoreTimeoutSeconds(p)
 	if p.QueueLimit <= 0 || 10000 < p.QueueLimit || int64(p.ScoreTimeoutSeconds) < minimumScoreSeconds || 7*24*60*60 < p.ScoreTimeoutSeconds {
 		return errors.New("queue_limit must be in 1..10000 and score_timeout_seconds must cover paired baseline/candidate replicates without exceeding seven days")
 	}
@@ -265,6 +269,19 @@ func (s *Settings) Validate() error {
 		return errors.New("at least one submitter token and one operator token are required")
 	}
 	return nil
+}
+
+// Includes the frozen per-stage startup/cleanup allowance used by the trusted
+// evaluator's outer TERM/KILL boundary.
+func evaluationStageTimeoutSeconds(p EvaluationPolicy) int64 {
+	phaseMs := p.RampMs + p.SettleMs + p.ClientWarmupTimeoutMs + p.DurationMs + p.RequestTimeoutMs
+	return (phaseMs+999)/1000 + evaluationStageOverheadSeconds
+}
+
+// Covers every paired replicate plus candidate build, scoring, and final
+// artifact cleanup outside the individual simulator stages.
+func minimumScoreTimeoutSeconds(p EvaluationPolicy) int64 {
+	return 2*int64(p.Replicates)*evaluationStageTimeoutSeconds(p) + evaluationJobOverheadSeconds
 }
 
 func validateLocalMountDirectory(path, parent string) error {

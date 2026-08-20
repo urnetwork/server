@@ -156,6 +156,7 @@ APEX_REQUEST_TIMEOUT=<frozen ceiling>
 APEX_RAMP=<calibrated ramp>
 APEX_PREWARM=<frozen reliability lookback>
 APEX_SETTLE=<calibrated settle>
+APEX_CLIENT_WARMUP_TIMEOUT=<calibrated complete-pool deadline>
 APEX_FLEET_SHARDS=<calibrated shard count>
 APEX_HOSTS=<calibrated exchange host count>
 APEX_SITE_LISTEN=<frozen fake-site host:port>

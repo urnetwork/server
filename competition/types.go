@@ -50,6 +50,7 @@ type EvaluationPolicy struct {
 	RampMs                  int64   `json:"ramp_ms" yaml:"ramp_ms"`
 	PrewarmMs               int64   `json:"prewarm_ms" yaml:"prewarm_ms"`
 	SettleMs                int64   `json:"settle_ms" yaml:"settle_ms"`
+	ClientWarmupTimeoutMs   int64   `json:"client_warmup_timeout_ms" yaml:"client_warmup_timeout_ms"`
 	DurationMs              int64   `json:"duration_ms" yaml:"duration_ms"`
 	RequestTimeoutMs        int64   `json:"request_timeout_ms" yaml:"request_timeout_ms"`
 	PipelineIntervalMs      int64   `json:"pipeline_interval_ms" yaml:"pipeline_interval_ms"`

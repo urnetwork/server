@@ -43,7 +43,7 @@ require_common() {
         APEX_PATCH_FILE APEX_PATCH_SHA256
         APEX_CPU_COUNT
         APEX_DURATION APEX_REQUEST_TIMEOUT APEX_RAMP APEX_PREWARM
-        APEX_SETTLE APEX_FLEET_SHARDS APEX_HOSTS APEX_PIPELINE_INTERVAL
+        APEX_SETTLE APEX_CLIENT_WARMUP_TIMEOUT APEX_FLEET_SHARDS APEX_HOSTS APEX_PIPELINE_INTERVAL
         APEX_TEST_TIMEOUT APEX_ANNOUNCE_TIMEOUT APEX_SITE_LISTEN
         APEX_API_PORT APEX_NO_IMPAIR APEX_WALL_TIMEOUT APEX_KILL_AFTER
     )
@@ -196,6 +196,7 @@ run_one() {
         --ramp "$APEX_RAMP"
         --prewarm "$APEX_PREWARM"
         --settle "$APEX_SETTLE"
+        --client-warmup-timeout "$APEX_CLIENT_WARMUP_TIMEOUT"
         --fleet-shards "$APEX_FLEET_SHARDS"
         --site-listen "$APEX_SITE_LISTEN"
         --hosts "$APEX_HOSTS"
@@ -388,6 +389,7 @@ finalize_bundle() {
         --arg ramp "$APEX_RAMP" \
         --arg prewarm "$APEX_PREWARM" \
         --arg settle "$APEX_SETTLE" \
+        --arg client_warmup_timeout "$APEX_CLIENT_WARMUP_TIMEOUT" \
         --arg fleet_shards "$APEX_FLEET_SHARDS" \
         --arg hosts "$APEX_HOSTS" \
         --arg site_listen "$APEX_SITE_LISTEN" \
@@ -420,6 +422,7 @@ finalize_bundle() {
                 ramp: $ramp,
                 prewarm: $prewarm,
                 settle: $settle,
+                client_warmup_timeout: $client_warmup_timeout,
                 fleet_shards: $fleet_shards,
                 hosts: $hosts,
                 site_listen: $site_listen,

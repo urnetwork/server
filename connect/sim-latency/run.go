@@ -43,6 +43,8 @@ type RunOptions struct {
 	Prewarm  time.Duration
 	Settle   time.Duration
 	Duration time.Duration
+	// hard deadline for establishing every long-lived client before measurement
+	ClientWarmupTimeout time.Duration
 	// deadline for a crawl and the score charged to every failed/incomplete
 	// observation
 	RequestTimeout time.Duration
@@ -129,7 +131,14 @@ func Run(options *RunOptions) (retErr error) {
 		}
 		options.RequestTimeout = 2 * time.Minute
 	}
+	if options.ClientWarmupTimeout <= 0 {
+		if options.Official {
+			return incompleteError("invalid_options", "setup", errors.New("official client warm-up timeout must be positive"))
+		}
+		options.ClientWarmupTimeout = 30 * time.Minute
+	}
 	if options.RequestTimeout.Milliseconds() <= 0 || options.Duration.Milliseconds() <= 0 ||
+		options.ClientWarmupTimeout.Milliseconds() <= 0 ||
 		options.Ramp < 0 || options.Prewarm < 0 || options.Settle < 0 || options.FleetShards < 0 {
 		return incompleteError("invalid_options", "setup", errors.New("run durations and fleet shard count are invalid"))
 	}
@@ -411,7 +420,14 @@ func Run(options *RunOptions) (retErr error) {
 
 	// ramp: stagger provider connects, then give the announce loop a moment to
 	// register connections + locations before the pipeline reads them.
-	logf("ramp=%s prewarm=%s settle=%s then measure=%s", options.Ramp, options.Prewarm, options.Settle, options.Duration)
+	logf(
+		"ramp=%s prewarm=%s settle=%s client-warmup-timeout=%s then measure=%s",
+		options.Ramp,
+		options.Prewarm,
+		options.Settle,
+		options.ClientWarmupTimeout,
+		options.Duration,
+	)
 	rampWait := options.Ramp + 15*time.Second
 	if err := waitPhase(ctx, rampWait); err != nil {
 		return incompleteError("interrupted", "ramp", err)
@@ -447,9 +463,30 @@ func Run(options *RunOptions) (retErr error) {
 		pool,
 		options.RequestTimeout,
 	)
-	driver.Warmup()
+	warmupCtx, cancelWarmup := context.WithTimeout(ctx, options.ClientWarmupTimeout)
+	warmupErr := driver.Warmup(warmupCtx)
+	cancelWarmup()
 	runStats.ClientsPool = len(pool)
 	runStats.ClientsEstablished = driver.EstablishedCount()
+	if warmupErr != nil {
+		if ctx.Err() != nil {
+			return incompleteError("interrupted", "warm client construction", ctx.Err())
+		}
+		if errors.Is(warmupErr, context.DeadlineExceeded) {
+			return incompleteError(
+				"client_warmup_timeout",
+				"warm client construction",
+				fmt.Errorf(
+					"established %d/%d warm clients within %s: %w",
+					driver.EstablishedCount(),
+					len(pool),
+					options.ClientWarmupTimeout,
+					warmupErr,
+				),
+			)
+		}
+		return incompleteError("warm_pool_incomplete", "warm client construction", warmupErr)
+	}
 	if ctx.Err() != nil {
 		return incompleteError("interrupted", "warm client construction", ctx.Err())
 	}
@@ -569,22 +606,23 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 		Arch:             runtime.GOARCH,
 		NumCpu:           runtime.NumCPU(),
 		Flags: map[string]string{
-			"ramp":               options.Ramp.String(),
-			"prewarm":            options.Prewarm.String(),
-			"settle":             options.Settle.String(),
-			"duration":           options.Duration.String(),
-			"request_timeout":    options.RequestTimeout.String(),
-			"fleet_shards":       intToStr(options.FleetShards),
-			"site_listen":        options.SiteListen,
-			"hosts":              intToStr(servicesConfig.HostCount),
-			"api_port":           intToStr(servicesConfig.ApiPort),
-			"ws_port_base":       intToStr(servicesConfig.WsPortBase),
-			"exchange_port_base": intToStr(servicesConfig.ExchangePortBase),
-			"pipeline_interval":  servicesConfig.PipelineInterval.String(),
-			"test_timeout":       servicesConfig.SpeedTestTimeout.String(),
-			"announce_timeout":   servicesConfig.AnnounceTimeout.String(),
-			"impair":             fmt.Sprintf("%t", impairEnabled),
-			"reset":              fmt.Sprintf("%t", options.Reset),
+			"ramp":                  options.Ramp.String(),
+			"prewarm":               options.Prewarm.String(),
+			"settle":                options.Settle.String(),
+			"client_warmup_timeout": options.ClientWarmupTimeout.String(),
+			"duration":              options.Duration.String(),
+			"request_timeout":       options.RequestTimeout.String(),
+			"fleet_shards":          intToStr(options.FleetShards),
+			"site_listen":           options.SiteListen,
+			"hosts":                 intToStr(servicesConfig.HostCount),
+			"api_port":              intToStr(servicesConfig.ApiPort),
+			"ws_port_base":          intToStr(servicesConfig.WsPortBase),
+			"exchange_port_base":    intToStr(servicesConfig.ExchangePortBase),
+			"pipeline_interval":     servicesConfig.PipelineInterval.String(),
+			"test_timeout":          servicesConfig.SpeedTestTimeout.String(),
+			"announce_timeout":      servicesConfig.AnnounceTimeout.String(),
+			"impair":                fmt.Sprintf("%t", impairEnabled),
+			"reset":                 fmt.Sprintf("%t", options.Reset),
 		},
 	}, nil
 }

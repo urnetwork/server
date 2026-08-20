@@ -57,6 +57,7 @@ evaluation_policy:
   ramp_ms: 0
   prewarm_ms: 0
   settle_ms: 0
+  client_warmup_timeout_ms: 0
   duration_ms: 0
   request_timeout_ms: 0
   pipeline_interval_ms: 0

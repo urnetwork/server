@@ -14,6 +14,7 @@ readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/docker-id-map.sh"
 readonly RETAIN_FAILURE_EVIDENCE="$SCRIPT_DIR/retain-failure-evidence.sh"
 readonly POSTGRES_INIT="$SCRIPT_DIR/postgres-init.sh"
+readonly TIMEOUT_BUDGET="$SCRIPT_DIR/timeout-budget.sh"
 readonly EMPTY_PATCH_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 readonly MAX_REQUEST_BYTES=$((2 * 1024 * 1024))
 readonly MAX_PROVIDERS_BYTES=$((1024 * 1024 * 1024))
@@ -201,6 +202,7 @@ sudo -n docker info >/dev/null
 [ -x "$DOCKER_ID_MAP" ] || die "trusted Docker id-map resolver is not executable"
 [ -x "$RETAIN_FAILURE_EVIDENCE" ] || die "trusted failure evidence retainer is not executable"
 [ -f "$POSTGRES_INIT" ] || die "trusted PostgreSQL initializer is missing"
+[ -x "$TIMEOUT_BUDGET" ] || die "trusted timeout-budget calculator is not executable"
 [ -f "$COMPOSE_FILE" ] || die "trusted Compose definition is missing"
 
 [[ "$request_path" = /* && "$result_path" = /* ]] || die "request and result paths must be absolute"
@@ -213,7 +215,7 @@ artifact_dir="$(dirname "$request_path")"
 
 readonly request_keys='["artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_id","round_seed_hex","schema","scorer_version","vault_local_directory"]'
 readonly patch_policy_keys='["allowed_paths","forbidden_paths","max_patch_bytes"]'
-readonly evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
+readonly evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
 jq -e \
     --argjson request_keys "$request_keys" \
     --argjson patch_policy_keys "$patch_policy_keys" \
@@ -418,6 +420,7 @@ request_timeout_ms="$(jq -er '.evaluation_policy.request_timeout_ms' "$request_p
 ramp_ms="$(jq -er '.evaluation_policy.ramp_ms' "$request_path")"
 prewarm_ms="$(jq -er '.evaluation_policy.prewarm_ms' "$request_path")"
 settle_ms="$(jq -er '.evaluation_policy.settle_ms' "$request_path")"
+client_warmup_timeout_ms="$(jq -er '.evaluation_policy.client_warmup_timeout_ms' "$request_path")"
 pipeline_interval_ms="$(jq -er '.evaluation_policy.pipeline_interval_ms' "$request_path")"
 test_timeout_ms="$(jq -er '.evaluation_policy.test_timeout_ms' "$request_path")"
 announce_timeout_ms="$(jq -er '.evaluation_policy.announce_timeout_ms' "$request_path")"
@@ -428,7 +431,7 @@ api_port="$(jq -er '.evaluation_policy.api_port' "$request_path")"
 impairment_enabled="$(jq -r '.evaluation_policy.impairment_enabled' "$request_path")"
 takeover_margin="$(jq -er '.evaluation_policy.takeover_margin' "$request_path")"
 score_timeout_seconds="$(jq -er '.evaluation_policy.score_timeout_seconds' "$request_path")"
-for numeric in duration_ms request_timeout_ms pipeline_interval_ms test_timeout_ms announce_timeout_ms exchange_hosts api_port score_timeout_seconds; do
+for numeric in client_warmup_timeout_ms duration_ms request_timeout_ms pipeline_interval_ms test_timeout_ms announce_timeout_ms exchange_hosts api_port score_timeout_seconds; do
     [[ "${!numeric}" =~ ^[1-9][0-9]*$ ]] || die "invalid positive policy field: $numeric"
 done
 for numeric in ramp_ms prewarm_ms settle_ms fleet_shards; do
@@ -436,7 +439,16 @@ for numeric in ramp_ms prewarm_ms settle_ms fleet_shards; do
 done
 [ "$impairment_enabled" = true ] || [ "$impairment_enabled" = false ] || die "impairment policy is invalid"
 if [ "$impairment_enabled" = true ]; then no_impair=no; else no_impair=yes; fi
-wall_timeout_seconds=$(((ramp_ms + settle_ms + duration_ms + request_timeout_ms + 999) / 1000 + 600))
+wall_timeout_seconds="$(
+    "$TIMEOUT_BUDGET" stage \
+        "$ramp_ms" "$settle_ms" "$client_warmup_timeout_ms" "$duration_ms" "$request_timeout_ms"
+)" || die "could not calculate the stage timeout budget"
+minimum_score_timeout_seconds="$(
+    "$TIMEOUT_BUDGET" score "$replicates" \
+        "$ramp_ms" "$settle_ms" "$client_warmup_timeout_ms" "$duration_ms" "$request_timeout_ms"
+)" || die "could not calculate the score timeout budget"
+[ "$minimum_score_timeout_seconds" -le "$score_timeout_seconds" ] ||
+    die "score timeout does not cover paired stage and cleanup budgets"
 
 compose_with() {
     local project="$1" env_file="$2"
@@ -479,6 +491,7 @@ write_runner_env() {
         "APEX_RAMP=${ramp_ms}ms" \
         "APEX_PREWARM=${prewarm_ms}ms" \
         "APEX_SETTLE=${settle_ms}ms" \
+        "APEX_CLIENT_WARMUP_TIMEOUT=${client_warmup_timeout_ms}ms" \
         "APEX_FLEET_SHARDS=$fleet_shards" \
         "APEX_HOSTS=$exchange_hosts" \
         "APEX_PIPELINE_INTERVAL=${pipeline_interval_ms}ms" \
