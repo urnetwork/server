@@ -369,7 +369,7 @@ func TestUserAuthLogin(t *testing.T) {
 			UserAuth: userAuth,
 			UserName: "",
 		}
-		useAuthAttemptId := server.NewId()
+		useAuthAttemptId := UserAuthAttemptId{}
 
 		result, err = handleLoginParsedAuthJwt(
 			&HandleLoginParsedAuthJwtArgs{
@@ -511,7 +511,7 @@ func TestSocialLogin(t *testing.T) {
 
 		networkId := server.NewId()
 		userId := server.NewId()
-		useAuthAttemptId := server.NewId()
+		useAuthAttemptId := UserAuthAttemptId{}
 
 		email := "hello@bringyour.com"
 
@@ -929,15 +929,23 @@ func TestRemoveExpiredAuthAttempts(t *testing.T) {
 
 		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), expiredCount+freshCount)
 
-		RemoveExpiredAuthAttempts(ctx, minTime)
+		removed := RemoveExpiredAuthAttempts(ctx, minTime)
+		connect.AssertEqual(t, removed, int64(expiredCount))
 
 		// only the in-window rows remain, and none older than minTime survived
 		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), freshCount)
 		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt WHERE attempt_time < $1`, minTime.UTC()), 0)
 
 		// idempotent: a second run removes nothing more
-		RemoveExpiredAuthAttempts(ctx, minTime)
+		removed = RemoveExpiredAuthAttempts(ctx, minTime)
+		connect.AssertEqual(t, removed, int64(0))
 		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), freshCount)
+
+		// The limiter no longer writes this table, so as the cutoff advances the
+		// legacy table converges to empty.
+		removed = RemoveExpiredAuthAttempts(ctx, now.Add(time.Hour))
+		connect.AssertEqual(t, removed, int64(freshCount))
+		connect.AssertEqual(t, countRows(ctx, `SELECT COUNT(*) FROM user_auth_attempt`), 0)
 	})
 }
 

@@ -2,10 +2,14 @@ package model
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
-	// "github.com/urnetwork/glog"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -20,203 +24,224 @@ const AttemptFailedCountThreshold = 5
 const AttemptLookback2 = 30 * time.Minute
 const AttemptFailedCountThreshold2 = 300
 
-func UserAuthAttempt(
-	userAuth *string,
-	session *session.ClientSession,
-) (userAuthAttemptId server.Id, allow bool) {
-	// insert attempt with success false
-	// select attempts by userAuth in past 5 minutes
-	// select attempts by clientIp in past 5 minutes
-	// if more than 10 failed in any, return false
+const userAuthAttemptRedisKeyPrefix = "auth_attempt."
 
-	clientAddressHash, clientPort, err := session.ClientAddressHashPort()
-	if err != nil {
+type userAuthAttemptSettings struct {
+	addressLookback time.Duration
+	addressLimit    int
+	globalLookback  time.Duration
+	globalLimit     int
+}
+
+var defaultUserAuthAttemptSettings = userAuthAttemptSettings{
+	addressLookback: AttemptLookback,
+	addressLimit:    AttemptFailedCountThreshold,
+	globalLookback:  AttemptLookback2,
+	globalLimit:     AttemptFailedCountThreshold2,
+}
+
+// UserAuthAttemptId is an opaque handle to the Redis histories changed by an
+// authentication attempt. It deliberately contains no raw user auth value.
+type UserAuthAttemptId struct {
+	addressRedisKey string
+	globalRedisKey  string
+}
+
+// authAttemptScript atomically records an attempt in the address history and,
+// for identified users, their global history. Scores are expiry times. Each
+// whole sorted set also expires one lookback after its most recent attempt, so
+// inactive histories clean themselves up without a periodic Redis scan.
+//
+// Every attempt, including a rejected one, is recorded. That matches the old
+// PostgreSQL limiter: continued attempts keep the sliding window active. Each
+// set is pruned by expiry and then by oldest rank, bounding it by time and its
+// own threshold count at every write.
+var authAttemptScript = redis.NewScript(`
+local address_key = KEYS[1]
+local has_global = tonumber(ARGV[1])
+local now_ms = tonumber(ARGV[2])
+local address_expiry_ms = tonumber(ARGV[3])
+local global_expiry_ms = tonumber(ARGV[4])
+local member = ARGV[5]
+local address_limit = tonumber(ARGV[6])
+local global_limit = tonumber(ARGV[7])
+local address_ttl_ms = tonumber(ARGV[8])
+local global_ttl_ms = tonumber(ARGV[9])
+
+redis.call('ZREMRANGEBYSCORE', address_key, '-inf', now_ms)
+redis.call('ZADD', address_key, address_expiry_ms, member)
+local address_count = redis.call('ZCARD', address_key)
+if address_limit < address_count then
+    redis.call('ZREMRANGEBYRANK', address_key, 0, address_count - address_limit - 1)
+    address_count = address_limit
+end
+redis.call('PEXPIRE', address_key, address_ttl_ms)
+
+local global_count = 0
+if has_global == 1 then
+    local global_key = KEYS[2]
+    redis.call('ZREMRANGEBYSCORE', global_key, '-inf', now_ms)
+    redis.call('ZADD', global_key, global_expiry_ms, member)
+    global_count = redis.call('ZCARD', global_key)
+    if global_limit < global_count then
+        redis.call('ZREMRANGEBYRANK', global_key, 0, global_count - global_limit - 1)
+        global_count = global_limit
+    end
+    redis.call('PEXPIRE', global_key, global_ttl_ms)
+end
+
+if address_count < address_limit and (has_global == 0 or global_count < global_limit) then
+    return 1
+end
+return 0
+`)
+
+// A success resets the global window and the window for its client-address
+// hash. Per-address histories for other client hashes remain untouched.
+var authAttemptSuccessScript = redis.NewScript(`
+redis.call('DEL', KEYS[1])
+if #KEYS == 2 then
+    redis.call('DEL', KEYS[2])
+end
+return 1
+`)
+
+func userAuthAttemptRedisKeys(
+	userAuth *string,
+	clientAddressHashHex string,
+) (addressRedisKey string, globalRedisKey string) {
+	if userAuth == nil {
+		// The hash tag is per address so identity-less histories spread across
+		// the cluster rather than sharing one hot slot.
+		addressRedisKey = fmt.Sprintf(
+			"%s{address_%s}.address",
+			userAuthAttemptRedisKeyPrefix,
+			clientAddressHashHex,
+		)
 		return
 	}
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
-		userAuthAttemptId = server.NewId()
+	// User auths are PII. HMAC gives us a stable cluster-distribution key
+	// without putting an email address or phone number in Redis keyspace.
+	mac := hmac.New(sha256.New, passwordPepper())
+	_, err := mac.Write([]byte("auth-attempt-user\x00"))
+	server.Raise(err)
+	_, err = mac.Write([]byte(*userAuth))
+	server.Raise(err)
+	userAuthHashHex := hex.EncodeToString(mac.Sum(nil))
+	hashTag := "user_" + userAuthHashHex
 
-		server.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
-				INSERT INTO user_auth_attempt
-				(user_auth_attempt_id, user_auth, client_address_hash, client_address_port, success)
-				VALUES ($1, $2, $3, $4, $5)
-			`,
-			userAuthAttemptId,
-			userAuth,
-			clientAddressHash[:],
-			clientPort,
-			false,
-		))
-
-		type UserAuthAttemptResult struct {
-			attemptTime time.Time
-			success     bool
-		}
-
-		parseAttempts := func(result server.PgResult) []UserAuthAttemptResult {
-			attempts := []UserAuthAttemptResult{}
-			for result.Next() {
-				var attempt UserAuthAttemptResult
-				server.Raise(result.Scan(
-					&attempt.attemptTime,
-					&attempt.success,
-				))
-				attempts = append(attempts, attempt)
-			}
-			return attempts
-		}
-
-		passesThreshold := func(attempts []UserAuthAttemptResult) bool {
-			failedCount := 0
-			for i := 0; i < len(attempts); i += 1 {
-				if !attempts[i].success {
-					failedCount += 1
-				}
-			}
-			return failedCount < AttemptFailedCountThreshold
-		}
-		passesThreshold2 := func(attempts []UserAuthAttemptResult) bool {
-			failedCount := 0
-			for i := 0; i < len(attempts); i += 1 {
-				if !attempts[i].success {
-					failedCount += 1
-				}
-			}
-			return failedCount < AttemptFailedCountThreshold2
-		}
-
-		if userAuth != nil {
-			// lookback by user auth and client ip hash
-			// then if that passes, lookback by user auth
-
-			var attempts []UserAuthAttemptResult
-			result, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT 
-						attempt_time,
-						success
-					FROM user_auth_attempt
-					WHERE 
-						user_auth = $1 AND
-						client_address_hash = $2 AND
-						now() - INTERVAL '1 seconds' * $3 <= attempt_time AND
-						success = false
-					ORDER BY attempt_time DESC
-					LIMIT $4
-				`,
-				userAuth,
-				clientAddressHash[:],
-				AttemptLookback/time.Second,
-				AttemptFailedCountThreshold,
-			)
-			server.WithPgResult(result, err, func() {
-				attempts = parseAttempts(result)
-			})
-			if !passesThreshold(attempts) {
-				return
-			}
-
-			var attempts2 []UserAuthAttemptResult
-			result, err = tx.Query(
-				session.Ctx,
-				`
-					SELECT 
-						attempt_time,
-						success
-					FROM user_auth_attempt
-					WHERE 
-						user_auth = $1 AND
-						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
-						success = false
-					ORDER BY attempt_time DESC
-					LIMIT $3
-				`,
-				userAuth,
-				AttemptLookback2/time.Second,
-				AttemptFailedCountThreshold2,
-			)
-			server.WithPgResult(result, err, func() {
-				attempts2 = parseAttempts(result)
-			})
-			if !passesThreshold2(attempts2) {
-				return
-			}
-		} else {
-			var attempts []UserAuthAttemptResult
-			result, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT 
-						attempt_time,
-						success
-					FROM user_auth_attempt
-					WHERE 
-						client_address_hash = $1 AND
-						now() - INTERVAL '1 seconds' * $2 <= attempt_time AND
-						success = false
-					ORDER BY attempt_time DESC
-					LIMIT $3
-				`,
-				clientAddressHash[:],
-				AttemptLookback/time.Second,
-				AttemptFailedCountThreshold,
-			)
-			server.WithPgResult(result, err, func() {
-				attempts = parseAttempts(result)
-			})
-			if !passesThreshold(attempts) {
-				return
-			}
-		}
-
-		allow = true
-	})
+	// The two histories for one user share a hash tag, allowing the Lua
+	// updates to remain atomic in Redis Cluster. Different users distribute
+	// across independent slots.
+	addressRedisKey = fmt.Sprintf(
+		"%s{%s}.address.%s",
+		userAuthAttemptRedisKeyPrefix,
+		hashTag,
+		clientAddressHashHex,
+	)
+	globalRedisKey = fmt.Sprintf(
+		"%s{%s}.global",
+		userAuthAttemptRedisKeyPrefix,
+		hashTag,
+	)
 	return
+}
+
+func UserAuthAttempt(
+	userAuth *string,
+	clientSession *session.ClientSession,
+) (userAuthAttemptId UserAuthAttemptId, allow bool) {
+	return userAuthAttemptAt(
+		userAuth,
+		clientSession,
+		server.NowUtc(),
+		defaultUserAuthAttemptSettings,
+	)
+}
+
+func userAuthAttemptAt(
+	userAuth *string,
+	clientSession *session.ClientSession,
+	now time.Time,
+	settings userAuthAttemptSettings,
+) (userAuthAttemptId UserAuthAttemptId, allow bool) {
+	if settings.addressLookback < time.Millisecond || settings.addressLimit <= 0 ||
+		settings.globalLookback < time.Millisecond || settings.globalLimit <= 0 {
+		panic("invalid user auth attempt settings")
+	}
+
+	clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+	if err != nil {
+		return
+	}
+	clientAddressHashHex := hex.EncodeToString(clientAddressHash[:])
+	addressRedisKey, globalRedisKey := userAuthAttemptRedisKeys(userAuth, clientAddressHashHex)
+	member := server.NewId().String()
+	userAuthAttemptId = UserAuthAttemptId{
+		addressRedisKey: addressRedisKey,
+		globalRedisKey:  globalRedisKey,
+	}
+
+	hasGlobal := 0
+	keys := []string{addressRedisKey}
+	if globalRedisKey != "" {
+		hasGlobal = 1
+		keys = append(keys, globalRedisKey)
+	}
+
+	var allowed int64
+	server.Redis(clientSession.Ctx, func(r server.RedisClient) {
+		allowed, err = authAttemptScript.Run(
+			clientSession.Ctx,
+			r,
+			keys,
+			hasGlobal,
+			now.UnixMilli(),
+			now.Add(settings.addressLookback).UnixMilli(),
+			now.Add(settings.globalLookback).UnixMilli(),
+			member,
+			settings.addressLimit,
+			settings.globalLimit,
+			settings.addressLookback.Milliseconds(),
+			settings.globalLookback.Milliseconds(),
+		).Int64()
+		server.Raise(err)
+	})
+	return userAuthAttemptId, allowed == 1
 }
 
 func SetUserAuthAttemptSuccess(
 	ctx context.Context,
-	userAuthAttemptId server.Id,
+	userAuthAttemptId UserAuthAttemptId,
 	success bool,
 ) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		setUserAuthAttemptSuccessInTx(ctx, tx, userAuthAttemptId, success)
+	if !success || userAuthAttemptId.addressRedisKey == "" {
+		return
+	}
+
+	keys := []string{userAuthAttemptId.addressRedisKey}
+	if userAuthAttemptId.globalRedisKey != "" {
+		keys = append(keys, userAuthAttemptId.globalRedisKey)
+	}
+	server.Redis(ctx, func(r server.RedisClient) {
+		_, err := authAttemptSuccessScript.Run(
+			ctx,
+			r,
+			keys,
+		).Result()
+		server.Raise(err)
 	})
 }
 
-func setUserAuthAttemptSuccessInTx(
-	ctx context.Context,
-	tx server.PgTx,
-	userAuthAttemptId server.Id,
-	success bool,
-) {
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-			UPDATE user_auth_attempt
-			SET success = $1
-			WHERE user_auth_attempt_id = $2
-		`,
-		success,
-		userAuthAttemptId,
-	))
-}
-
 // removeExpiredAuthAttemptsBatchSize bounds each delete pass. user_auth_attempt
-// is high-write, so an unbounded `DELETE ... WHERE attempt_time < $1` deletes the
-// whole older-than-window backlog in one long-locking statement; instead drain it
-// as a series of bounded, short-locking transactions. A var (not const) so tests
-// can drive the multi-batch drain loop with a small batch.
+// is now legacy, so the cleanup task drains it while Redis takes over. A var
+// (not const) lets tests force the multi-batch loop with a small batch.
 var removeExpiredAuthAttemptsBatchSize = 50000
 
-func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) {
-	// LIMIT-batched drain: each pass deletes at most one batch in its own tx,
-	// driven by the user_auth_attempt_attempt_time_user_auth_attempt_id index,
-	// until a pass removes fewer than the batch size (backlog drained).
+func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) (databaseRowsRemoved int64) {
+	// LIMIT-batched legacy-table drain: each pass deletes at most one batch in
+	// its own transaction until the older-than-window backlog is empty.
 	for {
 		batchCount := int64(0)
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -238,9 +263,11 @@ func RemoveExpiredAuthAttempts(ctx context.Context, minTime time.Time) {
 			))
 			batchCount = tag.RowsAffected()
 		})
+		databaseRowsRemoved += batchCount
 		if batchCount < int64(removeExpiredAuthAttemptsBatchSize) {
 			break
 		}
 	}
 	// wallet_auth_challenge_attempt cleanup is handled by RemoveExpiredWalletAuthChallenges
+	return
 }

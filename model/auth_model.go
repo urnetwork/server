@@ -299,7 +299,7 @@ func loginUserAuth(
 type HandleLoginParsedAuthJwtArgs struct {
 	AuthJwt           AuthJwt
 	AuthJwtStr        string
-	UserAuthAttemptId server.Id
+	UserAuthAttemptId UserAuthAttemptId
 }
 
 func handleLoginParsedAuthJwt(

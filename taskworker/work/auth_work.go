@@ -55,7 +55,10 @@ type RemoveExpiredAuthAttemptsArgs struct {
 }
 
 type RemoveExpiredAuthAttemptsResult struct {
+	DatabaseRowsRemoved int64
 }
+
+const removeExpiredAuthAttemptsInterval = 12 * time.Hour
 
 func ScheduleRemoveExpiredAuthAttempts(clientSession *session.ClientSession, tx server.PgTx) {
 	task.ScheduleTaskInTx(
@@ -64,17 +67,20 @@ func ScheduleRemoveExpiredAuthAttempts(clientSession *session.ClientSession, tx 
 		&RemoveExpiredAuthAttemptsArgs{},
 		clientSession,
 		task.RunOnce("remove_expired_auth_attempts"),
-		task.RunAt(server.NowUtc().Add(1*time.Hour)),
+		task.RunAt(server.NowUtc().Add(removeExpiredAuthAttemptsInterval)),
 	)
 }
 
 func RemoveExpiredAuthAttempts(
-	removeExpiredAuthCodes *RemoveExpiredAuthAttemptsArgs,
+	removeExpiredAuthAttempts *RemoveExpiredAuthAttemptsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveExpiredAuthAttemptsResult, error) {
 	minTime := server.NowUtc().Add(-24 * time.Hour)
-	model.RemoveExpiredAuthAttempts(clientSession.Ctx, minTime)
-	return &RemoveExpiredAuthAttemptsResult{}, nil
+	databaseRowsRemoved := model.RemoveExpiredAuthAttempts(clientSession.Ctx, minTime)
+	glog.Infof("[authw]removed %d legacy database auth attempt rows.\n", databaseRowsRemoved)
+	return &RemoveExpiredAuthAttemptsResult{
+		DatabaseRowsRemoved: databaseRowsRemoved,
+	}, nil
 }
 
 func RemoveExpiredAuthAttemptsPost(
