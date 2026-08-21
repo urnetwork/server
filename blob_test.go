@@ -3,14 +3,60 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
 )
+
+// Prove the configured non-local service account can perform every operation
+// required by the simulator's content-addressed evidence publisher.
+func TestLiveBlobStoreContentAddressedCanary(t *testing.T) {
+	if os.Getenv("SIM_TESTNET_LIVE_BLOB") != "1" {
+		t.Skip("set SIM_TESTNET_LIVE_BLOB=1 with WARP_ENV to probe the configured server/blob store")
+	}
+	store, ok := LoadBlobStore()
+	if !ok {
+		t.Fatal("configured MinIO blob store is unavailable")
+	}
+	if store.Authority() == "local" {
+		t.Fatalf("configured blob store is local: %q", store.Authority())
+	}
+	content := []byte("urnetwork sim-testnet MinIO canary v1\n")
+	hash := sha256.Sum256(content)
+	key := path.Join(store.Prefix(), "sim-testnet", "preflight", "sha256", fmt.Sprintf("%x", hash[:]))
+	localPath := filepath.Join(t.TempDir(), "canary")
+	if err := os.WriteFile(localPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := store.Put(ctx, key, localPath, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := store.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(actual, content) {
+		t.Fatalf("MinIO canary read=%q read_error=%v close_error=%v", actual, readErr, closeErr)
+	}
+	objects, err := store.List(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 || objects[0].Key != key || objects[0].Size != int64(len(content)) {
+		t.Fatalf("MinIO canary listing=%+v", objects)
+	}
+}
 
 func TestLocalBlobStoreRoundTrip(t *testing.T) {
 	root := t.TempDir()
