@@ -70,6 +70,22 @@ activation. The WhoDis private service port moves from 8053 to collision-free
 second root cause found during that move: Warp retained withdrawn Grafana DNAT
 rules at 7178–7182 even though Grafana's live allocation had moved, so the old
 rules could steal Connect traffic indefinitely.
+Updated later on 2026-08-20 after the rollout audit exposed three lifecycle
+blind spots: §11.6 now distinguishes MinIO's healthy LAN path from an omitted
+overlay bind; §16.7 defines bounded socket/conntrack cleanup summaries instead
+of per-port journal floods; and §17 separates snow's green Compose oneshot from
+a stale zero-peer Subtensor node and nginx's unrecovered OpenVPN-address bind
+race.
+The final Subtensor deployment pass added a third bootstrap discriminator:
+historical runtimes can return a JSON-RPC error for `eth_chainId` before the
+Frontier runtime API exists, even while the chain identity, peers, and head
+progress are healthy. Section 17 now keeps that response visible without
+mistaking it for a deployment failure, while still requiring the exact EVM
+identity before chain readiness.
+A post-deploy P2P audit then found snow listening on 30333 but accepting zero
+inbound sessions because the site's upstream NAT did not expose the port.
+Section 17 distinguishes that public-path failure from host firewall,
+conntrack, DNS, and bootnode failures.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -1309,6 +1325,26 @@ loki flushes on `chunk_idle_period`/shutdown; **mimir uploads only after a ~2h
 TSDB block boundary** — an empty mimir bucket right after a healthy start is
 EXPECTED, not a fault (populates on the next boundary). An empty/stale loki bucket
 while loki is crash-looping = writes stopped (11.2/11.4), not a storage bug.
+
+The S3 API must be reachable on both edge-6 addresses: LAN
+`192.168.51.193:23900` and management overlay `172.28.208.177:23900`. Do not
+infer this from `minio.service=active`; an address-specific bind can leave one
+path healthy and refuse the other. Check the configured bind, listening socket,
+and both HTTP health paths together:
+```
+systemctl show minio -p ActiveState -p SubState -p NRestarts -p ExecMainStatus
+grep -E '^(MINIO_OPTS|MINIO_VOLUMES)=' /etc/default/minio
+ss -lntp | grep ':23900'
+curl -fsS --max-time 5 http://192.168.51.193:23900/minio/health/live
+curl -fsS --max-time 5 http://172.28.208.177:23900/minio/health/live
+```
+Desired `MINIO_OPTS` binds the S3 API as `--address :23900` and keeps the
+administrative console loopback-only. The Ansible deployment must fail unless
+both health requests return 200. On 2026-08-20 the process was healthy but used
+`--address 192.168.51.193:23900`; LAN health returned 200 while the overlay
+connection was refused. That is a bind/config split, not a route, firewall, or
+data-store failure. Re-run `xops/main/ansible/run-minio.sh` after changing the
+vault environment; a source-only vault change does not restart the service.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
@@ -2726,6 +2762,67 @@ DNAT. Direct public-8053 QUIC probes time out only because the upstream firewall
 blocks that port; regenerate the units and deploy the rebuilt warpctl to remove
 the host rules themselves.
 
+That deployment warning is historical as of the 2026-08-20 20:01Z checkpoint.
+Edge-0, edge-1, edge-3, and edge-4 now run the same rebuilt warpctl (SHA-256
+`ac84483944b72572ada672bf2fcdb1287344385c5d2af58a0241e0e46ba2829b`).
+All ten enabled LB units carry both `--forwardports=udp:53:4053` and
+`--privateports=8053`, and every unit recorded an explicit successful deployment
+of LB version `2026.8.20-outerwerld+1024531200`. Surviving reconciliation records
+show the rebuilt worker deleting old public TCP/UDP 8053 DNAT while preserving
+public UDP/53 to private 4053. Thus the source, generated-unit, and deployed-LB
+sides of the 8053 privacy fix are all live.
+
+All 102 enabled `warp-main-*` units on those four hosts were active/running
+(26, 26, 25, and 25 respectively), with no enabled-but-inactive unit, nonzero
+systemd restart count, or nonzero main exit status. All 88 HTTP-capable
+non-LB blocks (API, app, Connect, Grafana, MCP, taskworker, and web) returned
+HTTP 200 with `status: ok`. All 20 Connect block status endpoints additionally
+returned `X-UR-Connect-Listeners-Ready: 1` and exactly
+`X-UR-Connect-UDP-Listeners: 443,4053,8053`. A fresh pinned wire matrix passed
+H1, direct H3, `h3dns`, and `h3dnspump` on all ten reachable IPv4 interfaces.
+Every QUIC carrier both sent and received and the observed wire return tuple was
+the exact selected public IPv4 with source UDP/443 or UDP/53 as appropriate.
+Edge-5 and `65.49.70.91` remained unreachable over management, H1, and all three
+QUIC carriers.
+
+Route53 agreed with the wire result: each of the ten reachable A checks had
+16/16 successful observations and edge-5 had 0/16. IPv6 improved to five
+healthy direct H1/H3 interfaces, each also 16/16 in Route53: edge-0 eno4,
+edge-1 eno2 and eno3, and edge-4 eno3 and eno4. Edge-0 eno2, both edge-3
+interfaces, and edge-5 remained 0/16. Do not require the DNS carrier on an IPv6
+tuple: `whodis.bringyour.com` is deliberately an A-only health-evaluated alias
+of `main-lb.bringyour.com`, and Warp's current product policy deliberately omits
+the public 53-to-4053 forward alias on IPv6. Direct H1/H3 are the IPv6 gates.
+
+The rollout was serving but had not yet converged to one LB generation. Two LB
+image versions arrived within minutes of each other, so edge-1, edge-3, and
+edge-4 temporarily had the current, intermediate, and pre-rollout nginx master
+on each interface; edge-0 had one or two masters per interface. The workers had
+active, correctly parented `docker container stop -t 3600` drains and the counts
+were shrinking (Connect was already at exactly five processes on edge-0/1 and
+five current plus two predecessors on edge-3/4). This bounded three-generation
+shape is explained by two back-to-back successful deployments, not by an
+unowned orphan. A third generation without two deployment-success records, or
+one that remains after the serialized one-hour drains have completed, is still
+the orphan-regression signal.
+
+Finally, every LB activation triggered journald rate limiting: between 81,710
+and 112,998 worker messages per LB unit were suppressed. The flood is dominated
+by per-port stale-conntrack cleanup after the large `netstat` snapshot. During
+such a rollout, an empty grep for deploy or firewall errors is not evidence;
+require the explicit final `Deploy success`, active unit and restart state,
+Connect listener readiness, Route53 observations, and the pinned wire matrix.
+The corrected warpctl captures the netstat snapshot without logging it, scans
+conntrack once per address family for the Docker-network reply source, and
+deletes only returned reply ports that are in the configured pool but have no
+live/draining listener. It emits one `Socket discovery ... scanned=...
+occupied_pool_ports=... duration=...` record and one `Conntrack cleanup ...
+family=... scanned=... candidate_ports=... stale_ports=... deleted_flows=...
+errors=... duration=...` record per family. Any raw socket/flow rows, per-pool-
+port delete output, or new journald suppression after that warpctl is deployed
+is a regression; the source correction is not live until warpctl is rebuilt and
+rolled out.
+
 ### 16.8 Incident-shaped playbook
 
 1. Resolve A/AAAA; map the selected public address to one edge/interface.
@@ -2765,3 +2862,183 @@ thousands of received/sent H3 DATAGRAM messages with zero carrier errors,
 proving routed app traffic rather than handshake-only success. That sequence
 is the known-good recovery shape for direct H3. The DNS-carrier matrix and
 failure split are recorded in §16.6.
+
+## 17. Subtensor RPC gateway (snow)
+
+Snow provides the testfinney archive node on loopback `127.0.0.1:9945` and an
+nginx HTTP/WebSocket gateway on overlay `172.28.208.185:9944`. Treat the node,
+gateway, and overlay lifecycle as separate layers. In particular,
+`subtensor.service` is a `Type=oneshot` Docker Compose launcher, so
+`active (exited)` proves only that Compose accepted the start; it does not prove
+that the container is current, peered, syncing, or reachable through nginx.
+
+### 17.1 Listener and deployment identity
+
+Run these together on snow:
+```
+systemctl show subtensor nginx openvpn@by-pre \
+  -p Id -p ActiveState -p SubState -p Result -p NRestarts -p ExecMainStatus
+ip -brief address show tun0
+ss -lntp | grep -E ':(9944|9945|30333)\b'
+docker ps --filter name=subtensor --format '{{.Image}} {{.Status}}'
+grep -E '^\s*image:|--(chain|sync|pruning|database|bootnodes)' \
+  /etc/subtensor/docker-compose.yml
+test -s /etc/subtensor/preflight.json && cat /etc/subtensor/preflight.json
+journalctl -u nginx -b --no-pager | tail -100
+```
+Required shape: `tun0` owns `172.28.208.185`; nginx listens on that exact
+address at 9944; the node listens on loopback 9945 and P2P 30333; the container
+uses the pinned RaoFoundation digest; and `preflight.json` records the expected
+testfinney identity. During archive bootstrap, `ready=false`, `isSyncing=true`,
+and a historical runtime version are expected. Before the historical head
+reaches Frontier, `evm_chain_id` can be unavailable and
+`evm_chain_id_error.message` can say that
+`EthereumRuntimeRPCApi_chain_id` is not found; this is bootstrap state only
+when peers and heads are progressing. Application cutover requires
+`ready=true`, `isSyncing=false`, runtime specification 447, transaction version
+1, EVM chain ID `0x3b1`, and an available `eth_getLogs`. A missing preflight or
+a mutable `v3.x` image is an undeployed/stale node even when the oneshot unit
+is green.
+
+P2P listening is not P2P exposure. From an independent internet host, probe
+snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a
+public-path proof):
+```
+# on snow: record WAN and the LAN target
+curl -4 -fsS --max-time 5 https://api.ipify.org
+ip -4 route get 1.1.1.1
+ss -lntp | grep ':30333\b'
+
+# on an independent host
+nc -vz -w 5 <snow-wan-ip> 30333
+```
+Healthy is a completed external TCP handshake plus a rising
+`substrate_sub_libp2p_incoming_connections_total`. A timeout while the local
+listener exists, UFW is inactive, and conntrack has ample capacity localizes
+the fault to upstream NAT/firewall. Forward WAN TCP/30333 to snow's LAN
+TCP/30333 and reserve the LAN address; snow currently receives its LAN address
+by DHCP, so an unreserved forward can silently drift after a lease change.
+
+### 17.2 Node progress and gateway path
+
+Query the backing node first, then the same RPC through the gateway:
+```
+rpc='{"jsonrpc":"2.0","id":1,"method":"system_health","params":[]}'
+curl -fsS --max-time 5 -H 'content-type: application/json' -d "$rpc" \
+  http://127.0.0.1:9945
+curl -fsS --max-time 5 http://172.28.208.185:9944/healthz
+curl -fsS --max-time 5 -H 'content-type: application/json' -d "$rpc" \
+  http://172.28.208.185:9944
+```
+Also sample `chain_getHeader` and `chain_getFinalizedHead` twice across a useful
+interval. Deployment-healthy bootstrap means peers are greater than zero, the
+best/finalized head advances, and the direct and proxied identity agree; it is
+valid for `isSyncing` to remain true while millions of archive blocks download.
+Chain-ready additionally requires `isSyncing=false`, preflight `ready=true`,
+and runtime specification 447. An RPC response alone is insufficient: a
+zero-peer node can serve a permanently stale local chain.
+
+`isSyncing=false` is especially unsafe by itself. With no peers, Subtensor can
+set `system_syncState.highestBlock` equal to its own stale `currentBlock` and
+therefore report false even though the public chain is millions of blocks
+ahead. Require all of: peers > 0, two advancing head samples, the expected
+current runtime, and a comparison against the official RPC head before
+declaring convergence. For the P2P layer, distinguish TCP reachability from a
+retained peer session:
+```
+getent ahosts bootnode.test.finney.opentensor.ai
+nc -vz -w 5 bootnode.test.finney.opentensor.ai 30333
+docker exec subtensor getent ahostsv4 bootnode.test.finney.opentensor.ai
+docker exec subtensor timeout 3 bash -c \
+  'exec 3<>/dev/tcp/bootnode.test.finney.opentensor.ai/30333'
+docker logs --since 10m subtensor | grep -E 'Running (litep2p|libp2p)|peers|Idle|Syncing'
+```
+A successful host `nc` does not prove the container path. If container DNS
+takes longer than the three-second gate while a direct-IP container TCP test
+succeeds, fix its resolver inputs before investigating P2P negotiation.
+
+Litep2p discovery can briefly lose the sole retained outbound peer, but repeated
+loss is not a healthy steady state. On 2026-08-20 the node imported at 630--685
+blocks/s with two peers, spent about 130 seconds at zero peers with a frozen
+head, then rediscovered outbound peers without a process restart and resumed.
+The cycle repeated. Metrics showed 155 discovered peers, zero inbound
+connections, and only outbound opened sessions; an independent edge timed out
+to snow's WAN TCP/30333. Treat any zero-peer/frozen-head sample as degraded;
+alert if it persists for three minutes, and page if it persists for five.
+Recovery requires both public inbound reachability and more than one good RPC
+sample. The observed temporary post-recovery proof was 12/12 five-second
+samples with two peers and `isSyncing=true`, while the head advanced from
+701,762 to 733,678. Never turn a zero-peer `isSyncing=false` sample into a ready
+signal.
+
+### 17.3 2026-08-20 incident signature
+
+Two independent faults were present:
+
+1. Nginx tried to bind `172.28.208.185:9944` during boot before
+   `openvpn@by-pre.service` had installed that address on `tun0`. It exited with
+   `bind() ... failed (99: Cannot assign requested address)`. The stock unit had
+   `Restart=no`, so port 9944 stayed closed even after the overlay appeared;
+   `nginx -t` then passed, which is the discriminator for this boot race.
+2. The node was still the old `ghcr.io/opentensor/subtensor:v3.2.7` deployment,
+   runtime specification 212 with RocksDB/pruning 256. It had zero peers and a
+   best head stuck at 3,424,064 despite the target already exceeding 7.8 million
+   at its prior start. The desired pinned runtime-447 archive deployment and
+   `/etc/subtensor/preflight.json` had never reached the host.
+
+The first pinned-image deployment then exposed a playbook bug: it asserted
+`isSyncing=false` and exact runtime 447 before installing nginx. At that point
+the new node was healthy bootstrap state—one peer, advancing from block 50,296
+toward 7,826,287, and reporting historical runtime 135 at that historical
+head—but the assertion aborted the play and left port 9944 closed. The corrected
+gate requires peer, identity, and head progress during bootstrap; writes
+`preflight.json` with `ready=false`; installs and probes nginx; and enforces
+runtime 447 only after synchronization converges. The nginx drop-in orders it
+after `openvpn@by-pre.service`, waits for the exact overlay address, and restarts
+after transient bind failures.
+
+A second run exposed the bootnode-path variant. The node reached block 316,785,
+then restarted with zero peers; for minutes its head did not move and
+`system_syncState` reported starting/current/highest all equal to 316,785 while
+the official target remained above 7.8 million. Both litep2p and libp2p showed
+the same result, ruling out the backend. Host DNS and TCP/30333 succeeded, but
+inside the container hostname resolution took 8.05 seconds and a five-second
+hostname TCP probe emitted no SYN; the same direct-IP container connection
+completed in 80ms with correct bridge forwarding, MASQUERADE, and return SYN-ACK.
+Snow's resolved config incorrectly preferred `192.168.51.1`, a resolver from a
+different site, ahead of its working `192.168.1.1` DHCP resolver. The corrected
+host config and Compose service pin reachable IPv4 DNS, and deployment now
+requires DNS plus bootnode TCP from inside the container within three seconds.
+The gateway include also runs immediately after local RPC liveness and before
+peer/progress assertions; even a real P2P failure therefore leaves an
+operational, restart-supervised 9944 endpoint while preflight remains not ready.
+
+A later run reached historical runtime 156, where `eth_getLogs` returned an
+empty result successfully but `eth_chainId` returned JSON-RPC error `-32603`
+because `EthereumRuntimeRPCApi_chain_id` did not yet exist. The playbook
+incorrectly dereferenced `.json.result` unconditionally and failed despite
+healthy archive progress. Bootstrap now asserts the stable chain, genesis,
+finality, runtime name, peer, and progress signals; it classifies and persists
+the optional historical EVM response. Exact runtime/transaction version, EVM
+chain ID, and log interface remain mandatory convergence gates. The corrected
+deployment completed 82 tasks with zero failures.
+
+That passing deployment still did not prove the public P2P path. Snow had the
+Docker proxy listening on `0.0.0.0:30333`, UFW inactive, and conntrack at only
+858 of 1,048,576 entries, but an independent edge could not connect to
+`173.25.160.143:30333`. Prometheus simultaneously reported
+`substrate_sub_libp2p_incoming_connections_total 0`; peer sessions were all
+outbound and periodically fell to zero. This is the upstream router/NAT
+signature. The required repair is WAN TCP/30333 forwarded to snow's current
+LAN `192.168.1.161:30333`, with that DHCP address reserved, followed by the
+independent-host handshake and rising inbound-connection counter.
+
+Gateway recovery and archive bootstrap deployment are complete after deploying
+`run-subtensor.sh`: the pinned image/chain identity, temporary peers, advancing
+heads, `/healthz`, and JSON-RPC on overlay 9944 are proven. P2P remains degraded
+until the upstream TCP/30333 forward is installed and externally verified;
+chain cutover additionally waits for preflight `ready=true` and runtime 447.
+Reboot snow once as a deployment gate: nginx must wait until
+`172.28.208.185` exists or restart on the transient bind failure.
+`network-online.target` alone does not guarantee that the later OpenVPN address
+is present.
