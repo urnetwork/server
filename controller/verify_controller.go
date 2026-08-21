@@ -188,6 +188,11 @@ func verifyServerKeyById(serverKeyId byte) *VerifyServerKey {
 // tests via `SetVerifySettings`.
 var verifySettingsInstance *model.VerifySettings
 
+// Test-only scheduling hook immediately before an EXTEND takes its trail
+// mutation lock. Production leaves it nil; controller tests use it to force a
+// stale-read ordering without sleeps or scheduler luck.
+var verifyExtendBeforeTrailLock func()
+
 var verifySettingsFromVault = sync.OnceValue(func() *model.VerifySettings {
 	res := server.Vault.RequireSimpleResource("verify.yml")
 	var conf struct {
@@ -234,6 +239,7 @@ var verifySettingsFromVault = sync.OnceValue(func() *model.VerifySettings {
 	}
 	s.StepTimeout = time.Duration(v.StepTimeoutSeconds) * time.Second
 	s.StepTimeoutGrace = time.Duration(v.StepTimeoutGraceSeconds) * time.Second
+	s.TrailLockTtl = s.StepTimeout + s.StepTimeoutGrace
 	s.TrailTtlGrace = time.Duration(v.TrailTtlGraceSeconds) * time.Second
 	s.EgressTtl = time.Duration(v.EgressTtlSeconds) * time.Second
 	s.EgressRefreshInterval = time.Duration(v.EgressRefreshSeconds) * time.Second
@@ -357,7 +363,6 @@ func verifySeed(
 	clientSession *session.ClientSession,
 ) (any, error) {
 	ctx := clientSession.Ctx
-	settings := verifySettings()
 
 	// input shape (a caller that cannot even form the message gets a plain
 	// error — signature validity does not depend on any provider state, so
@@ -374,6 +379,11 @@ func verifySeed(
 	if verify.M < 0 {
 		return nil, fmt.Errorf("400 M must be non-negative")
 	}
+	// Configuration and all Redis/PostgreSQL state are intentionally resolved
+	// only after the complete signed-message shape is present. This prevents
+	// the missing-signature fail-open class from reaching mutable state and
+	// keeps malformed unauthenticated requests independent of deployment state.
+	settings := verifySettings()
 
 	// §9 (V5): shed floods before any crypto or provider-state lookup. the
 	// per-source-ip/vpk hard rate limit is the DoS bound on trail-state
@@ -629,12 +639,11 @@ func verifyExtend(
 		return nil, fmt.Errorf("400 trail not found")
 	}
 
-	confirmedIds := verifyConfirmedIds(trail)
-
-	// §4.3 idempotency: a resend whose trail matches the already-confirmed
-	// hops replays the cached response — no double count, no depth advance.
-	// the signature is still required so only the vpk holder can fetch it.
-	if slices.Equal(verify.Trail, confirmedIds) {
+	var confirmedIds []server.Id
+	replayConfirmed := func(trail *model.VerifyTrail, confirmedIds []server.Id) (any, bool, error) {
+		if !slices.Equal(verify.Trail, confirmedIds) {
+			return nil, false, nil
+		}
 		replayMessage, err := connect.BuildVerifyExtendMessage(
 			connect.Id(trailId),
 			trail.ServerNonce,
@@ -643,31 +652,49 @@ func verifyExtend(
 			verifyConnectIds(verify.Trail),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("400 %s", err)
+			return nil, true, fmt.Errorf("400 %s", err)
 		}
 		if !connect.VerifyVerifyMessageSignature(trail.Vpk, replayMessage, verify.ExtendSig) {
-			return nil, fmt.Errorf("400 invalid extend signature")
+			return nil, true, fmt.Errorf("400 invalid extend signature")
 		}
 		responseJson, ok := model.GetVerifyTrailResponse(ctx, trailId)
 		if !ok {
-			return nil, fmt.Errorf("400 trail not found")
+			return nil, true, fmt.Errorf("400 trail not found")
 		}
-		return verifyDecodeCachedResponse(responseJson)
+		result, err := verifyDecodeCachedResponse(responseJson)
+		return result, true, err
 	}
 
 	// V3: serialize the mutating read-modify-write below (confirm+assign /
 	// complete) with a short per-trail lock, so two concurrent identical valid
 	// EXTENDs cannot both confirm the same pending hop (double-counting c_Y,
-	// corrupting the hop list, and stuffing the latency histogram). The
-	// idempotent-replay branch above is read-only and deliberately stays BEFORE
-	// the lock, so a retry after completion still serves the cached response
-	// without contending. On contention return 409; the caller retries
-	// idempotently (the retry replays once this holder commits). The single
-	// defer covers every early-return in the mutating path.
-	if !model.AcquireVerifyTrailLock(ctx, trailId, settings.TrailLockTtl) {
+	// corrupting the hop list, and stuffing the latency histogram). Replays use
+	// the same fence: reading trail state and its cached response separately
+	// outside the lock could pair a depth-N replay with a concurrently written
+	// depth-(N+1) response. The state is reloaded after acquisition because
+	// another holder can commit between the first load and SETNX. On contention
+	// return 409; the caller retries idempotently. The single defer covers every
+	// early return in the fenced path.
+	if verifyExtendBeforeTrailLock != nil {
+		verifyExtendBeforeTrailLock()
+	}
+	trailLockToken := model.AcquireVerifyTrailLock(ctx, trailId, model.VerifyTrailMutationLockTtl(settings, trail.M))
+	if trailLockToken == "" {
 		return nil, fmt.Errorf("409 trail busy")
 	}
-	defer model.ReleaseVerifyTrailLock(ctx, trailId)
+	defer model.ReleaseVerifyTrailLock(ctx, trailId, trailLockToken)
+
+	// The lock protects this snapshot through the matching write below. A
+	// request that became a replay while waiting returns the newly cached
+	// response without mutating state or accounting twice.
+	trail = model.GetVerifyTrail(ctx, trailId)
+	if trail == nil {
+		return nil, fmt.Errorf("400 trail not found")
+	}
+	confirmedIds = verifyConfirmedIds(trail)
+	if result, matched, err := replayConfirmed(trail, confirmedIds); matched {
+		return result, err
+	}
 
 	// §4.2 step 2: require active and not expired
 	if trail.Status != model.VerifyTrailStatusActive {

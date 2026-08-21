@@ -148,21 +148,51 @@ func TestVerifyTrailLockMutualExclusion(t *testing.T) {
 		ctx := context.Background()
 		trailId := server.NewId()
 
-		if !AcquireVerifyTrailLock(ctx, trailId, 30*time.Second) {
+		firstToken := AcquireVerifyTrailLock(ctx, trailId, 30*time.Second)
+		if firstToken == "" {
 			t.Fatal("first acquire must succeed")
 		}
-		if AcquireVerifyTrailLock(ctx, trailId, 30*time.Second) {
+		if token := AcquireVerifyTrailLock(ctx, trailId, 30*time.Second); token != "" {
 			t.Fatal("second acquire must be excluded (V3)")
 		}
-		ReleaseVerifyTrailLock(ctx, trailId)
-		if !AcquireVerifyTrailLock(ctx, trailId, 200*time.Millisecond) {
+		ReleaseVerifyTrailLock(ctx, trailId, firstToken)
+		crashedToken := AcquireVerifyTrailLock(ctx, trailId, 200*time.Millisecond)
+		if crashedToken == "" {
 			t.Fatal("acquire after release must succeed")
 		}
 		// the ttl self-heals a crashed holder
 		time.Sleep(400 * time.Millisecond)
-		if !AcquireVerifyTrailLock(ctx, trailId, time.Second) {
+		if token := AcquireVerifyTrailLock(ctx, trailId, time.Second); token == "" {
 			t.Fatal("acquire after ttl expiry must succeed")
 		}
+	})
+}
+
+func TestVerifyTrailLockStaleReleasePreservesSuccessor(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		trailId := server.NewId()
+		staleToken := AcquireVerifyTrailLock(ctx, trailId, time.Minute)
+		if staleToken == "" {
+			t.Fatal("initial lock acquire failed")
+		}
+		successorToken := server.NewId().String()
+		server.Redis(ctx, func(r server.RedisClient) {
+			if err := r.Set(ctx, verifyTrailLockKey(trailId), successorToken, time.Minute).Err(); err != nil {
+				t.Fatal(err)
+			}
+		})
+		ReleaseVerifyTrailLock(ctx, trailId, staleToken)
+		server.Redis(ctx, func(r server.RedisClient) {
+			current, err := r.Get(ctx, verifyTrailLockKey(trailId)).Result()
+			if err != nil || current != successorToken {
+				t.Fatalf("stale release left token=%q error=%v, want successor", current, err)
+			}
+		})
+		if token := AcquireVerifyTrailLock(ctx, trailId, time.Minute); token != "" {
+			t.Fatal("stale release deleted the successor lock")
+		}
+		ReleaseVerifyTrailLock(ctx, trailId, successorToken)
 	})
 }
 
@@ -461,6 +491,56 @@ func TestSweepExpiredVerifyTrails(t *testing.T) {
 			t.Fatal("the sweep must not persist a row for a terminal trail")
 		}
 	})
+}
+
+func TestSweepExpiredVerifyTrailsDefersToMutationLock(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultVerifySettings()
+		now := server.NowUtc()
+		deadline := uint64((settings.StepTimeout + settings.StepTimeoutGrace) / time.Millisecond)
+		trail := testVerifyBuildTrail(false, uint64(now.UnixMilli())-deadline-1)
+		CreateVerifyTrail(ctx, trail, `{}`, settings)
+		IncrVerifyActiveTrails(ctx, trail.Vpk, settings)
+
+		token := AcquireVerifyTrailLock(ctx, trail.TrailId, VerifyTrailMutationLockTtl(settings, trail.M))
+		if token == "" {
+			t.Fatal("in-flight EXTEND lock acquire failed")
+		}
+		if swept := SweepExpiredVerifyTrails(ctx, now, settings); swept != 0 {
+			t.Fatalf("sweeper expired an in-flight EXTEND: swept=%d", swept)
+		}
+		if got := GetVerifyTrail(ctx, trail.TrailId); got == nil || got.Status != VerifyTrailStatusActive {
+			t.Fatalf("locked trail changed during sweep: %+v", got)
+		}
+		if _, ok := testVerifyReapScore(ctx, trail.TrailId); !ok {
+			t.Fatal("contended sweep removed the due registry entry")
+		}
+
+		ReleaseVerifyTrailLock(ctx, trail.TrailId, token)
+		if swept := SweepExpiredVerifyTrails(ctx, now, settings); swept != 1 {
+			t.Fatalf("sweeper did not retry after EXTEND unlock: swept=%d", swept)
+		}
+		if got := GetVerifyTrail(ctx, trail.TrailId); got == nil || got.Status != VerifyTrailStatusExpired {
+			t.Fatalf("unlocked due trail status: %+v", got)
+		}
+	})
+}
+
+func TestVerifyTrailMutationLockTtlCoversLoadedTrail(t *testing.T) {
+	settings := DefaultVerifySettings()
+	settings.TrailLockTtl = time.Second
+	want := settings.TrailTtl(7)
+	if got := VerifyTrailMutationLockTtl(settings, 7); got != want {
+		t.Fatalf("mutation lock ttl=%s, want trail ttl=%s", got, want)
+	}
+	settings.TrailLockTtl = want + time.Second
+	if got := VerifyTrailMutationLockTtl(settings, 7); got != settings.TrailLockTtl {
+		t.Fatalf("configured lock ttl=%s, got=%s", settings.TrailLockTtl, got)
+	}
+	if got := VerifyTrailMutationLockTtl(nil, 7); got != 0 {
+		t.Fatalf("nil settings lock ttl=%s, want zero", got)
+	}
 }
 
 func TestVerifyStatsRollupIdempotent(t *testing.T) {

@@ -6,10 +6,12 @@ package controller
 // needs the pg+redis `test.sh` harness to validate end-to-end.
 
 import (
+	"context"
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,25 @@ func makeTestVerifyKey(serverKeyId byte, fill byte) *VerifyServerKey {
 	return &VerifyServerKey{
 		ServerKeyId: serverKeyId,
 		PrivateKey:  ed25519.NewKeyFromSeed(seed),
+	}
+}
+
+// TestVerifySeedRejectsMissingSignatureBeforeState is the regression for the
+// fail-open shape reported in RaoFoundation/bittensor#3392. A missing
+// signature must fail before rate counters, provider lookup, validator-key
+// lookup, or any other Redis/PostgreSQL state is consulted.
+func TestVerifySeedRejectsMissingSignatureBeforeState(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := &VerifyArgs{
+		ClientId: server.NewId(), Vpk: public,
+		ClientNonce: make([]byte, connect.VerifyNonceSize), SeedSig: nil, M: connect.VerifyMMin,
+	}
+	clientSession := session.NewLocalClientSession(context.Background(), "127.0.0.1:40000", nil)
+	if _, err := verifySeed(args, clientSession); err == nil || !strings.Contains(err.Error(), "seed_sig must be 64 bytes") {
+		t.Fatalf("missing seed signature did not fail closed at input shape: %v", err)
 	}
 }
 

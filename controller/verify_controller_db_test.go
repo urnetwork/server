@@ -14,6 +14,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -273,6 +276,201 @@ func TestVerifyControllerFullTrailFlow(t *testing.T) {
 			if assignments != 1 || confirmations != 1 {
 				t.Fatalf("provider %s stats = %+v, want 1/1", providerId, rows)
 			}
+		}
+	})
+}
+
+// TestVerifyControllerConcurrentExtendReloadsAfterLock forces two identical
+// EXTENDs to read the same pre-mutation trail, lets the first commit and unlock,
+// then lets the second acquire. The second must reload and replay the first
+// response instead of appending the same pending hop and counting it twice.
+func TestVerifyControllerConcurrentExtendReloadsAfterLock(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testVerifyInstallServerKey()
+		settings := model.DefaultVerifySettings()
+		SetVerifySettings(settings)
+
+		providerIps := map[server.Id]string{}
+		var seedProviderId server.Id
+		for i := 0; i < connect.VerifyMMin; i++ {
+			ip := fmt.Sprintf("203.0.113.%d", 10+10*i)
+			providerId := testVerifyProvider(ctx, netip.MustParseAddr(ip), settings)
+			providerIps[providerId] = ip
+			if i == 0 {
+				seedProviderId = providerId
+			}
+		}
+		validatorId, vpk, vpkKey := testVerifyValidator(ctx)
+		seedResult, err := Verify(
+			testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin),
+			testVerifySession(ctx, providerIps[seedProviderId]),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assign := seedResult.(*connect.VerifyAssignResult)
+		extendArgs := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, assign)
+		extendIp := providerIps[server.Id(assign.NextHop)]
+
+		firstLoaded := make(chan struct{})
+		secondLoaded := make(chan struct{})
+		allowFirst := make(chan struct{})
+		allowSecond := make(chan struct{})
+		var loadOrdinal atomic.Int32
+		verifyExtendBeforeTrailLock = func() {
+			switch loadOrdinal.Add(1) {
+			case 1:
+				close(firstLoaded)
+				<-allowFirst
+			case 2:
+				close(secondLoaded)
+				<-allowSecond
+			default:
+				panic("unexpected EXTEND at scheduling barrier")
+			}
+		}
+		defer func() { verifyExtendBeforeTrailLock = nil }()
+
+		type verifyCallResult struct {
+			result any
+			err    error
+		}
+		call := func() <-chan verifyCallResult {
+			resultCh := make(chan verifyCallResult, 1)
+			go func() {
+				result, err := Verify(extendArgs, testVerifySession(ctx, extendIp))
+				resultCh <- verifyCallResult{result: result, err: err}
+			}()
+			return resultCh
+		}
+
+		firstResultCh := call()
+		<-firstLoaded
+		secondResultCh := call()
+		<-secondLoaded
+		close(allowFirst)
+		firstResult := <-firstResultCh
+		if firstResult.err != nil {
+			t.Fatal(firstResult.err)
+		}
+		close(allowSecond)
+		secondResult := <-secondResultCh
+		if secondResult.err != nil {
+			t.Fatal(secondResult.err)
+		}
+		if !reflect.DeepEqual(secondResult.result, firstResult.result) {
+			t.Fatalf("second EXTEND = %#v, want cached %#v", secondResult.result, firstResult.result)
+		}
+
+		trail := model.GetVerifyTrail(ctx, server.Id(assign.TrailId))
+		if trail == nil || len(trail.Hops) != 2 || trail.Hops[1].ClientId != server.Id(assign.NextHop) {
+			t.Fatalf("trail after concurrent EXTENDs = %+v, want one confirmed pending hop", trail)
+		}
+		if trail.Pending == nil {
+			t.Fatal("trail must retain the single next assignment")
+		}
+	})
+}
+
+// TestVerifyControllerReplayCannotReadANewerCachedResponse proves that trail
+// state and its one-entry response cache are read under the same fence. A
+// penultimate EXTEND replay paused after its initial existence check must not
+// return the FINAL written by the following request.
+func TestVerifyControllerReplayCannotReadANewerCachedResponse(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testVerifyInstallServerKey()
+		settings := model.DefaultVerifySettings()
+		SetVerifySettings(settings)
+
+		providerIps := map[server.Id]string{}
+		var seedProviderId server.Id
+		for i := 0; i < connect.VerifyMMin; i++ {
+			ip := fmt.Sprintf("203.0.113.%d", 110+10*i)
+			providerId := testVerifyProvider(ctx, netip.MustParseAddr(ip), settings)
+			providerIps[providerId] = ip
+			if i == 0 {
+				seedProviderId = providerId
+			}
+		}
+		validatorId, vpk, vpkKey := testVerifyValidator(ctx)
+		seedResult, err := Verify(
+			testVerifySeedArgs(t, validatorId, vpk, vpkKey, connect.VerifyMMin),
+			testVerifySession(ctx, providerIps[seedProviderId]),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedAssign := seedResult.(*connect.VerifyAssignResult)
+		firstExtend := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, seedAssign)
+		depthTwoResult, err := Verify(firstExtend, testVerifySession(ctx, providerIps[server.Id(seedAssign.NextHop)]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		depthTwoAssign, ok := depthTwoResult.(*connect.VerifyAssignResult)
+		if !ok {
+			t.Fatalf("depth-two response = %T, want ASSIGN", depthTwoResult)
+		}
+		oldReplay := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, depthTwoAssign)
+		penultimateResult, err := Verify(oldReplay, testVerifySession(ctx, providerIps[server.Id(depthTwoAssign.NextHop)]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		penultimateAssign, ok := penultimateResult.(*connect.VerifyAssignResult)
+		if !ok {
+			t.Fatalf("penultimate response = %T, want ASSIGN", penultimateResult)
+		}
+		finalExtend := testVerifyExtendArgs(t, validatorId, vpk, vpkKey, penultimateAssign)
+
+		oldLoaded := make(chan struct{})
+		newLoaded := make(chan struct{})
+		allowOld := make(chan struct{})
+		allowNew := make(chan struct{})
+		var ordinal atomic.Int32
+		verifyExtendBeforeTrailLock = func() {
+			switch ordinal.Add(1) {
+			case 1:
+				close(oldLoaded)
+				<-allowOld
+			case 2:
+				close(newLoaded)
+				<-allowNew
+			default:
+				panic("unexpected EXTEND at cache scheduling barrier")
+			}
+		}
+		defer func() { verifyExtendBeforeTrailLock = nil }()
+
+		type callResult struct {
+			value any
+			err   error
+		}
+		call := func(args *VerifyArgs, ip string) <-chan callResult {
+			ch := make(chan callResult, 1)
+			go func() {
+				value, err := Verify(args, testVerifySession(ctx, ip))
+				ch <- callResult{value: value, err: err}
+			}()
+			return ch
+		}
+
+		oldCh := call(oldReplay, providerIps[server.Id(depthTwoAssign.NextHop)])
+		<-oldLoaded
+		newCh := call(finalExtend, providerIps[server.Id(penultimateAssign.NextHop)])
+		<-newLoaded
+		close(allowNew)
+		newResult := <-newCh
+		if newResult.err != nil {
+			t.Fatal(newResult.err)
+		}
+		if _, ok := newResult.value.(*connect.VerifyFinalResult); !ok {
+			t.Fatalf("concurrent advancement = %T, want FINAL", newResult.value)
+		}
+		close(allowOld)
+		oldResult := <-oldCh
+		if oldResult.err == nil || oldResult.value != nil || !strings.Contains(oldResult.err.Error(), "trail not active") {
+			t.Fatalf("stale replay returned newer cache: value=%#v error=%v", oldResult.value, oldResult.err)
 		}
 	})
 }

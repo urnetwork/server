@@ -81,7 +81,7 @@ func DefaultVerifySettings() *VerifySettings {
 		StepTimeout:      30 * time.Second,
 		StepTimeoutGrace: 5 * time.Second,
 		TrailTtlGrace:    60 * time.Second,
-		TrailLockTtl:     5 * time.Second,
+		TrailLockTtl:     35 * time.Second,
 		// D26 (guardrails off): the §5.3 eligibility token bucket defaults OFF
 		// — interval 0 means "always has a token" in SpendVerifyEligibilityToken
 		// / CheckVerifyEligibilityToken, so each validator drives its own
@@ -129,9 +129,10 @@ type VerifySettings struct {
 	StepTimeout      time.Duration
 	StepTimeoutGrace time.Duration
 	TrailTtlGrace    time.Duration
-	// TrailLockTtl bounds the per-trail EXTEND mutation lock (V3): long enough
-	// to cover one confirm+assign (incl. the durable insert), short enough to
-	// self-heal if the holder crashes mid-mutation.
+	// TrailLockTtl is the configured floor for the per-trail EXTEND mutation
+	// lock (V3). VerifyTrailMutationLockTtl raises it to the full trail TTL so a
+	// loaded mutation remains fenced from the expiry sweeper; Redis expiry still
+	// self-heals a holder crash.
 	TrailLockTtl          time.Duration
 	EligibilityInterval   time.Duration
 	EligibilityBurst      int
@@ -982,32 +983,62 @@ func CreateVerifyTrail(
 // concurrent identical EXTENDs cannot both confirm the same pending hop — which
 // would double-count `c_Y` (breaking the Wilson `r_Y>1` invariant), corrupt the
 // hop list (e.g. `[A,B,B]`), and stuff the latency histogram. Returns whether
-// the lock was acquired; on contention the caller returns 409 and the client
-// retries idempotently (the retry hits the §4.3 replay branch once the holder
-// commits). The lock self-heals via `ttl` if the holder crashes.
+// the lock was acquired as a nonempty ownership token; on contention it returns
+// empty and the caller returns 409. The token makes release compare-and-delete,
+// so an expired old holder cannot erase a successor's lease. The lock self-heals
+// via `ttl` if the holder crashes.
 func AcquireVerifyTrailLock(
 	ctx context.Context,
 	trailId server.Id,
 	ttl time.Duration,
-) (acquired bool) {
+) (token string) {
+	if ttl <= 0 {
+		return ""
+	}
+	candidate := server.NewId().String()
 	server.Redis(ctx, func(r server.RedisClient) {
-		ok, err := r.SetNX(ctx, verifyTrailLockKey(trailId), "1", ttl).Result()
+		ok, err := r.SetNX(ctx, verifyTrailLockKey(trailId), candidate, ttl).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
 			server.Raise(err)
 		}
-		acquired = ok
+		if ok {
+			token = candidate
+		}
 	})
 	return
 }
 
-// ReleaseVerifyTrailLock drops the per-trail mutation lock (V3). Safe to call
-// even if the lock already ttl-expired (DEL of a missing key is a no-op).
+// VerifyTrailMutationLockTtl keeps an in-flight mutation fenced for at least
+// the lifetime of the trail state it loaded. The configured floor is useful
+// for small test values; the full trail TTL prevents the expiry sweeper from
+// taking over merely because durable completion is slower than one hop's
+// response deadline.
+func VerifyTrailMutationLockTtl(settings *VerifySettings, m int) time.Duration {
+	if settings == nil {
+		return 0
+	}
+	ttl := settings.TrailLockTtl
+	if trailTtl := settings.TrailTtl(m); trailTtl > ttl {
+		ttl = trailTtl
+	}
+	return ttl
+}
+
+// ReleaseVerifyTrailLock drops only the caller-owned per-trail mutation lock.
+// A missing, expired, or replaced token is a no-op.
 func ReleaseVerifyTrailLock(
 	ctx context.Context,
 	trailId server.Id,
+	token string,
 ) {
+	if token == "" {
+		return
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		r.Del(ctx, verifyTrailLockKey(trailId))
+		_, err := server.RedisRemoveIfEqual(r, ctx, verifyTrailLockKey(trailId), []byte(token)).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			server.Raise(err)
+		}
 	})
 }
 
@@ -1486,29 +1517,51 @@ func SweepExpiredVerifyTrails(
 			continue
 		}
 
-		if trail.Pending != nil {
-			deadlineMs := trail.Pending.AssignedMs + uint64((settings.StepTimeout+settings.StepTimeoutGrace)/time.Millisecond)
-			if nowMs < deadlineMs {
-				// activity since the registry score was written: re-score
+		// Serialize expiry with EXTEND. A request may have loaded and validated
+		// this same active pending hop before the grace deadline; expiring it in
+		// parallel would leave a confirmed hop on an expired trail and double
+		// decrement the active counter. Contention is not an error: the due zset
+		// entry remains and the next sweep retries after the holder commits.
+		lockToken := AcquireVerifyTrailLock(ctx, trailId, VerifyTrailMutationLockTtl(settings, trail.M))
+		if lockToken == "" {
+			continue
+		}
+		func() {
+			defer ReleaseVerifyTrailLock(ctx, trailId, lockToken)
+			// The pre-lock snapshot may have changed while waiting. All expiry
+			// decisions and durable evidence below use the fenced reload.
+			trail = GetVerifyTrail(ctx, trailId)
+			if trail == nil || trail.Status != VerifyTrailStatusActive {
 				server.Redis(ctx, func(r server.RedisClient) {
-					r.ZAdd(ctx, verifyReapKey, redis.Z{
-						Score:  float64(deadlineMs),
-						Member: trailIdStr,
-					})
+					r.ZRem(ctx, verifyReapKey, trailIdStr)
 				})
-				continue
+				return
 			}
-		}
 
-		ExpireVerifyTrail(ctx, trailId)
-		DecrVerifyActiveTrails(ctx, trail.Vpk)
-		if !trail.Poison {
-			InsertVerifyTrail(ctx, NewExpiredVerifyTrailRow(trail))
-		}
-		sweptCount += 1
-		if glog.V(1) {
-			glog.Infof("[verify]reaped expired trail %s (depth %d, poison=%t)\n", trailId, len(trail.Hops), trail.Poison)
-		}
+			if trail.Pending != nil {
+				deadlineMs := trail.Pending.AssignedMs + uint64((settings.StepTimeout+settings.StepTimeoutGrace)/time.Millisecond)
+				if nowMs < deadlineMs {
+					// activity since the registry score was written: re-score
+					server.Redis(ctx, func(r server.RedisClient) {
+						r.ZAdd(ctx, verifyReapKey, redis.Z{
+							Score:  float64(deadlineMs),
+							Member: trailIdStr,
+						})
+					})
+					return
+				}
+			}
+
+			ExpireVerifyTrail(ctx, trailId)
+			DecrVerifyActiveTrails(ctx, trail.Vpk)
+			if !trail.Poison {
+				InsertVerifyTrail(ctx, NewExpiredVerifyTrailRow(trail))
+			}
+			sweptCount += 1
+			if glog.V(1) {
+				glog.Infof("[verify]reaped expired trail %s (depth %d, poison=%t)\n", trailId, len(trail.Hops), trail.Poison)
+			}
+		}()
 	}
 	return
 }
