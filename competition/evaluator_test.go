@@ -57,6 +57,15 @@ func TestHashLocalMountDirectoryIsDeterministicAndRejectsLinks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "nested", "a.yml"), []byte("a: 2\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// en_US collation orders these names differently from byte ordering. The
+	// trusted helper must still match the Go manifest when its caller supplies
+	// that locale, because the evaluator can run under systemd or a login shell.
+	if err := os.WriteFile(filepath.Join(root, "st.yml"), []byte("st: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "stripe.yml"), []byte("stripe: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	first, err := hashLocalMountDirectory(root)
 	if err != nil {
 		t.Fatal(err)
@@ -64,6 +73,17 @@ func TestHashLocalMountDirectoryIsDeterministicAndRejectsLinks(t *testing.T) {
 	shellDigest, err := exec.Command("./container/hash-local-mount.sh", root).Output()
 	if err != nil || strings.TrimSpace(string(shellDigest)) != first {
 		t.Fatalf("host and Go local-mount digests differ: %q %q %v", first, shellDigest, err)
+	}
+	hostileLocaleCommand := exec.Command("./container/hash-local-mount.sh", root)
+	hostileLocaleCommand.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
+	hostileLocaleDigest, err := hostileLocaleCommand.Output()
+	if err != nil || strings.TrimSpace(string(hostileLocaleDigest)) != first {
+		t.Fatalf(
+			"caller locale changed local-mount digest: want %q, got %q (%v)",
+			first,
+			hostileLocaleDigest,
+			err,
+		)
 	}
 	second, err := hashLocalMountDirectory(root)
 	if err != nil || second != first {
@@ -81,6 +101,24 @@ func TestHashLocalMountDirectoryIsDeterministicAndRejectsLinks(t *testing.T) {
 	}
 	if _, err := hashLocalMountDirectory(root); err == nil {
 		t.Fatal("local mount containing a symbolic link was accepted")
+	}
+}
+
+func TestEvaluatorPinsLocaleAndUsesCanonicalLocalMountDigest(t *testing.T) {
+	evaluatorBytes, err := os.ReadFile("container/evaluator.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluator := string(evaluatorBytes)
+	localePin := strings.Index(evaluator, "export LANG=C LC_ALL=C")
+	digestBinding := strings.Index(evaluator, `readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"`)
+	digestCall := strings.Index(evaluator, `"$HASH_LOCAL_MOUNT" "$1"`)
+	firstAuthentication := strings.Index(evaluator, "authenticate_local_mounts()")
+	if localePin < 0 || digestBinding < 0 || digestCall < 0 || firstAuthentication < 0 {
+		t.Fatal("evaluator does not bind the locale-pinned local-mount digest helper")
+	}
+	if firstAuthentication < localePin || firstAuthentication < digestBinding || firstAuthentication < digestCall {
+		t.Fatal("evaluator authenticates local mounts before pinning digest semantics")
 	}
 }
 

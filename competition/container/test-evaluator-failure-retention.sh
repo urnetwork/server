@@ -60,7 +60,8 @@ jq \
 chmod 0400 "$request"
 
 set +e
-"$SCRIPT_DIR/evaluator.sh" --request "$request" --result "$result" > "$log" 2>&1
+env LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 \
+    "$SCRIPT_DIR/evaluator.sh" --request "$request" --result "$result" > "$log" 2>&1
 status=$?
 set -e
 [ "$status" -ne 0 ] || {
@@ -96,6 +97,7 @@ rg -q 'retained sanitized failure evidence' "$log"
 jq -n --argjson evaluator_exit_code "$status" \
     '{schema:1,passed:true,evaluator_exit_code:$evaluator_exit_code,checks:[
       "intentional post-mount infrastructure failure",
+      "caller-locale-independent local mount authentication",
       "sanitized diagnostic retention",
       "hidden input removal",
       "credential path removal",

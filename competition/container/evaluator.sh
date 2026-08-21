@@ -6,12 +6,14 @@
 
 set -Eeuo pipefail
 umask 077
+export LANG=C LC_ALL=C
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 readonly BUILD_SUBMISSION="$SCRIPT_DIR/build-submission.sh"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/docker-id-map.sh"
+readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"
 readonly RETAIN_FAILURE_EVIDENCE="$SCRIPT_DIR/retain-failure-evidence.sh"
 readonly POSTGRES_INIT="$SCRIPT_DIR/postgres-init.sh"
 readonly TIMEOUT_BUDGET="$SCRIPT_DIR/timeout-budget.sh"
@@ -78,17 +80,7 @@ sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 file_bytes() { stat -c '%s' "$1"; }
 
 local_tree_sha256() {
-    local root="$1" relative
-    [ -d "$root" ] && [ ! -L "$root" ] || return 1
-    [ -z "$(find "$root" -mindepth 1 ! -type d ! -type f -print -quit)" ] || return 1
-    (
-        while IFS= read -r -d '' relative; do
-            case "$relative" in
-                *$'\n'*|*$'\r'*) return 1 ;;
-            esac
-            printf '%s  %s\n' "$(sha256_file "$root/$relative")" "$relative"
-        done < <(find "$root" -type f -printf '%P\0' | sort -z)
-    ) | sha256sum | awk '{print $1}'
+    "$HASH_LOCAL_MOUNT" "$1"
 }
 
 authenticate_local_mounts() {
@@ -200,6 +192,7 @@ sudo -n docker info >/dev/null
 [ -x "$BUILD_SUBMISSION" ] || die "trusted submission builder is not executable"
 [ -x "$RESOURCE_BOUNDARY" ] || die "trusted resource boundary is not executable"
 [ -x "$DOCKER_ID_MAP" ] || die "trusted Docker id-map resolver is not executable"
+[ -x "$HASH_LOCAL_MOUNT" ] || die "trusted local-mount digest helper is not executable"
 [ -x "$RETAIN_FAILURE_EVIDENCE" ] || die "trusted failure evidence retainer is not executable"
 [ -f "$POSTGRES_INIT" ] || die "trusted PostgreSQL initializer is missing"
 [ -x "$TIMEOUT_BUDGET" ] || die "trusted timeout-budget calculator is not executable"
