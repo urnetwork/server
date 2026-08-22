@@ -198,6 +198,12 @@ var (
 	proxyReportMutex  sync.Mutex
 	proxyReportedAt   = map[proxyReportKey]time.Time{}
 	proxyReportLastAt time.Time
+	proxyReportPruned time.Time
+	// proxyReportPruneScans counts prune passes so a test can assert the scan
+	// stays amortized. The scan runs under the global mutex on a path any
+	// caller can trigger, so one scan per request while the map is full would
+	// be a contention amplifier aimed at whoever is keeping it full.
+	proxyReportPruneScans int
 )
 
 // shouldReportProxy rate limits an operator report to once per interval per
@@ -230,7 +236,24 @@ func shouldReportProxy(key proxyReportKey, now time.Time) bool {
 		return true
 	}
 
-	if proxyReportedMax <= len(proxyReportedAt) {
+	// Prune at most once per interval.
+	//
+	// Not because a more frequent scan would find nothing -- entries are
+	// written at different times and so age out continuously, and a scan a
+	// second later can free one the previous scan could not. Because the scan
+	// walks the whole map while holding this process-global mutex, on a path
+	// any caller who can reach the api directly can trigger, so an unguarded
+	// scan hands the caller who is keeping the map full an O(cap) critical
+	// section per request: a contention amplifier built out of the flood guard.
+	//
+	// The prune is best-effort reclamation, not a correctness mechanism, which
+	// is what makes rate-limiting it safe. An entry that lingers past its
+	// interval only delays reuse of one slot; memory is bounded by the cap
+	// either way, and the tier below keeps the report firing while the map is
+	// full, so nothing goes silent while a prune is being deferred.
+	if proxyReportedMax <= len(proxyReportedAt) && proxyReportInterval <= now.Sub(proxyReportPruned) {
+		proxyReportPruned = now
+		proxyReportPruneScans += 1
 		for staleKey, lastAt := range proxyReportedAt {
 			if proxyReportInterval <= now.Sub(lastAt) {
 				delete(proxyReportedAt, staleKey)
@@ -258,6 +281,8 @@ func resetProxyReports() {
 	defer proxyReportMutex.Unlock()
 	proxyReportedAt = map[proxyReportKey]time.Time{}
 	proxyReportLastAt = time.Time{}
+	proxyReportPruned = time.Time{}
+	proxyReportPruneScans = 0
 }
 
 // glogErrorf is a var so a test can read a report's actual text rather than

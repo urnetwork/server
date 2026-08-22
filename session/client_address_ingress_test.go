@@ -468,6 +468,61 @@ func TestProxyReportSetIsBoundedAndPrunes(t *testing.T) {
 	}
 }
 
+// TestProxyReportPruneScanStaysAmortized.
+//
+// The prune walks the whole suppression map, under the process-global mutex,
+// on a code path any caller who can reach the api directly can trigger. Running
+// it on every request while the map is full would hand exactly the caller who
+// filled it an O(cap) critical section per request -- a contention amplifier
+// built out of the flood guard.
+//
+// An entry only becomes prunable after a whole interval, so scanning more often
+// than once per interval cannot free anything the previous scan did not.
+func TestProxyReportPruneScanStaysAmortized(t *testing.T) {
+	captureProxyReports(t)
+	now := time.Now()
+
+	for i := 0; i < proxyReportedMax; i += 1 {
+		shouldReportProxy(proxyReportKey{
+			peer: netip.AddrFrom4([4]byte{10, byte(i >> 8), byte(i), 1}),
+			kind: proxyReportUnenumerated,
+		}, now)
+	}
+	proxyReportMutex.Lock()
+	before := proxyReportPruneScans
+	proxyReportMutex.Unlock()
+
+	// every one of these finds the map full and is refused; none of them can
+	// free a slot, because nothing in it has aged out yet
+	for i := 0; i < 200; i += 1 {
+		shouldReportProxy(proxyReportKey{
+			peer: netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}),
+			kind: proxyReportUnenumerated,
+		}, now)
+	}
+	proxyReportMutex.Lock()
+	after := proxyReportPruneScans
+	proxyReportMutex.Unlock()
+
+	if 1 < after-before {
+		t.Fatalf(
+			"200 requests against a full suppression map ran %d prune scans, want at "+
+				"most 1. Each scan walks %d entries holding the process-global report "+
+				"mutex, on a path any caller can trigger",
+			after-before, proxyReportedMax,
+		)
+	}
+
+	// and once the entries have aged out, a scan does run again and does free
+	// the slots -- an amortized guard that never re-arms is just a leak
+	if !shouldReportProxy(proxyReportKey{
+		peer: netip.MustParseAddr("203.0.113.9"),
+		kind: proxyReportUnenumerated,
+	}, now.Add(2*proxyReportInterval)) {
+		t.Fatal("after every entry aged out, a new peer was still refused a report")
+	}
+}
+
 // TestNoProxyReportWithoutForwardingHeaders: a direct client that sends no
 // forwarding header is the ordinary case for a service reachable without a
 // proxy. Reporting it would bury the real signal.
@@ -759,6 +814,53 @@ func TestUnreadableForwardingHeaderFromATrustedPeerDegradesAndIsReported(t *test
 			"the report echoed the attacker-supplied header value; log injection\nreport: %s",
 			(*reports)[0],
 		)
+	}
+}
+
+// TestChainOfOnlyTrustedHopsResolvesToThePeerWithoutAReport covers the branch
+// where the walk finds no client at all.
+//
+// Ordinary internal traffic looks like this: one of the deployment's own
+// components calls the api through the ingress proxy, so every entry in the
+// chain is an enumerated proxy. There is no client to attribute it to, the peer
+// address is the correct answer, and nothing is misconfigured -- so this must
+// NOT be reported. It shares a return with the unreadable-header case, and if
+// the two are ever conflated the log fills up with alerts about traffic that is
+// working exactly as intended, which buries the report that matters.
+func TestChainOfOnlyTrustedHopsResolvesToThePeerWithoutAReport(t *testing.T) {
+	reports := captureProxyReports(t)
+	trusted := trustedIngress()
+
+	got, err := ResolveClientAddress(proxiedRequest("X-Forwarded-For", "172.18.0.9"), trusted)
+	if err != nil {
+		t.Fatalf("a chain of only trusted hops errored: %v", err)
+	}
+	if got != ingressProxyAddress {
+		t.Fatalf(
+			"a chain whose every entry is an enumerated proxy resolved to %q, want the "+
+				"peer address %s",
+			got, ingressProxyAddress,
+		)
+	}
+	if len(*reports) != 0 {
+		t.Fatalf(
+			"ordinary internal traffic between two enumerated proxies emitted %d "+
+				"misconfiguration reports; nothing is misconfigured, and this buries the "+
+				"report that matters:\n%s",
+			len(*reports), strings.Join(*reports, "\n"),
+		)
+	}
+
+	// same for a longer all-trusted chain
+	got, err = ResolveClientAddress(proxiedRequest("X-Forwarded-For", "172.18.0.9, 172.18.0.10"), trusted)
+	if err != nil {
+		t.Fatalf("a longer all-trusted chain errored: %v", err)
+	}
+	if got != ingressProxyAddress {
+		t.Fatalf("a longer all-trusted chain resolved to %q, want %s", got, ingressProxyAddress)
+	}
+	if len(*reports) != 0 {
+		t.Fatalf("a longer all-trusted chain emitted %d reports", len(*reports))
 	}
 }
 
