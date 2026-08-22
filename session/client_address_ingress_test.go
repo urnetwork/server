@@ -1002,6 +1002,58 @@ func TestProxySettingBothForwardingHeadersConsistentlyIsUnchanged(t *testing.T) 
 	}
 }
 
+// TestAnEmptyChainElementIsNotSkipped pins a decision that looks like a bug and
+// is deliberate.
+//
+// A trailing comma -- "203.0.113.9," -- leaves an element that names nobody,
+// and RFC 9110 list syntax says empty elements do not count. Skipping it and
+// reading the entry to its left would turn a peer fallback into a resolved
+// client address, which is friendlier. It is refused because the shape it
+// would rescue is indistinguishable from the shape it would break: where the
+// header is entirely client-supplied (the proxy owns the OTHER one), a client
+// that writes "6.6.6.6," would have chosen its own bucket. Nothing in this
+// deployment's proxy set emits an empty element, so the tolerance buys nothing
+// real and the safe reading is the unreadable one -- peer address, loud report.
+//
+// This is what makes it a decision rather than an oversight: if a proxy that
+// needs it ever turns up, deleting this test is the deliberate act.
+func TestAnEmptyChainElementIsNotSkipped(t *testing.T) {
+	reports := captureProxyReports(t)
+	trusted := trustedIngress()
+
+	got, err := ResolveClientAddress(proxiedRequest("X-Forwarded-For", "203.0.113.9,"), trusted)
+	if err != nil {
+		t.Fatalf("a trailing comma returned an error (%v); router.wrap makes that a 500", err)
+	}
+	if got != ingressProxyAddress {
+		t.Fatalf(
+			"a chain with an empty last element resolved to %q, want the peer address %s. "+
+				"Skipping empty elements also rescues a wholly client-supplied header",
+			got, ingressProxyAddress,
+		)
+	}
+	if len(*reports) != 1 || !strings.Contains((*reports)[0], "could not be read") {
+		t.Fatalf(
+			"an empty chain element must degrade LOUDLY, like any other unreadable "+
+				"header; got %d reports\n%s",
+			len(*reports), strings.Join(*reports, "\n"),
+		)
+	}
+
+	// the shape the decision protects
+	got, err = ResolveClientAddress(proxiedRequest("X-Forwarded-For", "6.6.6.6,"), trusted)
+	if err != nil {
+		t.Fatalf("a client-supplied chain with a trailing comma errored: %v", err)
+	}
+	if ip, _, splitErr := server.SplitClientAddress(got); splitErr == nil && ip == "6.6.6.6" {
+		t.Fatalf(
+			"a client wrote X-Forwarded-For: \"6.6.6.6,\" and the api resolved to %q. The "+
+				"trailing comma was skipped and the client chose its own rate-limit bucket",
+			got,
+		)
+	}
+}
+
 // TestAHeaderThatNamesNoClientIsNotSteppedOver pins which header decides once
 // two are present and only one of them names anybody.
 //

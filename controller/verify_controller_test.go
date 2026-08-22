@@ -159,13 +159,43 @@ func TestVerifySourceIpPrecedence(t *testing.T) {
 		return address
 	}
 
-	// 1. X-UR-Forwarded-For wins over everything
+	// 1. X-UR-Forwarded-For's ip:port wins over the bare form and its port
+	// companion, when the two headers name the SAME client. That is what a
+	// proxy setting both correctly sends, and it is the precedence /verify
+	// depends on: the port comes from the header that carries one.
 	req := newReq()
+	req.Header.Set("X-UR-Forwarded-For", "203.0.113.1:1111")
+	req.Header.Set("X-Forwarded-For", "203.0.113.1")
+	req.Header.Set("X-Forwarded-Source-Port", "2222")
+	if got := mustAddr(req); got != "203.0.113.1:1111" {
+		t.Fatalf("X-UR-Forwarded-For must win over the bare form of the same client, got %q", got)
+	}
+
+	// 1b. Two forwarding headers naming two DIFFERENT clients resolve to
+	// NEITHER -- they fall back to the immediate peer.
+	//
+	// This case used to assert that X-UR-Forwarded-For simply wins here. That
+	// was the forgery this precedence exists to prevent, wearing the other
+	// header name: a proxy overwrites the header IT sets and passes the
+	// client's other headers through untouched, so on any deployment whose
+	// proxy owns X-Forwarded-For (Caddy, ALB, CloudFront, Cloudflare) the
+	// client is the one that can set X-UR-Forwarded-For. Both ownership shapes
+	// exist in this project -- the warp load balancer force-overwrites
+	// X-UR-Forwarded-For, the beta Caddy front end has to strip it by hand --
+	// so neither header can be declared the authentic one, and /verify egress
+	// identity must not be a value the caller picked. See
+	// session.TestASecondForwardingHeaderCannotChooseTheBucket.
+	req = newReq()
 	req.Header.Set("X-UR-Forwarded-For", "203.0.113.1:1111")
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := mustAddr(req); got != "203.0.113.1:1111" {
-		t.Fatalf("X-UR-Forwarded-For must win, got %q", got)
+	if got := mustAddr(req); got != "10.9.9.9:5555" {
+		t.Fatalf(
+			"two forwarding headers named two different clients and /verify attributed "+
+				"the request to %q; neither can be shown to be the value the trusted proxy "+
+				"vouched for, so the only safe answer is the peer 10.9.9.9:5555",
+			got,
+		)
 	}
 
 	// 2. without X-UR-Forwarded-For: X-Forwarded-For + X-Forwarded-Source-Port
