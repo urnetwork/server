@@ -656,7 +656,7 @@ func TestProviderBandwidthReserveReturns429WhenCurrentBucketIsFull(t *testing.T)
 				INSERT INTO provider_bandwidth_quota (provider_bandwidth_quota_id, client_id, byte_count, bucket_start, create_time)
 				VALUES ($1, $2, $3, $4, $5)
 				`,
-				server.NewId(), server.NewId(), model.MaxProviderBandwidthBytesPerBucket, bucketStart, server.NowUtc(),
+				server.NewId(), server.NewId(), model.MaxProviderBandwidthBytesPerBucket(), bucketStart, server.NowUtc(),
 			))
 		})
 

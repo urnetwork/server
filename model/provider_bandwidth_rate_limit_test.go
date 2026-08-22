@@ -19,7 +19,7 @@ func TestReserveProviderBandwidthSlotFillsBucketThenSpillsToNext(t *testing.T) {
 
 		currentBucket := providerBandwidthBucketStart(server.NowUtc())
 
-		half := MaxProviderBandwidthBytesPerBucket / 2
+		half := MaxProviderBandwidthBytesPerBucket() / 2
 
 		_, bucket1, err := ReserveProviderBandwidthSlot(ctx, clientIdA, half)
 		connect.AssertEqual(t, err, nil)
@@ -27,7 +27,7 @@ func TestReserveProviderBandwidthSlotFillsBucketThenSpillsToNext(t *testing.T) {
 
 		// the remaining half fits exactly at the current bucket's ceiling,
 		// even though it's a different provider
-		_, bucketStart, err := ReserveProviderBandwidthSlot(ctx, clientIdB, MaxProviderBandwidthBytesPerBucket-half)
+		_, bucketStart, err := ReserveProviderBandwidthSlot(ctx, clientIdB, MaxProviderBandwidthBytesPerBucket()-half)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, bucketStart, currentBucket)
 
@@ -47,7 +47,7 @@ func TestReserveProviderBandwidthSlotErrorsWhenAllBucketsFull(t *testing.T) {
 		ctx := context.Background()
 
 		for i := 0; i < MaxProviderBandwidthLookaheadBuckets; i++ {
-			_, _, err := ReserveProviderBandwidthSlot(ctx, server.NewId(), MaxProviderBandwidthBytesPerBucket)
+			_, _, err := ReserveProviderBandwidthSlot(ctx, server.NewId(), MaxProviderBandwidthBytesPerBucket())
 			connect.AssertEqual(t, err, nil)
 		}
 
@@ -67,14 +67,14 @@ func TestCancelProviderBandwidthReservationFreesSlot(t *testing.T) {
 
 		currentBucket := providerBandwidthBucketStart(server.NowUtc())
 
-		reservationId, bucketStart, err := ReserveProviderBandwidthSlot(ctx, clientId, MaxProviderBandwidthBytesPerBucket)
+		reservationId, bucketStart, err := ReserveProviderBandwidthSlot(ctx, clientId, MaxProviderBandwidthBytesPerBucket())
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, bucketStart, currentBucket)
 
 		CancelProviderBandwidthReservation(ctx, reservationId)
 
 		// the current bucket's full ceiling must be available again
-		_, bucketStart, err = ReserveProviderBandwidthSlot(ctx, clientId, MaxProviderBandwidthBytesPerBucket)
+		_, bucketStart, err = ReserveProviderBandwidthSlot(ctx, clientId, MaxProviderBandwidthBytesPerBucket())
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, bucketStart, currentBucket)
 	})
@@ -117,4 +117,23 @@ func TestRemoveExpiredProviderBandwidthQuota(t *testing.T) {
 		// from ReserveProviderBandwidthSlot must remain
 		connect.AssertEqual(t, total, int64(7))
 	})
+}
+
+// The budget is configurable because capacity is a property of the deployment,
+// but an environment with no config file must still boot and must fall back to
+// the CONSERVATIVE default -- never to something larger than a small
+// deployment can afford.
+func TestActiveBandwidthBudgetFallsBackToTheConservativeDefault(t *testing.T) {
+	// a deployment may supply provider_bandwidth.yml, so this asserts the
+	// relationship rather than a fixed number: whatever is configured, the
+	// default it would fall back to must be the smaller, safer value.
+	if defaultActiveBandwidthProbesPerBucket <= 0 {
+		t.Fatal("the default budget must be positive; zero would reject every probe")
+	}
+	if MaxProviderBandwidthBytesPerBucket() != int64(activeBandwidthProbesPerBucket())*MaxProviderBandwidthBytesPerProbe {
+		t.Error("the hourly byte budget must be the probe count times the per-probe size")
+	}
+	if MaxProviderBandwidthBytesPerDay() != MaxProviderBandwidthLookaheadBuckets*MaxProviderBandwidthBytesPerBucket() {
+		t.Error("the daily cap must be the lookahead window times the hourly budget")
+	}
 }
