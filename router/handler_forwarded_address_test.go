@@ -204,6 +204,85 @@ func TestForgedForwardedAddressDoesNotReachTheHandler(t *testing.T) {
 	}
 }
 
+// TestSecondForwardingHeaderDoesNotReachTheHandler is the HTTP-boundary form of
+// session.TestASecondForwardingHeaderCannotChooseTheBucket.
+//
+// A proxy overwrites the header it sets and passes the client's other headers
+// through by default, so "the api reads two forwarding headers and honors the
+// first one it finds" was a bucket the client could pick, on whichever
+// deployment shape did not own that header. Asserted here because the value
+// that matters is the ClientAddress the impl is HANDED -- that is what every
+// per-address limit keys on -- and because the refusal must not have turned
+// into the 500 this suite exists to prevent.
+func TestSecondForwardingHeaderDoesNotReachTheHandler(t *testing.T) {
+	for _, shape := range []struct {
+		what    string
+		headers map[string]string
+	}{
+		{
+			"proxy owns X-Forwarded-For, client adds X-UR-Forwarded-For",
+			map[string]string{
+				"X-Forwarded-For":    "203.0.113.9",
+				"X-UR-Forwarded-For": "6.6.6.6:1234",
+			},
+		},
+		{
+			"proxy owns X-UR-Forwarded-For, client adds X-Forwarded-For",
+			map[string]string{
+				"X-UR-Forwarded-For": "203.0.113.9:41001",
+				"X-Forwarded-For":    "6.6.6.6",
+			},
+		},
+	} {
+		for _, run := range []struct {
+			wrapper string
+			call    func(*http.Request) (int, string, string)
+		}{
+			{"wrap", runWrapped},
+			{"wrapWithInput", runWrappedWithInput},
+		} {
+			statusCode, body, clientAddress := run.call(forwardedAddressRequest(t, shape.headers))
+			if statusCode != http.StatusOK {
+				t.Fatalf("%s: %s answered HTTP %d (%q), want 200", shape.what, run.wrapper, statusCode, body)
+			}
+			if strings.HasPrefix(clientAddress, "6.6.6.6") {
+				t.Fatalf(
+					"%s: %s handed the impl ClientAddress=%q. A client behind the trusted "+
+						"proxy just chose its own rate-limit bucket by setting the forwarding "+
+						"header the proxy does not overwrite",
+					shape.what, run.wrapper, clientAddress,
+				)
+			}
+			if clientAddress != "127.0.0.1:52344" {
+				t.Fatalf(
+					"%s: %s handed the impl ClientAddress=%q, want the peer address "+
+						"127.0.0.1:52344: with two headers naming two clients neither can be "+
+						"shown to be the proxy's",
+					shape.what, run.wrapper, clientAddress,
+				)
+			}
+		}
+	}
+
+	// and the deployment whose proxy sets BOTH headers correctly keeps the
+	// address and the port it had before the rule above existed
+	statusCode, body, clientAddress := runWrapped(forwardedAddressRequest(t, map[string]string{
+		"X-UR-Forwarded-For": "203.0.113.9:41001",
+		"X-Forwarded-For":    "6.6.6.6, 203.0.113.9",
+	}))
+	if statusCode != http.StatusOK {
+		t.Fatalf("a proxy setting both headers consistently answered HTTP %d (%q), want 200", statusCode, body)
+	}
+	if clientAddress != "203.0.113.9:41001" {
+		t.Fatalf(
+			"a proxy that sets both headers correctly handed the impl ClientAddress=%q, "+
+				"want 203.0.113.9:41001. Refusing on any difference between the two headers "+
+				"would take the client address away from a working deployment",
+			clientAddress,
+		)
+	}
+}
+
 // TestUntrustedPeerForwardingHeaderIsIgnoredAtTheHandler: the whole contract
 // only holds because the peer must be enumerated first. A request arriving from
 // a non-loopback peer carries no authority at all, whatever it claims.

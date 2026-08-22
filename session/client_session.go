@@ -187,6 +187,11 @@ const (
 	// one address, which is the same fleet-wide-budget failure, just on the
 	// other side of the trust boundary
 	proxyReportUnusableHeader proxyReportKind = "unusable-forwarding-header"
+	// a TRUSTED peer sent two forwarding headers naming two DIFFERENT clients:
+	// only one of them can be the value that peer observed, nothing here can
+	// tell which, and the difference means the proxy is passing a
+	// client-supplied header through
+	proxyReportConflictingHeaders proxyReportKind = "conflicting-forwarding-headers"
 )
 
 type proxyReportKey struct {
@@ -285,6 +290,31 @@ func resetProxyReports() {
 	proxyReportPruneScans = 0
 }
 
+// proxyForwardingHeaderContract is the sentence every operator-facing report
+// carries: the COMPLETE set of headers a trusted proxy has to own, not just
+// the one that triggered the report.
+//
+// Naming only the triggering header is what left the hole this constant
+// closes. This service reads two forwarding headers and a port companion, and
+// which one a deployment's proxy owns differs -- the warp load balancer writes
+// X-UR-Forwarded-For (see controller/verify_controller.go), while Caddy, nginx
+// and every managed load balancer write X-Forwarded-For. So an operator who
+// overwrites the one header a report named, and passes the others through, has
+// closed nothing: the client sets the other one and picks its own rate-limit
+// bucket. There is no preference this service could enforce instead, because
+// either choice would be the forgery in one of the two deployment shapes; the
+// resolver refuses to guess (see conflictingCandidates) and the remedy is
+// stated here as all three.
+//
+// It is a const so it is part of the format string, never an argument.
+const proxyForwardingHeaderContract = "OVERWRITE OR STRIP ALL THREE of the " +
+	"headers this service reads -- X-Forwarded-For, X-UR-Forwarded-For and " +
+	"X-Forwarded-Source-Port -- not only the one named here. Which of them a " +
+	"proxy sets differs by product, and any of the three that arrives from " +
+	"the client unchanged lets that client choose its own rate-limit bucket: " +
+	"nginx `proxy_set_header X-UR-Forwarded-For \"\";`, Caddy `header_up " +
+	"-X-UR-Forwarded-For`. "
+
 // glogErrorf is a var so a test can read a report's actual text rather than
 // asserting only that some report happened. It is also the single seam the
 // report tests drive: nothing stubs the report functions themselves, so the
@@ -328,7 +358,9 @@ func reportUnenumeratedProxy(peer netip.Addr, header string, trusted []netip.Pre
 			"optionally with X-Forwarded-Source-Port, or X-UR-Forwarded-For as "+
 			"ip:port. This service reads the last entry of the chain, so a proxy "+
 			"that appends is safe and a proxy that forwards the client's own value "+
-			"unchanged lets that client choose its rate-limit bucket. Enumerate the "+
+			"unchanged lets that client choose its rate-limit bucket. "+
+			proxyForwardingHeaderContract+
+			"Enumerate the "+
 			"NARROWEST range that contains only proxies: an address inside an "+
 			"enumerated CIDR is read as a proxy hop rather than as a client, so any "+
 			"real client arriving from inside that range loses its own rate-limit "+
@@ -372,9 +404,57 @@ func reportUnusableForwardingHeader(peer netip.Addr, header string, trusted []ne
 			"trusted by %s (currently %v), so this is the proxy's header, not a "+
 			"client's: it must send X-Forwarded-For as one ip per hop (a bare ip is "+
 			"fine, X-Forwarded-Source-Port is optional) or X-UR-Forwarded-For as "+
-			"ip:port. The value is not logged here because a proxy that forwards "+
+			"ip:port. "+
+			proxyForwardingHeaderContract+
+			"The value is not logged here because a proxy that forwards "+
 			"client headers makes it client-controlled.\n",
 		header,
+		peer,
+		peer,
+		trustedProxyCidrsEnvironment,
+		trusted,
+	)
+}
+
+// reportConflictingForwardingHeaders names a TRUSTED peer that sent two
+// forwarding headers pointing at two different clients.
+//
+// That is a proxy passing a client-supplied header through. A correctly
+// configured proxy leaves exactly one usable value for this service to read;
+// when two disagree, one of them was written by the client, and which one
+// cannot be told apart from here -- the warp load balancer owns
+// X-UR-Forwarded-For while Caddy and the managed load balancers own
+// X-Forwarded-For, so neither header is inherently the authentic one.
+//
+// The request is attributed to the peer, so the condition costs the client its
+// own rate-limit bucket rather than handing it a bucket of its choosing, and
+// it is reported because that fallback is the same shared-budget collapse the
+// rest of this file exists to prevent.
+//
+// The header VALUES are not logged, for the same reason as the two reports
+// above: both are client-influenced here by definition. Only the two header
+// NAMES are interpolated, and those come from forwardingHeaders, which is a
+// package constant list.
+func reportConflictingForwardingHeaders(peer netip.Addr, headerA string, headerB string, trusted []netip.Prefix) {
+	if !shouldReportProxy(proxyReportKey{peer: peer, kind: proxyReportConflictingHeaders}, time.Now()) {
+		return
+	}
+	glogErrorf(
+		"[session]%s and %s from TRUSTED peer %s named two DIFFERENT client "+
+			"addresses, so NEITHER was honored and the request was attributed to "+
+			"%s itself -- the most restrictive answer available. Only one of those "+
+			"headers can be the address that peer observed, and this service "+
+			"cannot tell which, so a client that sets the header the proxy does "+
+			"not overwrite would otherwise choose its own rate-limit budget. Every "+
+			"client that reaches this path shares one client address and therefore "+
+			"one budget, so signup and login can be refused for users who did "+
+			"nothing. The peer is trusted by %s (currently %v), so this is the "+
+			"proxy's configuration to fix: "+
+			proxyForwardingHeaderContract+
+			"The header values are not logged here because a proxy that forwards "+
+			"client headers makes them client-controlled.\n",
+		headerA,
+		headerB,
 		peer,
 		peer,
 		trustedProxyCidrsEnvironment,
@@ -464,6 +544,85 @@ func forwardedSourcePort(req *http.Request, chain string) (uint16, bool) {
 	return uint16(portNumber), true
 }
 
+// forwardedCandidate is one forwarding header's answer about who the client is.
+type forwardedCandidate struct {
+	header string
+	chain  string
+	addr   netip.Addr
+	port   uint16
+	// found is false when every entry in the chain is a trusted proxy, i.e.
+	// the header makes no claim about a client this service should honor
+	found bool
+}
+
+// forwardedCandidates reads EVERY forwarding header present on the request, in
+// forwardingHeaders order, rather than only the first one.
+//
+// Reading only the first is what let a client choose its own bucket. On a
+// deployment whose proxy owns X-Forwarded-For -- Caddy, ALB, CloudFront,
+// Cloudflare -- a client that also sends X-UR-Forwarded-For had the first slot
+// in that list, so its own value won over the one the proxy vouched for. The
+// mirror shape is a deployment whose proxy owns X-UR-Forwarded-For (the warp
+// load balancer): there the client-supplied header is X-Forwarded-For.
+// Reordering the list only moves the hole between the two shapes, so both are
+// read and disagreement is refused instead.
+//
+// A malformed header aborts the whole read, whichever header it is. Ignoring
+// the malformed one and honoring the other would be the forgery again with an
+// extra step: the unreadable header could be the proxy's, and the readable one
+// the client's.
+func forwardedCandidates(req *http.Request, trusted []netip.Prefix) (candidates []forwardedCandidate, malformedHeader string) {
+	for _, header := range forwardingHeaders {
+		chain := forwardingHeaderChain(req, header)
+		if chain == "" {
+			continue
+		}
+		addr, port, found, malformed := forwardedClientAddr(chain, trusted)
+		if malformed {
+			return nil, header
+		}
+		candidates = append(candidates, forwardedCandidate{
+			header: header,
+			chain:  chain,
+			addr:   addr,
+			port:   port,
+			found:  found,
+		})
+	}
+	return candidates, ""
+}
+
+// conflictingCandidates finds two headers that name two different clients.
+//
+// Only the ADDRESS is compared, deliberately. A proxy that sets both headers
+// correctly sets them in different forms -- X-UR-Forwarded-For as ip:port and
+// X-Forwarded-For as a bare ip, whose port reads as 0 -- so requiring the ports
+// to match too would call the correctly configured deployment a conflict and
+// drop it to the peer address. Port handling is therefore left exactly as it
+// was: the first present header decides it. The residual client influence over
+// the port on a proxy that passes X-Forwarded-Source-Port through is unchanged
+// by this function and is stated in proxyForwardingHeaderContract.
+//
+// Candidates with found == false are skipped: they name no client, so they
+// cannot disagree with one.
+func conflictingCandidates(candidates []forwardedCandidate) (first forwardedCandidate, other forwardedCandidate, conflict bool) {
+	claimed := false
+	for _, candidate := range candidates {
+		if !candidate.found {
+			continue
+		}
+		if !claimed {
+			first = candidate
+			claimed = true
+			continue
+		}
+		if first.addr != candidate.addr {
+			return first, candidate, true
+		}
+	}
+	return forwardedCandidate{}, forwardedCandidate{}, false
+}
+
 // ResolveClientAddress honors forwarding headers only when the immediate TCP
 // peer is in an explicit trusted CIDR. This makes source attribution an
 // application invariant instead of relying solely on an ingress rewrite.
@@ -494,17 +653,31 @@ func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, er
 		return remote.String(), nil
 	}
 
-	header := forwardingHeaderPresent(req)
-	if header == "" {
+	candidates, malformedHeader := forwardedCandidates(req, trusted)
+	if malformedHeader != "" {
+		reportUnusableForwardingHeader(remote.Addr(), malformedHeader, trusted)
 		return remote.String(), nil
 	}
-	chain := forwardingHeaderChain(req, header)
-	addr, port, found, malformed := forwardedClientAddr(chain, trusted)
-	if malformed {
-		reportUnusableForwardingHeader(remote.Addr(), header, trusted)
+	if len(candidates) == 0 {
 		return remote.String(), nil
 	}
-	if !found {
+	if first, other, conflict := conflictingCandidates(candidates); conflict {
+		// Two headers, two different clients. One of them is a value the proxy
+		// is passing through from the client, and nothing here can tell which,
+		// so neither is honored -- see reportConflictingForwardingHeaders.
+		reportConflictingForwardingHeaders(remote.Addr(), first.header, other.header, trusted)
+		return remote.String(), nil
+	}
+
+	// The FIRST present header still decides, exactly as before. Where the
+	// headers agree there is nothing to choose between; where they disagree the
+	// request has already been refused above. What must NOT happen is stepping
+	// PAST a first header that names no client (found == false, every entry
+	// inside an enumerated CIDR) to honor a later one: on a deployment whose
+	// proxy owns X-UR-Forwarded-For, that is a caller inside the trusted range
+	// getting its own X-Forwarded-For honored.
+	decisive := candidates[0]
+	if !decisive.found {
 		// Every entry in the chain is inside an enumerated CIDR. That is
 		// usually one of this deployment's own components calling in through
 		// the proxy, in which case the peer address is the right answer and
@@ -524,12 +697,13 @@ func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, er
 		// TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket.
 		return remote.String(), nil
 	}
+	port := decisive.port
 	if port == 0 {
-		if sourcePort, ok := forwardedSourcePort(req, chain); ok {
+		if sourcePort, ok := forwardedSourcePort(req, decisive.chain); ok {
 			port = sourcePort
 		}
 	}
-	return netip.AddrPortFrom(addr, port).String(), nil
+	return netip.AddrPortFrom(decisive.addr, port).String(), nil
 }
 
 func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt.ByJwt) *ClientSession {

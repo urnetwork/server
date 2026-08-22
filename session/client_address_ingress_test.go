@@ -371,6 +371,7 @@ func TestProxyReportSuppressionIsPerPeerAndPerCondition(t *testing.T) {
 	peer := netip.MustParseAddr("172.18.0.7")
 	unenumerated := proxyReportKey{peer: peer, kind: proxyReportUnenumerated}
 	unusable := proxyReportKey{peer: peer, kind: proxyReportUnusableHeader}
+	conflicting := proxyReportKey{peer: peer, kind: proxyReportConflictingHeaders}
 	now := time.Now()
 
 	if !shouldReportProxy(unenumerated, now) {
@@ -384,6 +385,17 @@ func TestProxyReportSuppressionIsPerPeerAndPerCondition(t *testing.T) {
 			"one condition suppressed a different condition for the same peer; the two " +
 				"have different remedies and an operator needs to see both",
 		)
+	}
+	if !shouldReportProxy(conflicting, now.Add(2*time.Second)) {
+		t.Fatal(
+			"a third condition was suppressed by the first two for the same peer. " +
+				"Conflicting forwarding headers mean the proxy is passing a client header " +
+				"through, which is a different edit from either enumerating a subnet or " +
+				"fixing a broken header value",
+		)
+	}
+	if shouldReportProxy(conflicting, now.Add(3*time.Second)) {
+		t.Fatal("a repeat of the conflicting-header condition inside the interval was reported; it can be flooded")
 	}
 	if !shouldReportProxy(unenumerated, now.Add(proxyReportInterval)) {
 		t.Fatal("no report after the interval elapsed; a wedged deployment goes silent")
@@ -583,6 +595,14 @@ func TestUnenumeratedProxyReportNamesTheRemedyAndItsPrecondition(t *testing.T) {
 		// enumerates 172.16.0.0/12 for a docker bridge silently takes the
 		// bucket away from any real client arriving from inside it
 		"NARROWEST",
+		// and the COMPLETE header contract, not only the header that happened
+		// to trigger this report. This service reads three headers, and which
+		// one a proxy sets differs by product, so an operator who overwrites
+		// the one named above and passes the others through has closed
+		// nothing: the client sets one of the others and picks its own bucket.
+		// This report is what recruits operators into enumerating a proxy at
+		// all, so it is where the whole contract has to be stated.
+		"OVERWRITE OR STRIP ALL THREE", "X-UR-Forwarded-For", "X-Forwarded-Source-Port",
 	} {
 		if !strings.Contains(captured, want) {
 			t.Fatalf(
@@ -757,17 +777,304 @@ func TestUrForwardedForChainIsNotReadAsASingleHop(t *testing.T) {
 		)
 	}
 
-	// X-UR-Forwarded-For still wins over X-Forwarded-For when both are present
-	both := httptest.NewRequest("POST", "/auth/network-create", nil)
-	both.RemoteAddr = ingressProxyAddress
-	both.Header.Set("X-UR-Forwarded-For", "203.0.113.9:41001")
-	both.Header.Set("X-Forwarded-For", "198.51.100.20")
-	got, err = ResolveClientAddress(both, trusted)
+	// This test used to end by pinning "X-UR-Forwarded-For still wins over
+	// X-Forwarded-For when both are present". That pin is deliberately INVERTED
+	// now, because it was the forgery wearing the other header name: on any
+	// deployment whose proxy owns X-Forwarded-For -- Caddy, ALB, CloudFront,
+	// Cloudflare -- the header a CLIENT can set is X-UR-Forwarded-For, so
+	// "X-UR wins" meant the client won. Disagreement between the two headers is
+	// now refused outright, see
+	// TestASecondForwardingHeaderCannotChooseTheBucket, and the shapes where
+	// they AGREE -- what a correctly configured proxy sends -- still resolve
+	// byte for byte as they did, see
+	// TestProxySettingBothForwardingHeadersConsistentlyIsUnchanged.
+}
+
+// bothHeadersRequest is a request from a trusted proxy carrying both forwarding
+// headers, which is what any pass-through proxy delivers as soon as a client
+// decides to set the one the proxy does not overwrite.
+func bothHeadersRequest(headerA string, valueA string, headerB string, valueB string) *http.Request {
+	req := httptest.NewRequest("POST", "/auth/network-create", nil)
+	req.RemoteAddr = ingressProxyAddress
+	req.Header.Set(headerA, valueA)
+	req.Header.Set(headerB, valueB)
+	return req
+}
+
+// TestASecondForwardingHeaderCannotChooseTheBucket is the regression for the
+// forgery that survived the first pass of this fix.
+//
+// This service reads two forwarding headers, and it used to honor whichever one
+// came first in forwardingHeaders -- X-UR-Forwarded-For. A proxy overwrites the
+// header IT sets and, by default, passes every other client header through
+// untouched. So on every deployment whose proxy owns X-Forwarded-For (Caddy,
+// nginx's documented recipe, ALB, CloudFront, Cloudflare), a client that sent
+// its own X-UR-Forwarded-For beat the address the proxy had vouched for and
+// chose its own rate-limit bucket -- stepping outside the 5-per-24h account
+// creation limit and the 5-per-5min auth attempt limit.
+//
+// Reordering the two would only move the hole: the warp load balancer sets
+// X-UR-Forwarded-For (controller/verify_controller.go) and there the
+// client-settable header is X-Forwarded-For. Both deployment shapes exist in
+// this project, so neither header can be declared the authentic one. When they
+// disagree the request is attributed to the PEER instead -- the most
+// restrictive answer available, never an address of the client's choosing.
+func TestASecondForwardingHeaderCannotChooseTheBucket(t *testing.T) {
+	for _, shape := range []struct {
+		what         string
+		proxyHeader  string
+		proxyValue   string
+		clientHeader string
+		clientValue  string
+	}{
+		{
+			"proxy owns X-Forwarded-For (Caddy/ALB/CloudFront/Cloudflare), client sends a bare X-UR-Forwarded-For",
+			"X-Forwarded-For", "203.0.113.9",
+			"X-UR-Forwarded-For", "6.6.6.6",
+		},
+		{
+			"same, with the ip:port form the old code accepted verbatim",
+			"X-Forwarded-For", "203.0.113.9",
+			"X-UR-Forwarded-For", "6.6.6.6:1234",
+		},
+		{
+			"same, with a whole forged chain in the client's header",
+			"X-Forwarded-For", "203.0.113.9",
+			"X-UR-Forwarded-For", "8.8.8.8:1, 6.6.6.6:2",
+		},
+		{
+			"proxy owns X-UR-Forwarded-For (warp load balancer), client sends X-Forwarded-For",
+			"X-UR-Forwarded-For", "203.0.113.9:41001",
+			"X-Forwarded-For", "6.6.6.6",
+		},
+		{
+			"proxy appends to X-Forwarded-For, client still tries the other header",
+			"X-Forwarded-For", "10.0.0.1, 203.0.113.9",
+			"X-UR-Forwarded-For", "6.6.6.6:1234",
+		},
+	} {
+		t.Run(shape.what, func(t *testing.T) {
+			reports := captureProxyReports(t)
+			got, err := ResolveClientAddress(
+				bothHeadersRequest(shape.proxyHeader, shape.proxyValue, shape.clientHeader, shape.clientValue),
+				trustedIngress(),
+			)
+			if err != nil {
+				t.Fatalf(
+					"two forwarding headers returned an error (%v); router.wrap turns that "+
+						"into HTTP 500 on every endpoint",
+					err,
+				)
+			}
+			if ip, _, splitErr := server.SplitClientAddress(got); splitErr == nil && ip == "6.6.6.6" {
+				t.Fatalf(
+					"a client behind a trusted proxy set %s: %q, the proxy vouched for %s: %q, "+
+						"and the api resolved to %q. It just chose its own rate-limit bucket and "+
+						"stepped outside every per-address limit in the service",
+					shape.clientHeader, shape.clientValue, shape.proxyHeader, shape.proxyValue, got,
+				)
+			}
+			if got != ingressProxyAddress {
+				t.Fatalf(
+					"two headers naming two different clients resolved to %q; neither can be "+
+						"shown to be the value the proxy vouched for, so the only safe answer is "+
+						"the peer address %s",
+					got, ingressProxyAddress,
+				)
+			}
+			if len(*reports) != 1 {
+				t.Fatalf(
+					"a trusted proxy passed a client-supplied forwarding header through and %d "+
+						"reports were emitted, want 1: the clients that reach this path share one "+
+						"rate-limit budget and nothing says so\n%s",
+					len(*reports), strings.Join(*reports, "\n"),
+				)
+			}
+			captured := (*reports)[0]
+			for _, want := range []string{"X-Forwarded-For", "X-UR-Forwarded-For", "TRUSTED", "172.18.0.7"} {
+				if !strings.Contains(captured, want) {
+					t.Fatalf(
+						"the conflicting-header report does not mention %q, so an operator cannot "+
+							"tell which peer or which headers to fix\nreport: %s",
+						want, captured,
+					)
+				}
+			}
+			// the header VALUES are client-influenced by definition on this
+			// path -- one of the two came from the client -- so neither may
+			// reach the log
+			for _, forbidden := range []string{"6.6.6.6", "8.8.8.8", "203.0.113.9"} {
+				if strings.Contains(captured, forbidden) {
+					t.Fatalf(
+						"the report echoed a forwarding header value (%s); one of the two is "+
+							"attacker-supplied\nreport: %s",
+						forbidden, captured,
+					)
+				}
+			}
+		})
+	}
+}
+
+// TestProxySettingBothForwardingHeadersConsistentlyIsUnchanged is the other
+// half of the test above, and the one that bounds its blast radius.
+//
+// A proxy that sets BOTH headers correctly is a normal configuration -- nginx
+// with proxy_set_header X-UR-Forwarded-For $remote_addr:$remote_port ALONGSIDE
+// X-Forwarded-For $proxy_add_x_forwarded_for -- and the two forms it sends
+// never look identical: one carries a port, the other is a bare ip, and the
+// X-Forwarded-For one carries whatever the client prepended. Refusing on any
+// difference would take the port away from that deployment and move its
+// wallet-challenge and auth-attempt buckets, for nothing. Only the ADDRESS is
+// compared, and where the addresses agree the resolved value is byte for byte
+// what it was before this change.
+func TestProxySettingBothForwardingHeadersConsistentlyIsUnchanged(t *testing.T) {
+	for _, shape := range []struct {
+		what string
+		ur   string
+		xff  string
+		want string
+	}{
+		{
+			"nginx sets X-UR-Forwarded-For=$remote_addr:$remote_port and X-Forwarded-For=$proxy_add_x_forwarded_for",
+			"203.0.113.9:41001", "6.6.6.6, 203.0.113.9", "203.0.113.9:41001",
+		},
+		{
+			"the same pair with nothing prepended by the client",
+			"203.0.113.9:41001", "203.0.113.9", "203.0.113.9:41001",
+		},
+		{
+			"both bare: the port is simply absent, as it is for a lone bare X-Forwarded-For",
+			"203.0.113.9", "203.0.113.9", "203.0.113.9:0",
+		},
+		{
+			"the client's prepended entry is inside the trusted range on one header only",
+			"203.0.113.9:41001", "172.18.0.9, 203.0.113.9", "203.0.113.9:41001",
+		},
+	} {
+		t.Run(shape.what, func(t *testing.T) {
+			reports := captureProxyReports(t)
+			got, err := ResolveClientAddress(
+				bothHeadersRequest("X-UR-Forwarded-For", shape.ur, "X-Forwarded-For", shape.xff),
+				trustedIngress(),
+			)
+			if err != nil {
+				t.Fatalf("a proxy that sets both headers consistently errored: %v", err)
+			}
+			if got != shape.want {
+				t.Fatalf(
+					"X-UR-Forwarded-For %q + X-Forwarded-For %q resolved to %q, want %q. A "+
+						"deployment whose proxy sets both correctly must not lose its client "+
+						"address or its port to the conflict rule",
+					shape.ur, shape.xff, got, shape.want,
+				)
+			}
+			if len(*reports) != 0 {
+				t.Fatalf(
+					"a correctly configured proxy produced %d misconfiguration reports; that "+
+						"buries the reports that are actionable\n%s",
+					len(*reports), strings.Join(*reports, "\n"),
+				)
+			}
+		})
+	}
+
+	// the optional port companion still pairs when both headers carry the bare
+	// form, exactly as it does for a lone bare X-Forwarded-For
+	captureProxyReports(t)
+	withPort := bothHeadersRequest("X-UR-Forwarded-For", "203.0.113.9", "X-Forwarded-For", "203.0.113.9")
+	withPort.Header.Set("X-Forwarded-Source-Port", "41001")
+	got, err := ResolveClientAddress(withPort, trustedIngress())
 	if err != nil {
-		t.Fatalf("both headers: %v", err)
+		t.Fatalf("both bare headers with a source port errored: %v", err)
 	}
 	if got != "203.0.113.9:41001" {
-		t.Fatalf("with both headers set the resolver returned %q, want the X-UR-Forwarded-For value", got)
+		t.Fatalf("both bare headers plus X-Forwarded-Source-Port resolved to %q, want 203.0.113.9:41001", got)
+	}
+}
+
+// TestAHeaderThatNamesNoClientIsNotSteppedOver pins which header decides once
+// two are present and only one of them names anybody.
+//
+// The shape is ordinary internal traffic: one of the deployment's own
+// components, whose address is inside an enumerated CIDR, calls the api through
+// the ingress proxy. The header the proxy sets names that component, every
+// entry in it is a trusted proxy, so it makes no claim this service can honor
+// -- and the component has also sent the other forwarding header.
+//
+// "Use the first header that named somebody" is the natural way to write the
+// multi-header read and it is a forgery: it hands that caller exactly the
+// address it wrote. The FIRST PRESENT header decides, whether or not it named
+// anyone, and the fallback stays the peer.
+func TestAHeaderThatNamesNoClientIsNotSteppedOver(t *testing.T) {
+	reports := captureProxyReports(t)
+
+	got, err := ResolveClientAddress(
+		bothHeadersRequest("X-UR-Forwarded-For", "172.18.0.9:5000", "X-Forwarded-For", "6.6.6.6"),
+		trustedIngress(),
+	)
+	if err != nil {
+		t.Fatalf("an all-trusted first header alongside a second header errored: %v", err)
+	}
+	if got != ingressProxyAddress {
+		t.Fatalf(
+			"the proxy's header named only enumerated hops and the caller's own "+
+				"X-Forwarded-For said 6.6.6.6; the api resolved to %q, want the peer address "+
+				"%s. A caller inside the trusted range just chose its own rate-limit bucket",
+			got, ingressProxyAddress,
+		)
+	}
+	if len(*reports) != 0 {
+		t.Fatalf(
+			"ordinary internal traffic emitted %d reports; nothing here is misconfigured "+
+				"and this buries the reports that are actionable\n%s",
+			len(*reports), strings.Join(*reports, "\n"),
+		)
+	}
+}
+
+// TestEitherForwardingHeaderBeingUnreadableDegradesToThePeer: an unreadable
+// header aborts the whole read, whichever of the two it is.
+//
+// Ignoring the unreadable one and honoring the other looks generous and is the
+// forgery again with an extra step -- the unreadable header can be the PROXY's
+// (that is exactly the condition reportUnusableForwardingHeader exists for) and
+// the readable one the client's. There is no way to tell from here, so neither
+// is honored.
+func TestEitherForwardingHeaderBeingUnreadableDegradesToThePeer(t *testing.T) {
+	for _, shape := range []struct{ what, ur, xff string }{
+		{"the client's header is the unreadable one", "not-an-address", "203.0.113.9"},
+		{"the proxy's header is the unreadable one", "203.0.113.9:41001", "not-an-address"},
+		{"an unreadable entry inside a chain", "203.0.113.9:41001", "6.6.6.6, nonsense, 203.0.113.9,"},
+	} {
+		t.Run(shape.what, func(t *testing.T) {
+			reports := captureProxyReports(t)
+			got, err := ResolveClientAddress(
+				bothHeadersRequest("X-UR-Forwarded-For", shape.ur, "X-Forwarded-For", shape.xff),
+				trustedIngress(),
+			)
+			if err != nil {
+				t.Fatalf("an unreadable header returned an error (%v); router.wrap makes that a 500", err)
+			}
+			if got != ingressProxyAddress {
+				t.Fatalf(
+					"with one header unreadable the resolver returned %q, want the peer address "+
+						"%s: the unreadable one may be the proxy's and the readable one the "+
+						"client's",
+					got, ingressProxyAddress,
+				)
+			}
+			if len(*reports) != 1 {
+				t.Fatalf("want exactly one report, got %d\n%s", len(*reports), strings.Join(*reports, "\n"))
+			}
+			if !strings.Contains((*reports)[0], "could not be read") {
+				t.Fatalf(
+					"an unreadable header was reported as something else; the remedies differ"+
+						"\nreport: %s",
+					(*reports)[0],
+				)
+			}
+		})
 	}
 }
 
@@ -820,6 +1127,21 @@ func TestUnreadableForwardingHeaderFromATrustedPeerDegradesAndIsReported(t *test
 			"the report echoed the attacker-supplied header value; log injection\nreport: %s",
 			(*reports)[0],
 		)
+	}
+	// an operator who lands here is already editing their proxy configuration,
+	// so this report states the same complete header contract as the
+	// unenumerated one -- all three headers, not just the broken one
+	for _, want := range []string{
+		"OVERWRITE OR STRIP ALL THREE", "X-Forwarded-For", "X-UR-Forwarded-For", "X-Forwarded-Source-Port",
+	} {
+		if !strings.Contains((*reports)[0], want) {
+			t.Fatalf(
+				"the unusable-header report does not mention %q, so an operator can fix the "+
+					"header this named and still leave a client-settable one behind"+
+					"\nreport: %s",
+				want, (*reports)[0],
+			)
+		}
 	}
 }
 
