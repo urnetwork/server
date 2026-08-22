@@ -328,7 +328,11 @@ func reportUnenumeratedProxy(peer netip.Addr, header string, trusted []netip.Pre
 			"optionally with X-Forwarded-Source-Port, or X-UR-Forwarded-For as "+
 			"ip:port. This service reads the last entry of the chain, so a proxy "+
 			"that appends is safe and a proxy that forwards the client's own value "+
-			"unchanged lets that client choose its rate-limit bucket. If %s is not a "+
+			"unchanged lets that client choose its rate-limit bucket. Enumerate the "+
+			"NARROWEST range that contains only proxies: an address inside an "+
+			"enumerated CIDR is read as a proxy hop rather than as a client, so any "+
+			"real client arriving from inside that range loses its own rate-limit "+
+			"bucket and shares the proxy's. If %s is not a "+
 			"proxy of this deployment then a client is sending a forwarding header "+
 			"it is not entitled to: the header is correctly ignored and no "+
 			"configuration change is wanted.\n",
@@ -501,9 +505,23 @@ func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, er
 		return remote.String(), nil
 	}
 	if !found {
-		// every hop in the chain is itself a trusted proxy, so the client is
-		// one of this deployment's own components. The peer address is the
-		// correct answer and there is nothing to report.
+		// Every entry in the chain is inside an enumerated CIDR. That is
+		// usually one of this deployment's own components calling in through
+		// the proxy, in which case the peer address is the right answer and
+		// there is nothing to report. It can ALSO be a real client whose
+		// address happens to fall inside a range the operator enumerated, and
+		// that client has just lost its own rate-limit bucket and joined the
+		// proxy's -- the shared-budget failure this file exists to prevent, on
+		// a narrow path.
+		//
+		// It is not reported, because the two are indistinguishable from here
+		// and the first is ordinary traffic: an alert on every internal call
+		// would bury the reports that are actionable. The remedy belongs to the
+		// operator and reportUnenumeratedProxy states it -- enumerate the
+		// narrowest range that contains only proxies. Note this is the ONE
+		// place the new reader is more conservative than the old one, which
+		// never checked a forwarded value against the trusted set at all; see
+		// TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket.
 		return remote.String(), nil
 	}
 	if port == 0 {

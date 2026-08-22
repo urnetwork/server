@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -577,6 +578,11 @@ func TestUnenumeratedProxyReportNamesTheRemedyAndItsPrecondition(t *testing.T) {
 		// operator cannot follow this into a different outage or into a
 		// spoofable configuration
 		"$proxy_add_x_forwarded_for", "last entry", "unchanged",
+		// and the precondition on the CIDR itself: an address inside an
+		// enumerated range is read as a proxy hop, so an operator who
+		// enumerates 172.16.0.0/12 for a docker bridge silently takes the
+		// bucket away from any real client arriving from inside it
+		"NARROWEST",
 	} {
 		if !strings.Contains(captured, want) {
 			t.Fatalf(
@@ -955,6 +961,110 @@ func TestFourInSixAddressesAreOneAddressEverywhere(t *testing.T) {
 	}
 }
 
+// legacyTrustedBranch is the trusted-peer half of ResolveClientAddress as it
+// stood before this change, verbatim, so claims about what the previous
+// implementation did are checked rather than asserted in a comment.
+//
+// Note what is NOT in it: any check of the forwarded VALUE against the trusted
+// set. That absence is the subject of
+// TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket.
+func legacyTrustedBranch(req *http.Request) (string, error) {
+	forwarded := strings.TrimSpace(req.Header.Get("X-UR-Forwarded-For"))
+	if forwarded != "" {
+		if strings.Contains(forwarded, ",") {
+			return "", fmt.Errorf("invalid X-UR-Forwarded-For chain")
+		}
+		address, err := parseRequestAddress(forwarded)
+		if err != nil {
+			return "", fmt.Errorf("invalid X-UR-Forwarded-For: %w", err)
+		}
+		return address.String(), nil
+	}
+	forwardedIp := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
+	forwardedPort := strings.TrimSpace(req.Header.Get("X-Forwarded-Source-Port"))
+	if forwardedIp == "" && forwardedPort == "" {
+		return "", nil
+	}
+	if forwardedIp == "" || forwardedPort == "" || strings.Contains(forwardedIp, ",") {
+		return "", fmt.Errorf("forwarded source requires one IP and one port")
+	}
+	address, err := parseRequestAddress(net.JoinHostPort(strings.Trim(forwardedIp, "[]"), forwardedPort))
+	if err != nil {
+		return "", fmt.Errorf("invalid forwarded source: %w", err)
+	}
+	return address.String(), nil
+}
+
+// TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket is the ONE
+// behaviour change in this work that is not a 500 being replaced, and it is
+// here so it is not discovered later as a surprise.
+//
+// The previous reader never compared a forwarded value to the trusted set: it
+// took X-UR-Forwarded-For, or X-Forwarded-For + X-Forwarded-Source-Port, and
+// returned it. The new reader walks the chain right to left skipping entries
+// that are themselves inside an enumerated CIDR -- which is what lets it find
+// the client behind two proxy hops, and is the whole reason a client cannot
+// prepend an address of its own. The cost is that a forwarded address INSIDE an
+// enumerated range is now read as a proxy hop rather than as a client.
+//
+// So an operator who enumerates 172.16.0.0/12 because their docker bridge peer
+// is 172.18.0.7 also takes the individual rate-limit bucket away from any real
+// caller arriving from inside 172.16.0.0/12. The direction is conservative --
+// those callers fall back to sharing the proxy's address, they are never
+// attributed to something a caller chose -- but it IS the shared-budget failure
+// this work exists to remove, on a narrow path, so:
+//
+//   - reportUnenumeratedProxy now tells the operator to enumerate the narrowest
+//     range that contains only proxies (pinned by the "NARROWEST" entry in
+//     TestUnenumeratedProxyReportNamesTheRemedyAndItsPrecondition), and
+//   - this test states the trade explicitly instead of leaving it implied by
+//     "nothing that used to resolve resolves differently", which is not true.
+func TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket(t *testing.T) {
+	captureProxyReports(t)
+	trusted := trustedIngress() // 172.16.0.0/12, the natural docker-bridge CIDR
+
+	insideTheRange := "172.20.5.5"
+
+	for _, shape := range []struct {
+		what      string
+		request   *http.Request
+		wasBefore string
+	}{
+		{
+			"X-UR-Forwarded-For naming an address inside the enumerated range",
+			proxiedRequest("X-UR-Forwarded-For", insideTheRange+":41001"),
+			insideTheRange + ":41001",
+		},
+		{
+			"X-Forwarded-For + source port naming an address inside the enumerated range",
+			ingressRequest(insideTheRange, "41001"),
+			insideTheRange + ":41001",
+		},
+	} {
+		before, err := legacyTrustedBranch(shape.request)
+		if err != nil || before != shape.wasBefore {
+			t.Fatalf(
+				"%s: the previous implementation returned (%q, %v), want (%q, nil). This "+
+					"test's whole premise is that this path USED to resolve; re-derive it",
+				shape.what, before, err, shape.wasBefore,
+			)
+		}
+
+		got, err := ResolveClientAddress(shape.request, trusted)
+		if err != nil {
+			t.Fatalf("%s: %v", shape.what, err)
+		}
+		if got != ingressProxyAddress {
+			t.Fatalf(
+				"%s resolved to %q, want the peer %s. If this now resolves to the "+
+					"forwarded address again, the right-to-left walk has stopped skipping "+
+					"enumerated hops and a client can prepend its own address",
+				shape.what, got, ingressProxyAddress,
+			)
+		}
+	}
+}
+
 // TestEveryLoosenedShapeUsedToBeAnHttp500 is the argument that this change
 // cannot regress a working deployment, written as a test.
 //
@@ -964,33 +1074,15 @@ func TestFourInSixAddressesAreOneAddressEverywhere(t *testing.T) {
 // of these paths today is a deployment whose api answers 500 to every request,
 // so there is no working behaviour for the looser contract to take away -- only
 // an outage for it to end.
+//
+// That argument covers the LOOSENING and nothing else. It is not a claim that
+// no previously-working input resolves differently: exactly one does, and
+// TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket is where that
+// one is stated and pinned. Adding it to the table below would fail, because
+// the replica returns it without an error.
 func TestEveryLoosenedShapeUsedToBeAnHttp500(t *testing.T) {
 	captureProxyReports(t)
 	trusted := trustedIngress()
-
-	// the previous implementation, verbatim, so the claim is checked rather
-	// than asserted in a comment
-	oldResolve := func(req *http.Request) error {
-		forwarded := strings.TrimSpace(req.Header.Get("X-UR-Forwarded-For"))
-		if forwarded != "" {
-			if strings.Contains(forwarded, ",") {
-				return fmt.Errorf("invalid X-UR-Forwarded-For chain")
-			}
-			if _, err := parseRequestAddress(forwarded); err != nil {
-				return fmt.Errorf("invalid X-UR-Forwarded-For: %w", err)
-			}
-			return nil
-		}
-		forwardedIp := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
-		forwardedPort := strings.TrimSpace(req.Header.Get("X-Forwarded-Source-Port"))
-		if forwardedIp == "" && forwardedPort == "" {
-			return nil
-		}
-		if forwardedIp == "" || forwardedPort == "" || strings.Contains(forwardedIp, ",") {
-			return fmt.Errorf("forwarded source requires one IP and one port")
-		}
-		return nil
-	}
 
 	for _, shape := range []struct {
 		what   string
@@ -1005,7 +1097,7 @@ func TestEveryLoosenedShapeUsedToBeAnHttp500(t *testing.T) {
 		{"an unreadable header from a trusted proxy", "X-Forwarded-For", "not-an-address"},
 	} {
 		req := proxiedRequest(shape.header, shape.value)
-		if err := oldResolve(req); err == nil {
+		if _, err := legacyTrustedBranch(req); err == nil {
 			t.Fatalf(
 				"%s (%s: %s) did NOT error on the previous implementation, so this test "+
 					"is no longer evidence that the looser contract only replaces 500s -- "+
