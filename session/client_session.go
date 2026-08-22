@@ -615,8 +615,22 @@ func forwardedCandidates(req *http.Request, trusted []netip.Prefix) (candidates 
 // the port on a proxy that passes X-Forwarded-Source-Port through is unchanged
 // by this function and is stated in proxyForwardingHeaderContract.
 //
-// Candidates with found == false are skipped: they name no client, so they
-// cannot disagree with one.
+// Candidates with found == false are skipped HERE, and refused by
+// candidateNamesNoClient instead. This function is only the REPORTED condition
+// -- two headers that each name a client and name different ones -- because a
+// report is a resource a client must not be able to spend. Behind a trusted
+// proxy the peer is one address for every client, so the (peer, condition)
+// suppression slot is shared; a client can produce a header that names no
+// client whenever it likes, so reporting that shape would let it take the slot
+// every interval and silence the genuine both-named conflict from a real
+// misconfiguration. Both shapes resolve to the peer either way, so nothing is
+// lost by keeping one of them quiet.
+//
+// Note that with two entries in forwardingHeaders, a candidate with
+// found == false means at most ONE candidate has found == true, so this
+// function provably cannot fire for any request candidateNamesNoClient
+// catches: the split changes which shapes are refused, never which are
+// reported.
 func conflictingCandidates(candidates []forwardedCandidate) (first forwardedCandidate, other forwardedCandidate, conflict bool) {
 	claimed := false
 	for _, candidate := range candidates {
@@ -633,6 +647,44 @@ func conflictingCandidates(candidates []forwardedCandidate) (first forwardedCand
 		}
 	}
 	return forwardedCandidate{}, forwardedCandidate{}, false
+}
+
+// candidateNamesNoClient reports whether any PRESENT forwarding header names no
+// client at all -- every entry in its chain is inside an enumerated CIDR.
+//
+// Such a header is not neutral. It is a claim, by a header this deployment
+// reads, that the client is a trusted hop; it disagrees with any other header
+// that names a real client, and the answer when two headers disagree is the
+// peer address. Treating it as "makes no claim, so it cannot disagree" is what
+// let a client behind a trusted proxy pick its own bucket: the proxy wrote
+// X-Forwarded-For: <an address inside the enumerated range>, the client wrote
+// X-UR-Forwarded-For: 6.6.6.6, only the client's header named anybody, and the
+// client got 6.6.6.6.
+//
+// EVERY candidate is checked, not just the first. The first-only version
+// guarded one of the two deployment shapes and left its mirror open, and which
+// header a proxy owns differs by product -- the warp load balancer writes
+// X-UR-Forwarded-For, Caddy and the managed load balancers write
+// X-Forwarded-For -- so a rule that holds for only one ordering holds for
+// neither deployment.
+//
+// The discriminating question is whether a legitimate deployment sends one
+// header naming a client while the other names only enumerated hops, and the
+// answer is no in the direction this closes. The warp sidecar writes
+// X-UR-Forwarded-For as $remote_addr:$remote_port, i.e. the peer IT sees: if
+// X-UR-Forwarded-For names a real client then that sidecar is the edge, so
+// there is no inner enumerated hop that could have written an all-enumerated
+// X-Forwarded-For, and that header came from the client. The mirror direction
+// (X-UR names only enumerated hops, X-Forwarded-For names a client -- warp
+// nginx behind an enumerated CDN) already resolved to the peer before this
+// change, via the first-candidate guard, so it loses nothing it had.
+func candidateNamesNoClient(candidates []forwardedCandidate) bool {
+	for _, candidate := range candidates {
+		if !candidate.found {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveClientAddress honors forwarding headers only when the immediate TCP
@@ -681,34 +733,39 @@ func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, er
 		return remote.String(), nil
 	}
 
-	// The FIRST present header still decides, exactly as before. Where the
-	// headers agree there is nothing to choose between; where they disagree the
-	// request has already been refused above. What must NOT happen is stepping
-	// PAST a first header that names no client (found == false, every entry
-	// inside an enumerated CIDR) to honor a later one: on a deployment whose
-	// proxy owns X-UR-Forwarded-For, that is a caller inside the trusted range
-	// getting its own X-Forwarded-For honored.
-	decisive := candidates[0]
-	if !decisive.found {
-		// Every entry in the chain is inside an enumerated CIDR. That is
-		// usually one of this deployment's own components calling in through
-		// the proxy, in which case the peer address is the right answer and
-		// there is nothing to report. It can ALSO be a real client whose
-		// address happens to fall inside a range the operator enumerated, and
-		// that client has just lost its own rate-limit bucket and joined the
-		// proxy's -- the shared-budget failure this file exists to prevent, on
-		// a narrow path.
+	if candidateNamesNoClient(candidates) {
+		// At least one present header names no client -- every entry in its
+		// chain is inside an enumerated CIDR. That is usually one of this
+		// deployment's own components calling in through the proxy, in which
+		// case the peer address is the right answer and there is nothing to
+		// report. It can ALSO be a real client whose address happens to fall
+		// inside a range the operator enumerated, and that client has just lost
+		// its own rate-limit bucket and joined the proxy's -- the shared-budget
+		// failure this file exists to prevent, on a narrow path.
 		//
-		// It is not reported, because the two are indistinguishable from here
-		// and the first is ordinary traffic: an alert on every internal call
-		// would bury the reports that are actionable. The remedy belongs to the
-		// operator and reportUnenumeratedProxy states it -- enumerate the
-		// narrowest range that contains only proxies. Note this is the ONE
-		// place the new reader is more conservative than the old one, which
-		// never checked a forwarded value against the trusted set at all; see
+		// Either way it is the answer for the WHOLE request, not just for that
+		// header: a second header that does name a client cannot be honored
+		// over it, because on this shape the header that names the client is
+		// the client's own (see candidateNamesNoClient). Honoring it is exactly
+		// how a client behind a trusted proxy picked its own bucket.
+		//
+		// It is not reported, because the internal-call case and the
+		// client-inside-the-range case are indistinguishable from here, the
+		// first is ordinary traffic, and a client can produce this shape on
+		// demand -- so a report here would be a suppression slot the client
+		// gets to spend. The remedy belongs to the operator and
+		// reportUnenumeratedProxy states it: enumerate the narrowest range that
+		// contains only proxies. Note this is the ONE place the new reader is
+		// more conservative than the old one, which never checked a forwarded
+		// value against the trusted set at all; see
 		// TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket.
 		return remote.String(), nil
 	}
+
+	// The FIRST present header decides, exactly as before. Every present header
+	// names a client and they all name the SAME one by now -- disagreement was
+	// refused above, in both of its forms -- so this chooses only the port.
+	decisive := candidates[0]
 	port := decisive.port
 	if port == 0 {
 		if sourcePort, ok := forwardedSourcePort(req, decisive.chain); ok {

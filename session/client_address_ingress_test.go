@@ -831,31 +831,74 @@ func TestASecondForwardingHeaderCannotChooseTheBucket(t *testing.T) {
 		proxyValue   string
 		clientHeader string
 		clientValue  string
+		// how many operator reports the shape must produce. 1 where both
+		// headers name a client and the two disagree -- that is a proxy
+		// passing a client header through, and it is actionable. 0 where the
+		// proxy's header names only enumerated hops: see the comment on the
+		// last group of shapes below.
+		wantReports int
 	}{
 		{
 			"proxy owns X-Forwarded-For (Caddy/ALB/CloudFront/Cloudflare), client sends a bare X-UR-Forwarded-For",
 			"X-Forwarded-For", "203.0.113.9",
 			"X-UR-Forwarded-For", "6.6.6.6",
+			1,
 		},
 		{
 			"same, with the ip:port form the old code accepted verbatim",
 			"X-Forwarded-For", "203.0.113.9",
 			"X-UR-Forwarded-For", "6.6.6.6:1234",
+			1,
 		},
 		{
 			"same, with a whole forged chain in the client's header",
 			"X-Forwarded-For", "203.0.113.9",
 			"X-UR-Forwarded-For", "8.8.8.8:1, 6.6.6.6:2",
+			1,
 		},
 		{
 			"proxy owns X-UR-Forwarded-For (warp load balancer), client sends X-Forwarded-For",
 			"X-UR-Forwarded-For", "203.0.113.9:41001",
 			"X-Forwarded-For", "6.6.6.6",
+			1,
 		},
 		{
 			"proxy appends to X-Forwarded-For, client still tries the other header",
 			"X-Forwarded-For", "10.0.0.1, 203.0.113.9",
 			"X-UR-Forwarded-For", "6.6.6.6:1234",
+			1,
+		},
+
+		// The shapes below are the ones the first pass of the conflict rule
+		// missed. The proxy's header is PRESENT and names only addresses
+		// inside an enumerated CIDR, so it claims no client -- and a candidate
+		// that claims no client used to be skipped as "cannot disagree",
+		// leaving the client's header the only claim and handing the client
+		// the address it wrote. Both orderings are here, because the header a
+		// proxy owns differs by product and only one of the two directions was
+		// guarded.
+		//
+		// They report NOTHING: see TestAHeaderThatNamesNoClientIsNotSteppedOver
+		// for why, and note that a client can reach this shape at will, so a
+		// report here would let it occupy the peer's conflicting-headers
+		// suppression slot and silence a genuine one.
+		{
+			"proxy's X-Forwarded-For names only an enumerated hop, client sends X-UR-Forwarded-For",
+			"X-Forwarded-For", "172.20.5.5",
+			"X-UR-Forwarded-For", "6.6.6.6:1234",
+			0,
+		},
+		{
+			"same, with a chain of two enumerated hops in the proxy's header",
+			"X-Forwarded-For", "172.18.0.9, 172.20.5.5",
+			"X-UR-Forwarded-For", "6.6.6.6:1234",
+			0,
+		},
+		{
+			"mirror: proxy's X-UR-Forwarded-For names only an enumerated hop, client sends X-Forwarded-For",
+			"X-UR-Forwarded-For", "172.20.5.5:41001",
+			"X-Forwarded-For", "6.6.6.6",
+			0,
 		},
 	} {
 		t.Run(shape.what, func(t *testing.T) {
@@ -887,13 +930,17 @@ func TestASecondForwardingHeaderCannotChooseTheBucket(t *testing.T) {
 					got, ingressProxyAddress,
 				)
 			}
-			if len(*reports) != 1 {
+			if len(*reports) != shape.wantReports {
 				t.Fatalf(
 					"a trusted proxy passed a client-supplied forwarding header through and %d "+
-						"reports were emitted, want 1: the clients that reach this path share one "+
-						"rate-limit budget and nothing says so\n%s",
-					len(*reports), strings.Join(*reports, "\n"),
+						"reports were emitted, want %d: either the clients that reach this path "+
+						"share one rate-limit budget and nothing says so, or a client can occupy "+
+						"the peer's suppression slot and silence a genuine report\n%s",
+					len(*reports), shape.wantReports, strings.Join(*reports, "\n"),
 				)
+			}
+			if shape.wantReports == 0 {
+				return
 			}
 			captured := (*reports)[0]
 			for _, want := range []string{
@@ -1444,6 +1491,44 @@ func TestForwardedAddressInsideAnEnumeratedCidrSharesTheProxyBucket(t *testing.T
 					"forwarded address again, the right-to-left walk has stopped skipping "+
 					"enumerated hops and a client can prepend its own address",
 				shape.what, got, ingressProxyAddress,
+			)
+		}
+	}
+
+	// The claim above -- "shares the proxy's bucket" -- has to hold when the
+	// caller ALSO sends the other forwarding header, which is the only way it
+	// is worth anything. It did not: a header naming only enumerated hops was
+	// read as making no claim, so it could not contradict the client's header,
+	// and the caller got the address it wrote instead of the proxy's bucket.
+	// That is not "shares the proxy's bucket", it is "escapes rate limiting" --
+	// the opposite of what this test and reportUnenumeratedProxy both promise.
+	//
+	// These are not table rows because legacyTrustedBranch reads ONE header and
+	// the premise above is that the old implementation RESOLVED the shape; a
+	// two-header request has no single old answer to compare against.
+	for _, both := range []struct {
+		what string
+		ur   string
+		xff  string
+	}{
+		{"the caller adds X-UR-Forwarded-For to the proxy's X-Forwarded-For", "6.6.6.6:1234", insideTheRange},
+		{"the caller adds X-Forwarded-For to the proxy's X-UR-Forwarded-For", insideTheRange + ":41001", "6.6.6.6"},
+		{"a whole forged chain alongside the enumerated hop", "8.8.8.8:1, 6.6.6.6:2", insideTheRange},
+	} {
+		got, err := ResolveClientAddress(
+			bothHeadersRequest("X-UR-Forwarded-For", both.ur, "X-Forwarded-For", both.xff),
+			trusted,
+		)
+		if err != nil {
+			t.Fatalf("%s: %v", both.what, err)
+		}
+		if got != ingressProxyAddress {
+			t.Fatalf(
+				"%s: X-UR-Forwarded-For %q + X-Forwarded-For %q resolved to %q, want the "+
+					"peer %s. A caller inside an enumerated range must SHARE the proxy's "+
+					"bucket, which is what this test and the operator report both state; "+
+					"resolving to the other header lets it choose any bucket it likes",
+				both.what, both.ur, both.xff, got, ingressProxyAddress,
 			)
 		}
 	}

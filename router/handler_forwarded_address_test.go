@@ -233,6 +233,28 @@ func TestSecondForwardingHeaderDoesNotReachTheHandler(t *testing.T) {
 				"X-Forwarded-For":    "6.6.6.6",
 			},
 		},
+		// The two below are the shapes the first pass of the conflict rule
+		// let through, at the boundary where it matters. The proxy's header
+		// is present and names only an address inside an enumerated CIDR
+		// (here 127.0.0.0/8, the shipped default), so it makes no claim about
+		// a client -- and a header that makes no claim used to be unable to
+		// contradict the client's, which handed the client the address it
+		// wrote. This is the shape a client reaches on the beta deploy if
+		// X-UR-Forwarded-For is ever passed through.
+		{
+			"proxy's X-Forwarded-For names only an enumerated hop, client adds X-UR-Forwarded-For",
+			map[string]string{
+				"X-Forwarded-For":    "127.0.0.9",
+				"X-UR-Forwarded-For": "6.6.6.6:1234",
+			},
+		},
+		{
+			"proxy's X-UR-Forwarded-For names only an enumerated hop, client adds X-Forwarded-For",
+			map[string]string{
+				"X-UR-Forwarded-For": "127.0.0.9:5000",
+				"X-Forwarded-For":    "6.6.6.6",
+			},
+		},
 	} {
 		for _, run := range []struct {
 			wrapper string
