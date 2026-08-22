@@ -211,6 +211,42 @@ type proxyReportKey struct {
 	kind proxyReportKind
 }
 
+// proxyReportPeerV4Prefix and proxyReportPeerV6Prefix bucket the peer in the
+// suppression key by NETWORK rather than by address.
+//
+// They are the prefixes server.ClientIpHashForAddr already uses to decide what
+// counts as one client (/29 v4, /56 v6); nothing in ip.go changes, this reuses
+// the same answer. Without it the key unmapped the peer but did not mask it,
+// so a caller could buy a fresh report slot with every source address it
+// owned: measured, a single ipv6 /64 -- an ordinary residential allocation --
+// sustained the whole proxyReportedMax cap of 1024 report lines per interval,
+// 1754 bytes each, about 2.6 GB a day of glog.Errorf. Bucketed, the same
+// caller gets 1 line per interval. Since it cannot buy extra rate-limit budget
+// by rotating inside its /29 or /56, it should not be able to buy extra log
+// volume with it either.
+//
+// Coarser would be worse than the flood: two genuinely different unenumerated
+// proxies must not silence each other, or the report stops naming the proxy an
+// operator has to fix. /29 and /56 are the granularity this service already
+// treats as one host.
+const (
+	proxyReportPeerV4Prefix = 29
+	proxyReportPeerV6Prefix = 56
+)
+
+func proxyReportPeerBucket(peer netip.Addr) netip.Addr {
+	// unmap first, exactly as proxyIsTrusted does, so a 4-in-6 peer and the
+	// same host in plain ipv4 are one bucket and not two
+	peer = peer.Unmap()
+	if peer.Is4() {
+		return netip.PrefixFrom(peer, proxyReportPeerV4Prefix).Masked().Addr()
+	}
+	if peer.Is6() {
+		return netip.PrefixFrom(peer, proxyReportPeerV6Prefix).Masked().Addr()
+	}
+	return peer
+}
+
 var (
 	proxyReportMutex  sync.Mutex
 	proxyReportedAt   = map[proxyReportKey]time.Time{}
@@ -224,22 +260,26 @@ var (
 )
 
 // shouldReportProxy rate limits an operator report to once per interval per
-// (peer, condition).
+// (peer NETWORK, condition) -- see proxyReportPeerBucket for why the key is a
+// network and not an address.
 //
 // The timestamp map is only written when a report is actually emitted, so it
 // cannot grow faster than one entry per emitted line, and entries older than
 // the interval are pruned once it reaches its cap. Should a burst of distinct
-// peers fill it anyway, the report degrades to a single global token per
-// interval rather than either going silent or growing without bound.
+// peer networks fill it anyway, the report degrades to a single global token
+// per interval rather than either going silent or growing without bound.
 //
 // That global-token tier is the one place a caller who can reach the api
 // directly can starve the signal, and it costs them more than proxyReportedMax
-// distinct source addresses inside one interval to get there. It is acceptable
-// because the failure mode is fewer log lines, never a wrong address: in the
-// deployment this exists to diagnose, the wedged proxy is essentially all of
-// the traffic, so it wins the token on nearly every pass.
+// distinct /29s or /56s inside one interval to get there -- not, as it did
+// before the key was bucketed, that many individual addresses out of one
+// residential /64. It is acceptable because the failure mode is fewer log
+// lines, never a wrong address: in the deployment this exists to diagnose, the
+// wedged proxy is essentially all of the traffic, so it wins the token on
+// nearly every pass. TestGenuineReportSurvivesAFloodOfDistinctPeers is that
+// claim as a test.
 func shouldReportProxy(key proxyReportKey, now time.Time) bool {
-	key.peer = key.peer.Unmap()
+	key.peer = proxyReportPeerBucket(key.peer)
 
 	proxyReportMutex.Lock()
 	defer proxyReportMutex.Unlock()
@@ -332,6 +372,24 @@ const proxyForwardingHeaderContract = "OVERWRITE OR STRIP ALL THREE of the " +
 // report tests drive: nothing stubs the report functions themselves, so the
 // rate limiting below is exercised by the same tests that count reports.
 var glogErrorf = glog.Errorf
+
+// The three reports below print the peer's FULL address, unhashed, and that is
+// deliberate rather than an oversight. Everywhere this service PERSISTS a
+// client address it stores server.ClientIpHash instead (and
+// db_migrations_code.go blanks the raw values that predate that), so these are
+// the one place a client address is written out in plaintext.
+//
+// The reason is that the address is the remedy. Every one of these reports asks
+// an operator to enumerate a CIDR in BRINGYOUR_TRUSTED_PROXY_CIDRS or to fix a
+// specific proxy, and neither is actionable from a hash -- a report that says
+// "some peer is misconfigured" diagnoses nothing. The scope is bounded by what
+// reaches these paths: only a peer that sent a forwarding header, at most once
+// per interval per network, and never the header VALUE, which is the part a
+// client controls.
+//
+// If that trade ever needs revisiting, the thing to change is the destination
+// (an operator-only sink) rather than the content, because a bucketed or hashed
+// address here would leave the failure these exist to diagnose undiagnosable.
 
 // reportUnenumeratedProxy names a peer that sent a forwarding header this
 // service will not honor.

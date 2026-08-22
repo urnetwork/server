@@ -536,6 +536,146 @@ func TestProxyReportPruneScanStaysAmortized(t *testing.T) {
 	}
 }
 
+// TestReportSlotsAreNotBoughtByRotatingSourceAddresses: the suppression key is
+// a peer NETWORK, not a peer address, so rotating source addresses inside one
+// network buys no fresh report slots.
+//
+// Measured before this key was bucketed: one unenumerated-proxy report is ~1.8
+// KB, and a caller rotating addresses sustained the full cap of 1024 report
+// lines per minute -- roughly 1.8 MB/min, 2.6 GB/day of glog.Errorf from one
+// caller. The cost of that was a single ipv6 /64, which every residential
+// allocation is, because the key unmapped the peer but did not mask it. It is
+// only reachable on the UNTRUSTED-peer path (reportUnenumeratedProxy), i.e. an
+// api reachable without a proxy in front of it; behind an enumerated proxy the
+// peer is one address and the ceiling was already one line per minute.
+//
+// The prefixes are the ones server.ClientIpHashForAddr already uses to decide
+// what counts as one client (/29 v4, /56 v6). Nothing in ip.go changes; this
+// reuses the same answer so a caller who cannot buy extra rate-limit budget by
+// rotating addresses cannot buy extra log volume with it either.
+func TestReportSlotsAreNotBoughtByRotatingSourceAddresses(t *testing.T) {
+	captureProxyReports(t)
+	now := time.Now()
+
+	// a whole ipv4 /29, one address at a time
+	emitted := 0
+	for i := 0; i < 8; i += 1 {
+		if shouldReportProxy(proxyReportKey{
+			peer: netip.AddrFrom4([4]byte{203, 0, 113, byte(i)}),
+			kind: proxyReportUnenumerated,
+		}, now) {
+			emitted += 1
+		}
+	}
+	if emitted != 1 {
+		t.Fatalf(
+			"every address in one ipv4 /29 was reported separately (%d lines): a caller "+
+				"buys a fresh report slot per address, and the ceiling is %d lines per "+
+				"interval instead of one",
+			emitted, proxyReportedMax,
+		)
+	}
+
+	// the next /29 is a different network and must still be named -- masking
+	// that silenced neighbouring proxies would be a worse bug than the flood
+	if !shouldReportProxy(proxyReportKey{
+		peer: netip.AddrFrom4([4]byte{203, 0, 113, 8}),
+		kind: proxyReportUnenumerated,
+	}, now) {
+		t.Fatal(
+			"the adjacent /29 was suppressed by its neighbour: the peer bucket is coarser " +
+				"than the one the rest of the service uses for a client, and an operator " +
+				"cannot see which proxies are unenumerated",
+		)
+	}
+
+	// an ipv6 /64 -- the cheapest thing an attacker can have -- across four
+	// simulated minutes. One /56 is one slot, so the ceiling is one line per
+	// interval no matter how many addresses are used.
+	resetProxyReports()
+	perMinute := []int{}
+	n := 0
+	for minute := 0; minute < 4; minute += 1 {
+		at := now.Add(time.Duration(minute) * proxyReportInterval)
+		lines := 0
+		for i := 0; i < 4096; i += 1 {
+			n += 1
+			peer := netip.AddrFrom16([16]byte{
+				0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+				byte(n >> 56), byte(n >> 48), byte(n >> 40), byte(n >> 32),
+				byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
+			})
+			if shouldReportProxy(proxyReportKey{peer: peer, kind: proxyReportUnenumerated}, at) {
+				lines += 1
+			}
+		}
+		perMinute = append(perMinute, lines)
+	}
+	for minute, lines := range perMinute {
+		if lines != 1 {
+			t.Fatalf(
+				"4096 addresses from ONE ipv6 /64 produced %d report lines in simulated "+
+					"minute %d (all minutes: %v), want 1 each. A single residential ipv6 "+
+					"allocation can drive the error log at %d lines per interval",
+				lines, minute, perMinute, lines,
+			)
+		}
+	}
+
+	// and the report set never had to hold more than the one entry
+	proxyReportMutex.Lock()
+	size := len(proxyReportedAt)
+	proxyReportMutex.Unlock()
+	if size != 1 {
+		t.Fatalf(
+			"16384 addresses from one ipv6 /64 left %d entries in the suppression map, "+
+				"want 1: rotating addresses still grows it",
+			size,
+		)
+	}
+}
+
+// TestGenuineReportSurvivesAFloodOfDistinctPeers is the liveness half of the
+// bound above, and the property that makes every suppression tier in
+// shouldReportProxy acceptable.
+//
+// Bounding a log is easy; bounding it without losing the one line an operator
+// needs is the requirement. The deployment this whole file exists to diagnose
+// is one whose ingress proxy is not enumerated -- that peer is essentially all
+// of the traffic -- so it must keep being named every interval even while a
+// caller with a large address range keeps the suppression map full.
+func TestGenuineReportSurvivesAFloodOfDistinctPeers(t *testing.T) {
+	captureProxyReports(t)
+	now := time.Now()
+
+	wedged := proxyReportKey{peer: netip.MustParseAddr("198.51.100.7"), kind: proxyReportUnenumerated}
+	genuine := 0
+	n := 0
+	for minute := 0; minute < 5; minute += 1 {
+		at := now.Add(time.Duration(minute) * proxyReportInterval)
+		if shouldReportProxy(wedged, at) {
+			genuine += 1
+		}
+		// distinct /29s, so each one is a genuinely different network and the
+		// bucketing above does not do the work for us
+		for i := 0; i < 4000; i += 1 {
+			n += 1
+			shouldReportProxy(proxyReportKey{
+				peer: netip.AddrFrom4([4]byte{10, byte(n >> 11), byte(n >> 3), 0}),
+				kind: proxyReportUnenumerated,
+			}, at)
+		}
+	}
+	if genuine != 5 {
+		t.Fatalf(
+			"the wedged proxy was named %d times across 5 intervals while a flood of "+
+				"distinct peers ran, want 5. The report an operator needs is the one that "+
+				"went missing, and the failure it diagnoses is invisible without it",
+			genuine,
+		)
+	}
+}
+
 // TestNoProxyReportWithoutForwardingHeaders: a direct client that sends no
 // forwarding header is the ordinary case for a service reachable without a
 // proxy. Reporting it would bury the real signal.
