@@ -467,6 +467,85 @@ func TestAccountLimitRefusalIsHonestAboutItsScope(t *testing.T) {
 	})
 }
 
+// TestAccountLimitRetryHintTracksTheOldestAttempt is the assertion that tells
+// the documented Retry-After apart from a flat restatement of the window.
+//
+// CheckNetworkCreateRateLimit computes the hint in SQL, in the same statement
+// and against the same clock as the count:
+//
+//	COALESCE(CEIL(EXTRACT(EPOCH FROM (MIN(create_time) + INTERVAL '1 seconds' * $2 - now())))::bigint, 0)
+//
+// and the comment above it promises "the real remaining time on the window: the
+// oldest attempt still counted expires then, freeing exactly one slot." Nothing
+// asserted the VALUE. The test above only requires 0 < seconds <= window, and
+// api/handlers only requires that the header parses and is positive, so a flat
+// `NetworkCreateDailyWindow`, or arithmetic broken by the timestamp /
+// timestamptz mix in that expression, passed the entire suite -- and a client
+// told to come back in 24 hours when a slot frees in 4 either waits a day it
+// did not have to or hammers the endpoint because the hint was obviously wrong.
+//
+// So the attempts are backdated by a known amount and the hint has to follow
+// them. The two candidate answers are 20 hours apart, which is far outside any
+// tolerance the clock needs.
+func TestAccountLimitRetryHintTracksTheOldestAttempt(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		clientA := regressionSession(ctx, regressionClientA)
+		defer clientA.Cancel()
+
+		clientAddressHash, _, err := clientA.ClientAddressHashPort()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// fill the budget with attempts made 20 hours ago, so ~4h of the 24h
+		// window remains on the oldest one
+		const aged = 20 * time.Hour
+		agedAt := server.NowUtc().Add(-aged)
+		server.Tx(ctx, func(tx server.PgTx) {
+			for i := 0; i < NetworkCreateDailyLimit; i += 1 {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						INSERT INTO network_create_attempt
+						(network_create_attempt_id, client_address_hash, create_time)
+						VALUES ($1, $2, $3)
+					`,
+					server.NewId(),
+					clientAddressHash[:],
+					// spread them so MIN() has something to choose
+					agedAt.Add(time.Duration(i)*time.Minute),
+				))
+			}
+		})
+
+		err = CheckNetworkCreateRateLimit(ctx, clientA)
+		if err == nil {
+			t.Fatal("the over-limit call was allowed; the backdated attempts are still inside the window")
+		}
+		var retryAfter interface{ RetryAfterSeconds() int }
+		if !errors.As(err, &retryAfter) {
+			t.Fatalf("the account-creation refusal %q carries no retry hint for Retry-After", err)
+		}
+
+		seconds := retryAfter.RetryAfterSeconds()
+		want := int((NetworkCreateDailyWindow - aged) / time.Second)
+		flat := int(NetworkCreateDailyWindow / time.Second)
+		// generous: absorbs the test's own runtime and any clock skew between
+		// this process and postgres, while staying 19 hours clear of `flat`
+		const tolerance = 15 * 60
+		if seconds < want-tolerance || want+tolerance < seconds {
+			t.Fatalf(
+				"%d attempts made %s ago produced Retry-After = %d seconds, want ~%d (the "+
+					"time left on the OLDEST attempt). %d would be a flat restatement of the "+
+					"%s window, which is what this test exists to rule out",
+				NetworkCreateDailyLimit, aged, seconds, want, flat, NetworkCreateDailyWindow,
+			)
+		}
+	})
+}
+
 // TestAbandonedSsoSignupsDoNotSpendTheAddressWideAuthBudget pins the sharpest
 // wrongful 503 in the report, from the other side.
 //
