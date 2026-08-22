@@ -111,6 +111,18 @@ func parseRequestAddress(raw string) (netip.AddrPort, error) {
 		// this, proxyIsTrusted (which unmaps) and server.ClientIpHashForAddr
 		// (which does not) disagree about what host a request came from, and
 		// one host holds two per-address budgets and two report slots.
+		//
+		// One-time effect when this ships, stated because it is a LOOSENING
+		// and the rest of this change is not. netip treats a 4-in-6 address as
+		// ipv6 (Is4 is false for it), so server.ClientIpHashForAddr masks such
+		// a client under the /56 rule -- and the first 7 bytes of the 4-in-6
+		// form are all zero, so every 4-in-6 client on the deployment hashes
+		// to the SAME bucket and shares one budget. After the Unmap they split
+		// into their real per-/29 buckets, i.e. each of them gets a fresh
+		// account-creation budget on the day this deploys. It is the same
+		// wrongly-collapsed bucket being un-collapsed that this branch exists
+		// for, and reachability is low (Go renders ipv4 peers in ipv4 form),
+		// but it is worth knowing before it lands rather than after.
 		return netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()), nil
 	}
 	host, port, err := net.SplitHostPort(raw)

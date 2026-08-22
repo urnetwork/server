@@ -74,6 +74,30 @@ func WalletAuthChallengeAttempt(
 			return failedCount < WalletAuthChallengeAttemptFailedCountThreshold
 		}
 
+		// This threshold keys on client_address_port as well as the address
+		// hash, which has two consequences an operator should know about, and
+		// neither is repaired here.
+		//
+		// The port is CLIENT-INFLUENCED wherever a trusted proxy passes
+		// X-Forwarded-Source-Port or X-UR-Forwarded-For through instead of
+		// overwriting them, so a caller behind such a proxy can vary one header
+		// and get a fresh bucket per attempt. The remedy is the proxy's, and it
+		// is what every report in session/client_session.go now states: a
+		// trusted proxy must overwrite or strip all three forwarding headers.
+		//
+		// The port also MOVES with the deployment's proxy. Where the proxy
+		// sends a bare X-Forwarded-For and no port companion, the resolved port
+		// is 0 for every client, so this key becomes per-/29 instead of
+		// per-connection: the threshold binds for the first time (a wedged
+		// deployment's ephemeral peer port made it per-connection, i.e. never),
+		// and at the same time five failed challenges start being shared across
+		// everyone in a /29.
+		//
+		// Dropping the port from the key would close the first at the cost of
+		// making the second universal -- a shared budget for every deployment,
+		// which is the wrongful-refusal failure this branch exists to remove,
+		// in a limiter this suite does not cover. So it is left alone
+		// deliberately rather than by omission.
 		var attempts []WalletAuthChallengeAttemptResult
 		result, err := tx.Query(
 			session.Ctx,
