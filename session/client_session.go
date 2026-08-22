@@ -14,6 +14,7 @@ import (
 	// "strconv"
 	"strings"
 	"sync"
+	"time"
 	// "sync"
 
 	// "bytes"
@@ -132,6 +133,104 @@ func proxyIsTrusted(remote netip.Addr, trusted []netip.Prefix) bool {
 	return false
 }
 
+// forwardingHeaders are the headers ResolveClientAddress honors from a trusted
+// peer. Their presence on a request from an UNTRUSTED peer is the
+// misconfiguration signal reported below.
+var forwardingHeaders = []string{"X-UR-Forwarded-For", "X-Forwarded-For"}
+
+func forwardingHeaderPresent(req *http.Request) string {
+	for _, header := range forwardingHeaders {
+		if strings.TrimSpace(req.Header.Get(header)) != "" {
+			return header
+		}
+	}
+	return ""
+}
+
+// unenumeratedProxyReportInterval bounds the report once every distinct peer
+// has already been named. A wedged deployment stays loud for as long as it is
+// wedged -- this path never stops firing -- while no caller can flood the log.
+const unenumeratedProxyReportInterval = time.Minute
+
+// unenumeratedProxyReportedMax bounds the memory the per-peer suppression can
+// take. Any client can set a forwarding header on a directly reachable api, so
+// the set of peers that reach the report is caller-influenced and must not
+// grow without limit.
+const unenumeratedProxyReportedMax = 1024
+
+var (
+	unenumeratedProxyMutex    sync.Mutex
+	unenumeratedProxyReported = map[netip.Addr]bool{}
+	unenumeratedProxyLastAt   time.Time
+)
+
+// shouldReportUnenumeratedProxy rate limits the report to once per distinct
+// peer while the bounded set has room, and to once per interval after that.
+func shouldReportUnenumeratedProxy(peer netip.Addr, now time.Time) bool {
+	unenumeratedProxyMutex.Lock()
+	defer unenumeratedProxyMutex.Unlock()
+
+	if !unenumeratedProxyReported[peer] && len(unenumeratedProxyReported) < unenumeratedProxyReportedMax {
+		unenumeratedProxyReported[peer] = true
+		unenumeratedProxyLastAt = now
+		return true
+	}
+	if now.Sub(unenumeratedProxyLastAt) < unenumeratedProxyReportInterval {
+		return false
+	}
+	unenumeratedProxyLastAt = now
+	return true
+}
+
+// resetUnenumeratedProxyReports clears the suppression state so one test's
+// report does not silence the next.
+func resetUnenumeratedProxyReports() {
+	unenumeratedProxyMutex.Lock()
+	defer unenumeratedProxyMutex.Unlock()
+	unenumeratedProxyReported = map[netip.Addr]bool{}
+	unenumeratedProxyLastAt = time.Time{}
+}
+
+// glogErrorf is a var so a test can read the report's actual text rather than
+// asserting only that some report happened.
+var glogErrorf = glog.Errorf
+
+// reportUnenumeratedProxy names a peer that sent a forwarding header this
+// service will not honor. It is a var so tests can observe the report without
+// scraping the log.
+//
+// This exists because the failure it reports is otherwise silent and total. If
+// the deployment's ingress proxy is not enumerated in
+// BRINGYOUR_TRUSTED_PROXY_CIDRS then every request resolves to that proxy's own
+// address, every per-address budget in the service collapses into one budget
+// for the whole fleet, and the only symptom is legitimate users refused for
+// something strangers did. Nothing else in the service can tell that apart from
+// real abuse.
+//
+// The report deliberately does NOT trust the peer. Honoring a forwarding header
+// from an unenumerated peer would let any client claim any source address and
+// step outside every per-address limit in the service.
+var reportUnenumeratedProxy = func(peer netip.Addr, header string, trusted []netip.Prefix) {
+	if !shouldReportUnenumeratedProxy(peer, time.Now()) {
+		return
+	}
+	glogErrorf(
+		"[session]%s from untrusted peer %s was IGNORED. If %s is this deployment's "+
+			"ingress proxy then it is missing from %s (currently %v) and EVERY client "+
+			"behind it now shares one client address and therefore one rate-limit "+
+			"budget -- signup and login will be refused for users who did nothing. "+
+			"Add its subnet. If %s is not a proxy of this deployment then a client is "+
+			"sending a forwarding header it is not entitled to: the header is "+
+			"correctly ignored and no configuration change is wanted.\n",
+		header,
+		peer,
+		peer,
+		trustedProxyCidrsEnvironment,
+		trusted,
+		peer,
+	)
+}
+
 // ResolveClientAddress honors forwarding headers only when the immediate TCP
 // peer is in an explicit trusted CIDR. This makes source attribution an
 // application invariant instead of relying solely on an ingress rewrite.
@@ -141,6 +240,13 @@ func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, er
 		return "", fmt.Errorf("invalid remote address %q: %w", req.RemoteAddr, err)
 	}
 	if !proxyIsTrusted(remote.Addr(), trusted) {
+		// The header is not honored -- see reportUnenumeratedProxy -- but its
+		// presence means either the deployment forgot to enumerate its ingress
+		// proxy, which silently collapses every per-address budget onto one
+		// address, or a client is spoofing. Both are worth saying out loud.
+		if header := forwardingHeaderPresent(req); header != "" {
+			reportUnenumeratedProxy(remote.Addr(), header, trusted)
+		}
 		return remote.String(), nil
 	}
 

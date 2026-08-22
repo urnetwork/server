@@ -401,6 +401,17 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 		statusError = true
 	}
 
+	// A rate limit knows when the caller may try again; without the header the
+	// client can only guess, and guessing early costs it more budget. Read
+	// through a one-method interface so the direction of the import stays as it
+	// is: model does not import the router.
+	var retryAfter interface{ RetryAfterSeconds() int }
+	if errors.As(err, &retryAfter) {
+		if seconds := retryAfter.RetryAfterSeconds(); 0 < seconds {
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		}
+	}
+
 	http.Error(w, message, statusCode)
 	return
 }
