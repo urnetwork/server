@@ -194,7 +194,11 @@ type schemaType string
 const (
 	schemaTypeDbIpEnterprise schemaType = "DBIP-Location-ISP (compat=Enterprise)"
 	schemaTypeIpInfoCoreData schemaType = "ipinfo bundle_location_core.mmdb"
-	schemaTypeArinDb         schemaType = "urnetwork arindb"
+	// MaxMind's free GeoLite2-City. Read through unmarshalDbIp because its
+	// record layout is a strict subset of the DB-IP enterprise one for every
+	// key that decoder reads.
+	schemaTypeGeoLite2City schemaType = "GeoLite2-City"
+	schemaTypeArinDb       schemaType = "urnetwork arindb"
 )
 
 var ipDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
@@ -248,7 +252,7 @@ type IpInfo struct {
 
 func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 	switch self.schemaType {
-	case schemaTypeDbIpEnterprise:
+	case schemaTypeDbIpEnterprise, schemaTypeGeoLite2City:
 		return self.unmarshalDbIp(d)
 	case schemaTypeIpInfoCoreData:
 		return self.unmarshalIpInfo(d)
@@ -261,6 +265,19 @@ func (self *IpInfo) unmarshalDbIp(d *mmdbdata.Decoder) error {
 	// the following schema are supported:
 	// - `DBIP-Location-ISP (compat=Enterprise)`
 	//   https://db-ip.com/db/format/ip-to-location-isp/mmdb.html
+	// - `GeoLite2-City`
+	//   https://dev.maxmind.com/geoip/docs/databases/city-and-country
+	//
+	// GeoLite2-City is read here rather than in a decoder of its own because
+	// it is a strict SUBSET of the layout above for every key this reads:
+	// continent{code,names.en}, country{iso_code,names.en}, subdivisions[]
+	// {names.en}, city{names.en} and location{latitude,longitude,time_zone}
+	// are identical, and the keys it lacks -- traits.isp, traits.organization,
+	// traits.user_type, traits.autonomous_system_number/organization -- are
+	// simply absent, so Organization, ASN and UserType stay zero. Every branch
+	// below skips unknown keys, so extra keys are inert too. A GeoLite2
+	// database is therefore a location-only source: expect no ISP, no ASN and
+	// no user type from it.
 	mapIter, _, err := d.ReadMap()
 	if err != nil {
 		return err
