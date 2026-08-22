@@ -811,6 +811,48 @@ func TestForwardedSourcePortStillPairsWithBareXForwardedFor(t *testing.T) {
 	}
 }
 
+// TestFourInSixAddressesAreOneAddressEverywhere: a v4-mapped v6 peer
+// ([::ffff:203.0.113.9]) and the same host arriving as plain ipv4 are one host,
+// and every consumer of the resolved address has to agree about that.
+//
+// proxyIsTrusted unmaps; server.ClientIpHashForAddr does NOT -- it branches on
+// addr.Is4(), which is false for the mapped form, and hashes the /56 v6 network
+// instead of the /29 v4 one. So leaving the mapped form in place gives one host
+// two per-address budgets and two report slots, which halves the effective cap
+// on the report set and doubles every rate limit for anyone who can choose
+// which form their peer address takes.
+func TestFourInSixAddressesAreOneAddressEverywhere(t *testing.T) {
+	captureProxyReports(t)
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+
+	mapped := httptest.NewRequest("POST", "/auth/network-create", nil)
+	mapped.RemoteAddr = "[::ffff:203.0.113.9]:41001"
+	got, err := ResolveClientAddress(mapped, trusted)
+	if err != nil {
+		t.Fatalf("resolve mapped peer: %v", err)
+	}
+	if got != "203.0.113.9:41001" {
+		t.Fatalf(
+			"a v4-mapped peer resolved to %q, want 203.0.113.9:41001: it now buckets "+
+				"under the ipv6 /56 rule instead of the ipv4 /29 one and holds a second, "+
+				"separate rate-limit budget",
+			got,
+		)
+	}
+
+	// the same inside a forwarding header from a trusted peer
+	forwarded := httptest.NewRequest("POST", "/auth/network-create", nil)
+	forwarded.RemoteAddr = "127.0.0.1:52344"
+	forwarded.Header.Set("X-Forwarded-For", "::ffff:203.0.113.9")
+	got, err = ResolveClientAddress(forwarded, trusted)
+	if err != nil {
+		t.Fatalf("resolve mapped forwarded address: %v", err)
+	}
+	if got != "203.0.113.9:0" {
+		t.Fatalf("a v4-mapped forwarded address resolved to %q, want 203.0.113.9:0", got)
+	}
+}
+
 // TestEveryLoosenedShapeUsedToBeAnHttp500 is the argument that this change
 // cannot regress a working deployment, written as a test.
 //
