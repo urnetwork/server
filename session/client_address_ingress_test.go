@@ -8,9 +8,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
-// Regression suite for wrongful 429/503 on account creation.
+// Regression suite for wrongful 429/503 on account creation, and for the HTTP
+// 500 the first attempt at fixing it would have caused.
 //
 // Every per-address budget in the service keys off the address
 // ResolveClientAddress returns: the account-creation limit (5 per 24h,
@@ -21,6 +24,17 @@ import (
 // with "429 You have reached the maximum number of account creations for
 // today." or "503 User auth attempts exceeded limits." for something five
 // strangers did.
+//
+// The other half of this file is the opposite failure. The resolver used to
+// require a header shape almost no real proxy sends -- X-Forwarded-For paired
+// with X-Forwarded-Source-Port, single hop -- and returned an ERROR for
+// anything else. router.wrap and router.wrapWithInput both turn a session
+// construction failure into HTTP 500, on every endpoint. So an operator who
+// read the "add its subnet to BRINGYOUR_TRUSTED_PROXY_CIDRS" report, enumerated
+// their stock nginx, and stopped there took the entire api down: nginx sends a
+// bare X-Forwarded-For, and $proxy_add_x_forwarded_for appends a comma on the
+// second hop. Those shapes now resolve; anything still unreadable degrades to
+// the peer address and is reported, never served as a 500.
 
 const (
 	// the ingress proxy's own address on a container bridge network
@@ -36,13 +50,26 @@ func ingressRequest(clientIp string, clientPort string) *http.Request {
 	return req
 }
 
+// proxiedRequest is a request arriving from a trusted proxy carrying whatever
+// header a real proxy would have set, and nothing this service invented.
+func proxiedRequest(header string, value string) *http.Request {
+	req := httptest.NewRequest("POST", "/auth/network-create", nil)
+	req.RemoteAddr = ingressProxyAddress
+	req.Header.Set(header, value)
+	return req
+}
+
+func trustedIngress() []netip.Prefix {
+	return []netip.Prefix{netip.MustParsePrefix(ingressProxyCidr)}
+}
+
 // TestResolveClientAddressSeparatesClientsBehindTrustedIngressProxy is the
 // highest-value assertion in this suite: two unrelated signups arriving through
 // the same proxy must not resolve to the same address. A resolver that returns
 // the proxy address for both gives the entire fleet a single 5-per-24h signup
 // budget.
 func TestResolveClientAddressSeparatesClientsBehindTrustedIngressProxy(t *testing.T) {
-	trusted := []netip.Prefix{netip.MustParsePrefix(ingressProxyCidr)}
+	trusted := trustedIngress()
 
 	first, err := ResolveClientAddress(ingressRequest("203.0.113.9", "41001"), trusted)
 	if err != nil {
@@ -86,9 +113,7 @@ func TestResolveClientAddressSeparatesClientsBehindTrustedIngressProxy(t *testin
 func TestNewClientSessionFromRequestUsesConfiguredTrustedProxies(t *testing.T) {
 	original := trustedProxyPrefixes
 	defer func() { trustedProxyPrefixes = original }()
-	trustedProxyPrefixes = func() []netip.Prefix {
-		return []netip.Prefix{netip.MustParsePrefix(ingressProxyCidr)}
-	}
+	trustedProxyPrefixes = trustedIngress
 
 	firstSession, err := NewClientSessionFromRequest(ingressRequest("203.0.113.9", "41001"))
 	if err != nil {
@@ -140,7 +165,9 @@ func TestNewClientSessionFromRequestUsesConfiguredTrustedProxies(t *testing.T) {
 // still deliberately does not assert the deployment is configured, because it
 // cannot.
 func TestUnenumeratedIngressProxyCollapsesEveryClientOntoOneAddress(t *testing.T) {
-	resetUnenumeratedProxyReports()
+	// capture rather than merely reset, so this test does not print a real
+	// operator alert into the go test output
+	captureProxyReports(t)
 	defaults := trustedProxyPrefixes()
 
 	for _, prefix := range defaults {
@@ -171,30 +198,39 @@ func TestUnenumeratedIngressProxyCollapsesEveryClientOntoOneAddress(t *testing.T
 	}
 }
 
-// capturedProxyReport is one operator-facing report of an unenumerated proxy.
-type capturedProxyReport struct {
-	peer   netip.Addr
-	header string
-}
-
-// captureProxyReports swaps the reporter for the duration of a test and clears
-// the suppression state on both sides, so one test cannot silence the next.
-func captureProxyReports(t *testing.T) *[]capturedProxyReport {
+// captureProxyReports collects the operator reports a test provokes.
+//
+// It swaps glogErrorf -- the LAST seam before the log -- and nothing else. An
+// earlier version of this helper replaced reportUnenumeratedProxy with a stub
+// that re-implemented the rate-limit guard, which meant every test that counted
+// reports was counting the stub: the production guard could be deleted outright
+// and the whole suite stayed green. Stubbing here puts ResolveClientAddress ->
+// the real report function -> the real shouldReportProxy -> the log under one
+// seam, so the counts below are counts of what the service would actually
+// print.
+func captureProxyReports(t *testing.T) *[]string {
 	t.Helper()
-	reports := []capturedProxyReport{}
-	original := reportUnenumeratedProxy
-	resetUnenumeratedProxyReports()
-	reportUnenumeratedProxy = func(peer netip.Addr, header string, trusted []netip.Prefix) {
-		if !shouldReportUnenumeratedProxy(peer, time.Now()) {
-			return
-		}
-		reports = append(reports, capturedProxyReport{peer: peer, header: header})
+	reports := []string{}
+	original := glogErrorf
+	resetProxyReports()
+	glogErrorf = func(format string, args ...any) {
+		reports = append(reports, fmt.Sprintf(format, args...))
 	}
 	t.Cleanup(func() {
-		reportUnenumeratedProxy = original
-		resetUnenumeratedProxyReports()
+		glogErrorf = original
+		resetProxyReports()
 	})
 	return &reports
+}
+
+func reportsMentioning(reports []string, substring string) int {
+	count := 0
+	for _, report := range reports {
+		if strings.Contains(report, substring) {
+			count += 1
+		}
+	}
+	return count
 }
 
 // TestUnenumeratedIngressProxyIsReportedLoudly is the test for the highest-value
@@ -225,11 +261,11 @@ func TestUnenumeratedIngressProxyIsReportedLoudly(t *testing.T) {
 			len(*reports),
 		)
 	}
-	if got := (*reports)[0].peer.String(); got != "172.18.0.7" {
-		t.Fatalf("report named peer %q, want the actual TCP peer 172.18.0.7", got)
+	if !strings.Contains((*reports)[0], "172.18.0.7") {
+		t.Fatalf("report does not name the actual TCP peer 172.18.0.7\nreport: %s", (*reports)[0])
 	}
-	if (*reports)[0].header != "X-Forwarded-For" {
-		t.Fatalf("report named header %q, want X-Forwarded-For", (*reports)[0].header)
+	if !strings.Contains((*reports)[0], "X-Forwarded-For") {
+		t.Fatalf("report does not name the header that triggered it\nreport: %s", (*reports)[0])
 	}
 
 	// X-UR-Forwarded-For is the other header a trusted peer is allowed to set,
@@ -243,8 +279,8 @@ func TestUnenumeratedIngressProxyIsReportedLoudly(t *testing.T) {
 	if len(*reports) != 2 {
 		t.Fatalf("X-UR-Forwarded-For from an untrusted peer produced %d reports total, want 2", len(*reports))
 	}
-	if (*reports)[1].header != "X-UR-Forwarded-For" {
-		t.Fatalf("second report named header %q, want X-UR-Forwarded-For", (*reports)[1].header)
+	if !strings.Contains((*reports)[1], "X-UR-Forwarded-For") {
+		t.Fatalf("second report does not name X-UR-Forwarded-For\nreport: %s", (*reports)[1])
 	}
 }
 
@@ -273,8 +309,12 @@ func TestUnenumeratedProxyReportDoesNotTrustThePeer(t *testing.T) {
 
 // TestUnenumeratedProxyReportIsRateLimited: the report is emitted on a request
 // path, so an unbounded one is a log-flooding hole -- any client can set
-// X-Forwarded-For on a directly reachable api. Once per distinct peer, then no
-// more than once per interval.
+// X-Forwarded-For on a directly reachable api. Once per distinct peer per
+// interval.
+//
+// This drives the production guard, not a copy of it: captureProxyReports swaps
+// only glogErrorf, so deleting the shouldReportProxy call from
+// reportUnenumeratedProxy fails here.
 func TestUnenumeratedProxyReportIsRateLimited(t *testing.T) {
 	reports := captureProxyReports(t)
 	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
@@ -307,45 +347,124 @@ func TestUnenumeratedProxyReportIsRateLimited(t *testing.T) {
 			len(*reports),
 		)
 	}
+	if reportsMentioning(*reports, "172.18.0.8") != 1 {
+		t.Fatalf("the second peer was not named in any report:\n%s", strings.Join(*reports, "\n"))
+	}
 }
 
-// TestUnenumeratedProxyReportSurvivesTheBoundedPeerSet pins the suppression
-// state directly. The per-peer set is bounded, so a caller cycling source
-// addresses cannot grow it without limit -- but once it is full the report must
-// keep firing on the interval, otherwise a deployment that becomes wedged later
-// goes quiet again, which is the exact failure this change exists to prevent.
-func TestUnenumeratedProxyReportSurvivesTheBoundedPeerSet(t *testing.T) {
+// TestProxyReportSuppressionIsPerPeerAndPerCondition pins the suppression state
+// directly.
+//
+// It used to be one global "last reported at" instant shared by every peer:
+// with the peer set full, whoever called first in each interval took the only
+// token, so a caller who could reach the api directly and out-pace the real
+// proxy kept the operator's log full of their own address while the genuinely
+// wedged proxy was named rarely or never. Per-peer timestamps remove that.
+//
+// The set is still bounded -- a caller cycling source addresses must not grow
+// server memory without limit -- but entries are now pruned once they age out,
+// so filling it is no longer permanent for the process lifetime.
+func TestProxyReportSuppressionIsPerPeerAndPerCondition(t *testing.T) {
 	captureProxyReports(t)
 
 	peer := netip.MustParseAddr("172.18.0.7")
+	unenumerated := proxyReportKey{peer: peer, kind: proxyReportUnenumerated}
+	unusable := proxyReportKey{peer: peer, kind: proxyReportUnusableHeader}
 	now := time.Now()
-	if !shouldReportUnenumeratedProxy(peer, now) {
+
+	if !shouldReportProxy(unenumerated, now) {
 		t.Fatal("the first sighting of a peer was suppressed")
 	}
-	if shouldReportUnenumeratedProxy(peer, now.Add(unenumeratedProxyReportInterval-time.Second)) {
+	if shouldReportProxy(unenumerated, now.Add(proxyReportInterval-time.Second)) {
 		t.Fatal("a repeat inside the interval was reported; the report can be flooded")
 	}
-	if !shouldReportUnenumeratedProxy(peer, now.Add(unenumeratedProxyReportInterval)) {
+	if !shouldReportProxy(unusable, now.Add(time.Second)) {
+		t.Fatal(
+			"one condition suppressed a different condition for the same peer; the two " +
+				"have different remedies and an operator needs to see both",
+		)
+	}
+	if !shouldReportProxy(unenumerated, now.Add(proxyReportInterval)) {
 		t.Fatal("no report after the interval elapsed; a wedged deployment goes silent")
 	}
 
-	// fill the bounded set, then confirm the interval path still fires
-	resetUnenumeratedProxyReports()
-	for i := 0; i < unenumeratedProxyReportedMax+16; i += 1 {
-		shouldReportUnenumeratedProxy(netip.AddrFrom4([4]byte{10, byte(i >> 8), byte(i), 1}), now)
+	// a busy stranger must not take the wedged proxy's slot
+	resetProxyReports()
+	stranger := netip.MustParseAddr("198.51.100.1")
+	strangerKey := proxyReportKey{peer: stranger, kind: proxyReportUnenumerated}
+	for i := 0; i < 100; i += 1 {
+		shouldReportProxy(strangerKey, now.Add(time.Duration(i)*time.Millisecond))
 	}
-	unenumeratedProxyMutex.Lock()
-	size := len(unenumeratedProxyReported)
-	unenumeratedProxyMutex.Unlock()
-	if unenumeratedProxyReportedMax < size {
+	if !shouldReportProxy(unenumerated, now) {
+		t.Fatal(
+			"a peer that had never been reported was suppressed by another peer's " +
+				"traffic: whoever calls first holds the only token and the real wedged " +
+				"proxy is never named",
+		)
+	}
+
+	// a 4-in-6 form of a peer is the same peer: two map slots for one host
+	// halves the effective cap, and proxyIsTrusted already unmaps
+	resetProxyReports()
+	if !shouldReportProxy(proxyReportKey{peer: netip.MustParseAddr("203.0.113.9"), kind: proxyReportUnenumerated}, now) {
+		t.Fatal("first sighting suppressed")
+	}
+	if shouldReportProxy(proxyReportKey{peer: netip.MustParseAddr("::ffff:203.0.113.9"), kind: proxyReportUnenumerated}, now) {
+		t.Fatal("the 4-in-6 form of an already-reported peer took a second slot")
+	}
+}
+
+// TestProxyReportSetIsBoundedAndPrunes: the suppression map is written only
+// when a report is actually emitted and pruned when it fills, so a caller
+// cycling source addresses can neither grow it without limit nor silence it
+// permanently. The second half is the one that matters -- the previous version
+// never evicted, so once 1024 peers had been seen the per-peer path was gone
+// for the lifetime of the process.
+func TestProxyReportSetIsBoundedAndPrunes(t *testing.T) {
+	captureProxyReports(t)
+	now := time.Now()
+
+	for i := 0; i < proxyReportedMax+512; i += 1 {
+		key := proxyReportKey{
+			peer: netip.AddrFrom4([4]byte{10, byte(i >> 8), byte(i), 1}),
+			kind: proxyReportUnenumerated,
+		}
+		shouldReportProxy(key, now)
+	}
+	proxyReportMutex.Lock()
+	size := len(proxyReportedAt)
+	proxyReportMutex.Unlock()
+	if proxyReportedMax < size {
 		t.Fatalf(
 			"the per-peer suppression set grew to %d entries, cap is %d: a caller "+
 				"cycling source addresses can grow server memory without limit",
-			size, unenumeratedProxyReportedMax,
+			size, proxyReportedMax,
 		)
 	}
-	if !shouldReportUnenumeratedProxy(netip.MustParseAddr("198.51.100.1"), now.Add(unenumeratedProxyReportInterval)) {
-		t.Fatal("with the peer set full, the interval path stopped reporting entirely")
+
+	// with the set full of entries still inside the interval, the report must
+	// not stop entirely
+	fresh := proxyReportKey{peer: netip.MustParseAddr("198.51.100.1"), kind: proxyReportUnenumerated}
+	if !shouldReportProxy(fresh, now.Add(proxyReportInterval)) {
+		t.Fatal("with the peer set full, the report stopped entirely")
+	}
+
+	// once the old entries age out they are pruned, so the set does not stay
+	// full forever and per-peer reporting comes back
+	later := now.Add(2 * proxyReportInterval)
+	if !shouldReportProxy(proxyReportKey{peer: netip.MustParseAddr("198.51.100.2"), kind: proxyReportUnenumerated}, later) {
+		t.Fatal("a new peer after the interval was suppressed")
+	}
+	proxyReportMutex.Lock()
+	prunedSize := len(proxyReportedAt)
+	proxyReportMutex.Unlock()
+	if proxyReportedMax <= prunedSize {
+		t.Fatalf(
+			"the suppression set was still full (%d entries) an interval after every "+
+				"entry aged out: it never evicts, so a burst of distinct peers disables "+
+				"per-peer reporting for the lifetime of the process",
+			prunedSize,
+		)
 	}
 }
 
@@ -370,33 +489,388 @@ func TestNoProxyReportWithoutForwardingHeaders(t *testing.T) {
 	}
 }
 
-// TestUnenumeratedProxyReportNamesTheEnvironmentVariable pins the operator's
-// only actionable detail. A report that says something is wrong without naming
-// the peer and the variable to set is not the fix -- the deployment sat wedged
-// because nobody knew which knob to turn.
-func TestUnenumeratedProxyReportNamesTheEnvironmentVariable(t *testing.T) {
-	resetUnenumeratedProxyReports()
-	defer resetUnenumeratedProxyReports()
-
-	captured := ""
-	original := glogErrorf
-	glogErrorf = func(format string, args ...any) {
-		captured = fmt.Sprintf(format, args...)
-	}
-	defer func() { glogErrorf = original }()
+// TestUnenumeratedProxyReportNamesTheRemedyAndItsPrecondition pins the
+// operator's only actionable detail, and the correction that motivated this
+// round of review.
+//
+// The report tells an operator to add the peer's subnet to
+// BRINGYOUR_TRUSTED_PROXY_CIDRS. The trusted branch used to demand
+// X-Forwarded-For paired with X-Forwarded-Source-Port and single-hop, and to
+// return an error -- HTTP 500 on every endpoint -- for anything else. Stock
+// nginx sends neither the port header nor a single-hop chain. Following this
+// message was therefore a way to take the api down. The header contract is now
+// permissive enough for a real proxy, and the message states it, including the
+// one thing an operator can still get wrong: a proxy that passes a
+// client-supplied forwarding header through unchanged lets the client choose
+// its own rate-limit bucket.
+func TestUnenumeratedProxyReportNamesTheRemedyAndItsPrecondition(t *testing.T) {
+	reports := captureProxyReports(t)
 
 	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
 	if _, err := ResolveClientAddress(ingressRequest("203.0.113.9", "41001"), trusted); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
+	if len(*reports) != 1 {
+		t.Fatalf("want exactly one report, got %d", len(*reports))
+	}
+	captured := (*reports)[0]
 
-	for _, want := range []string{"172.18.0.7", trustedProxyCidrsEnvironment, "X-Forwarded-For", "127.0.0.0/8"} {
+	for _, want := range []string{
+		// which peer, which knob, what is trusted today
+		"172.18.0.7", trustedProxyCidrsEnvironment, "X-Forwarded-For", "127.0.0.0/8",
+		// and what the proxy must actually do once it is trusted, so the
+		// operator cannot follow this into a different outage or into a
+		// spoofable configuration
+		"$proxy_add_x_forwarded_for", "last entry", "unchanged",
+	} {
 		if !strings.Contains(captured, want) {
 			t.Fatalf(
 				"the misconfiguration report does not mention %q; an operator reading it "+
-					"cannot tell which peer to enumerate or where.\nreport: %s",
+					"cannot tell which peer to enumerate, where, or what that proxy has to "+
+					"send once it is trusted.\nreport: %s",
 				want, captured,
 			)
+		}
+	}
+}
+
+// -- the trusted branch: what real proxies actually send -----------------------
+
+// TestStockNginxBareXForwardedForResolvesTheClient is the direct regression for
+// the defect this round exists to fix.
+//
+// nginx's documented recipe is
+//
+//	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+//
+// and it sends no X-Forwarded-Source-Port at all; ALB, CloudFront and
+// Cloudflare are the same. The trusted branch used to answer that with
+// `forwarded source requires one IP and one port`, which router.wrap and
+// router.wrapWithInput turn into HTTP 500 for EVERY endpoint. An operator who
+// followed the report above and enumerated their nginx took the whole api down.
+//
+// Two assertions, because either one alone is satisfiable by a wrong fix:
+// resolving without error (not a 500) AND resolving to the client rather than
+// the proxy (not a fleet-wide budget).
+func TestStockNginxBareXForwardedForResolvesTheClient(t *testing.T) {
+	captureProxyReports(t)
+	trusted := trustedIngress()
+
+	got, err := ResolveClientAddress(proxiedRequest("X-Forwarded-For", "203.0.113.9"), trusted)
+	if err != nil {
+		t.Fatalf(
+			"a trusted proxy sending only a bare X-Forwarded-For -- stock nginx, ALB, "+
+				"CloudFront, Cloudflare -- was answered with an error: %v. "+
+				"router.wrap and router.wrapWithInput turn that into HTTP 500 on every "+
+				"endpoint, so enumerating that proxy takes the api down",
+			err,
+		)
+	}
+	ip, port, err := server.SplitClientAddress(got)
+	if err != nil {
+		t.Fatalf("resolved address %q does not split: %v", got, err)
+	}
+	if ip != "203.0.113.9" {
+		t.Fatalf(
+			"a bare X-Forwarded-For from a trusted proxy resolved to ip %q (%q); every "+
+				"client behind that proxy shares one rate-limit budget",
+			ip, got,
+		)
+	}
+	// the port is genuinely unknown here -- no proxy in this shape sends one --
+	// and 0 is how that is spelled. Every limiter that matters buckets on the
+	// ip alone (server.ClientIpHash), so this costs nothing.
+	if port != 0 {
+		t.Fatalf("resolved %q, want port 0 for an address with no forwarded port", got)
+	}
+
+	// second hop: $proxy_add_x_forwarded_for APPENDS, so a two-proxy path
+	// produces a comma. That was the other 500.
+	got, err = ResolveClientAddress(
+		proxiedRequest("X-Forwarded-For", "203.0.113.9, 172.18.0.9"),
+		trusted,
+	)
+	if err != nil {
+		t.Fatalf("a two-hop X-Forwarded-For chain was answered with an error: %v", err)
+	}
+	if ip, _, _ := server.SplitClientAddress(got); ip != "203.0.113.9" {
+		t.Fatalf(
+			"a chain whose later hops are all enumerated proxies resolved to %q, want "+
+				"the client 203.0.113.9: the trusted hops must be walked past, not "+
+				"treated as the client",
+			got,
+		)
+	}
+}
+
+// TestClientCannotForgeItsAddressThroughATrustedProxy is the safety half of the
+// change above, and the reason the chain is walked from the RIGHT.
+//
+// X-Forwarded-For is a client-supplied header. A proxy that uses
+// $proxy_add_x_forwarded_for appends what it observed, so a client that sends
+// "X-Forwarded-For: 6.6.6.6" causes the api to see "6.6.6.6, <client ip>". Read
+// left to right -- "the original client" -- every client behind the proxy picks
+// its own rate-limit bucket and walks out of every per-address limit in the
+// service, which is strictly worse than the shared-budget bug being fixed.
+func TestClientCannotForgeItsAddressThroughATrustedProxy(t *testing.T) {
+	captureProxyReports(t)
+	trusted := trustedIngress()
+
+	forged := "6.6.6.6"
+	real := "203.0.113.9"
+
+	for _, chain := range []string{
+		// client prepended one address
+		forged + ", " + real,
+		// client prepended a whole fake chain
+		forged + ", 8.8.8.8, 9.9.9.9, " + real,
+		// client prepended something that is not an address at all
+		"not-an-address, " + real,
+		// client prepended an address inside the trusted range, trying to make
+		// the walk skip past its real address
+		"6.6.6.6, 172.18.0.9, " + real,
+	} {
+		got, err := ResolveClientAddress(proxiedRequest("X-Forwarded-For", chain), trusted)
+		if err != nil {
+			t.Fatalf("chain %q: %v", chain, err)
+		}
+		ip, _, err := server.SplitClientAddress(got)
+		if err != nil {
+			t.Fatalf("chain %q resolved to %q which does not split: %v", chain, got, err)
+		}
+		if ip == forged {
+			t.Fatalf(
+				"a client behind a trusted proxy set X-Forwarded-For: %q and was "+
+					"attributed to %q. It just chose its own rate-limit bucket and stepped "+
+					"outside every per-address limit in the service",
+				chain, ip,
+			)
+		}
+		if ip != real {
+			t.Fatalf("chain %q resolved to %q, want the address the proxy appended, %s", chain, ip, real)
+		}
+	}
+
+	// repeated field lines are equivalent to one comma-joined line (RFC 9110).
+	// A proxy that appends a SECOND X-Forwarded-For line rather than extending
+	// the first is legal, and reading only the first line would hand back
+	// exactly the value the client sent.
+	multiLine := httptest.NewRequest("POST", "/auth/network-create", nil)
+	multiLine.RemoteAddr = ingressProxyAddress
+	multiLine.Header.Add("X-Forwarded-For", forged)
+	multiLine.Header.Add("X-Forwarded-For", real)
+	got, err := ResolveClientAddress(multiLine, trusted)
+	if err != nil {
+		t.Fatalf("repeated X-Forwarded-For lines: %v", err)
+	}
+	if ip, _, _ := server.SplitClientAddress(got); ip != real {
+		t.Fatalf(
+			"a client sent its own X-Forwarded-For line and the proxy appended a second "+
+				"line; the api resolved to %q, want %s. Only the first field line was "+
+				"read, so the client chose its own bucket",
+			ip, real,
+		)
+	}
+}
+
+// TestUrForwardedForChainIsNotReadAsASingleHop: the same right-to-left rule
+// applies to this service's own header. It used to be rejected outright, which
+// is safe but is a 500; taking the FIRST element instead would be the forgery
+// above wearing a different header name.
+func TestUrForwardedForChainIsNotReadAsASingleHop(t *testing.T) {
+	captureProxyReports(t)
+	trusted := trustedIngress()
+
+	got, err := ResolveClientAddress(
+		proxiedRequest("X-UR-Forwarded-For", "6.6.6.6:1, 203.0.113.9:41001"),
+		trusted,
+	)
+	if err != nil {
+		t.Fatalf("X-UR-Forwarded-For chain: %v", err)
+	}
+	if got != "203.0.113.9:41001" {
+		t.Fatalf(
+			"an X-UR-Forwarded-For chain resolved to %q, want 203.0.113.9:41001: the "+
+				"leftmost element is whatever the client supplied",
+			got,
+		)
+	}
+
+	// X-UR-Forwarded-For still wins over X-Forwarded-For when both are present
+	both := httptest.NewRequest("POST", "/auth/network-create", nil)
+	both.RemoteAddr = ingressProxyAddress
+	both.Header.Set("X-UR-Forwarded-For", "203.0.113.9:41001")
+	both.Header.Set("X-Forwarded-For", "198.51.100.20")
+	got, err = ResolveClientAddress(both, trusted)
+	if err != nil {
+		t.Fatalf("both headers: %v", err)
+	}
+	if got != "203.0.113.9:41001" {
+		t.Fatalf("with both headers set the resolver returned %q, want the X-UR-Forwarded-For value", got)
+	}
+}
+
+// TestUnreadableForwardingHeaderFromATrustedPeerDegradesAndIsReported is what
+// keeps the change above honest.
+//
+// Falling back to the peer address instead of erroring cannot produce a wrong
+// attribution -- the peer is where the packets came from, the most restrictive
+// answer available -- but it silently reinstates the fleet-wide-budget collapse
+// this whole file exists to prevent. So it is not silent: a trusted peer whose
+// header cannot be read is named, with its own remedy, distinct from the
+// unenumerated-proxy remedy.
+func TestUnreadableForwardingHeaderFromATrustedPeerDegradesAndIsReported(t *testing.T) {
+	reports := captureProxyReports(t)
+	trusted := trustedIngress()
+
+	got, err := ResolveClientAddress(proxiedRequest("X-Forwarded-For", "not-an-address"), trusted)
+	if err != nil {
+		t.Fatalf(
+			"an unreadable forwarding header from a trusted peer returned an error (%v); "+
+				"router.wrap turns that into HTTP 500 on every endpoint",
+			err,
+		)
+	}
+	if got != ingressProxyAddress {
+		t.Fatalf(
+			"an unreadable header resolved to %q; the only safe fallback is the peer "+
+				"address %s",
+			got, ingressProxyAddress,
+		)
+	}
+	if len(*reports) != 1 {
+		t.Fatalf(
+			"a trusted proxy sent a header this service cannot read and %d reports were "+
+				"emitted, want 1: every client behind it now shares one rate-limit budget "+
+				"and nothing says so",
+			len(*reports),
+		)
+	}
+	if !strings.Contains((*reports)[0], "TRUSTED") || !strings.Contains((*reports)[0], "172.18.0.7") {
+		t.Fatalf(
+			"the report does not identify the trusted peer whose header is broken\nreport: %s",
+			(*reports)[0],
+		)
+	}
+	// the header VALUE is attacker-influenced on any proxy that forwards client
+	// headers, so it must never reach the log
+	if strings.Contains((*reports)[0], "not-an-address") {
+		t.Fatalf(
+			"the report echoed the attacker-supplied header value; log injection\nreport: %s",
+			(*reports)[0],
+		)
+	}
+}
+
+// TestForwardedSourcePortStillPairsWithBareXForwardedFor pins the one shape
+// that already worked, byte for byte. Loosening the contract must not change
+// what the warp sidecar's existing pairing resolves to.
+func TestForwardedSourcePortStillPairsWithBareXForwardedFor(t *testing.T) {
+	captureProxyReports(t)
+	trusted := trustedIngress()
+
+	got, err := ResolveClientAddress(ingressRequest("203.0.113.9", "41001"), trusted)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got != "203.0.113.9:41001" {
+		t.Fatalf("X-Forwarded-For + X-Forwarded-Source-Port resolved to %q, want 203.0.113.9:41001", got)
+	}
+
+	// ipv6 through the same pairing
+	v6 := httptest.NewRequest("POST", "/auth/network-create", nil)
+	v6.RemoteAddr = ingressProxyAddress
+	v6.Header.Set("X-Forwarded-For", "2001:db8::7")
+	v6.Header.Set("X-Forwarded-Source-Port", "41001")
+	got, err = ResolveClientAddress(v6, trusted)
+	if err != nil {
+		t.Fatalf("ipv6 resolve: %v", err)
+	}
+	if got != "[2001:db8::7]:41001" {
+		t.Fatalf("ipv6 X-Forwarded-For resolved to %q, want [2001:db8::7]:41001", got)
+	}
+
+	// on a chain the port belongs to whichever hop wrote it and there is no way
+	// to tell which, so it is dropped rather than guessed -- but the ADDRESS is
+	// still resolved, because dropping the port must not cost the client its
+	// own bucket
+	chained := httptest.NewRequest("POST", "/auth/network-create", nil)
+	chained.RemoteAddr = ingressProxyAddress
+	chained.Header.Set("X-Forwarded-For", "6.6.6.6, 203.0.113.9")
+	chained.Header.Set("X-Forwarded-Source-Port", "41001")
+	got, err = ResolveClientAddress(chained, trusted)
+	if err != nil {
+		t.Fatalf("chained resolve: %v", err)
+	}
+	if got != "203.0.113.9:0" {
+		t.Fatalf(
+			"a multi-hop chain took the source port header anyway and resolved to %q, "+
+				"want 203.0.113.9:0",
+			got,
+		)
+	}
+}
+
+// TestEveryLoosenedShapeUsedToBeAnHttp500 is the argument that this change
+// cannot regress a working deployment, written as a test.
+//
+// Each input below is a shape the trusted branch now accepts. On the previous
+// implementation every one of them returned an error, and router.wrap /
+// router.wrapWithInput turn that into HTTP 500. A deployment that reaches any
+// of these paths today is a deployment whose api answers 500 to every request,
+// so there is no working behaviour for the looser contract to take away -- only
+// an outage for it to end.
+func TestEveryLoosenedShapeUsedToBeAnHttp500(t *testing.T) {
+	captureProxyReports(t)
+	trusted := trustedIngress()
+
+	// the previous implementation, verbatim, so the claim is checked rather
+	// than asserted in a comment
+	oldResolve := func(req *http.Request) error {
+		forwarded := strings.TrimSpace(req.Header.Get("X-UR-Forwarded-For"))
+		if forwarded != "" {
+			if strings.Contains(forwarded, ",") {
+				return fmt.Errorf("invalid X-UR-Forwarded-For chain")
+			}
+			if _, err := parseRequestAddress(forwarded); err != nil {
+				return fmt.Errorf("invalid X-UR-Forwarded-For: %w", err)
+			}
+			return nil
+		}
+		forwardedIp := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
+		forwardedPort := strings.TrimSpace(req.Header.Get("X-Forwarded-Source-Port"))
+		if forwardedIp == "" && forwardedPort == "" {
+			return nil
+		}
+		if forwardedIp == "" || forwardedPort == "" || strings.Contains(forwardedIp, ",") {
+			return fmt.Errorf("forwarded source requires one IP and one port")
+		}
+		return nil
+	}
+
+	for _, shape := range []struct {
+		what   string
+		header string
+		value  string
+	}{
+		{"stock nginx / ALB / CloudFront / Cloudflare", "X-Forwarded-For", "203.0.113.9"},
+		{"two nginx hops ($proxy_add_x_forwarded_for appends)", "X-Forwarded-For", "203.0.113.9, 172.18.0.9"},
+		{"a client that prepended its own value", "X-Forwarded-For", "6.6.6.6, 203.0.113.9"},
+		{"a proxy that writes ip:port into X-Forwarded-For", "X-Forwarded-For", "203.0.113.9:41001"},
+		{"an X-UR-Forwarded-For chain", "X-UR-Forwarded-For", "6.6.6.6:1, 203.0.113.9:41001"},
+		{"an unreadable header from a trusted proxy", "X-Forwarded-For", "not-an-address"},
+	} {
+		req := proxiedRequest(shape.header, shape.value)
+		if err := oldResolve(req); err == nil {
+			t.Fatalf(
+				"%s (%s: %s) did NOT error on the previous implementation, so this test "+
+					"is no longer evidence that the looser contract only replaces 500s -- "+
+					"re-derive the argument",
+				shape.what, shape.header, shape.value,
+			)
+		}
+		if _, err := ResolveClientAddress(req, trusted); err != nil {
+			t.Fatalf("%s (%s: %s) still errors: %v", shape.what, shape.header, shape.value, err)
 		}
 	}
 }

@@ -106,7 +106,12 @@ func ParseTrustedProxyPrefixes(raw string) ([]netip.Prefix, error) {
 
 func parseRequestAddress(raw string) (netip.AddrPort, error) {
 	if addrPort, err := netip.ParseAddrPort(raw); err == nil {
-		return addrPort, nil
+		// Unmap so a 4-in-6 peer ([::ffff:203.0.113.9]) and the same host
+		// arriving as plain ipv4 are one address everywhere downstream. Without
+		// this, proxyIsTrusted (which unmaps) and server.ClientIpHashForAddr
+		// (which does not) disagree about what host a request came from, and
+		// one host holds two per-address budgets and two report slots.
+		return netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()), nil
 	}
 	host, port, err := net.SplitHostPort(raw)
 	if err != nil {
@@ -138,66 +143,131 @@ func proxyIsTrusted(remote netip.Addr, trusted []netip.Prefix) bool {
 // misconfiguration signal reported below.
 var forwardingHeaders = []string{"X-UR-Forwarded-For", "X-Forwarded-For"}
 
+// forwardingHeaderChain is the whole of one forwarding header, as one chain.
+//
+// Header.Get would return only the FIRST field line, and RFC 9110 makes
+// repeated field lines equivalent to one comma-joined line. A proxy that
+// appends a second X-Forwarded-For line instead of extending the first is
+// entirely legal, and reading only the first line there would hand back a
+// value the CLIENT sent while discarding the one the proxy vouched for --
+// the exact forgery forwardedClientAddr walks right-to-left to prevent.
+func forwardingHeaderChain(req *http.Request, header string) string {
+	return strings.TrimSpace(strings.Join(req.Header.Values(header), ","))
+}
+
 func forwardingHeaderPresent(req *http.Request) string {
 	for _, header := range forwardingHeaders {
-		if strings.TrimSpace(req.Header.Get(header)) != "" {
+		if forwardingHeaderChain(req, header) != "" {
 			return header
 		}
 	}
 	return ""
 }
 
-// unenumeratedProxyReportInterval bounds the report once every distinct peer
-// has already been named. A wedged deployment stays loud for as long as it is
-// wedged -- this path never stops firing -- while no caller can flood the log.
-const unenumeratedProxyReportInterval = time.Minute
+// proxyReportInterval bounds how often one peer is named for one condition.
+// A wedged deployment stays loud for as long as it is wedged -- these paths
+// never stop firing -- while no caller can flood the log.
+const proxyReportInterval = time.Minute
 
-// unenumeratedProxyReportedMax bounds the memory the per-peer suppression can
-// take. Any client can set a forwarding header on a directly reachable api, so
-// the set of peers that reach the report is caller-influenced and must not
-// grow without limit.
-const unenumeratedProxyReportedMax = 1024
+// proxyReportedMax bounds the memory the suppression map can take. Any client
+// can set a forwarding header on a directly reachable api, so the set of peers
+// that reach a report is caller-influenced and must not grow without limit.
+const proxyReportedMax = 1024
 
-var (
-	unenumeratedProxyMutex    sync.Mutex
-	unenumeratedProxyReported = map[netip.Addr]bool{}
-	unenumeratedProxyLastAt   time.Time
+// proxyReportKind separates the two operator-facing conditions so one does not
+// suppress the other for the same peer. They have different remedies.
+type proxyReportKind string
+
+const (
+	// an UNTRUSTED peer sent a forwarding header: either the deployment forgot
+	// to enumerate its ingress proxy, or a client is spoofing
+	proxyReportUnenumerated proxyReportKind = "unenumerated-proxy"
+	// a TRUSTED peer sent a forwarding header this service cannot read: the
+	// client identity is lost and every client behind that proxy collapses onto
+	// one address, which is the same fleet-wide-budget failure, just on the
+	// other side of the trust boundary
+	proxyReportUnusableHeader proxyReportKind = "unusable-forwarding-header"
 )
 
-// shouldReportUnenumeratedProxy rate limits the report to once per distinct
-// peer while the bounded set has room, and to once per interval after that.
-func shouldReportUnenumeratedProxy(peer netip.Addr, now time.Time) bool {
-	unenumeratedProxyMutex.Lock()
-	defer unenumeratedProxyMutex.Unlock()
+type proxyReportKey struct {
+	peer netip.Addr
+	kind proxyReportKind
+}
 
-	if !unenumeratedProxyReported[peer] && len(unenumeratedProxyReported) < unenumeratedProxyReportedMax {
-		unenumeratedProxyReported[peer] = true
-		unenumeratedProxyLastAt = now
+var (
+	proxyReportMutex  sync.Mutex
+	proxyReportedAt   = map[proxyReportKey]time.Time{}
+	proxyReportLastAt time.Time
+)
+
+// shouldReportProxy rate limits an operator report to once per interval per
+// (peer, condition).
+//
+// The timestamp map is only written when a report is actually emitted, so it
+// cannot grow faster than one entry per emitted line, and entries older than
+// the interval are pruned once it reaches its cap. Should a burst of distinct
+// peers fill it anyway, the report degrades to a single global token per
+// interval rather than either going silent or growing without bound.
+//
+// That global-token tier is the one place a caller who can reach the api
+// directly can starve the signal, and it costs them more than proxyReportedMax
+// distinct source addresses inside one interval to get there. It is acceptable
+// because the failure mode is fewer log lines, never a wrong address: in the
+// deployment this exists to diagnose, the wedged proxy is essentially all of
+// the traffic, so it wins the token on nearly every pass.
+func shouldReportProxy(key proxyReportKey, now time.Time) bool {
+	key.peer = key.peer.Unmap()
+
+	proxyReportMutex.Lock()
+	defer proxyReportMutex.Unlock()
+
+	if lastAt, seen := proxyReportedAt[key]; seen {
+		if now.Sub(lastAt) < proxyReportInterval {
+			return false
+		}
+		proxyReportedAt[key] = now
+		proxyReportLastAt = now
 		return true
 	}
-	if now.Sub(unenumeratedProxyLastAt) < unenumeratedProxyReportInterval {
-		return false
+
+	if proxyReportedMax <= len(proxyReportedAt) {
+		for staleKey, lastAt := range proxyReportedAt {
+			if proxyReportInterval <= now.Sub(lastAt) {
+				delete(proxyReportedAt, staleKey)
+			}
+		}
 	}
-	unenumeratedProxyLastAt = now
+	if proxyReportedMax <= len(proxyReportedAt) {
+		// the map is full of entries that are all still inside the interval
+		if now.Sub(proxyReportLastAt) < proxyReportInterval {
+			return false
+		}
+		proxyReportLastAt = now
+		return true
+	}
+
+	proxyReportedAt[key] = now
+	proxyReportLastAt = now
 	return true
 }
 
-// resetUnenumeratedProxyReports clears the suppression state so one test's
-// report does not silence the next.
-func resetUnenumeratedProxyReports() {
-	unenumeratedProxyMutex.Lock()
-	defer unenumeratedProxyMutex.Unlock()
-	unenumeratedProxyReported = map[netip.Addr]bool{}
-	unenumeratedProxyLastAt = time.Time{}
+// resetProxyReports clears the suppression state so one test's report does not
+// silence the next.
+func resetProxyReports() {
+	proxyReportMutex.Lock()
+	defer proxyReportMutex.Unlock()
+	proxyReportedAt = map[proxyReportKey]time.Time{}
+	proxyReportLastAt = time.Time{}
 }
 
-// glogErrorf is a var so a test can read the report's actual text rather than
-// asserting only that some report happened.
+// glogErrorf is a var so a test can read a report's actual text rather than
+// asserting only that some report happened. It is also the single seam the
+// report tests drive: nothing stubs the report functions themselves, so the
+// rate limiting below is exercised by the same tests that count reports.
 var glogErrorf = glog.Errorf
 
 // reportUnenumeratedProxy names a peer that sent a forwarding header this
-// service will not honor. It is a var so tests can observe the report without
-// scraping the log.
+// service will not honor.
 //
 // This exists because the failure it reports is otherwise silent and total. If
 // the deployment's ingress proxy is not enumerated in
@@ -210,8 +280,15 @@ var glogErrorf = glog.Errorf
 // The report deliberately does NOT trust the peer. Honoring a forwarding header
 // from an unenumerated peer would let any client claim any source address and
 // step outside every per-address limit in the service.
-var reportUnenumeratedProxy = func(peer netip.Addr, header string, trusted []netip.Prefix) {
-	if !shouldReportUnenumeratedProxy(peer, time.Now()) {
+//
+// The remedy it prints is the whole remedy. An operator who enumerates the
+// subnet and stops there must not end up worse off, so the message also states
+// what the proxy has to send and, more importantly, what it must NOT do:
+// forward a client-supplied value unchanged. The attacker-supplied header
+// VALUE is never logged -- only the header name, which is one of two package
+// constants.
+func reportUnenumeratedProxy(peer netip.Addr, header string, trusted []netip.Prefix) {
+	if !shouldReportProxy(proxyReportKey{peer: peer, kind: proxyReportUnenumerated}, time.Now()) {
 		return
 	}
 	glogErrorf(
@@ -219,21 +296,159 @@ var reportUnenumeratedProxy = func(peer netip.Addr, header string, trusted []net
 			"ingress proxy then it is missing from %s (currently %v) and EVERY client "+
 			"behind it now shares one client address and therefore one rate-limit "+
 			"budget -- signup and login will be refused for users who did nothing. "+
-			"Add its subnet. If %s is not a proxy of this deployment then a client is "+
-			"sending a forwarding header it is not entitled to: the header is "+
-			"correctly ignored and no configuration change is wanted.\n",
+			"Add its subnet to %s. That proxy must also OVERWRITE the forwarding "+
+			"header with the address of the connection it received, not pass a "+
+			"client-supplied value through: send X-Forwarded-For (nginx "+
+			"$proxy_add_x_forwarded_for, or any ALB/CloudFront/Cloudflare default), "+
+			"optionally with X-Forwarded-Source-Port, or X-UR-Forwarded-For as "+
+			"ip:port. This service reads the last entry of the chain, so a proxy "+
+			"that appends is safe and a proxy that forwards the client's own value "+
+			"unchanged lets that client choose its rate-limit bucket. If %s is not a "+
+			"proxy of this deployment then a client is sending a forwarding header "+
+			"it is not entitled to: the header is correctly ignored and no "+
+			"configuration change is wanted.\n",
 		header,
 		peer,
 		peer,
 		trustedProxyCidrsEnvironment,
 		trusted,
+		trustedProxyCidrsEnvironment,
 		peer,
 	)
+}
+
+// reportUnusableForwardingHeader names a TRUSTED peer whose forwarding header
+// could not be read.
+//
+// This is the report that keeps the degrade-instead-of-error behaviour in
+// ResolveClientAddress honest. Before, an unreadable header from a trusted peer
+// returned an error that wrapWithInput and wrap both turn into HTTP 500 for
+// every endpoint -- loud, but a total outage. Falling back to the peer address
+// instead cannot be wrong (the peer is the address the packets actually came
+// from, the most restrictive answer available) but it silently reintroduces the
+// exact fleet-wide-budget collapse this file exists to prevent. So it is not
+// silent.
+//
+// The header VALUE is deliberately not logged: it is attacker-influenced on any
+// proxy that forwards client headers, and this format string is a constant.
+func reportUnusableForwardingHeader(peer netip.Addr, header string, trusted []netip.Prefix) {
+	if !shouldReportProxy(proxyReportKey{peer: peer, kind: proxyReportUnusableHeader}, time.Now()) {
+		return
+	}
+	glogErrorf(
+		"[session]%s from TRUSTED peer %s could not be read as a client address, so "+
+			"the client address fell back to %s itself. Every client behind that peer "+
+			"now shares one client address and therefore one rate-limit budget -- "+
+			"signup and login will be refused for users who did nothing. The peer is "+
+			"trusted by %s (currently %v), so this is the proxy's header, not a "+
+			"client's: it must send X-Forwarded-For as one ip per hop (a bare ip is "+
+			"fine, X-Forwarded-Source-Port is optional) or X-UR-Forwarded-For as "+
+			"ip:port. The value is not logged here because a proxy that forwards "+
+			"client headers makes it client-controlled.\n",
+		header,
+		peer,
+		peer,
+		trustedProxyCidrsEnvironment,
+		trusted,
+	)
+}
+
+// parseForwardedElement reads one entry of a forwarding header. Real proxies
+// disagree about the form: nginx, ALB, CloudFront and Cloudflare all write a
+// bare ip into X-Forwarded-For, the warp sidecar writes ip:port into
+// X-UR-Forwarded-For, and some proxies write ip:port into X-Forwarded-For for
+// ipv4. All four are accepted; a missing port comes back as 0.
+//
+// ParseAddr is tried before ParseAddrPort deliberately: a bare ipv6 is full of
+// colons, and reading "2001:db8::7" as host:port would be wrong.
+func parseForwardedElement(raw string) (netip.Addr, uint16, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return netip.Addr{}, 0, false
+	}
+	if addr, err := netip.ParseAddr(raw); err == nil {
+		return addr.Unmap(), 0, true
+	}
+	if addr, err := netip.ParseAddr(strings.Trim(raw, "[]")); err == nil {
+		return addr.Unmap(), 0, true
+	}
+	if addrPort, err := parseRequestAddress(raw); err == nil {
+		return addrPort.Addr(), addrPort.Port(), true
+	}
+	return netip.Addr{}, 0, false
+}
+
+// forwardedClientAddr reads the client address a trusted peer vouched for.
+//
+// The chain is walked RIGHT TO LEFT, skipping entries that are themselves
+// trusted proxies, and the first entry that is not a trusted proxy wins. That
+// direction is the whole security property. A proxy appends what it observed to
+// the right (nginx's $proxy_add_x_forwarded_for, and every managed load
+// balancer), so everything to the LEFT of the entry a trusted hop wrote is a
+// value the client supplied. Reading left to right -- taking "the original
+// client" -- would let any client behind the proxy prepend an address of its
+// choosing and pick its own rate-limit bucket. Reading right to left, a client
+// that sends "X-Forwarded-For: 6.6.6.6" gets "6.6.6.6, <its real ip>" and is
+// attributed to its real ip.
+//
+// found is false when no entry survives: either every entry is a trusted proxy
+// (the client genuinely is one), or an entry could not be parsed at all. The
+// two are told apart by malformed, because only the second is worth reporting.
+// Walking stops at the first unparseable entry rather than skipping it, because
+// an entry that cannot be read cannot be shown to be a trusted hop, and
+// stepping over it is exactly the step that walks into client-controlled text.
+func forwardedClientAddr(chain string, trusted []netip.Prefix) (addr netip.Addr, port uint16, found bool, malformed bool) {
+	elements := strings.Split(chain, ",")
+	for i := len(elements) - 1; 0 <= i; i -= 1 {
+		elementAddr, elementPort, ok := parseForwardedElement(elements[i])
+		if !ok {
+			return netip.Addr{}, 0, false, true
+		}
+		if proxyIsTrusted(elementAddr, trusted) {
+			continue
+		}
+		return elementAddr, elementPort, true, false
+	}
+	return netip.Addr{}, 0, false, false
+}
+
+// forwardedSourcePort reads the optional companion header that carries the
+// client's source port for a bare X-Forwarded-For.
+//
+// It is honored only for a single-hop chain, which is exactly the shape the
+// previous implementation required, so the pairing this service already
+// documented keeps its meaning and nothing new is inferred from it. On a longer
+// chain the port belongs to whichever hop wrote it and there is no way to tell
+// which, so it is dropped rather than guessed.
+func forwardedSourcePort(req *http.Request, chain string) (uint16, bool) {
+	if strings.Contains(chain, ",") {
+		return 0, false
+	}
+	raw := strings.TrimSpace(req.Header.Get("X-Forwarded-Source-Port"))
+	if raw == "" {
+		return 0, false
+	}
+	portNumber, err := net.LookupPort("tcp", raw)
+	if err != nil || portNumber < 0 || 65535 < portNumber {
+		return 0, false
+	}
+	return uint16(portNumber), true
 }
 
 // ResolveClientAddress honors forwarding headers only when the immediate TCP
 // peer is in an explicit trusted CIDR. This makes source attribution an
 // application invariant instead of relying solely on an ingress rewrite.
+//
+// A forwarding header this service cannot read is never an error. It used to
+// be, and that error became HTTP 500 on every endpoint (router.wrap and
+// router.wrapWithInput both turn a session construction failure into a 500), so
+// an operator who enumerated a stock nginx -- which sends a bare
+// X-Forwarded-For with no X-Forwarded-Source-Port, and appends a comma on the
+// second hop -- took the whole api down by following the advice in
+// reportUnenumeratedProxy. Both of those shapes are now read correctly; anything
+// still unreadable falls back to the peer address, which is where the packets
+// actually came from and therefore the most restrictive answer available, and
+// is reported loudly rather than served as a 500.
 func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, error) {
 	remote, err := parseRequestAddress(req.RemoteAddr)
 	if err != nil {
@@ -250,31 +465,28 @@ func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, er
 		return remote.String(), nil
 	}
 
-	forwarded := strings.TrimSpace(req.Header.Get("X-UR-Forwarded-For"))
-	if forwarded != "" {
-		if strings.Contains(forwarded, ",") {
-			return "", fmt.Errorf("invalid X-UR-Forwarded-For chain")
-		}
-		address, err := parseRequestAddress(forwarded)
-		if err != nil {
-			return "", fmt.Errorf("invalid X-UR-Forwarded-For: %w", err)
-		}
-		return address.String(), nil
-	}
-
-	forwardedIp := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
-	forwardedPort := strings.TrimSpace(req.Header.Get("X-Forwarded-Source-Port"))
-	if forwardedIp == "" && forwardedPort == "" {
+	header := forwardingHeaderPresent(req)
+	if header == "" {
 		return remote.String(), nil
 	}
-	if forwardedIp == "" || forwardedPort == "" || strings.Contains(forwardedIp, ",") {
-		return "", fmt.Errorf("forwarded source requires one IP and one port")
+	chain := forwardingHeaderChain(req, header)
+	addr, port, found, malformed := forwardedClientAddr(chain, trusted)
+	if malformed {
+		reportUnusableForwardingHeader(remote.Addr(), header, trusted)
+		return remote.String(), nil
 	}
-	address, err := parseRequestAddress(net.JoinHostPort(strings.Trim(forwardedIp, "[]"), forwardedPort))
-	if err != nil {
-		return "", fmt.Errorf("invalid forwarded source: %w", err)
+	if !found {
+		// every hop in the chain is itself a trusted proxy, so the client is
+		// one of this deployment's own components. The peer address is the
+		// correct answer and there is nothing to report.
+		return remote.String(), nil
 	}
-	return address.String(), nil
+	if port == 0 {
+		if sourcePort, ok := forwardedSourcePort(req, chain); ok {
+			port = sourcePort
+		}
+	}
+	return netip.AddrPortFrom(addr, port).String(), nil
 }
 
 func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt.ByJwt) *ClientSession {

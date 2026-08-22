@@ -36,17 +36,56 @@ func TestResolveClientAddressTrustBoundary(t *testing.T) {
 	}
 }
 
-func TestResolveClientAddressRejectsChainsAndPartialHeaders(t *testing.T) {
+// TestResolveClientAddressReadsChainsAndPartialHeaders replaces a test that
+// asserted the opposite, and the replacement is deliberate.
+//
+// It used to read:
+//
+//	req.Header.Set("X-UR-Forwarded-For", "192.0.2.1:1, 192.0.2.2:2")
+//	if _, err := ResolveClientAddress(req, trusted); err == nil {
+//	        t.Fatal("forwarded chain accepted")
+//	}
+//	req.Header.Set("X-Forwarded-For", "192.0.2.1")
+//	if _, err := ResolveClientAddress(req, trusted); err == nil {
+//	        t.Fatal("partial forwarded identity accepted")
+//	}
+//
+// Rejecting is safe in the sense that no address is forged, but the rejection
+// is an ERROR, and router.wrap / router.wrapWithInput turn a session
+// construction failure into HTTP 500 for every endpoint. Both shapes above are
+// what real proxies send: nginx with the documented
+// proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for sends a bare
+// X-Forwarded-For with no source port, and appends a comma on the second hop.
+// So the old contract meant "enumerate your ingress proxy in
+// BRINGYOUR_TRUSTED_PROXY_CIDRS" and "keep the api up" were mutually
+// exclusive.
+//
+// Both are now read, and the chain is read from the RIGHT: the entry a trusted
+// hop appended, never the entry a client prepended. See
+// TestClientCannotForgeItsAddressThroughATrustedProxy, which is where that
+// property is pinned properly.
+func TestResolveClientAddressReadsChainsAndPartialHeaders(t *testing.T) {
+	captureProxyReports(t)
 	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "127.0.0.1:8080"
 	req.Header.Set("X-UR-Forwarded-For", "192.0.2.1:1, 192.0.2.2:2")
-	if _, err := ResolveClientAddress(req, trusted); err == nil {
-		t.Fatal("forwarded chain accepted")
+	got, err := ResolveClientAddress(req, trusted)
+	if err != nil {
+		t.Fatalf("a forwarded chain from a trusted peer errored (HTTP 500 on every endpoint): %v", err)
 	}
+	if got != "192.0.2.2:2" {
+		t.Fatalf("forwarded chain resolved to %q, want the last hop 192.0.2.2:2", got)
+	}
+
 	req.Header.Del("X-UR-Forwarded-For")
 	req.Header.Set("X-Forwarded-For", "192.0.2.1")
-	if _, err := ResolveClientAddress(req, trusted); err == nil {
-		t.Fatal("partial forwarded identity accepted")
+	got, err = ResolveClientAddress(req, trusted)
+	if err != nil {
+		t.Fatalf("a bare X-Forwarded-For from a trusted peer errored (HTTP 500 on every endpoint): %v", err)
+	}
+	if got != "192.0.2.1:0" {
+		t.Fatalf("bare X-Forwarded-For resolved to %q, want 192.0.2.1:0", got)
 	}
 }

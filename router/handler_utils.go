@@ -127,8 +127,14 @@ func WrapRequireAuth[R any](
 			}
 			r, err := impl(session)
 			if err != nil {
-				// wrap the error to tag the impl
-				err = fmt.Errorf("[%s]%s", implName(impl), err)
+				// wrap the error to tag the impl. %w, not %s: RaiseHttpError
+				// reads Retry-After off the error with errors.As, and %s
+				// flattens the error to text and breaks that chain. The
+				// client-facing message is identical either way -- the tag is
+				// peeled by httpErrorCodeRegex -- so the only thing %s changed
+				// was silently dropping the retry hint from any rate limit
+				// reached through an authenticated route.
+				err = fmt.Errorf("[%s]%w", implName(impl), err)
 			}
 			return r, err
 		},
@@ -153,8 +159,14 @@ func WrapRequireClient[R any](
 			}
 			r, err := impl(session)
 			if err != nil {
-				// wrap the error to tag the impl
-				err = fmt.Errorf("[%s]%s", implName(impl), err)
+				// wrap the error to tag the impl. %w, not %s: RaiseHttpError
+				// reads Retry-After off the error with errors.As, and %s
+				// flattens the error to text and breaks that chain. The
+				// client-facing message is identical either way -- the tag is
+				// peeled by httpErrorCodeRegex -- so the only thing %s changed
+				// was silently dropping the retry hint from any rate limit
+				// reached through an authenticated route.
+				err = fmt.Errorf("[%s]%w", implName(impl), err)
 			}
 			return r, err
 		},
@@ -174,8 +186,14 @@ func WrapNoAuth[R any](
 		func(session *session.ClientSession) (R, error) {
 			r, err := impl(session)
 			if err != nil {
-				// wrap the error to tag the impl
-				err = fmt.Errorf("[%s]%s", implName(impl), err)
+				// wrap the error to tag the impl. %w, not %s: RaiseHttpError
+				// reads Retry-After off the error with errors.As, and %s
+				// flattens the error to text and breaks that chain. The
+				// client-facing message is identical either way -- the tag is
+				// peeled by httpErrorCodeRegex -- so the only thing %s changed
+				// was silently dropping the retry hint from any rate limit
+				// reached through an authenticated route.
+				err = fmt.Errorf("[%s]%w", implName(impl), err)
 			}
 			return r, err
 		},
