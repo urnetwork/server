@@ -72,6 +72,8 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
+		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),
+		router.NewRoute("POST", "/network/provider-blackhole-checks", handlers.SubmitProviderBlackholeChecks),
 		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
 		// operator-to-server, same operator secret: the certificate pins this
 		// server observed DIRECTLY for the geolocation source hosts. The

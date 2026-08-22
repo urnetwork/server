@@ -5678,6 +5678,49 @@ var migrations = []any{
 			)
 	`),
 
+	// Blackhole detection is a SEPARATE signal from egress health, not a cheaper
+	// version of it.
+	//
+	// Egress health samples ~131 destinations across several classes and takes
+	// minutes per provider, so it can only sweep the fleet slowly -- on beta a
+	// provider went days between measurements. A provider that stops carrying
+	// traffic is invisible for that whole window: it stays connected, keeps
+	// accepting clients, and answers nothing. This table holds the cheap answer
+	// to the single question "did ANY traffic get through" -- cheap enough to
+	// sweep the whole fleet hourly -- so a provider that goes dark leaves the
+	// public list within hours instead of within days. See
+	// ProviderBlackholeCheckMaxAge for the tolerance that gives the sweep three
+	// attempts at a provider before its evidence lapses.
+	//
+	// One row per provider, keyed on client_id like provider_egress_health: this
+	// is the current picture, not a history. `failure` is a short class, the same
+	// shape and width as provider_egress_probe_attempt.probe_failure, so the
+	// server can reject an oversized value rather than silently truncating it.
+	//
+	// NOTE ON POSITION: this entry is placed before the competition control-plane
+	// block rather than at the end of the list. ApplyDbMigrationsUpTo iterates
+	// `for i := DbVersion(ctx); i < upTo; i += 1`, so a migration runs only when
+	// its list INDEX is at or past the deployed version -- a database already
+	// past this index skips it. Hence IF NOT EXISTS on both statements: they have
+	// to be safe to apply out of band and safe to re-apply.
+	newSqlMigration(`
+        CREATE TABLE IF NOT EXISTS provider_blackhole_check (
+            client_id uuid NOT NULL,
+            checked_at timestamp NOT NULL,
+            ok bool NOT NULL,
+            failure varchar(64) NOT NULL DEFAULT '',
+            update_time timestamp NOT NULL,
+
+            PRIMARY KEY (client_id)
+        );
+
+        -- the due query orders by "checked least recently first", and the sweep
+        -- has to find the oldest rows without scanning the whole table once the
+        -- fleet is large
+        CREATE INDEX IF NOT EXISTS provider_blackhole_check_checked_at
+            ON provider_blackhole_check (checked_at ASC, client_id ASC)
+    `),
+
 	// Durable sim-latency competition control plane. The queue is deliberately
 	// independent of pending_task: untrusted submissions are claimed by a
 	// dedicated evaluator identity, and the singleton slot below makes the FIFO
