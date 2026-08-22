@@ -1950,12 +1950,18 @@ func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err 
 type providerCountFilter struct {
 	healthCounts map[server.Id]ProviderEgressHealthCounts
 	countryCodes map[server.Id]string
+	// blackholed is the FAILING set only, not a verdict for every provider:
+	// absent means "no current evidence this provider is dark", which covers
+	// both a passing check and no check at all. See
+	// GetAllProviderBlackholedClientIds for why it fails in that direction.
+	blackholed map[server.Id]bool
 }
 
 func newProviderCountFilter(ctx context.Context) providerCountFilter {
 	return providerCountFilter{
 		healthCounts: GetAllProviderEgressHealthCounts(ctx),
 		countryCodes: GetAllProviderEgressCountryCodes(ctx),
+		blackholed:   GetAllProviderBlackholedClientIds(ctx),
 	}
 }
 
@@ -1967,6 +1973,17 @@ func newProviderCountFilter(ctx context.Context) providerCountFilter {
 // Compared exactly as 10*ok >= 9*total rather than through a float, so the 90%
 // boundary cannot drift with rounding.
 func (f providerCountFilter) passesHealth(clientId server.Id) bool {
+	// The hourly blackhole check overrides a passing health measurement, and
+	// only ever in the removing direction. The two run on very different
+	// cadences -- health sweeps the fleet over hours to days, the blackhole
+	// check over an hour -- so a provider that went dark since its last health
+	// measurement is caught here rather than at the next health sweep. A
+	// provider is only in this set when a CURRENT check says nothing got
+	// through; see GetAllProviderBlackholedClientIds.
+	if f.blackholed[clientId] {
+		return false
+	}
+
 	counts, ok := f.healthCounts[clientId]
 	if !ok {
 		return false
