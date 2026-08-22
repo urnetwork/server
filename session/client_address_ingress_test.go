@@ -602,7 +602,12 @@ func TestUnenumeratedProxyReportNamesTheRemedyAndItsPrecondition(t *testing.T) {
 		// nothing: the client sets one of the others and picks its own bucket.
 		// This report is what recruits operators into enumerating a proxy at
 		// all, so it is where the whole contract has to be stated.
-		"OVERWRITE OR STRIP ALL THREE", "X-UR-Forwarded-For", "X-Forwarded-Source-Port",
+		//
+		// The ENUMERATION is pinned, not the three names on their own: both
+		// reports already mention all three headers incidentally, so asserting
+		// the names alone still passed with the contract sentence gutted.
+		"OVERWRITE OR STRIP ALL THREE",
+		"X-Forwarded-For, X-UR-Forwarded-For and X-Forwarded-Source-Port",
 	} {
 		if !strings.Contains(captured, want) {
 			t.Fatalf(
@@ -891,7 +896,11 @@ func TestASecondForwardingHeaderCannotChooseTheBucket(t *testing.T) {
 				)
 			}
 			captured := (*reports)[0]
-			for _, want := range []string{"X-Forwarded-For", "X-UR-Forwarded-For", "TRUSTED", "172.18.0.7"} {
+			for _, want := range []string{
+				"X-Forwarded-For", "X-UR-Forwarded-For", "TRUSTED", "172.18.0.7",
+				"OVERWRITE OR STRIP ALL THREE",
+				"X-Forwarded-For, X-UR-Forwarded-For and X-Forwarded-Source-Port",
+			} {
 				if !strings.Contains(captured, want) {
 					t.Fatalf(
 						"the conflicting-header report does not mention %q, so an operator cannot "+
@@ -1132,7 +1141,8 @@ func TestUnreadableForwardingHeaderFromATrustedPeerDegradesAndIsReported(t *test
 	// so this report states the same complete header contract as the
 	// unenumerated one -- all three headers, not just the broken one
 	for _, want := range []string{
-		"OVERWRITE OR STRIP ALL THREE", "X-Forwarded-For", "X-UR-Forwarded-For", "X-Forwarded-Source-Port",
+		"OVERWRITE OR STRIP ALL THREE",
+		"X-Forwarded-For, X-UR-Forwarded-For and X-Forwarded-Source-Port",
 	} {
 		if !strings.Contains((*reports)[0], want) {
 			t.Fatalf(
