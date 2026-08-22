@@ -176,12 +176,52 @@ func TestVerifySourceIpPrecedence(t *testing.T) {
 		t.Fatalf("X-Forwarded-For+port expected, got %q", got)
 	}
 
-	// 3. A trusted proxy sending a partial identity is rejected, never silently
-	// re-attributed to the proxy itself.
+	// 3. A trusted proxy sending X-Forwarded-For WITHOUT the source port is the
+	// ordinary case, not an error: stock nginx
+	// (proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for), ALB,
+	// CloudFront and Cloudflare all send a bare ip and no port header. It must
+	// resolve to the CLIENT.
+	//
+	// This case used to assert the opposite -- that a bare X-Forwarded-For is
+	// rejected -- on the reasoning that rejecting is safer than silently
+	// re-attributing the request to the proxy. The premise was right and the
+	// conclusion was wrong: the rejection is an ERROR, and router.wrap /
+	// router.wrapWithInput turn a session construction failure into HTTP 500 on
+	// every endpoint, so "reject" meant the api was down for any deployment
+	// that enumerated a normal proxy. Attribution is preserved by reading the
+	// client out of the header, which is what this now checks. The port is
+	// genuinely unknown, and 0 is how that is spelled; every /verify hash keys
+	// on the ip alone (model.ParseVerifyEgressIp, server.ClientIpHash).
 	req = newReq()
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
-	if _, err := addr(req); err == nil {
-		t.Fatal("partial forwarded source must be rejected")
+	if got := mustAddr(req); got != "198.51.100.2:0" {
+		t.Fatalf("bare X-Forwarded-For from a trusted proxy resolved as %q, want 198.51.100.2:0", got)
+	}
+
+	// 3b. The safety half the old assertion was protecting is unchanged: a
+	// header the service genuinely cannot read is never re-attributed to
+	// anything the caller chose. It falls back to the immediate peer -- the
+	// most restrictive answer available -- and the running service emits an
+	// operator report naming that peer (pinned in
+	// session.TestUnreadableForwardingHeaderFromATrustedPeerDegradesAndIsReported,
+	// which can reach the log seam from inside that package).
+	req = newReq()
+	req.Header.Set("X-Forwarded-For", "not-an-address")
+	if got := mustAddr(req); got != "10.9.9.9:5555" {
+		t.Fatalf("an unreadable forwarding header resolved as %q, want the peer 10.9.9.9:5555", got)
+	}
+
+	// 3c. And a chain is read as a chain: the entry the trusted hop appended,
+	// never the entry the client prepended.
+	req = newReq()
+	req.Header.Set("X-Forwarded-For", "6.6.6.6, 198.51.100.2")
+	if got := mustAddr(req); got != "198.51.100.2:0" {
+		t.Fatalf(
+			"a client behind the trusted proxy prepended X-Forwarded-For: 6.6.6.6 and "+
+				"/verify attributed the request to %q; it just chose its own egress "+
+				"identity",
+			got,
+		)
 	}
 
 	// 4. no forwarding headers → RemoteAddr
