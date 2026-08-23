@@ -81,8 +81,14 @@ identity until the pending main-branch fixes are merged and pushed.
    exact-device-IRQ executable, and both root-owned systemd units. The first
    fail-closed unit requires exactly 12 online physical CPUs with SMT off, the
    `performance` governor, turbo off, `vm.overcommit_memory=1`, and the derived
-   10+2 split. The dependent unit routes every movable device IRQ to the two
-   management CPUs and verifies the resulting affinity. Install a reviewed
+   10+2 split. It normalizes the kernel's transient numeric SMT state and
+   retries the `off` transition during early boot. The dependent unit routes
+   every movable device IRQ to the two management CPUs and verifies the
+   resulting affinity. Both units are required dependencies of Docker, so a
+   failed host control prevents the daemon from admitting evaluations. The
+   qualification digest binds the stable IRQ policy while every heartbeat
+   revalidates all currently discovered IRQs; transient IRQ numbers are kept
+   only as diagnostic evidence. Install a reviewed
    `docker-daemon.example.json` as `/etc/docker/daemon.json` during a controlled
    restart; the host check authenticates its bytes, hardening semantics, and a
    live non-identity container UID/GID map. The firewall remains a separate

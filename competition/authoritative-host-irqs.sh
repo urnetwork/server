@@ -30,6 +30,14 @@ boundary="$($RESOURCE_BOUNDARY)" || die 'resource boundary is invalid'
 management_cpuset="$(jq -er '.management_cpuset' <<<"$boundary")"
 evaluation_cpuset="$(jq -er '.evaluation_cpuset' <<<"$boundary")"
 [[ "$management_cpuset" =~ ^[0-9,-]+$ ]] || die 'management CPU set is invalid'
+irq_policy="$(jq -cnS \
+    --arg evaluation_cpuset "$evaluation_cpuset" \
+    --arg management_cpuset "$management_cpuset" \
+    --argjson minimum_device_irq "$MIN_DEVICE_IRQ" \
+    '{schema:1,kind:"sim-latency-irq-placement-policy",
+      evaluation_cpuset:$evaluation_cpuset,management_cpuset:$management_cpuset,
+      minimum_device_irq:$minimum_device_irq}')"
+irq_policy_sha256="$(printf '%s' "$irq_policy" | sha256sum | awk '{print $1}')"
 
 mapfile -t device_irqs < <(
     awk -F: -v minimum="$MIN_DEVICE_IRQ" '
@@ -80,6 +88,7 @@ jq -n \
     --arg evaluation_cpuset "$evaluation_cpuset" \
     --arg management_cpuset "$management_cpuset" \
     --arg irq_affinity_sha256 "$irq_affinity_sha256" \
+    --arg irq_policy_sha256 "$irq_policy_sha256" \
     --argjson discovered_irq_count "${#device_irqs[@]}" \
     --argjson verified_irq_count "${#verified_irqs[@]}" \
     --argjson failed_irqs "$failed_json" \
@@ -88,6 +97,7 @@ jq -n \
       evaluation_cpuset:$evaluation_cpuset,management_cpuset:$management_cpuset,
       minimum_device_irq:16,discovered_irq_count:$discovered_irq_count,
       verified_irq_count:$verified_irq_count,failed_irqs:$failed_irqs,
-      irq_affinity_sha256:$irq_affinity_sha256,passed:$passed}'
+      irq_affinity_sha256:$irq_affinity_sha256,
+      irq_policy_sha256:$irq_policy_sha256,passed:$passed}'
 
 [ "$passed" = true ]

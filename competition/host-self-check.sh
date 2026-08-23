@@ -13,6 +13,7 @@ readonly DOCKER_DAEMON_CONFIG=/etc/docker/daemon.json
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/container/resource-boundary.sh"
 readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/container/hash-local-mount.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/container/docker-id-map.sh"
+readonly IRQ_CONTROL="$SCRIPT_DIR/authoritative-host-irqs.sh"
 
 if [ "${1:-}" != --json ] || [ "$#" -ne 1 ]; then
     printf 'usage: competition-host-self-check --json\n' >&2
@@ -57,7 +58,7 @@ expected_vault_local_sha256="$(cfg '.vault_local_sha256')"
 expected_numa_list="$(cfg '.numa_list')"
 expected_governor="$(cfg '.governor')"
 expected_turbo="$(cfg '.turbo_state')"
-expected_irq_sha="$(cfg '.irq_affinity_sha256')"
+expected_irq_policy_sha="$(cfg '.irq_policy_sha256')"
 expected_docker_daemon_config_sha256="$(cfg '.docker_daemon_config_sha256')"
 expected_cgroup="$(cfg '.job_cgroup')"
 expected_artifact_quota_bytes="$(cfg '.artifact_quota_bytes')"
@@ -94,14 +95,23 @@ elif [ -r /sys/devices/system/cpu/cpufreq/boost ]; then
     if [ "$(tr -d '\n' </sys/devices/system/cpu/cpufreq/boost)" = 0 ]; then turbo_state=disabled; else turbo_state=enabled; fi
 fi
 
-irq_affinity_sha256="$(
-    for path in /proc/irq/[0-9]*/smp_affinity_list; do
-        [ -r "$path" ] || continue
-        printf '%s=' "${path#/proc/irq/}"
-        tr -d '\n' <"$path"
-        printf '\n'
-    done | LC_ALL=C sort | sha256sum | awk '{print $1}'
-)"
+irq_report=""
+irq_affinity_sha256=""
+irq_policy_sha256=""
+irq_live_passed=false
+if [ -x "$IRQ_CONTROL" ]; then
+    irq_report="$($IRQ_CONTROL --check 2>/dev/null || true)"
+    if jq -e '
+        .schema == 1 and .kind == "sim-latency-authoritative-host-irqs" and
+        (.irq_affinity_sha256 | test("^[0-9a-f]{64}$")) and
+        (.irq_policy_sha256 | test("^[0-9a-f]{64}$")) and
+        (.passed | type == "boolean")
+    ' <<<"$irq_report" >/dev/null 2>&1; then
+        irq_affinity_sha256="$(jq -er '.irq_affinity_sha256' <<<"$irq_report")"
+        irq_policy_sha256="$(jq -er '.irq_policy_sha256' <<<"$irq_report")"
+        irq_live_passed="$(jq -er '.passed' <<<"$irq_report")"
+    fi
+fi
 
 os_identity="$(. /etc/os-release 2>/dev/null; printf '%s-%s' "${ID:-unknown}" "${VERSION_ID:-unknown}")"
 docker_server_version="$(sudo -n docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
@@ -175,7 +185,7 @@ facts="$(jq -cnS \
     --arg smt "$smt_control" \
     --arg governor "$governors" \
     --arg turbo "$turbo_state" \
-    --arg irq_affinity_sha256 "$irq_affinity_sha256" \
+    --arg irq_policy_sha256 "$irq_policy_sha256" \
     --arg job_cgroup "$expected_cgroup" \
     --arg docker_server_version "$docker_server_version" \
     --arg docker_cgroup_version "$docker_cgroup_version" \
@@ -199,7 +209,7 @@ facts="$(jq -cnS \
       evaluation_cpu_list:$evaluation_cpu_list,
       management_cpu_list:$management_cpu_list,numa_list:$numa_list,
       threads_per_core:$threads_per_core,smt:$smt,governor:$governor,
-      turbo:$turbo,irq_affinity_sha256:$irq_affinity_sha256,
+      turbo:$turbo,irq_policy_sha256:$irq_policy_sha256,
       job_cgroup:$job_cgroup,docker_server_version:$docker_server_version,
       docker_cgroup_version:$docker_cgroup_version,
       docker_security_options:$docker_security_options,
@@ -232,7 +242,8 @@ turbo_pinned=false
 numa_pinned=false
 [ -n "$expected_numa_list" ] && [ "$numa_allowed" = "$expected_numa_list" ] && numa_pinned=true
 irq_pinned=false
-[ -n "$expected_irq_sha" ] && [ "$irq_affinity_sha256" = "$expected_irq_sha" ] && irq_pinned=true
+[ "$irq_live_passed" = true ] && [ -n "$expected_irq_policy_sha" ] &&
+    [ "$irq_policy_sha256" = "$expected_irq_policy_sha" ] && irq_pinned=true
 kernel_pinned=false
 [ -n "$expected_kernel" ] && [ "$kernel_release" = "$expected_kernel" ] && [ "$microcode_revision" = "$expected_microcode" ] && kernel_pinned=true
 management_cpu_reserved=false
@@ -382,6 +393,8 @@ report="$(jq -cn \
     --arg kernel_release "$kernel_release" \
     --arg microcode_revision "$microcode_revision" \
     --arg rebaseline_round_id "$rebaseline_round_id" \
+    --arg irq_affinity_sha256 "$irq_affinity_sha256" \
+    --arg irq_policy_sha256 "$irq_policy_sha256" \
     --argjson logical_cpu_count "${logical_cpu_count:-0}" \
     --argjson smt_disabled "$smt_disabled" \
     --argjson governor_pinned "$governor_pinned" \
@@ -413,6 +426,8 @@ report="$(jq -cn \
     '{schema:1,host_id:$host_id,hardware_id:$hardware_id,
       qualification_sha256:$qualification_sha256,image_digest:$image_digest,
       kernel_release:$kernel_release,microcode_revision:$microcode_revision,
+      irq_affinity_sha256:$irq_affinity_sha256,
+      irq_policy_sha256:$irq_policy_sha256,
       logical_cpu_count:$logical_cpu_count,smt_disabled:$smt_disabled,
       governor_pinned:$governor_pinned,turbo_pinned:$turbo_pinned,
       numa_pinned:$numa_pinned,irq_pinned:$irq_pinned,cgroup_v2:$cgroup_v2,

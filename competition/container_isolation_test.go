@@ -660,7 +660,8 @@ func TestAuthoritativeHostControlsAreFailClosed(t *testing.T) {
 	}
 	control := string(controlBytes)
 	for _, required := range []string{
-		`/sys/devices/system/cpu/smt/control off`,
+		`readonly SMT_CONTROL=/sys/devices/system/cpu/smt/control`,
+		`urnetwork_disable_smt "$SMT_CONTROL" 10 1`,
 		`write_root_file "$governor_path" performance`,
 		`write_root_file /sys/devices/system/cpu/intel_pstate/no_turbo 1`,
 		`sysctl -q -w vm.overcommit_memory=1`,
@@ -686,7 +687,10 @@ func TestAuthoritativeHostControlsAreFailClosed(t *testing.T) {
 		`ConditionFileIsExecutable=/usr/local/libexec/urnetwork/authoritative-host-controls`,
 		`ExecStart=/usr/local/libexec/urnetwork/authoritative-host-controls --apply`,
 		`RemainAfterExit=yes`,
+		`Restart=on-failure`,
+		`RestartSec=2`,
 		`TimeoutStartSec=60`,
+		`RequiredBy=containerd.service docker.service`,
 	} {
 		if !strings.Contains(controlUnit, required) {
 			t.Errorf("host-control unit is missing %q", required)
@@ -709,11 +713,40 @@ func TestAuthoritativeHostControlsAreFailClosed(t *testing.T) {
 		`printf '%s\n' "$management_cpuset" | sudo -n tee "$affinity_path"`,
 		`[ "$configured" != "$management_cpuset" ]`,
 		`[ "${#failed_irqs[@]}" -eq 0 ]`,
+		`kind:"sim-latency-irq-placement-policy"`,
+		`irq_policy_sha256`,
 		`[ "$passed" = true ]`,
 	} {
 		if !strings.Contains(irq, required) {
 			t.Errorf("authoritative IRQ control is missing %q", required)
 		}
+	}
+
+	hostCheckBytes, err := os.ReadFile("host-self-check.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostCheck := string(hostCheckBytes)
+	for _, required := range []string{
+		`irq_report="$($IRQ_CONTROL --check`,
+		`[ "$irq_live_passed" = true ]`,
+		`[ "$irq_policy_sha256" = "$expected_irq_policy_sha" ]`,
+	} {
+		if !strings.Contains(hostCheck, required) {
+			t.Errorf("host IRQ qualification is missing %q", required)
+		}
+	}
+	factsStart := strings.Index(hostCheck, `facts="$(jq -cnS`)
+	factsEnd := strings.Index(hostCheck, `qualification_sha256="$(printf`)
+	if factsStart == -1 || factsEnd <= factsStart {
+		t.Fatal("host qualification facts block is unavailable")
+	}
+	facts := hostCheck[factsStart:factsEnd]
+	if !strings.Contains(facts, `irq_policy_sha256`) {
+		t.Fatal("host qualification does not bind the stable IRQ policy")
+	}
+	if strings.Contains(facts, `irq_affinity_sha256`) {
+		t.Fatal("host qualification still binds reboot-unstable IRQ numbers")
 	}
 
 	irqUnitBytes, err := os.ReadFile("authoritative-host-irqs.service.example")
@@ -727,6 +760,8 @@ func TestAuthoritativeHostControlsAreFailClosed(t *testing.T) {
 		`Requires=urnetwork-authoritative-host-controls.service`,
 		`ConditionFileIsExecutable=/usr/local/libexec/urnetwork/authoritative-host-irqs`,
 		`ExecStart=/usr/local/libexec/urnetwork/authoritative-host-irqs --apply`,
+		`Restart=on-failure`,
+		`RequiredBy=containerd.service docker.service`,
 	} {
 		if !strings.Contains(irqUnit, required) {
 			t.Errorf("IRQ unit is missing %q", required)
@@ -740,17 +775,47 @@ func TestAuthoritativeHostControlsAreFailClosed(t *testing.T) {
 	installer := string(installerBytes)
 	for _, required := range []string{
 		`install -D -o root -g root -m 0555 "$CONTROL_SOURCE" "$CONTROL_TARGET"`,
+		`install -D -o root -g root -m 0444 "$CONTROL_LIBRARY_SOURCE" "$CONTROL_LIBRARY_TARGET"`,
 		`install -D -o root -g root -m 0555 "$BOUNDARY_SOURCE" "$BOUNDARY_TARGET"`,
 		`install -D -o root -g root -m 0555 "$IRQ_SOURCE" "$IRQ_TARGET"`,
 		`install -D -o root -g root -m 0444 "$UNIT_SOURCE" "$UNIT_TARGET"`,
 		`install -D -o root -g root -m 0444 "$IRQ_UNIT_SOURCE" "$IRQ_UNIT_TARGET"`,
-		`systemctl enable "$UNIT_NAME" "$IRQ_UNIT_NAME"`,
+		`systemctl reenable "$UNIT_NAME" "$IRQ_UNIT_NAME"`,
 		`sudo -n "$CONTROL_TARGET" --check`,
 		`sudo -n "$IRQ_TARGET" --check`,
 	} {
 		if !strings.Contains(installer, required) {
 			t.Errorf("host-control installer is missing %q", required)
 		}
+	}
+}
+
+func TestAuthoritativeHostSMTNormalization(t *testing.T) {
+	command := exec.Command("bash", "./test-authoritative-host-controls-lib.sh")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("SMT normalization regression test failed: %v\n%s", err, output)
+	}
+}
+
+func TestContainerSmokeHashesRemappedLocalSourcesAsRoot(t *testing.T) {
+	scriptBytes, err := os.ReadFile("container/smoke-test.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	for _, required := range []string{
+		`sudo -n chown -R "$container_host_uid:$container_host_gid" "$smoke_root/local-source"`,
+		`config_local_sha256="$(sudo -n "$HASH_LOCAL_MOUNT" "$config_local_directory")"`,
+		`vault_local_sha256="$(sudo -n "$HASH_LOCAL_MOUNT" "$vault_local_directory")"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("remapped local-source smoke boundary is missing %q", required)
+		}
+	}
+	if strings.Contains(script, `config_local_sha256="$($HASH_LOCAL_MOUNT`) ||
+		strings.Contains(script, `vault_local_sha256="$($HASH_LOCAL_MOUNT`) {
+		t.Fatal("smoke hashes a remapped local source as the unprivileged caller")
 	}
 }
 

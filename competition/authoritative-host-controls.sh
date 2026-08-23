@@ -10,6 +10,15 @@ umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/container/resource-boundary.sh"
+readonly CONTROL_LIBRARY="$SCRIPT_DIR/authoritative-host-controls-lib.sh"
+readonly SMT_CONTROL=/sys/devices/system/cpu/smt/control
+
+[ -r "$CONTROL_LIBRARY" ] || {
+    printf '[competition-host-controls] ERROR: control library is unavailable\n' >&2
+    exit 1
+}
+# shellcheck source=authoritative-host-controls-lib.sh
+source "$CONTROL_LIBRARY"
 
 mode="${1:---check}"
 [ "$#" -eq 1 ] || {
@@ -29,7 +38,7 @@ die() {
     exit 1
 }
 
-for command in awk jq lscpu paste sort sysctl; do
+for command in awk jq lscpu paste sleep sort sysctl; do
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
 done
 [ -x "$RESOURCE_BOUNDARY" ] || die "resource-boundary helper is unavailable"
@@ -43,11 +52,7 @@ write_root_file() {
 
 if [ "$mode" = --apply ]; then
     [ "$(id -u)" -eq 0 ] || command -v sudo >/dev/null 2>&1 || die "sudo is required"
-    if [ -w /sys/devices/system/cpu/smt/control ]; then
-        printf 'off\n' > /sys/devices/system/cpu/smt/control
-    else
-        write_root_file /sys/devices/system/cpu/smt/control off
-    fi
+    urnetwork_disable_smt "$SMT_CONTROL" 10 1 || die "could not disable SMT"
 
     while IFS= read -r cpu; do
         governor_path="/sys/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
@@ -81,7 +86,7 @@ host_cpu_list="$(lscpu -p=CPU | awk -F, '!/^#/ {print $1}' | paste -sd, -)"
 logical_cpu_count="$(lscpu -p=CPU | awk -F, '!/^#/ {count++} END {print count+0}')"
 physical_core_count="$(lscpu -p=SOCKET,CORE | awk -F, '!/^#/ {seen[$1 ":" $2]=1} END {print length(seen)+0}')"
 threads_per_core="$(lscpu -p=CPU,CORE | awk -F, '!/^#/ {count[$2]++} END {max=0; for (core in count) if (max < count[core]) max=count[core]; print max+0}')"
-smt_control="$(tr -d '\n' </sys/devices/system/cpu/smt/control 2>/dev/null || true)"
+smt_control="$(tr -d '\n' <"$SMT_CONTROL" 2>/dev/null || true)"
 governors="$(for path in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
     [ -r "$path" ] || continue
     cpu="${path#/sys/devices/system/cpu/cpu}"

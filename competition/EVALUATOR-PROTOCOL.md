@@ -163,9 +163,15 @@ their resource-boundary dependency, exact device-IRQ placement, and two
 root-owned systemd units. The first runs before Docker and fails unless SMT is
 off, exactly 12 physical CPUs are online, every online CPU uses the performance
 governor, turbo is off, Redis-safe overcommit is enabled, and the live topology
-derives the frozen 10-evaluation/2-management split. The dependent IRQ unit
-then fails unless every discovered movable device IRQ is routed exactly to the
-management set. A reboot must prove both units reapply before Docker. Firewall
+derives the frozen 10-evaluation/2-management split. Early boot may expose a
+transient numeric SMT state; the control normalizes that state and retries the
+`off` transition before failing closed. The dependent IRQ unit then fails
+unless every discovered movable device IRQ is routed exactly to the management
+set. The qualification binds a stable digest of the minimum IRQ and CPU-set
+policy, while the live check separately verifies every currently numbered IRQ
+and retains the number-sensitive affinity digest only as diagnostics. Both
+units are required Docker dependencies. A reboot must prove both units reapply
+before Docker. Firewall
 qualification remains separate. Docker namespace qualification uses a live
 container `/proc/*/{uid,gid}_map` probe and rejects an identity mapping even if
 daemon configuration merely claims user-namespace support.

@@ -182,15 +182,15 @@ else
 fi
 sudo -n chown -R "$container_host_uid:$container_host_gid" "$smoke_root/input" "$smoke_root/output"
 sudo -n chmod 0700 "$smoke_root/input" "$smoke_root/output"
-config_local_sha256="$($HASH_LOCAL_MOUNT "$config_local_directory")"
-vault_local_sha256="$($HASH_LOCAL_MOUNT "$vault_local_directory")"
+config_local_sha256="$(sudo -n "$HASH_LOCAL_MOUNT" "$config_local_directory")"
+vault_local_sha256="$(sudo -n "$HASH_LOCAL_MOUNT" "$vault_local_directory")"
 
 verify_local_sources_unchanged() {
-    [ "$($HASH_LOCAL_MOUNT "$config_local_directory")" = "$config_local_sha256" ] || {
+    [ "$(sudo -n "$HASH_LOCAL_MOUNT" "$config_local_directory")" = "$config_local_sha256" ] || {
         printf 'config/local changed during the smoke test\n' >&2
         return 1
     }
-    [ "$($HASH_LOCAL_MOUNT "$vault_local_directory")" = "$vault_local_sha256" ] || {
+    [ "$(sudo -n "$HASH_LOCAL_MOUNT" "$vault_local_directory")" = "$vault_local_sha256" ] || {
         printf 'vault/local changed during the smoke test\n' >&2
         return 1
     }

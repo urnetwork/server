@@ -9,7 +9,10 @@ ConditionFileIsExecutable=/usr/local/libexec/urnetwork/authoritative-host-irqs
 Type=oneshot
 ExecStart=/usr/local/libexec/urnetwork/authoritative-host-irqs --apply
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=2
 TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=containerd.service docker.service

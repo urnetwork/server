@@ -18,7 +18,7 @@
   "numa_list": "0",
   "governor": "performance",
   "turbo_state": "disabled",
-  "irq_affinity_sha256": "REPLACE_WITH_64_HEX",
+  "irq_policy_sha256": "REPLACE_WITH_64_HEX",
   "docker_daemon_config_sha256": "REPLACE_WITH_64_HEX",
   "job_cgroup": "/urnetwork/competition.slice/evaluator.scope",
   "artifact_quota_bytes": 34359738368,
