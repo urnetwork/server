@@ -274,10 +274,22 @@ var (
 // distinct /29s or /56s inside one interval to get there -- not, as it did
 // before the key was bucketed, that many individual addresses out of one
 // residential /64. It is acceptable because the failure mode is fewer log
-// lines, never a wrong address: in the deployment this exists to diagnose, the
-// wedged proxy is essentially all of the traffic, so it wins the token on
-// nearly every pass. TestGenuineReportSurvivesAFloodOfDistinctPeers is that
-// claim as a test.
+// lines, never a wrong address.
+//
+// Be precise about WHY a wedged proxy keeps reporting under a flood, because
+// the obvious explanation is wrong: it is not that it wins the single global
+// token. The prune at the bottom of this function evicts an entry once
+// proxyReportInterval has elapsed, so at an interval boundary the wedged
+// entry is dropped and whichever peer arrives first takes the token. What
+// actually keeps it reporting is the seen-branch refreshing its key on every
+// request, ahead of the prune -- and in the deployment this exists to
+// diagnose, the wedged proxy is essentially all of the traffic.
+//
+// So a boundary-timed flood CAN starve the diagnostic. That costs an attacker
+// at least 1024 sustained distinct /29s or /56s, and the cost of success is
+// fewer log lines -- never a wrong address, never a rate-limit budget, never
+// a spoof. It is recorded rather than fixed because tightening the prune to
+// buy the property back would trade a real bound for a diagnostic nicety.
 func shouldReportProxy(key proxyReportKey, now time.Time) bool {
 	key.peer = proxyReportPeerBucket(key.peer)
 
