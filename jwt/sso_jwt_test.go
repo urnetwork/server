@@ -52,6 +52,63 @@ func testingAppleClaims() gojwt.MapClaims {
 	}
 }
 
+func TestValidateSsoClaimsAudienceAllowList(t *testing.T) {
+	issuer := "https://issuer.example"
+	allowedClientIds := []string{"web-client", "android-client", "ios-client"}
+
+	tests := []struct {
+		name    string
+		claims  gojwt.MapClaims
+		wantErr bool
+	}{
+		{
+			name:   "first configured audience",
+			claims: gojwt.MapClaims{"iss": issuer, "aud": "web-client"},
+		},
+		{
+			name:   "middle configured audience",
+			claims: gojwt.MapClaims{"iss": issuer, "aud": "android-client"},
+		},
+		{
+			name:   "last configured audience",
+			claims: gojwt.MapClaims{"iss": issuer, "aud": "ios-client"},
+		},
+		{
+			name:   "one token audience matches",
+			claims: gojwt.MapClaims{"iss": issuer, "aud": []any{"unrelated-client", "ios-client"}},
+		},
+		{
+			name:    "single audience does not match",
+			claims:  gojwt.MapClaims{"iss": issuer, "aud": "unrelated-client"},
+			wantErr: true,
+		},
+		{
+			name:    "no token audience matches",
+			claims:  gojwt.MapClaims{"iss": issuer, "aud": []any{"unrelated-client", "other-client"}},
+			wantErr: true,
+		},
+		{
+			name:    "missing audience",
+			claims:  gojwt.MapClaims{"iss": issuer},
+			wantErr: true,
+		},
+		{
+			name:    "malformed audience",
+			claims:  gojwt.MapClaims{"iss": issuer, "aud": 42},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateSsoClaims(test.claims, []string{issuer}, allowedClientIds)
+			if gotErr := err != nil; gotErr != test.wantErr {
+				t.Fatalf("validateSsoClaims() error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseGoogleJwt(t *testing.T) {
 	key := testingSsoKey(t)
 	keys := []any{&key.PublicKey}
@@ -86,9 +143,17 @@ func TestParseGoogleJwt(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 
 	// multiple configured client ids (ios/android/web)
-	claims = testingGoogleClaims()
-	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{"other-client", clientId})
-	connect.AssertEqual(t, err, nil)
+	googleClientIds := []string{
+		clientId,
+		"338638865390-sqtpdk41i165gu9sqa8mt7fs4sjtci59.apps.googleusercontent.com",
+		"338638865390-tdgpupo59durdck5es80iukafh0or4uq.apps.googleusercontent.com",
+	}
+	for _, configuredClientId := range googleClientIds {
+		claims = testingGoogleClaims()
+		claims["aud"] = configuredClientId
+		_, err = parseGoogleJwtWithKeys(sign(claims), keys, googleClientIds)
+		connect.AssertEqual(t, err, nil)
+	}
 
 	// no configured client id: audience check is skipped
 	claims = testingGoogleClaims()
@@ -172,6 +237,15 @@ func TestParseAppleJwt(t *testing.T) {
 	_, err = parseAppleJwtWithKeys(sign(claims), keys, []string{clientId})
 	connect.AssertNotEqual(t, err, nil)
 
+	// multiple configured client ids (native and web, current and legacy)
+	appleClientIds := []string{"network.ur", "network.ur.service", "com.bringyour.network", "com.bringyour.service"}
+	for _, configuredClientId := range appleClientIds {
+		claims = testingAppleClaims()
+		claims["aud"] = configuredClientId
+		_, err = parseAppleJwtWithKeys(sign(claims), keys, appleClientIds)
+		connect.AssertEqual(t, err, nil)
+	}
+
 	// no configured client id: audience check is skipped
 	claims = testingAppleClaims()
 	claims["aud"] = "com.attacker.app"
@@ -222,6 +296,16 @@ func TestSsoAllowedClientIds(t *testing.T) {
   - "b.example"
 `))
 		connect.AssertEqual(t, ssoAllowedClientIds("test_sso.yml"), []string{"a.example", "b.example"})
+		pop()
+
+		// list entries are normalized and empty entries cannot accidentally
+		// become accepted audiences
+		pop = server.Vault.PushSimpleResource("test_sso.yml", []byte(`client_id:
+  - "  web.example  "
+  - ""
+  - "mobile.example"
+`))
+		connect.AssertEqual(t, ssoAllowedClientIds("test_sso.yml"), []string{"web.example", "mobile.example"})
 		pop()
 
 		pop = server.Vault.PushSimpleResource("test_sso.yml", []byte(`client_id: ""`))
