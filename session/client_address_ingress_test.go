@@ -664,12 +664,14 @@ func TestGenuineReportSurvivesAFloodOfDistinctPeers(t *testing.T) {
 		if shouldReportProxy(wedged, at) {
 			genuine += 1
 		}
-		// distinct /29s, so each one is a genuinely different network and the
-		// bucketing above does not do the work for us
+		// Four thousand GENUINELY distinct /29s per interval, four times the
+		// map's cap, so the bucketing this test sits next to does none of the
+		// work: {n>>13, n>>5, n<<3} is the big-endian encoding of n into the
+		// 29 network bits, so every n is its own /29.
 		for i := 0; i < 4000; i += 1 {
 			n += 1
 			shouldReportProxy(proxyReportKey{
-				peer: netip.AddrFrom4([4]byte{10, byte(n >> 11), byte(n >> 3), 0}),
+				peer: netip.AddrFrom4([4]byte{10, byte(n >> 13), byte(n >> 5), byte(n << 3)}),
 				kind: proxyReportUnenumerated,
 			}, at)
 		}
