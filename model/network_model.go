@@ -213,11 +213,36 @@ func NetworkCreate(
 		}
 	}
 
-	// email/SSO/wallet paths use the existing auth rate limit
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
-	if !allow {
-		return nil, maxUserAuthAttemptsError()
-	}
+	// INPUT VALIDATION RUNS FIRST, BEFORE ANY LIMITER IS CHARGED.
+	//
+	// UserAuthAttempt used to be consumed here, above every check below. That
+	// meant an unticked terms box, a network name that was too short, or a
+	// network name someone else already has each burned one of five slots in a
+	// five-minute window -- and for a signup with no user auth (SSO, wallet)
+	// those slots are shared by everyone at the client address, so ordinary
+	// form mistakes refused strangers. Four mistakes and the user's own
+	// corrected submission was refused too. A form mistake must not spend a
+	// shared budget.
+	//
+	// Nothing between here and the limiter WRITES. ValidateNetworkName and the
+	// user-auth normalisation are pure; checkNetworkNameAvailability is two
+	// reads. Everything that creates or mutates state -- networkCreateUserAuth,
+	// ParseAuthJwt, networkCreateAuthJwt, UseWalletAuthChallenge,
+	// networkCreateWalletAuth, the search index Add, auditNetworkCreate, JWT
+	// minting -- stays below the limiter.
+	//
+	// Be precise about what the reorder does hand out unmetered, because the
+	// obvious sentence ("it is the same lookup /auth/network-check already
+	// serves") is not quite true and this comment is load-bearing for anyone
+	// moving code across the limiter later. checkNetworkNameAvailability is a
+	// SUPERSET of NetworkCheck: both run the fuzzy networkNameSearch, and it
+	// adds an exact `SELECT network_id FROM network WHERE network_name = $1`
+	// inside a transaction. So the reorder does widen the free oracle slightly
+	// -- exact-name existence for names the fuzzy search misses -- and costs
+	// one extra unmetered read transaction per unauthenticated request. That is
+	// acceptable because POST /auth/network-check (api/api.go) is already
+	// unauthenticated, unlimited and DB-backed, so no new capability appears;
+	// it is not acceptable as licence to move anything else up here.
 
 	if !networkCreate.Terms {
 		result := &NetworkCreateResult{
@@ -250,20 +275,30 @@ func NetworkCreate(
 		return result, nil
 	}
 
+	// an unparseable email or phone number is a form mistake like any other,
+	// so it is refused here rather than after the limiter below
+	if networkCreate.UserAuth != nil && userAuth == nil {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message: "Invalid email or phone number.",
+			},
+		}
+		return result, nil
+	}
+
 	containsProfanity := goaway.IsProfane(validatedNetworkName)
+
+	// email/SSO/wallet paths use the existing auth rate limit. The input is
+	// valid by this point, so a slot is only ever spent on a submission that
+	// would otherwise create an account.
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	if !allow {
+		return nil, maxUserAuthAttemptsError(userAuth)
+	}
 
 	if networkCreate.UserAuth != nil {
 		// user is creating a network via email/phone + pass
 		// validate the user does not exist
-
-		if userAuth == nil {
-			result := &NetworkCreateResult{
-				Error: &NetworkCreateResultError{
-					Message: "Invalid email or phone number.",
-				},
-			}
-			return result, nil
-		}
 
 		resultNetworkCreate := networkCreateUserAuth(
 			session.Ctx,

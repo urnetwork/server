@@ -105,6 +105,23 @@ func wrap[R any](
 	writeJsonResponse(w, result)
 }
 
+// tagImplError prefixes an impl error with the impl name, the "[tag]" form
+// RaiseHttpError's httpErrorCodeRegex peels back off before the message reaches
+// the client.
+//
+// %w, not %s. RaiseHttpError reads the retry hint off a rate limit with
+// errors.As, and %s flattens the error to text, which breaks that chain. The
+// client-facing message is byte-identical either way, so the only visible
+// effect of %s was a 429 that silently lost its Retry-After -- a defect with no
+// symptom at the status code. This is one function rather than three copies so
+// that a single test can pin all three wrappers.
+func tagImplError[R any](impl ImplFunction[R], err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("[%s]%w", implName(impl), err)
+}
+
 func implName[R any](impl ImplFunction[R]) string {
 	name := runtime.FuncForPC(reflect.ValueOf(impl).Pointer()).Name()
 	// remove all /vXXXX paths in the canonical module
@@ -126,11 +143,7 @@ func WrapRequireAuth[R any](
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
 			r, err := impl(session)
-			if err != nil {
-				// wrap the error to tag the impl
-				err = fmt.Errorf("[%s]%s", implName(impl), err)
-			}
-			return r, err
+			return r, tagImplError(impl, err)
 		},
 		w,
 		req,
@@ -152,11 +165,7 @@ func WrapRequireClient[R any](
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
 			r, err := impl(session)
-			if err != nil {
-				// wrap the error to tag the impl
-				err = fmt.Errorf("[%s]%s", implName(impl), err)
-			}
-			return r, err
+			return r, tagImplError(impl, err)
 		},
 		w,
 		req,
@@ -173,11 +182,7 @@ func WrapNoAuth[R any](
 	wrap(
 		func(session *session.ClientSession) (R, error) {
 			r, err := impl(session)
-			if err != nil {
-				// wrap the error to tag the impl
-				err = fmt.Errorf("[%s]%s", implName(impl), err)
-			}
-			return r, err
+			return r, tagImplError(impl, err)
 		},
 		w,
 		req,
@@ -399,6 +404,17 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 		statusCode, _ = strconv.Atoi(groups[2])
 		message = groups[3]
 		statusError = true
+	}
+
+	// A rate limit knows when the caller may try again; without the header the
+	// client can only guess, and guessing early costs it more budget. Read
+	// through a one-method interface so the direction of the import stays as it
+	// is: model does not import the router.
+	var retryAfter interface{ RetryAfterSeconds() int }
+	if errors.As(err, &retryAfter) {
+		if seconds := retryAfter.RetryAfterSeconds(); 0 < seconds {
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		}
 	}
 
 	http.Error(w, message, statusCode)
