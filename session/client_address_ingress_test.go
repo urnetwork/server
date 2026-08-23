@@ -333,7 +333,15 @@ func TestUnenumeratedProxyReportIsRateLimited(t *testing.T) {
 		)
 	}
 
-	// a genuinely different peer is worth naming once
+	// A genuinely different peer is worth naming once.
+	//
+	// The spacing here is LOAD-BEARING: the suppression key is a peer network,
+	// not an address (proxyReportPeerBucket), and 172.18.0.7 is the last
+	// address of 172.18.0.0/29 while 172.18.0.8 is the first of 172.18.0.8/29.
+	// Move either one and this stops asserting distinctness -- it becomes one
+	// peer reported twice, which the interval already forbids, and the test
+	// passes for the wrong reason. The invariant itself is pinned on purpose in
+	// TestReportSlotsAreNotBoughtByRotatingSourceAddresses.
 	other := httptest.NewRequest("POST", "/auth/network-create", nil)
 	other.RemoteAddr = "172.18.0.8:52345"
 	other.Header.Set("X-Forwarded-For", "203.0.113.9")
