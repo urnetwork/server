@@ -764,6 +764,12 @@ func warmupRequestAttempt(
 	return complete && ready()
 }
 
+// Targets the fixed unscored site page so a workload seed's root size cannot
+// alter provider-path establishment.
+func warmupRequestUrl(siteAddr string) string {
+	return fmt.Sprintf("http://%s%s", siteAddr, siteWarmupPath)
+}
+
 // Proves every measured lane with a bounded request cohort, then requires the
 // complete quality window. The post-request readiness check closes the race
 // where a provider starts draining while its last response is in flight.
@@ -774,7 +780,7 @@ func (self *ClientDriver) warmupTunnel(
 ) bool {
 	warmupCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	requestUrl := fmt.Sprintf("http://%s/", self.siteAddr)
+	requestUrl := warmupRequestUrl(self.siteAddr)
 	qualityWindowSize := self.qualityWindowSize()
 	for warmupCtx.Err() == nil {
 		attemptCtx, cancelAttempt := context.WithTimeout(warmupCtx, warmupCohortTimeout)

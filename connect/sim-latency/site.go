@@ -30,7 +30,11 @@ import (
 	"time"
 )
 
-const siteMaxDepth = 24
+const (
+	siteMaxDepth        = 24
+	siteWarmupPath      = "/.well-known/sim-latency-warmup"
+	siteWarmupBodyBytes = 4 * 1024
+)
 
 type siteHandler struct {
 	seed     int64
@@ -121,6 +125,13 @@ func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if n := self.requests.Add(1); n <= 5 || n%1000 == 0 {
 		logf("fake site received request #%d: %s", n, r.URL.Path)
 	}
+	// Path establishment must not inherit a scored page's seeded body size. A
+	// download-tier root can otherwise turn a usable slow exit into a false
+	// establishment failure at the warmup cohort deadline.
+	if r.URL.Path == siteWarmupPath {
+		self.writePage(w, sitePage{Size: siteWarmupBodyBytes})
+		return
+	}
 	remaining, ok := self.parsePath(r.URL.Path)
 	if !ok {
 		http.NotFound(w, r)
@@ -170,15 +181,20 @@ func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	page := sitePage{Urls: urls, Size: bodySize}
+	self.writePage(w, sitePage{Urls: urls, Size: bodySize})
+}
+
+// Writes the page header and deterministic padding shared by scored and
+// warmup responses.
+func (self *siteHandler) writePage(w http.ResponseWriter, page sitePage) {
 	headerBytes, _ := json.Marshal(page)
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(headerBytes)+1+bodySize))
+	w.Header().Set("Content-Length", strconv.Itoa(len(headerBytes)+1+page.Size))
 	w.WriteHeader(http.StatusOK)
 	w.Write(headerBytes)
 	w.Write([]byte("\n"))
-	writePadding(w, bodySize)
+	writePadding(w, page.Size)
 }
 
 // parsePath returns the remaining depth encoded in the path. "/" is the root;

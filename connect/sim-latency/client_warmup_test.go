@@ -403,6 +403,40 @@ func TestWarmupRequestCohortRejectsOneIncompleteLane(t *testing.T) {
 	}
 }
 
+// The driver must never use the seeded scored root for path qualification.
+func TestWarmupRequestUrlTargetsBoundedSitePage(t *testing.T) {
+	const connectionsPerCrawl = 6
+	var stateLock sync.Mutex
+	requestPaths := []string{}
+	testServer := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		stateLock.Lock()
+		requestPaths = append(requestPaths, request.URL.Path)
+		stateLock.Unlock()
+		if request.URL.Path != siteWarmupPath {
+			http.NotFound(responseWriter, request)
+			return
+		}
+		_, _ = io.WriteString(responseWriter, "{\"urls\":[],\"size\":4}\nabcd")
+	}))
+	defer testServer.Close()
+
+	requestUrl := warmupRequestUrl(strings.TrimPrefix(testServer.URL, "http://"))
+	if !warmupRequestCohort(context.Background(), testServer.Client(), requestUrl, connectionsPerCrawl) {
+		t.Fatal("bounded warmup page did not establish every lane")
+	}
+	stateLock.Lock()
+	gotPaths := append([]string{}, requestPaths...)
+	stateLock.Unlock()
+	if len(gotPaths) != connectionsPerCrawl {
+		t.Fatalf("warmup requests = %d, want %d", len(gotPaths), connectionsPerCrawl)
+	}
+	for index, path := range gotPaths {
+		if path != siteWarmupPath {
+			t.Errorf("warmup request %d path = %q, want %q", index, path, siteWarmupPath)
+		}
+	}
+}
+
 func TestWarmupRequestAttemptInitiatesLazyWindowBeforeReadinessCheck(t *testing.T) {
 	ready := false
 	events := []string{}

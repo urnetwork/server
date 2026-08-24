@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -163,6 +164,47 @@ func TestSiteTreeTerminates(t *testing.T) {
 		t.Fatalf("no pages crawled")
 	}
 	t.Logf("crawled %d pages", visited)
+}
+
+// A hidden workload's scored root may be a slow download-tier page. Warmup
+// must use a small unscored page so body-size sampling cannot decide whether a
+// client is reported as having a provider path.
+func TestSiteWarmupPageIsBoundedAcrossWorkloadSeeds(t *testing.T) {
+	const failedCalibrationSeed = int64(6775002577590458567)
+	config := defaultConfig(failedCalibrationSeed, 900, 80, 30)
+
+	rootRecorder := httptest.NewRecorder()
+	rootRequest := httptest.NewRequest(http.MethodGet, "http://site.test/", nil)
+	(&siteHandler{seed: failedCalibrationSeed, site: config.Site}).ServeHTTP(rootRecorder, rootRequest)
+	root, err := readSiteResponse(rootRecorder.Result())
+	if err != nil || !root.complete {
+		t.Fatalf("hidden-seed root response is incomplete: result=%+v err=%v", root, err)
+	}
+	if root.page.Size < config.Site.LargeMinBodyBytes {
+		t.Fatalf(
+			"hidden-seed root size = %d, want download tier >= %d",
+			root.page.Size,
+			config.Site.LargeMinBodyBytes,
+		)
+	}
+
+	for _, seed := range []int64{48, failedCalibrationSeed} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "http://site.test"+siteWarmupPath, nil)
+		(&siteHandler{seed: seed, site: config.Site}).ServeHTTP(recorder, request)
+		result, err := readSiteResponse(recorder.Result())
+		if err != nil || !result.complete {
+			t.Fatalf("seed %d warmup response is incomplete: result=%+v err=%v", seed, result, err)
+		}
+		if result.page.Size != siteWarmupBodyBytes || len(result.page.Urls) != 0 {
+			t.Fatalf(
+				"seed %d warmup page = %+v, want no links and %d bytes",
+				seed,
+				result.page,
+				siteWarmupBodyBytes,
+			)
+		}
+	}
 }
 
 // a canceled crawl must fully unwind: queued jobs are balanced and the closer
