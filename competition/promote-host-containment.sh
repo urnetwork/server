@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # Promote authenticated evaluator and adversarial-resource evidence into the
-# root-owned containment marker consumed by host-self-check.sh. This command is
+# root-owned runtime markers consumed by host-self-check.sh. This command is
 # intentionally separate from the evaluator: candidate code cannot update its
-# own host qualification.
+# own host qualification. Runtime markers are recreated after every reboot.
 
 set -Eeuo pipefail
 umask 077
@@ -107,7 +107,10 @@ readonly config_local_directory="$(jq -er '.config_local_directory' "$host_confi
 readonly vault_local_directory="$(jq -er '.vault_local_directory' "$host_config")"
 readonly config_local_sha256="$(jq -er '.config_local_sha256' "$host_config")"
 readonly vault_local_sha256="$(jq -er '.vault_local_sha256' "$host_config")"
+readonly template_output_path="$(jq -er '.template_database_marker' "$host_config")"
+readonly redis_output_path="$(jq -er '.redis_reset_marker' "$host_config")"
 readonly output_path="$(jq -er '.cleanup_marker' "$host_config")"
+readonly immutable_output_path="$(jq -er '.immutable_reports_marker' "$host_config")"
 
 [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "host image digest is invalid"
 [[ "$job_cgroup" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "host job cgroup is invalid"
@@ -118,7 +121,13 @@ readonly output_path="$(jq -er '.cleanup_marker' "$host_config")"
 [[ "$management_memory_reserve_bytes" =~ ^[0-9]+$ ]] || die "management reserve is invalid"
 [[ "$config_local_sha256" =~ ^[0-9a-f]{64}$ ]] || die "config/local digest is invalid"
 [[ "$vault_local_sha256" =~ ^[0-9a-f]{64}$ ]] || die "vault/local digest is invalid"
-[[ "$output_path" == /* ]] && [ "$output_path" != / ] || die "cleanup marker path is unsafe"
+declare -A output_path_seen=()
+for marker_path in "$template_output_path" "$redis_output_path" "$output_path" "$immutable_output_path"; do
+    [[ "$marker_path" == /* ]] && [ "$marker_path" != / ] || die "runtime marker path is unsafe"
+    [ "$(realpath -m -- "$marker_path")" = "$marker_path" ] || die "runtime marker path is non-canonical"
+    [ -z "${output_path_seen[$marker_path]:-}" ] || die "runtime marker paths must be unique"
+    output_path_seen[$marker_path]=1
+done
 [ "$config_local_directory" = "$(realpath -e "$config_local_directory")" ] || die "config/local path is unsafe"
 [ "$vault_local_directory" = "$(realpath -e "$vault_local_directory")" ] || die "vault/local path is unsafe"
 [ "$($HASH_LOCAL_MOUNT "$config_local_directory")" = "$config_local_sha256" ] ||
@@ -265,21 +274,88 @@ jq -e \
      .residual_containers == 0 and .residual_networks == 0' \
     "$resource_bomb_report" >/dev/null || die "production resource-bomb evidence is invalid"
 
-output_parent="$(dirname -- "$output_path")"
-[ -d "$output_parent" ] && [ ! -L "$output_parent" ] || die "cleanup marker parent is unsafe"
-[ "$(stat -c %u "$output_parent")" -eq 0 ] || die "cleanup marker parent is not root-owned"
-parent_mode="$(stat -c %a "$output_parent")"
-[ $((8#$parent_mode & 0022)) -eq 0 ] || die "cleanup marker parent is group/world writable"
+prepare_output_parent() {
+    local path="$1" parent grandparent mode
+    parent="$(dirname -- "$path")"
+    if [ ! -e "$parent" ]; then
+        grandparent="$(dirname -- "$parent")"
+        [ -d "$grandparent" ] && [ ! -L "$grandparent" ] ||
+            die "runtime marker grandparent is unsafe"
+        [ "$(stat -c %u "$grandparent")" -eq 0 ] ||
+            die "runtime marker grandparent is not root-owned"
+        mode="$(stat -c %a "$grandparent")"
+        [ $((8#$mode & 0022)) -eq 0 ] ||
+            die "runtime marker grandparent is group/world writable"
+        install -d -o 0 -g 0 -m 0700 "$parent"
+    fi
+    [ -d "$parent" ] && [ ! -L "$parent" ] || die "runtime marker parent is unsafe"
+    [ "$(stat -c %u "$parent")" -eq 0 ] || die "runtime marker parent is not root-owned"
+    mode="$(stat -c %a "$parent")"
+    [ $((8#$mode & 0022)) -eq 0 ] || die "runtime marker parent is group/world writable"
+    if [ -e "$path" ]; then
+        secure_root_owned "$path" || die "existing runtime marker is unsafe"
+    fi
+    printf '%s' "$parent"
+}
 
+template_output_parent="$(prepare_output_parent "$template_output_path")"
+redis_output_parent="$(prepare_output_parent "$redis_output_path")"
+output_parent="$(prepare_output_parent "$output_path")"
+immutable_output_parent="$(prepare_output_parent "$immutable_output_path")"
+
+template_database_id="$(jq -er '.security.template_database_id' "$worker_result")"
+redis_generation_id="$(jq -er '.security.redis_generation_id' "$worker_result")"
+worker_result_sha256="$(sha256_file "$worker_result")"
+evidence_artifact_count="$(jq -er '.artifacts | length' "$evidence_manifest")"
+promoted_at="$(date -u '+%FT%TZ')"
+
+template_tmp="$template_output_parent/.competition-template-database.$$.new"
+redis_tmp="$redis_output_parent/.competition-redis-reset.$$.new"
 marker_tmp="$output_parent/.competition-containment.$$.new"
+immutable_tmp="$immutable_output_parent/.competition-immutable-reports.$$.new"
 config_tmp="$host_config_parent/.competition-host.$$.new"
 cleanup_tmp() {
-    rm -f -- "$marker_tmp" "$config_tmp"
+    rm -f -- "$template_tmp" "$redis_tmp" "$marker_tmp" "$immutable_tmp" "$config_tmp"
 }
 trap cleanup_tmp EXIT
 
+jq -n --arg promoted_at "$promoted_at" --arg job_id "$job_id" \
+    --arg round_id "$round_id" --arg image_digest "$image_digest" \
+    --arg template_database_id "$template_database_id" \
+    --arg evidence_manifest_sha256 "$evidence_manifest_sha256" \
+    --arg evaluation_complete_sha256 "$completion_sha256" \
+    '{schema:1,kind:"sim-latency-template-database-reset",promoted_at:$promoted_at,
+      job_id:$job_id,round_id:$round_id,image_digest:$image_digest,
+      template_database_id:$template_database_id,
+      evidence_manifest_sha256:$evidence_manifest_sha256,
+      evaluation_complete_sha256:$evaluation_complete_sha256,verified:true}' > "$template_tmp"
+
+jq -n --arg promoted_at "$promoted_at" --arg job_id "$job_id" \
+    --arg round_id "$round_id" --arg image_digest "$image_digest" \
+    --arg redis_generation_id "$redis_generation_id" \
+    --arg evidence_manifest_sha256 "$evidence_manifest_sha256" \
+    --arg evaluation_complete_sha256 "$completion_sha256" \
+    '{schema:1,kind:"sim-latency-redis-reset",promoted_at:$promoted_at,
+      job_id:$job_id,round_id:$round_id,image_digest:$image_digest,
+      redis_generation_id:$redis_generation_id,
+      evidence_manifest_sha256:$evidence_manifest_sha256,
+      evaluation_complete_sha256:$evaluation_complete_sha256,verified:true}' > "$redis_tmp"
+
+jq -n --arg promoted_at "$promoted_at" --arg job_id "$job_id" \
+    --arg round_id "$round_id" --arg image_digest "$image_digest" \
+    --arg worker_result_sha256 "$worker_result_sha256" \
+    --arg evidence_manifest_sha256 "$evidence_manifest_sha256" \
+    --arg evaluation_complete_sha256 "$completion_sha256" \
+    --argjson evidence_artifact_count "$evidence_artifact_count" \
+    '{schema:1,kind:"sim-latency-immutable-reports",promoted_at:$promoted_at,
+      job_id:$job_id,round_id:$round_id,image_digest:$image_digest,
+      worker_result_sha256:$worker_result_sha256,
+      evidence_manifest_sha256:$evidence_manifest_sha256,
+      evaluation_complete_sha256:$evaluation_complete_sha256,
+      evidence_artifact_count:$evidence_artifact_count,verified:true}' > "$immutable_tmp"
+
 jq -n \
-    --arg promoted_at "$(date -u '+%FT%TZ')" \
+    --arg promoted_at "$promoted_at" \
     --arg image_digest "$image_digest" \
     --arg job_cgroup "$job_cgroup" \
     --arg postgres_image "$postgres_image" \
@@ -287,6 +363,9 @@ jq -n \
     --arg evaluation_cpu_list "$evaluation_cpuset" \
     --arg management_cpu_list "$management_cpuset" \
     --arg job_id "$job_id" --arg round_id "$round_id" \
+    --arg template_database_id "$template_database_id" \
+    --arg redis_generation_id "$redis_generation_id" \
+    --arg worker_result_sha256 "$worker_result_sha256" \
     --arg evidence_manifest_sha256 "$evidence_manifest_sha256" \
     --arg evaluation_complete_sha256 "$completion_sha256" \
     --arg config_local_sha256 "$config_local_sha256" \
@@ -300,6 +379,8 @@ jq -n \
     --argjson cleanup_elapsed_ms "$(jq -er '.cleanup_elapsed_ms' "$resource_bomb_report")" \
     '{schema:1,kind:"sim-latency-host-containment",promoted_at:$promoted_at,
       qualified_job_id:$job_id,qualified_round_id:$round_id,
+      template_database_id:$template_database_id,
+      redis_generation_id:$redis_generation_id,
       image_digest:$image_digest,job_cgroup:$job_cgroup,
       postgres_image:$postgres_image,redis_image:$redis_image,
       artifact_quota_bytes:$artifact_quota_bytes,
@@ -320,24 +401,46 @@ jq -n \
       docker_gid_map_sha256:$docker_gid_map_sha256,
       config_local_sha256:$config_local_sha256,
       vault_local_sha256:$vault_local_sha256,
+      worker_result_sha256:$worker_result_sha256,
       evidence_manifest_sha256:$evidence_manifest_sha256,
       evaluation_complete_sha256:$evaluation_complete_sha256,
       cleanup_elapsed_ms:$cleanup_elapsed_ms,cleanup_limit_ms:10000,
       residual_containers:0,residual_networks:0,cleanup_complete:true}' > "$marker_tmp"
-chmod 0600 "$marker_tmp"
-sync -d "$marker_tmp"
+for pending_marker in "$template_tmp" "$redis_tmp" "$marker_tmp" "$immutable_tmp"; do
+    chmod 0600 "$pending_marker"
+    sync -d "$pending_marker"
+done
+template_sha256="$(sha256_file "$template_tmp")"
+redis_sha256="$(sha256_file "$redis_tmp")"
 marker_sha256="$(sha256_file "$marker_tmp")"
+immutable_sha256="$(sha256_file "$immutable_tmp")"
 
-jq --arg marker_sha "$marker_sha256" \
-    '.cleanup_marker_sha256 = $marker_sha' "$host_config" > "$config_tmp"
+jq --arg template_sha "$template_sha256" --arg redis_sha "$redis_sha256" \
+    --arg marker_sha "$marker_sha256" --arg immutable_sha "$immutable_sha256" \
+    '.template_database_marker_sha256 = $template_sha |
+     .redis_reset_marker_sha256 = $redis_sha |
+     .cleanup_marker_sha256 = $marker_sha |
+     .immutable_reports_marker_sha256 = $immutable_sha' "$host_config" > "$config_tmp"
 chmod 0600 "$config_tmp"
 sync -d "$config_tmp"
-install -o 0 -g 0 -m 0600 "$marker_tmp" "$output_path"
+mv -f -- "$template_tmp" "$template_output_path"
+mv -f -- "$redis_tmp" "$redis_output_path"
+mv -f -- "$marker_tmp" "$output_path"
+mv -f -- "$immutable_tmp" "$immutable_output_path"
 mv -f -- "$config_tmp" "$host_config"
-sync -d "$output_path" "$host_config"
-sync "$output_parent" "$host_config_parent"
+sync -d "$template_output_path" "$redis_output_path" "$output_path" \
+    "$immutable_output_path" "$host_config"
+sync "$template_output_parent" "$redis_output_parent" "$output_parent" \
+    "$immutable_output_parent" "$host_config_parent"
 
 jq -cn --arg path "$output_path" --arg sha256 "$marker_sha256" \
+    --arg template_path "$template_output_path" --arg template_sha "$template_sha256" \
+    --arg redis_path "$redis_output_path" --arg redis_sha "$redis_sha256" \
+    --arg immutable_path "$immutable_output_path" --arg immutable_sha "$immutable_sha256" \
     --arg job_id "$job_id" --arg round_id "$round_id" \
     '{schema:1,kind:"sim-latency-host-containment-promotion",path:$path,
-      sha256:$sha256,job_id:$job_id,round_id:$round_id,promoted:true}'
+      sha256:$sha256,job_id:$job_id,round_id:$round_id,promoted:true,
+      markers:{template_database:{path:$template_path,sha256:$template_sha},
+        redis_reset:{path:$redis_path,sha256:$redis_sha},
+        cleanup:{path:$path,sha256:$sha256},
+        immutable_reports:{path:$immutable_path,sha256:$immutable_sha}}}'

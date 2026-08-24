@@ -61,8 +61,9 @@ identity until the pending main-branch fixes are merged and pushed.
    `host-config.example.json`. The script hashes live kernel/microcode, CPU,
    SMT/governor/turbo, NUMA, IRQ, cgroup v2, Docker version/security mode,
    digest-pinned PostgreSQL/Redis image ids, and sysctl facts. Its frozen
-   cleanup marker uses `host-containment.example.json` and must be derived from
-   a successful live evaluator qualification; it binds the common service
+   runtime marker set uses `host-containment.example.json` for the cleanup
+   record and must be derived from a successful live evaluator qualification;
+   it binds the common service
    cgroup, 10+2 CPU split, management-memory reserve, resource limits, cleanup,
    service images, 32 GiB artifact quota, successful CPU-/memory-bomb cleanup,
    the internal/no-published-port candidate network, networkless scorer, exact
@@ -73,9 +74,10 @@ identity until the pending main-branch fixes are merged and pushed.
    every evidence hash and declared size, authenticates the worker/completion
    chain, checks every baseline/candidate runner's exact local mounts and the
    authenticated local-leaf digest record, combines
-   the production resource-bomb result, writes the root-owned marker, and
-   atomically updates its hash in the root-owned host config. A failed
-   promotion leaves no marker.
+   the production resource-bomb result, and atomically recreates the transient
+   template-database, Redis-reset, cleanup, and immutable-report markers plus
+   their hashes in the root-owned host config. This restores the complete
+   readiness proof after reboot. A failed promotion leaves no new marker set.
    Run `install-authoritative-host-controls.sh --install` before Docker. It
    installs the CPU-control executable, its resource-boundary dependency, the
    exact-device-IRQ executable, and both root-owned systemd units. The first

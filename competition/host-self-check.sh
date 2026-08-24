@@ -298,9 +298,7 @@ hash_marker() {
 offline_build_cache=false
 secure_root_path "$offline_cache" && offline_build_cache=true
 template_database=false
-hash_marker "$template_marker" "$template_marker_sha" && template_database=true
 redis_reset=false
-hash_marker "$redis_marker" "$redis_marker_sha" && redis_reset=true
 cleanup_verified=false
 services_in_job_cgroup=false
 resource_limits_verified=false
@@ -349,6 +347,10 @@ if hash_marker "$cleanup_marker" "$cleanup_marker_sha" &&
         .docker_gid_map_sha256 == $docker_gid_map_sha256 and
         .config_local_sha256 == $config_local_sha256 and
         .vault_local_sha256 == $vault_local_sha256 and
+        (.template_database_id | type == "string" and length > 0) and
+        (.redis_generation_id | type == "string" and length > 0) and
+        (.worker_result_sha256 | type == "string" and
+          test("^[0-9a-f]{64}$")) and
         (.evidence_manifest_sha256 | type == "string" and
           test("^[0-9a-f]{64}$")) and
         (.evaluation_complete_sha256 | type == "string" and
@@ -367,7 +369,43 @@ if hash_marker "$cleanup_marker" "$cleanup_marker_sha" &&
     containment_no_production_secrets=true
 fi
 immutable_reports=false
-hash_marker "$immutable_marker" "$immutable_marker_sha" && immutable_reports=true
+if [ "$cleanup_verified" = true ] && hash_marker "$template_marker" "$template_marker_sha" &&
+   jq -e --slurpfile containment "$cleanup_marker" --arg image_digest "$image_digest" \
+       '.schema == 1 and .kind == "sim-latency-template-database-reset" and
+        .verified == true and .image_digest == $image_digest and
+        .job_id == $containment[0].qualified_job_id and
+        .round_id == $containment[0].qualified_round_id and
+        .template_database_id == $containment[0].template_database_id and
+        .evidence_manifest_sha256 == $containment[0].evidence_manifest_sha256 and
+        .evaluation_complete_sha256 == $containment[0].evaluation_complete_sha256' \
+       "$template_marker" >/dev/null 2>&1; then
+    template_database=true
+fi
+if [ "$cleanup_verified" = true ] && hash_marker "$redis_marker" "$redis_marker_sha" &&
+   jq -e --slurpfile containment "$cleanup_marker" --arg image_digest "$image_digest" \
+       '.schema == 1 and .kind == "sim-latency-redis-reset" and
+        .verified == true and .image_digest == $image_digest and
+        .job_id == $containment[0].qualified_job_id and
+        .round_id == $containment[0].qualified_round_id and
+        .redis_generation_id == $containment[0].redis_generation_id and
+        .evidence_manifest_sha256 == $containment[0].evidence_manifest_sha256 and
+        .evaluation_complete_sha256 == $containment[0].evaluation_complete_sha256' \
+       "$redis_marker" >/dev/null 2>&1; then
+    redis_reset=true
+fi
+if [ "$cleanup_verified" = true ] && hash_marker "$immutable_marker" "$immutable_marker_sha" &&
+   jq -e --slurpfile containment "$cleanup_marker" --arg image_digest "$image_digest" \
+       '.schema == 1 and .kind == "sim-latency-immutable-reports" and
+        .verified == true and .image_digest == $image_digest and
+        .job_id == $containment[0].qualified_job_id and
+        .round_id == $containment[0].qualified_round_id and
+        .worker_result_sha256 == $containment[0].worker_result_sha256 and
+        .evidence_manifest_sha256 == $containment[0].evidence_manifest_sha256 and
+        .evaluation_complete_sha256 == $containment[0].evaluation_complete_sha256 and
+        (.evidence_artifact_count | type == "number" and . > 0)' \
+       "$immutable_marker" >/dev/null 2>&1; then
+    immutable_reports=true
+fi
 artifact_storage=false
 secure_root_path "$artifact_root" && artifact_storage=true
 

@@ -893,6 +893,11 @@ func TestResourceBombGateCoversOOMAndCleanup(t *testing.T) {
 		`.scorer_network_none_verified == true`,
 		`.evidence_manifest_sha256 | type == "string"`,
 		`.evaluation_complete_sha256 | type == "string"`,
+		`.kind == "sim-latency-template-database-reset"`,
+		`.kind == "sim-latency-redis-reset"`,
+		`.kind == "sim-latency-immutable-reports"`,
+		`.job_id == $containment[0].qualified_job_id`,
+		`.worker_result_sha256 == $containment[0].worker_result_sha256`,
 		`.cleanup_elapsed_ms <= .cleanup_limit_ms`,
 		`.residual_containers == 0 and .residual_networks == 0`,
 	} {
@@ -928,7 +933,13 @@ func TestHostContainmentPromotionAuthenticatesEvidence(t *testing.T) {
 		`.destination == "/runtime/config/local" and .rw == false`,
 		`.destination == "/runtime/vault/local" and .rw == false`,
 		`container evidence violates the local-only boundary`,
+		`sim-latency-template-database-reset`,
+		`sim-latency-redis-reset`,
+		`sim-latency-immutable-reports`,
+		`.template_database_marker_sha256 = $template_sha`,
+		`.redis_reset_marker_sha256 = $redis_sha`,
 		`.cleanup_marker_sha256 = $marker_sha`,
+		`.immutable_reports_marker_sha256 = $immutable_sha`,
 	} {
 		if !strings.Contains(promoter, required) {
 			t.Errorf("host containment promoter is missing %q", required)
@@ -947,6 +958,7 @@ func TestHostContainmentPromotionAuthenticatesEvidence(t *testing.T) {
 		`identity Docker user namespace was promoted`,
 		`failed promotion left a marker`,
 		`failed user-namespace promotion left a marker`,
+		`simulated reboot did not recreate runtime markers`,
 	} {
 		if !strings.Contains(testScript, required) {
 			t.Errorf("host containment promotion regression is missing %q", required)

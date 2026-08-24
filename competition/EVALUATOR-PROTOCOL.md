@@ -211,14 +211,18 @@ for iteration. Qualification must use `--production-memory-limit`; the local
 and left zero residual objects. The authoritative host must reproduce that mode
 before it can attest `resource_bomb_cleanup_verified`.
 
-The root-owned containment marker promoted during host qualification also
-binds the successful evaluator evidence-manifest and completion hashes. Its
+The root-owned runtime marker set promoted during host qualification also
+binds the successful evaluator worker-result, evidence-manifest, and completion
+hashes. Its
 network and mount booleans must prove an internal candidate network with no
 published ports, a networkless scorer, exactly the two read-only local leaves,
 and no production credentials. The host's own default route is intentionally
 not treated as evidence about a container network namespace.
-`promote-host-containment.sh` is the only supported promotion path. Its
-deterministic fixture authenticates a valid chain, then constructs a
+`promote-host-containment.sh` is the only supported promotion path. It
+atomically recreates all four transient readiness markers and updates their
+root-owned host-config hashes, including when `/run/urnetwork` disappeared in
+a reboot. Its deterministic fixture authenticates a valid chain, simulates
+that reboot boundary, then constructs a
 hash-consistent adversarial chain containing a parent `/runtime/config` mount
 and proves that no marker is written.
 

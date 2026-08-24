@@ -133,19 +133,30 @@ make_evaluation() {
 }
 
 make_host_config() {
-    local path="$1" marker="$2" pending
+    local path="$1" marker="$2" pending marker_prefix
     pending="$test_root/host-config.$$.new"
+    marker_prefix="${marker%.json}"
     jq -n --arg image_digest "$image_digest" \
         --arg config_sha "$config_local_sha256" --arg vault_sha "$vault_local_sha256" \
         --arg config_dir "$test_root/config/local" --arg vault_dir "$test_root/vault/local" \
         --arg evaluation_cpuset "$evaluation_cpuset" --arg management_cpuset "$management_cpuset" \
-        --arg marker "$marker" --argjson active_memory "$active_memory_limit_bytes" \
+        --arg template_marker "$marker_prefix.template-database.json" \
+        --arg redis_marker "$marker_prefix.redis-reset.json" \
+        --arg marker "$marker" \
+        --arg immutable_marker "$marker_prefix.immutable-reports.json" \
+        --argjson active_memory "$active_memory_limit_bytes" \
         --argjson reserve_memory "$management_memory_reserve_bytes" \
         '{schema:1,image_digest:$image_digest,job_cgroup:"/urnetwork/competition.slice/evaluator.scope",
           postgres_image:"postgres:fixture",redis_image:"redis:fixture",
           evaluation_cpu_list:$evaluation_cpuset,management_cpu_list:$management_cpuset,
           artifact_quota_bytes:34359738368,active_memory_limit_bytes:$active_memory,
-          management_memory_reserve_bytes:$reserve_memory,cleanup_marker:$marker,
+          management_memory_reserve_bytes:$reserve_memory,
+          template_database_marker:$template_marker,
+          template_database_marker_sha256:("0" * 64),
+          redis_reset_marker:$redis_marker,redis_reset_marker_sha256:("0" * 64),
+          cleanup_marker:$marker,
+          immutable_reports_marker:$immutable_marker,
+          immutable_reports_marker_sha256:("0" * 64),
           config_local_directory:$config_dir,vault_local_directory:$vault_dir,
           config_local_sha256:$config_sha,vault_local_sha256:$vault_sha,
           cleanup_marker_sha256:("0" * 64)}' > "$pending"
@@ -165,19 +176,24 @@ jq -n --arg evaluation_cpuset "$evaluation_cpuset" --arg management_cpuset "$man
 
 evaluation="$test_root/evaluation"
 control_root="$test_root/control"
+runtime_parent="$test_root/run/urnetwork"
 install -d -m 0700 "$test_root/config/local" "$test_root/vault/local"
 # The fixture hashes are the SHA-256 of an empty sorted-file manifest.
 config_local_sha256="$("$SCRIPT_DIR/container/hash-local-mount.sh" "$test_root/config/local")"
 vault_local_sha256="$("$SCRIPT_DIR/container/hash-local-mount.sh" "$test_root/vault/local")"
-sudo -n install -d -o 0 -g 0 -m 0700 "$control_root"
-marker="$control_root/containment.json"
+sudo -n install -d -o 0 -g 0 -m 0700 "$control_root" "$test_root/run" "$runtime_parent"
+marker="$runtime_parent/containment.json"
+template_marker="${marker%.json}.template-database.json"
+redis_marker="${marker%.json}.redis-reset.json"
+immutable_marker="${marker%.json}.immutable-reports.json"
 config="$control_root/host.json"
 make_evaluation "$evaluation"
 make_host_config "$config" "$marker"
 
 promotion="$(sudo -n "$PROMOTER" --host-config "$config" --evaluation-dir "$evaluation" \
     --resource-bomb-report "$resource_bomb")"
-jq -e '.schema == 1 and .promoted == true and .job_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"' \
+jq -e '.schema == 1 and .promoted == true and .job_id == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" and
+       (.markers | keys) == ["cleanup","immutable_reports","redis_reset","template_database"]' \
     <<<"$promotion" >/dev/null
 sudo -n jq -e \
     '.schema == 1 and .kind == "sim-latency-host-containment" and
@@ -189,6 +205,42 @@ sudo -n jq -e \
     "$marker" >/dev/null
 [ "$(sudo -n sha256sum "$marker" | awk '{print $1}')" = "$(sudo -n jq -er '.cleanup_marker_sha256' "$config")" ]
 [ "$(sudo -n stat -c %u "$marker")" -eq 0 ] && [ "$(sudo -n stat -c %a "$marker")" = 600 ]
+for marker_spec in \
+    "$template_marker:template_database_marker_sha256" \
+    "$redis_marker:redis_reset_marker_sha256" \
+    "$immutable_marker:immutable_reports_marker_sha256"; do
+    runtime_marker="${marker_spec%%:*}"
+    config_field="${marker_spec##*:}"
+    [ "$(sudo -n sha256sum "$runtime_marker" | awk '{print $1}')" = \
+        "$(sudo -n jq -er ".$config_field" "$config")" ]
+    [ "$(sudo -n stat -c %u "$runtime_marker")" -eq 0 ] &&
+        [ "$(sudo -n stat -c %a "$runtime_marker")" = 600 ]
+done
+sudo -n jq -e --slurpfile cleanup "$marker" --slurpfile redis "$redis_marker" \
+    --slurpfile immutable "$immutable_marker" \
+    '.schema == 1 and .kind == "sim-latency-template-database-reset" and .verified == true and
+     .job_id == $cleanup[0].qualified_job_id and .round_id == $cleanup[0].qualified_round_id and
+     .template_database_id == $cleanup[0].template_database_id and
+     $redis[0].kind == "sim-latency-redis-reset" and $redis[0].verified == true and
+     $redis[0].redis_generation_id == $cleanup[0].redis_generation_id and
+     $immutable[0].kind == "sim-latency-immutable-reports" and
+     $immutable[0].worker_result_sha256 == $cleanup[0].worker_result_sha256' \
+    "$template_marker" >/dev/null
+
+# /run is transient. Removing the complete marker directory deterministically
+# reproduces a reboot and proves that one promotion restores every readiness
+# marker plus its root-owned directory, rather than cleanup evidence alone.
+sudo -n rm -f -- "$template_marker" "$redis_marker" "$marker" "$immutable_marker"
+sudo -n rmdir -- "$runtime_parent"
+promotion="$(sudo -n "$PROMOTER" --host-config "$config" --evaluation-dir "$evaluation" \
+    --resource-bomb-report "$resource_bomb")"
+if ! sudo -n test -d "$runtime_parent" || ! sudo -n test -f "$template_marker" ||
+   ! sudo -n test -f "$redis_marker" || ! sudo -n test -f "$marker" ||
+   ! sudo -n test -f "$immutable_marker"; then
+    printf 'simulated reboot did not recreate runtime markers\n' >&2
+    exit 1
+fi
+jq -e '.promoted == true and (.markers | length) == 4' <<<"$promotion" >/dev/null
 
 bad_evaluation="$test_root/bad-evaluation"
 bad_marker="$control_root/bad-containment.json"
@@ -206,10 +258,13 @@ if sudo -n "$PROMOTER" --host-config "$bad_config" --evaluation-dir "$bad_evalua
     printf 'unsafe parent config mount was promoted\n' >&2
     exit 1
 fi
-[ ! -e "$bad_marker" ] || {
-    printf 'failed promotion left a marker\n' >&2
-    exit 1
-}
+for bad_runtime_marker in "$bad_marker" "${bad_marker%.json}.template-database.json" \
+    "${bad_marker%.json}.redis-reset.json" "${bad_marker%.json}.immutable-reports.json"; do
+    [ ! -e "$bad_runtime_marker" ] || {
+        printf 'failed promotion left a marker\n' >&2
+        exit 1
+    }
+done
 
 bad_userns_evaluation="$test_root/bad-userns-evaluation"
 bad_userns_marker="$control_root/bad-userns-containment.json"
@@ -230,9 +285,14 @@ if sudo -n "$PROMOTER" --host-config "$bad_userns_config" \
     printf 'identity Docker user namespace was promoted\n' >&2
     exit 1
 fi
-[ ! -e "$bad_userns_marker" ] || {
-    printf 'failed user-namespace promotion left a marker\n' >&2
-    exit 1
-}
+for bad_runtime_marker in "$bad_userns_marker" \
+    "${bad_userns_marker%.json}.template-database.json" \
+    "${bad_userns_marker%.json}.redis-reset.json" \
+    "${bad_userns_marker%.json}.immutable-reports.json"; do
+    [ ! -e "$bad_runtime_marker" ] || {
+        printf 'failed user-namespace promotion left a marker\n' >&2
+        exit 1
+    }
+done
 
 printf 'host containment promotion test passed\n'
