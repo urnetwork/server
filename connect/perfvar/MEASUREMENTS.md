@@ -1813,6 +1813,34 @@ real burst working sets and existing logical limits. Mobile keeps its existing
 small warm targets; server-specific tuning is the lazy capacity/index policy,
 not a more aggressive server trim timer.
 
+### 20-MiB mobile follow-up: server isolation
+
+The later 20-MiB mobile topology/reclaim work (final Connect commit `3a495e7`)
+was isolated again from exact parent `f4d3656` on the same Apple M4 Pro / Go
+1.26.7 host with `GOMAXPROCS=10`. Every benchmark in `server/connect`,
+`server/connect/perfvar`, and `server/proxy` ran serially for 300 ms, five
+times, with `-benchmem`. The mobile packet-pressure reader is not constructed
+or called by either server component.
+
+| Package | Parent geomean | Candidate geomean | Change | Allocation result |
+|---|---:|---:|---:|---|
+| `server/connect` | 8.918 us/op | 8.847 us/op | -0.79% | 112.8 B/op geomean and allocs/op unchanged |
+| `server/connect/perfvar` link primitives | 571.4 ns/op | 572.8 ns/op | +0.25% | 1.452 KiB/op and 5.477 allocs/op unchanged |
+| `server/proxy` | 5.914 us/op | 5.915 us/op | +0.01% | every individual B/op and allocs/op result unchanged |
+
+The timing deltas are host noise and the allocation equality is the useful
+guard. No server reclaim/re-warm override was added: server callers keep the
+historical 1-MiB wrappers, desktop/server GC pacing remains 100, and only a
+<=20-MiB mobile SDK instance samples the new packet-root pressure signal.
+
+The canonical full PERFVAR attempt ran for 376.662 seconds with its documented
+environment, but Redis at `10.211.55.5:6379` returned `host is down`, so its
+DB-backed fixtures are infrastructure-blocked rather than passing evidence. A
+single severe-profile count comparison also observed 68 versus 69 once; that
+focused path then passed three non-race repetitions (121.646 seconds) and its
+race run (57.859 seconds). The DB-dependent full suite remains an external
+rerun, not a silently green result.
+
 ### Known test-fixture failures
 
 `TestConnectMultiClientPerformance` failed identically on the parent and
@@ -1859,6 +1887,7 @@ throughput aggregates.
 | Log | Use |
 |---|---|
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-server-bench.txt` | Eight-repeat parent, initial memory commit, and lazy-capacity Connect/PERFVAR/proxy microbenchmarks |
+| `/tmp/urnetwork-server-m20-ab.lDDp1P/{baseline,current}.txt` | Five-repeat exact-parent/current 20-MiB follow-up across server Connect, PERFVAR link, and proxy benchmarks |
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-perfvar.txt` | Canonical five-run clean-LAN TCP matrices used for payload correctness and stable-route comparison |
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/paired-{parent,current}-{1..20}.txt` | Alternating-process H3 diagnostic for whole-commit variance |
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/isolate-{parent,pool}-{1..12}.txt` | Parent versus pool-only H3 isolation |
