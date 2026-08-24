@@ -1841,6 +1841,43 @@ focused path then passed three non-race repetitions (121.646 seconds) and its
 race run (57.859 seconds). The DB-dependent full suite remains an external
 rerun, not a silently green result.
 
+### 24-MiB mobile rebalance: exact server isolation
+
+The 2026-08-24 mobile SDK candidate raises only the mobile steady target to 24
+MiB, fixes Auto quality/speed at 4/1, uses a 512-KiB mobile warm set, and changes
+Android/iOS GC pacing from 10 to 25. Linux/server keeps `GOGC=100`, the existing
+20-MiB default `DeviceLocal` target, the 1-MiB server pool wrapper, and no mobile
+packet-pressure or idle-reclaim path.
+
+An initial comparison against the retained prior-day log moved the time
+geomeans +1.75% for `server/connect`, +2.59% for its PERFVAR link primitives,
+and -2.37% for `server/proxy`. A second current-source cohort repeated the first
+within -0.02%, -1.02%, and +0.71%, respectively. Because that cross-day result
+could not distinguish code from host state, it was not accepted as the change
+impact.
+
+The retained result is an exact same-session A/B. Temporary worktrees held
+server at `1806bbc9` and every non-SDK dependency fixed; the baseline SDK was
+`49f756f`, while the candidate worktree contained only the 24-MiB patch. Every
+benchmark in `server/connect`, `server/connect/perfvar`, and `server/proxy` ran
+for 300 ms with `-benchmem`, `GOMAXPROCS=10`, and six repetitions per side. The
+process order was baseline/candidate/candidate/baseline for each of three
+cycles, balancing warm-up and thermal drift.
+
+| Package | Baseline geomean | Candidate geomean | Time change | Allocation result |
+|---|---:|---:|---:|---|
+| `server/connect` | 8.954 us/op | 8.949 us/op | -0.05% | B/op +0.01%; allocs/op unchanged |
+| `server/connect/perfvar` | 585.8 ns/op | 584.8 ns/op | -0.17% | B/op and allocs/op unchanged |
+| `server/proxy` | 5.844 us/op | 5.847 us/op | +0.05% | every B/op and allocs/op result unchanged |
+
+No individual timing comparison was statistically significant. The exact A/B
+therefore rejects a server performance regression and identifies the earlier
+1.5--1.7% same-source offset as cross-session host drift. No server-specific
+reclaim tuning is warranted. The broad `go test ./connect ./proxy -short`
+attempt remained environment-blocked by absent `WARP_ENV` and vault `pg.yml`,
+matching the documented fixture limitation; benchmark processes and focused
+mobile/server policy tests passed.
+
 ### Known test-fixture failures
 
 `TestConnectMultiClientPerformance` failed identically on the parent and
@@ -1888,6 +1925,7 @@ throughput aggregates.
 |---|---|
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-server-bench.txt` | Eight-repeat parent, initial memory commit, and lazy-capacity Connect/PERFVAR/proxy microbenchmarks |
 | `/tmp/urnetwork-server-m20-ab.lDDp1P/{baseline,current}.txt` | Five-repeat exact-parent/current 20-MiB follow-up across server Connect, PERFVAR link, and proxy benchmarks |
+| `/tmp/urnetwork-m24-exact-ab.zQn7v9/{base,current}.txt` | Six-repeat order-balanced exact SDK baseline/24-MiB candidate comparison across every server Connect, PERFVAR link, and proxy benchmark |
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-perfvar.txt` | Canonical five-run clean-LAN TCP matrices used for payload correctness and stable-route comparison |
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/paired-{parent,current}-{1..20}.txt` | Alternating-process H3 diagnostic for whole-commit variance |
 | `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/isolate-{parent,pool}-{1..12}.txt` | Parent versus pool-only H3 isolation |
