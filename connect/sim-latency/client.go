@@ -587,6 +587,7 @@ func (self *ClientDriver) Run() error {
 			}
 			arrivals := r.poisson(meanPerSecond)
 			for i := 0; i < arrivals; i += 1 {
+				crawlIndex := next
 				client := self.clients[next%len(self.clients)]
 				next += 1
 				self.active.Add(1)
@@ -594,7 +595,7 @@ func (self *ClientDriver) Run() error {
 					defer self.active.Done()
 					crawlCtx, cancel := context.WithTimeout(self.ctx, self.requestTimeout)
 					defer cancel()
-					self.crawl(crawlCtx, client.label, client.httpClient)
+					self.crawl(crawlCtx, client.label, client.httpClient, crawlIndex)
 				})
 			}
 		}
@@ -828,7 +829,7 @@ func (self *ClientDriver) qualityWindowSize() int {
 // It fully unwinds on ctx cancel: queued-but-unconsumed jobs are balanced so
 // the closer goroutine's pending.Wait() always completes (it used to leak one
 // goroutine per timed-out crawl — thousands over a long run).
-func (self *ClientDriver) crawl(ctx context.Context, clientLabel string, httpClient *http.Client) {
+func (self *ClientDriver) crawl(ctx context.Context, clientLabel string, httpClient *http.Client, crawlIndex int) {
 	type job struct {
 		path  string
 		depth int
@@ -879,7 +880,10 @@ func (self *ClientDriver) crawl(ctx context.Context, clientLabel string, httpCli
 		}()
 	}
 
-	submit("/", 0)
+	// The monotonically assigned index is identical in paired runs because the
+	// arrival process is seeded. It gives each crawl an independent, repeatable
+	// site tree instead of reusing one root-depth draw for the whole workload.
+	submit(fmt.Sprintf("/?crawl=%d", crawlIndex), 0)
 
 	// close jobs once all pending work drains
 	closerDone := make(chan struct{})

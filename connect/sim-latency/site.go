@@ -8,8 +8,9 @@ package main
 // continues deeper (a "next page" link) and the rest are leaves (sub-
 // resources), so a crawl loads ~1 + depth*branching pages with a mean depth of
 // K — bounded, but deep enough to exercise sequential discovery. Responses are
-// deterministic from (seed, path) so runs reproduce, and carry a random-sized
-// body so throughput is actually moved.
+// deterministic from (seed, crawl index, path) so paired runs reproduce while
+// one workload contains a real distribution of depths and body sizes. Without
+// the crawl index every arrival shares the root page's single geometric draw.
 //
 // The site listens on a real socket; providers egress to it over real OS
 // sockets (loopback), which the disabled security policy permits.
@@ -138,7 +139,11 @@ func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pageRng := self.pathRng(r.URL.Path)
+	// The client gives each admitted crawl a stable query index. Include it in
+	// the root identity so depth and body-size sampling happen per crawl; child
+	// tokens carry that identity through the rest of the tree.
+	pageIdentity := r.URL.RequestURI()
+	pageRng := self.pathRng(pageIdentity)
 
 	if r.URL.Path == "/" {
 		// draw the crawl depth (mean K), capped
@@ -176,7 +181,7 @@ func (self *siteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// one child continues deeper; the rest are leaves
 				childRemaining = remaining - 1
 			}
-			token := self.childToken(r.URL.Path, i)
+			token := self.childToken(pageIdentity, i)
 			urls = append(urls, fmt.Sprintf("/p/%d/%s", childRemaining, token))
 		}
 	}

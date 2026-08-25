@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -166,6 +167,84 @@ func TestSiteTreeTerminates(t *testing.T) {
 	t.Logf("crawled %d pages", visited)
 }
 
+// A workload contains many independent crawls, so its tree-depth distribution
+// must be sampled across those crawls. Sampling only from (seed, "/") makes
+// every arrival share one draw and lets a valid hidden seed collapse the whole
+// measurement to root pages.
+func TestSiteRootTopologyVariesAcrossCrawls(t *testing.T) {
+	const crawlCount = 80
+	for _, seed := range []int64{1, 99, 1001} {
+		config := defaultConfig(seed, 900, crawlCount, 30)
+		handler := &siteHandler{seed: seed, site: config.Site}
+		pairedHandler := &siteHandler{seed: seed, site: config.Site}
+		depths := map[int]bool{}
+		totalDepth := 0
+		for crawlIndex := 0; crawlIndex < crawlCount; crawlIndex += 1 {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(
+				http.MethodGet,
+				fmt.Sprintf("http://site.test/?crawl=%d", crawlIndex),
+				nil,
+			)
+			handler.ServeHTTP(recorder, request)
+			result, err := readSiteResponse(recorder.Result())
+			if err != nil || !result.complete {
+				t.Fatalf("seed %d crawl %d response is incomplete: result=%+v err=%v", seed, crawlIndex, result, err)
+			}
+			pairedRecorder := httptest.NewRecorder()
+			pairedHandler.ServeHTTP(pairedRecorder, request.Clone(request.Context()))
+			pairedResult, pairedErr := readSiteResponse(pairedRecorder.Result())
+			if pairedErr != nil || !pairedResult.complete {
+				t.Fatalf(
+					"seed %d paired crawl %d response is incomplete: result=%+v err=%v",
+					seed,
+					crawlIndex,
+					pairedResult,
+					pairedErr,
+				)
+			}
+			if result.page.Size != pairedResult.page.Size ||
+				strings.Join(result.page.Urls, "\n") != strings.Join(pairedResult.page.Urls, "\n") {
+				t.Fatalf(
+					"seed %d crawl %d is not reproducible: first=%+v paired=%+v",
+					seed,
+					crawlIndex,
+					result.page,
+					pairedResult.page,
+				)
+			}
+
+			depth := 0
+			if 0 < len(result.page.Urls) {
+				if len(result.page.Urls) != int(config.Site.Branching) {
+					t.Fatalf(
+						"seed %d crawl %d root links = %d, want %d",
+						seed,
+						crawlIndex,
+						len(result.page.Urls),
+						int(config.Site.Branching),
+					)
+				}
+				remaining, ok := handler.parsePath(result.page.Urls[0])
+				if !ok {
+					t.Fatalf("seed %d crawl %d has invalid child path %q", seed, crawlIndex, result.page.Urls[0])
+				}
+				depth = remaining + 1
+			}
+			depths[depth] = true
+			totalDepth += depth
+		}
+
+		if len(depths) < 4 {
+			t.Errorf("seed %d produced only %d distinct depths across %d crawls: %v", seed, len(depths), crawlCount, depths)
+		}
+		meanDepth := float64(totalDepth) / crawlCount
+		if meanDepth < 2 || 6 < meanDepth {
+			t.Errorf("seed %d mean depth = %.3f across %d crawls, want [2, 6]", seed, meanDepth, crawlCount)
+		}
+	}
+}
+
 // A hidden workload's scored root may be a slow download-tier page. Warmup
 // must use a small unscored page so body-size sampling cannot decide whether a
 // client is reported as having a provider path.
@@ -203,6 +282,35 @@ func TestSiteWarmupPageIsBoundedAcrossWorkloadSeeds(t *testing.T) {
 				result.page,
 				siteWarmupBodyBytes,
 			)
+		}
+	}
+}
+
+// The arrival index is the reproducible boundary between the load generator
+// and fake site. Losing it from the root request silently restores one shared
+// depth draw for every crawl in the evaluation.
+func TestCrawlSendsStableIndexToSiteRoot(t *testing.T) {
+	requestUris := make(chan string, 2)
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestUris <- r.URL.RequestURI()
+		(&siteHandler{}).writePage(w, sitePage{Size: 16})
+	}))
+	defer httpServer.Close()
+
+	config := &Config{}
+	config.Clients.ConnectionsPerCrawl = 1
+	driver := &ClientDriver{
+		ctx:      context.Background(),
+		config:   config,
+		siteAddr: strings.TrimPrefix(httpServer.URL, "http://"),
+		out:      bufio.NewWriter(io.Discard),
+	}
+	for _, crawlIndex := range []int{37, 38} {
+		driver.crawl(context.Background(), "test-client", httpServer.Client(), crawlIndex)
+		requestUri := <-requestUris
+		expectedUri := fmt.Sprintf("/?crawl=%d", crawlIndex)
+		if requestUri != expectedUri {
+			t.Fatalf("crawl %d root request = %q, want %q", crawlIndex, requestUri, expectedUri)
 		}
 	}
 }
@@ -251,7 +359,7 @@ func TestCrawlCancelDoesNotLeak(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		driver.crawl(crawlCtx, "test-client", &http.Client{})
+		driver.crawl(crawlCtx, "test-client", &http.Client{}, 0)
 	}()
 
 	// let the root fetch fan out and the workers block on stalled children,
