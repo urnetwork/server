@@ -1920,6 +1920,47 @@ the mobile packet-pressure/reclaim policy. No server-specific reclaim tuning
 is warranted. The broad short tier still waits on unavailable Redis/vault/DB
 fixtures; focused H1 tests and every benchmark-only tier pass.
 
+### 2026-08-25 H1 lane/ACK directionality follow-up
+
+The iterative-depth device arm reached its full earned 128-Packet / 256-KiB
+window without improving fast.com, so the next controlled PERFVAR comparison
+held byte budgets fixed and varied only negotiated logical data lanes. On the
+four-flow impaired profile, lane zero delivered 20.247 Mbit/s with a
+41.474-Mbit/s calibrated underlay; eight lanes delivered 29.058 Mbit/s with a
+43.704-Mbit/s underlay. That is a +43.5% raw improvement at similar route
+capacity. Order-balanced repeats remained calibration-variable, so the result
+is evidence that independent flow sequencing removes head-of-line recovery,
+not a claim that eight lanes always multiply throughput by that amount.
+
+An adjacent clean 50-ms H1 A/B checked the lossless compact Transfer-ACK
+overflow fallback. Folding a full handoff directly into the existing monotonic
+cumulative/selective window changed 134.551 to 134.529 Mbit/s (-0.016%). It
+adds no queue, timer, wait, or per-ACK allocation. A separate server H1
+10-ms-backpressure experiment reduced the order-balanced median from 28.90 to
+24.00 Mbit/s (-17.0%) and was fully reverted. Server/client H1 drains therefore
+remain ready-only; neither side waits to fill a batch.
+
+The physical client-only lane arm then improved Wikipedia median load from
+1,157.8 to 348.8 ms and reduced timeout resends from 1,053 to 152 while keeping
+Go runtime below 20.61 MiB. Public fast.com remained far below same-session
+Direct because the deployed provider still sent every download flow on lane
+zero. The next decisive test is symmetric: one pinned explicit-H1 provider and
+client with eight shared-budget lanes, the retained 16-frame / 24-KiB provider
+logical group, and direct established TCP-ACK application. Default Auto remains
+unchanged until that controlled provider A/B covers transport transitions.
+
+The final shared-code gate first repeated every benchmark in all three server
+packages three times at 300 ms. A later audit found a 15.5-hour-old,
+campaign-owned benchmark-listing probe consuming more than one CPU core during
+that cohort, so it is retained only as conservative pass evidence. After
+stopping the probe, five 500-ms affected repetitions measured production H1 TLS
+medians of 891.7 ns full payload and 370.3 ns ACK sized, both at two
+allocations/op; PERFVAR receive-credit admission was 673.6 ns, and proxy
+batch-64 was 5,406 ns. Those clean-host results improve the preceding
+final-source cohort. The ACK overflow path is dormant until its compact
+handoff channel is full, so ordinary server traffic pays no added queue or
+timer cost.
+
 ### Known test-fixture failures
 
 `TestConnectMultiClientPerformance` failed identically on the parent and
