@@ -235,10 +235,20 @@ func (self *connectH3DatagramCollector) Collect(metrics chan<- prometheus.Metric
 const AllowOnlyIpv4 = false
 
 const (
-	connectH1WriteBatchMaxMessageCount = 8
+	// Drain more ACK-sized messages without retaining a larger socket buffer.
+	// Payload traffic stops after 12 KiB, so one complete next <=4-KiB H1
+	// message cannot push the existing 16-KiB coalescer past its bound. The
+	// drain is ready-only: sparse traffic still writes immediately.
+	connectH1WriteBatchMaxMessageCount = 32
+	connectH1WriteBatchDrainByteCount  = 12 * 1024
 	connectH3WriteBatchMaxMessageCount = 16
 	connectH3WriteBatchMaxByteCount    = 64 * 1024
 )
+
+func connectH1WriteBatchCanDrain(messageCount int, messageByteCount int) bool {
+	return messageCount < connectH1WriteBatchMaxMessageCount &&
+		messageByteCount < connectH1WriteBatchDrainByteCount
+}
 
 // Mirrors the client-side pre-publication query. quic-go v0.61.0 cannot queue
 // a 2,048-byte DATAGRAM because its packet buffer is capped at 1,452 bytes, so
@@ -307,7 +317,7 @@ func (self *connectH1BatchResponseWriter) Hijack() (
 	return connect.NewWebSocketWriteBatchConn(conn), readWriter, nil
 }
 
-// Writes one user frame immediately, plus at most seven more frames already
+// Writes one user frame immediately, plus a bounded set of frames already
 // queued at the same instant. Every dequeued pooled buffer is returned after
 // the terminal flush; successful accounting is published only after that
 // flush reaches the delegated connection.
@@ -328,10 +338,11 @@ func writeConnectH1UserReadyBatch(
 	var messageStorage [connectH1WriteBatchMaxMessageCount][]byte
 	messageStorage[0] = firstMessage
 	messageCount := 1
+	messageByteCount := len(firstMessage)
 	open = true
 	if writeBatch != nil {
 	drainReady:
-		for messageCount < len(messageStorage) {
+		for connectH1WriteBatchCanDrain(messageCount, messageByteCount) {
 			select {
 			case <-ctx.Done():
 				open = false
@@ -343,6 +354,7 @@ func writeConnectH1UserReadyBatch(
 				}
 				messageStorage[messageCount] = message
 				messageCount += 1
+				messageByteCount += len(message)
 			default:
 				break drainReady
 			}

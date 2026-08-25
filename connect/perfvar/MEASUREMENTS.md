@@ -1878,6 +1878,48 @@ attempt remained environment-blocked by absent `WARP_ENV` and vault `pg.yml`,
 matching the documented fixture limitation; benchmark processes and focused
 mobile/server policy tests passed.
 
+### 2026-08-25 H1 ready-drain and retained-budget isolation
+
+The final H1/mobile-memory tree was checked again because a previous-day broad
+comparison appeared roughly 20% slower in `server/connect/perfvar` and
+`server/proxy`. That movement was uniform across unrelated benchmarks and had
+unchanged allocation counts, but was retained as a possible regression until a
+same-session isolation could distinguish it from host-frequency drift.
+
+First, one current binary swept the server H1 TLS ready limit at 8, 16, and 32
+messages. Each point ran seven times for 500 ms with `GOMAXPROCS=10` and
+`-benchmem`:
+
+| Shape | 8-message median | 16-message median | 32-message median | 8 -> 32 result |
+| --- | ---: | ---: | ---: | ---: |
+| Full payload | 1,057 ns / 1,305.04 MB/s | 996.4 ns / 1,385.02 MB/s | 936.5 ns / 1,473.51 MB/s | 11.4% less time; 12.9% more throughput |
+| ACK sized | 766.4 ns / 167.03 MB/s | 544.3 ns / 235.18 MB/s | 413.8 ns / 309.30 MB/s | 46.0% less time; 85.2% more throughput |
+
+Full-payload TCP writes/frame fell 0.125 -> 0.09375; ACK-sized writes/frame fell
+0.125 -> 0.03125. All points retained two allocations/op; full payload retained
+17 B/op, while ACK-sized work changed 11 -> 10 B/op. The writer is ready-only,
+stops ordinary bytes at 12 KiB, and uses the existing 16-KiB wrapper, so the
+larger count adds neither a batching timer nor socket storage.
+
+The complete current benchmark-only tiers then passed with 190
+`server/connect`, 10 `server/connect/perfvar`, and 20 `server/proxy` samples.
+To isolate the apparent broad slowdown, detached baseline Connect/SDK
+worktrees and the current tree ran in baseline/current/current/baseline order;
+server code, host, Go process settings, and benchmark duration were held fixed.
+Each arm contributed ten samples per benchmark. PERFVAR's two link primitives
+changed -0.46% in time geomean. Proxy's four WireGuard upload shapes changed
++0.64% overall, with individual medians from -2.18% to +2.41%. Every B/op and
+allocs/op result was identical. The baseline itself reproduced the newer,
+slower absolute host rate, proving that the previous-day 20% shift was host
+state rather than the Connect/SDK changes.
+
+The exact changed path is materially faster and the shared server paths are
+neutral within normal host variance. Server/default receive queues do not
+enable mobile retained-root scanning, and neither server component installs
+the mobile packet-pressure/reclaim policy. No server-specific reclaim tuning
+is warranted. The broad short tier still waits on unavailable Redis/vault/DB
+fixtures; focused H1 tests and every benchmark-only tier pass.
+
 ### Known test-fixture failures
 
 `TestConnectMultiClientPerformance` failed identically on the parent and

@@ -27,7 +27,7 @@ const (
 	serverH1SocketBatchBenchmarkPayloadByteCount = 1380
 	serverH1SocketBatchBenchmarkQueueSize        = 4096
 	serverH1SocketBatchBenchmarkMessageCount     = 4
-	serverH1SocketBatchBenchmarkMaxMessageCount  = 8
+	serverH1SocketBatchBenchmarkMaxMessageCount  = 32
 	serverH1SocketBatchBenchmarkByteCount        = 16 * 1024
 )
 
@@ -51,10 +51,12 @@ const (
 
 // Configures one explicit carrier, writer shape, and arrival pattern.
 type serverH1SocketBatchBenchmarkSettings struct {
-	mode            serverH1SocketBatchBenchmarkMode
-	workload        serverH1SocketBatchBenchmarkWorkload
-	enableTls       bool
-	maxMessageCount int
+	mode              serverH1SocketBatchBenchmarkMode
+	workload          serverH1SocketBatchBenchmarkWorkload
+	enableTls         bool
+	maxMessageCount   int
+	maxBatchByteCount int
+	payloadByteCount  int
 }
 
 // Counts writes into the transport wrapper separately from writes that reach
@@ -229,7 +231,11 @@ func benchmarkServerH1SocketBatch(
 	settings serverH1SocketBatchBenchmarkSettings,
 ) {
 	b.Helper()
-	b.SetBytes(serverH1SocketBatchBenchmarkPayloadByteCount)
+	payloadByteCount := settings.payloadByteCount
+	if payloadByteCount == 0 {
+		payloadByteCount = serverH1SocketBatchBenchmarkPayloadByteCount
+	}
+	b.SetBytes(int64(payloadByteCount))
 	maxMessageCount := settings.maxMessageCount
 	if maxMessageCount == 0 {
 		maxMessageCount = serverH1SocketBatchBenchmarkMessageCount
@@ -239,7 +245,7 @@ func benchmarkServerH1SocketBatch(
 		b.Fatalf("invalid maximum message count %d", maxMessageCount)
 	}
 
-	payload := make([]byte, serverH1SocketBatchBenchmarkPayloadByteCount)
+	payload := make([]byte, payloadByteCount)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
@@ -331,13 +337,17 @@ func benchmarkServerH1SocketBatch(
 
 			messages := messageStorage[:1:maxMessageCount]
 			messages[0] = firstMessage
+			batchMessageByteCount := len(firstMessage)
 			if settings.mode != serverH1SocketBatchBenchmarkSingleton {
 			drainReady:
 				for len(messages) < cap(messages) &&
+					(settings.maxBatchByteCount <= 0 ||
+						batchMessageByteCount < settings.maxBatchByteCount) &&
 					writtenMessageCount+len(messages) < b.N {
 					select {
 					case message := <-send:
 						messages = append(messages, message)
+						batchMessageByteCount += len(message)
 					default:
 						break drainReady
 					}
@@ -702,6 +712,78 @@ func BenchmarkServerH1WebSocketTlsReadyDrainCoalescedBatch8Loopback(b *testing.B
 		workload:        serverH1SocketBatchBenchmarkSaturated,
 		enableTls:       true,
 		maxMessageCount: 8,
+	})
+}
+
+// Measures sixteen-message TLS coalescing without the production byte stop.
+func BenchmarkServerH1WebSocketTlsReadyDrainCoalescedBatch16Loopback(b *testing.B) {
+	benchmarkServerH1SocketBatch(b, serverH1SocketBatchBenchmarkSettings{
+		mode:            serverH1SocketBatchBenchmarkReadyCoalesced,
+		workload:        serverH1SocketBatchBenchmarkSaturated,
+		enableTls:       true,
+		maxMessageCount: 16,
+	})
+}
+
+// Measures thirty-two-message TLS coalescing without the production byte stop.
+func BenchmarkServerH1WebSocketTlsReadyDrainCoalescedBatch32Loopback(b *testing.B) {
+	benchmarkServerH1SocketBatch(b, serverH1SocketBatchBenchmarkSettings{
+		mode:            serverH1SocketBatchBenchmarkReadyCoalesced,
+		workload:        serverH1SocketBatchBenchmarkSaturated,
+		enableTls:       true,
+		maxMessageCount: 32,
+	})
+}
+
+// Measures the exact production count/byte policy with ordinary payloads.
+func BenchmarkServerH1WebSocketTlsReadyDrainCoalescedProductionLoopback(b *testing.B) {
+	benchmarkServerH1SocketBatch(b, serverH1SocketBatchBenchmarkSettings{
+		mode:              serverH1SocketBatchBenchmarkReadyCoalesced,
+		workload:          serverH1SocketBatchBenchmarkSaturated,
+		enableTls:         true,
+		maxMessageCount:   connectH1WriteBatchMaxMessageCount,
+		maxBatchByteCount: connectH1WriteBatchDrainByteCount,
+	})
+}
+
+func BenchmarkServerH1WebSocketTlsAckSizedBatch8Loopback(b *testing.B) {
+	benchmarkServerH1SocketBatch(b, serverH1SocketBatchBenchmarkSettings{
+		mode:             serverH1SocketBatchBenchmarkReadyCoalesced,
+		workload:         serverH1SocketBatchBenchmarkSaturated,
+		enableTls:        true,
+		maxMessageCount:  8,
+		payloadByteCount: 128,
+	})
+}
+
+func BenchmarkServerH1WebSocketTlsAckSizedBatch16Loopback(b *testing.B) {
+	benchmarkServerH1SocketBatch(b, serverH1SocketBatchBenchmarkSettings{
+		mode:             serverH1SocketBatchBenchmarkReadyCoalesced,
+		workload:         serverH1SocketBatchBenchmarkSaturated,
+		enableTls:        true,
+		maxMessageCount:  16,
+		payloadByteCount: 128,
+	})
+}
+
+func BenchmarkServerH1WebSocketTlsAckSizedBatch32Loopback(b *testing.B) {
+	benchmarkServerH1SocketBatch(b, serverH1SocketBatchBenchmarkSettings{
+		mode:             serverH1SocketBatchBenchmarkReadyCoalesced,
+		workload:         serverH1SocketBatchBenchmarkSaturated,
+		enableTls:        true,
+		maxMessageCount:  32,
+		payloadByteCount: 128,
+	})
+}
+
+func BenchmarkServerH1WebSocketTlsAckSizedProductionLoopback(b *testing.B) {
+	benchmarkServerH1SocketBatch(b, serverH1SocketBatchBenchmarkSettings{
+		mode:              serverH1SocketBatchBenchmarkReadyCoalesced,
+		workload:          serverH1SocketBatchBenchmarkSaturated,
+		enableTls:         true,
+		maxMessageCount:   connectH1WriteBatchMaxMessageCount,
+		maxBatchByteCount: connectH1WriteBatchDrainByteCount,
+		payloadByteCount:  128,
 	})
 }
 
