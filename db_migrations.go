@@ -5678,6 +5678,136 @@ var migrations = []any{
 			)
 	`),
 
+	// Release 1.0 snapshots payout ownership per provider client. Rows are
+	// append-only so a wallet rotation can never rewrite a prior epoch.
+	newSqlMigration(`
+		CREATE TABLE st_provider_wallet_history (
+			wallet_version bigserial PRIMARY KEY,
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			coldkey_ss58 varchar(128) NOT NULL,
+			coldkey_pubkey bytea NOT NULL CHECK (octet_length(coldkey_pubkey) = 32),
+			set_time timestamp NOT NULL
+		);
+
+		CREATE INDEX st_provider_wallet_history_snapshot
+		ON st_provider_wallet_history (client_id, set_time DESC, wallet_version DESC);
+
+		CREATE FUNCTION st_provider_wallet_append_only_guard()
+		RETURNS trigger LANGUAGE plpgsql AS $st_provider_wallet_guard$
+		BEGIN
+			RAISE EXCEPTION 'st provider wallet history is append-only';
+		END
+		$st_provider_wallet_guard$;
+
+		CREATE TRIGGER st_provider_wallet_append_only
+		BEFORE UPDATE OR DELETE ON st_provider_wallet_history
+		FOR EACH ROW EXECUTE FUNCTION st_provider_wallet_append_only_guard();
+	`),
+
+	// Release 1.0 chain history is finalized and hash-bound. A block number
+	// alone cannot detect an endpoint reorg/equivocation after restart.
+	newSqlMigration(`
+		ALTER TABLE st_event
+		ADD COLUMN block_hash varchar(80) NOT NULL DEFAULT '';
+
+		ALTER TABLE st_chain_sync
+		ADD COLUMN block_hash varchar(80) NOT NULL DEFAULT '';
+	`),
+
+	newSqlMigration(`
+		CREATE TABLE st_payout_artifact (
+			epoch bigint NOT NULL,
+			no_id bigint NOT NULL,
+			content_hash varchar(80) NOT NULL,
+			content_key text NOT NULL,
+			history_key text NOT NULL,
+			payout_root bytea NOT NULL CHECK (octet_length(payout_root) = 32),
+			create_time timestamp NOT NULL,
+			PRIMARY KEY (epoch, no_id),
+			UNIQUE (content_hash)
+		);
+
+		CREATE FUNCTION st_payout_artifact_immutable_guard()
+		RETURNS trigger LANGUAGE plpgsql AS $st_payout_artifact_guard$
+		BEGIN
+			RAISE EXCEPTION 'st payout artifacts are immutable';
+		END
+		$st_payout_artifact_guard$;
+
+		CREATE TRIGGER st_payout_artifact_immutable
+		BEFORE UPDATE OR DELETE ON st_payout_artifact
+		FOR EACH ROW EXECUTE FUNCTION st_payout_artifact_immutable_guard();
+	`),
+	newSqlMigration(`
+		ALTER TABLE st_payout_leaf ADD COLUMN client_id uuid NULL;
+		CREATE INDEX st_payout_leaf_client_epoch ON st_payout_leaf (client_id, epoch, no_id);
+	`),
+
+	// Release 1.0 chain writes are durable before signing or broadcasting.
+	// The intent owns the account nonce; individual attempts record the exact
+	// signed bytes so a restart can rebroadcast/reconcile without ever creating
+	// a second logical operation.  Calldata is intentionally retained: the
+	// server API history is the canonical audit surface from the deployment
+	// boundary, and calldata contains no private key material.
+	newSqlMigration(`
+		CREATE TABLE st_transaction_intent (
+			intent_id uuid PRIMARY KEY,
+			intent_key varchar(255) NOT NULL UNIQUE,
+			profile varchar(16) NOT NULL,
+			deployment_id varchar(128) NOT NULL,
+			chain_id bigint NOT NULL CHECK (chain_id > 0),
+			from_address varchar(42) NOT NULL,
+			to_address varchar(42) NOT NULL,
+			calldata_hash varchar(66) NOT NULL,
+			calldata bytea NOT NULL,
+			nonce bigint NOT NULL CHECK (nonce >= 0),
+			status varchar(16) NOT NULL CHECK (
+				status IN ('prepared', 'signed', 'broadcast', 'mined', 'finalized', 'failed', 'uncertain')
+			),
+			current_tx_hash varchar(80) NULL,
+			attempt_count int NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+			error varchar(2048) NULL,
+			create_time timestamp NOT NULL,
+			update_time timestamp NOT NULL,
+
+			UNIQUE (profile, deployment_id, chain_id, from_address, nonce),
+			CHECK (from_address ~ '^0x[0-9a-f]{40}$'),
+			CHECK (to_address ~ '^0x[0-9a-f]{40}$'),
+			CHECK (calldata_hash ~ '^0x[0-9a-f]{64}$')
+		);
+
+		CREATE INDEX st_transaction_intent_reconcile
+		ON st_transaction_intent (profile, deployment_id, status, update_time);
+
+		CREATE TABLE st_transaction_attempt (
+			intent_id uuid NOT NULL REFERENCES st_transaction_intent(intent_id),
+			attempt int NOT NULL CHECK (attempt > 0),
+			tx_hash varchar(80) NOT NULL UNIQUE,
+			raw_transaction bytea NOT NULL,
+			gas_limit bigint NOT NULL CHECK (gas_limit > 0),
+			gas_price varchar(80) NULL,
+			gas_tip_cap varchar(80) NULL,
+			gas_fee_cap varchar(80) NULL,
+			status varchar(16) NOT NULL CHECK (
+				status IN ('signed', 'broadcast', 'mined', 'finalized', 'failed', 'uncertain', 'replaced')
+			),
+			inclusion_block bigint NULL,
+			inclusion_hash varchar(80) NULL,
+			finalized_block bigint NULL,
+			finalized_hash varchar(80) NULL,
+			error varchar(2048) NULL,
+			create_time timestamp NOT NULL,
+			update_time timestamp NOT NULL,
+
+			PRIMARY KEY (intent_id, attempt),
+			CHECK (
+				(gas_price IS NOT NULL AND gas_tip_cap IS NULL AND gas_fee_cap IS NULL) OR
+				(gas_price IS NULL AND gas_tip_cap IS NOT NULL AND gas_fee_cap IS NOT NULL)
+			),
+			CHECK (tx_hash ~ '^0x[0-9a-f]{64}$')
+		);
+	`),
 	// Durable sim-latency competition control plane. The queue is deliberately
 	// independent of pending_task: untrusted submissions are claimed by a
 	// dedicated evaluator identity, and the singleton slot below makes the FIFO
@@ -5985,136 +6115,5 @@ var migrations = []any{
 			RETURN NEW;
 		END
 		$competition_round_guard$;
-	`),
-
-	// Release 1.0 snapshots payout ownership per provider client. Rows are
-	// append-only so a wallet rotation can never rewrite a prior epoch.
-	newSqlMigration(`
-		CREATE TABLE st_provider_wallet_history (
-			wallet_version bigserial PRIMARY KEY,
-			client_id uuid NOT NULL,
-			network_id uuid NOT NULL,
-			coldkey_ss58 varchar(128) NOT NULL,
-			coldkey_pubkey bytea NOT NULL CHECK (octet_length(coldkey_pubkey) = 32),
-			set_time timestamp NOT NULL
-		);
-
-		CREATE INDEX st_provider_wallet_history_snapshot
-		ON st_provider_wallet_history (client_id, set_time DESC, wallet_version DESC);
-
-		CREATE FUNCTION st_provider_wallet_append_only_guard()
-		RETURNS trigger LANGUAGE plpgsql AS $st_provider_wallet_guard$
-		BEGIN
-			RAISE EXCEPTION 'st provider wallet history is append-only';
-		END
-		$st_provider_wallet_guard$;
-
-		CREATE TRIGGER st_provider_wallet_append_only
-		BEFORE UPDATE OR DELETE ON st_provider_wallet_history
-		FOR EACH ROW EXECUTE FUNCTION st_provider_wallet_append_only_guard();
-	`),
-
-	// Release 1.0 chain history is finalized and hash-bound. A block number
-	// alone cannot detect an endpoint reorg/equivocation after restart.
-	newSqlMigration(`
-		ALTER TABLE st_event
-		ADD COLUMN block_hash varchar(80) NOT NULL DEFAULT '';
-
-		ALTER TABLE st_chain_sync
-		ADD COLUMN block_hash varchar(80) NOT NULL DEFAULT '';
-	`),
-
-	newSqlMigration(`
-		CREATE TABLE st_payout_artifact (
-			epoch bigint NOT NULL,
-			no_id bigint NOT NULL,
-			content_hash varchar(80) NOT NULL,
-			content_key text NOT NULL,
-			history_key text NOT NULL,
-			payout_root bytea NOT NULL CHECK (octet_length(payout_root) = 32),
-			create_time timestamp NOT NULL,
-			PRIMARY KEY (epoch, no_id),
-			UNIQUE (content_hash)
-		);
-
-		CREATE FUNCTION st_payout_artifact_immutable_guard()
-		RETURNS trigger LANGUAGE plpgsql AS $st_payout_artifact_guard$
-		BEGIN
-			RAISE EXCEPTION 'st payout artifacts are immutable';
-		END
-		$st_payout_artifact_guard$;
-
-		CREATE TRIGGER st_payout_artifact_immutable
-		BEFORE UPDATE OR DELETE ON st_payout_artifact
-		FOR EACH ROW EXECUTE FUNCTION st_payout_artifact_immutable_guard();
-	`),
-	newSqlMigration(`
-		ALTER TABLE st_payout_leaf ADD COLUMN client_id uuid NULL;
-		CREATE INDEX st_payout_leaf_client_epoch ON st_payout_leaf (client_id, epoch, no_id);
-	`),
-
-	// Release 1.0 chain writes are durable before signing or broadcasting.
-	// The intent owns the account nonce; individual attempts record the exact
-	// signed bytes so a restart can rebroadcast/reconcile without ever creating
-	// a second logical operation.  Calldata is intentionally retained: the
-	// server API history is the canonical audit surface from the deployment
-	// boundary, and calldata contains no private key material.
-	newSqlMigration(`
-		CREATE TABLE st_transaction_intent (
-			intent_id uuid PRIMARY KEY,
-			intent_key varchar(255) NOT NULL UNIQUE,
-			profile varchar(16) NOT NULL,
-			deployment_id varchar(128) NOT NULL,
-			chain_id bigint NOT NULL CHECK (chain_id > 0),
-			from_address varchar(42) NOT NULL,
-			to_address varchar(42) NOT NULL,
-			calldata_hash varchar(66) NOT NULL,
-			calldata bytea NOT NULL,
-			nonce bigint NOT NULL CHECK (nonce >= 0),
-			status varchar(16) NOT NULL CHECK (
-				status IN ('prepared', 'signed', 'broadcast', 'mined', 'finalized', 'failed', 'uncertain')
-			),
-			current_tx_hash varchar(80) NULL,
-			attempt_count int NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-			error varchar(2048) NULL,
-			create_time timestamp NOT NULL,
-			update_time timestamp NOT NULL,
-
-			UNIQUE (profile, deployment_id, chain_id, from_address, nonce),
-			CHECK (from_address ~ '^0x[0-9a-f]{40}$'),
-			CHECK (to_address ~ '^0x[0-9a-f]{40}$'),
-			CHECK (calldata_hash ~ '^0x[0-9a-f]{64}$')
-		);
-
-		CREATE INDEX st_transaction_intent_reconcile
-		ON st_transaction_intent (profile, deployment_id, status, update_time);
-
-		CREATE TABLE st_transaction_attempt (
-			intent_id uuid NOT NULL REFERENCES st_transaction_intent(intent_id),
-			attempt int NOT NULL CHECK (attempt > 0),
-			tx_hash varchar(80) NOT NULL UNIQUE,
-			raw_transaction bytea NOT NULL,
-			gas_limit bigint NOT NULL CHECK (gas_limit > 0),
-			gas_price varchar(80) NULL,
-			gas_tip_cap varchar(80) NULL,
-			gas_fee_cap varchar(80) NULL,
-			status varchar(16) NOT NULL CHECK (
-				status IN ('signed', 'broadcast', 'mined', 'finalized', 'failed', 'uncertain', 'replaced')
-			),
-			inclusion_block bigint NULL,
-			inclusion_hash varchar(80) NULL,
-			finalized_block bigint NULL,
-			finalized_hash varchar(80) NULL,
-			error varchar(2048) NULL,
-			create_time timestamp NOT NULL,
-			update_time timestamp NOT NULL,
-
-			PRIMARY KEY (intent_id, attempt),
-			CHECK (
-				(gas_price IS NOT NULL AND gas_tip_cap IS NULL AND gas_fee_cap IS NULL) OR
-				(gas_price IS NULL AND gas_tip_cap IS NOT NULL AND gas_fee_cap IS NOT NULL)
-			),
-			CHECK (tx_hash ~ '^0x[0-9a-f]{64}$')
-		);
 	`),
 }
