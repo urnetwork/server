@@ -1,0 +1,227 @@
+{
+  "uid": "urnetwork-postgres",
+  "title": "urnetwork / postgres",
+  "description": "PostgreSQL health and workload: availability, connection pressure and idle transactions, transaction/row rates, cache efficiency, locks, deadlocks, temporary I/O, database growth, and host pressure.",
+  "tags": ["urnetwork", "postgres", "database", "infrastructure"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(pg_up{job=\"postgres\"}, env)",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "host",
+        "label": "host",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(pg_up{env=\"$env\",job=\"postgres\"}, host)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      },
+      {
+        "name": "database",
+        "label": "database",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(pg_stat_database_numbackends{env=\"$env\",host=~\"$host\",job=\"postgres\"}, datname)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "PostgreSQL up",
+      "description": "Exporter connection to PostgreSQL. Zero means the database or local socket query is unavailable.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "mappings": [{"type": "value", "options": {"0": {"text": "down", "color": "red"}, "1": {"text": "up", "color": "green"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "min(pg_up{env=\"$env\",host=~\"$host\",job=\"postgres\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 2,
+      "title": "connection utilization",
+      "description": "All backends divided by max_connections. Poolers should keep this well below saturation.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 70}, {"color": "red", "value": 90}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "100 * sum(pg_stat_activity_count{env=\"$env\",host=~\"$host\",job=\"postgres\"}) / sum(pg_settings_max_connections{env=\"$env\",host=~\"$host\",job=\"postgres\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 3,
+      "title": "idle in transaction",
+      "description": "Sessions holding a transaction open while idle. Sustained values pin xmin and consume connections.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 10}, {"color": "red", "value": 100}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "sum(pg_stat_activity_count{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\",state=~\"idle in transaction.*\"}) or on() vector(0)", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 4,
+      "title": "selected database size",
+      "description": "Total on-disk size for the selected databases.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "sum(pg_database_size_bytes{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 5,
+      "title": "connections by state",
+      "description": "Backend sessions by PostgreSQL state. Idle-in-transaction is separated because it retains transaction state.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "normal", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (state) (pg_stat_activity_count{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"})", "legendFormat": "{{state}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 6,
+      "title": "transactions / s",
+      "description": "Committed and rolled-back transactions across selected databases.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "tps", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(pg_stat_database_xact_commit{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "commits", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum(rate(pg_stat_database_xact_rollback{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "rollbacks", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "buffer cache hit ratio",
+      "description": "Share of heap block reads served from shared buffers. Drops can indicate a working-set or query-plan change.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 95}, {"color": "green", "value": 99}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "min"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "100 * sum by (datname) (rate(pg_stat_database_blks_hit{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval])) / clamp_min(sum by (datname) (rate(pg_stat_database_blks_hit{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]) + rate(pg_stat_database_blks_read{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval])), 0.000001)", "legendFormat": "{{datname}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 8,
+      "title": "row activity / s",
+      "description": "Tuple reads and mutations across selected databases.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "rows/s", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(pg_stat_database_tup_returned{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "returned", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum(rate(pg_stat_database_tup_fetched{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "fetched", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "C", "expr": "sum(rate(pg_stat_database_tup_inserted{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "inserted", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "D", "expr": "sum(rate(pg_stat_database_tup_updated{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "updated", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "E", "expr": "sum(rate(pg_stat_database_tup_deleted{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "deleted", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 9,
+      "title": "deadlocks and rollbacks / s",
+      "description": "Database deadlocks and transaction rollbacks. Correlate spikes with application errors and lock pressure.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(pg_stat_database_deadlocks{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "deadlocks", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum(rate(pg_stat_database_xact_rollback{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "rollbacks", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 10,
+      "title": "temporary bytes / s",
+      "description": "Temporary-file write rate. Sustained growth points to sorts/hashes spilling beyond work_mem.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "Bps", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (datname) (rate(pg_stat_database_temp_bytes{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"}[$__rate_interval]))", "legendFormat": "{{datname}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 11,
+      "title": "locks by mode",
+      "description": "Held and waiting locks grouped by database and lock mode.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "normal", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (datname, mode) (pg_locks_count{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"})", "legendFormat": "{{datname}} {{mode}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 12,
+      "title": "oldest transaction by state",
+      "description": "Maximum transaction age observed in pg_stat_activity. The configured five-minute idle-in-transaction timeout bounds idle transaction age.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 60}, {"color": "red", "value": 300}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "max by (datname, state) (pg_stat_activity_max_tx_duration{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"})", "legendFormat": "{{datname}} {{state}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 13,
+      "title": "database growth",
+      "description": "On-disk database size by database.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "max by (host, datname) (pg_database_size_bytes{env=\"$env\",host=~\"$host\",datname=~\"$database\",job=\"postgres\"})", "legendFormat": "{{datname}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 14,
+      "title": "host database disk used",
+      "description": "Root-filesystem utilization; /var/lib/postgresql currently lives on this filesystem.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 75}, {"color": "red", "value": 90}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "100 * (1 - node_filesystem_avail_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=\"/\"} / node_filesystem_size_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=\"/\"})", "legendFormat": "{{host}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 15,
+      "title": "host CPU and memory used",
+      "description": "Database-host pressure beside PostgreSQL signals.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 44},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "100 * (1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=\"idle\"}[$__rate_interval])))", "legendFormat": "{{host}} cpu", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "100 * (1 - node_memory_MemAvailable_bytes{env=\"$env\",host=~\"$host\",job=\"node\"} / node_memory_MemTotal_bytes{env=\"$env\",host=~\"$host\",job=\"node\"})", "legendFormat": "{{host}} memory", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    }
+  ]
+}

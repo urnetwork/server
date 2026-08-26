@@ -33,6 +33,7 @@ import (
 	// "github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // each client connection is a transport for the resident client
@@ -1035,18 +1036,16 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	connectedGauge.Add(1)
 	defer connectedGauge.Sub(1)
 
-	// find the client ip:port from the request header
-	// `X-Forwarded-For` is added by the warp lb
-	clientAddress := r.Header.Get("X-UR-Forwarded-For")
-	if clientAddress == "" {
-		clientIpStr := r.Header.Get("X-Forwarded-For")
-		clientPortStr := r.Header.Get("X-Forwarded-Source-Port")
-		if clientIpStr != "" && clientPortStr != "" {
-			clientAddress = fmt.Sprintf("%s:%s", clientIpStr, clientPortStr)
-		}
-	}
-	if clientAddress == "" {
-		// use the raw connection remote address
+	// The fleet-standard attribution (session.ResolveClientAddressFromRequest):
+	// X-UR-Forwarded-For then X-Forwarded-For from the warp lb, honored only
+	// when the peer is an enumerated proxy — so a direct connection to the
+	// service port can no longer choose its own address (and rate-limit
+	// bucket) by sending the header itself, which the previous unguarded
+	// header read here allowed.
+	clientAddress, resolveErr := session.ResolveClientAddressFromRequest(r)
+	if resolveErr != nil {
+		// unparseable remote address — keep the raw value; the parse below
+		// decides what to do with it, exactly as before
 		clientAddress = r.RemoteAddr
 	}
 

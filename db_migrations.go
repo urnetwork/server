@@ -6221,4 +6221,15 @@ var migrations = []any{
 			CHECK (tx_hash ~ '^0x[0-9a-f]{64}$')
 		);
 	`),
+
+	// Wallet auth must never outlive its owning user. NOT VALID keeps rollout
+	// safe if a legacy orphan exists, while PostgreSQL still enforces the
+	// constraint for every new or changed row. Operations can validate the
+	// historical rows after auditing any legacy orphan separately.
+	newSqlMigration(`
+		ALTER TABLE network_user_auth_wallet
+		ADD CONSTRAINT network_user_auth_wallet_user_fk
+		FOREIGN KEY (user_id) REFERENCES network_user(user_id)
+		ON DELETE CASCADE NOT VALID;
+	`),
 }

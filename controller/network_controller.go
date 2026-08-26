@@ -66,7 +66,7 @@ func NetworkCreate(
 		AuthVerifySend(verifySend, session)
 	} else {
 
-		if result.UserAuth != nil {
+		if result.UserAuth != nil && !result.SuppressAccountMessages {
 			awsMessageSender := GetAWSMessageSender()
 			awsMessageSender.SendAccountMessageTemplate(
 				*result.UserAuth,

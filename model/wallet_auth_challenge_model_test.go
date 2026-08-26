@@ -57,6 +57,48 @@ func TestWalletAuthChallengeCreateAndUse(t *testing.T) {
 	})
 }
 
+func TestWalletAuthChallengeBindsBlockchainAndAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		walletA := solana.NewWallet()
+		walletB := solana.NewWallet()
+		blockchain := SOL.String()
+		addressA := walletA.PublicKey().String()
+
+		addressChallenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{
+			WalletAddress: &addressA,
+			Blockchain:    &blockchain,
+		}, ctx)
+		connect.AssertEqual(t, addressChallenge.Error, nil)
+		signatureB, err := walletB.PrivateKey.Sign([]byte(addressChallenge.MessageTemplate))
+		connect.AssertEqual(t, err, nil)
+		addressResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: SOL.String(),
+			PublicKey:  walletB.PublicKey().String(),
+			Message:    addressChallenge.MessageTemplate,
+			Signature:  base64.StdEncoding.EncodeToString(signatureB[:]),
+		}, ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, addressResult.Valid, false)
+		connect.AssertEqual(t, strings.Contains(addressResult.Error.Message, "wallet address mismatch"), true)
+
+		tao := TAO.String()
+		chainChallenge := CreateWalletAuthChallenge(WalletAuthChallengeArgs{Blockchain: &tao}, ctx)
+		connect.AssertEqual(t, chainChallenge.Error, nil)
+		signatureA, err := walletA.PrivateKey.Sign([]byte(chainChallenge.MessageTemplate))
+		connect.AssertEqual(t, err, nil)
+		chainResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: SOL.String(),
+			PublicKey:  walletA.PublicKey().String(),
+			Message:    chainChallenge.MessageTemplate,
+			Signature:  base64.StdEncoding.EncodeToString(signatureA[:]),
+		}, ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, chainResult.Valid, false)
+		connect.AssertEqual(t, strings.Contains(chainResult.Error.Message, "blockchain mismatch"), true)
+	})
+}
+
 func TestWalletAuthChallengeExpired(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

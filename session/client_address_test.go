@@ -89,3 +89,39 @@ func TestResolveClientAddressReadsChainsAndPartialHeaders(t *testing.T) {
 		t.Fatalf("bare X-Forwarded-For resolved to %q, want 192.0.2.1:0", got)
 	}
 }
+
+// An ipv6 "addr:port" element without brackets is readable only when the
+// address part cannot absorb the port: a COMPRESSED ipv6 plus ":443" is itself
+// a valid address ("2001:db8::7:443" — the port becomes one more hex group),
+// so that form is inherently ambiguous and parses as the bare address by
+// design. The warp lb now brackets ipv6 in X-UR-Forwarded-For (warpctl
+// $warp_client_addr) to remove the ambiguity at the source; this test pins the
+// two shapes the reader must get right regardless:
+//
+//  1. a FULL-FORM ipv6 with a trailing port (too many groups to be a bare
+//     address) splits at the last colon instead of reporting the header
+//     unusable and collapsing the client onto the lb's address, and
+//  2. the lb's bracketed pair — X-UR-Forwarded-For with the port,
+//     X-Forwarded-For without — resolves as one client, not a conflict.
+func TestResolveClientAddressReadsBracketlessIpv6WithPort(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "127.0.0.1:8080"
+	req.Header.Set("X-UR-Forwarded-For", "2001:db8:0:0:0:0:0:7:443")
+	got, err := ResolveClientAddress(req, trusted)
+	if err != nil || got != "[2001:db8::7]:443" {
+		t.Fatalf("full-form bracketless ipv6 element resolved to %q err=%v, want [2001:db8::7]:443", got, err)
+	}
+
+	req.Header.Set("X-Forwarded-For", "2001:db8::7")
+	got, err = ResolveClientAddress(req, trusted)
+	if err != nil || got != "[2001:db8::7]:443" {
+		t.Fatalf("full-form lb header pair resolved to %q err=%v, want [2001:db8::7]:443", got, err)
+	}
+
+	req.Header.Set("X-UR-Forwarded-For", "[2001:db8::7]:443")
+	got, err = ResolveClientAddress(req, trusted)
+	if err != nil || got != "[2001:db8::7]:443" {
+		t.Fatalf("bracketed lb header pair resolved to %q err=%v, want [2001:db8::7]:443", got, err)
+	}
+}

@@ -244,6 +244,8 @@ func UseWalletAuthChallenge(
 	var used bool
 	var expireTime time.Time
 	var createTime time.Time
+	var issuedWalletAddress *string
+	var issuedBlockchain string
 	server.Tx(ctx, func(tx server.PgTx) {
 		result, dbErr := tx.Query(
 			ctx,
@@ -251,7 +253,9 @@ func UseWalletAuthChallenge(
 				SELECT
 					used,
 					expire_time,
-					create_time
+					create_time,
+					wallet_address,
+					blockchain
 				FROM wallet_auth_challenge
 				WHERE challenge_value = $1
 				FOR UPDATE
@@ -266,10 +270,18 @@ func UseWalletAuthChallenge(
 				err = errors.New("challenge not found")
 				return
 			}
-			server.Raise(result.Scan(&used, &expireTime, &createTime))
+			server.Raise(result.Scan(&used, &expireTime, &createTime, &issuedWalletAddress, &issuedBlockchain))
 		})
 
 		if err != nil {
+			return
+		}
+		if issuedBlockchain != blockchain {
+			err = errors.New("challenge blockchain mismatch")
+			return
+		}
+		if issuedWalletAddress != nil && *issuedWalletAddress != args.PublicKey {
+			err = errors.New("challenge wallet address mismatch")
 			return
 		}
 
@@ -315,7 +327,7 @@ func UseWalletAuthChallenge(
 		switch err.Error() {
 		case "challenge already used", "challenge expired":
 			code = "403"
-		case "challenge timestamp mismatch", "challenge timestamp outside allowed skew":
+		case "challenge timestamp mismatch", "challenge timestamp outside allowed skew", "challenge blockchain mismatch", "challenge wallet address mismatch":
 			code = "400"
 		}
 		return &UseWalletAuthChallengeResult{

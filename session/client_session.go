@@ -566,6 +566,21 @@ func parseForwardedElement(raw string) (netip.Addr, uint16, bool) {
 	if addrPort, err := parseRequestAddress(raw); err == nil {
 		return addrPort.Addr(), addrPort.Port(), true
 	}
+	// nginx renders an ipv6 $remote_addr WITHOUT brackets, so the warp lb's
+	// X-UR-Forwarded-For for an ipv6 client is "2001:db8::7:443" — too many
+	// groups for ParseAddr and bracketless for every host:port reader above.
+	// Split at the LAST colon: this string already failed to parse as a bare
+	// address, so if the prefix is a valid address and the suffix a valid
+	// port, that split is the only reading it has. Without this, every ipv6
+	// client behind the lb reports as an unusable forwarding header and
+	// collapses onto the lb's own address.
+	if i := strings.LastIndexByte(raw, ':'); 0 < i && i+1 < len(raw) {
+		if addr, err := netip.ParseAddr(raw[:i]); err == nil {
+			if portNumber, err := net.LookupPort("tcp", raw[i+1:]); err == nil && 0 <= portNumber && portNumber <= 65535 {
+				return addr.Unmap(), uint16(portNumber), true
+			}
+		}
+	}
 	return netip.Addr{}, 0, false
 }
 
@@ -755,6 +770,18 @@ func candidateNamesNoClient(candidates []forwardedCandidate) bool {
 		}
 	}
 	return false
+}
+
+// ResolveClientAddressFromRequest is the FLEET-STANDARD client attribution:
+// X-UR-Forwarded-For first, then X-Forwarded-For (paired with
+// X-Forwarded-Source-Port), honored ONLY when the immediate TCP peer is
+// inside BRINGYOUR_TRUSTED_PROXY_CIDRS, and the peer address itself
+// otherwise. Services must use this instead of reading the headers
+// directly: an unguarded read lets any caller that reaches the service
+// port without the lb send the header itself and choose its own address —
+// and with it its rate-limit bucket and every per-address budget.
+func ResolveClientAddressFromRequest(req *http.Request) (string, error) {
+	return ResolveClientAddress(req, trustedProxyPrefixes())
 }
 
 // ResolveClientAddress honors forwarding headers only when the immediate TCP

@@ -96,6 +96,10 @@ type NetworkCreateResult struct {
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
 	IsPro                bool                             `json:"is_pro,omitempty"`
+	// SuppressAccountMessages is server-internal. Dedicated acceptance auth
+	// identities can authenticate immediately without causing verification or
+	// welcome-message sends from production infrastructure.
+	SuppressAccountMessages bool `json:"-"`
 }
 
 type NetworkCreateResultNetwork struct {
@@ -299,6 +303,7 @@ func NetworkCreate(
 	if networkCreate.UserAuth != nil {
 		// user is creating a network via email/phone + pass
 		// validate the user does not exist
+		testAuthPolicy := testAuthPolicyForUserAuth(userAuth)
 
 		resultNetworkCreate := networkCreateUserAuth(
 			session.Ctx,
@@ -306,12 +311,36 @@ func NetworkCreate(
 			userAuth,
 			validatedNetworkName,
 			containsProfanity,
+			testAuthPolicy.BypassVerification,
 		)
 
 		if resultNetworkCreate.Created {
 			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
 			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
+
+			if testAuthPolicy.BypassVerification {
+				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+
+				byJwt := jwt.NewByJwt(
+					resultNetworkCreate.NetworkId,
+					resultNetworkCreate.UserId,
+					validatedNetworkName,
+					false,
+					resultNetworkCreate.IsPro,
+				)
+				byJwtSigned := byJwt.Sign()
+				return &NetworkCreateResult{
+					Network: &NetworkCreateResultNetwork{
+						ByJwt:       &byJwtSigned,
+						NetworkName: validatedNetworkName,
+						NetworkId:   resultNetworkCreate.NetworkId,
+						IsPro:       resultNetworkCreate.IsPro,
+					},
+					UserAuth:                userAuth,
+					SuppressAccountMessages: testAuthPolicy.SuppressAccountMessages,
+				}, nil
+			}
 
 			result := &NetworkCreateResult{
 				VerificationRequired: &NetworkCreateResultVerification{
@@ -444,12 +473,17 @@ func NetworkCreate(
 			}, nil
 		}
 
-		networkCreateResult := networkCreateWalletAuth(
+		networkCreateResult, err := networkCreateWalletAuth(
 			session.Ctx,
 			&networkCreate,
 			validatedNetworkName,
 			containsProfanity,
 		)
+		if err != nil {
+			return &NetworkCreateResult{
+				Error: &NetworkCreateResultError{Message: err.Error()},
+			}, nil
+		}
 
 		if networkCreateResult.Created {
 
@@ -547,7 +581,10 @@ func networkCreateWalletAuth(
 	networkCreate *NetworkCreateArgs,
 	validatedNetworkName string,
 	containsProfanity bool,
-) networkCreateResult {
+) (networkCreateResult, error) {
+	if err := validateWalletAuth(networkCreate.WalletAuth); err != nil {
+		return networkCreateResult{}, err
+	}
 
 	created := false
 	var createdNetworkId server.Id
@@ -586,7 +623,7 @@ func networkCreateWalletAuth(
 				VALUES ($1, $2, $3, $4, $5)
 			`,
 			createdUserId,
-			AuthTypeSolana,
+			walletAuthType(networkCreate.WalletAuth.Blockchain),
 			networkCreate.WalletAuth.PublicKey,
 			networkCreate.WalletAuth.Blockchain,
 			networkCreate.UserName,
@@ -596,7 +633,8 @@ func networkCreateWalletAuth(
 		}
 
 		// insert into network_user_auth_wallet
-		addWalletAuth(
+		server.Raise(addWalletAuthInTx(
+			tx,
 			&AddWalletAuthArgs{
 				WalletAuth: &WalletAuthArgs{
 					PublicKey:  networkCreate.WalletAuth.PublicKey,
@@ -607,7 +645,7 @@ func networkCreateWalletAuth(
 				UserId: createdUserId,
 			},
 			ctx,
-		)
+		))
 
 		_, err = tx.Exec(
 			ctx,
@@ -643,7 +681,7 @@ func networkCreateWalletAuth(
 		NetworkName: networkCreate.NetworkName,
 		UserId:      createdUserId,
 		IsPro:       isPro,
-	}
+	}, nil
 
 }
 
@@ -773,6 +811,7 @@ func networkCreateUserAuth(
 	userAuth *string,
 	validatedNetworkName string,
 	containsProfanity bool,
+	verified bool,
 ) networkCreateResult {
 
 	created := false
@@ -853,6 +892,7 @@ func networkCreateUserAuth(
 				UserAuth:     userAuth,
 				PasswordHash: passwordHash,
 				PasswordSalt: passwordSalt,
+				Verified:     verified,
 			},
 			ctx,
 		)
@@ -1247,6 +1287,16 @@ func Testing_CreateNetworkByWallet(
 	signature string,
 	message string,
 ) {
+	walletArgs := &AddWalletAuthArgs{
+		WalletAuth: &WalletAuthArgs{
+			PublicKey:  publicKey,
+			Signature:  signature,
+			Message:    message,
+			Blockchain: AuthTypeSolana,
+		},
+		UserId: adminUserId,
+	}
+	server.Raise(validateWalletAuth(walletArgs.WalletAuth))
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1273,18 +1323,7 @@ func Testing_CreateNetworkByWallet(
 			AuthTypeSolana,
 		))
 
-		addWalletAuth(
-			&AddWalletAuthArgs{
-				WalletAuth: &WalletAuthArgs{
-					PublicKey:  publicKey,
-					Signature:  signature,
-					Message:    message,
-					Blockchain: AuthTypeSolana,
-				},
-				UserId: adminUserId,
-			},
-			ctx,
-		)
+		server.Raise(addWalletAuthInTx(tx, walletArgs, ctx))
 	})
 
 }

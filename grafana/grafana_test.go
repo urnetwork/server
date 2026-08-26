@@ -140,6 +140,74 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 	}
 }
 
+func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
+	tests := []struct {
+		name           string
+		diskMountpoint string
+		serviceMetrics []string
+	}{
+		{
+			name:           "minio.json",
+			diskMountpoint: "/mnt/data",
+			serviceMetrics: []string{
+				"minio_cluster_health_nodes_online_count",
+				"minio_cluster_health_drives_offline_count",
+				"minio_cluster_health_capacity_usable_free_bytes",
+				"minio_cluster_usage_buckets_total_bytes",
+				"minio_api_requests_5xx_errors_total",
+			},
+		},
+		{
+			name:           "subtensor.json",
+			diskMountpoint: "/",
+			serviceMetrics: []string{
+				"substrate_block_height",
+				"substrate_sub_libp2p_peers_count",
+				"substrate_sub_libp2p_is_major_syncing",
+				"substrate_ready_transactions_number",
+				"substrate_rpc_sessions_opened",
+			},
+		},
+		{
+			name:           "postgres.json",
+			diskMountpoint: "/",
+			serviceMetrics: []string{
+				"pg_up",
+				"pg_stat_activity_count",
+				"pg_stat_activity_max_tx_duration",
+				"pg_settings_max_connections",
+				"pg_stat_database_xact_commit",
+				"pg_stat_database_deadlocks",
+				"pg_locks_count",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dashboard := readTestDashboard(t, test.name)
+			queries := strings.Join(dashboardExpressions(dashboard), "\n")
+			for _, metric := range test.serviceMetrics {
+				if !strings.Contains(queries, metric) {
+					t.Errorf("dashboard is missing service metric %s", metric)
+				}
+			}
+			if !strings.Contains(queries, "node_cpu_seconds_total") ||
+				!strings.Contains(queries, "node_memory_MemAvailable_bytes") {
+				t.Error("dashboard must include host CPU and memory context")
+			}
+			if !strings.Contains(queries, "node_filesystem_avail_bytes") ||
+				!strings.Contains(queries, `mountpoint="`+test.diskMountpoint+`"`) {
+				t.Errorf("dashboard must include host disk context for %s", test.diskMountpoint)
+			}
+			if !strings.Contains(queries, `{env="$env"`) ||
+				!strings.Contains(queries, `host=~"$host"`) {
+				t.Error("dashboard queries must be scoped by env and host")
+			}
+		})
+	}
+}
+
 // the scalar operator network measurements (controller/stats_collector.go).
 // every taskworker publishes the same value, so a dashboard must read each
 // with max — never sum or avg — to select the measurement without replica

@@ -39,6 +39,7 @@ const (
 	AuthTypeBringYour  AuthType = "bringyour"
 	AuthTypeGuest      AuthType = "guest"
 	AuthTypeSolana     AuthType = "solana"
+	AuthTypeBittensor  AuthType = "bittensor"
 	AuthTypeSeedphrase AuthType = "seedphrase"
 )
 
@@ -757,6 +758,24 @@ func AuthLoginWithPassword(
 	// server.Logger().Printf("Comparing password hashes\n")
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), passwordSalt)
 	if bytes.Equal(passwordHash, loginPasswordHash) {
+		// A configured acceptance identity must never get stranded behind a code
+		// prompt. This also repairs an unverified fixture left by a run against an
+		// older server, but only after its password has been proven.
+		if !userVerified && testAuthPolicyForUserAuth(userAuth).BypassVerification {
+			server.Db(session.Ctx, func(conn server.PgConn) {
+				server.RaisePgResult(conn.Exec(
+					session.Ctx,
+					`
+						UPDATE network_user_auth_password
+						SET verified = true
+						WHERE user_id = $1 AND user_auth = $2
+					`,
+					userId,
+					userAuth,
+				))
+			})
+			userVerified = true
+		}
 
 		if userVerified {
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
