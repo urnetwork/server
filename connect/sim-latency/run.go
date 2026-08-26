@@ -623,6 +623,7 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 			"pipeline_interval":     servicesConfig.PipelineInterval.String(),
 			"test_timeout":          servicesConfig.SpeedTestTimeout.String(),
 			"announce_timeout":      servicesConfig.AnnounceTimeout.String(),
+			"forward_idle_timeout":  servicesConfig.ForwardIdleTimeout.String(),
 			"impair":                fmt.Sprintf("%t", impairEnabled),
 			"reset":                 fmt.Sprintf("%t", options.Reset),
 		},

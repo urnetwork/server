@@ -93,6 +93,10 @@ type ServicesConfig struct {
 	// the announce delay before a connection is registered + tested. Lower =
 	// faster warm-up.
 	AnnounceTimeout time.Duration
+	// how long an inactive exchange forward remains reusable. The simulation
+	// keeps this below the warm-client revisit interval so measured traffic
+	// exercises forward construction and contract validation.
+	ForwardIdleTimeout time.Duration
 }
 
 func DefaultServicesConfig() *ServicesConfig {
@@ -103,10 +107,35 @@ func DefaultServicesConfig() *ServicesConfig {
 		ExchangePortBase: 7750,
 		// fast warm-up defaults: providers become selectable within a few
 		// seconds of connecting + one pipeline round
-		PipelineInterval: 10 * time.Second,
-		SpeedTestTimeout: 3 * time.Second,
-		AnnounceTimeout:  2 * time.Second,
+		PipelineInterval:   10 * time.Second,
+		SpeedTestTimeout:   3 * time.Second,
+		AnnounceTimeout:    2 * time.Second,
+		ForwardIdleTimeout: 5 * time.Second,
 	}
+}
+
+// Builds the exchange configuration used by every simulated host. Keeping
+// the measured-path lifetime here makes the competition target explicit and
+// prevents warm-up from permanently bypassing contract validation.
+func newSimulationExchangeSettings(servicesConfig *ServicesConfig) *connectserver.ExchangeSettings {
+	settings := connectserver.DefaultExchangeSettings()
+	// run the real per-connection latency + speed tests so scores reflect
+	// the simulated conditions
+	settings.ConnectionTestConfig = connectserver.DefaultTestConfig()
+	// warm-up tuning: the score gate needs a completed speed test (a
+	// provider missing it scores at the cutoff and is excluded), so fire the
+	// synthetic speed test quickly and register/test the connection promptly.
+	settings.ConnectionAnnounceTimeout = servicesConfig.AnnounceTimeout
+	settings.ConnectionAnnounceSettings.SyntheticSpeedTimeout = servicesConfig.SpeedTestTimeout
+	settings.ConnectionAnnounceSettings.PassiveSpeedWindowDuration = servicesConfig.SpeedTestTimeout
+	// measured clients are intentionally long-lived, but their exchange
+	// forwards must expire between idle crawls so the allowlisted contract
+	// lookup remains part of the measured path.
+	settings.ForwardIdleTimeout = servicesConfig.ForwardIdleTimeout
+	// a large fleet reconnects often; do not throttle
+	settings.ConnectionRateLimitSettings.BurstConnectionCount = 1_000_000
+	settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 10_000_000
+	return settings
 }
 
 // NewServices stands up the exchanges, connect handlers, api server, and the
@@ -137,19 +166,7 @@ func NewServices(ctx context.Context, servicesConfig *ServicesConfig) (*Services
 		wsPort := servicesConfig.WsPortBase + i
 		exchangePort := servicesConfig.ExchangePortBase + i
 
-		settings := connectserver.DefaultExchangeSettings()
-		// run the real per-connection latency + speed tests so scores reflect
-		// the simulated conditions
-		settings.ConnectionTestConfig = connectserver.DefaultTestConfig()
-		// warm-up tuning: the score gate needs a completed speed test (a
-		// provider missing it scores at the cutoff and is excluded), so fire the
-		// synthetic speed test quickly and register/test the connection promptly.
-		settings.ConnectionAnnounceTimeout = servicesConfig.AnnounceTimeout
-		settings.ConnectionAnnounceSettings.SyntheticSpeedTimeout = servicesConfig.SpeedTestTimeout
-		settings.ConnectionAnnounceSettings.PassiveSpeedWindowDuration = servicesConfig.SpeedTestTimeout
-		// a large fleet reconnects often; do not throttle
-		settings.ConnectionRateLimitSettings.BurstConnectionCount = 1_000_000
-		settings.ConnectionRateLimitSettings.MaxTotalConnectionCount = 10_000_000
+		settings := newSimulationExchangeSettings(servicesConfig)
 
 		exchange := connectserver.NewExchange(
 			serviceCtx,
@@ -217,7 +234,8 @@ func validateServicesConfig(config *ServicesConfig) error {
 		config.ExchangePortBase <= 0 || 65535-(config.HostCount-1) < config.ExchangePortBase {
 		return errors.New("service host count or port range is invalid")
 	}
-	if config.PipelineInterval <= 0 || config.SpeedTestTimeout <= 0 || config.AnnounceTimeout <= 0 {
+	if config.PipelineInterval <= 0 || config.SpeedTestTimeout <= 0 ||
+		config.AnnounceTimeout <= 0 || config.ForwardIdleTimeout <= 0 {
 		return errors.New("service timing must be positive")
 	}
 	return nil
