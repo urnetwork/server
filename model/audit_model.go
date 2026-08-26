@@ -72,8 +72,6 @@ type Stats struct {
 
 	// deviceId -> *ProviderState
 	activeProviders map[server.Id]*ProviderState
-	// networkId -> bool
-	activeNetworks map[server.Id]bool
 	// deviceId -> bool
 	activeDevices map[server.Id]bool
 }
@@ -130,6 +128,13 @@ func ComputeStats(ctx context.Context, lookback int) *Stats {
 		glog.Infof("[audit]ComputeStats90 computeStatsTransfer\n")
 		// all transfer
 		computeStatsTransfer(ctx, stats, conn)
+
+		// The *_summary fields are the public current counters. Provider and
+		// place history is reconstructed from daily audit events, but the live
+		// selectable-provider tables are the authority for what exists now.
+		// Using the historical three-day maximum here made ur.io publish stale
+		// peaks as if they were current inventory.
+		setCurrentProviderSummaries(stats, countProvidersByCountry(ctx, conn))
 	})
 
 	return stats
@@ -293,93 +298,115 @@ func computeStatsNetwork(ctx context.Context, stats *Stats, conn server.PgConn) 
 	result, err := conn.Query(
 		ctx,
 		`
+			WITH days AS (
+				SELECT generate_series(
+					CAST(@startDay AS date),
+					CAST(@endDay AS date),
+					interval '1 day'
+				)::date AS day
+			),
+			changes AS (
+				SELECT
+					event_time::date AS day,
+					COUNT(*) FILTER (
+						WHERE event_type = @eventTypeNetworkCreated
+					) AS created_count,
+					COUNT(*) FILTER (
+						WHERE event_type = @eventTypeNetworkDeleted
+					) AS deleted_count
+				FROM audit_network_event
+				WHERE
+					CAST(@startDay AS date) <= event_time AND
+					event_time < CAST(@endDay AS date) + interval '1 day' AND
+					event_type IN (
+						@eventTypeNetworkCreated,
+						@eventTypeNetworkDeleted
+					)
+				GROUP BY event_time::date
+			),
+			current_networks AS (
+				SELECT COUNT(*) AS network_count FROM network
+			)
 			SELECT
-				t.day,
-				t.network_id,
-				audit_network_event.event_type
-			FROM (
-				SELECT
-					to_char(event_time, 'YYYY-MM-DD') AS day,
-					network_id, MAX(event_id::varchar) AS max_event_id
-				FROM audit_network_event
-				WHERE
-					now() - interval '1 days' * @lookback <= event_time AND
-					event_type IN (
-						@eventTypeNetworkCreated,
-						@eventTypeNetworkDeleted
-					)
-				GROUP BY day, network_id
-
-				UNION ALL
-
-				SELECT
-					@startDay AS day,
-					network_id,
-					MAX(event_id::varchar) AS max_event_id
-				FROM audit_network_event
-				WHERE
-					event_time < now() - interval '1 days' * @lookback AND
-					event_type IN (
-						@eventTypeNetworkCreated,
-						@eventTypeNetworkDeleted
-					)
-				GROUP BY network_id
-			) t
-			INNER JOIN audit_network_event ON t.max_event_id::uuid = audit_network_event.event_id
-			ORDER BY day ASC
+				to_char(days.day, 'YYYY-MM-DD') AS day,
+				COALESCE(changes.created_count, 0),
+				COALESCE(changes.deleted_count, 0),
+				current_networks.network_count
+			FROM days
+			CROSS JOIN current_networks
+			LEFT JOIN changes ON changes.day = days.day
+			ORDER BY days.day ASC
 		`,
 		server.PgNamedArgs{
 			"startDay":                startDay,
-			"lookback":                stats.Lookback,
+			"endDay":                  endDay,
 			"eventTypeNetworkCreated": AuditEventTypeNetworkCreated,
 			"eventTypeNetworkDeleted": AuditEventTypeNetworkDeleted,
 		},
 	)
 	server.WithPgResult(result, err, func() {
-		activeDay := startDay
-		activeNetworks := map[server.Id]bool{}
-
-		networksData := map[string]int{}
-
-		exportActive := func() {
-			networksData[activeDay] = len(activeNetworks)
-		}
-
-		var day string
-		var networkId server.Id
-		var eventType string
+		changes := map[string]networkDayChange{}
+		currentNetworkCount := 0
 		for result.Next() {
-			result.Scan(&day, &networkId, &eventType)
-
-			if day != activeDay {
-				exportActive()
-				for packDay := nextDay(activeDay); packDay < day; packDay = nextDay(activeDay) {
-					activeDay = packDay
-					exportActive()
-				}
-				activeDay = day
-			}
-
-			// update the active providers
-			switch AuditEventType(eventType) {
-			case AuditEventTypeNetworkDeleted:
-				delete(activeNetworks, networkId)
-			case AuditEventTypeNetworkCreated:
-				activeNetworks[networkId] = true
-			}
-		}
-		exportActive()
-		// endDay inclusive: see computeStatsProvider
-		for packDay := nextDay(activeDay); packDay <= endDay; packDay = nextDay(activeDay) {
-			activeDay = packDay
-			exportActive()
+			var day string
+			var change networkDayChange
+			server.Raise(result.Scan(
+				&day,
+				&change.created,
+				&change.deleted,
+				&currentNetworkCount,
+			))
+			changes[day] = change
 		}
 
-		stats.NetworksData = networksData
-		stats.NetworksSummary = summary(networksData)
-
-		stats.activeNetworks = activeNetworks
+		// `network` is the authoritative current inventory. Walk daily audit
+		// deltas backwards from that exact count. The former forward replay
+		// required a creation event for every still-live network; the 180-day
+		// retention task legitimately removed those old events, so hundreds of
+		// thousands of older live networks silently disappeared from the
+		// public total. Backward reconstruction needs only events inside the
+		// requested window and is therefore compatible with retention.
+		stats.NetworksData = networkDataFromCurrent(
+			startDay,
+			endDay,
+			currentNetworkCount,
+			changes,
+		)
+		stats.NetworksSummary = currentNetworkCount
 	})
+}
+
+type networkDayChange struct {
+	created int
+	deleted int
+}
+
+func networkDataFromCurrent(
+	startDay string,
+	endDay string,
+	currentNetworkCount int,
+	changes map[string]networkDayChange,
+) map[string]int {
+	networksData := map[string]int{}
+	runningCount := currentNetworkCount
+	for day := endDay; startDay <= day; day = previousDay(day) {
+		networksData[day] = runningCount
+		change := changes[day]
+		runningCount -= change.created - change.deleted
+	}
+	return networksData
+}
+
+func setCurrentProviderSummaries(stats *Stats, byCountry []ProviderCountryCount) {
+	stats.ProvidersSummary = 0
+	stats.CountriesSummary = len(byCountry)
+	stats.RegionsSummary = 0
+	stats.CitiesSummary = 0
+	for _, country := range byCountry {
+		stats.ProvidersSummary += int(country.Count)
+		stats.RegionsSummary += int(country.RegionCount)
+		stats.CitiesSummary += int(country.CityCount)
+	}
 }
 
 // computeStatsDevice: the devices series is CONNECTED-PER-DAY — a device
@@ -604,6 +631,12 @@ func nextDay(day string) string {
 	server.Raise(err)
 	end := start.Add(d)
 	return end.Format("2006-01-02")
+}
+
+func previousDay(day string) string {
+	end, err := time.Parse("2006-01-02", day)
+	server.Raise(err)
+	return end.Add(-24 * time.Hour).Format("2006-01-02")
 }
 
 func ExportStats(ctx context.Context, stats *Stats) {
