@@ -495,12 +495,21 @@ type ConnectHandlerSettings struct {
 }
 
 // Keeps server-resident Transfer recovery symmetric with the client H3 path.
-func connectH3TransferCarrierProperties(useH3Datagrams bool) connect.TransferCarrierProperties {
-	return connect.TransferCarrierProperties{
+func connectH3TransferCarrierProperties(
+	useH3Datagrams bool,
+	settings *connect.H3DatagramSettings,
+	maxDatagramByteCount int,
+) connect.TransferCarrierProperties {
+	properties := connect.TransferCarrierProperties{
 		Unreliable:              useH3Datagrams,
 		UnreliableFlowIsolation: useH3Datagrams,
 		UnreliableFlowReserve:   useH3Datagrams,
 	}
+	if useH3Datagrams {
+		properties.UnreliableMaxMessageByteCount =
+			connect.H3DatagramTransferFrameByteLimit(settings, maxDatagramByteCount)
+	}
+	return properties
 }
 
 // Joins all per-connection workers before their handler releases shared state.
@@ -1304,9 +1313,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					pingTracker.Receive()
 
 					messageByteCount := len(message)
-					sendResult := residentTransport.trySendMessage(
+					sendResult := residentTransport.sendReceivedMessage(
 						handleCtx.Done(),
 						message,
+						connect.CarrierReliabilityReliable,
 					)
 					if sendResult == pooledMessageSendDone {
 						return
@@ -1850,12 +1860,23 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		)
 		defer finishConnectionAnnounce(announce)
 
+		maxDatagramByteCount := 0
+		if useH3Datagrams {
+			maxDatagramByteCount = initialConnectH3DatagramPathByteCount(
+				self.settings.H3DatagramSettings.TargetDatagramByteCount,
+				conn.SendDatagram,
+			)
+		}
 		residentTransport := NewResidentTransportWithProperties(
 			handleCtx,
 			self.exchange,
 			clientId,
 			instanceId,
-			connectH3TransferCarrierProperties(useH3Datagrams),
+			connectH3TransferCarrierProperties(
+				useH3Datagrams,
+				self.settings.H3DatagramSettings,
+				maxDatagramByteCount,
+			),
 		)
 		var datagramFragmenter *connect.H3DatagramFragmenter
 		var datagramReassembler *connect.H3DatagramReassembler
@@ -1900,15 +1921,19 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		})
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
-		deliverRoutedMessage := func(message []byte) bool {
+		deliverRoutedMessage := func(
+			message []byte,
+			reliability connect.CarrierReliability,
+		) bool {
 			// Reliability tracking remains at the complete Transfer boundary,
 			// independent of the selected hybrid lane or DATAGRAM fragments.
 			announce.ReceiveMessage(ByteCount(len(message)))
 			pingTracker.Receive()
 			messageByteCount := len(message)
-			sendResult := residentTransport.trySendMessage(
+			sendResult := residentTransport.sendReceivedMessage(
 				handleCtx.Done(),
 				message,
+				reliability,
 			)
 			if sendResult == pooledMessageSendDone {
 				return false
@@ -1925,7 +1950,8 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		if useH3Datagrams {
 			// Authentication, liveness, and routed frames above the negotiated
 			// hybrid threshold share this reliable stream. DATAGRAM has its own
-			// receive pump below; neither reader waits on resident admission.
+			// receive pump below. The stream propagates fixed-queue backpressure;
+			// DATAGRAM admission remains nonblocking.
 			// Clear the authentication deadline because DATAGRAM activity does
 			// not satisfy a stream read deadline. QUIC's connection-level idle
 			// timeout owns peer liveness in hybrid mode, while handler cleanup
@@ -1942,7 +1968,10 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 					}
 					if len(message) != 0 {
 						self.settings.H3DatagramStats.RecordStreamReceived(len(message))
-						if !deliverRoutedMessage(message) {
+						if !deliverRoutedMessage(
+							message,
+							connect.CarrierReliabilityReliable,
+						) {
 							return
 						}
 						continue
@@ -1987,7 +2016,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 					}
 				}
 
-				if !deliverRoutedMessage(message) {
+				reliability := connect.CarrierReliabilityReliable
+				if useH3Datagrams {
+					reliability = connect.CarrierReliabilityUnreliable
+				}
+				if !deliverRoutedMessage(message, reliability) {
 					return
 				}
 			}
@@ -2015,10 +2048,6 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 			connect.MessagePoolReturn(message)
 		}
-		maxDatagramByteCount := initialConnectH3DatagramPathByteCount(
-			self.settings.H3DatagramSettings.TargetDatagramByteCount,
-			conn.SendDatagram,
-		)
 		sendDatagramMessage := func(message []byte) (useStream bool, sendErr error) {
 			var nextMaxDatagramByteCount int
 			useStream, nextMaxDatagramByteCount, sendErr = datagramFragmenter.SendHybrid(

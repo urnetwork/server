@@ -26,13 +26,14 @@ type legacyTransferCarrierExchangeHeader struct {
 // receiver reads an old header, so mixed-version deployment stays reliable.
 func TestExchangeHeaderUnreliableTransferGobCompatibility(t *testing.T) {
 	current := ExchangeHeader{
-		Version:                 1,
-		ClientId:                server.NewId(),
-		ResidentId:              server.NewId(),
-		Op:                      ExchangeOpTransport,
-		UnreliableTransfer:      true,
-		UnreliableFlowIsolation: true,
-		UnreliableFlowReserve:   true,
+		Version:                               1,
+		ClientId:                              server.NewId(),
+		ResidentId:                            server.NewId(),
+		Op:                                    ExchangeOpTransport,
+		UnreliableTransfer:                    true,
+		UnreliableTransferMaxMessageByteCount: 733,
+		UnreliableFlowIsolation:               true,
+		UnreliableFlowReserve:                 true,
 	}
 	var currentBytes bytes.Buffer
 	if err := gob.NewEncoder(&currentBytes).Encode(&current); err != nil {
@@ -62,7 +63,9 @@ func TestExchangeHeaderUnreliableTransferGobCompatibility(t *testing.T) {
 		t.Fatalf("current receiver rejected old header: %v", err)
 	}
 	if decoded.UnreliableTransfer || decoded.UnreliableFlowIsolation ||
-		decoded.UnreliableFlowReserve || decoded.Version != legacy.Version ||
+		decoded.UnreliableFlowReserve ||
+		decoded.UnreliableTransferMaxMessageByteCount != 0 ||
+		decoded.Version != legacy.Version ||
 		decoded.ClientId != legacy.ClientId || decoded.ResidentId != legacy.ResidentId ||
 		decoded.Op != legacy.Op {
 		t.Fatalf("current receiver decoded %+v, want reliable legacy identity %+v", decoded, legacy)
@@ -83,20 +86,28 @@ func TestResidentTransportConstructorCarriesTransferProperties(t *testing.T) {
 		clientId,
 		instanceId,
 		clientconnect.TransferCarrierProperties{
-			Unreliable:              true,
-			UnreliableFlowIsolation: true,
-			UnreliableFlowReserve:   true,
+			Unreliable:                    true,
+			UnreliableMaxMessageByteCount: 733,
+			UnreliableFlowIsolation:       true,
+			UnreliableFlowReserve:         true,
 		},
 	)
 	defer unreliable.Close()
 	if !unreliable.header.UnreliableTransfer ||
+		unreliable.header.UnreliableTransferMaxMessageByteCount != 733 ||
 		!unreliable.header.UnreliableFlowIsolation ||
 		!unreliable.header.UnreliableFlowReserve {
 		t.Fatal("unreliable resident transport omitted its exchange property")
 	}
+	roundTrip := unreliable.header.transferCarrierProperties()
+	if !roundTrip.Unreliable || roundTrip.UnreliableMaxMessageByteCount != 733 ||
+		!roundTrip.UnreliableFlowIsolation || !roundTrip.UnreliableFlowReserve {
+		t.Fatalf("exchange carrier round trip=%+v", roundTrip)
+	}
 	reliable := NewResidentTransport(ctx, exchange, clientId, instanceId)
 	defer reliable.Close()
 	if reliable.header.UnreliableTransfer ||
+		reliable.header.UnreliableTransferMaxMessageByteCount != 0 ||
 		reliable.header.UnreliableFlowIsolation ||
 		reliable.header.UnreliableFlowReserve {
 		t.Fatal("legacy resident transport was marked unreliable")
