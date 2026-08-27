@@ -9,6 +9,7 @@ import json
 import math
 import subprocess
 import sys
+import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -150,6 +151,28 @@ PRIOR_REQUIRED_PASSES = 11
 ORDERING_METRIC = (
     "candidate_raw_score_ms_over_designated_baseline_raw_score_ms"
 )
+SECURITY_BOOLEAN_IDS = {
+    "template_database_reset",
+    "redis_reset",
+    "cgroup_contained",
+    "resource_limits",
+    "management_cpu_reserved",
+    "management_memory_reserved",
+    "default_deny_network",
+    "offline_build",
+    "offline_build_resource_limits",
+    "no_production_secrets",
+    "structural_patch_check",
+    "accounting_complete",
+    "resource_report_complete",
+    "cleanup_complete",
+    "immutable_reports",
+}
+SECURITY_ID_IDS = {
+    "cgroup_id",
+    "template_database_id",
+    "redis_generation_id",
+}
 PRODUCTION_ASSERTIONS = {
     "release_artifacts": {
         "api_binary_cgo_disabled",
@@ -296,9 +319,86 @@ def finite_positive(value: Any, label: str) -> float:
     return float(value)
 
 
+def security_evidence_authenticated(value: Any) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and set(value) == SECURITY_BOOLEAN_IDS | SECURITY_ID_IDS
+        and all(value[key] is True for key in SECURITY_BOOLEAN_IDS)
+        and all(
+            isinstance(value[key], str) and bool(value[key])
+            for key in SECURITY_ID_IDS
+        )
+    )
+
+
+def authenticate_evidence_manifest(
+    attempt_directory: Path, manifest: dict[str, Any]
+) -> tuple[int, int]:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise AuditError(f"empty evidence manifest: {attempt_directory}")
+    attempt_root = attempt_directory.resolve(strict=True)
+    seen: set[str] = set()
+    total_bytes = 0
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            raise AuditError(
+                f"evidence manifest entry {index} is not an object"
+            )
+        relative = artifact.get("path")
+        expected_sha256 = artifact.get("sha256")
+        expected_bytes = artifact.get("bytes")
+        relative_path = Path(relative) if isinstance(relative, str) else None
+        if not (
+            isinstance(relative, str)
+            and relative
+            and "\\" not in relative
+            and relative_path is not None
+            and not relative_path.is_absolute()
+            and all(part not in {"", ".", ".."} for part in relative_path.parts)
+            and relative not in seen
+            and isinstance(expected_sha256, str)
+            and len(expected_sha256) == 64
+            and expected_sha256
+            == expected_sha256.lower()
+            and all(character in "0123456789abcdef" for character in expected_sha256)
+            and isinstance(expected_bytes, int)
+            and not isinstance(expected_bytes, bool)
+            and expected_bytes >= 0
+        ):
+            raise AuditError(
+                f"evidence manifest entry {index} is invalid"
+            )
+        seen.add(relative)
+        artifact_path = attempt_directory.joinpath(*relative_path.parts)
+        path_cursor = attempt_directory
+        symlink_component = False
+        for part in relative_path.parts:
+            path_cursor /= part
+            symlink_component = symlink_component or path_cursor.is_symlink()
+        try:
+            resolved = artifact_path.resolve(strict=True)
+        except OSError as exc:
+            raise AuditError(
+                f"manifest artifact is unavailable: {relative}: {exc}"
+            ) from exc
+        if not (
+            resolved.is_relative_to(attempt_root)
+            and not symlink_component
+            and artifact_path.is_file()
+            and artifact_path.stat().st_size == expected_bytes
+            and sha256(artifact_path) == expected_sha256
+        ):
+            raise AuditError(
+                f"manifest artifact is unauthenticated: {relative}"
+            )
+        total_bytes += expected_bytes
+    return len(seen), total_bytes
+
+
 def independent_seed_result_evidence(
     commitment: dict[str, Any],
-) -> tuple[str, dict[str, str], dict[str, int]]:
+) -> tuple[str, dict[str, str], dict[str, int], int, int]:
     entries = commitment.get("seeds")
     if not (
         isinstance(entries, list)
@@ -314,6 +414,8 @@ def independent_seed_result_evidence(
     placeability_counts = {
         reference: 0 for reference in ("better", "noop", "worse")
     }
+    authenticated_manifest_entries = 0
+    authenticated_manifest_bytes = 0
     expected_gates = {
         "G1_success",
         "G2_volume",
@@ -321,11 +423,6 @@ def independent_seed_result_evidence(
         "G4_matchmaking",
         "G5_stability",
         "G6_resources",
-    }
-    security_ids = {
-        "cgroup_id",
-        "template_database_id",
-        "redis_generation_id",
     }
     for index in range(1, INDEPENDENT_TARGET + 1):
         path = INDEPENDENT / f"seed-{index:02d}/seed-result.json"
@@ -408,16 +505,7 @@ def independent_seed_result_evidence(
                 worker.get("schema") == 1
                 and worker.get("eval_error") is None
                 and isinstance(score, dict)
-                and isinstance(security, dict)
-                and all(
-                    value is True
-                    for key, value in security.items()
-                    if key not in security_ids
-                )
-                and all(
-                    isinstance(security.get(key), str) and bool(security[key])
-                    for key in security_ids
-                )
+                and security_evidence_authenticated(security)
                 and manifest.get("schema") == 1
                 and manifest.get("kind") == "sim-latency-evidence-manifest"
                 and manifest.get("job_id") == worker.get("job_id")
@@ -426,6 +514,11 @@ def independent_seed_result_evidence(
                 raise AuditError(
                     f"seed {index} {reference} worker evidence is invalid"
                 )
+            manifest_entries, manifest_bytes = authenticate_evidence_manifest(
+                attempt_directory, manifest
+            )
+            authenticated_manifest_entries += manifest_entries
+            authenticated_manifest_bytes += manifest_bytes
             gates = score.get("gates")
             if not (
                 isinstance(gates, dict)
@@ -557,7 +650,13 @@ def independent_seed_result_evidence(
                 "utf-8"
             )
         )
-    return digest.hexdigest(), result_hashes, placeability_counts
+    return (
+        digest.hexdigest(),
+        result_hashes,
+        placeability_counts,
+        authenticated_manifest_entries,
+        authenticated_manifest_bytes,
+    )
 
 
 def load_production_check(
@@ -1285,6 +1384,8 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
             seed_results_sha256,
             seed_result_hashes,
             reference_placeability_counts,
+            authenticated_manifest_entries,
+            authenticated_manifest_bytes,
         ) = independent_seed_result_evidence(commitment)
         terminal_seed_entries = terminal_decision.get("seed_results")
         if not (
@@ -1333,6 +1434,8 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
                 "terminal_seed_result_aggregate_sha256": terminal_aggregate,
                 "independent_seed_result_hashes": seed_result_hashes,
                 "reference_placeability_counts": reference_placeability_counts,
+                "authenticated_manifest_entries": authenticated_manifest_entries,
+                "authenticated_manifest_bytes": authenticated_manifest_bytes,
                 "reference_ordering_passes": progress.get(
                     "reference_ordering_passes"
                 ),
@@ -1361,13 +1464,7 @@ def audit_security_and_packages(checks: list[dict[str, Any]]) -> None:
             and host.get("resource_bomb_cleanup_verified") is True
             and host.get("default_deny_network") is True
             and host.get("checks", {}).get("docker_user_namespace") is True
-            and isinstance(security, dict)
-            and all(
-                value is True
-                for key, value in security.items()
-                if key
-                not in {"cgroup_id", "template_database_id", "redis_generation_id"}
-            )
+            and security_evidence_authenticated(security)
             and sha256(CONTROL_BOUNDARY) == CONTROL_BOUNDARY_SHA256
             and sha256(CONTROL_BOUNDARY_VERIFIER)
             == CONTROL_BOUNDARY_VERIFIER_SHA256
@@ -1526,6 +1623,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 seed_results_sha256,
                 seed_result_hashes,
                 reference_placeability_counts,
+                _authenticated_manifest_entries,
+                _authenticated_manifest_bytes,
             ) = independent_seed_result_evidence(commitment)
             records = {
                 check_id: load_production_check(readiness, check_id)
@@ -1698,6 +1797,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 seed_results_sha256,
                 seed_result_hashes,
                 reference_placeability_counts,
+                _authenticated_manifest_entries,
+                _authenticated_manifest_bytes,
             ) = independent_seed_result_evidence(commitment)
             report_sha = sha256(FINAL_REPORT)
             visual_count = sum(parser.section_visuals)
@@ -1821,10 +1922,124 @@ def audit() -> dict[str, Any]:
     }
 
 
+def expect_manifest_failure(
+    label: str, attempt_directory: Path, manifest: dict[str, Any]
+) -> None:
+    try:
+        authenticate_evidence_manifest(attempt_directory, manifest)
+    except AuditError:
+        return
+    raise AuditError(f"manifest self-test accepted {label}")
+
+
+def self_test() -> None:
+    security = {
+        **{key: True for key in SECURITY_BOOLEAN_IDS},
+        **{key: f"test-{key}" for key in SECURITY_ID_IDS},
+    }
+    if not security_evidence_authenticated(security):
+        raise AuditError("security evidence self-test rejected valid evidence")
+    invalid_security: dict[str, dict[str, Any]] = {}
+    missing = security.copy()
+    missing.pop("cleanup_complete")
+    invalid_security["missing flag"] = missing
+    false_flag = security.copy()
+    false_flag["cleanup_complete"] = False
+    invalid_security["false flag"] = false_flag
+    extra = security.copy()
+    extra["unfrozen_flag"] = True
+    invalid_security["extra flag"] = extra
+    empty_identifier = security.copy()
+    empty_identifier["cgroup_id"] = ""
+    invalid_security["empty identifier"] = empty_identifier
+    if any(
+        security_evidence_authenticated(value)
+        for value in invalid_security.values()
+    ):
+        raise AuditError("security evidence self-test accepted invalid evidence")
+    payload = b"authenticated evidence\n"
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
+    with tempfile.TemporaryDirectory(
+        prefix="sim-latency-finalization-audit-"
+    ) as directory:
+        attempt = Path(directory) / "attempt-1"
+        evidence = attempt / "evidence"
+        evidence.mkdir(parents=True)
+        artifact = evidence / "result.json"
+        artifact.write_bytes(payload)
+        artifact.chmod(0o400)
+        entry = {
+            "path": "evidence/result.json",
+            "sha256": payload_sha256,
+            "bytes": len(payload),
+        }
+        manifest = {"artifacts": [entry]}
+        if authenticate_evidence_manifest(attempt, manifest) != (
+            1,
+            len(payload),
+        ):
+            raise AuditError("manifest self-test count mismatch")
+        expect_manifest_failure(
+            "duplicate path", attempt, {"artifacts": [entry, entry.copy()]}
+        )
+        expect_manifest_failure(
+            "parent traversal",
+            attempt,
+            {"artifacts": [{**entry, "path": "../result.json"}]},
+        )
+        expect_manifest_failure(
+            "wrong byte count",
+            attempt,
+            {"artifacts": [{**entry, "bytes": len(payload) + 1}]},
+        )
+        artifact.chmod(0o600)
+        artifact.write_bytes(b"tampered evidence\n")
+        artifact.chmod(0o400)
+        expect_manifest_failure("tampered content", attempt, manifest)
+        artifact.chmod(0o600)
+        artifact.write_bytes(payload)
+        artifact.chmod(0o400)
+        symlink = evidence / "linked.json"
+        symlink.symlink_to(artifact)
+        expect_manifest_failure(
+            "symlink artifact",
+            attempt,
+            {
+                "artifacts": [
+                    {
+                        **entry,
+                        "path": "evidence/linked.json",
+                    }
+                ]
+            },
+        )
+        linked_directory = attempt / "linked-evidence"
+        linked_directory.symlink_to(evidence, target_is_directory=True)
+        expect_manifest_failure(
+            "symlink parent directory",
+            attempt,
+            {
+                "artifacts": [
+                    {
+                        **entry,
+                        "path": "linked-evidence/result.json",
+                    }
+                ]
+            },
+        )
+    print("finalization audit manifest self-test: passed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+    if args.require_complete and args.self_test:
+        raise AuditError("diagnostic modes are mutually exclusive")
+    if args.self_test:
+        self_test()
+        return 0
     result = audit()
     json.dump(result, sys.stdout, indent=2, sort_keys=True, allow_nan=False)
     sys.stdout.write("\n")

@@ -435,7 +435,7 @@ jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" --arg contr
 for output in authenticated-api.json full-staging-round.json monitoring-and-recovery.json artifact-retention.json no-secrets-audit.json; do
     [ ! -e "$OUTPUT_ROOT/$output" ] || die "production check already exists: $output"
 done
-for service in urnetwork-final-calibration-recovery-8c7cfc98.service urnetwork-final-independent-r1-da4ee86a.service urnetwork-reference-v5-pilot-4a290509-attempt-01.service urnetwork-reference-v5-hidden-PENDING.service; do
+for service in urnetwork-final-calibration-recovery-8c7cfc98.service urnetwork-final-independent-r1-da4ee86a.service urnetwork-reference-v5-pilot-4a290509-attempt-01.service urnetwork-reference-v5-hidden-a889248b-attempt-01.service; do
     state="$(systemctl is-active "$service" 2>/dev/null || true)"
     case "$state" in inactive|failed|unknown) ;; *) die "measurement service is active: $service ($state)" ;; esac
 done

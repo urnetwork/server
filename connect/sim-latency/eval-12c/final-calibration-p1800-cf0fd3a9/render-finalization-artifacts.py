@@ -117,6 +117,28 @@ PRIOR_REQUIRED_PASSES = 11
 ORDERING_METRIC = (
     "candidate_raw_score_ms_over_designated_baseline_raw_score_ms"
 )
+SECURITY_BOOLEAN_IDS = {
+    "template_database_reset",
+    "redis_reset",
+    "cgroup_contained",
+    "resource_limits",
+    "management_cpu_reserved",
+    "management_memory_reserved",
+    "default_deny_network",
+    "offline_build",
+    "offline_build_resource_limits",
+    "no_production_secrets",
+    "structural_patch_check",
+    "accounting_complete",
+    "resource_report_complete",
+    "cleanup_complete",
+    "immutable_reports",
+}
+SECURITY_ID_IDS = {
+    "cgroup_id",
+    "template_database_id",
+    "redis_generation_id",
+}
 LAUNCH_REPLICATES = 9
 LAUNCH_PLACEABILITY_TARGET = 0.94
 LAUNCH_PLACEABILITY_OBSERVED = 0.94614
@@ -168,6 +190,18 @@ class ReportShapeParser(HTMLParser):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RenderError(message)
+
+
+def security_evidence_authenticated(value: Any) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and set(value) == SECURITY_BOOLEAN_IDS | SECURITY_ID_IDS
+        and all(value[key] is True for key in SECURITY_BOOLEAN_IDS)
+        and all(
+            isinstance(value[key], str) and bool(value[key])
+            for key in SECURITY_ID_IDS
+        )
+    )
 
 
 def sha256(path: Path) -> str:
@@ -733,11 +767,6 @@ def validate_terminal_inputs() -> dict[str, Any]:
         "G5_stability",
         "G6_resources",
     }
-    security_ids = {
-        "cgroup_id",
-        "template_database_id",
-        "redis_generation_id",
-    }
     seed_results: list[dict[str, Any]] = []
     for index in range(1, INDEPENDENT_TARGET + 1):
         path = INDEPENDENT / f"seed-{index:02d}/seed-result.json"
@@ -822,17 +851,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
                 worker.get("schema") == 1
                 and worker.get("eval_error") is None
                 and isinstance(score, dict)
-                and isinstance(security, dict)
-                and all(
-                    value is True
-                    for key, value in security.items()
-                    if key not in security_ids
-                )
-                and all(
-                    isinstance(security.get(key), str)
-                    and bool(security[key])
-                    for key in security_ids
-                )
+                and security_evidence_authenticated(security)
                 and manifest.get("schema") == 1
                 and manifest.get("kind") == "sim-latency-evidence-manifest"
                 and manifest.get("job_id") == worker.get("job_id")
@@ -1831,6 +1850,20 @@ def render_outputs(data: dict[str, Any]) -> None:
 
 
 def self_test() -> None:
+    security = {
+        **{key: True for key in SECURITY_BOOLEAN_IDS},
+        **{key: f"test-{key}" for key in SECURITY_ID_IDS},
+    }
+    require(
+        security_evidence_authenticated(security),
+        "self-test valid security evidence",
+    )
+    invalid_security = security.copy()
+    invalid_security.pop("cleanup_complete")
+    require(
+        not security_evidence_authenticated(invalid_security),
+        "self-test incomplete security evidence",
+    )
     baseline_scores = [
         40_000 + index * 100 for index in range(SAME_SEED_TARGET)
     ]
