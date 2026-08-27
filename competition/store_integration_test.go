@@ -73,7 +73,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		}
 		raw, normalized := 100.0, 100.0
 		_, err = store.Complete(ctx, settings, "worker-a", claimed1.JobId, EvaluationOutcome{
-			Score:            &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}}},
+			Score:            &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: passingScoreGates()},
 			ArtifactManifest: []byte(`{"schema":1,"test":true}`),
 		})
 		if err != nil {

@@ -110,6 +110,38 @@ The API process can continue serving the ordinary BringYour routes when the
 competition is unconfigured; competition `/healthz` stays live while every
 other competition operation returns a typed, non-secret 503.
 
+## Same-round re-baseline
+
+Round creation deliberately does not claim a baseline that cannot exist yet.
+After an operator generates a round, queue admission remains closed until the
+authoritative host completes this sequence:
+
+1. Stop the ordinary competition worker and acquire the root-owned host
+   single-job operational lock. Confirm that no evaluation container or queued
+   job is running.
+2. Run `cli/competitionrebaseline` on the two management CPUs with the generated
+   round UUID, the no-op reference patch, and its canonical SHA-256 through the
+   mandatory `--patch_sha256` argument. The command loads the
+   encrypted round record through the trusted store, checks the current-round
+   policy and host containment identity, and runs the ordinary evaluator. It
+   succeeds only when the pristine baseline, the no-op candidate, every score
+   gate, and the complete evaluator security/artifact chain pass. Its output
+   contains hashes and paths only—never the hidden seed or API credentials.
+3. As root, run `competition/promote-round-rebaseline.sh` with that output, the
+   root-owned host config, the frozen production resource-bomb report, and the
+   pinned self-check executable. The promotion replays
+   `promote-host-containment.sh`, atomically installs the round-bound marker,
+   updates its expected hash in the host config, and requires a fresh
+   management-CPU self-check naming the exact round.
+4. Restart the worker. Its heartbeat and queue claim both independently require
+   `rebaseline_round_id` to equal the active job's round. Only then may
+   `/competition/score` admit submissions.
+
+Failed and non-placeable re-baseline attempts remain retained evidence; they
+are never promoted and cannot make readiness true. The operational lock is
+mandatory because the re-baseline is intentionally outside the submission FIFO
+until it has established the prerequisite that allows that FIFO to open.
+
 ## Hidden-seed lifecycle
 
 Round creation draws 256 bits from the OS CSPRNG. The seed is AES-256-GCM

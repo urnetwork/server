@@ -151,9 +151,11 @@ jq -e \
 runner_memory_limit_bytes="$(jq -er '.runner_memory_limit_bytes' <<<"$boundary_json")"
 
 readonly security_keys='["accounting_complete","cgroup_contained","cleanup_complete","default_deny_network","immutable_reports","management_cpu_reserved","management_memory_reserved","no_production_secrets","offline_build","offline_build_resource_limits","redis_reset","resource_limits","resource_report_complete","structural_patch_check","template_database_reset"]'
-jq -e --argjson security_keys "$security_keys" \
+readonly score_gate_keys='["G1_success","G2_volume","G3_path_integrity","G4_matchmaking","G5_stability","G6_resources"]'
+jq -e --argjson security_keys "$security_keys" --argjson score_gate_keys "$score_gate_keys" \
     '.schema == 1 and .eval_error == null and .score != null and
      .score.score_schema == 1 and .score.placeable == true and
+     ((.score.gates | keys | sort) == $score_gate_keys) and
      ([.score.gates[] | .passed == true] | all) and
      ([.security | to_entries[] | select(.value | type == "boolean") | .key] | sort) == $security_keys and
      ([.security | to_entries[] | select(.value | type == "boolean") | .value == true] | all) and

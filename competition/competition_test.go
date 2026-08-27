@@ -459,6 +459,33 @@ func TestHostEligibilityAllowsPreRoundHeartbeatButRejectsMalformedRebaseline(t *
 	}
 }
 
+func passingScoreGates() map[string]Gate {
+	gates := make(map[string]Gate, len(requiredScoreGateNames))
+	for _, name := range requiredScoreGateNames {
+		gates[name] = Gate{Passed: true, Details: map[string]any{}}
+	}
+	return gates
+}
+
+func TestValidateScoreRequiresFrozenGateSet(t *testing.T) {
+	raw, normalized := 10.0, 100.0
+	score := &ScoreResult{
+		ScoreSchema: ScoreSchema, RawScore: &raw, NormalizedScore: &normalized,
+		Placeable: true, Gates: passingScoreGates(),
+	}
+	if err := validateScore(score); err != nil {
+		t.Fatal(err)
+	}
+	delete(score.Gates, "G6_resources")
+	if err := validateScore(score); err == nil {
+		t.Fatal("score without every frozen gate was accepted")
+	}
+	score.Gates["replacement"] = Gate{Passed: true, Details: map[string]any{}}
+	if err := validateScore(score); err == nil {
+		t.Fatal("score with a renamed frozen gate was accepted")
+	}
+}
+
 func TestWorkerRetriesInfrastructureUnderSameJob(t *testing.T) {
 	settings := validSettings()
 	raw, normalized := 10.0, 100.0
@@ -474,7 +501,7 @@ func TestWorkerRetriesInfrastructureUnderSameJob(t *testing.T) {
 		check: hostCheck,
 		outcomes: []EvaluationOutcome{
 			{Error: infrastructureError("host_transient", "host transient"), Infrastructure: true},
-			{Score: &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: map[string]Gate{"g1": {Passed: true, Details: map[string]any{}}}}, ArtifactManifest: []byte(`{"schema":1}`)},
+			{Score: &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: passingScoreGates()}, ArtifactManifest: []byte(`{"schema":1}`)},
 		},
 	}
 	worker, err := NewWorker(settings, store, evaluator, "box-a-worker")

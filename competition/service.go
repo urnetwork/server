@@ -315,11 +315,12 @@ func validateScore(score *ScoreResult) error {
 	if math.IsNaN(*score.NormalizedScore) || math.IsInf(*score.NormalizedScore, 0) || *score.NormalizedScore < 1 || 200 < *score.NormalizedScore {
 		return errors.New("normalized score must be finite and in [1, 200]")
 	}
-	if score.Gates == nil {
-		return errors.New("score gates are missing")
+	if len(score.Gates) != len(requiredScoreGateNames) {
+		return errors.New("score must contain exactly the frozen gate set")
 	}
-	for name, gate := range score.Gates {
-		if strings.TrimSpace(name) == "" || gate.Details == nil {
+	for _, name := range requiredScoreGateNames {
+		gate, ok := score.Gates[name]
+		if !ok || strings.TrimSpace(name) == "" || gate.Details == nil {
 			return fmt.Errorf("score gate %q is malformed", name)
 		}
 	}

@@ -14,6 +14,17 @@ const (
 	ScorerVersion = "sim-latency-score/1"
 )
 
+// The public score contract has six fixed gates; missing, renamed, or extra
+// gates indicate a scorer/control-plane schema mismatch.
+var requiredScoreGateNames = [...]string{
+	"G1_success",
+	"G2_volume",
+	"G3_path_integrity",
+	"G4_matchmaking",
+	"G5_stability",
+	"G6_resources",
+}
+
 type HealthResult struct {
 	Status  string    `json:"status"`
 	Version string    `json:"version"`
