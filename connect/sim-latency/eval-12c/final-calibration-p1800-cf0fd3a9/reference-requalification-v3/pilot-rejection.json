@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-reference-v3-pilot-rejection",
+  "rejected_at": "2026-08-27T12:25:00Z",
+  "accepted": false,
+  "campaign_exit_code": 0,
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "pilot_runner_sha256": "d1ce19f9d8aa70f07c8a9fbbc366bce313c86868e369fb70208ffe903064a3d2",
+  "pilot_protocol_sha256": "cdec7c37beec8f4a96d2297456362da7e798f1169d48448973a4debec7fea9a7",
+  "pilot_design_sha256": "c9eec5b76dbb0834ea95d85bcc572f581ed42bd0235c8d93a291401deb36f8f6",
+  "pilot_decision_sha256": "24f359b5e87cc4278531b8ba9a49240560a2738ce1b158e1bb551ff5b20dca67",
+  "pilot_seed_reveal_sha256": "6b4675b9945d5140458244340d7e9a489ba4f65aa8762416b84aed265d3a7c59",
+  "campaign_commitment_sha256": "ae6064c7a63cc01f902c67bb40242b47043fce94930e2b72889e8c63091d041f",
+  "seed_result_sha256": "7bb21b7e0bf68062edb02fa228b55ec27829b7b04b4d9aefae8079f2c4444b9f",
+  "round_public_sha256": "a9551856a49d701662288544fc6bebb63dbe04919b498dee8522b80c559f9ddb",
+  "providers_sha256": "724a289d38b04503ac873317b6c331d660c76f41b0836452faad6d410959dbc6",
+  "round_id": "4f117799-f7f1-46ab-8cb9-e7be7031cbdd",
+  "seed_commitment": "fddac982fe30f7873f1fc4bf60c0ea12c32394462afa1d8587e4fff86d0168e2",
+  "reference_order": [
+    "better",
+    "noop",
+    "worse"
+  ],
+  "patch_sha256": {
+    "better": "5cfb3e4a3fa9c0ffb86e1d10fb276a3a92fdc10175a7d86440bbc2a543dd0987",
+    "noop": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+    "worse": "fd789f47f41ade788edabfc71f95b545241ba03fc78aac52748f8535d7c9cb62"
+  },
+  "worker_result_sha256": {
+    "better": "985c86f5ffd3b4bf363e34d9e247a099f5901da67483e5173dbabb5f75253cbe",
+    "noop": "c3245d42b86b86280356831af5d8673ec7d79c037a9793e3322027508c0cbe67",
+    "worse": "1c95f1dd23c595a87c8b6767f3db22b7761f72c3ac9f2f070a8b447f4b520276"
+  },
+  "evidence_manifest_sha256": {
+    "better": "627dc4cb77ce2ecc75ad4ff0f6cf977d90e3708b6e496ae0fe27b8d9f525323f",
+    "noop": "5c393ea8716eb5a33e5884323316a2be71e2d18f37aefa7c7048def4985cbfc6",
+    "worse": "b4eb098f2f0150dab162f5e9132e0db2a5849f198690d3f70254941d35cf0271"
+  },
+  "all_references_placeable": true,
+  "all_reference_gates_g1_through_g6_passed": true,
+  "private_paired_baseline_scores_ms": {
+    "better": 36070.8772,
+    "noop": 43026.094250000024,
+    "worse": 36599.156
+  },
+  "candidate_raw_scores_ms": {
+    "better": 33114.90914999998,
+    "noop": 35513.883849999955,
+    "worse": 43097.50119999988
+  },
+  "precommitted_private_paired_ratios": {
+    "better": 0.9180511182578054,
+    "noop": 0.8254033852956555,
+    "worse": 1.1775545097269424
+  },
+  "precommitted_private_paired_ordering_passed": false,
+  "designated_baseline": {
+    "reference": "better",
+    "raw_score_ms": 36070.8772
+  },
+  "diagnostic_designated_baseline_ratios": {
+    "better": 0.9180511182578054,
+    "noop": 0.984558364164206,
+    "worse": 1.1948004746610343
+  },
+  "diagnostic_designated_baseline_ordering_passed": true,
+  "root_cause": {
+    "classification": "calibration-analysis-baseline-boundary-mismatch",
+    "description": "The campaign ranked three candidate-to-private-baseline ratios even though the frozen scoring contract defines one detached same-round baseline manifest shared by every candidate in a round. The three independently drawn private baselines spanned 19.282084578747138%, which inverted better and no-op despite the candidate raw scores retaining the intended order.",
+    "private_baseline_span_fraction": 0.19282084578747138,
+    "frozen_contract_evidence": [
+      "connect/sim-latency/APEX-SCORE-SPEC.md:27",
+      "connect/sim-latency/APEX-SCORE-SPEC.md:134",
+      "connect/sim-latency/OFFICIAL-RUN.md:253"
+    ],
+    "simulator_or_scorer_defect_found": false,
+    "production_source_change_required": false
+  },
+  "retired_pilot_seed": {
+    "round_id": "4f117799-f7f1-46ab-8cb9-e7be7031cbdd",
+    "seed_commitment": "fddac982fe30f7873f1fc4bf60c0ea12c32394462afa1d8587e4fff86d0168e2",
+    "seed_reuse_forbidden": true
+  },
+  "retention": {
+    "all_complete_measurements_retained": true,
+    "measurements_censored": false,
+    "results_reclassified_under_replacement_protocol": false,
+    "hidden_promotion_failure_sha256": "427cef0b1dd0d972f3ed65f3f3be4e7a37eb4d09f9f610b9e3ec31fdb0f125c0",
+    "terminal_completion_failure_sha256": "f98c09c6ccf5283655db7e280f3e90cfb1594aa1fc20def3c2a816a07377671a",
+    "hidden_seed_material_created": false,
+    "terminal_handoff_launched": false,
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0
+  },
+  "replacement_protocol_constraints": {
+    "fresh_pilot_seed_required": true,
+    "all_prior_pilot_seeds_forbidden": true,
+    "one_predesignated_same_round_baseline_per_seed": true,
+    "ordering_metric": "candidate_raw_score_ms_over_designated_baseline_raw_score_ms",
+    "private_paired_ratios_retained_as_diagnostics": true,
+    "protocol_must_be_frozen_before_new_seed_creation": true
+  }
+}

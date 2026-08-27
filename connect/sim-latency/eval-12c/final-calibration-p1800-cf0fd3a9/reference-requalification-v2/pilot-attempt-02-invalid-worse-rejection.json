@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-reference-v2-pilot-invalid-worse-rejection",
+  "rejected_at": "2026-08-27T11:15:01Z",
+  "accepted": false,
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "frozen_base_git_sha": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "boot_id": "34760d1b-a0b6-46a0-b8c1-264abd1affba",
+  "reason": "The v2 worse reference sleeps for 30000 ms before each provider-path contract check, while the frozen provider-path test timeout is 3000 ms. It therefore cannot produce a scoreable full-scale candidate and is invalid as a reference control.",
+  "root_cause": {
+    "classification": "invalid_reference_patch_not_simulator_or_evaluator_failure",
+    "worse_patch_sha256": "6239ab98018536a30a3842fae51c6df4ecd74c6626e9969f427117d7edefadb2",
+    "inserted_delay_ms": 30000,
+    "frozen_test_timeout_ms": 3000,
+    "delay_to_timeout_ratio": 10,
+    "client_warmup_timeout_ms": 1200000,
+    "observed_provider_path_failures": 32,
+    "candidate_results_csv_bytes": 0,
+    "candidate_results_csv_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "candidate_stderr_sha256": "58021ace8b2111939deff5026331c5882b4e4123c7dbee12a42205596bd01d48",
+    "candidate_score_produced": false,
+    "pilot_ordering_decision_possible": false
+  },
+  "retired_pilot_seed": {
+    "round_id": "3cf4209a-7605-493f-8701-c5e20acbc1e1",
+    "campaign_commitment_sha256": "489e810026f58b8520086e98436781bc11595724f1fa1c5689fdc49cdde8b6e5",
+    "round_public_sha256": "bce44c765b763738879072913805d66afb3a2779f8bd16605d4867aeebdd9683",
+    "providers_sha256": "ab4d197dd50d794962115b260b9705f3571923999e97e7e32822c0e96b2f85ac",
+    "worker_request_sha256": "7658446aa6fcecaa786c99d59f6221e335d49b578299a7f44117f86415c20b77",
+    "seed_reuse_forbidden": true,
+    "fresh_precommitted_seed_required": true
+  },
+  "retained_completed_noop": {
+    "candidate_raw_score_ms": 34008.821,
+    "same_round_baseline_raw_score_ms": 38832.230500000005,
+    "paired_ratio": 0.8757885025430101,
+    "placeable": true,
+    "all_g1_g6_passed": true,
+    "score_sha256": "075f29fb16c720f59733d2ae0c7a7f64062621fb87446d449dca8512d01a0290",
+    "worker_result_sha256": "bf41f594900a52fb66fdc196b8b5f2e1f68a962de021310d2c36ca10f3f997c9",
+    "evidence_manifest_sha256": "f890dc3d70c414660ac1359f41642d81a69f53bfd73b22758a6bf76106edbb5b"
+  },
+  "failure_evidence": {
+    "failure_json_sha256": "09df6b0d5b802b03a6ae9ee0e2f05c52ac2f0ea901d07719134cf5580998567d",
+    "failed_evidence_manifest_sha256": "a8d7d10d1de90bfb0f928e4648a7f2d6799c8a64cc85eecf01224b6a1340b0ee",
+    "last_progress_sha256": "33550717a11e9a73dfe66b59c739c77bc1881e83bfb13642e585982add3b41ba",
+    "termination_exit_code": 143,
+    "termination_used_evaluator_term_cleanup_path": true,
+    "failure_evidence_retained": true
+  },
+  "orchestration": {
+    "pilot_service": "urnetwork-reference-v2-pilot-7f10e722-attempt-02.service",
+    "pilot_invocation_id": "c02f8844f69b45dc90bd5b8cec71412c",
+    "pilot_launch_sha256": "e5482f7fcfaf57ec6ff693d3db9241ebb0efe0510c8b9278498cf7de6281b38b",
+    "hidden_promoter_service": "urnetwork-reference-v2-hidden-promoter-636eba78-attempt-02.service",
+    "hidden_promoter_invocation_id": "27dee51539594b8d829ff17cec4ea99d",
+    "hidden_promoter_launch_sha256": "1645298af4a79fc4d364157f97786a1248d08a25b157702b8afeb20f4872db29",
+    "terminal_watcher_service": "urnetwork-reference-v2-terminal-completion-bad56037-attempt-03.service",
+    "terminal_watcher_invocation_id": "067a5651dfcd4e639499a81bb40174fd",
+    "terminal_watcher_launch_sha256": "fa2eb7ae17d70b1380aec3a3bb626975110d86460a30efa51ec2f0c1b8e7f868",
+    "pilot_decision_created": false,
+    "pilot_seed_reveal_created": false,
+    "hidden_campaign_launched": false,
+    "hidden_seed_material_created": false
+  },
+  "retention": {
+    "pilot_claimed_as_pass": false,
+    "completed_measurements_censored": false,
+    "completed_measurements_reclassified": false,
+    "partial_measurements_retained": true,
+    "failure_artifacts_retained": true,
+    "replacement_must_use_a_new_patch_and_fresh_seed": true
+  },
+  "cleanup": {
+    "pilot_service_active_state": "inactive",
+    "pilot_service_sub_state": "dead",
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0,
+    "verified_at": "2026-08-27T11:15:01Z"
+  }
+}

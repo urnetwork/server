@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-reference-v5-static-qualification",
+  "qualified_at": "2026-08-27T16:26:49Z",
+  "accepted_for_full_scale_evaluator_pilot": true,
+  "official_reference_set_accepted": false,
+  "performance_acceptance_pending": true,
+  "frozen_inputs": {
+    "base_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+    "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+    "boot_id": "34760d1b-a0b6-46a0-b8c1-264abd1affba",
+    "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+    "simulator_scorer_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
+    "host_qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+    "baseline_mean_ms": 43101.69115,
+    "significant_better_threshold_ms": 36162.31887485,
+    "scale": {
+      "providers": 1800,
+      "clients": 200,
+      "arrivals_per_minute": 80,
+      "quality_window": 2,
+      "exchange_hosts": 4,
+      "fleet_shards": 4,
+      "duration": "3m0s",
+      "impairment": true
+    }
+  },
+  "patch_sha256": {
+    "better": "1a81e5a5fb7897cee38eb3952ed0db82a6cccb4a7821eb9db84d93eb55d9ff82",
+    "noop": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+    "worse": "982b192198ffa63942db1804629844f1cf9801bd4a71f64d2847a305217257a0"
+  },
+  "validation_source_sha256": {
+    "better_reference_test_go": "536181fcfc943f6d211a2f8be3917314df5167a42940b16f547402b68bd1e5d9",
+    "worse_reference_test_go": "85c6e44cced90ff25d6d7b2ee35c9b5fe0c2edf543f730baa03879310ad71c1c"
+  },
+  "static_checks": [
+    {
+      "name": "all-patches-apply-cleanly-to-frozen-base",
+      "passed": true,
+      "command": "for p in better noop worse; do git apply --check /home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9/reference-requalification-v5/$p.patch || exit $?; done"
+    },
+    {
+      "name": "better-focused-correctness",
+      "passed": true,
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go test -timeout 5m ./connect -run '^(TestV5Reference|TestResidentContractManagerCanceledLookupReturnsInactive|TestHandleContractManagerDone)' -count=1",
+      "worktree": "/home/by/urnetwork/server-v5-reference"
+    },
+    {
+      "name": "better-focused-race",
+      "passed": true,
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go test -race -timeout 5m ./connect -run '^(TestV5Reference|TestResidentContractManagerCanceledLookupReturnsInactive|TestHandleContractManagerDone)' -count=1",
+      "worktree": "/home/by/urnetwork/server-v5-reference"
+    },
+    {
+      "name": "worse-focused-correctness",
+      "passed": true,
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go test -timeout 5m ./connect -run '^(TestV5WorseReference|TestResidentContractManagerCanceledLookupReturnsInactive|TestHandleContractManagerDone)' -count=1",
+      "worktree": "/home/by/urnetwork/server-v5-worse"
+    },
+    {
+      "name": "worse-focused-race",
+      "passed": true,
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go test -race -timeout 5m ./connect -run '^(TestV5WorseReference|TestResidentContractManagerCanceledLookupReturnsInactive|TestHandleContractManagerDone)' -count=1",
+      "worktree": "/home/by/urnetwork/server-v5-worse"
+    }
+  ],
+  "better_reference_contract": {
+    "production_valid": true,
+    "simulator_only_branch": false,
+    "timeout_changed": false,
+    "behavior": "Bulk-fetch open contracts, cache unordered pair activity, reuse an authoritative per-source snapshot for absent pairs during the existing five-second cache window, and coalesce simultaneous cache misses with a per-manager lookup mutex.",
+    "deterministic_coverage": [
+      "active pair",
+      "closed pair",
+      "missing pair",
+      "unrelated pair",
+      "absent pair cached inactive",
+      "canceled lookup"
+    ]
+  },
+  "worse_reference_contract": {
+    "production_valid": true,
+    "scope": "fleet-role process only",
+    "activation_delay": "5m0s",
+    "maximum_workers_per_shard": 2,
+    "worker_gomaxprocs": 2,
+    "busy_interval": "90ms",
+    "idle_interval": "10ms",
+    "ordinary_commands_affected": false,
+    "deterministic_coverage": [
+      "fleet-only role selection",
+      "two-worker bound",
+      "90/10 duty cycle",
+      "five-minute activation delay",
+      "cancellation before activation"
+    ]
+  },
+  "invariants": {
+    "frozen_source_modified": false,
+    "frozen_baseline_modified": false,
+    "frozen_scale_modified": false,
+    "fresh_seed_material_created": false,
+    "prior_measurements_reclassified": false,
+    "full_scale_pilot_required": true,
+    "fresh_hidden_four_of_five_screen_required_after_pilot": true
+  }
+}
