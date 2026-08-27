@@ -29,6 +29,7 @@ INDEPENDENT_ROOT = REFERENCE_V5 / "hidden-launch-runtime"
 INDEPENDENT = INDEPENDENT_ROOT / "independent-references"
 
 SOURCE_LOCK = ROOT / "source-lock.json"
+SEASON_BASE_EQUIVALENCE = ROOT / "season-base-equivalence.json"
 FRONTIER = ROOT / "exact-frontier/frontier-decision.json"
 POINT = ROOT / "exact-frontier/p1800-c200-r80-q2/point-summary.json"
 FROZEN_ROUND = ROUND / "frozen-round.json"
@@ -70,10 +71,16 @@ CALIBRATION_DOCUMENT = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
 SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
 )
+SEASON_BASE_EQUIVALENCE_SHA256 = (
+    "6bce6a80cecfee0297bcc11afbaa390576d8f542980d8797e4da33046daa07b3"
+)
 CALIBRATION_TEMPLATE_SHA256 = (
     "ff4883f7b9d0776ebe0e91d33e91a25d1f8a5bbb616776a135e1e1c06e8cc7cc"
 )
 BASE_SHA = "5ca3d5242f4a7d40efe4415635608023b05a0956"
+PUBLIC_AUTHORING_TAG = "apex-season-1"
+PUBLIC_AUTHORING_COMMIT = "eb697281cbe0a19a27d7771fe69fb24c2c3dab8c"
+EDITABLE_BLOB = "66e2d39956b958749dfdfd00f408d4c05f874833"
 EVALUATOR_IMAGE = (
     "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
 )
@@ -271,6 +278,7 @@ def esc(value: Any) -> str:
 def validate_terminal_inputs() -> dict[str, Any]:
     require(sha256(SOURCE_LOCK) == SOURCE_LOCK_SHA256, "source lock changed")
     for path, expected_hash in (
+        (SEASON_BASE_EQUIVALENCE, SEASON_BASE_EQUIVALENCE_SHA256),
         (PLACEABILITY_POLICY, PLACEABILITY_POLICY_SHA256),
         (POSTPROCESSING_REPAIR, POSTPROCESSING_REPAIR_SHA256),
         (STRICT_SAME_ANALYSIS, STRICT_SAME_ANALYSIS_SHA256),
@@ -279,6 +287,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
         exact_mode(path, 0o400)
         require(sha256(path) == expected_hash, f"authenticated input changed: {path}")
     source_lock = load_object(SOURCE_LOCK)
+    season_base = load_object(SEASON_BASE_EQUIVALENCE)
     frontier = load_object(FRONTIER)
     point = load_object(POINT)
     frozen = load_object(FROZEN_ROUND)
@@ -307,6 +316,37 @@ def validate_terminal_inputs() -> dict[str, Any]:
         and source_lock.get("evaluator", {}).get("simulator_sha256")
         == SIMULATOR_SHA256,
         "source-lock evaluator identity",
+    )
+    authoring = season_base.get("public_authoring_base")
+    evaluator = season_base.get("authoritative_evaluator")
+    policy = season_base.get("patch_policy")
+    editable_blobs = season_base.get("editable_blobs")
+    editable = (
+        editable_blobs.get("connect/resident_contract_manager.go")
+        if isinstance(editable_blobs, dict)
+        else None
+    )
+    require(
+        season_base.get("kind") == "sim-latency-season-base-equivalence"
+        and isinstance(authoring, dict)
+        and authoring.get("tag") == PUBLIC_AUTHORING_TAG
+        and authoring.get("commit") == PUBLIC_AUTHORING_COMMIT
+        and authoring.get("remote_tag_matches_local") is True
+        and isinstance(evaluator, dict)
+        and evaluator.get("commit") == BASE_SHA
+        and evaluator.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+        and evaluator.get("image_digest") == EVALUATOR_IMAGE
+        and isinstance(policy, dict)
+        and policy.get("allowed_paths")
+        == ["connect/resident_contract_manager.go"]
+        and isinstance(editable, dict)
+        and editable.get("identical") is True
+        and editable.get("public_authoring_base_blob") == EDITABLE_BLOB
+        and editable.get("authoritative_evaluator_blob") == EDITABLE_BLOB
+        and season_base.get("all_allowed_path_blobs_identical") is True
+        and season_base.get("local_reproduction_uses_evaluator_image") is True
+        and season_base.get("seed_material_included") is False,
+        "public authoring base equivalence",
     )
     require(
         frontier.get("accepted") is True
@@ -1046,6 +1086,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
 
     return {
         "source_lock": source_lock,
+        "season_base": season_base,
         "frontier": frontier,
         "point": point,
         "frozen": frozen,
@@ -1411,12 +1452,13 @@ def render_html(data: dict[str, Any]) -> str:
     <div class="metrics">
       {metric('production readiness checks', '7 / 7 passed')}
       {metric('control-plane commit', compact_sha(str(readiness['control_plane_commit'])))}
-      {metric('source repositories frozen', '9 exact commits')}
+      {metric('public patch base', f'{PUBLIC_AUTHORING_TAG} · {compact_sha(PUBLIC_AUTHORING_COMMIT)}')}
+      {metric('evaluator source', compact_sha(BASE_SHA))}
       {metric('host qualification', compact_sha(HOST_QUALIFICATION_SHA256))}
     </div>
   </section>
 
-  <footer>Generated {generated_at} from content-addressed local evidence. Season server commit <code>{BASE_SHA}</code>; simulator <code>{SIMULATOR_SHA256}</code>.</footer>
+  <footer>Generated {generated_at} from content-addressed local evidence. Public patch tag <code>{PUBLIC_AUTHORING_TAG}</code> at <code>{PUBLIC_AUTHORING_COMMIT}</code>; authoritative evaluator commit <code>{BASE_SHA}</code>; simulator <code>{SIMULATOR_SHA256}</code>.</footer>
 </main>
 </body>
 </html>
@@ -1534,6 +1576,10 @@ def render_calibration_document(data: dict[str, Any]) -> str:
     source_lock_link = (
         "eval-12c/final-calibration-p1800-cf0fd3a9/source-lock.json"
     )
+    season_base_link = (
+        "eval-12c/final-calibration-p1800-cf0fd3a9/"
+        "season-base-equivalence.json"
+    )
     progress_link = (
         "eval-12c/final-calibration-p1800-cf0fd3a9/post-frontier/"
         "p1800-c200-r80-q2/same-seed/progress.json"
@@ -1569,6 +1615,7 @@ Status: **LOCALLY QUALIFIED — technical launch gate open**
 Generated: `{generated_at}`  
 Score schema: `1`  
 Source lock: `{SOURCE_LOCK_SHA256}`
+Season-base equivalence: `{SEASON_BASE_EQUIVALENCE_SHA256}`
 
 This is the terminal local calibration for the sim-latency competition. It
 binds the selected workload, baseline noise, takeover policy, independent-seed
@@ -1578,7 +1625,11 @@ on-call ownership are separate operational decisions.
 
 ## Frozen identity and environment
 
-- Season server commit: `{BASE_SHA}`
+- Public patch-authoring base: `{PUBLIC_AUTHORING_TAG}` at
+  `{PUBLIC_AUTHORING_COMMIT}`
+- Entire editable surface: `connect/resident_contract_manager.go`, Git blob
+  `{EDITABLE_BLOB}` at both the public tag and evaluator commit
+- Authoritative evaluator source commit: `{BASE_SHA}`
 - Evaluator image: `{EVALUATOR_IMAGE}`
 - Simulator and scorer SHA-256: `{SIMULATOR_SHA256}`
 - Host qualification SHA-256: `{HOST_QUALIFICATION_SHA256}`
@@ -1593,6 +1644,8 @@ on-call ownership are separate operational decisions.
   socket, and external networking are unavailable.
 
 Authoritative source-lock record: [`{source_lock_link}`]({source_lock_link}).
+Public-tag/evaluator equivalence record:
+[`{season_base_link}`]({season_base_link}).
 
 ### Frozen repository commits
 
@@ -1785,6 +1838,9 @@ def render_outputs(data: dict[str, Any]) -> None:
         "kind": "sim-latency-finalize-report-evidence",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source_lock_sha256": SOURCE_LOCK_SHA256,
+        "season_base_equivalence_sha256": (
+            SEASON_BASE_EQUIVALENCE_SHA256
+        ),
         "same_seed_selection_sha256": sha256(SELECTION),
         "same_seed_analysis_sha256": sha256(SAME_ANALYSIS),
         "strict_same_seed_analysis_sha256": STRICT_SAME_ANALYSIS_SHA256,

@@ -88,6 +88,7 @@ FINAL_REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
 )
+SERVER_COMMIT = "5ca3d5242f4a7d40efe4415635608023b05a0956"
 SEASON_BASE_EQUIVALENCE_SHA256 = (
     "6bce6a80cecfee0297bcc11afbaa390576d8f542980d8797e4da33046daa07b3"
 )
@@ -1602,8 +1603,7 @@ def audit_security_and_packages(checks: list[dict[str, Any]]) -> None:
             and CONTROL_SOURCE_RELEASE.stat().st_mode & 0o777 == 0o400
             and control_release.get("kind")
             == "sim-latency-control-plane-source-release"
-            and control_release.get("season_base_commit")
-            == "5ca3d5242f4a7d40efe4415635608023b05a0956"
+            and control_release.get("season_base_commit") == SERVER_COMMIT
             and control_release.get("control_plane_commit")
             == CONTROL_SOURCE_COMMIT
             and control_release.get("origin_control_plane_commit")
@@ -1838,6 +1838,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
             "not confidence-equivalent",
             "8/12",
             "r=9",
+            "apex-season-1",
+            "public patch-authoring base",
         )
         superseded_template = (
             "not yet qualified" in text.lower()
@@ -1848,6 +1850,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
             "pass"
             if not superseded_template
             and SOURCE_LOCK_SHA256 in text
+            and SEASON_BASE_EQUIVALENCE_SHA256 in text
+            and SERVER_COMMIT in text
             and all(term in text.lower() for term in required_terms)
             else "pending"
         )
@@ -1899,9 +1903,13 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and "94.614%" in text
                 and "86.612%" in text
                 and "placeability is a separate diagnostic" in text.lower()
+                and "apex-season-1" in text
+                and SERVER_COMMIT in text
                 and evidence.get("schema") == 1
                 and evidence.get("kind") == "sim-latency-finalize-report-evidence"
                 and evidence.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+                and evidence.get("season_base_equivalence_sha256")
+                == SEASON_BASE_EQUIVALENCE_SHA256
                 and evidence.get("report_sha256") == report_sha
                 and evidence.get("same_seed_selection_sha256")
                 == sha256(SELECTION)
