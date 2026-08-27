@@ -47,7 +47,11 @@ if [[ -d $perfvar_dir ]]; then
     popd
 fi
 
-for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -sd ' ' -`; do
+# Evaluator outputs are immutable evidence, not Go packages. Some retained
+# campaigns contain standalone *_test.go policy fixtures and root-owned trees;
+# never let them enter source test discovery or make CI depend on artifact
+# ownership.
+for d in `find . -path './connect/sim-latency/eval-*' -prune -o -iname '*_test.go' -print | xargs -n 1 dirname | sort | uniq | paste -sd ' ' -`; do
     if [[ $d == $proxy_dir || $d == $perfvar_dir ]]; then
         # run separately above with each integration package's timing contract
         continue

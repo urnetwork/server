@@ -117,12 +117,14 @@ The raw score of one replicate is `Q(0.95)` over all of its `L(row)` values.
 Lower is better. Failures are included at the timeout ceiling; timing is never
 computed over successes alone.
 
-For each scalar diagnostic, the baseline value is `Q(0.50)` over baseline
-replicate values and the candidate value is `Q(0.50)` over candidate replicate
-values. Because the signed replicate count is odd, this is the middle order
-statistic. The official `raw_score` is the candidate median. No best-of-run,
-retry, trimming, or replacement of a failed replicate is allowed. Identical
-canonical patch bytes in one round reuse the cached aggregate result.
+For each performance scalar diagnostic, the baseline value is `Q(0.50)` over
+baseline replicate values and the candidate value is `Q(0.50)` over candidate
+replicate values. Because the signed replicate count is odd, this is the middle
+order statistic. G3 accounting coverage and G4 sample-span coverage are safety
+diagnostics and aggregate as the minimum replicate value. The official
+`raw_score` is the candidate median. No best-of-run, retry, trimming, or
+replacement of a failed replicate is allowed. Identical canonical patch bytes
+in one round reuse the cached aggregate result.
 
 ## 5. Gates
 
@@ -173,10 +175,21 @@ evaluation error.
 Every measured-window FindProviders2 sample MUST have `pool_count > 0` and a
 non-empty retained `candidates` list, and every replicate MUST contain at least
 one measured-window sample. Its `load_millis` MUST be finite and non-negative.
-For each replicate, compute type-7 p05 of `pool_count`; the cross-replicate
-median MUST preserve at least 90% of the same-round baseline. This prevents a
-submission from buying lower matchmaking latency by collapsing the eligible
-provider pool. The two inclusive conditions are
+For every replicate, the first-to-last in-window sample span MUST cover at
+least 90% of the measured window:
+
+```text
+(max(sample_time_ms) - min(sample_time_ms)) /
+    (measure_end_ms - measure_start_ms) >= 0.90
+```
+
+The baseline builder rejects a replicate below this bound. A candidate below
+it fails G4 and is non-placeable. This prevents a submission from suppressing
+matchmaking work after an early valid observation. For each replicate, compute
+type-7 p05 of `pool_count`; the cross-replicate median MUST preserve at least
+90% of the same-round baseline. This also prevents a submission from buying
+lower matchmaking latency by collapsing the eligible provider pool. The other
+two inclusive conditions are
 
 ```text
 C(per_replicate_load_millis_p95) <=
@@ -272,8 +285,9 @@ byte-identical output.
 
 The scorer always records aggregate and per-replicate raw score, success rate,
 request count, received bytes, accounting coverage, sample count, empty-pool
-count, FindProviders2 load p95 and pool-count p05, resource flags, gate
-thresholds, normalized score, and takeover threshold.
+count, minimum first-to-last sample-span fraction, FindProviders2 load p95 and
+pool-count p05, resource flags, gate thresholds, normalized score, and takeover
+threshold.
 
 During an active hidden-seed round Apex returns only `score_schema`,
 `placeable`, normalized score (when placeable), gate booleans, and the typed

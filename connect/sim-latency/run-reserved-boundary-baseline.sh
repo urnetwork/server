@@ -95,7 +95,9 @@ verify_result() {
            (.request_count | type == "number" and . > 0) and
            (.received_bytes | type == "number" and . > 0) and
            (.findproviders_load_p95_ms | type == "number" and isfinite and . >= 0) and
-           (.findproviders_pool_p05 | type == "number" and . > 0)] | all)' \
+           (.findproviders_pool_p05 | type == "number" and . > 0) and
+           (.findproviders_sample_span_fraction |
+             type == "number" and isfinite and . >= 0.90 and . <= 1)] | all)' \
         "$baseline" >/dev/null || return 1
     jq -e \
         '.schema == 1 and .eval_error == null and .score.placeable == true and

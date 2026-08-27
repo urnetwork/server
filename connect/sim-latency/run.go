@@ -200,6 +200,8 @@ func Run(options *RunOptions) (retErr error) {
 
 	var driver *ClientDriver
 	var driverDone <-chan error
+	var stopMatchmakingProbes context.CancelFunc
+	var matchmakingProbesDone <-chan error
 	var fleet *Fleet
 	var fleetProcs []*fleetProcess
 	var services *Services
@@ -218,6 +220,15 @@ func Run(options *RunOptions) (retErr error) {
 		stopSignals()
 		var cleanupErr error
 
+		if stopMatchmakingProbes != nil {
+			stopMatchmakingProbes()
+		}
+		if matchmakingProbesDone != nil {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				waitAsync("matchmaking probes", matchmakingProbesDone, teardownTimeout),
+			)
+		}
 		if driverDone != nil {
 			cleanupErr = errors.Join(cleanupErr, waitAsync("client driver", driverDone, teardownTimeout))
 		}
@@ -511,13 +522,53 @@ func Run(options *RunOptions) (retErr error) {
 	runStats.MeasureStartMs = measureStart.UnixMilli()
 	runStats.MeasureEndMs = measureEnd.UnixMilli()
 	logf("MEASURE WINDOW: [%d, %d] unix-ms", measureStart.UnixMilli(), measureEnd.UnixMilli())
+	probeOffsets := matchmakingProbeOffsets(options.Duration)
+	if len(probeOffsets) < 2 || probeOffsets[0] != 0 {
+		return incompleteError(
+			"matchmaking_probe_schedule_invalid",
+			"measurement setup",
+			fmt.Errorf("no complete probe schedule for the %s measured window", options.Duration),
+		)
+	}
 	probeTimeout := min(options.Duration, 10*time.Second)
-	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
-	probeErr := driver.ProbeMatchmaking(probeCtx)
-	probeCancel()
+	probe := func(probeParentCtx context.Context, probeIndex int) error {
+		probeCtx, probeCancel := context.WithTimeout(probeParentCtx, probeTimeout)
+		defer probeCancel()
+		return driver.ProbeMatchmaking(probeCtx, probeIndex)
+	}
+	probeErr := probe(ctx, 0)
 	if probeErr != nil {
 		return incompleteError("matchmaking_probe_failed", "measurement setup", probeErr)
 	}
+	matchmakingProbeCtx, cancelMatchmakingProbes := context.WithCancel(ctx)
+	stopMatchmakingProbes = cancelMatchmakingProbes
+	matchmakingProbesDoneMutable := make(chan error, 1)
+	matchmakingProbesDone = matchmakingProbesDoneMutable
+	waitUntil := func(waitCtx context.Context, target time.Time) error {
+		remaining := target.Sub(server.NowUtc())
+		if remaining <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			return nil
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		}
+	}
+	go func() {
+		matchmakingProbesDoneMutable <- runMatchmakingProbes(
+			matchmakingProbeCtx,
+			measureStart,
+			probeOffsets[1:],
+			1,
+			waitUntil,
+			probe,
+		)
+		close(matchmakingProbesDoneMutable)
+	}()
 	driverDoneMutable := make(chan error, 1)
 	driverDone = driverDoneMutable
 	go func() {
@@ -540,6 +591,16 @@ func Run(options *RunOptions) (retErr error) {
 		logf("measure window complete; stopping arrivals and draining admitted crawls")
 	case <-ctx.Done():
 		return incompleteError("interrupted", "measured window", ctx.Err())
+	case probeErr := <-matchmakingProbesDone:
+		matchmakingProbesDone = nil
+		stopMatchmakingProbes = nil
+		if ctx.Err() != nil {
+			return incompleteError("interrupted", "measured window", ctx.Err())
+		}
+		if probeErr == nil {
+			probeErr = errors.New("matchmaking probes stopped before measure window ended")
+		}
+		return incompleteError("matchmaking_probe_failed", "measured window", probeErr)
 	case driverErr := <-driverDone:
 		driverDone = nil
 		if driverErr == nil {
@@ -547,6 +608,12 @@ func Run(options *RunOptions) (retErr error) {
 		}
 		return incompleteError("client_driver_stopped", "measured window", driverErr)
 	}
+	stopMatchmakingProbes()
+	if err := waitAsync("matchmaking probes", matchmakingProbesDone, teardownTimeout); err != nil {
+		return incompleteError("matchmaking_probe_drain_failed", "measurement drain", err)
+	}
+	stopMatchmakingProbes = nil
+	matchmakingProbesDone = nil
 
 	// Closing admission and canceling the run are intentionally separate. A
 	// crawl whose arrival precedes measureEnd belongs to the sample and must be
@@ -586,6 +653,11 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 	if servicesConfig == nil {
 		servicesConfig = DefaultServicesConfig()
 	}
+	probeInterval := ""
+	probeOffsets := matchmakingProbeOffsets(options.Duration)
+	if 1 < len(probeOffsets) {
+		probeInterval = (probeOffsets[1] - probeOffsets[0]).String()
+	}
 	return &RunStats{
 		Schema:           runStatsSchema,
 		Kind:             runStatsKind,
@@ -608,24 +680,31 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 		Arch:             runtime.GOARCH,
 		NumCpu:           runtime.NumCPU(),
 		Flags: map[string]string{
-			"ramp":                  options.Ramp.String(),
-			"prewarm":               options.Prewarm.String(),
-			"settle":                options.Settle.String(),
-			"client_warmup_timeout": options.ClientWarmupTimeout.String(),
-			"duration":              options.Duration.String(),
-			"request_timeout":       options.RequestTimeout.String(),
-			"fleet_shards":          intToStr(options.FleetShards),
-			"site_listen":           options.SiteListen,
-			"hosts":                 intToStr(servicesConfig.HostCount),
-			"api_port":              intToStr(servicesConfig.ApiPort),
-			"ws_port_base":          intToStr(servicesConfig.WsPortBase),
-			"exchange_port_base":    intToStr(servicesConfig.ExchangePortBase),
-			"pipeline_interval":     servicesConfig.PipelineInterval.String(),
-			"test_timeout":          servicesConfig.SpeedTestTimeout.String(),
-			"announce_timeout":      servicesConfig.AnnounceTimeout.String(),
-			"forward_idle_timeout":  servicesConfig.ForwardIdleTimeout.String(),
-			"impair":                fmt.Sprintf("%t", impairEnabled),
-			"reset":                 fmt.Sprintf("%t", options.Reset),
+			"ramp":                       options.Ramp.String(),
+			"prewarm":                    options.Prewarm.String(),
+			"settle":                     options.Settle.String(),
+			"client_warmup_timeout":      options.ClientWarmupTimeout.String(),
+			"duration":                   options.Duration.String(),
+			"request_timeout":            options.RequestTimeout.String(),
+			"fleet_shards":               intToStr(options.FleetShards),
+			"site_listen":                options.SiteListen,
+			"hosts":                      intToStr(servicesConfig.HostCount),
+			"api_port":                   intToStr(servicesConfig.ApiPort),
+			"ws_port_base":               intToStr(servicesConfig.WsPortBase),
+			"exchange_port_base":         intToStr(servicesConfig.ExchangePortBase),
+			"pipeline_interval":          servicesConfig.PipelineInterval.String(),
+			"test_timeout":               servicesConfig.SpeedTestTimeout.String(),
+			"announce_timeout":           servicesConfig.AnnounceTimeout.String(),
+			"forward_idle_timeout":       servicesConfig.ForwardIdleTimeout.String(),
+			"matchmaking_probe_interval": probeInterval,
+			"matchmaking_sample_span_minimum": strconv.FormatFloat(
+				minimumFindProvidersSampleSpanFraction,
+				'f',
+				2,
+				64,
+			),
+			"impair": fmt.Sprintf("%t", impairEnabled),
+			"reset":  fmt.Sprintf("%t", options.Reset),
 		},
 	}, nil
 }

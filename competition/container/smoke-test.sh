@@ -552,7 +552,10 @@ sudo -n docker inspect "$scorer_id" | jq -e \
      (.[0].Mounts | any(.Destination == "/score-output" and .RW == true))' >/dev/null
 sudo -n jq -e '.score_schema == 1 and
        .kind == "sim-latency-score-baseline" and
-       (.replicates | length) == 1' "$baseline_output/baseline.json" >/dev/null
+       (.replicates | length) == 1 and
+       ([.replicates[].findproviders_sample_span_fraction |
+         type == "number" and isfinite and . >= 0.90 and . <= 1] | all)' \
+    "$baseline_output/baseline.json" >/dev/null
 compose --profile score down --volumes --remove-orphans >&2
 active_project=""
 verify_local_sources_unchanged

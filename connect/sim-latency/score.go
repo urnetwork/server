@@ -33,16 +33,18 @@ const scoreBaselineKind = "sim-latency-score-baseline"
 const accountingSnapshotKind = "sim-latency-accounting"
 const resourceReportKind = "sim-latency-resource-report"
 const scoreResultMaxInputBytes = 128 << 20
+const minimumFindProvidersSampleSpanFraction = 0.90
 
 // ScoreBaselineReplicate contains trusted same-round baseline diagnostics for
 // one replicate. The scorer recomputes every aggregate from these values.
 type ScoreBaselineReplicate struct {
-	RawScore               float64 `json:"raw_score"`
-	SuccessRate            float64 `json:"success_rate"`
-	RequestCount           int64   `json:"request_count"`
-	ReceivedBytes          int64   `json:"received_bytes"`
-	FindProvidersLoadP95Ms float64 `json:"findproviders_load_p95_ms"`
-	FindProvidersPoolP05   float64 `json:"findproviders_pool_p05"`
+	RawScore                        float64 `json:"raw_score"`
+	SuccessRate                     float64 `json:"success_rate"`
+	RequestCount                    int64   `json:"request_count"`
+	ReceivedBytes                   int64   `json:"received_bytes"`
+	FindProvidersLoadP95Ms          float64 `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64 `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64 `json:"findproviders_sample_span_fraction"`
 }
 
 // ScoreBaselineManifest is the signed, hidden-seed round contract consumed by
@@ -124,29 +126,31 @@ type ScoreGate struct {
 }
 
 type ScoreReplicateDiagnostics struct {
-	EvaluationId            string   `json:"evaluation_id"`
-	RawScore                float64  `json:"raw_score"`
-	SuccessRate             float64  `json:"success_rate"`
-	RequestCount            int64    `json:"request_count"`
-	ReceivedBytes           int64    `json:"received_bytes"`
-	ProviderEgressBytes     int64    `json:"provider_egress_bytes"`
-	AccountingCoverage      float64  `json:"accounting_coverage"`
-	FindProvidersSamples    int64    `json:"findproviders_samples"`
-	FindProvidersEmptyPools int64    `json:"findproviders_empty_pools"`
-	FindProvidersLoadP95Ms  float64  `json:"findproviders_load_p95_ms"`
-	FindProvidersPoolP05    float64  `json:"findproviders_pool_p05"`
-	StabilityFindings       []string `json:"stability_findings"`
-	ResourceFindings        []string `json:"resource_findings"`
+	EvaluationId                    string   `json:"evaluation_id"`
+	RawScore                        float64  `json:"raw_score"`
+	SuccessRate                     float64  `json:"success_rate"`
+	RequestCount                    int64    `json:"request_count"`
+	ReceivedBytes                   int64    `json:"received_bytes"`
+	ProviderEgressBytes             int64    `json:"provider_egress_bytes"`
+	AccountingCoverage              float64  `json:"accounting_coverage"`
+	FindProvidersSamples            int64    `json:"findproviders_samples"`
+	FindProvidersEmptyPools         int64    `json:"findproviders_empty_pools"`
+	FindProvidersLoadP95Ms          float64  `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64  `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64  `json:"findproviders_sample_span_fraction"`
+	StabilityFindings               []string `json:"stability_findings"`
+	ResourceFindings                []string `json:"resource_findings"`
 }
 
 type ScoreAggregateDiagnostics struct {
-	RawScore               float64 `json:"raw_score"`
-	SuccessRate            float64 `json:"success_rate"`
-	RequestCount           float64 `json:"request_count"`
-	ReceivedBytes          float64 `json:"received_bytes"`
-	AccountingCoverage     float64 `json:"accounting_coverage,omitempty"`
-	FindProvidersLoadP95Ms float64 `json:"findproviders_load_p95_ms"`
-	FindProvidersPoolP05   float64 `json:"findproviders_pool_p05"`
+	RawScore                        float64 `json:"raw_score"`
+	SuccessRate                     float64 `json:"success_rate"`
+	RequestCount                    float64 `json:"request_count"`
+	ReceivedBytes                   float64 `json:"received_bytes"`
+	AccountingCoverage              float64 `json:"accounting_coverage,omitempty"`
+	FindProvidersLoadP95Ms          float64 `json:"findproviders_load_p95_ms"`
+	FindProvidersPoolP05            float64 `json:"findproviders_pool_p05"`
+	FindProvidersSampleSpanFraction float64 `json:"findproviders_sample_span_fraction"`
 }
 
 type ScoreDiagnostics struct {
@@ -377,7 +381,8 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 		}
 		if diagnostic.FindProvidersSamples <= 0 || diagnostic.FindProvidersEmptyPools != 0 ||
 			!finiteNonnegative(diagnostic.FindProvidersLoadP95Ms) ||
-			!finitePositive(diagnostic.FindProvidersPoolP05) {
+			!finitePositive(diagnostic.FindProvidersPoolP05) ||
+			diagnostic.FindProvidersSampleSpanFraction < minimumFindProvidersSampleSpanFraction {
 			return nil, scoreError("baseline_gate_failed", "baseline replicate %d fails matchmaking integrity", i+1)
 		}
 		if !replicate.stabilityOK {
@@ -395,12 +400,13 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 			return nil, scoreError("baseline_gate_failed", "baseline replicate %d has an invalid measured workload", i+1)
 		}
 		replicates = append(replicates, ScoreBaselineReplicate{
-			RawScore:               diagnostic.RawScore,
-			SuccessRate:            diagnostic.SuccessRate,
-			RequestCount:           diagnostic.RequestCount,
-			ReceivedBytes:          diagnostic.ReceivedBytes,
-			FindProvidersLoadP95Ms: diagnostic.FindProvidersLoadP95Ms,
-			FindProvidersPoolP05:   diagnostic.FindProvidersPoolP05,
+			RawScore:                        diagnostic.RawScore,
+			SuccessRate:                     diagnostic.SuccessRate,
+			RequestCount:                    diagnostic.RequestCount,
+			ReceivedBytes:                   diagnostic.ReceivedBytes,
+			FindProvidersLoadP95Ms:          diagnostic.FindProvidersLoadP95Ms,
+			FindProvidersPoolP05:            diagnostic.FindProvidersPoolP05,
+			FindProvidersSampleSpanFraction: diagnostic.FindProvidersSampleSpanFraction,
 		})
 	}
 	contract.Replicates = replicates
@@ -481,7 +487,10 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 			!finite(replicate.SuccessRate) || replicate.SuccessRate < 0.97 || 1 < replicate.SuccessRate ||
 			replicate.RequestCount <= 0 || replicate.ReceivedBytes <= 0 ||
 			!finiteNonnegative(replicate.FindProvidersLoadP95Ms) ||
-			!finitePositive(replicate.FindProvidersPoolP05) {
+			!finitePositive(replicate.FindProvidersPoolP05) ||
+			!finite(replicate.FindProvidersSampleSpanFraction) ||
+			replicate.FindProvidersSampleSpanFraction < minimumFindProvidersSampleSpanFraction ||
+			1 < replicate.FindProvidersSampleSpanFraction {
 			return scoreError("invalid_baseline", "baseline replicate contains an invalid or non-finite diagnostic")
 		}
 	}
@@ -495,6 +504,7 @@ func aggregateBaseline(replicates []ScoreBaselineReplicate) baselineAggregate {
 	receivedBytes := make([]float64, 0, len(replicates))
 	loadP95s := make([]float64, 0, len(replicates))
 	poolP05s := make([]float64, 0, len(replicates))
+	sampleSpanFraction := math.Inf(1)
 	for _, replicate := range replicates {
 		rawScores = append(rawScores, replicate.RawScore)
 		successRates = append(successRates, replicate.SuccessRate)
@@ -502,14 +512,16 @@ func aggregateBaseline(replicates []ScoreBaselineReplicate) baselineAggregate {
 		receivedBytes = append(receivedBytes, float64(replicate.ReceivedBytes))
 		loadP95s = append(loadP95s, replicate.FindProvidersLoadP95Ms)
 		poolP05s = append(poolP05s, replicate.FindProvidersPoolP05)
+		sampleSpanFraction = math.Min(sampleSpanFraction, replicate.FindProvidersSampleSpanFraction)
 	}
 	return baselineAggregate{ScoreAggregateDiagnostics: ScoreAggregateDiagnostics{
-		RawScore:               scoreMedian(rawScores),
-		SuccessRate:            scoreMedian(successRates),
-		RequestCount:           scoreMedian(requestCounts),
-		ReceivedBytes:          scoreMedian(receivedBytes),
-		FindProvidersLoadP95Ms: scoreMedian(loadP95s),
-		FindProvidersPoolP05:   scoreMedian(poolP05s),
+		RawScore:                        scoreMedian(rawScores),
+		SuccessRate:                     scoreMedian(successRates),
+		RequestCount:                    scoreMedian(requestCounts),
+		ReceivedBytes:                   scoreMedian(receivedBytes),
+		FindProvidersLoadP95Ms:          scoreMedian(loadP95s),
+		FindProvidersPoolP05:            scoreMedian(poolP05s),
+		FindProvidersSampleSpanFraction: sampleSpanFraction,
 	}}
 }
 
@@ -521,6 +533,7 @@ func aggregateCandidate(replicates []candidateReplicate) ScoreAggregateDiagnosti
 	loadP95s := make([]float64, 0, len(replicates))
 	poolP05s := make([]float64, 0, len(replicates))
 	coverage := math.Inf(1)
+	sampleSpanFraction := math.Inf(1)
 	for _, replicate := range replicates {
 		diagnostic := replicate.diagnostics
 		rawScores = append(rawScores, diagnostic.RawScore)
@@ -530,18 +543,23 @@ func aggregateCandidate(replicates []candidateReplicate) ScoreAggregateDiagnosti
 		loadP95s = append(loadP95s, diagnostic.FindProvidersLoadP95Ms)
 		poolP05s = append(poolP05s, diagnostic.FindProvidersPoolP05)
 		coverage = math.Min(coverage, diagnostic.AccountingCoverage)
+		sampleSpanFraction = math.Min(sampleSpanFraction, diagnostic.FindProvidersSampleSpanFraction)
 	}
 	if math.IsInf(coverage, 1) {
 		coverage = 0
 	}
+	if math.IsInf(sampleSpanFraction, 1) {
+		sampleSpanFraction = 0
+	}
 	return ScoreAggregateDiagnostics{
-		RawScore:               scoreMedian(rawScores),
-		SuccessRate:            scoreMedian(successRates),
-		RequestCount:           scoreMedian(requestCounts),
-		ReceivedBytes:          scoreMedian(receivedBytes),
-		AccountingCoverage:     coverage,
-		FindProvidersLoadP95Ms: scoreMedian(loadP95s),
-		FindProvidersPoolP05:   scoreMedian(poolP05s),
+		RawScore:                        scoreMedian(rawScores),
+		SuccessRate:                     scoreMedian(successRates),
+		RequestCount:                    scoreMedian(requestCounts),
+		ReceivedBytes:                   scoreMedian(receivedBytes),
+		AccountingCoverage:              coverage,
+		FindProvidersLoadP95Ms:          scoreMedian(loadP95s),
+		FindProvidersPoolP05:            scoreMedian(poolP05s),
+		FindProvidersSampleSpanFraction: sampleSpanFraction,
 	}
 }
 
@@ -570,6 +588,7 @@ func buildScoreGates(
 
 	allSamplesPresent := true
 	allPoolsNonempty := true
+	allSampleSpansComplete := true
 	allStable := true
 	allResources := true
 	for _, replicate := range replicates {
@@ -579,12 +598,15 @@ func buildScoreGates(
 		if 0 < replicate.diagnostics.FindProvidersEmptyPools {
 			allPoolsNonempty = false
 		}
+		if replicate.diagnostics.FindProvidersSampleSpanFraction < minimumFindProvidersSampleSpanFraction {
+			allSampleSpansComplete = false
+		}
 		allStable = allStable && replicate.stabilityOK
 		allResources = allResources && replicate.resourcesOK
 	}
 	loadMax := 1.25 * baseline.FindProvidersLoadP95Ms
 	poolMin := 0.90 * baseline.FindProvidersPoolP05
-	g4 := allSamplesPresent && allPoolsNonempty &&
+	g4 := allSamplesPresent && allPoolsNonempty && allSampleSpansComplete &&
 		candidate.FindProvidersLoadP95Ms <= loadMax && poolMin <= candidate.FindProvidersPoolP05
 
 	return map[string]ScoreGate{
@@ -618,14 +640,18 @@ func buildScoreGates(
 		"G4_matchmaking": {
 			Passed: g4,
 			Details: map[string]any{
-				"all_replicates_have_samples": allSamplesPresent,
-				"all_pools_nonempty":          allPoolsNonempty,
-				"candidate_load_p95_ms":       candidate.FindProvidersLoadP95Ms,
-				"baseline_load_p95_ms":        baseline.FindProvidersLoadP95Ms,
-				"maximum_inclusive_ms":        loadMax,
-				"candidate_pool_p05":          candidate.FindProvidersPoolP05,
-				"baseline_pool_p05":           baseline.FindProvidersPoolP05,
-				"pool_minimum_inclusive":      poolMin,
+				"all_replicates_have_samples":                     allSamplesPresent,
+				"all_pools_nonempty":                              allPoolsNonempty,
+				"all_replicates_span_at_least_minimum":            allSampleSpansComplete,
+				"minimum_replicate_sample_span_fraction":          candidate.FindProvidersSampleSpanFraction,
+				"baseline_minimum_replicate_sample_span_fraction": baseline.FindProvidersSampleSpanFraction,
+				"sample_span_minimum_inclusive":                   minimumFindProvidersSampleSpanFraction,
+				"candidate_load_p95_ms":                           candidate.FindProvidersLoadP95Ms,
+				"baseline_load_p95_ms":                            baseline.FindProvidersLoadP95Ms,
+				"maximum_inclusive_ms":                            loadMax,
+				"candidate_pool_p05":                              candidate.FindProvidersPoolP05,
+				"baseline_pool_p05":                               baseline.FindProvidersPoolP05,
+				"pool_minimum_inclusive":                          poolMin,
 			},
 		},
 		"G5_stability": {
@@ -799,19 +825,20 @@ func scoreReplicate(
 	resourceFindings := preRunResourceFindings
 
 	out.diagnostics = ScoreReplicateDiagnostics{
-		EvaluationId:            runStats.EvaluationId,
-		RawScore:                rowMetrics.RawScore,
-		SuccessRate:             rowMetrics.SuccessRate,
-		RequestCount:            rowMetrics.RequestCount,
-		ReceivedBytes:           rowMetrics.ReceivedBytes,
-		ProviderEgressBytes:     accounting.ProviderEgressBytes,
-		AccountingCoverage:      coverage,
-		FindProvidersSamples:    sampleMetrics.Count,
-		FindProvidersEmptyPools: sampleMetrics.EmptyPools,
-		FindProvidersLoadP95Ms:  sampleMetrics.LoadP95Ms,
-		FindProvidersPoolP05:    sampleMetrics.PoolP05,
-		StabilityFindings:       stabilityFindings,
-		ResourceFindings:        resourceFindings,
+		EvaluationId:                    runStats.EvaluationId,
+		RawScore:                        rowMetrics.RawScore,
+		SuccessRate:                     rowMetrics.SuccessRate,
+		RequestCount:                    rowMetrics.RequestCount,
+		ReceivedBytes:                   rowMetrics.ReceivedBytes,
+		ProviderEgressBytes:             accounting.ProviderEgressBytes,
+		AccountingCoverage:              coverage,
+		FindProvidersSamples:            sampleMetrics.Count,
+		FindProvidersEmptyPools:         sampleMetrics.EmptyPools,
+		FindProvidersLoadP95Ms:          sampleMetrics.LoadP95Ms,
+		FindProvidersPoolP05:            sampleMetrics.PoolP05,
+		FindProvidersSampleSpanFraction: sampleMetrics.SpanFraction,
+		StabilityFindings:               stabilityFindings,
+		ResourceFindings:                resourceFindings,
 	}
 	out.stabilityOK = len(stabilityFindings) == 0
 	out.resourcesOK = len(resourceFindings) == 0
@@ -1049,10 +1076,13 @@ func isLegacyLogLine(line string) bool {
 }
 
 type scoreSampleMetrics struct {
-	Count      int64
-	EmptyPools int64
-	LoadP95Ms  float64
-	PoolP05    float64
+	Count         int64
+	EmptyPools    int64
+	FirstSampleMs int64
+	LastSampleMs  int64
+	SpanFraction  float64
+	LoadP95Ms     float64
+	PoolP05       float64
 }
 
 func readScoreSamples(path string, startMs int64, endMs int64) (scoreSampleMetrics, error) {
@@ -1077,6 +1107,13 @@ func readScoreSamples(path string, startMs int64, endMs int64) (scoreSampleMetri
 		loadMillis := float64(value.LoadMillis)
 		if !finiteNonnegative(loadMillis) {
 			return scoreError("malformed_samples", "FindProviders2 sample contains invalid load_millis")
+		}
+		if metrics.Count == 0 {
+			metrics.FirstSampleMs = timestamp
+			metrics.LastSampleMs = timestamp
+		} else {
+			metrics.FirstSampleMs = min(metrics.FirstSampleMs, timestamp)
+			metrics.LastSampleMs = max(metrics.LastSampleMs, timestamp)
 		}
 		metrics.Count++
 		if value.PoolCount <= 0 || len(value.Candidates) == 0 {
@@ -1127,6 +1164,9 @@ func readScoreSamples(path string, startMs int64, endMs int64) (scoreSampleMetri
 	}
 	if 0 < len(pools) {
 		metrics.PoolP05 = quantile(pools, 0.05)
+	}
+	if 0 < metrics.Count && startMs < endMs {
+		metrics.SpanFraction = float64(metrics.LastSampleMs-metrics.FirstSampleMs) / float64(endMs-startMs)
 	}
 	return metrics, nil
 }

@@ -515,12 +515,13 @@ same-round baseline manifest:
 
 The signed manifest determines the odd replicate count, exact run flags,
 providers SHA-256, timeout, takeover margin, and baseline replicate
-diagnostics. Candidate and baseline values aggregate by median. The output is
-deterministic `score_schema: 1` JSON with the raw/normalized score, all G1-G6
-results, diagnostics, and a typed submission or infrastructure error. Missing,
-malformed, legacy-schema, mixed-id, incomplete, OOM, panic, or unclean artifacts
-fail closed. See [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for containment and bundle
-construction.
+diagnostics. Performance values aggregate by median; accounting and
+matchmaking sample-span coverage aggregate by the minimum replicate. The output
+is deterministic `score_schema: 1` JSON with the raw/normalized score, all
+G1-G6 results, diagnostics, and a typed submission or infrastructure error.
+Missing, malformed, legacy-schema, mixed-id, incomplete, OOM, panic, or unclean
+artifacts fail closed. See [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for containment
+and bundle construction.
 
 The trusted evaluator creates that manifest from its same-round baseline bundle
 with the same parsers used for candidates:

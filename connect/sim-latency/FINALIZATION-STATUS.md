@@ -1,6 +1,6 @@
 # sim-latency finalization status
 
-Status date: 2026-08-20
+Status date: 2026-08-27
 
 Topology decision: production qualification uses one authoritative evaluator
 host. A second image-identical host is not a launch gate. All containment,
@@ -8,32 +8,40 @@ frozen-host, frontier, same-seed, independent-seed, reference-separability,
 artifact, and operational gates remain unchanged.
 
 The repository-local simulator, scorer, runner, competition control plane, and
-miner package are implemented and locally verified. The corrected 20-run
-same-seed campaign is complete and authenticated as **historical local
-directional evidence**. It replaced the pre-drain-fix baseline, but the later
-10-evaluation-core/2-management-core safety split means it must not be reused
-as the final-boundary baseline. The replacement reserved-boundary campaign has
-10 authenticated baseline replicates. A subsequent nine-replicate attempt
-completed its baseline and A/A executions but failed baseline scoring because
-replicate 7 had a G5 stability finding; the then-current failure cleanup erased
-its tmpfs evidence, so the entire attempt is excluded. The scorer now reports
-sanitized finding codes and the evaluator retains sanitized failed evidence,
-but this lost finding cannot be reconstructed. The pending main-branch changes
-have since landed and the repositories were synchronized. A new frontier pass
-then exposed a separate measurement-boundary instability: at q4/r6, identical
-seed/config pristine and no-op runs produced 95.170% and 98.768% success. Their
-setup paths took different amounts of time, so provider churn/degraded schedules
-entered measurement at different phases; the HTTP warm-up also retained only
-two of six parallel lanes by default. Both root causes are now corrected and
-deterministically regression-tested, but the post-fix frontier replay remains
-the next calibration gate. Neither historical result substitutes for the
-post-fix production-host calibration or reference separability.
+miner package are implemented and locally verified. Historical local campaigns
+remain useful directional evidence but do not substitute for the final locked
+source/image campaign.
+
+The first locked 2026-08-26 final-host campaign retained the previously
+bracketed `p1800-c200-r80-q2` point and completed 15 of 20 same-seed A/A pairs.
+A raw-protobuf audit then found a real measurement-contract defect: 27 of 30
+run halves stopped producing FindProviders2 observations before the required
+90% first-to-last sample span. The minimum, median, mean, and maximum spans were
+54.10%, 60.61%, 63.66%, and 98.66%; the three passing halves depended on
+incidental late client replacement and therefore could not qualify. The
+campaign was stopped before frontier promotion, all completed evidence was
+preserved, attempt 16016 was retained as an interrupted exit-143 result, and no
+hidden seed material was created. The read-only invalidation manifest is
+`eval-12c/final-calibration-p1800-a2bec3bd/campaign-invalidated.json` with
+SHA-256 `804e68e07903ae772ee7f9d269a112a139455343986a461d59cc4e232276bf2d`.
+
+The correction replaces the one measurement-start probe with immutable
+absolute-offset probes throughout the window, rotates authenticated pool
+identities deterministically, joins the probe worker on cancellation, and adds
+a fail-closed scorer field and G4 minimum of 0.90 for every replicate. The
+baseline builder rejects incomplete coverage; an otherwise valid candidate is
+ordinary non-placeable under G4. Deterministic schedule, cancellation, exact
+boundary, below-boundary, golden, complete-package, race-focused, shell, and
+vet checks pass. Production evidence resumes only from a clean pushed source
+lock, rebuilt image, host requalification, and fresh campaign; none of the 15
+invalidated pairs can be promoted.
+
 The integration is
 **not Apex launch-finalized**: this checkout has neither the accepted
-production-hardware calibration nor the root-owned authoritative-host evaluator
-deployment, published image digests, Macrocosmos staging decision, production
-credentials, or on-call organization required by `FINALIZE.md`. Those gates
-remain explicit rather than being replaced with workstation evidence.
+production calibration, published final image digests, Macrocosmos staging
+decision, production credentials, or on-call organization required by
+`FINALIZE.md`. Those gates remain explicit rather than being replaced with
+partial campaign evidence.
 
 ## Complete in this checkout
 
@@ -85,12 +93,13 @@ remain explicit rather than being replaced with workstation evidence.
   private wire copy, uses kernel-assigned UDP ports, and joins attempt-owned
   connection workers. Deterministic schedule and caller-buffer-ownership tests
   cover the root causes; focused normal/race tests pass.
-- Every measured run now performs one real quality-ranked, authenticated
-  `FindProviders2` probe after the measurement window opens. Deterministic
-  tests bind its pool identity, forwarded client address, location/exclusion
-  spec, quality-window count, and fail-closed empty-pool behavior. This removes
-  the short-run case where warm-up discovery occurred before measurement and
-  no in-window matchmaking audit row happened by chance.
+- Every measured run now performs real quality-ranked, authenticated
+  `FindProviders2` probes on an absolute schedule spanning at least 90% of the
+  window. Deterministic tests bind identity rotation, forwarded client address,
+  location/exclusion spec, quality-window count, the complete absolute
+  schedule, joined cancellation, and fail-closed empty-pool behavior. The
+  scorer independently derives the first-to-last sample span from authenticated
+  protobufs and rejects a short baseline or fails candidate G4.
 - Constructed multi-client window candidates now have one cleanup owner.
   Replacement declines, surplus candidates, and failed initial pings cancel
   the channel and let its `RemoveClientWithArgs` path join Client/OOB work;
@@ -525,7 +534,8 @@ that mounts `/runtime/config`, leaving no failed marker behind.
 
 The artifact verifier additionally requires 20 consecutive authenticated tags,
 complete warm pools, success >=97% in every run, non-empty matchmaking pools,
-full resource coverage, zero swap, and the held-out `indistinguishable` verdict.
+at least 90% first-to-last matchmaking sample span in every run, full resource
+coverage, zero swap, and the held-out `indistinguishable` verdict.
 
 The 2026-08-17 20:07 UTC pre-freeze regression passed the exact `server/test.sh`
 environment for race-enabled `competition`, `api`, `connect/sim-latency`, and
@@ -548,25 +558,19 @@ recorded results.
   seeds, execution of the provisional no-op/worse/better references after
   promotion to the frozen season base, 19/20 separability, accepted noise
   policy, and a signed production `APEX-CALIBRATION.md`.
-- Clear the explicit source-freeze pause; review all pending main fixes, commit
-  every participating repository, pull/merge/push, verify the clean pushed
-  source lock, rebuild the evaluator image, and restart the 20-run campaign.
+- Rebuild and requalify the evaluator from a clean pushed source lock containing
+  the sample-coverage correction, then restart the official frontier plus
+  20-run campaign from a fresh round.
 - Frozen production scale, duration, replicate count, takeover margin, tuning,
   base tag, exact patch allowlist, and immutable evaluator image.
-- Root-owned deployment on one authoritative machine: exactly 12 exposed
-  physical CPUs split into 10 evaluation CPUs and 2 management CPUs, frozen
-  SMT/governor/turbo/NUMA/IRQ/kernel/microcode, one parent boundary for the
-  runner/PostgreSQL/Redis, at least 24 GiB management memory reserve, template
-  DB/Redis resets, default-deny networking, offline build cache, immutable
-  artifact retention, cleanup, and monitoring. At 2026-08-17 19:56 UTC the
-  enabled root-owned CPU/IRQ units put exactly 12 physical CPUs online, disabled
-  SMT/turbo, selected `performance`, set `vm.overcommit_memory=1`, produced the
-  live 10+2 split, and pinned all 49 movable IRQs to CPUs `20,22`. The local
-  Compose boundary and adversarial CPU/OOM cleanup gate pass. Still open: prove
-  both units after reboot; freeze NUMA/kernel/microcode and the final host
-  digest; enable Docker user-namespace remapping or rootless mode; verify the
-  firewall; and restart Docker in a controlled window (its daemon still reports
-  the pre-control 24-CPU view and `/etc/docker/daemon.json` is not yet installed).
+- The single authoritative host qualified on the current boot for the
+  invalidated image with exactly 12 physical CPUs online, 10 evaluation CPUs
+  and 2 management CPUs, SMT and turbo disabled, `performance` governor, NUMA node
+  0, a 96 GiB active boundary plus 24 GiB management reserve, PostgreSQL/Redis
+  inside the job boundary, local-only read-only config/vault mounts, immutable
+  reports, and adversarial CPU/OOM cleanup. The complete qualification must be
+  repeated against the rebuilt image/source lock; production monitoring and
+  operational ownership remain open.
 - Final source-bound patch-policy digest/base tag and promotion or regeneration
   of the provisional reference patches against them; the literal pre-freeze
   file review is complete, but must be re-authenticated after the pending main
@@ -580,5 +584,5 @@ recorded results.
   decision.
 
 The launch gate remains closed until that external evidence exists. In
-particular, this local 24-logical-CPU campaign must not be copied into
-an official 12-core signed round baseline.
+particular, the invalidated `a2bec3bd` campaign must not be copied into a signed
+round baseline.

@@ -36,12 +36,16 @@
       "details": {
         "all_pools_nonempty": true,
         "all_replicates_have_samples": true,
+        "all_replicates_span_at_least_minimum": true,
         "baseline_load_p95_ms": 10,
+        "baseline_minimum_replicate_sample_span_fraction": 0.9,
         "baseline_pool_p05": 100,
         "candidate_load_p95_ms": 12.600000381469727,
         "candidate_pool_p05": 100,
         "maximum_inclusive_ms": 12.5,
-        "pool_minimum_inclusive": 90
+        "minimum_replicate_sample_span_fraction": 0.9,
+        "pool_minimum_inclusive": 90,
+        "sample_span_minimum_inclusive": 0.9
       }
     },
     "G5_stability": {
@@ -70,7 +74,8 @@
       "request_count": 100,
       "received_bytes": 10000,
       "findproviders_load_p95_ms": 10,
-      "findproviders_pool_p05": 100
+      "findproviders_pool_p05": 100,
+      "findproviders_sample_span_fraction": 0.9
     },
     "candidate": {
       "raw_score": 100,
@@ -79,7 +84,8 @@
       "received_bytes": 10000,
       "accounting_coverage": 1,
       "findproviders_load_p95_ms": 12.600000381469727,
-      "findproviders_pool_p05": 100
+      "findproviders_pool_p05": 100,
+      "findproviders_sample_span_fraction": 0.9
     },
     "replicates": [
       {
@@ -90,10 +96,11 @@
         "received_bytes": 10000,
         "provider_egress_bytes": 10000,
         "accounting_coverage": 1,
-        "findproviders_samples": 1,
+        "findproviders_samples": 2,
         "findproviders_empty_pools": 0,
         "findproviders_load_p95_ms": 12.600000381469727,
         "findproviders_pool_p05": 100,
+        "findproviders_sample_span_fraction": 0.9,
         "stability_findings": [],
         "resource_findings": []
       }

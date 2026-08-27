@@ -189,9 +189,11 @@ orchestration outside the scorer.
     within the specified band of the baseline.
   - **G3 path integrity:** immutable server-side provider-egress/accounting bytes
     cover at least 95% of client-received bytes.
-  - **G4 matchmaking:** samples exist, candidate pools are non-empty, and p95
-    FindProviders2 `load_millis` is within the allowed baseline multiplier;
-    candidate pool-count p05 also preserves at least 90% of baseline.
+  - **G4 matchmaking:** samples exist in every replicate, their first-to-last
+    timestamps span at least 90% of the measured window, candidate pools are
+    non-empty, and p95 FindProviders2 `load_millis` is within the allowed
+    baseline multiplier; candidate pool-count p05 also preserves at least 90%
+    of baseline.
   - **G5 stability:** the run completed with no panic, restart, fatal recovery,
     missing service, or unclean drain.
   - **G6 resources:** the cgroup/resource report shows no OOM, hard kill, limit

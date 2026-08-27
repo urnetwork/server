@@ -269,7 +269,10 @@ build_baseline_bundle() {
         --round-id "$APEX_ROUND_ID" \
         --takeover-margin "$APEX_TAKEOVER_MARGIN" \
         --out "$APEX_BASELINE_MANIFEST" >/dev/null
-    jq -e '.score_schema == 1 and .kind == "sim-latency-score-baseline" and (.replicates | length % 2 == 1)' \
+    jq -e '.score_schema == 1 and .kind == "sim-latency-score-baseline" and
+        (.replicates | length % 2 == 1) and
+        ([.replicates[].findproviders_sample_span_fraction |
+          type == "number" and isfinite and . >= 0.90 and . <= 1] | all)' \
         "$APEX_BASELINE_MANIFEST" >/dev/null || die "baseline builder emitted an invalid manifest"
     log "baseline manifest written: $APEX_BASELINE_MANIFEST sha256=$(sha256_file "$APEX_BASELINE_MANIFEST")"
 }
