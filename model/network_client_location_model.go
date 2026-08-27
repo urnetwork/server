@@ -2944,6 +2944,8 @@ type FindProvidersProvider struct {
 	HasEstimatedBytesPerSecond bool              `json:"has_estimated_bytes_per_second"`
 	Tier                       int               `json:"tier"`
 	IntermediaryIds            []server.Id       `json:"intermediary_ids"`
+	NetworkOnly                bool              `json:"network_only,omitempty"`
+	ReputationFailedNames      string            `json:"reputation_failed_names,omitempty"`
 	Location                   *ProviderLocation `json:"location,omitempty"`
 }
 
@@ -2985,6 +2987,13 @@ type ClientScore struct {
 	// the pre-existing behaviour -- or every provider would be treated as
 	// network-only until the cache turned over.
 	NetworkOnly bool
+	// ReputationFailedNames is the current external-probe domain/vendor
+	// rejection set. It is intentionally separate from health scoring: a
+	// hosted exit can carry traffic correctly while a particular publisher
+	// refuses its egress IP. Like the location ids below, this is set only on
+	// the top-level score so each lookback does not duplicate the string in
+	// every gob cache blob.
+	ReputationFailedNames string
 
 	// set only on the top-level score, never on the `LookbackClientScores`
 	// copies: each score is gob-serialized into thousands of cache key
@@ -3078,14 +3087,15 @@ func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, loc
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
-	addClientScore := func(lookbackClientScore *ClientScore, m map[server.Id]*ClientScore) *ClientScore {
+	addClientScore := func(lookbackClientScore *ClientScore, reputationFailedNames string, m map[server.Id]*ClientScore) *ClientScore {
 		clientScore, ok := m[lookbackClientScore.ClientId]
 		if !ok {
 			clientScore = &ClientScore{
-				ClientId:             lookbackClientScore.ClientId,
-				NetworkId:            lookbackClientScore.NetworkId,
-				NetworkOnly:          lookbackClientScore.NetworkOnly,
-				LookbackClientScores: map[int]*ClientScore{},
+				ClientId:              lookbackClientScore.ClientId,
+				NetworkId:             lookbackClientScore.NetworkId,
+				NetworkOnly:           lookbackClientScore.NetworkOnly,
+				ReputationFailedNames: reputationFailedNames,
+				LookbackClientScores:  map[int]*ClientScore{},
 			}
 			m[lookbackClientScore.ClientId] = clientScore
 		}
@@ -3174,7 +3184,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		}
 	}
 
-	loadClientScore := func(result server.PgResult) (lookbackClientScore *ClientScore, cityLocationXId *server.Id, regionLocationXId *server.Id, countryLocationXId *server.Id) {
+	loadClientScore := func(result server.PgResult) (lookbackClientScore *ClientScore, cityLocationXId *server.Id, regionLocationXId *server.Id, countryLocationXId *server.Id, reputationFailedNames string) {
 		var clientId server.Id
 		var networkId server.Id
 		var netTypeScore int
@@ -3203,6 +3213,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			&reliabilityWeight,
 			&independentReliabilityWeight,
 			&publiclyUsable,
+			&reputationFailedNames,
 		))
 		lookbackClientScore = &ClientScore{
 			ClientId:                     clientId,
@@ -3265,7 +3276,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	            	WHERE
 	            		provide_key.client_id = network_client_location_reliability.client_id AND
 	            		provide_key.provide_mode = $1
-	            )
+	            ),
+	            COALESCE(provider_egress_health.reputation_failed_names, '')
 
 	        FROM network_client_location_reliability
 
@@ -3278,6 +3290,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	        -- weight, lookback 0) rather than excluding it outright.
 	        LEFT JOIN client_connection_reliability_score ON
 	        	client_connection_reliability_score.client_id = network_client_location_reliability.client_id
+	        LEFT JOIN provider_egress_health ON
+	                provider_egress_health.client_id = network_client_location_reliability.client_id AND
+	                provider_egress_health.measured_at >= $3
 	        WHERE
 	        	network_client_location_reliability.connected = true AND
 	        	network_client_location_reliability.valid = true AND
@@ -3312,10 +3327,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	        `,
 			ProvideModePublic,
 			ProvideModeNetwork,
+			server.NowUtc().Add(-ProviderEgressHealthMaxAge).UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId := loadClientScore(result)
+				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId, reputationFailedNames := loadClientScore(result)
 
 				// top-level only; the lookback copies stay nil (see `ClientScore`)
 				setLocationIds := func(clientScore *ClientScore) {
@@ -3341,7 +3357,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 						clientScores = map[server.Id]*ClientScore{}
 						locationClientScores[locationId] = clientScores
 					}
-					setLocationIds(addClientScore(lookbackClientScore, clientScores))
+					setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
 				}
 			}
 		})
@@ -3370,7 +3386,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	                	WHERE
 	                		provide_key.client_id = network_client_location_reliability.client_id AND
 	                		provide_key.provide_mode = $1
-	                )
+	                ),
+	                COALESCE(provider_egress_health.reputation_failed_names, '')
 
 	            FROM network_client_location_reliability
 
@@ -3378,8 +3395,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
             -- above this one -- treats an unscored client as neutral rather
             -- than excluding it, since the reliability-scoring pipeline may
             -- never populate at this env's small/cold-start scale
-            LEFT JOIN client_connection_reliability_score ON
+	            LEFT JOIN client_connection_reliability_score ON
 	        		client_connection_reliability_score.client_id = network_client_location_reliability.client_id
+	            LEFT JOIN provider_egress_health ON
+	                    provider_egress_health.client_id = network_client_location_reliability.client_id AND
+	                    provider_egress_health.measured_at >= $3
 
 	            LEFT JOIN location_group_member location_group_member_city ON
 	                location_group_member_city.location_id = network_client_location_reliability.city_location_id
@@ -3409,10 +3429,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	        `,
 			ProvideModePublic,
 			ProvideModeNetwork,
+			server.NowUtc().Add(-ProviderEgressHealthMaxAge).UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId := loadClientScore(result)
+				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId, reputationFailedNames := loadClientScore(result)
 
 				// once per distinct group id. The three location columns can
 				// be the same id (a country-only client), in which case all
@@ -3427,7 +3448,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 						clientScores = map[server.Id]*ClientScore{}
 						locationGroupClientScores[locationGroupId] = clientScores
 					}
-					addClientScore(lookbackClientScore, clientScores)
+					addClientScore(lookbackClientScore, reputationFailedNames, clientScores)
 				}
 			}
 		})
@@ -3953,6 +3974,25 @@ func resolveProviderLocation(
 	return location
 }
 
+// findProvidersProviderFromClientScore is the cache-to-wire boundary. Keep
+// discovery metadata assembled in one pure helper so reputation and
+// same-network eligibility cannot be silently dropped by one response path.
+func findProvidersProviderFromClientScore(
+	clientScore *ClientScore,
+	rankMode RankMode,
+	directory map[server.Id]*locationDirectoryEntry,
+) *FindProvidersProvider {
+	return &FindProvidersProvider{
+		ClientId:                   clientScore.ClientId,
+		Tier:                       clientScore.Tiers[rankMode],
+		EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
+		HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
+		NetworkOnly:                clientScore.NetworkOnly,
+		ReputationFailedNames:      clientScore.ReputationFailedNames,
+		Location:                   resolveProviderLocation(directory, clientScore),
+	}
+}
+
 func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
@@ -4129,14 +4169,7 @@ func FindProviders2(
 		// output in order of `clientIds`
 		for _, clientId := range clientIds {
 			clientScore := clientScores[clientId]
-			provider := &FindProvidersProvider{
-				ClientId:                   clientId,
-				Tier:                       clientScore.Tiers[rankMode],
-				EstimatedBytesPerSecond:    clientScore.MaxBytesPerSecond,
-				HasEstimatedBytesPerSecond: clientScore.HasSpeedTest,
-				Location:                   resolveProviderLocation(directory, clientScore),
-			}
-			providers = append(providers, provider)
+			providers = append(providers, findProvidersProviderFromClientScore(clientScore, rankMode, directory))
 		}
 
 		// export one anonymized stats sample tracing this call's pool and
