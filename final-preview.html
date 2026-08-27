@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sim-latency final evaluation preview</title>
+  <style>
+    :root{--ink:#10223d;--muted:#5b6b82;--paper:#f5f7fb;--card:#fff;--navy:#12335d;--cyan:#35b7c9;--green:#37a56b;--amber:#eea52b;--red:#d95555;--line:#dbe3ee}
+    *{box-sizing:border-box} body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.48 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}
+    header{padding:48px clamp(22px,7vw,92px) 36px;background:linear-gradient(125deg,#0d294e,#164a72 62%,#147d8d);color:white}
+    .eyebrow{letter-spacing:.14em;text-transform:uppercase;font-weight:800;font-size:12px;color:#a9f0f6} h1{font-size:clamp(32px,5vw,58px);line-height:1.03;margin:10px 0 14px;max-width:900px}
+    header p{max-width:900px;color:#d7edf7;font-size:17px} .stamp{display:flex;gap:12px;flex-wrap:wrap;margin-top:24px}
+    .pill{border:1px solid #77ced9;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:800;letter-spacing:.04em} .pill.running{background:#2f9e69} .pill.attention{background:#b34a4a} .pill.idle{background:#6b7687}
+    main{max-width:1180px;margin:0 auto;padding:28px 20px 68px} section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:clamp(22px,4vw,40px);margin:20px 0;box-shadow:0 10px 32px rgba(22,45,78,.06)}
+    .section-head{display:flex;justify-content:space-between;gap:20px;align-items:flex-start} h2{margin:0 0 8px;font-size:clamp(23px,3vw,34px)} h3{margin:0 0 4px;font-size:16px} p{margin:5px 0;color:var(--muted)} .index{font-size:12px;font-weight:900;color:var(--cyan);letter-spacing:.15em}
+    .grid{display:grid;grid-template-columns:1.25fr .75fr;gap:24px;margin-top:24px;align-items:center} .metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .metric{padding:14px;border:1px solid var(--line);border-radius:12px;background:#f9fbfe} .metric strong{display:block;font-size:21px} .metric span{font-size:12px;color:var(--muted)}
+    svg{width:100%;height:auto;background:#f7fafe;border:1px solid var(--line);border-radius:14px} svg text{font-family:inherit} .axis{stroke:#a9b8ca;stroke-width:1} .series{fill:none;stroke:var(--navy);stroke-width:3} .dot{fill:var(--cyan)} .threshold{stroke:var(--red);stroke-width:2;stroke-dasharray:7 5} .threshold-label{fill:var(--red);font-size:12px;font-weight:800} .label{fill:var(--muted);font-size:11px}
+    .lane-eval{fill:#1e527e} .lane-mgmt{fill:#35b7c9} .mem-runner{fill:#17476f} .mem-service{fill:#43a6b7} .mem-reserve{fill:#efb14a} .bar-ok{fill:#36a56a} .bar-stop{fill:#d95555} .bar-future{fill:#a8b6c7}
+    .gate{display:grid;grid-template-columns:180px 1fr 58px;gap:10px;align-items:center;margin:11px 0} .track{height:12px;border-radius:99px;background:#e7edf4;overflow:hidden} .fill{height:100%;background:linear-gradient(90deg,var(--cyan),var(--green))} .gate b{text-align:right;font-size:12px}
+    table{width:100%;border-collapse:collapse;margin-top:20px} th,td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:left} th{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+    .callout{border-left:4px solid var(--amber);padding:10px 14px;background:#fff8e9;border-radius:4px;margin-top:18px} code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px} footer{text-align:center;color:var(--muted);padding:18px}
+    @media(max-width:800px){.grid{grid-template-columns:1fr}.section-head{display:block}.gate{grid-template-columns:125px 1fr 48px}}
+  </style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">Team preview · measured-target source freeze</div>
+  <h1>Final sim-latency evaluation environment</h1>
+  <p>The corrected evaluator image and local source commits are frozen. The exact-image frontier selected 1,800 providers after p2700 crossed the quality boundary; all 12 same-seed pairs are sealed, and R=9 with a 16.1% takeover margin is selected. The common-round-baseline v4 campaign completed all five precommitted seeds and was rejected at 2/5 strict orderings versus the required 4/5. The stronger v5 pilot passed strict shared-baseline ordering, and its fresh five-seed hidden screen is now running.</p>
+  <div class="stamp"><span class="pill running">V5 HIDDEN SCREEN ACTIVE · 0 / 5</span><span class="pill">snapshot 27 August 2026 · 19:00 UTC</span><span class="pill">SCALE FROZEN · p1800</span><span class="pill">12 / 12 BASELINE SEALED</span></div>
+</header>
+<main>
+  <section id="environment">
+    <div class="section-head"><div><div class="index">01 · ENVIRONMENT</div><h2>One host, one bounded evaluation job</h2><p>Exactly twelve physical CPUs are online: ten for the untrusted stack and two reserved for orchestration and cleanup.</p></div><code>cf0fd3a9e733…</code></div>
+    <div class="grid">
+      <svg viewBox="0 0 780 250" role="img" aria-label="CPU and memory isolation layout">
+        <text x="28" y="28" font-size="13" font-weight="800">PHYSICAL CPU LANES</text>
+        <rect class="lane-eval" x="28" y="45" width="585" height="48" rx="8"/><rect class="lane-mgmt" x="619" y="45" width="117" height="48" rx="8"/>
+        <text x="50" y="75" fill="white" font-weight="800">10 evaluation cores · containers + services</text><text x="629" y="68" fill="white" font-size="11" font-weight="800">2 management</text><text x="633" y="83" fill="white" font-size="10">kill / audit</text>
+        <text x="28" y="126" font-size="13" font-weight="800">128 GiB HOST MEMORY</text>
+        <rect class="mem-runner" x="28" y="143" width="414" height="48" rx="8"/><rect class="mem-service" x="444" y="143" width="138" height="48"/><rect class="mem-reserve" x="584" y="143" width="152" height="48" rx="8"/>
+        <text x="48" y="172" fill="white" font-weight="800">72 GiB runner</text><text x="457" y="165" fill="white" font-size="11" font-weight="800">16 GiB PG</text><text x="457" y="180" fill="white" font-size="11">8 GiB Redis</text><text x="600" y="172" fill="#4b3310" font-size="11" font-weight="800">≥24 GiB reserve</text>
+        <text x="28" y="226" class="label">Docker user namespaces · default-deny network · read-only config/local + vault/local · hostile CPU/RAM cleanup ≤10 s</text>
+      </svg>
+      <div class="metrics">
+        <div class="metric"><strong>5ca3d5242f4a…</strong><span>server commit</span></div>
+        <div class="metric"><strong>0cf71458833f…</strong><span>source lock</span></div>
+        <div class="metric"><strong>9cb7a977f171…</strong><span>new host qualification</span></div>
+        <div class="metric"><strong>3,131 s</strong><span>full p1800 R=3 host promotion</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="scale">
+    <div class="section-head"><div><div class="index">02 · SCALE</div><h2>Final target: 1,800 providers and 200 clients</h2><p>The official exact-image sweep accepted p1800 in both impairment modes. p2700 became the authenticated upper bound when its no-impair reference run reached only 96.9804% success, below the 97% floor.</p></div><strong>p1800 FROZEN</strong></div>
+    <div class="grid">
+      <svg viewBox="0 0 780 250" role="img" aria-label="Provider frontier and selected scale">
+        <text x="28" y="28" font-size="13" font-weight="800">EXACT-IMAGE FRONTIER</text>
+        <rect class="bar-ok" x="80" y="55" width="390" height="34" rx="7"/><text x="90" y="77" fill="white" font-weight="800">p1800 · SELECTED · both modes pass G1–G6</text>
+        <rect class="bar-stop" x="80" y="108" width="585" height="34" rx="7"/><text x="90" y="130" fill="white" font-weight="800">p2700 · REJECTED · reference success 96.9804% &lt; 97%</text>
+        <rect class="bar-future" x="80" y="161" width="650" height="34" rx="7"/><text x="90" y="183" fill="white" font-weight="800">higher points skipped after authenticated upper bound</text>
+        <line class="axis" x1="80" y1="211" x2="730" y2="211"/><text x="80" y="230" class="label">accepted</text><text x="440" y="230" class="label">quality boundary</text><text x="730" y="230" text-anchor="end" class="label">frontier complete</text>
+      </svg>
+      <div class="metrics">
+        <div class="metric"><strong>1,800</strong><span>providers</span></div>
+        <div class="metric"><strong>200</strong><span>warm clients</span></div>
+        <div class="metric"><strong>80/min</strong><span>arrivals</span></div>
+        <div class="metric"><strong>98.680%</strong><span>minimum accepted success</span></div>
+      </div>
+    </div>
+    <div class="callout">The final competition target is p1800—not 15k or 100k: 1,800 providers, 200 warm clients, 80 arrivals/minute, quality window 2, four exchange hosts, four fleet shards, and a three-minute measurement window. Its minimum frontier sample span was 94.444%. The frontier runs do not count toward the fresh n=12 baseline.</div>
+  </section>
+
+  <section id="baseline">
+    <div class="section-head"><div><div class="index">03 · BASELINE</div><h2>Twelve uncensored same-seed pairs</h2><p>The selected p1800 scale has all 12 authenticated post-frontier pairs. Pairs 3, 6, 11, and 12 were non-placeable, but remain in the noise population. The authorized launch policy selects the median of R=9 and a 16.1% takeover margin.</p></div><strong>43,101.691 ms</strong></div>
+    <div class="grid">
+      <svg viewBox="0 0 780 210" role="img" aria-label="Completed baseline, no-op score, and significant-better threshold">
+        <text x="28" y="28" font-size="13" font-weight="800">LOWER IS BETTER · POST-FRONTIER SAME-SEED · n=12 OF 12</text>
+        <line class="axis" x1="64" y1="164" x2="758" y2="164"/>
+        <line class="threshold" data-threshold-for="preview-same-seed-score" x1="520" y1="48" x2="520" y2="164"/>
+        <text data-threshold-label-for="preview-same-seed-score" x="510" y="42" text-anchor="end" class="threshold-label">significantly better ≤36,162.319 ms</text>
+        <line class="series" data-baseline-id="preview-same-seed-score" x1="507" y1="88" x2="730" y2="88"/>
+        <circle cx="644" cy="88" r="6" fill="#12335d"/><circle cx="578" cy="88" r="6" fill="#12335d"/><circle cx="507" cy="88" r="6" fill="#12335d"/><circle cx="641" cy="88" r="6" fill="#12335d"/><circle cx="572" cy="88" r="6" fill="#12335d"/><circle cx="632" cy="88" r="6" fill="#12335d"/><circle cx="566" cy="88" r="6" fill="#12335d"/><circle cx="607" cy="88" r="6" fill="#12335d"/><circle cx="730" cy="88" r="6" fill="#12335d"/><circle cx="582" cy="88" r="6" fill="#12335d"/><circle cx="632" cy="88" r="6" fill="#12335d"/><circle cx="604" cy="88" r="6" fill="#12335d"/>
+        <line class="series" data-baseline-id="preview-same-seed-score" x1="608" y1="62" x2="608" y2="164"/>
+        <text x="608" y="52" text-anchor="middle" font-size="12" font-weight="800" fill="#12335d">baseline mean 43,101.691</text>
+        <circle class="dot" cx="596" cy="124" r="8"/><text x="596" y="113" text-anchor="middle" class="label">no-op mean 42,196.873</text>
+        <text x="64" y="188" class="label">0 ms</text><text x="758" y="188" text-anchor="end" class="label">55,000 ms</text>
+      </svg>
+      <div class="metrics">
+        <div class="metric"><strong>43,101.691 ms</strong><span>n=12 baseline mean · threshold line ≤36,162.319 ms</span></div>
+        <div class="metric"><strong>42,196.873 ms</strong><span>paired no-op mean</span></div>
+        <div class="metric"><strong>10.127%</strong><span>baseline run-to-run CV · threshold line ≤36,162.319 ms</span></div>
+        <div class="metric"><strong>8 / 12</strong><span>placeable no-op draws; all 12 retained</span></div>
+      </div>
+    </div>
+    <div class="callout">The red line is now the selected threshold at the observed baseline mean: 43,101.691 × (1 − 0.161) = 36,162.319 ms. The original strict familywise placeability rule failed at every R; R=9 reached 86.612% against its 95% gate. The authorized launch policy controls one production evaluation instead: R=9 reaches 94.614% against a 94% floor, implying an estimated 5.386% no-op false-rejection probability. That compromise is retained and explicitly not confidence-equivalent to the strict rule.</div>
+  </section>
+
+  <section id="readiness">
+    <div class="section-head"><div><div class="index">04 · READINESS</div><h2>V5 pilot passed; hidden screen active</h2><p>Secure evaluation, API/package conformance, adversarial cleanup, networkless image derivation, and fail-closed scoring are implemented. V1–v4 remain retained exactly as measured. V4 corrected the shared-baseline boundary but its smaller controls reached only 2/5 strict orderings. The stronger v5 pilot then ranked better 35,391.239 ms &lt; no-op 38,802.551 ms &lt; worse 46,422.227 ms against one 36,599.163 ms designated baseline. All 164 pilot manifest entries authenticated, with one attempt per reference and zero residual resources. Five new hidden commitments are now sealed and running.</p></div><strong>v5 pilot PASS · hidden 0/5 active · gate ≥4/5</strong></div>
+    <div class="grid">
+      <svg viewBox="0 0 780 250" role="img" aria-label="Finalization milestone progress">
+        <text x="28" y="28" font-size="13" font-weight="800">EVIDENCE PIPELINE</text>
+        <circle cx="80" cy="115" r="28" fill="#37a56b"/><text x="80" y="120" text-anchor="middle" fill="white" font-weight="900">✓</text>
+        <line x1="108" y1="115" x2="210" y2="115" stroke="#8da2b8" stroke-width="5"/>
+        <circle cx="240" cy="115" r="28" fill="#37a56b"/><text x="240" y="120" text-anchor="middle" fill="white" font-weight="900">✓</text>
+        <line x1="268" y1="115" x2="370" y2="115" stroke="#8da2b8" stroke-width="5"/>
+        <circle cx="400" cy="115" r="28" fill="#37a56b"/><text x="400" y="120" text-anchor="middle" fill="white" font-weight="900">✓</text>
+        <line x1="428" y1="115" x2="530" y2="115" stroke="#8da2b8" stroke-width="5"/>
+        <circle cx="560" cy="115" r="28" fill="#35b7c9"/><text x="560" y="120" text-anchor="middle" fill="white" font-weight="900">↻</text>
+        <line x1="588" y1="115" x2="680" y2="115" stroke="#8da2b8" stroke-width="5"/>
+        <circle cx="710" cy="115" r="28" fill="#a8b6c7"/><text x="710" y="120" text-anchor="middle" fill="white" font-weight="900">R</text>
+        <text x="80" y="165" text-anchor="middle" class="label">source + image</text><text x="240" y="165" text-anchor="middle" class="label">host + frontier</text><text x="400" y="165" text-anchor="middle" class="label">same-seed 12/12</text><text x="560" y="165" text-anchor="middle" class="label">v5 hidden 0/5</text><text x="710" y="165" text-anchor="middle" class="label">final report</text>
+        <text x="28" y="220" class="label">V5 pilot passed; five unique hidden commitments were sealed before result 1 and exclude all 22 retired commitments.</text>
+      </svg>
+      <div>
+        <div class="gate"><span>Source/image lock</span><div class="track"><div class="fill" style="width:100%"></div></div><b>PASS</b></div>
+        <div class="gate"><span>Host + frontier</span><div class="track"><div class="fill" style="width:100%"></div></div><b>PASS</b></div>
+        <div class="gate"><span>Same-seed baseline</span><div class="track"><div class="fill" style="width:100%"></div></div><b>12/12</b></div>
+        <div class="gate"><span>Stronger references</span><div class="track"><div class="fill" style="width:50%"></div></div><b>PILOT PASS · 0/5</b></div>
+        <div class="gate"><span>V4 hidden archive</span><div class="track"><div class="fill" style="width:100%"></div></div><b>5/5 · REJECT</b></div>
+      </div>
+    </div>
+    <table><thead><tr><th>Area</th><th>Status</th><th>Proof / next gate</th></tr></thead><tbody>
+      <tr><td>Evaluator containment</td><td>R=3 promotion passed</td><td>G1–G6 + all 15 security controls · eight spans ≥94.442% · 72 GiB OOM-137 cleanup in 614 ms · userns · default-deny network · local-only read-only mounts · separate API/worker control-secret roots verified</td></tr>
+      <tr><td>Source/API/package</td><td>Locked + conformance green</td><td><code>5ca3d5242f4a…</code> · both OpenAPI specs · image <code>cf0fd3a9e733…</code> · source lock <code>0cf71458833f…</code></td></tr>
+      <tr><td>Baseline</td><td>12/12 authenticated; R=9 frozen</td><td>Baseline mean 43,101.691 ms → threshold line ≤36,162.319 ms · no-op mean 42,196.873 ms · 16.1% takeover margin</td></tr>
+      <tr><td>Reference separability</td><td>V5 pilot passed; hidden 0/5 active</td><td>The v5 pilot produced strict shared-baseline ordering in one attempt per reference; 164 manifest entries and every security assertion verified. Five fresh hidden commitments were published before the first result. Acceptance requires at least four strict orderings with no statistical retries. Selected competition aggregation remains R=9.</td></tr>
+      <tr><td>Measurement compromise</td><td>Authorized + hash-bound</td><td>12/12 replaces 20/20 and the 4/5 hidden launch screen replaces 19/20; it is not confidence-equivalent to the original protocol. Every v1–v4 measurement remains retained and uncensored, all 22 prior commitments are forbidden, and v5 changes no frozen simulator, scorer, scale, baseline, or production source.</td></tr>
+      <tr><td>External operations</td><td>HANDOFF_OPEN</td><td>Registry, staging credentials, alerts, on-call, partner acceptance</td></tr>
+    </tbody></table>
+    <div class="callout">Snapshot at 19:00 UTC on 27 August: the v5 pilot is immutably accepted for hidden screening after strict better &lt; no-op &lt; worse ordering. Its disclosed commitment is retired. The hidden campaign committed five unique fresh seeds at 18:58:35 UTC, before any seed result, with no overlap against all 22 retired commitments; evaluation 1 of 15 is active inside the reserved boundary. If the hidden screen passes first time, the estimate for the parallel release gates, fixed 6 h 03 min R=9 staging commitment/reveal window, final seal, 10/10 audit, and four-section <code>finalize-report.html</code> remains approximately 05:45–06:30 UTC on 28 August.</div>
+  </section>
+</main>
+<footer>Generated from source lock 0cf71458… and authenticated local evidence · no hidden seed material is embedded.</footer>
+</body>
+</html>
