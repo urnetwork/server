@@ -25,6 +25,8 @@ INDEPENDENT_ROOT = REFERENCE_V5 / "hidden-launch-runtime"
 INDEPENDENT = INDEPENDENT_ROOT / "independent-references"
 
 SOURCE_LOCK = ROOT / "source-lock.json"
+SEASON_BASE_EQUIVALENCE = ROOT / "season-base-equivalence.json"
+PATCH_POLICY = SERVER / "competition/container/policy.example.json"
 FRONTIER = ROOT / "exact-frontier/frontier-decision.json"
 POINT = ROOT / "exact-frontier/p1800-c200-r80-q2/point-summary.json"
 AMENDMENT = ROOT / "launch-readiness-measurement-amendment.json"
@@ -85,6 +87,12 @@ FINAL_REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 
 SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
+)
+SEASON_BASE_EQUIVALENCE_SHA256 = (
+    "6bce6a80cecfee0297bcc11afbaa390576d8f542980d8797e4da33046daa07b3"
+)
+PATCH_POLICY_SHA256 = (
+    "2dba553cd94d6d901e0fc590fd147d3e39273b41c24317e987b1bbf479382460"
 )
 AMENDMENT_SHA256 = (
     "3bd163e339cc7dc8e23757dd23ea238607f7eb6eaecc1959acd412661b9a770f"
@@ -764,6 +772,74 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
         repositories = lock.get("repositories")
         if not isinstance(repositories, dict):
             raise AuditError("source-lock repositories are missing")
+        season_base = load_json(SEASON_BASE_EQUIVALENCE)
+        policy = load_json(PATCH_POLICY)
+        authoring = season_base.get("public_authoring_base")
+        evaluator = season_base.get("authoritative_evaluator")
+        policy_evidence = season_base.get("patch_policy")
+        editable_blobs = season_base.get("editable_blobs")
+        editable_path = "connect/resident_contract_manager.go"
+        editable = (
+            editable_blobs.get(editable_path)
+            if isinstance(editable_blobs, dict)
+            else None
+        )
+        if not (
+            sha256(SEASON_BASE_EQUIVALENCE)
+            == SEASON_BASE_EQUIVALENCE_SHA256
+            and SEASON_BASE_EQUIVALENCE.stat().st_mode & 0o777 == 0o400
+            and season_base.get("kind")
+            == "sim-latency-season-base-equivalence"
+            and isinstance(authoring, dict)
+            and authoring.get("tag") == "apex-season-1"
+            and authoring.get("remote_tag_matches_local") is True
+            and command(
+                ["git", "rev-parse", "apex-season-1^{tag}"], SERVER
+            )
+            == authoring.get("annotated_tag_object")
+            and command(["git", "rev-parse", "apex-season-1^{}"], SERVER)
+            == authoring.get("commit")
+            and isinstance(evaluator, dict)
+            and evaluator.get("commit") == repositories.get("server")
+            and evaluator.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+            and evaluator.get("image_digest")
+            == lock.get("evaluator", {}).get("image_id")
+            and sha256(PATCH_POLICY) == PATCH_POLICY_SHA256
+            and policy.get("allowed_paths") == [editable_path]
+            and policy.get("max_patch_bytes") == 262144
+            and isinstance(policy_evidence, dict)
+            and policy_evidence.get("sha256") == PATCH_POLICY_SHA256
+            and policy_evidence.get("allowed_paths") == [editable_path]
+            and policy_evidence.get("max_patch_bytes") == 262144
+            and isinstance(editable, dict)
+            and editable.get("identical") is True
+            and editable.get("public_authoring_base_blob")
+            == command(
+                [
+                    "git",
+                    "rev-parse",
+                    f"{authoring.get('commit')}:{editable_path}",
+                ],
+                SERVER,
+            )
+            and editable.get("authoritative_evaluator_blob")
+            == command(
+                [
+                    "git",
+                    "rev-parse",
+                    f"{evaluator.get('commit')}:{editable_path}",
+                ],
+                SERVER,
+            )
+            and editable.get("public_authoring_base_blob")
+            == editable.get("authoritative_evaluator_blob")
+            and season_base.get("public_base_is_ancestor_of_evaluator") is True
+            and season_base.get("all_allowed_path_blobs_identical") is True
+            and season_base.get("local_reproduction_uses_evaluator_image") is True
+            and season_base.get("force_move_published_tag_required") is False
+            and season_base.get("seed_material_included") is False
+        ):
+            raise AuditError("public authoring base is not evaluator-equivalent")
         result_document_overlay: dict[str, str] | None = None
         for name, expected in repositories.items():
             repository = URNETWORK / str(name)
@@ -803,12 +879,18 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
             checks,
             "source_identity",
             "pass",
-            "All nine repositories match the frozen commits; the sole allowed tracked overlay is the immutable, hash-bound terminal calibration result.",
+            "All nine repositories match the frozen commits; the public authoring tag is blob-identical across the entire one-file patch surface, and the sole allowed tracked overlay is the immutable terminal calibration result.",
             {
                 "source_lock_sha256": SOURCE_LOCK_SHA256,
                 "server_commit": repositories.get("server"),
                 "repository_count": len(repositories),
                 "evaluator_image_digest": lock.get("evaluator", {}).get("image_id"),
+                "public_authoring_tag": authoring.get("tag"),
+                "public_authoring_commit": authoring.get("commit"),
+                "editable_blob": editable.get("authoritative_evaluator_blob"),
+                "season_base_equivalence_sha256": (
+                    SEASON_BASE_EQUIVALENCE_SHA256
+                ),
                 "result_document_overlay": result_document_overlay,
             },
         )
