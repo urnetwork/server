@@ -1,0 +1,59 @@
+{
+  "attempt_directory_count_after": 15,
+  "attempt_directory_count_before": 15,
+  "attempt_snapshot_sha256": "9e18af67e5720375797dfd3a713314cb7171b9c7a444a3aa8305fb1cd3c5ce16",
+  "attestation_sha256": "b96b216022b34e2bf0e9838ca51380431d9f97e95121610951c37d0274cc5c02",
+  "calibration_decision_sha256": "ba49014d7ceef1ff044a2d799f7911868b2eb159a6c587425a9c9f3d4fac2649",
+  "campaign_commitment_sha256": "c79798ad1769fda861fd86da0cdec7bd2f12f11f5964e2582cfe84a69c9afd69",
+  "campaign_reveal_kind": "sim-latency-independent-seed-reveal",
+  "campaign_reveal_reconstructed": true,
+  "campaign_reveal_sha256": "06c80eb4516125d8074a1293e0586e2928d03754776c6656da783bcb5ed465ac",
+  "cleanup_after": {
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0
+  },
+  "cleanup_before": {
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0
+  },
+  "commitment_derivations_reverified": true,
+  "generator_seed_derivations_reverified": true,
+  "invalid_first_repair": {
+    "attestation_sha256": "50ffce32792a9ecc73c7b135a0f9050727d4ad467c6f26a87bd09f18d68a925f",
+    "mirrored_reveal_sha256": "57435cb82f1a0d4689f1ba32d56fba6483d8fc233eb3569697171c981aad3441",
+    "reason": "A byte-for-byte mirror of the terminal reveal was rejected because the terminal and generic campaign reveals intentionally have different schemas.",
+    "repair_evidence_sha256": "3591d3e860aa8b6892df76187954430fe9abcafad22b0f2f943b50f4022541c9",
+    "retained_private_for_forensics": true
+  },
+  "kind": "sim-latency-hidden-attestation-schema-postprocessing-repair",
+  "measurements_censored": false,
+  "original_measurement_artifacts_changed": false,
+  "original_runner_sha256": "a889248bf2b2175e79ce0f5526cfa294fea17700f56f6eec46eda8f53aae519e",
+  "original_service_state": {
+    "active_state": "failed",
+    "exec_main_status": 1,
+    "invocation_id": "6f54d4a8727b4351ba122022f6c79b13",
+    "restarts": 0,
+    "result": "exit-code",
+    "sub_state": "failed"
+  },
+  "private_reveal_artifacts_exportable": false,
+  "public_private_terminal_lineage_reverified": true,
+  "repair": "Reconstruct the generic campaign reveal from the original private rounds, authenticate each derivation against the public manifests, premeasurement commitment, and sealed terminal reveal, then re-enter only the frozen runner's existing-decision attestation branch.",
+  "repair_evidence_contains_seed_material": false,
+  "repair_script_sha256": "a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0",
+  "repaired_at": "2026-08-27T23:34:25Z",
+  "reveal_documents_byte_identical": false,
+  "root_cause": "The hidden runner completed and sealed its v5 terminal reveal, but its inherited campaign shell did not leave the distinct generic independent-seed reveal required by the inherited attestation path.",
+  "schema": 1,
+  "seed_results_or_worker_evidence_changed": false,
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "statistical_measurements_rerun": false,
+  "terminal_decision_sha256": "3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835",
+  "terminal_only_runner_exit_code": 0,
+  "terminal_only_runner_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "terminal_only_runner_stdout_sha256": "941d276507978ed9be8787605941f285091e87ee95f5b87c8bd82b50e034770e",
+  "terminal_progress_sha256": "f2bbe8797dc463bb85d576cea29575579757df3eb7109a2170fd0566008d1e8b",
+  "terminal_reveal_kind": "sim-latency-reference-v5-hidden-launch-seed-reveal",
+  "terminal_reveal_sha256": "57435cb82f1a0d4689f1ba32d56fba6483d8fc233eb3569697171c981aad3441"
+}

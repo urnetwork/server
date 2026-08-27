@@ -13,6 +13,7 @@ import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+import uuid
 
 
 SERVER = Path("/home/by/urnetwork/server")
@@ -57,6 +58,12 @@ INDEPENDENT_DECISION = INDEPENDENT_ROOT / "calibration-decision.json"
 INDEPENDENT_ANALYSIS = INDEPENDENT_ROOT / "same-seed-analysis.json"
 INDEPENDENT_TERMINAL_DECISION = REFERENCE_V5 / "hidden-launch-decision.json"
 INDEPENDENT_TERMINAL_REVEAL = REFERENCE_V5 / "hidden-launch-seed-reveal.json"
+INDEPENDENT_ATTESTATION_REPAIR = (
+    REFERENCE_V5 / "hidden-attestation-path-repair.json"
+)
+INDEPENDENT_ATTESTATION_REPAIR_SCRIPT = (
+    REFERENCE_V5 / "repair-hidden-attestation-path.py"
+)
 INDEPENDENT_PROTOCOL = REFERENCE_V5 / "hidden-launch-protocol.json"
 INDEPENDENT_MEASUREMENT_AMENDMENT = (
     REFERENCE_V5 / "hidden-launch-measurement-amendment.json"
@@ -666,6 +673,68 @@ def independent_seed_result_evidence(
         authenticated_manifest_entries,
         authenticated_manifest_bytes,
     )
+
+
+def independent_reveal_public_projection(
+    reveal: dict[str, Any],
+) -> list[dict[str, Any]]:
+    seeds = reveal.get("seeds")
+    if not (
+        isinstance(seeds, list)
+        and len(seeds) == INDEPENDENT_TARGET
+        and all(isinstance(seed, dict) for seed in seeds)
+        and [seed.get("seed_index") for seed in seeds]
+        == list(range(1, INDEPENDENT_TARGET + 1))
+    ):
+        raise AuditError("independent seed reveal order is invalid")
+    projection: list[dict[str, Any]] = []
+    expected_keys = {
+        "seed_index",
+        "round_id",
+        "round_seed_hex",
+        "seed_commitment",
+        "generator_seed",
+        "providers_sha256",
+    }
+    for seed in seeds:
+        if set(seed) != expected_keys:
+            raise AuditError("independent seed reveal fields are invalid")
+        try:
+            round_id = uuid.UUID(seed["round_id"])
+            seed_bytes = bytes.fromhex(seed["round_seed_hex"])
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise AuditError("independent seed reveal material is malformed") from exc
+        if str(round_id) != seed["round_id"] or len(seed_bytes) != 32:
+            raise AuditError("independent seed reveal material is noncanonical")
+        commitment = hashlib.sha256(
+            b"urnetwork-sim-latency-round-v1\0" + round_id.bytes + seed_bytes
+        ).hexdigest()
+        generator_digest = hashlib.sha256(
+            b"urnetwork-sim-latency-generator-v1\0" + seed_bytes
+        ).digest()
+        generator_seed = int.from_bytes(generator_digest[:8], "big") & (
+            (1 << 63) - 1
+        )
+        if generator_seed == 0:
+            generator_seed = 1
+        providers_sha256 = seed.get("providers_sha256")
+        if not (
+            seed.get("seed_commitment") == commitment
+            and seed.get("generator_seed") == generator_seed
+            and isinstance(providers_sha256, str)
+            and len(providers_sha256) == 64
+            and all(character in "0123456789abcdef" for character in providers_sha256)
+        ):
+            raise AuditError("independent seed reveal derivation is invalid")
+        projection.append(
+            {
+                "seed_index": seed["seed_index"],
+                "round_id": seed["round_id"],
+                "seed_commitment": seed["seed_commitment"],
+                "providers_sha256": providers_sha256,
+            }
+        )
+    return projection
 
 
 def load_production_check(
@@ -1354,6 +1423,10 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
         independent_analysis = load_json(INDEPENDENT_ANALYSIS)
         terminal_decision = load_json(INDEPENDENT_TERMINAL_DECISION)
         terminal_reveal = load_json(INDEPENDENT_TERMINAL_REVEAL)
+        attestation_repair = load_json(INDEPENDENT_ATTESTATION_REPAIR)
+        reveal_projection = independent_reveal_public_projection(reveal)
+        repair_service_state = attestation_repair.get("original_service_state")
+        repair_invalid_attempt = attestation_repair.get("invalid_first_repair")
         if not (
             completed == INDEPENDENT_TARGET
             and progress.get("target_independent_seeds") == INDEPENDENT_TARGET
@@ -1400,9 +1473,16 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
             is True
             and INDEPENDENT_DECISION.stat().st_mode & 0o777 == 0o400
             and INDEPENDENT_ANALYSIS.stat().st_mode & 0o777 == 0o400
+            and reveal.get("schema") == 1
+            and reveal.get("kind") == "sim-latency-independent-seed-reveal"
             and reveal.get("replicates_per_reference") == 1
+            and reveal.get("calibration_decision_sha256")
+            == sha256(INDEPENDENT_DECISION)
             and isinstance(reveal.get("seeds"), list)
             and len(reveal["seeds"]) == INDEPENDENT_TARGET
+            and reveal_projection == commitment.get("seeds")
+            and reveal.get("seeds") == terminal_reveal.get("seeds")
+            and INDEPENDENT_REVEAL.stat().st_mode & 0o777 == 0o400
             and attestation.get("accepted") is True
             and attestation.get("campaign_commitment_sha256")
             == sha256(INDEPENDENT_COMMITMENT)
@@ -1461,6 +1541,72 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
             and terminal_reveal.get("all_prior_seed_reuse_forbidden") is True
             and terminal_reveal.get("retired_seed_commitments_sha256")
             == REFERENCE_V5_RETIRED_COMMITMENTS_SHA256
+            and attestation_repair.get("schema") == 1
+            and attestation_repair.get("kind")
+            == "sim-latency-hidden-attestation-schema-postprocessing-repair"
+            and attestation_repair.get("source_lock_sha256")
+            == SOURCE_LOCK_SHA256
+            and attestation_repair.get("original_runner_sha256")
+            == sha256(REFERENCE_V5_RUNNER)
+            and attestation_repair.get("repair_script_sha256")
+            == sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
+            and attestation_repair.get("terminal_decision_sha256")
+            == sha256(INDEPENDENT_TERMINAL_DECISION)
+            and attestation_repair.get("terminal_progress_sha256")
+            == sha256(INDEPENDENT_PROGRESS)
+            and attestation_repair.get("campaign_commitment_sha256")
+            == sha256(INDEPENDENT_COMMITMENT)
+            and attestation_repair.get("calibration_decision_sha256")
+            == sha256(INDEPENDENT_DECISION)
+            and attestation_repair.get("terminal_reveal_sha256")
+            == sha256(INDEPENDENT_TERMINAL_REVEAL)
+            and attestation_repair.get("campaign_reveal_sha256")
+            == sha256(INDEPENDENT_REVEAL)
+            and attestation_repair.get("attestation_sha256")
+            == sha256(INDEPENDENT_ATTESTATION)
+            and isinstance(repair_service_state, dict)
+            and repair_service_state.get("active_state") == "failed"
+            and repair_service_state.get("result") == "exit-code"
+            and repair_service_state.get("exec_main_status") == 1
+            and repair_service_state.get("restarts") == 0
+            and attestation_repair.get("terminal_only_runner_exit_code") == 0
+            and attestation_repair.get("attempt_directory_count_before") == 15
+            and attestation_repair.get("attempt_directory_count_after") == 15
+            and attestation_repair.get("seed_results_or_worker_evidence_changed")
+            is False
+            and attestation_repair.get("statistical_measurements_rerun") is False
+            and attestation_repair.get("measurements_censored") is False
+            and attestation_repair.get("original_measurement_artifacts_changed")
+            is False
+            and attestation_repair.get("campaign_reveal_reconstructed") is True
+            and attestation_repair.get("reveal_documents_byte_identical") is False
+            and attestation_repair.get("commitment_derivations_reverified") is True
+            and attestation_repair.get("generator_seed_derivations_reverified")
+            is True
+            and attestation_repair.get("public_private_terminal_lineage_reverified")
+            is True
+            and attestation_repair.get("cleanup_before", {}).get(
+                "residual_competition_containers"
+            )
+            == 0
+            and attestation_repair.get("cleanup_before", {}).get(
+                "residual_competition_networks"
+            )
+            == 0
+            and attestation_repair.get("cleanup_after", {}).get(
+                "residual_competition_containers"
+            )
+            == 0
+            and attestation_repair.get("cleanup_after", {}).get(
+                "residual_competition_networks"
+            )
+            == 0
+            and isinstance(repair_invalid_attempt, dict)
+            and repair_invalid_attempt.get("retained_private_for_forensics")
+            is True
+            and repair_invalid_attempt.get("mirrored_reveal_sha256")
+            == sha256(INDEPENDENT_TERMINAL_REVEAL)
+            and INDEPENDENT_ATTESTATION_REPAIR.stat().st_mode & 0o777 == 0o400
         ):
             raise AuditError("independent result, commitment, or reveal chain is invalid")
         (
@@ -1510,6 +1656,12 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
                 "attestation_sha256": sha256(INDEPENDENT_ATTESTATION),
                 "terminal_decision_sha256": sha256(INDEPENDENT_TERMINAL_DECISION),
                 "terminal_reveal_sha256": sha256(INDEPENDENT_TERMINAL_REVEAL),
+                "attestation_repair_sha256": sha256(
+                    INDEPENDENT_ATTESTATION_REPAIR
+                ),
+                "attestation_repair_script_sha256": sha256(
+                    INDEPENDENT_ATTESTATION_REPAIR_SCRIPT
+                ),
                 "protocol_sha256": sha256(INDEPENDENT_PROTOCOL),
                 "compatibility_decision_sha256": sha256(INDEPENDENT_DECISION),
                 "source_calibration_selection_sha256": sha256(SELECTION),
@@ -1738,6 +1890,12 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 == sha256(INDEPENDENT_TERMINAL_DECISION)
                 and staging_amendment.get("hidden_campaign_protocol_sha256")
                 == sha256(INDEPENDENT_PROTOCOL)
+                and staging_amendment.get("hidden_attestation_repair_sha256")
+                == sha256(INDEPENDENT_ATTESTATION_REPAIR)
+                and staging_amendment.get(
+                    "hidden_attestation_repair_script_sha256"
+                )
+                == sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
                 and isinstance(replacement, dict)
                 and replacement.get("same_seed_pairs") == SAME_SEED_TARGET
                 and replacement.get("independent_seeds") == INDEPENDENT_TARGET
@@ -1777,6 +1935,12 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 == PRE_REPAIR_PROGRESS_SHA256
                 and readiness.get("independent_attestation_sha256")
                 == sha256(INDEPENDENT_ATTESTATION)
+                and readiness.get("independent_attestation_repair_sha256")
+                == sha256(INDEPENDENT_ATTESTATION_REPAIR)
+                and readiness.get(
+                    "independent_attestation_repair_script_sha256"
+                )
+                == sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
                 and readiness.get("independent_calibration_decision_sha256")
                 == sha256(INDEPENDENT_DECISION)
                 and readiness.get("independent_terminal_decision_sha256")

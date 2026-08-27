@@ -54,6 +54,12 @@ INDEPENDENT_DECISION = INDEPENDENT_ROOT / "calibration-decision.json"
 INDEPENDENT_ANALYSIS = INDEPENDENT_ROOT / "same-seed-analysis.json"
 INDEPENDENT_COMMITMENT = INDEPENDENT / "campaign-commitment.json"
 INDEPENDENT_TERMINAL_DECISION = REFERENCE_V5 / "hidden-launch-decision.json"
+INDEPENDENT_ATTESTATION_REPAIR = (
+    REFERENCE_V5 / "hidden-attestation-path-repair.json"
+)
+INDEPENDENT_ATTESTATION_REPAIR_SCRIPT = (
+    REFERENCE_V5 / "repair-hidden-attestation-path.py"
+)
 INDEPENDENT_PROTOCOL = REFERENCE_V5 / "hidden-launch-protocol.json"
 INDEPENDENT_MEASUREMENT_AMENDMENT = (
     REFERENCE_V5 / "hidden-launch-measurement-amendment.json"
@@ -305,6 +311,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
     independent_analysis = load_object(INDEPENDENT_ANALYSIS)
     independent_commitment = load_object(INDEPENDENT_COMMITMENT)
     independent_terminal_decision = load_object(INDEPENDENT_TERMINAL_DECISION)
+    independent_attestation_repair = load_object(INDEPENDENT_ATTESTATION_REPAIR)
     independent_protocol = load_object(INDEPENDENT_PROTOCOL)
     reference_v5_qualification = load_object(REFERENCE_V5_QUALIFICATION)
     staging_reference_v5_amendment = load_object(STAGING_REFERENCE_V5_AMENDMENT)
@@ -625,6 +632,29 @@ def validate_terminal_inputs() -> dict[str, Any]:
         and independent_progress.get("separability_passed") is True,
         "independent reference campaign",
     )
+    exact_mode(INDEPENDENT_ATTESTATION_REPAIR, 0o400)
+    require(
+        independent_attestation_repair.get("kind")
+        == "sim-latency-hidden-attestation-schema-postprocessing-repair"
+        and independent_attestation_repair.get("source_lock_sha256")
+        == SOURCE_LOCK_SHA256
+        and independent_attestation_repair.get("repair_script_sha256")
+        == sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
+        and independent_attestation_repair.get("campaign_commitment_sha256")
+        == sha256(INDEPENDENT_COMMITMENT)
+        and independent_attestation_repair.get("terminal_decision_sha256")
+        == sha256(INDEPENDENT_TERMINAL_DECISION)
+        and independent_attestation_repair.get("attestation_sha256")
+        == sha256(INDEPENDENT_ATTESTATION)
+        and independent_attestation_repair.get("statistical_measurements_rerun")
+        is False
+        and independent_attestation_repair.get("measurements_censored") is False
+        and independent_attestation_repair.get(
+            "original_measurement_artifacts_changed"
+        )
+        is False,
+        "independent attestation repair",
+    )
     require(
         independent_attestation.get("accepted") is True
         and independent_attestation.get("target_independent_seeds")
@@ -772,6 +802,12 @@ def validate_terminal_inputs() -> dict[str, Any]:
         == sha256(INDEPENDENT_TERMINAL_DECISION)
         and staging_reference_v5_amendment.get("hidden_campaign_protocol_sha256")
         == sha256(INDEPENDENT_PROTOCOL)
+        and staging_reference_v5_amendment.get("hidden_attestation_repair_sha256")
+        == sha256(INDEPENDENT_ATTESTATION_REPAIR)
+        and staging_reference_v5_amendment.get(
+            "hidden_attestation_repair_script_sha256"
+        )
+        == sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
         and staging_reference_v5_amendment.get(
             "reference_v5_qualification_sha256"
         )
@@ -1041,6 +1077,10 @@ def validate_terminal_inputs() -> dict[str, Any]:
         == sha256(STAGING_REFERENCE_V5_AMENDMENT)
         and readiness.get("independent_attestation_sha256")
         == sha256(INDEPENDENT_ATTESTATION)
+        and readiness.get("independent_attestation_repair_sha256")
+        == sha256(INDEPENDENT_ATTESTATION_REPAIR)
+        and readiness.get("independent_attestation_repair_script_sha256")
+        == sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
         and readiness.get("independent_calibration_decision_sha256")
         == sha256(INDEPENDENT_DECISION)
         and readiness.get("independent_terminal_decision_sha256")
@@ -1848,6 +1888,12 @@ def render_outputs(data: dict[str, Any]) -> None:
         "placeability_policy_amendment_sha256": PLACEABILITY_POLICY_SHA256,
         "same_seed_postprocessing_repair_sha256": POSTPROCESSING_REPAIR_SHA256,
         "independent_attestation_sha256": sha256(INDEPENDENT_ATTESTATION),
+        "independent_attestation_repair_sha256": sha256(
+            INDEPENDENT_ATTESTATION_REPAIR
+        ),
+        "independent_attestation_repair_script_sha256": sha256(
+            INDEPENDENT_ATTESTATION_REPAIR_SCRIPT
+        ),
         "independent_calibration_decision_sha256": sha256(INDEPENDENT_DECISION),
         "independent_terminal_decision_sha256": sha256(
             INDEPENDENT_TERMINAL_DECISION

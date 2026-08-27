@@ -18,6 +18,8 @@ readonly REFERENCE_V5="$ROOT/reference-requalification-v5"
 readonly INDEPENDENT_ATTESTATION="$REFERENCE_V5/hidden-launch-runtime/independent-campaign-attestation.json"
 readonly INDEPENDENT_DECISION="$REFERENCE_V5/hidden-launch-decision.json"
 readonly INDEPENDENT_PROGRESS="$REFERENCE_V5/hidden-launch-runtime/independent-references/progress.json"
+readonly INDEPENDENT_ATTESTATION_REPAIR="$REFERENCE_V5/hidden-attestation-path-repair.json"
+readonly INDEPENDENT_ATTESTATION_REPAIR_SCRIPT="$REFERENCE_V5/repair-hidden-attestation-path.py"
 readonly REFERENCE_V5_STAGING_AMENDMENT="$ROOT/production-staging-reference-v5-amendment.json"
 readonly SERVICE_CHECK="$ROOT/production-readiness/service-backed-fifo-cache-failover.json"
 readonly RELEASE_CHECK="$ROOT/production-readiness/release-artifacts.json"
@@ -40,7 +42,9 @@ readonly REBASELINE="$RELEASE/binaries/competitionrebaseline"
 readonly DBINIT="$RELEASE/binaries/competitiondbinit"
 readonly SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
 readonly PROTOCOL_SHA=6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af
-readonly REFERENCE_V5_STAGING_AMENDMENT_SHA=PENDING_REFERENCE_V5_STAGING_AMENDMENT_SHA256
+readonly REFERENCE_V5_STAGING_AMENDMENT_SHA=618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695
+readonly INDEPENDENT_ATTESTATION_REPAIR_SHA=499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d
+readonly INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA=a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0
 readonly CONTROL_COMMIT=5070445ddb1764ad80f999102a9d71946e5a9e29
 readonly CONTROL_RELEASE_SHA=b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940
 readonly EVALUATOR_IMAGE=sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038
@@ -384,6 +388,10 @@ esac
 [ "$(sha256_file "$ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
 [ "$(sha256_file "$REFERENCE_V5_STAGING_AMENDMENT")" = "$REFERENCE_V5_STAGING_AMENDMENT_SHA" ] ||
     die "reference-v5 staging amendment changed"
+[ "$(sha256_file "$INDEPENDENT_ATTESTATION_REPAIR")" = "$INDEPENDENT_ATTESTATION_REPAIR_SHA" ] ||
+    die "independent attestation repair changed"
+[ "$(sha256_file "$INDEPENDENT_ATTESTATION_REPAIR_SCRIPT")" = "$INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA" ] ||
+    die "independent attestation repair script changed"
 [ "$(sha256_file "$PROVISIONER")" = "$PROVISIONER_SHA" ] || die "provisioner changed"
 [ "$(sha256_file "$ROOT/control-plane-release/source-release.json")" = "$CONTROL_RELEASE_SHA" ] || die "control source release changed"
 [ "$(git -C "$CONTROL" rev-parse HEAD)" = "$CONTROL_COMMIT" ] || die "control-plane commit changed"
@@ -396,11 +404,15 @@ jq -e --arg source "$SOURCE_LOCK_SHA" '.accepted == true and .source_lock_sha256
 jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
     --arg attestation "$(sha256_file "$INDEPENDENT_ATTESTATION")" \
     --arg decision "$(sha256_file "$INDEPENDENT_DECISION")" \
+    --arg repair "$INDEPENDENT_ATTESTATION_REPAIR_SHA" \
+    --arg repair_script "$INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA" \
     '.kind == "sim-latency-production-staging-reference-v5-amendment" and
      .draft == false and .authorized == true and .source_lock_sha256 == $source and
      .original_production_staging_protocol_sha256 == $protocol and
      .hidden_campaign_attestation_sha256 == $attestation and
      .hidden_campaign_decision_sha256 == $decision and
+     .hidden_attestation_repair_sha256 == $repair and
+     .hidden_attestation_repair_script_sha256 == $repair_script and
      .replacement_measurement_dependencies.same_seed_pairs == 12 and
      .replacement_measurement_dependencies.independent_seeds == 5 and
      .replacement_measurement_dependencies.required_reference_ordering_passes == 4 and

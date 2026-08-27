@@ -50,6 +50,12 @@ INDEPENDENT = INDEPENDENT_ROOT / "independent-campaign-attestation.json"
 INDEPENDENT_DECISION = INDEPENDENT_ROOT / "calibration-decision.json"
 INDEPENDENT_ANALYSIS = INDEPENDENT_ROOT / "same-seed-analysis.json"
 INDEPENDENT_TERMINAL_DECISION = REFERENCE_V5 / "hidden-launch-decision.json"
+INDEPENDENT_ATTESTATION_REPAIR = (
+    REFERENCE_V5 / "hidden-attestation-path-repair.json"
+)
+INDEPENDENT_ATTESTATION_REPAIR_SCRIPT = (
+    REFERENCE_V5 / "repair-hidden-attestation-path.py"
+)
 INDEPENDENT_PROTOCOL = REFERENCE_V5 / "hidden-launch-protocol.json"
 INDEPENDENT_MEASUREMENT_AMENDMENT = (
     REFERENCE_V5 / "hidden-launch-measurement-amendment.json"
@@ -73,7 +79,7 @@ PROTOCOL_SHA256 = (
     "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af"
 )
 STAGING_REFERENCE_V5_AMENDMENT_SHA256 = (
-    "PENDING_REFERENCE_V5_STAGING_AMENDMENT_SHA256"
+    "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695"
 )
 CONTROL_COMMIT = "5070445ddb1764ad80f999102a9d71946e5a9e29"
 CONTROL_SOURCE_RELEASE_SHA256 = (
@@ -96,6 +102,12 @@ STRICT_SAME_ANALYSIS_SHA256 = (
 )
 PRE_REPAIR_PROGRESS_SHA256 = (
     "6dca4d29e1a61df3427229923dfa22bbc4ac776c30db3f8f2e7a6bc574dcf8f0"
+)
+INDEPENDENT_ATTESTATION_REPAIR_SHA256 = (
+    "499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d"
+)
+INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA256 = (
+    "a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0"
 )
 MEASUREMENT_AMENDMENT_SHA256 = (
     "3bd163e339cc7dc8e23757dd23ea238607f7eb6eaecc1959acd412661b9a770f"
@@ -531,6 +543,7 @@ def main() -> int:
         (POSTPROCESSING_REPAIR, POSTPROCESSING_REPAIR_SHA256),
         (STRICT_SAME_ANALYSIS, STRICT_SAME_ANALYSIS_SHA256),
         (PRE_REPAIR_PROGRESS, PRE_REPAIR_PROGRESS_SHA256),
+        (INDEPENDENT_ATTESTATION_REPAIR, INDEPENDENT_ATTESTATION_REPAIR_SHA256),
     ):
         verify_authenticated_input(path, expected_hash)
 
@@ -547,6 +560,7 @@ def main() -> int:
     independent_analysis = load(INDEPENDENT_ANALYSIS)
     independent_commitment = load(INDEPENDENT_COMMITMENT)
     independent_terminal = load(INDEPENDENT_TERMINAL_DECISION)
+    independent_attestation_repair = load(INDEPENDENT_ATTESTATION_REPAIR)
     independent_protocol = load(INDEPENDENT_PROTOCOL)
     independent_measurement_amendment = load(
         INDEPENDENT_MEASUREMENT_AMENDMENT
@@ -581,6 +595,14 @@ def main() -> int:
         )
         == sha256(INDEPENDENT_PROTOCOL)
         and staging_reference_v5_amendment.get(
+            "hidden_attestation_repair_sha256"
+        )
+        == INDEPENDENT_ATTESTATION_REPAIR_SHA256
+        and staging_reference_v5_amendment.get(
+            "hidden_attestation_repair_script_sha256"
+        )
+        == INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA256
+        and staging_reference_v5_amendment.get(
             "reference_v5_qualification_sha256"
         )
         == sha256(REFERENCE_V5_QUALIFICATION)
@@ -597,6 +619,28 @@ def main() -> int:
         ).get("required_reference_ordering_passes")
         == INDEPENDENT_REQUIRED_PASSES,
         "reference-v5 staging amendment is not authenticated",
+    )
+    require(
+        sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
+        == INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA256
+        and independent_attestation_repair.get("kind")
+        == "sim-latency-hidden-attestation-schema-postprocessing-repair"
+        and independent_attestation_repair.get("source_lock_sha256")
+        == SOURCE_LOCK_SHA256
+        and independent_attestation_repair.get("campaign_commitment_sha256")
+        == sha256(INDEPENDENT_COMMITMENT)
+        and independent_attestation_repair.get("terminal_decision_sha256")
+        == sha256(INDEPENDENT_TERMINAL_DECISION)
+        and independent_attestation_repair.get("attestation_sha256")
+        == sha256(INDEPENDENT)
+        and independent_attestation_repair.get("statistical_measurements_rerun")
+        is False
+        and independent_attestation_repair.get("measurements_censored") is False
+        and independent_attestation_repair.get(
+            "original_measurement_artifacts_changed"
+        )
+        is False,
+        "independent attestation repair is not authenticated",
     )
 
     active_measurements = dict(progress)
@@ -957,6 +1001,12 @@ def main() -> int:
         "strict_same_seed_analysis_sha256": STRICT_SAME_ANALYSIS_SHA256,
         "pre_repair_same_seed_progress_sha256": PRE_REPAIR_PROGRESS_SHA256,
         "independent_attestation_sha256": sha256(INDEPENDENT),
+        "independent_attestation_repair_sha256": (
+            INDEPENDENT_ATTESTATION_REPAIR_SHA256
+        ),
+        "independent_attestation_repair_script_sha256": (
+            INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA256
+        ),
         "independent_calibration_decision_sha256": sha256(INDEPENDENT_DECISION),
         "independent_terminal_decision_sha256": sha256(
             INDEPENDENT_TERMINAL_DECISION
