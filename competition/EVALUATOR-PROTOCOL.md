@@ -90,7 +90,14 @@ total 96 GiB and must leave at least 24 GiB outside the active stack.
     "normalized_score": 100.0,
     "placeable": true,
     "takeover_eligible": false,
-    "gates": {"G1": {"passed": true, "details": {}}},
+    "gates": {
+      "G1_success": {"passed": true, "details": {}},
+      "G2_volume": {"passed": true, "details": {}},
+      "G3_path_integrity": {"passed": true, "details": {}},
+      "G4_matchmaking": {"passed": true, "details": {}},
+      "G5_stability": {"passed": true, "details": {}},
+      "G6_resources": {"passed": true, "details": {}}
+    },
     "diagnostics": {}
   },
   "eval_error": null,
@@ -124,7 +131,9 @@ total 96 GiB and must leave at least 24 GiB outside the active stack.
 }
 ```
 
-Exactly one of `score` and `eval_error` is non-null. A submission error is
+Exactly one of `score` and `eval_error` is non-null. A score contains exactly
+the six named G1–G6 entries above; a missing, renamed, or additional gate is an
+infrastructure failure. A submission error is
 terminal and non-retriable. A `candidate_build_failed` result occurs before
 any workload process starts, so it must authenticate `submission-error.json`,
 the completion marker, the offline/default-deny build boundary, cleanup, and

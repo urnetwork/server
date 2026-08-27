@@ -121,8 +121,8 @@ authoritative host completes this sequence:
    job is running.
 2. Run `cli/competitionrebaseline` on the two management CPUs with the generated
    round UUID, the no-op reference patch, and its canonical SHA-256 through the
-   mandatory `--patch_sha256` argument. The command loads the
-   encrypted round record through the trusted store, checks the current-round
+   mandatory `--patch_sha256` argument. The command loads the encrypted round
+   record through the trusted store, checks the current-round
    policy and host containment identity, and runs the ordinary evaluator. It
    succeeds only when the pristine baseline, the no-op candidate, every score
    gate, and the complete evaluator security/artifact chain pass. Its output
