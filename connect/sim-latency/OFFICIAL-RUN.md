@@ -36,7 +36,7 @@ Build the reviewed season base once, then derive a candidate with dependency
 networking disabled and the pre-populated module cache:
 
 ```bash
-./competition/container/build-base.sh --tag registry/base:season-1
+./competition/container/build-base.sh --epoch 0 --tag registry/base:season-1
 ./competition/container/build-submission.sh \
   --base-image registry/base@sha256:<digest> \
   --patch /job/canonical.patch --policy /job/policy.json
@@ -144,6 +144,7 @@ APEX_PATCH_FILE=<absolute canonical patch path>
 APEX_PATCH_SHA256=<canonical patch, 64 hex>
 APEX_ARTIFACT_ROOT=<absolute per-season artifact root>
 APEX_EVALUATION_ID=<unique [A-Za-z0-9._-]+ id>
+APEX_EPOCH=<measured source epoch 0..6>
 APEX_API_IMAGE_DIGEST=sha256:<64 hex>
 APEX_HARDWARE_ID=<inventory id>
 APEX_HOST_QUALIFICATION_SHA256=<64 hex live host-fact digest>

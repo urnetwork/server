@@ -214,7 +214,17 @@ func readBaseline(path string) (*Baseline, error) {
 // always `run --reset` (independent replicates) with the replicate's meta
 // path, forwarding the run-shaping flags the user gave the baseline command.
 func replicateRunArgs(opts docopt.Opts, metaPath string) []string {
-	args := []string{"run", "--reset", "--meta", metaPath}
+	args := []string{
+		"run",
+		"--epoch", optString(opts, "--epoch", ""),
+		"--reset",
+		"--meta", metaPath,
+	}
+	for _, flag := range []string{"--source-config", "--repos-root"} {
+		if value := optString(opts, flag, ""); value != "" {
+			args = append(args, flag, value)
+		}
+	}
 	forward := []string{
 		"--providers", "--site-home",
 		"--ramp", "--prewarm", "--settle", "--client-warmup-timeout", "--duration", "--request-timeout",
@@ -284,6 +294,9 @@ func runBaselineReplicates(opts docopt.Opts, n int, dir string) ([]string, error
 // ---- command ----
 
 func runBaselineCmd(opts docopt.Opts) {
+	if _, _, _, err := checkConfiguredSource(opts); err != nil {
+		fatalf("source epoch preflight: %s", err)
+	}
 	alpha := optFloat(opts, "--alpha", 0.05)
 	outPath := optString(opts, "--out", "baseline.json")
 

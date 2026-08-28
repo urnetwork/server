@@ -44,6 +44,7 @@ cd "$(dirname "$0")"
 # eval-48a revision (rate 200, sha eca46fe8...) and its k=12 baseline are
 # archived under eval-48g/*-eval48a.
 SEED=48
+EPOCH=0          # frozen baseline source epoch in config/main/sim-latency.yml
 COUNT=2000        # providers
 CLIENTS=200       # warm client identity pool
 RATE=80           # mean client arrivals per minute (crawl weight ~2.4x eval-48a)
@@ -110,7 +111,7 @@ regenerate it: rm $PROVIDERS && ./eval-48.sh init (or update PROVIDERS_SHA if th
 }
 
 standard_run_args() {
-    echo "run --reset --providers $PROVIDERS --fleet-shards $FLEET_SHARDS --site-home eval-48g/.sim-site"
+    echo "run --epoch $EPOCH --reset --providers $PROVIDERS --fleet-shards $FLEET_SHARDS --site-home eval-48g/.sim-site"
 }
 
 eval48_run() {
@@ -284,7 +285,7 @@ eval48_baseline() {
         runs="${runs:+$runs,}$csv"
     done
     [ -n "$runs" ] || die "no completed campaign runs under eval-48g/runs/"
-    ./sim-latency baseline --runs "$runs" --out eval-48g/baseline.json
+    ./sim-latency baseline --epoch "$EPOCH" --runs "$runs" --out eval-48g/baseline.json
 }
 
 eval48_summary() {

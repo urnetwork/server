@@ -96,6 +96,7 @@ type RunStats struct {
 	Flags         map[string]string `json:"flags,omitempty"`
 
 	// official evaluation identity and frozen scoring inputs
+	SourceEpoch            int    `json:"source_epoch"`
 	ScoreSchema            int    `json:"score_schema,omitempty"`
 	ScorerVersion          string `json:"scorer_version,omitempty"`
 	EvaluationId           string `json:"evaluation_id,omitempty"`

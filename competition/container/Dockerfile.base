@@ -42,6 +42,8 @@ RUN apt-get update \
 
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 ARG BASE_SHA
+ARG SOURCE_EPOCH
+ARG SOURCE_CONFIG_SHA256
 ARG SOURCE_LOCK_SHA256
 COPY source/server /workspace/server
 COPY source/connect /workspace/connect
@@ -52,6 +54,7 @@ COPY source/goidenticons /workspace/goidenticons
 COPY source/userwireguard /workspace/userwireguard
 COPY source/sn /workspace/sn
 COPY source-lock.json /opt/urnetwork/source-lock.json
+COPY sim-latency.yml /opt/urnetwork/sim-latency.yml
 COPY evaluator/entrypoint.sh /usr/local/libexec/competition-container
 COPY evaluator/official-run.sh /usr/local/libexec/competition-official-run
 
@@ -72,7 +75,12 @@ RUN go mod download \
 RUN GOFLAGS=-mod=readonly go build -trimpath -o /usr/local/libexec/competitionpatch ./cli/competitionpatch \
     && GOFLAGS=-mod=readonly go build -trimpath -o /usr/local/libexec/competitiondbinit ./cli/competitiondbinit \
     && GOFLAGS=-mod=readonly go build -trimpath -o /opt/urnetwork/bin/sim-latency ./connect/sim-latency
-RUN git status --porcelain --untracked-files=all \
+RUN test "$(sha256sum /opt/urnetwork/sim-latency.yml | awk '{print $1}')" = "${SOURCE_CONFIG_SHA256}" \
+    && /opt/urnetwork/bin/sim-latency source-check \
+        --epoch "${SOURCE_EPOCH}" \
+        --source-config /opt/urnetwork/sim-latency.yml \
+        --repos-root /workspace \
+    && git status --porcelain --untracked-files=all \
     && go version -m /opt/urnetwork/bin/sim-latency \
     && test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.revision=//p')" = "${BASE_SHA}" \
     && test "$(go version -m /opt/urnetwork/bin/sim-latency | sed -n 's/.*vcs.modified=//p')" = false
@@ -80,17 +88,21 @@ RUN git status --porcelain --untracked-files=all \
 RUN install -m 0444 /dev/null /opt/urnetwork/submission/canonical.patch \
     && jq -n \
         --arg base_sha "${BASE_SHA}" \
+        --argjson source_epoch "${SOURCE_EPOCH}" \
+        --arg source_config_sha256 "${SOURCE_CONFIG_SHA256}" \
         --arg source_lock_sha256 "${SOURCE_LOCK_SHA256}" \
         --arg simulator_sha256 "$(sha256sum /opt/urnetwork/bin/sim-latency | awk '{print $1}')" \
-        '{schema: 1, image_kind: "evaluator-base", base_sha: $base_sha, build_sha: $base_sha, patch_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", policy_sha256: null, source_lock_sha256: $source_lock_sha256, simulator_sha256: $simulator_sha256, paths: []}' \
+        '{schema: 1, image_kind: "evaluator-base", base_sha: $base_sha, build_sha: $base_sha, source_epoch: $source_epoch, source_config_sha256: $source_config_sha256, patch_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", policy_sha256: null, source_lock_sha256: $source_lock_sha256, simulator_sha256: $simulator_sha256, paths: []}' \
         > /opt/urnetwork/image-identity.json \
-    && chmod 0444 /opt/urnetwork/image-identity.json /opt/urnetwork/source-lock.json \
+    && chmod 0444 /opt/urnetwork/image-identity.json /opt/urnetwork/source-lock.json /opt/urnetwork/sim-latency.yml \
     && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)"
 
 LABEL org.opencontainers.image.title="URnetwork sim-latency evaluator base" \
       org.opencontainers.image.revision="${BASE_SHA}" \
       com.urnetwork.competition.image-kind="evaluator-base" \
       com.urnetwork.competition.base-sha="${BASE_SHA}" \
+      com.urnetwork.competition.source-epoch="${SOURCE_EPOCH}" \
+      com.urnetwork.competition.source-config-sha256="${SOURCE_CONFIG_SHA256}" \
       com.urnetwork.competition.source-lock-sha256="${SOURCE_LOCK_SHA256}"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/libexec/competition-container"]

@@ -282,6 +282,7 @@ printf '%s\n' \
     "APEX_PROVIDERS_SHA256=$providers_sha256" \
     'APEX_ARTIFACT_ROOT=/artifacts' \
     'APEX_EVALUATION_ID=container-smoke-preflight' \
+    'APEX_EPOCH=0' \
     "APEX_API_IMAGE_DIGEST=$candidate_image_id" \
     'APEX_HARDWARE_ID=local-container-smoke-not-qualified' \
     "APEX_HOST_QUALIFICATION_SHA256=$qualification_sha256" \
@@ -493,6 +494,7 @@ write_scorer_common_env() {
         "APEX_PROVIDERS_SHA256=$providers_sha256" \
         'APEX_ARTIFACT_ROOT=/artifacts' \
         'APEX_EVALUATION_ID=container-smoke-preflight' \
+        'APEX_EPOCH=0' \
         "APEX_API_IMAGE_DIGEST=$base_image_id" \
         'APEX_HARDWARE_ID=local-container-smoke-not-qualified' \
         "APEX_HOST_QUALIFICATION_SHA256=$qualification_sha256" \

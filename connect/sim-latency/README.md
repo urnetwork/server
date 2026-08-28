@@ -317,6 +317,12 @@ is a rules decision recorded in `compare.go`/`metricDefs`.
    read the local pg/redis/jwt config. sim-latency sets the other env defaults
    (`WARP_ENV=local`, hostnames) itself; `run-local.sh` here does the same.
 
+3. `config/main/sim-latency.yml` contains the requested source epoch and the
+   `connect`, `sdk`, `server`, and `proxy` checkouts are clean, on
+   `sim-latency`, and exactly at that epoch's commits. `run`, `fleet`, and
+   `baseline` fail before touching services if any identity differs. Use
+   `./sim-latency source-check --epoch 0` to verify the baseline checkout.
+
 ## Quick start
 
 ```
@@ -327,7 +333,7 @@ go build -o sim-latency .
 ./sim-latency init --count 2000 --clients 200 --rate 200 --seed 1 --out providers.yml
 
 # 2. run: brings up the environment, ramps the fleet, settles, then measures
-./sim-latency run --reset --providers providers.yml --meta results.run.json > results.csv
+./sim-latency run --epoch 0 --reset --providers providers.yml --meta results.run.json > results.csv
 #    (per-request CSV on stdout; all logs on stderr; --reset clears prior
 #     runs' reliability state; the run.json side-car carries the window +
 #     metric summaries)
@@ -339,7 +345,7 @@ go build -o sim-latency .
 Or use the convenience wrapper that sets the local env:
 
 ```
-./run-local.sh run --providers providers.yml > results.csv
+./run-local.sh run --epoch 0 --providers providers.yml > results.csv
 ```
 
 ## The warm-up period
@@ -458,13 +464,13 @@ it encapsulates the variance used to measure significance):
 ```
 # 1. measure the baseline once per (config, duration, machine): k >= 5
 #    replicate runs of UNCHANGED code, each from a clean reset. One command:
-./sim-latency baseline --replicates 5 --providers providers.yml --out baseline.json
+./sim-latency baseline --epoch 0 --replicates 5 --providers providers.yml --out baseline.json
 #    (runs 5 sequential `run --reset` replicates into baseline-runs/, then
 #     computes; or compute from runs you already have:
-#     ./sim-latency baseline --runs aa1.csv,aa2.csv,aa3.csv,aa4.csv,aa5.csv)
+#     ./sim-latency baseline --epoch 0 --runs aa1.csv,aa2.csv,aa3.csv,aa4.csv,aa5.csv)
 
 # 2. measure the candidate build (same providers.yml, same flags)
-./sim-latency run --reset --providers providers.yml --meta b.run.json > b.csv
+./sim-latency run --epoch 0 --reset --providers providers.yml --meta b.run.json > b.csv
 
 # 3. decide
 ./sim-latency compare --a b.csv --b baseline-runs/baseline-1.csv --baseline baseline.json --p 0.05
@@ -615,7 +621,7 @@ side is free to *react* however it likes — e.g. the multi-client's
 By default the fleet runs in-process. For scale, shard it into subprocesses:
 
 ```
-./sim-latency run --providers providers.yml --fleet-shards 8
+./sim-latency run --epoch 0 --providers providers.yml --fleet-shards 8
 ```
 
 spawns 8 `sim-latency fleet` subprocesses, each carrying 1/8 of the providers,

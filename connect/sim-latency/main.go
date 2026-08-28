@@ -47,14 +47,16 @@ func main() {
 
 Usage:
   sim-latency init [--out=<path>] [--count=<n>] [--clients=<n>] [--rate=<m>] [--seed=<s>] [--quality-window=<n>]
-  sim-latency run [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>]
-  sim-latency fleet --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
+  sim-latency run --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair] [--reset] [--meta=<path>] [--evaluation-id=<id>] [--official] [--expected-revision=<sha>] [--resource-report=<path>] [--accounting-report=<path>] [--accounting-source=<path>] [--final-marker=<path>]
+  sim-latency fleet --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --providers=<path> --shard=<i/n> --api-url=<url> --ws-urls=<urls> [--ramp=<d>] [--evaluation-id=<id>] [--accounting-command-fd=<n>] [--accounting-response-fd=<n>]
   sim-latency analyze --run=<path> [--window=<w>] [--out=<path>] [--json]
-  sim-latency baseline --runs=<paths> [--alpha=<a>] [--out=<path>]
-  sim-latency baseline [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
+  sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] --runs=<paths> [--alpha=<a>] [--out=<path>]
+  sim-latency baseline --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--replicates=<n>] [--out-dir=<dir>] [--alpha=<a>] [--out=<path>] [--providers=<path>] [--site-home=<dir>] [--ramp=<d>] [--prewarm=<d>] [--settle=<d>] [--client-warmup-timeout=<d>] [--duration=<d>] [--request-timeout=<d>] [--fleet-shards=<n>] [--site-listen=<addr>] [--hosts=<n>] [--api-port=<p>] [--pipeline-interval=<d>] [--test-timeout=<d>] [--announce-timeout=<d>] [--no-impair]
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
+  sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency promote --epoch=<n> --winner=<dir> --winner-job-id=<id> [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
   sim-latency reset
   sim-latency -h | --help
   sim-latency --version
@@ -62,6 +64,13 @@ Usage:
 Options:
   -h --help              Show this screen.
   --version              Show version.
+  --epoch=<n>            Source epoch: 0 is baseline; 1..6 follow winning promotions.
+  --source-config=<path> Epoch ledger path [default: discovered config/main/sim-latency.yml].
+  --repos-root=<dir>     Parent of connect, sdk, server, and proxy [default: discovered workspace].
+  --winner=<dir>         Winner directory containing one or more <repository>.patch files.
+  --winner-job-id=<id>   Published winning competition job id recorded in the next epoch.
+  --message=<text>       Promotion commit message suffix.
+  --dry-run              Validate and stage a promotion without pushing or updating local branches.
   --out=<path>           Output path for the selected file-producing command.
   --count=<n>            Number of providers [default: 100000].
   --clients=<n>          Client identity pool size [default: 4000].
@@ -148,6 +157,10 @@ Options:
 		runScoreBaseline(opts)
 	case optBool(opts, "score"):
 		runScore(opts)
+	case optBool(opts, "source-check"):
+		runSourceCheck(opts)
+	case optBool(opts, "promote"):
+		runPromote(opts)
 	case optBool(opts, "reset"):
 		requireLocalEnvironment("reset")
 		runReset()
@@ -195,6 +208,10 @@ func generatedConfig(seed int64, count int, clients int, rate float64, qualityWi
 }
 
 func runRun(opts docopt.Opts) {
+	epochNumber, sourceConfig, repositoriesRoot, err := checkConfiguredSource(opts)
+	if err != nil {
+		fatalf("source epoch preflight: %s", err)
+	}
 	providers, _ := opts.String("--providers")
 	siteHome, _ := opts.String("--site-home")
 	absSiteHome := mustAbs(siteHome)
@@ -213,6 +230,9 @@ func runRun(opts docopt.Opts) {
 	servicesConfig.AnnounceTimeout = optDuration(opts, "--announce-timeout", servicesConfig.AnnounceTimeout)
 
 	options := &RunOptions{
+		Epoch:               epochNumber,
+		SourceConfig:        sourceConfig,
+		RepositoriesRoot:    repositoriesRoot,
 		ConfigPath:          providers,
 		SiteHome:            absSiteHome,
 		Ramp:                optDuration(opts, "--ramp", 1*time.Minute),
@@ -240,6 +260,9 @@ func runRun(opts docopt.Opts) {
 }
 
 func runFleet(opts docopt.Opts) {
+	if _, _, _, err := checkConfiguredSource(opts); err != nil {
+		fatalf("source epoch preflight: %s", err)
+	}
 	providers, _ := opts.String("--providers")
 	shard, _ := opts.String("--shard")
 	apiUrl, _ := opts.String("--api-url")
