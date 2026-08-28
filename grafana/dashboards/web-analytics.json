@@ -1,0 +1,240 @@
+{
+  "uid": "urnetwork-web-analytics",
+  "title": "urnetwork / web analytics",
+  "tags": ["urnetwork", "web", "seo"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "refresh": "5m",
+  "time": {"from": "now-7d", "to": "now"},
+  "description": "Privacy-safe web views and webmaster search performance. Page views are structured Loki events containing only site, normalized path, country bucket, source class, and engine; provider query rows reach Loki only after the taskworker marks them privacy_safe. No panel queries IP addresses, user identifiers, cookies, URL queries, or full referrer URLs.",
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(urnetwork_build_info, env)",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "site",
+        "label": "site",
+        "type": "custom",
+        "query": "ur.io,ur.xyz",
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+"
+      },
+      {
+        "name": "path",
+        "label": "path",
+        "type": "textbox",
+        "query": ".+",
+        "current": {"text": ".+", "value": ".+"}
+      },
+      {
+        "name": "region",
+        "label": "region",
+        "type": "textbox",
+        "query": ".+",
+        "current": {"text": ".+", "value": ".+"}
+      },
+      {
+        "name": "engine",
+        "label": "search engine",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(urnetwork_web_search_clicks_total{env=\"$env\",site=~\"$site\"}, engine)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "privacy-safe page views",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "views",
+      "description": "Requests for rendered pages only. Paths are normalized and query strings are discarded before export.",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"},
+      "targets": [
+        {"refId": "A", "expr": "sum(count_over_time({env=\"$env\",service=\"web\"} | json | event=\"web_page_view\" | privacy_safe=\"true\" | site=~\"$site\" | path=~\"$path\" | region=~\"$region\" [$__range]))", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "search referrals",
+      "description": "Page views whose privacy-safe source classifier identified a search engine. The raw Referer header is never exported.",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"},
+      "targets": [
+        {"refId": "A", "expr": "sum(count_over_time({env=\"$env\",service=\"web\"} | json | event=\"web_page_view\" | privacy_safe=\"true\" | site=~\"$site\" | path=~\"$path\" | region=~\"$region\" | source=\"search\" [$__range]))", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "AI referrals",
+      "description": "Source-level referrals from AI assistants and answer engines; no prompt or user identifier is available or collected.",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"},
+      "targets": [
+        {"refId": "A", "expr": "sum(count_over_time({env=\"$env\",service=\"web\"} | json | event=\"web_page_view\" | privacy_safe=\"true\" | site=~\"$site\" | path=~\"$path\" | region=~\"$region\" | source=\"ai\" [$__range]))", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "last webmaster import age",
+      "description": "Age of the oldest selected provider's last successful import. A high value means search performance is stale, not that traffic is zero.",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 93600}, {"color": "red", "value": 180000}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "background", "graphMode": "none", "justifyMode": "auto"},
+      "targets": [
+        {"refId": "A", "expr": "time() - min(urnetwork_web_search_ingest_last_success_timestamp_seconds{env=\"$env\",site=~\"$site\",engine=~\"$engine\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "views per hour by path and region",
+      "description": "Top 30 normalized path/region pairs. Region is a coarse code resolved before the client address is discarded.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 5},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 12, "showPoints": "never", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["sum", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "topk(30, sum by (path, region) (count_over_time({env=\"$env\",service=\"web\"} | json | event=\"web_page_view\" | privacy_safe=\"true\" | site=~\"$site\" | path=~\"$path\" | region=~\"$region\" [1h])))", "legendFormat": "{{path}} · {{region}}", "range": true, "editorMode": "code", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    },
+    {
+      "id": 7,
+      "type": "bargauge",
+      "title": "top paths",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 13},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "minVizWidth": 0, "minVizHeight": 10, "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}},
+      "targets": [
+        {"refId": "A", "expr": "topk(25, sum by (path) (count_over_time({env=\"$env\",service=\"web\"} | json | event=\"web_page_view\" | privacy_safe=\"true\" | site=~\"$site\" | path=~\"$path\" | region=~\"$region\" [$__range])))", "legendFormat": "{{path}}", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "views by region",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 13},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "minVizWidth": 0, "minVizHeight": 10, "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}},
+      "targets": [
+        {"refId": "A", "expr": "topk(25, sum by (region) (count_over_time({env=\"$env\",service=\"web\"} | json | event=\"web_page_view\" | privacy_safe=\"true\" | site=~\"$site\" | path=~\"$path\" | region=~\"$region\" [$__range])))", "legendFormat": "{{region}}", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "views by source",
+      "description": "Low-cardinality source class and engine only; full referrer URLs are not retained.",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 13},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "minVizWidth": 0, "minVizHeight": 10, "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""}},
+      "targets": [
+        {"refId": "A", "expr": "topk(25, sum by (source, engine) (count_over_time({env=\"$env\",service=\"web\"} | json | event=\"web_page_view\" | privacy_safe=\"true\" | site=~\"$site\" | path=~\"$path\" | region=~\"$region\" [$__range])))", "legendFormat": "{{source}} · {{engine}}", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "webmaster search performance",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "search clicks and impressions by engine",
+      "description": "Aggregated webmaster API totals. DuckDuckGo and AI assistants appear only as referral sources unless they publish a webmaster query API.",
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 22},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum by (engine) (rate(urnetwork_web_search_clicks_total{env=\"$env\",site=~\"$site\",engine=~\"$engine\"}[$__rate_interval])) * 3600", "legendFormat": "{{engine}} clicks/h", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum by (engine) (rate(urnetwork_web_search_impressions_total{env=\"$env\",site=~\"$site\",engine=~\"$engine\"}[$__rate_interval])) * 3600", "legendFormat": "{{engine}} impressions/h", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "imported query rows",
+      "description": "Rows accepted after normalization, redaction, and the configured minimum-impressions privacy floor.",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 22},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto"},
+      "targets": [
+        {"refId": "A", "expr": "sum(increase(urnetwork_web_search_ingest_rows_total{env=\"$env\",site=~\"$site\",engine=~\"$engine\",result=\"accepted\"}[$__range]))", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "top search landing paths",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 30},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []},
+      "options": {"showHeader": true, "cellHeight": "sm", "sortBy": [{"displayName": "Value", "desc": true}]},
+      "targets": [
+        {"refId": "A", "expr": "topk(50, sum by (engine, path) (increase(urnetwork_web_search_clicks_total{env=\"$env\",site=~\"$site\",engine=~\"$engine\"}[$__range])))", "legendFormat": "{{engine}} · {{path}}", "format": "table", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "provider import health",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 30},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso"}, "overrides": []},
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "targets": [
+        {"refId": "A", "expr": "max by (site, engine) (urnetwork_web_search_ingest_last_success_timestamp_seconds{env=\"$env\",site=~\"$site\",engine=~\"$engine\"}) * 1000", "legendFormat": "{{site}} · {{engine}}", "format": "table", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 15,
+      "type": "logs",
+      "title": "privacy-filtered search terms",
+      "description": "Structured taskworker rows only. The importer must redact likely email/phone identifiers, cap length, apply the minimum-impressions floor, and set privacy_safe=true. Query text is never a Prometheus label.",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 39},
+      "datasource": {"type": "loki", "uid": "warp-loki"},
+      "options": {"showTime": true, "showLabels": false, "wrapLogMessage": true, "sortOrder": "Descending", "dedupStrategy": "none", "enableLogDetails": true},
+      "targets": [
+        {"refId": "A", "expr": "{env=\"$env\",service=\"taskworker\"} | json | event=\"web_search_query\" | site=~\"$site\" | engine=~\"$engine\" | privacy_safe=\"true\" | line_format `{{.engine}} · {{.query}} · clicks={{.clicks}} · impressions={{.impressions}} · position={{.position}} · {{.path}}`", "queryType": "range", "datasource": {"type": "loki", "uid": "warp-loki"}}
+      ]
+    }
+  ]
+}

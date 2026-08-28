@@ -675,6 +675,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `[c]h3 handshake no response mode=... sent_packets=N pto=M ...` | The client emitted QUIC packets but received zero packets before handshake failure. This is the Initial-blackhole signal that `PacketLost` misses; PTOs are counted separately. | Pin the resolved public tuple, then split public DNAT/conntrack, LB backend socket, and return path with §16.5/§16.6. Do not interpret `q_lost=0` as health. |
 | `[c]h3 connect err = ... context deadline exceeded` | No valid QUIC response reached the client. This is below auth but otherwise ambiguous: direct UDP/443, DNS-envelope creation, public UDP/53 delivery, LB/PP/DNS decode, and the return tuple can all cause it. | Record the mode and resolved IP. For direct H3, split public ingress from backend-listener loss with §16.5. For `h3dns`/`h3dnspump`, prove raw envelopes were sent and compare the exact port-53 DNAT delta: zero is upstream delivery, no rule is LB activation, and a rise without a 4053 (or migration 8053) accept is LB/PP/decode (§16.6). |
 | `panic: Missing host port for service port <port>` (LB startup) | The image's nginx config contains a logical listener absent from runtime `WARP_PORTS`; usually services.yml/image generation is newer than the systemd unit's baked `--portblocks`/`--forwardports`. The desired LB version may look deployed while the new container is Exited(2) and the old LB keeps serving. | Compare `systemctl cat`, container `WARP_PORTS`, and baked nginx listeners; regenerate and deploy units (§11.8), then require the new LB to stay `Up` before evaluating its behavior. |
+| `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125`) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. | Compare `ctr version` client/server and check whether `/proc/<containerd-pid>/exe` is `(deleted)`. Stop retrying/restarting Warp units; restart/reboot the container runtime one host at a time, then require client/server versions to match and a replacement container to reach `Up`. See §8.5a. |
+| `systemd-networkd-wait-online.service: Timeout occurred while waiting for network connectivity` after an edge reboot | At least one configured link never reached online. On the 2026-08-28 recovery, unused no-carrier NICs remained `configuring` while every serving interface was already `routable`; this failed the boot wait unit but did not imply a traffic outage. | Use `networkctl list`, source-specific `ip route get`, and public probes. The authoritative edge netplans mark known non-serving links `optional: true`; recurrence after those netplans take effect means a new required-link failure or config drift. Do not restart working networkd during recovery. |
+| `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
@@ -1121,6 +1124,60 @@ Observed 2026-07-19 22:53–22:55: edges 0/1/4 all logged
   pre-incident baseline within ~10 min of the final burst, old same-tag
   containers gone by their stop timeout, no residual page-tier tickets
   except known standing ones.
+
+### 8.5a Controlled APT left Docker/containerd split across versions
+
+`policy_rc_d: 101` deliberately suppresses package-triggered service restarts.
+That is unsafe if a controlled APT pass upgrades `containerd.io` but the
+playbook returns without a rolling runtime restart. On 2026-08-28 edge-0,
+edge-1, and edge-4 had the 2.3.3 binaries installed while their live
+containerd process was still 2.2.6; `readlink /proc/<pid>/exe` ended in
+`(deleted)`. Every subsequent deploy failed before application startup:
+
+```
+docker run ...                                            # exit 125
+docker inspect <created-container> --format '{{.State.Error}}'
+# failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix
+ctr version                                               # Client 2.3.3, Server 2.2.6
+```
+
+This is a containerd bootstrap-protocol mismatch, not a Warp poll, port,
+drain, image, or application failure. The 2.3 shim writes a protobuf bootstrap
+result that the still-running 2.2 daemon cannot parse. Existing containers
+remain `Up`, so public traffic stays on the old generation while every
+`warp-main-*` worker retries. The unit's `ActiveState=active`, `NRestarts=0`
+is therefore expected and misleading. Read the Docker daemon journal for the
+real error. Pre-fix Warp builds retain only exit 125; the corrected `outAndLog`
+adds a bounded, escaped stderr excerpt to the same journal record.
+
+Recovery is a controlled rolling restart/reboot of the container runtime, one
+host at a time. Restarting Warp units alone cannot repair the daemon/shim
+pairing and increases retry churn. Before advancing to the next host require:
+
+1. Docker and containerd client/server versions match;
+2. neither daemon executable is `(deleted)`;
+3. one newly created container reaches `Up` and its Warp journal records
+   `Deploy success`;
+4. the old service generation drains normally.
+
+Observed recovery on 2026-08-28: edge-4, edge-0, and edge-1 took 432s, 578s,
+and 488s respectively to reboot and return to Ansible. After each host returned,
+Docker was 29.7.2/29.7.2, containerd was 2.3.3/2.3.3, all five API blocks on
+`2026.8.28-outerwerld+1031122680` returned 200 from their host allocation, and
+the post-boot daemon/Warp journals contained no recurrence. Keep the rolling
+reboot timeout above these slow physical boot times. A final fleet probe found
+matching runtime pairs and zero failed Warp units on every reachable edge;
+edge-5 was already known offline and was not part of the recovery. Strict
+public probes also made five IPv6 requests to `api-v6.bringyour.com/my-ip-info`
+and received the exact bound source address every time.
+
+The edge APT playbook now snapshots all Docker/containerd/runc packages around
+the controlled upgrade, probes daemon liveness, executable paths, and
+client/server versions, and performs a throttled reboot when either package
+state changes or the probe detects an inconsistent runtime. It then refuses to
+continue unless the strict probe passes and Warp launches a main-environment
+container. A `/var/run/reboot-required` check alone is not sufficient: this
+userspace package transition does not have to create that file.
 
 ### 8.6 Config-generation restart wave — binary version alone is incomplete
 
