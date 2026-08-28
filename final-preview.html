@@ -27,8 +27,8 @@
 <header>
   <div class="eyebrow">Team preview · measured-target source freeze</div>
   <h1>Final sim-latency evaluation environment</h1>
-  <p>The corrected evaluator image and local source commits are frozen. The exact-image frontier selected 1,800 providers after p2700 crossed the quality boundary; all 12 same-seed pairs are sealed, and R=9 with a 16.1% takeover margin is selected. The stronger v5 references passed their pilot and then met the authorized hidden-seed screen at exactly four of five strict orderings. Seven of ten local launch gates now pass with no failures; release validation, the fixed staging round, and final documentation remain.</p>
-  <div class="stamp"><span class="pill running">V5 HIDDEN SCREEN · ACCEPTED · 4 PASS / 1 FAIL</span><span class="pill">snapshot 27 August 2026 · 23:38 UTC</span><span class="pill">LOCAL AUDIT · 7 PASS / 3 PENDING / 0 FAIL</span><span class="pill">12 / 12 BASELINE SEALED</span></div>
+  <p>The corrected evaluator image and local source commits are frozen. The exact-image frontier selected 1,800 providers after p2700 crossed the quality boundary; all 12 same-seed pairs are sealed, and R=9 with a 16.1% takeover margin is selected. The stronger v5 references met the authorized hidden-seed screen at exactly four of five strict orderings. The digest-equivalent API/worker release and service-backed FIFO/cache/failover gate now pass; the fixed staging round and final documentation remain.</p>
+  <div class="stamp"><span class="pill running">RELEASE + SERVICE GATE · PASSED</span><span class="pill">snapshot 28 August 2026 · 00:09 UTC</span><span class="pill">LOCAL AUDIT · 7 PASS / 3 PENDING / 0 FAIL</span><span class="pill">12 / 12 BASELINE SEALED</span></div>
 </header>
 <main>
   <section id="environment">
@@ -98,7 +98,7 @@
   </section>
 
   <section id="readiness">
-    <div class="section-head"><div><div class="index">04 · READINESS</div><h2>V5 hidden screen accepted; staging is next</h2><p>Secure evaluation, API/package conformance, adversarial cleanup, networkless image derivation, and fail-closed scoring are implemented. V1–v4 remain retained exactly as measured. The stronger v5 pilot ranked better 35,391.239 ms &lt; no-op 38,802.551 ms &lt; worse 46,422.227 ms against one 36,599.163 ms designated baseline. Its hidden seeds 1, 2, 4, and 5 passed; seed 3 failed and remains retained without retry. All 15 hidden reference attempts and 836 authenticated manifest entries remain unchanged, with zero residual resources.</p></div><strong>v5 hidden ACCEPTED · 4P / 1F · 7/10 local gates pass</strong></div>
+    <div class="section-head"><div><div class="index">04 · READINESS</div><h2>Release and service gates passed; staging is next</h2><p>The four static Go binaries carry the exact pushed revision with CGO disabled. API and worker images are loadable Docker archives whose platform-manifest digests exactly equal the manifests covered by retained SLSA v1 provenance and SPDX SBOMs. The service-backed gate passed all 11 FIFO, cache, singleton, failover, retry, immutability, append-only, address, and migration-order assertions. V5 remains accepted at four of five hidden strict orderings with no retries or residual resources.</p></div><strong>RELEASE 15/15 · SERVICE 11/11 · V5 4P/1F</strong></div>
     <div class="grid">
       <svg viewBox="0 0 780 250" role="img" aria-label="Finalization milestone progress">
         <text x="28" y="28" font-size="13" font-weight="800">EVIDENCE PIPELINE</text>
@@ -110,9 +110,9 @@
         <line x1="428" y1="115" x2="530" y2="115" stroke="#8da2b8" stroke-width="5"/>
         <circle cx="560" cy="115" r="28" fill="#37a56b"/><text x="560" y="120" text-anchor="middle" fill="white" font-weight="900">✓</text>
         <line x1="588" y1="115" x2="680" y2="115" stroke="#8da2b8" stroke-width="5"/>
-        <circle cx="710" cy="115" r="28" fill="#35b7c9"/><text x="710" y="120" text-anchor="middle" fill="white" font-weight="900">↻</text>
-        <text x="80" y="165" text-anchor="middle" class="label">source + image</text><text x="240" y="165" text-anchor="middle" class="label">host + frontier</text><text x="400" y="165" text-anchor="middle" class="label">same-seed 12/12</text><text x="560" y="165" text-anchor="middle" class="label">v5 hidden 4P/1F</text><text x="710" y="165" text-anchor="middle" class="label">release + staging</text>
-        <text x="28" y="220" class="label">Five unique seeds were precommitted; 4/5 ordered strictly, all 15 reference attempts are retained, and the repaired attestation reran no measurements.</text>
+        <circle cx="710" cy="115" r="28" fill="#37a56b"/><text x="710" y="120" text-anchor="middle" fill="white" font-weight="900">✓</text>
+        <text x="80" y="165" text-anchor="middle" class="label">source + image</text><text x="240" y="165" text-anchor="middle" class="label">host + frontier</text><text x="400" y="165" text-anchor="middle" class="label">same-seed 12/12</text><text x="560" y="165" text-anchor="middle" class="label">v5 hidden 4P/1F</text><text x="710" y="165" text-anchor="middle" class="label">release gates</text>
+        <text x="28" y="220" class="label">Release 15/15 and service 11/11 pass. The fixed 6 h 03 min production staging window is the remaining operational gate.</text>
       </svg>
       <div>
         <div class="gate"><span>Source/image lock</span><div class="track"><div class="fill" style="width:100%"></div></div><b>PASS</b></div>
@@ -120,7 +120,7 @@
         <div class="gate"><span>Same-seed baseline</span><div class="track"><div class="fill" style="width:100%"></div></div><b>12/12</b></div>
         <div class="gate"><span>Stronger references</span><div class="track"><div class="fill" style="width:100%"></div></div><b>4 PASS · 1 FAIL</b></div>
         <div class="gate"><span>Local launch audit</span><div class="track"><div class="fill" style="width:70%"></div></div><b>7 / 10</b></div>
-        <div class="gate"><span>V4 hidden archive</span><div class="track"><div class="fill" style="width:100%"></div></div><b>5/5 · REJECT</b></div>
+        <div class="gate"><span>Release + service</span><div class="track"><div class="fill" style="width:100%"></div></div><b>26 / 26</b></div>
       </div>
     </div>
     <table><thead><tr><th>Area</th><th>Status</th><th>Proof / next gate</th></tr></thead><tbody>
@@ -128,11 +128,12 @@
       <tr><td>Source/API/package</td><td>Locked + conformance green</td><td><code>5ca3d5242f4a…</code> · both OpenAPI specs · image <code>cf0fd3a9e733…</code> · source lock <code>0cf71458833f…</code></td></tr>
       <tr><td>Baseline</td><td>12/12 authenticated; R=9 frozen</td><td>Baseline mean 43,101.691 ms → threshold line ≤36,162.319 ms · no-op mean 42,196.873 ms · 16.1% takeover margin</td></tr>
       <tr><td>Reference separability</td><td>V5 hidden accepted: 4 pass / 1 fail</td><td>Seeds 1, 2, 4, and 5 produced strict shared-baseline ordering; seed 3 did not. The 4/5 gate passed exactly. All 15 attempts remain authenticated and uncensored with no retry. Selected competition aggregation remains R=9.</td></tr>
-      <tr><td>Local finalization</td><td>7 pass · 3 pending · 0 fail</td><td>Release artifacts and the service-backed gate run next, followed by the fixed 6 h 03 min staging round, readiness seal, calibration document, four-section report, and 10/10 completion audit.</td></tr>
+      <tr><td>Release + service gate</td><td>15/15 + 11/11 assertions pass</td><td>Four exact-revision static binaries · attested OCI archives · digest-equivalent loadable Docker archives · PostgreSQL/Redis FIFO, cache, singleton, failover, retry, immutability, append-only, dedicated-address, and origin-before-local migration checks</td></tr>
+      <tr><td>Local finalization</td><td>7 pass · 3 pending · 0 fail</td><td>The fixed 6 h 03 min staging round runs next, followed by the readiness seal, calibration document, four-section report, and 10/10 completion audit.</td></tr>
       <tr><td>Measurement compromise</td><td>Authorized + hash-bound</td><td>12/12 replaces 20/20 and the 4/5 hidden launch screen replaces 19/20; it is not confidence-equivalent to the original protocol. Every v1–v4 measurement remains retained and uncensored, all 22 prior commitments are forbidden, and v5 changes no frozen simulator, scorer, scale, baseline, or production source.</td></tr>
       <tr><td>External operations</td><td>HANDOFF_OPEN</td><td>Registry, staging credentials, alerts, on-call, partner acceptance</td></tr>
     </tbody></table>
-    <div class="callout">Snapshot at 23:38 UTC on 27 August: the hidden campaign committed five unique fresh seeds at 18:58:35 UTC, before any result, with no overlap against all 22 retired commitments. It completed at 23:22:37 UTC and passed exactly 4/5. The original service then exited after sealing the accepted decision because its inherited attestation path expected a second, generic reveal schema. A deterministic post-processing repair reconstructed that document from the original rounds, reverified every commitment and generator derivation, and created only the attestation; no measurement, seed result, worker result, or manifest changed. The current estimate for release validation, the fixed 6 h 03 min staging window, seal, 10/10 audit, and four-section <code>finalize-report.html</code> is approximately 06:15–06:45 UTC on 28 August.</div>
+    <div class="callout">Snapshot at 00:09 UTC on 28 August: release promotion is complete at manifest <code>e1405b3ca7c9…</code>; the authenticated release check is <code>dd49f6b83b97…</code> and the service-backed check is <code>79b076c61535…</code>. Rejected build attempts remain quarantined and no BuildKit, PostgreSQL, Redis, or competition-job resource survived cleanup. The fixed 6 h 03 min staging window, seal, 10/10 audit, and four-section <code>finalize-report.html</code> are estimated for approximately 06:45–07:15 UTC on 28 August.</div>
   </section>
 </main>
 <footer>Generated from source lock 0cf71458… and authenticated local evidence · no hidden seed material is embedded.</footer>

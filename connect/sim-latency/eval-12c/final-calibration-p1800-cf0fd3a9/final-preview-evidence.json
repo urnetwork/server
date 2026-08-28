@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "sim-latency-final-preview-evidence",
-  "generated_at": "2026-08-27T23:38:00Z",
+  "generated_at": "2026-08-28T00:09:00Z",
   "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
   "same_seed_progress_sha256": "468fc8c9e3f1fd13a2d99e68ce1e680cc46a73e8c65c2ae7e9ad86a7121e0ffe",
   "same_seed_analysis_sha256": "41325e3aabd98495afb22264ab2981ad690e4e2ca7ebb295b40c40ea96d0de9c",
@@ -150,6 +150,28 @@
     "frozen_source_changed": false,
     "contains_hidden_seed_material": false
   },
+  "release_and_service_snapshot": {
+    "state": "passed",
+    "control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+    "release_manifest_sha256": "e1405b3ca7c900e800c718917758a79d56c2392dc23c8ab1bd3bc17d8d5620db",
+    "release_check_sha256": "dd49f6b83b9761e52ca270e7d46706e38811ffa3b35997773b8fb5e36a12b7ca",
+    "release_assertions_passed": 15,
+    "release_assertions_total": 15,
+    "service_backed_check_sha256": "79b076c615357fe5eb2e105e00b4fd2703094860cf96153f0d65c5bc6f03d71c",
+    "service_backed_assertions_passed": 11,
+    "service_backed_assertions_total": 11,
+    "release_builder_sha256": "50d5c0a4c0b64c3b344270d74dfd724bb037982b92c0d53ac9cc6215aeee3887",
+    "release_oci_verifier_sha256": "b4a0316f591f1963110e5a328adee56a9a6d091a6c1deef8b0e6015d5f9cff2b",
+    "api_image_id": "sha256:da64be6fa93021d26dea5138b9fadc38e8b14762115f5298a1e6b58a218feb48",
+    "api_platform_manifest_digest": "sha256:0853b4543129788b3db5bd1a53c9143f50ce0a3abe6ce7dfa45167bc3165bd9a",
+    "worker_image_id": "sha256:bacba185b8a345a01ed13c69a64b86f2821f8d453b70ada96e96bd231868ed50",
+    "worker_platform_manifest_digest": "sha256:42f5e79fac177363e99aa515c6f905bb5d4570a18ef9d8343945d9df626f2564",
+    "origin_migrations_before_local": true,
+    "runtime_manifest_digest_equivalent_to_attested_manifest": true,
+    "residual_buildkit_containers": 0,
+    "residual_competition_containers": 0,
+    "residual_service_containers": 0
+  },
   "local_audit_snapshot": {
     "required_passes": 7,
     "required_pending": 3,
@@ -164,7 +186,7 @@
   },
   "report": {
     "path": "/home/by/urnetwork/server/final-preview.html",
-    "sha256": "de87693f841325a6f97b82a6a88eac8da66bbfd6397377355188a2b6c14f5300",
+    "sha256": "2011ec4cc129819d24c1f4726a0f5fbfa268f22d633b86c24cba58bf7246a027",
     "mode": "0444",
     "sections": 4,
     "svg_visuals": 4,

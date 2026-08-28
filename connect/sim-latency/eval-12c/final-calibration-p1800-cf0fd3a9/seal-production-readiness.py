@@ -7,6 +7,9 @@ import hashlib
 import json
 import math
 import os
+import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -71,6 +74,7 @@ INDEPENDENT_RESULTS = INDEPENDENT_ROOT / "independent-references"
 SOURCE_RELEASE = ROOT / "control-plane-release/source-release.json"
 RELEASE_ROOT = ROOT / "control-plane-release/final"
 RELEASE_MANIFEST = RELEASE_ROOT / "release-build.json"
+RELEASE_OCI_VERIFIER = ROOT / "verify-release-oci.py"
 
 SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
@@ -85,6 +89,13 @@ CONTROL_COMMIT = "5070445ddb1764ad80f999102a9d71946e5a9e29"
 CONTROL_SOURCE_RELEASE_SHA256 = (
     "b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940"
 )
+RELEASE_OCI_VERIFIER_SHA256 = (
+    "b4a0316f591f1963110e5a328adee56a9a6d091a6c1deef8b0e6015d5f9cff2b"
+)
+RELEASE_IMAGE_TAGS = {
+    "api": "urnetwork/sim-latency-competition-api:5070445d",
+    "worker": "urnetwork/sim-latency-competition-worker:5070445d",
+}
 EVALUATOR_IMAGE = (
     "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
 )
@@ -362,6 +373,13 @@ def verify_release_content(check: dict[str, Any]) -> None:
         "release manifest hash is unbound",
     )
     require(
+        RELEASE_OCI_VERIFIER.is_file()
+        and not RELEASE_OCI_VERIFIER.is_symlink()
+        and RELEASE_OCI_VERIFIER.stat().st_mode & 0o777 == 0o500
+        and sha256(RELEASE_OCI_VERIFIER) == RELEASE_OCI_VERIFIER_SHA256,
+        "release OCI verifier identity failed",
+    )
+    require(
         manifest.get("control_plane_commit") == CONTROL_COMMIT
         and manifest.get("source_lock_sha256") == SOURCE_LOCK_SHA256
         and manifest.get("production_staging_protocol_sha256") == PROTOCOL_SHA256
@@ -375,12 +393,18 @@ def verify_release_content(check: dict[str, Any]) -> None:
         "dbinit_binary": RELEASE_ROOT / "binaries/competitiondbinit",
         "api_archive": RELEASE_ROOT / "images/api.docker.tar",
         "worker_archive": RELEASE_ROOT / "images/worker.docker.tar",
+        "api_oci_archive": RELEASE_ROOT / "images/api.oci.tar",
+        "worker_oci_archive": RELEASE_ROOT / "images/worker.oci.tar",
         "api_metadata": RELEASE_ROOT / "images/api.metadata.json",
         "worker_metadata": RELEASE_ROOT / "images/worker.metadata.json",
+        "api_attested_metadata": RELEASE_ROOT / "images/api.attested-metadata.json",
+        "worker_attested_metadata": RELEASE_ROOT / "images/worker.attested-metadata.json",
         "api_provenance": RELEASE_ROOT / "images/api.attestations/provenance.json",
         "worker_provenance": RELEASE_ROOT / "images/worker.attestations/provenance.json",
         "api_sbom": RELEASE_ROOT / "images/api.attestations/sbom.spdx.json",
         "worker_sbom": RELEASE_ROOT / "images/worker.attestations/sbom.spdx.json",
+        "api_verification": RELEASE_ROOT / "images/api.attestations/verification.json",
+        "worker_verification": RELEASE_ROOT / "images/worker.attestations/verification.json",
         "builder_inspect": RELEASE_ROOT / "images/builder.inspect.log",
     }
     for label, path in expected_paths.items():
@@ -428,9 +452,12 @@ def verify_release_content(check: dict[str, Any]) -> None:
         require(isinstance(image, dict) and isinstance(checked, dict), f"release image is malformed: {key}")
         for field, suffix in {
             "docker_archive_sha256": "archive",
+            "attested_oci_archive_sha256": "oci_archive",
             "metadata_sha256": "metadata",
+            "attested_metadata_sha256": "attested_metadata",
             "provenance_sha256": "provenance",
             "sbom_sha256": "sbom",
+            "equivalence_verification_sha256": "verification",
         }.items():
             digest = sha256(expected_paths[f"{key}_{suffix}"])
             require(
@@ -442,6 +469,17 @@ def verify_release_content(check: dict[str, Any]) -> None:
             and isinstance(image.get("image_id"), str)
             and image["image_id"].startswith("sha256:"),
             f"release image ID failed: {key}",
+        )
+        require(
+            image.get("platform_manifest_digest")
+            == checked.get("platform_manifest_digest")
+            and isinstance(image.get("platform_manifest_digest"), str)
+            and image["platform_manifest_digest"].startswith("sha256:")
+            and isinstance(image.get("attested_index_digest"), str)
+            and image["attested_index_digest"].startswith("sha256:")
+            and image["platform_manifest_digest"]
+            != image["attested_index_digest"],
+            f"release image manifest identities failed: {key}",
         )
     require(
         builder.get("driver") == "docker-container"
@@ -458,8 +496,11 @@ def verify_release_content(check: dict[str, Any]) -> None:
         and attestations.get("sbom_format") == "SPDX"
         and isinstance(attestations.get("sbom_generator_image_ref"), str)
         and "@sha256:" in attestations["sbom_generator_image_ref"]
+        and attestations.get("verifier_sha256")
+        == RELEASE_OCI_VERIFIER_SHA256
         and attestations.get("provenance_verified") is True
-        and attestations.get("sbom_verified") is True,
+        and attestations.get("sbom_verified") is True
+        and attestations.get("runtime_manifest_digest_equivalent") is True,
         "release attestation identity failed",
     )
     require(
@@ -469,6 +510,8 @@ def verify_release_content(check: dict[str, Any]) -> None:
     for key in ("api", "worker"):
         provenance = load(expected_paths[f"{key}_provenance"])
         sbom = load(expected_paths[f"{key}_sbom"])
+        verification = load(expected_paths[f"{key}_verification"])
+        image = images[key]
         provenance_predicate = provenance.get("predicate")
         sbom_predicate = sbom.get("predicate")
         require(
@@ -484,6 +527,78 @@ def verify_release_content(check: dict[str, Any]) -> None:
             and str(sbom_predicate.get("spdxVersion", "")).startswith("SPDX-"),
             f"SPDX SBOM failed: {key}",
         )
+        require(
+            verification.get("schema") == 1
+            and verification.get("kind")
+            == "sim-latency-release-image-equivalence-verification"
+            and verification.get("component") == key
+            and verification.get("expected_tag") == RELEASE_IMAGE_TAGS[key]
+            and verification.get("attested_oci_archive_sha256")
+            == image.get("attested_oci_archive_sha256")
+            and verification.get("attested_metadata_sha256")
+            == image.get("attested_metadata_sha256")
+            and verification.get("runtime_docker_archive_sha256")
+            == image.get("docker_archive_sha256")
+            and verification.get("runtime_metadata_sha256")
+            == image.get("metadata_sha256")
+            and verification.get("attested_index_digest")
+            == image.get("attested_index_digest")
+            and verification.get("platform_manifest_digest")
+            == image.get("platform_manifest_digest")
+            and verification.get("image_config_digest")
+            == image.get("image_id")
+            and verification.get("provenance_sha256")
+            == image.get("provenance_sha256")
+            and verification.get("sbom_sha256") == image.get("sbom_sha256")
+            and verification.get("slsa_v1_verified") is True
+            and verification.get("spdx_verified") is True
+            and verification.get("runtime_manifest_digest_equivalent") is True
+            and verification.get("archive_paths_safely_validated") is True,
+            f"release image equivalence record failed: {key}",
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix=f"sim-latency-release-{key}-verification."
+        ) as temporary:
+            regenerated = Path(temporary) / "output"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RELEASE_OCI_VERIFIER),
+                    "--attested-archive",
+                    str(expected_paths[f"{key}_oci_archive"]),
+                    "--attested-metadata",
+                    str(expected_paths[f"{key}_attested_metadata"]),
+                    "--runtime-archive",
+                    str(expected_paths[f"{key}_archive"]),
+                    "--runtime-metadata",
+                    str(expected_paths[f"{key}_metadata"]),
+                    "--output-dir",
+                    str(regenerated),
+                    "--component",
+                    key,
+                    "--expected-tag",
+                    RELEASE_IMAGE_TAGS[key],
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            require(
+                completed.returncode == 0,
+                f"release image equivalence re-verification failed: {key}: "
+                f"{completed.stderr.strip()}",
+            )
+            for name, retained in (
+                ("provenance.json", expected_paths[f"{key}_provenance"]),
+                ("sbom.spdx.json", expected_paths[f"{key}_sbom"]),
+                ("verification.json", expected_paths[f"{key}_verification"]),
+            ):
+                require(
+                    sha256(regenerated / name) == sha256(retained),
+                    f"release equivalence regeneration changed {key}.{name}",
+                )
 
 
 def verify_check(check_id: str, name: str, expected: set[str]) -> dict[str, Any]:

@@ -1,0 +1,22 @@
+{
+  "archive_paths_safely_validated": true,
+  "attested_index_digest": "sha256:d64e87a78a01a0224defdd712df12cd39e2905ed90183479653a94b7a5d3aa08",
+  "attested_metadata_sha256": "3223aa02a27be67fe5c7dc777b7eb486b4f792cf00d8929b2004294b7d8e56a7",
+  "attested_oci_archive_sha256": "722f10e3719ed5951a5e253a546b6657833122ed29ced1ed01d0468790b94bdd",
+  "component": "worker",
+  "expected_tag": "urnetwork/sim-latency-competition-worker:5070445d",
+  "image_config_digest": "sha256:bacba185b8a345a01ed13c69a64b86f2821f8d453b70ada96e96bd231868ed50",
+  "image_layer_digests": [
+    "sha256:5818c8b6964b242fe5371c963e156bfec380b74d2ca736e877e068adb883d948"
+  ],
+  "kind": "sim-latency-release-image-equivalence-verification",
+  "platform_manifest_digest": "sha256:42f5e79fac177363e99aa515c6f905bb5d4570a18ef9d8343945d9df626f2564",
+  "provenance_sha256": "b7673ef16db89a968964070cb77448861f31aa0e91140ae38217a1ca2904f802",
+  "runtime_docker_archive_sha256": "3f50b4a8f5da6d79cc3dd3e70783d631e5d8bcd616ff997ab49bdee8c3274101",
+  "runtime_manifest_digest_equivalent": true,
+  "runtime_metadata_sha256": "e6968060098044a66a6dfa654b30e37e799a6132b07858329061394e54ad8e66",
+  "sbom_sha256": "17cf66fd2a83e4289beacf99f80a091d9ac8a6ef35ceb1763cfc27c5e96e2f66",
+  "schema": 1,
+  "slsa_v1_verified": true,
+  "spdx_verified": true
+}

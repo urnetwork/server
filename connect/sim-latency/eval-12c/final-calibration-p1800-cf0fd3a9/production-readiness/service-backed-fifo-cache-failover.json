@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-readiness-check",
+  "check_id": "service_backed_fifo_cache_failover",
+  "passed": true,
+  "generated_at": "2026-08-27T23:47:24Z",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
+  "control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+  "dedicated_service_ip": "10.213.0.1",
+  "test_source_sha256": {
+    "migration_order": "ca122814769ee0083fac951b1a931fa4bb942b3cb244aa7ddfd3e949a1ec2189",
+    "store_integration": "5f60a86b0b77e7aac62f2ada1931d1762c22135afe7f6b4bbb7d989493c2fc3d"
+  },
+  "logs": {
+    "stack": "c6628512b47ec570d48563f694e9fa4c015f73c24b9091bfa528a71b741b00cc",
+    "service_inspect": "cf27fc4abc21ee327015fe4abf710fd4babd10c4a1bb6b70617472c786896566",
+    "migration_order": "73daa18ff7293514f330ab5374c334b7a9a18fbcb273f435e9f5316b6ea31ee2",
+    "store_integration": "6c21a37926c3d035deb52d6cfa5275ff5b32c6ee1ea62fd5187f184a0aed58af"
+  },
+  "assertions": {
+    "postgres_dedicated_address": true,
+    "redis_dedicated_address": true,
+    "origin_migrations_before_local": true,
+    "fifo_verified": true,
+    "cache_acl_verified": true,
+    "singleton_slot_verified": true,
+    "lease_failover_verified": true,
+    "infrastructure_retry_verified": true,
+    "terminal_fields_immutable": true,
+    "event_log_append_only": true,
+    "test_exit_zero": true
+  }
+}

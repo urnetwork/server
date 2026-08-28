@@ -1,0 +1,26 @@
+{
+  "archive_paths_safely_validated": true,
+  "attested_index_digest": "sha256:f9a57c3b25289fb9c24d49e179fb2da5210073552a17f4cf0dc97ac0f4d8e6cd",
+  "attested_metadata_sha256": "a48b691c8c1230291e2d2e1884a47a329d2e9b32692147b3af7b04ed4acf599e",
+  "attested_oci_archive_sha256": "f724a540a5e9757f86bdc146e7952b9b18598fddfd06c690366060cba4e0dee5",
+  "component": "api",
+  "expected_tag": "urnetwork/sim-latency-competition-api:5070445d",
+  "image_config_digest": "sha256:da64be6fa93021d26dea5138b9fadc38e8b14762115f5298a1e6b58a218feb48",
+  "image_layer_digests": [
+    "sha256:966c395d29cb24a3faf7e04f32878fe5778819d4132daee4f47e2aaf7b9af924",
+    "sha256:c5b087069a275b60cccd34d72977207760d0d98b0bf143a763fdbe744ef57b50",
+    "sha256:cb8fdaba20667ef61770ec3b04a3cc079bbe16c8396e394232132534af6f6552",
+    "sha256:5eb146f7868c6f00e0d2341c76128033b3bd62db6d711eb4ec6bf5649e4daa30",
+    "sha256:c75b23cbaf1e3a1f480001a6a942db8c8aee8a6dfafff06aea475bdb23940fb8"
+  ],
+  "kind": "sim-latency-release-image-equivalence-verification",
+  "platform_manifest_digest": "sha256:0853b4543129788b3db5bd1a53c9143f50ce0a3abe6ce7dfa45167bc3165bd9a",
+  "provenance_sha256": "af1e7ebe06437604a23f872843864bd5c4071e86e7f5344af2b1a00b9582c65b",
+  "runtime_docker_archive_sha256": "992574559375b7dc15203b06034ddf48840d8e6f402f88c1b1d742413f697442",
+  "runtime_manifest_digest_equivalent": true,
+  "runtime_metadata_sha256": "81f5811245ff3c13305716970f94ba56542bbc7c3538dc12d366406979b00dda",
+  "sbom_sha256": "40603655235920417d45d2036a350632dafbe2e6521d42627dccf3f57a4e2bdc",
+  "schema": 1,
+  "slsa_v1_verified": true,
+  "spdx_verified": true
+}
