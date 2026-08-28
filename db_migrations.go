@@ -5923,6 +5923,68 @@ var migrations = []any{
 		FOREIGN KEY (user_id) REFERENCES network_user(user_id)
 		ON DELETE CASCADE NOT VALID;
 	`),
+
+	// Privacy-filtered webmaster aggregates. Query text reaches this table only
+	// after the minimum-impression floor, PII redaction, and length cap. The
+	// synthetic hash key keeps long page/query text out of a PostgreSQL btree
+	// primary key while preserving idempotent overlapping imports.
+	newSqlMigration(`
+		CREATE TABLE web_search_analytics (
+			row_key char(64) PRIMARY KEY CHECK (row_key ~ '^[0-9a-f]{64}$'),
+			provider varchar(32) NOT NULL,
+			site varchar(255) NOT NULL,
+			period_start timestamp NOT NULL,
+			period_end timestamp NOT NULL,
+			search_type varchar(32) NOT NULL,
+			query varchar(640) NOT NULL CHECK (query <> ''),
+			path varchar(4096) NOT NULL,
+			region varchar(16) NOT NULL,
+			device varchar(32) NOT NULL,
+			clicks double precision NOT NULL CHECK (clicks >= 0 AND clicks < 'Infinity'::double precision),
+			impressions double precision NOT NULL CHECK (impressions >= 10 AND impressions < 'Infinity'::double precision),
+			average_position double precision NOT NULL CHECK (average_position >= 0 AND average_position < 'Infinity'::double precision),
+			update_time timestamp NOT NULL,
+			CHECK (period_start < period_end)
+		);
+
+		CREATE INDEX web_search_analytics_time
+		ON web_search_analytics (site, provider, period_start DESC);
+
+		CREATE INDEX web_search_analytics_expiry
+		ON web_search_analytics (period_end);
+
+		CREATE INDEX web_search_analytics_volume
+		ON web_search_analytics (impressions, period_end);
+
+		CREATE INDEX web_search_analytics_group_volume
+		ON web_search_analytics (
+			provider, site, period_start, period_end, search_type,
+			impressions DESC, clicks DESC
+		);
+
+		CREATE TABLE web_search_ingest_state (
+			provider varchar(32) NOT NULL,
+			site varchar(255) NOT NULL,
+			stream varchar(32) NOT NULL,
+			last_attempt timestamp,
+			last_success timestamp,
+			cursor_time timestamp,
+			last_error varchar(64) NOT NULL DEFAULT '',
+			update_time timestamp NOT NULL,
+			PRIMARY KEY (provider, site, stream)
+		);
+
+		CREATE TABLE web_search_manual_import (
+			provider varchar(32) NOT NULL,
+			object_key text NOT NULL,
+			content_sha256 char(64) NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+			rows_accepted int NOT NULL CHECK (rows_accepted >= 0),
+			rows_rejected int NOT NULL CHECK (rows_rejected >= 0),
+			process_time timestamp NOT NULL,
+			PRIMARY KEY (provider, object_key, content_sha256)
+		);
+	`),
+
 	// Durable sim-latency competition control plane. The queue is deliberately
 	// independent of pending_task: untrusted submissions are claimed by a
 	// dedicated evaluator identity, and the singleton slot below makes the FIFO

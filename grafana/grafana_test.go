@@ -148,6 +148,67 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 	}
 }
 
+func TestWebAnalyticsDashboardPrivacyContract(t *testing.T) {
+	dashboard := readTestDashboard(t, "web-analytics.json")
+	if slices.Contains(dashboard.Tags, PublicTag) {
+		t.Fatal("web analytics contains search terms and must remain an authenticated dashboard")
+	}
+	joined := strings.Join(dashboardExpressions(dashboard), "\n")
+	for _, metric := range []string{
+		"urnetwork_web_search_clicks_total",
+		"urnetwork_web_search_impressions_total",
+		"urnetwork_web_search_ingest_rows_total",
+		"urnetwork_web_search_ingest_last_success_timestamp_seconds",
+	} {
+		if !strings.Contains(joined, metric) {
+			t.Errorf("web analytics is missing %s", metric)
+		}
+	}
+	for _, panelID := range []int{2, 3, 4, 6, 7, 8, 9} {
+		panel := dashboardPanelById(dashboard, panelID)
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Fatalf("web analytics page-view panel %d is missing", panelID)
+		}
+		expression := panel.Targets[0].Expr
+		for _, required := range []string{
+			`service="web"`,
+			`event="web_page_view"`,
+			`privacy_safe="true"`,
+			"count_over_time",
+		} {
+			if !strings.Contains(expression, required) {
+				t.Errorf("page-view panel %d lacks %s: %s", panelID, required, expression)
+			}
+		}
+	}
+	privateLabel := regexp.MustCompile(`(?i)\b(ip|client_ip|remote_addr|user_id|cookie|full_referrer)\b`)
+	if privateLabel.MatchString(joined) {
+		t.Errorf("web analytics query references a forbidden user-level field: %s", privateLabel.FindString(joined))
+	}
+	searchTerms := dashboardPanelById(dashboard, 15)
+	if searchTerms == nil || searchTerms.Type != "logs" || len(searchTerms.Targets) != 1 {
+		t.Fatal("web analytics privacy-filtered search terms panel is missing")
+	}
+	termQuery := searchTerms.Targets[0].Expr
+	for _, required := range []string{
+		`service="taskworker"`,
+		`event="web_search_query"`,
+		`privacy_safe="true"`,
+		`{{.query}}`,
+	} {
+		if !strings.Contains(termQuery, required) {
+			t.Errorf("search terms query lacks %s: %s", required, termQuery)
+		}
+	}
+	// Query text is intentionally a parsed Loki field, never a persistent
+	// Prometheus label on a high-cardinality metric.
+	for _, expression := range dashboardExpressions(dashboard) {
+		if strings.Contains(expression, "urnetwork_web_") && strings.Contains(expression, `query=`) {
+			t.Errorf("raw search query used as a metric label: %s", expression)
+		}
+	}
+}
+
 func TestServiceLogsLinksToLogsDrilldown(t *testing.T) {
 	dashboard := readTestDashboard(t, "service-logs.json")
 	for _, link := range dashboard.Links {
