@@ -1,21 +1,21 @@
 {
   "archive_paths_safely_validated": true,
-  "attested_index_digest": "sha256:d64e87a78a01a0224defdd712df12cd39e2905ed90183479653a94b7a5d3aa08",
-  "attested_metadata_sha256": "3223aa02a27be67fe5c7dc777b7eb486b4f792cf00d8929b2004294b7d8e56a7",
-  "attested_oci_archive_sha256": "722f10e3719ed5951a5e253a546b6657833122ed29ced1ed01d0468790b94bdd",
+  "attested_index_digest": "sha256:7997536193a0280bd98660d0cefed4c192bcd17d3b153884cd6258b37fd7e156",
+  "attested_metadata_sha256": "c074244659be35716e0d53b74c5c329bbec7b9501cc1e16b1efee5c99c59010e",
+  "attested_oci_archive_sha256": "6d1a95e8f4e28b30147fee6f2acfc70cd3e0865ca39c7f46c71ef5f0a5209188",
   "component": "worker",
-  "expected_tag": "urnetwork/sim-latency-competition-worker:5070445d",
-  "image_config_digest": "sha256:bacba185b8a345a01ed13c69a64b86f2821f8d453b70ada96e96bd231868ed50",
+  "expected_tag": "urnetwork/sim-latency-competition-worker:2ee4883f-2abcf145",
+  "image_config_digest": "sha256:94b4f8b0392ed643ab09ecd5fc048af64f903d681ba0cf0e3805659d9671f4ce",
   "image_layer_digests": [
-    "sha256:5818c8b6964b242fe5371c963e156bfec380b74d2ca736e877e068adb883d948"
+    "sha256:5e87f85901cba96185285277074b35ad8e7c540598ab3885776a5cd2fa580375"
   ],
   "kind": "sim-latency-release-image-equivalence-verification",
-  "platform_manifest_digest": "sha256:42f5e79fac177363e99aa515c6f905bb5d4570a18ef9d8343945d9df626f2564",
-  "provenance_sha256": "b7673ef16db89a968964070cb77448861f31aa0e91140ae38217a1ca2904f802",
-  "runtime_docker_archive_sha256": "3f50b4a8f5da6d79cc3dd3e70783d631e5d8bcd616ff997ab49bdee8c3274101",
+  "platform_manifest_digest": "sha256:ed3c7d0bc63c66d1a874b270a47d7074a024be631c27a342f185d049d9ffb80d",
+  "provenance_sha256": "220d37c62f33b3687b384b13162cefdbea3ad4490153f935bcf0f836bbb7841e",
+  "runtime_docker_archive_sha256": "b290a99a3cf82af2dbee864d5fcc34a6e32bd9b765cefc0f45d23a6d855dcfe4",
   "runtime_manifest_digest_equivalent": true,
-  "runtime_metadata_sha256": "e6968060098044a66a6dfa654b30e37e799a6132b07858329061394e54ad8e66",
-  "sbom_sha256": "17cf66fd2a83e4289beacf99f80a091d9ac8a6ef35ceb1763cfc27c5e96e2f66",
+  "runtime_metadata_sha256": "ce600bf91992df186e4cd38728bd537dff881d878a729d1f539ee4ce121b568a",
+  "sbom_sha256": "42955801c1cc6a730886d981424e2cf6beaa53eec58add7f33972a223e8a0a4e",
   "schema": 1,
   "slsa_v1_verified": true,
   "spdx_verified": true

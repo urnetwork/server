@@ -3,10 +3,9 @@
   "kind": "sim-latency-production-readiness-check",
   "check_id": "service_backed_fifo_cache_failover",
   "passed": true,
-  "generated_at": "2026-08-28T05:08:03Z",
-  "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+  "generated_at": "2026-08-28T00:47:28Z",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
   "production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
-  "production_staging_attempt_06_remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
   "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
   "dedicated_service_ip": "10.213.0.1",
   "test_source_sha256": {
@@ -14,10 +13,10 @@
     "store_integration": "5f60a86b0b77e7aac62f2ada1931d1762c22135afe7f6b4bbb7d989493c2fc3d"
   },
   "logs": {
-    "stack": "e8de64b9697fd7d8c5794fa43c3e4ce81cb79021d2be8d583718f81689737f8f",
-    "service_inspect": "578b5ae38944bae1481ef2f3177677b840cec1e6dbc7159045be31caa1630ead",
-    "migration_order": "6e8b844a5e8726e41dac235d829be9c19ab3385ae87b366f62fb9528a77241e5",
-    "store_integration": "720210d45c6ba18e95a1f563491f1103dcee987f41e2bc6159592c167ddd15a8"
+    "stack": "f937f41528c1388a3012fe534f6e58246841a94f4305f3a6cafa2d1964a8d138",
+    "service_inspect": "002601b0e5fc37f257f63b6b5da68f62fd259b3f616f7c3b728ba9eb490c40c2",
+    "migration_order": "3ee121f22ee36dd46cffd822da83410b282a7d2496df4be930017580a93dce21",
+    "store_integration": "c6991633dd779dbddb019045f49aef775d01c3fc00dab93daa1a3f1c786eebdd"
   },
   "assertions": {
     "postgres_dedicated_address": true,
@@ -30,7 +29,6 @@
     "infrastructure_retry_verified": true,
     "terminal_fields_immutable": true,
     "event_log_append_only": true,
-    "test_exit_zero": true,
-    "attempt_06_remediation_bound": true
+    "test_exit_zero": true
   }
 }
