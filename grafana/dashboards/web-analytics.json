@@ -225,11 +225,24 @@
       ]
     },
     {
+      "id": 16,
+      "type": "timeseries",
+      "title": "provider import attempts by outcome",
+      "description": "Privacy-safe webmaster provider attempts, split by provider and outcome code.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 39},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "sum"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum by (engine, result) (rate(urnetwork_web_search_provider_runs_total{env=\"$env\",engine=~\"$engine\"}[$__rate_interval]))", "legendFormat": "{{engine}} · {{result}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
       "id": 15,
       "type": "logs",
       "title": "privacy-filtered search terms",
       "description": "Structured taskworker rows only. The importer must redact likely email/phone identifiers, cap length, apply the minimum-impressions floor, and set privacy_safe=true. Query text is never a Prometheus label.",
-      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 39},
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 47},
       "datasource": {"type": "loki", "uid": "warp-loki"},
       "options": {"showTime": true, "showLabels": false, "wrapLogMessage": true, "sortOrder": "Descending", "dedupStrategy": "none", "enableLogDetails": true},
       "targets": [
