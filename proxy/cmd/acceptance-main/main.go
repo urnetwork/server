@@ -21,6 +21,8 @@ func main() {
 	targetURL := flag.String("target", "https://api.bringyour.com/hello", "HTTPS target loaded through every proxy")
 	repeat := flag.Int("repeat", 1, "number of full proxy repetitions")
 	probeTimeout := flag.Duration("probe-timeout", 120*time.Second, "readiness and data-plane retry window per protocol")
+	soakDuration := flag.Duration("soak-duration", 5*time.Minute, "sustained data-plane duration per protocol")
+	soakInterval := flag.Duration("soak-interval", 5*time.Second, "delay between sustained HTTPS requests")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -31,6 +33,8 @@ func main() {
 		CredentialsPath: *credentials,
 		Repeat:          *repeat,
 		ProbeTimeout:    *probeTimeout,
+		SoakDuration:    *soakDuration,
+		SoakInterval:    *soakInterval,
 	})
 	if err := proxyacceptance.WriteResults(*resultsPath, results); err != nil {
 		fmt.Fprintf(os.Stderr, "[proxy acceptance] write results: %v\n", err)

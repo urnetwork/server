@@ -60,6 +60,7 @@ func rt(v any) reflect.Type { return reflect.TypeOf(v) }
 
 func registry() []specEndpoint {
 	return []specEndpoint{
+		{"GET", "/clock", nil, rt(model.ClockResult{})},
 		{"GET", "/stats/last-90", nil, rt(model.Stats{})},
 		{"GET", "/stats/providers", nil, rt(model.StatsProvidersResult{})},
 		{"POST", "/stats/providers-last-n", rt(model.StatsProvidersArgs{}), rt(model.StatsProvidersResult{})},

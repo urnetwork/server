@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -19,7 +17,7 @@ import (
 // 429, not the 503 this used to return. A rate limit is client-attributable:
 // the request was refused because of who sent it and how often, not because the
 // service is broken. A 5xx tells every well-behaved client and SDK to retry,
-// and every retry records another attempt (see authAttemptScript), so the
+// and every retry records another attempt (see server.CheckIpRateLimitAttempt), so the
 // status itself made the condition worse and did so self-reinforcingly.
 //
 // The wording depends on which budget was spent, because the two are not the
@@ -89,78 +87,20 @@ type UserAuthAttemptId struct {
 	globalRedisKey  string
 }
 
-// authAttemptScript atomically records an attempt in the address history and,
-// for identified users, their global history. Scores are expiry times. Each
-// whole sorted set also expires one lookback after its most recent attempt, so
-// inactive histories clean themselves up without a periodic Redis scan.
-//
-// Every attempt, including a rejected one, is recorded. That matches the old
-// PostgreSQL limiter: continued attempts keep the sliding window active. Each
-// set is pruned by expiry and then by oldest rank, bounding it by time and its
-// own threshold count at every write.
-var authAttemptScript = redis.NewScript(`
-local address_key = KEYS[1]
-local has_global = tonumber(ARGV[1])
-local now_ms = tonumber(ARGV[2])
-local address_expiry_ms = tonumber(ARGV[3])
-local global_expiry_ms = tonumber(ARGV[4])
-local member = ARGV[5]
-local address_limit = tonumber(ARGV[6])
-local global_limit = tonumber(ARGV[7])
-local address_ttl_ms = tonumber(ARGV[8])
-local global_ttl_ms = tonumber(ARGV[9])
-
-redis.call('ZREMRANGEBYSCORE', address_key, '-inf', now_ms)
-redis.call('ZADD', address_key, address_expiry_ms, member)
-local address_count = redis.call('ZCARD', address_key)
-if address_limit < address_count then
-    redis.call('ZREMRANGEBYRANK', address_key, 0, address_count - address_limit - 1)
-    address_count = address_limit
-end
-redis.call('PEXPIRE', address_key, address_ttl_ms)
-
-local global_count = 0
-if has_global == 1 then
-    local global_key = KEYS[2]
-    redis.call('ZREMRANGEBYSCORE', global_key, '-inf', now_ms)
-    redis.call('ZADD', global_key, global_expiry_ms, member)
-    global_count = redis.call('ZCARD', global_key)
-    if global_limit < global_count then
-        redis.call('ZREMRANGEBYRANK', global_key, 0, global_count - global_limit - 1)
-        global_count = global_limit
-    end
-    redis.call('PEXPIRE', global_key, global_ttl_ms)
-end
-
-if address_count < address_limit and (has_global == 0 or global_count < global_limit) then
-    return 1
-end
-return 0
-`)
-
-// A success resets the global window and the window for its client-address
-// hash. Per-address histories for other client hashes remain untouched.
-var authAttemptSuccessScript = redis.NewScript(`
-redis.call('DEL', KEYS[1])
-if #KEYS == 2 then
-    redis.call('DEL', KEYS[2])
-end
-return 1
-`)
-
 func userAuthAttemptRedisKeys(
 	userAuth *string,
 	clientAddressHashHex string,
 ) (addressRedisKey string, globalRedisKey string) {
+	return server.IpRateLimitAttemptRedisKeys(
+		userAuthAttemptRedisKeyPrefix,
+		userAuthAttemptGlobalHashTag(userAuth),
+		clientAddressHashHex,
+	)
+}
+
+func userAuthAttemptGlobalHashTag(userAuth *string) string {
 	if userAuth == nil {
-		// The hash tag is per address so identity-less histories spread across
-		// the cluster rather than sharing one hot slot.
-		addressRedisKey = fmt.Sprintf(
-			"%s{address_%s}.address",
-			userAuthAttemptRedisKeyPrefix,
-			clientAddressHashHex,
-		)
-		return
+		return ""
 	}
 
 	// User auths are PII. HMAC gives us a stable cluster-distribution key
@@ -171,29 +111,21 @@ func userAuthAttemptRedisKeys(
 	_, err = mac.Write([]byte(*userAuth))
 	server.Raise(err)
 	userAuthHashHex := hex.EncodeToString(mac.Sum(nil))
-	hashTag := "user_" + userAuthHashHex
-
-	// The two histories for one user share a hash tag, allowing the Lua
-	// updates to remain atomic in Redis Cluster. Different users distribute
-	// across independent slots.
-	addressRedisKey = fmt.Sprintf(
-		"%s{%s}.address.%s",
-		userAuthAttemptRedisKeyPrefix,
-		hashTag,
-		clientAddressHashHex,
-	)
-	globalRedisKey = fmt.Sprintf(
-		"%s{%s}.global",
-		userAuthAttemptRedisKeyPrefix,
-		hashTag,
-	)
-	return
+	return "user_" + userAuthHashHex
 }
 
 func UserAuthAttempt(
 	userAuth *string,
 	clientSession *session.ClientSession,
 ) (userAuthAttemptId UserAuthAttemptId, allow bool) {
+	// The fixed acceptance phone is intentionally exercised repeatedly in
+	// immediate reruns. Its tests.yml policy requires both the exact normalized
+	// phone and a configured fixture password, so only that phone skips
+	// histories; every email and identity-less SSO, wallet, and reset-code
+	// attempt retains normal limits.
+	if userAuth != nil && testAuthPolicyForUserAuth(userAuth).BypassRateLimits {
+		return UserAuthAttemptId{}, true
+	}
 	return userAuthAttemptAt(
 		userAuth,
 		clientSession,
@@ -213,44 +145,51 @@ func userAuthAttemptAt(
 		panic("invalid user auth attempt settings")
 	}
 
-	clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+	rateLimitClient, err := server.NewRateLimitClient(clientSession.ClientAddress)
 	if err != nil {
-		return
+		// Deferred sessions can carry only a persisted hash. They cannot be
+		// newly classified, but retain their original address budget.
+		clientAddressHash, _, err := clientSession.ClientAddressHashPort()
+		if err != nil {
+			return
+		}
+		rateLimitClient = server.NewStoredRateLimitClient(clientAddressHash)
 	}
-	clientAddressHashHex := hex.EncodeToString(clientAddressHash[:])
-	addressRedisKey, globalRedisKey := userAuthAttemptRedisKeys(userAuth, clientAddressHashHex)
-	member := server.NewId().String()
+	return userAuthAttemptAtForClient(
+		userAuth,
+		clientSession,
+		now,
+		settings,
+		rateLimitClient,
+	)
+}
+
+func userAuthAttemptAtForClient(
+	userAuth *string,
+	clientSession *session.ClientSession,
+	now time.Time,
+	settings userAuthAttemptSettings,
+	rateLimitClient *server.RateLimitClient,
+) (userAuthAttemptId UserAuthAttemptId, allow bool) {
+	attemptId, allow, err := server.CheckIpRateLimitAttempt(
+		clientSession.Ctx,
+		rateLimitClient,
+		userAuthAttemptGlobalHashTag(userAuth),
+		now,
+		server.IpRateLimitAttemptSettings{
+			KeyPrefix:       userAuthAttemptRedisKeyPrefix,
+			AddressLookback: settings.addressLookback,
+			AddressLimit:    settings.addressLimit,
+			GlobalLookback:  settings.globalLookback,
+			GlobalLimit:     settings.globalLimit,
+		},
+	)
+	server.Raise(err)
 	userAuthAttemptId = UserAuthAttemptId{
-		addressRedisKey: addressRedisKey,
-		globalRedisKey:  globalRedisKey,
+		addressRedisKey: attemptId.AddressRedisKey,
+		globalRedisKey:  attemptId.GlobalRedisKey,
 	}
-
-	hasGlobal := 0
-	keys := []string{addressRedisKey}
-	if globalRedisKey != "" {
-		hasGlobal = 1
-		keys = append(keys, globalRedisKey)
-	}
-
-	var allowed int64
-	server.Redis(clientSession.Ctx, func(r server.RedisClient) {
-		allowed, err = authAttemptScript.Run(
-			clientSession.Ctx,
-			r,
-			keys,
-			hasGlobal,
-			now.UnixMilli(),
-			now.Add(settings.addressLookback).UnixMilli(),
-			now.Add(settings.globalLookback).UnixMilli(),
-			member,
-			settings.addressLimit,
-			settings.globalLimit,
-			settings.addressLookback.Milliseconds(),
-			settings.globalLookback.Milliseconds(),
-		).Int64()
-		server.Raise(err)
-	})
-	return userAuthAttemptId, allowed == 1
+	return userAuthAttemptId, allow
 }
 
 func SetUserAuthAttemptSuccess(
@@ -258,22 +197,16 @@ func SetUserAuthAttemptSuccess(
 	userAuthAttemptId UserAuthAttemptId,
 	success bool,
 ) {
-	if !success || userAuthAttemptId.addressRedisKey == "" {
+	if !success {
 		return
 	}
-
-	keys := []string{userAuthAttemptId.addressRedisKey}
-	if userAuthAttemptId.globalRedisKey != "" {
-		keys = append(keys, userAuthAttemptId.globalRedisKey)
-	}
-	server.Redis(ctx, func(r server.RedisClient) {
-		_, err := authAttemptSuccessScript.Run(
-			ctx,
-			r,
-			keys,
-		).Result()
-		server.Raise(err)
-	})
+	server.Raise(server.ClearIpRateLimitAttempt(
+		ctx,
+		server.IpRateLimitAttemptId{
+			AddressRedisKey: userAuthAttemptId.addressRedisKey,
+			GlobalRedisKey:  userAuthAttemptId.globalRedisKey,
+		},
+	))
 }
 
 // removeExpiredAuthAttemptsBatchSize bounds each delete pass. user_auth_attempt

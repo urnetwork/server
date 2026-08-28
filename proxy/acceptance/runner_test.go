@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -237,6 +238,123 @@ func TestCleanupFailureFailsOtherwisePassingProtocols(t *testing.T) {
 		if !strings.Contains(result.Detail, "cleanup failed") {
 			t.Fatalf("%s detail did not report cleanup: %q", name, result.Detail)
 		}
+	}
+}
+
+func TestRunExecutesSustainedProtocolCampaignsSequentiallyBeforeCleanup(t *testing.T) {
+	removed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/auth/login-with-password":
+			_, _ = w.Write([]byte(`{"network":{"by_jwt":"jwt"}}`))
+		case "/network/auth-client":
+			_, _ = w.Write([]byte(`{"client_id":"client","proxy_config_result":{"auth_token":"token"}}`))
+		case "/network/remove-client":
+			close(removed)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	order := []string{}
+	results := runWithDependencies(context.Background(), Options{
+		APIURL: server.URL, TargetURL: server.URL + "/target", CredentialsPath: "injected", Repeat: 1,
+	}, runDependencies{
+		credentials: &credentials{user: "user", password: "password"},
+		httpClient:  server.Client(),
+		probes: func(*proxyConfigResult) map[string]protocolProbe {
+			probes := map[string]protocolProbe{}
+			for _, protocol := range protocolNames {
+				protocol := protocol
+				probes[protocol] = func(context.Context) error {
+					select {
+					case <-removed:
+						t.Fatalf("temporary client was removed before %s campaign", protocol)
+					default:
+					}
+					order = append(order, protocol)
+					return nil
+				}
+			}
+			return probes
+		},
+	})
+	wantOrder := []string{"http", "socks", "wireguard"}
+	if !slices.Equal(order, wantOrder) {
+		t.Fatalf("campaign order = %v, want %v", order, wantOrder)
+	}
+	for _, protocol := range protocolNames {
+		assertResult(t, results, protocol, "PASS")
+	}
+	select {
+	case <-removed:
+	default:
+		t.Fatal("temporary client was not removed after all protocol campaigns completed")
+	}
+}
+
+func TestProbeHTTPSRunsConfiguredSustainedCampaign(t *testing.T) {
+	requestCount := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	successfulRequests, err := probeHTTPSCampaign(
+		context.Background(),
+		"HTTP CONNECT",
+		target.URL,
+		target.Client().Transport,
+		time.Second,
+		30*time.Second,
+		10*time.Second,
+		func(context.Context, time.Duration) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successfulRequests != 4 {
+		t.Fatalf("successful requests = %d, want 4 (one readiness plus three sustained)", successfulRequests)
+	}
+	if requestCount != successfulRequests {
+		t.Fatalf("target requests = %d, want %d", requestCount, successfulRequests)
+	}
+}
+
+func TestProbeHTTPSFailsImmediatelyOnRateLimitDuringSustainedCampaign(t *testing.T) {
+	requestCount := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestCount++
+		if requestCount == 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	successfulRequests, err := probeHTTPSCampaign(
+		context.Background(),
+		"SOCKS5",
+		target.URL,
+		target.Client().Transport,
+		time.Second,
+		50*time.Second,
+		10*time.Second,
+		func(context.Context, time.Duration) error { return nil },
+	)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 429") || !strings.Contains(err.Error(), "sustained request 2/5") {
+		t.Fatalf("rate-limit error = %v", err)
+	}
+	if successfulRequests != 2 {
+		t.Fatalf("successful requests = %d, want 2", successfulRequests)
+	}
+	if requestCount != 3 {
+		t.Fatalf("target requests = %d, want 3; a 429 must not be retried", requestCount)
 	}
 }
 

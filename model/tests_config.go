@@ -16,7 +16,8 @@ type testsVaultConfig struct {
 		SuppressAccountMessages bool     `yaml:"suppress_account_messages"`
 	} `yaml:"email_verification"`
 	Signup struct {
-		Phone struct {
+		Password string `yaml:"password"`
+		Phone    struct {
 			Number string `yaml:"number"`
 		} `yaml:"phone"`
 	} `yaml:"signup"`
@@ -24,6 +25,9 @@ type testsVaultConfig struct {
 
 type testAuthPolicy struct {
 	BypassVerification      bool
+	BypassRateLimits        bool
+	AllowPasswordRepair     bool
+	ConfiguredPassword      string
 	SuppressAccountMessages bool
 }
 
@@ -63,10 +67,11 @@ func loadTestsVaultConfig() (*testsVaultConfig, error) {
 }
 
 // testAuthPolicyForUserAuth returns an empty policy for every configuration
-// problem. That is the fail-closed behavior: normal verification remains
-// required if tests.yml is missing, malformed, versioned unexpectedly, or
-// contains an invalid bypass identity. Email matching is by exact configured
-// domain; phone matching is against the one normalized signup phone fixture.
+// problem. That is the fail-closed behavior: normal verification and auth
+// attempt limits remain required if tests.yml is missing, malformed, versioned
+// unexpectedly, or contains an invalid bypass identity. Email matching is by
+// exact configured domain; phone matching is against the one normalized signup
+// phone fixture.
 func testAuthPolicyForUserAuth(userAuth *string) testAuthPolicy {
 	normalUserAuth, authType := NormalUserAuthV1(userAuth)
 	if normalUserAuth == nil || (authType != UserAuthTypeEmail && authType != UserAuthTypePhone) {
@@ -119,8 +124,18 @@ func testAuthPolicyForUserAuth(userAuth *string) testAuthPolicy {
 	if !matched {
 		return testAuthPolicy{}
 	}
-	return testAuthPolicy{
+	policy := testAuthPolicy{
 		BypassVerification:      true,
 		SuppressAccountMessages: config.EmailVerification.SuppressAccountMessages,
 	}
+	// A fixed phone fixture cannot vary its identity between campaigns. Let it
+	// recover from an interrupted or older campaign only when the caller proves
+	// possession of the exact password stored beside that phone in tests.yml.
+	// Domain-matched email accounts never receive this repair capability.
+	if authType == UserAuthTypePhone && config.Signup.Password != "" {
+		policy.BypassRateLimits = true
+		policy.AllowPasswordRepair = true
+		policy.ConfiguredPassword = config.Signup.Password
+	}
+	return policy
 }

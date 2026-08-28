@@ -38,6 +38,7 @@ func InitTasks(ctx context.Context) {
 		// work.ScheduleWarmEmail(clientSession, tx)
 		work.ScheduleExportStats(clientSession, tx)
 		work.ScheduleExportProvidersMap(clientSession, tx)
+		work.ScheduleBackfillClock(clientSession, tx, server.NowUtc())
 		work.ScheduleWebSearchAnalytics(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
@@ -146,6 +147,7 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ExportProvidersMap,
 			work.ExportProvidersMapPost,
 		),
+		task.NewTaskTarget(work.BackfillClock),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
 			work.WebSearchAnalyticsPost,

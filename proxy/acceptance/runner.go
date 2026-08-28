@@ -22,10 +22,13 @@ import (
 )
 
 const (
-	Platform              = "server/proxy"
-	defaultProbeTimeout   = 120 * time.Second
-	maxAPIResponseBytes   = 1024 * 1024
-	maxProbeResponseBytes = 64 * 1024
+	Platform               = "server/proxy"
+	defaultProbeTimeout    = 120 * time.Second
+	defaultSoakDuration    = 5 * time.Minute
+	defaultSoakInterval    = 5 * time.Second
+	readinessRetryInterval = 2 * time.Second
+	maxAPIResponseBytes    = 1024 * 1024
+	maxProbeResponseBytes  = 64 * 1024
 )
 
 var protocolNames = []string{"socks", "http", "wireguard"}
@@ -37,6 +40,8 @@ type Options struct {
 	CredentialsPath string
 	Repeat          int
 	ProbeTimeout    time.Duration
+	SoakDuration    time.Duration
+	SoakInterval    time.Duration
 }
 
 // Result is one row in the root acceptance matrix.
@@ -123,11 +128,17 @@ func Run(ctx context.Context, opts Options) []Result {
 }
 
 func runWithDependencies(ctx context.Context, opts Options, deps runDependencies) []Result {
-	if err := validateOptions(opts); err != nil {
-		return failedResults(err.Error())
-	}
 	if opts.ProbeTimeout == 0 {
 		opts.ProbeTimeout = defaultProbeTimeout
+	}
+	if opts.SoakDuration == 0 {
+		opts.SoakDuration = defaultSoakDuration
+	}
+	if opts.SoakInterval == 0 {
+		opts.SoakInterval = defaultSoakInterval
+	}
+	if err := validateOptions(opts); err != nil {
+		return failedResults(err.Error())
 	}
 
 	var creds credentials
@@ -185,10 +196,18 @@ func runWithDependencies(ctx context.Context, opts Options, deps runDependencies
 	results := make([]Result, 0, len(protocolNames))
 	for _, name := range protocolNames {
 		if len(failures[name]) == 0 && passes[name] == opts.Repeat {
+			successfulRequestsPerCampaign := 1 + int(opts.SoakDuration/opts.SoakInterval)
 			results = append(results, Result{
 				Case:   name,
 				Status: "PASS",
-				Detail: fmt.Sprintf("%d/%d HTTPS requests succeeded through %s", passes[name], opts.Repeat, labels[name]),
+				Detail: fmt.Sprintf(
+					"%d/%d sustained campaigns succeeded through %s (%d HTTPS requests each over %s)",
+					passes[name],
+					opts.Repeat,
+					labels[name],
+					successfulRequestsPerCampaign,
+					opts.SoakDuration,
+				),
 			})
 			continue
 		}
@@ -207,6 +226,15 @@ func validateOptions(opts Options) error {
 	}
 	if opts.ProbeTimeout < 0 {
 		return errors.New("probe timeout cannot be negative")
+	}
+	if opts.SoakDuration < 0 {
+		return errors.New("soak duration cannot be negative")
+	}
+	if opts.SoakInterval <= 0 {
+		return errors.New("soak interval must be positive")
+	}
+	if opts.SoakDuration < opts.SoakInterval {
+		return errors.New("soak duration must include at least one soak interval")
 	}
 	for label, raw := range map[string]string{"API": opts.APIURL, "target": opts.TargetURL} {
 		parsed, err := url.Parse(raw)
@@ -249,8 +277,11 @@ func (r *runner) runIteration(ctx context.Context) map[string]error {
 		result = errorsForEveryProtocol(ctx.Err())
 	} else {
 		probes := r.newProbes(provisioned.ProxyConfigResult)
-		// HTTP runs first because it also causes the hosted proxy device to open;
-		// the SOCKS and WireGuard checks then exercise the same ready resident.
+		// A proxy device has one active data-plane mode: DialContext clears the
+		// WireGuard receive channel, while WireGuard installs that channel. Run
+		// each sustained campaign in isolation on the same temporary client so a
+		// test never invalidates another protocol's path while measuring it. HTTP
+		// stays first because it opens and warms a newly placed hosted device.
 		for _, name := range []string{"http", "socks", "wireguard"} {
 			probe := probes[name]
 			if probe == nil {
@@ -393,7 +424,17 @@ func (r *runner) productionProbes(config *proxyConfigResult) map[string]protocol
 			proxyURL.User = url.UserPassword(config.AuthToken, "acceptance")
 			transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 			defer transport.CloseIdleConnections()
-			return probeHTTPS(ctx, "HTTP CONNECT", r.opts.TargetURL, transport, r.opts.ProbeTimeout)
+			_, err = probeHTTPSCampaign(
+				ctx,
+				"HTTP CONNECT",
+				r.opts.TargetURL,
+				transport,
+				r.opts.ProbeTimeout,
+				r.opts.SoakDuration,
+				r.opts.SoakInterval,
+				waitForProbeInterval,
+			)
+			return err
 		},
 		"socks": func(ctx context.Context) error {
 			if config.SocksProxyURL == "" || config.AuthToken == "" {
@@ -413,7 +454,17 @@ func (r *runner) productionProbes(config *proxyConfigResult) map[string]protocol
 			}
 			transport := &http.Transport{DialContext: contextDialer.DialContext}
 			defer transport.CloseIdleConnections()
-			return probeHTTPS(ctx, "SOCKS5", r.opts.TargetURL, transport, r.opts.ProbeTimeout)
+			_, err = probeHTTPSCampaign(
+				ctx,
+				"SOCKS5",
+				r.opts.TargetURL,
+				transport,
+				r.opts.ProbeTimeout,
+				r.opts.SoakDuration,
+				r.opts.SoakInterval,
+				waitForProbeInterval,
+			)
+			return err
 		},
 		"wireguard": func(ctx context.Context) error {
 			if config.WgConfig == nil {
@@ -427,57 +478,126 @@ func (r *runner) productionProbes(config *proxyConfigResult) map[string]protocol
 				transport.CloseIdleConnections()
 				closeClient()
 			}()
-			return probeHTTPS(ctx, "WireGuard", r.opts.TargetURL, transport, r.opts.ProbeTimeout)
+			_, err = probeHTTPSCampaign(
+				ctx,
+				"WireGuard",
+				r.opts.TargetURL,
+				transport,
+				r.opts.ProbeTimeout,
+				r.opts.SoakDuration,
+				r.opts.SoakInterval,
+				waitForProbeInterval,
+			)
+			return err
 		},
 	}
 }
 
-func probeHTTPS(ctx context.Context, protocol, target string, transport http.RoundTripper, retryWindow time.Duration) error {
+type targetHTTPStatusError struct {
+	statusCode int
+}
+
+func (e *targetHTTPStatusError) Error() string {
+	return fmt.Sprintf("target returned HTTP %d", e.statusCode)
+}
+
+type probeIntervalWait func(context.Context, time.Duration) error
+
+func probeHTTPSCampaign(
+	ctx context.Context,
+	protocol string,
+	target string,
+	transport http.RoundTripper,
+	retryWindow time.Duration,
+	soakDuration time.Duration,
+	soakInterval time.Duration,
+	wait probeIntervalWait,
+) (int, error) {
+	if wait == nil {
+		wait = waitForProbeInterval
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, retryWindow)
 	defer cancel()
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	var lastErr error
 	for {
-		request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
-		if err != nil {
-			return err
+		lastErr = probeHTTPSRequest(probeCtx, client, target)
+		if lastErr == nil {
+			break
 		}
-		request.Header.Set("Accept", "text/plain, */*")
-		request.Header.Set("User-Agent", "urnetwork-proxy-acceptance/1")
-		request.Close = true
-		response, err := client.Do(request)
-		if err == nil {
-			_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, maxProbeResponseBytes))
-			closeErr := response.Body.Close()
-			switch {
-			case readErr != nil:
-				lastErr = readErr
-			case closeErr != nil:
-				lastErr = closeErr
-			case response.StatusCode < 200 || response.StatusCode >= 300:
-				lastErr = fmt.Errorf("target returned HTTP %d", response.StatusCode)
-			default:
-				return nil
-			}
-		} else {
-			lastErr = err
+		var statusErr *targetHTTPStatusError
+		if errors.As(lastErr, &statusErr) && statusErr.statusCode == http.StatusTooManyRequests {
+			return 0, fmt.Errorf("%s readiness was rate limited: %w", protocol, lastErr)
 		}
 		if probeCtx.Err() != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return 0, ctx.Err()
 			}
-			return fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
+			return 0, fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
 		}
-		timer := time.NewTimer(2 * time.Second)
-		select {
-		case <-probeCtx.Done():
-			timer.Stop()
+		if err := wait(probeCtx, readinessRetryInterval); err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return 0, ctx.Err()
 			}
-			return fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
-		case <-timer.C:
+			return 0, fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
 		}
+	}
+
+	successfulRequests := 1
+	sustainedRequests := int(soakDuration / soakInterval)
+	for requestIndex := 1; requestIndex <= sustainedRequests; requestIndex++ {
+		if err := wait(ctx, soakInterval); err != nil {
+			return successfulRequests, err
+		}
+		if err := probeHTTPSRequest(ctx, client, target); err != nil {
+			return successfulRequests, fmt.Errorf(
+				"%s sustained request %d/%d failed after %d successful requests: %w",
+				protocol,
+				requestIndex,
+				sustainedRequests,
+				successfulRequests,
+				err,
+			)
+		}
+		successfulRequests++
+	}
+	return successfulRequests, nil
+}
+
+func probeHTTPSRequest(ctx context.Context, client *http.Client, target string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Accept", "text/plain, */*")
+	request.Header.Set("User-Agent", "urnetwork-proxy-acceptance/1")
+	request.Close = true
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, maxProbeResponseBytes))
+	closeErr := response.Body.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return &targetHTTPStatusError{statusCode: response.StatusCode}
+	}
+	return nil
+}
+
+func waitForProbeInterval(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
