@@ -10,6 +10,13 @@ config_local_directory: /srv/warp/config/local
 vault_local_directory: /srv/warp/vault/local
 season_ends_at: 2027-01-01T00:00:00Z
 retain_until: 2027-02-01T00:00:00Z
+# Six submission epochs. A new hidden-seed round is prepared automatically
+# after the prior epoch drains and its winner is frozen. The preparation window
+# leaves time for the mandatory same-round R=9 rebaseline before admission.
+season_policy:
+  epoch_count: 6
+  submission_window_seconds: 604800
+  preparation_window_seconds: 57600
 worker_lease_seconds: 90
 worker_heartbeat_seconds: 20
 host_heartbeat_max_age_seconds: 60
@@ -66,5 +73,8 @@ evaluation_policy:
   impairment_enabled: true
   replicates: 0
   takeover_margin: 0
-  queue_limit: 0
-  score_timeout_seconds: 0
+  # Initial public cap: ten distinct canonical patches may wait for the
+  # post-close FIFO. At the calibrated 49,392-second job bound this is about
+  # 5.7 days of nominal grading; duplicate patches remain cache hits.
+  queue_limit: 10
+  score_timeout_seconds: 49392

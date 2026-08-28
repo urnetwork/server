@@ -6232,4 +6232,81 @@ var migrations = []any{
 		$competition_round_guard$;
 	`),
 
+	// Six-epoch batch lifecycle and immutable winner publication. Historical
+	// pre-launch rounds receive their deterministic creation-order epoch so the
+	// migration remains safe on staging databases; production admits at most the
+	// configured six through the application and unique database identity.
+	newSqlMigration(`
+		ALTER TABLE competition_round
+			ADD COLUMN epoch_number integer,
+			ADD COLUMN finalized_at timestamp NULL,
+			ADD COLUMN winner_job_id uuid NULL;
+
+		WITH ranked AS (
+			SELECT round_id,
+			       row_number() OVER (
+			           PARTITION BY competition_id ORDER BY created_at, round_id
+			       ) AS epoch_number
+			FROM competition_round
+		)
+		UPDATE competition_round AS round
+		SET epoch_number = ranked.epoch_number
+		FROM ranked
+		WHERE ranked.round_id = round.round_id;
+
+		ALTER TABLE competition_round
+			ALTER COLUMN epoch_number SET NOT NULL,
+			ADD CONSTRAINT competition_round_epoch_positive CHECK (epoch_number > 0),
+			ADD CONSTRAINT competition_round_winner_job_fk
+				FOREIGN KEY (winner_job_id) REFERENCES competition_job(job_id);
+
+		CREATE UNIQUE INDEX competition_round_epoch_identity
+		ON competition_round (competition_id, epoch_number);
+
+		CREATE INDEX competition_round_finalize_idx
+		ON competition_round (competition_id, closes_at, epoch_number)
+		WHERE canceled = false AND finalized_at IS NULL;
+
+		CREATE OR REPLACE FUNCTION competition_round_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_epoch_lifecycle_guard$
+		BEGIN
+			IF OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.competition_id IS DISTINCT FROM NEW.competition_id OR
+			   OLD.epoch_number IS DISTINCT FROM NEW.epoch_number OR
+			   OLD.workload_commitment IS DISTINCT FROM NEW.workload_commitment OR
+			   OLD.seed_nonce IS DISTINCT FROM NEW.seed_nonce OR
+			   OLD.seed_ciphertext IS DISTINCT FROM NEW.seed_ciphertext OR
+			   OLD.providers_sha256 IS DISTINCT FROM NEW.providers_sha256 OR
+			   OLD.providers_path IS DISTINCT FROM NEW.providers_path OR
+			   OLD.policy_json IS DISTINCT FROM NEW.policy_json OR
+			   OLD.opens_at IS DISTINCT FROM NEW.opens_at OR
+			   OLD.closes_at IS DISTINCT FROM NEW.closes_at OR
+			   OLD.reveal_at IS DISTINCT FROM NEW.reveal_at OR
+			   OLD.created_at IS DISTINCT FROM NEW.created_at OR
+			   (OLD.canceled AND NOT NEW.canceled) OR
+			   (OLD.finalized_at IS NOT NULL AND (
+			       OLD.finalized_at IS DISTINCT FROM NEW.finalized_at OR
+			       OLD.winner_job_id IS DISTINCT FROM NEW.winner_job_id
+			   )) OR
+			   (NEW.finalized_at IS NULL AND NEW.winner_job_id IS NOT NULL) OR
+			   (NEW.finalized_at IS NOT NULL AND NEW.finalized_at < NEW.closes_at)
+			THEN
+				RAISE EXCEPTION 'competition round immutable fields changed';
+			END IF;
+			IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
+				SELECT 1 FROM competition_job AS job
+				WHERE job.job_id = NEW.winner_job_id
+				  AND job.round_id = NEW.round_id
+				  AND job.state = 'succeeded'
+				  AND (job.score_json->>'placeable')::boolean
+				  AND (job.score_json->>'takeover_eligible')::boolean
+			) THEN
+				RAISE EXCEPTION 'competition winner is not an eligible job in this round';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_epoch_lifecycle_guard$;
+	`),
 }

@@ -144,16 +144,16 @@ containment boundary before this round-scoped attestation can exist.
 go test -race ./competition ./api
 go test . -run TestApplyDbMigrations -count=1
 go vet ./competition ./api ./cli/competitionworker
-cd ../sn && python3 -m unittest discover -s competition/tests -v
-cd ../server && ./competition/container/test-build-isolation.sh \
+(cd connect/sim-latency && ./tests.sh)
+./competition/container/test-build-isolation.sh \
   --allow-local-base \
   --base-image urnetwork/sim-latency-evaluator-base:dev \
   --policy competition/container/policy.example.json
-cd ../server && ./competition/container/smoke-test.sh \
+./competition/container/smoke-test.sh \
   urnetwork/sim-latency-evaluator-base:dev
-cd ../server && ./competition/container/test-resource-bomb-cleanup.sh \
+./competition/container/test-resource-bomb-cleanup.sh \
   --production-memory-limit
-cd ../server && ./competition/test-promote-host-containment.sh
+./competition/test-promote-host-containment.sh
 ```
 
 Production readiness is evidence, not a config flag: missing/old host

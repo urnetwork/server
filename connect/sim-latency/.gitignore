@@ -1,5 +1,6 @@
 # build + run artifacts
 sim-latency
+build/
 eval-48g/
 eval-12c/
 .sim-site/

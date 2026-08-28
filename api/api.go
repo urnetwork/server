@@ -28,6 +28,7 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/competition/healthz", handlers.CompetitionHealth),
 		router.NewRoute("GET", "/competition/readyz", handlers.CompetitionReady),
 		router.NewRoute("GET", "/competition/info", handlers.CompetitionInfo),
+		router.NewRoute("GET", "/competition/leaderboard", handlers.CompetitionLeaderboard),
 		router.NewRoute("GET", "/competition/round/([^/]+)/providers.yml", handlers.CompetitionGetRoundWorkload),
 		router.NewRoute("POST", "/competition/generate-round", handlers.CompetitionGenerateRound),
 		router.NewRoute("POST", "/competition/score", handlers.CompetitionSubmitScore),

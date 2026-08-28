@@ -1,0 +1,99 @@
+schema: 1
+status_date: 2026-08-28
+launch_state: implementation_complete_release_and_external_actions_pending
+
+evaluation_host:
+  authoritative_hosts_required: 1
+  physical_cpu_count: 12
+  evaluation_cpu_count: 10
+  management_cpu_count: 2
+  memory_gib: 128
+
+season:
+  epoch_count: 6
+  submission_window_seconds: 604800
+  reveal: at_close
+  grading: after_close_fifo
+  preparation_window_seconds: 57600
+  queue_limit: 10
+  score_timeout_seconds: 49392
+  first_opens_at: null
+  season_ends_at: null
+  retain_until: null
+  baseline_source_policy: approval_required
+
+release_record:
+  server_commit: null
+  sn_commit: null
+  warp_commit: null
+  main_api_image_digest: null
+  competition_worker_image_or_archive_digest: null
+  openapi_sha256: null
+  recorded_by: null
+  recorded_at: null
+
+retention:
+  backend: server/blob
+  service: minio
+  required_mode: COMPLIANCE
+  versioning_required: true
+  post_upload_authentication: sha256_and_size
+  candidate_credentials_exposed: false
+  warn_used_percent: 75
+  page_used_percent: 90
+  deletion_owner: pending_operator_record
+
+monitoring:
+  destination: main_grafana_mimir
+  dashboard: server/grafana/dashboards/competition.json
+  alert_rules: warp/grafana/alerting/competition.yml
+  contact_policy: existing_main_policy
+  on_call_record: pending_operator_record
+
+checklist:
+  - id: evaluator_and_baseline
+    status: complete
+    evidence: connect/sim-latency/final-baseline.html
+  - id: single_host_containment
+    status: complete
+    evidence: connect/sim-latency/APEX-CALIBRATION.md
+  - id: main_postgres_redis_restore
+    status: complete_operator_confirmed
+    evidence: existing_main_environment
+  - id: api_migration_worker_ordering
+    status: complete_operator_confirmed
+    evidence: existing_main_environment
+  - id: public_ingress_controls
+    status: complete_operator_confirmed
+    evidence: existing_main_environment
+  - id: competition_api_and_leaderboard
+    status: complete
+    evidence: sn/api/competition.yml
+  - id: six_epoch_batch_lifecycle
+    status: complete
+    evidence: server/competition/store.go
+  - id: immutable_artifact_implementation
+    status: complete
+    evidence: server/competition/artifact_archive.go
+  - id: grafana_implementation
+    status: complete
+    evidence: server/grafana/dashboards/competition.json
+  - id: final_calendar
+    status: approval_required
+  - id: credential_bundle
+    status: approval_or_rotation_required
+  - id: final_release_record
+    status: deployment_action_required
+  - id: live_minio_readiness_backup_capacity_and_deletion_owner
+    status: deployment_verification_required
+  - id: grafana_deploy_contact_routing_and_on_call
+    status: deployment_verification_required
+  - id: miner_onboarding_token_distribution_and_revocation
+    status: operator_action_required
+  - id: fees_rewards_eligibility_legal_and_abuse
+    status: business_approval_required
+  - id: winner_source_policy
+    status: approval_required
+  - id: apex_adapter_staging_registry_and_signed_handoff
+    status: external_acceptance_required
+    evidence: server/competition/APEX-HANDOFF.md

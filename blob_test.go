@@ -118,6 +118,45 @@ func TestLocalBlobStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLocalBlobStoreRetainedCapability(t *testing.T) {
+	store := NewLocalBlobStore(t.TempDir(), "competition").(RetainedBlobStore)
+	source := filepath.Join(t.TempDir(), "artifact.json")
+	content := []byte("{\"schema\":1}\n")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	retainUntil := NowUtc().Add(24 * time.Hour).Truncate(time.Second)
+	proof, err := store.PutRetained(
+		context.Background(), "competition/round/artifact.json", source,
+		"application/json", retainUntil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.Mode != "LOCAL" || proof.Size != int64(len(content)) ||
+		proof.Key != "competition/round/artifact.json" || proof.RetainUntil != retainUntil {
+		t.Fatalf("retention proof = %+v", proof)
+	}
+	reader, err := store.GetVersion(context.Background(), proof.Key, proof.VersionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(got, content) {
+		t.Fatalf("retained read = %q, %v, %v", got, readErr, closeErr)
+	}
+	if err := store.CheckRetention(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutRetained(
+		context.Background(), "competition/round/expired", source,
+		"application/json", NowUtc().Add(-time.Second),
+	); err == nil {
+		t.Fatal("expired retention deadline accepted")
+	}
+}
+
 func TestLocalBlobStoreReaper(t *testing.T) {
 	root := t.TempDir()
 	store := NewLocalBlobStore(root, "stats").(*localBlobStore)

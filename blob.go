@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -49,6 +50,18 @@ const blobPartialSuffix = ".partial"
 type BlobObject struct {
 	Key  string
 	Size int64
+}
+
+// Immutable retention proof returned for a write that the backend protects
+// through the requested absolute date. Production MinIO writes use compliance
+// object lock and name the exact retained object version. The local backend is
+// only a development substitute and reports mode LOCAL.
+type BlobRetention struct {
+	Key         string
+	Size        int64
+	VersionId   string
+	Mode        string
+	RetainUntil time.Time
 }
 
 // BlobLifecycleRule expires (deletes) objects whose key starts with KeyPrefix
@@ -91,6 +104,24 @@ type BlobStore interface {
 	Prefix() string
 	// Authority is the backing endpoint (for logging).
 	Authority() string
+}
+
+// RetainedBlobStore is the optional immutable-evidence capability. Keeping it
+// separate from BlobStore lets ordinary streams use simple object storage,
+// while callers handling dispute evidence can fail closed unless the backend
+// proves versioning and compliance retention.
+type RetainedBlobStore interface {
+	BlobStore
+	// PutRetained uploads one immutable object version and proves that the
+	// backend will reject deletion through retainUntil. Production MinIO uses
+	// compliance mode; the local implementation exists for deterministic tests.
+	PutRetained(ctx context.Context, key string, localPath string, contentType string, retainUntil time.Time) (*BlobRetention, error)
+	// GetVersion opens the exact immutable version returned by PutRetained.
+	// An empty version id selects the current object for local/test stores.
+	GetVersion(ctx context.Context, key string, versionId string) (io.ReadCloser, error)
+	// CheckRetention verifies that immutable retained writes are available. It
+	// performs no mutation and is suitable for readiness checks.
+	CheckRetention(ctx context.Context) error
 }
 
 // BlobStoreConfig is the backing MinIO configuration (or local-backend
@@ -248,12 +279,49 @@ func (self *minioBlobStore) Put(ctx context.Context, key string, localPath strin
 	return err
 }
 
+func (self *minioBlobStore) PutRetained(
+	ctx context.Context,
+	key string,
+	localPath string,
+	contentType string,
+	retainUntil time.Time,
+) (*BlobRetention, error) {
+	retainUntil = retainUntil.UTC()
+	if !NowUtc().Before(retainUntil) {
+		return nil, errors.New("blob retention must end in the future")
+	}
+	upload, err := self.client.FPutObject(ctx, self.bucket, key, localPath, minio.PutObjectOptions{
+		ContentType:     contentType,
+		Mode:            minio.Compliance,
+		RetainUntilDate: retainUntil,
+	})
+	if err != nil {
+		return nil, err
+	}
+	mode, retainedUntil, err := self.client.GetObjectRetention(ctx, self.bucket, key, upload.VersionID)
+	if err != nil {
+		return nil, err
+	}
+	if mode == nil || *mode != minio.Compliance || retainedUntil == nil ||
+		retainedUntil.Before(retainUntil.Add(-time.Second)) {
+		return nil, errors.New("minio did not prove compliance retention")
+	}
+	return &BlobRetention{
+		Key: key, Size: upload.Size, VersionId: upload.VersionID,
+		Mode: minio.Compliance.String(), RetainUntil: retainedUntil.UTC(),
+	}, nil
+}
+
 func (self *minioBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	object, err := self.client.GetObject(ctx, self.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, err
 	}
 	return object, nil
+}
+
+func (self *minioBlobStore) GetVersion(ctx context.Context, key string, versionId string) (io.ReadCloser, error) {
+	return self.client.GetObject(ctx, self.bucket, key, minio.GetObjectOptions{VersionID: versionId})
 }
 
 func (self *minioBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobObject, error) {
@@ -356,6 +424,31 @@ func (self *minioBlobStore) SetLifecycle(ctx context.Context, rules []BlobLifecy
 	config := lifecycle.NewConfiguration()
 	config.Rules = mergeOwnedLifecycleRules(existing, owned)
 	return self.client.SetBucketLifecycle(ctx, self.bucket, config)
+}
+
+func (self *minioBlobStore) CheckRetention(ctx context.Context) error {
+	exists, err := self.client.BucketExists(ctx, self.bucket)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("minio blob bucket does not exist")
+	}
+	objectLock, _, _, _, err := self.client.GetObjectLockConfig(ctx, self.bucket)
+	if err != nil {
+		return err
+	}
+	if objectLock != "Enabled" {
+		return errors.New("minio blob bucket does not have object lock enabled")
+	}
+	versioning, err := self.client.GetBucketVersioning(ctx, self.bucket)
+	if err != nil {
+		return err
+	}
+	if !versioning.Enabled() {
+		return errors.New("minio blob bucket does not have versioning enabled")
+	}
+	return nil
 }
 
 // mergeOwnedLifecycleRules replaces existing rules by exact ID match with the
@@ -488,6 +581,33 @@ func (self *localBlobStore) Put(ctx context.Context, key string, localPath strin
 	return os.Rename(tmp, dst)
 }
 
+func (self *localBlobStore) PutRetained(
+	ctx context.Context,
+	key string,
+	localPath string,
+	contentType string,
+	retainUntil time.Time,
+) (*BlobRetention, error) {
+	retainUntil = retainUntil.UTC()
+	if !NowUtc().Before(retainUntil) {
+		return nil, errors.New("blob retention must end in the future")
+	}
+	if err := self.Put(ctx, key, localPath, contentType); err != nil {
+		return nil, err
+	}
+	destination := self.pathFor(key)
+	if err := os.Chmod(destination, 0400); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		return nil, err
+	}
+	return &BlobRetention{
+		Key: key, Size: info.Size(), Mode: "LOCAL", RetainUntil: retainUntil,
+	}, nil
+}
+
 func (self *localBlobStore) usageBytes() (int64, error) {
 	var total int64
 	if _, err := os.Stat(self.root); err != nil {
@@ -510,6 +630,13 @@ func (self *localBlobStore) usageBytes() (int64, error) {
 
 func (self *localBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return os.Open(self.pathFor(key))
+}
+
+func (self *localBlobStore) GetVersion(ctx context.Context, key string, versionId string) (io.ReadCloser, error) {
+	if versionId != "" {
+		return nil, errors.New("local blob store does not have object versions")
+	}
+	return self.Get(ctx, key)
 }
 
 func (self *localBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobObject, error) {
@@ -553,6 +680,10 @@ func (self *localBlobStore) SetLifecycle(ctx context.Context, rules []BlobLifecy
 	self.reapOnce.Do(func() {
 		go self.reapLoop(ctx)
 	})
+	return nil
+}
+
+func (self *localBlobStore) CheckRetention(context.Context) error {
 	return nil
 }
 

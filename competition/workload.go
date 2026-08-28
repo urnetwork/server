@@ -149,7 +149,7 @@ func removeRoundWorkload(settings *Settings, round *roundRecord) {
 	_ = os.Remove(expectedDirectory)
 }
 
-func readRoundWorkload(settings *Settings, round *roundRecord) ([]byte, error) {
+func readRoundWorkload(ctx context.Context, settings *Settings, round *roundRecord) ([]byte, error) {
 	if settings == nil || round == nil || !sha256Pattern.MatchString(round.ProvidersSha256) {
 		return nil, errors.New("round workload identity is missing")
 	}
@@ -159,7 +159,13 @@ func readRoundWorkload(settings *Settings, round *roundRecord) ([]byte, error) {
 	}
 	bytes, err := readRegularFile(round.ProvidersPath, maxProvidersFileSize)
 	if err != nil {
-		return nil, err
+		if settings.artifactArchive == nil {
+			return nil, err
+		}
+		// MinIO is the durable copy. Falling back to it makes a local artifact
+		// disk loss recoverable without weakening the immutable round identity;
+		// the archive reader authenticates the committed SHA-256 before return.
+		return settings.artifactArchive.ReadRoundWorkload(ctx, settings, round)
 	}
 	digest := sha256.Sum256(bytes)
 	if hex.EncodeToString(digest[:]) != round.ProvidersSha256 {

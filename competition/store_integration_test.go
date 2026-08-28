@@ -17,7 +17,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		store := PostgresStore{}
 		now := server.NowUtc()
 		round, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
-			OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(time.Hour), RevealAt: now.Add(2 * time.Hour),
+			OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(500 * time.Millisecond), RevealAt: now.Add(500 * time.Millisecond),
 		})
 		if err != nil {
 			t.Fatalf("CreateRound: %s", err)
@@ -27,7 +27,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		}
 		if _, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
 			OpensAt: now, ClosesAt: now.Add(30 * time.Minute), RevealAt: now.Add(time.Hour),
-		}); !errors.Is(err, ErrConflict) {
+		}); !errors.Is(err, ErrPreviousEpochOpen) {
 			t.Fatalf("overlapping round error = %v", err)
 		}
 
@@ -58,6 +58,18 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second enqueue: %s", err)
 		}
+		patch3, patchErr := ValidateAndCanonicalizePatch(testPatch("third"), settings.PatchPolicy)
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		job3, _, err := store.Enqueue(ctx, settings, round.RoundId, patch3, "miner-a")
+		if err != nil {
+			t.Fatalf("third enqueue: %s", err)
+		}
+		if early, err := store.Claim(ctx, settings, "worker-a"); err != nil || early != nil {
+			t.Fatalf("batch job was claimable before closes_at: %#v, %v", early, err)
+		}
+		time.Sleep(600 * time.Millisecond)
 		claimed1, err := store.Claim(ctx, settings, "worker-a")
 		if err != nil || claimed1 == nil || claimed1.JobId != job1.JobId || claimed1.AttemptCount != 1 {
 			t.Fatalf("first claim = %#v, %v", claimed1, err)
@@ -73,7 +85,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		}
 		raw, normalized := 100.0, 100.0
 		_, err = store.Complete(ctx, settings, "worker-a", claimed1.JobId, EvaluationOutcome{
-			Score:            &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}}},
+			Score:            &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, TakeoverEligible: true, Gates: map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}}},
 			ArtifactManifest: []byte(`{"schema":1,"test":true}`),
 		})
 		if err != nil {
@@ -105,14 +117,6 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 			t.Fatalf("complete failed submission: %s", err)
 		}
 
-		patch3, patchErr := ValidateAndCanonicalizePatch(testPatch("third"), settings.PatchPolicy)
-		if patchErr != nil {
-			t.Fatal(patchErr)
-		}
-		job3, _, err := store.Enqueue(ctx, settings, round.RoundId, patch3, "miner-a")
-		if err != nil {
-			t.Fatalf("third enqueue: %s", err)
-		}
 		claimed3, err := store.Claim(ctx, settings, "worker-a")
 		if err != nil || claimed3 == nil || claimed3.JobId != job3.JobId {
 			t.Fatalf("third claim = %#v, %v", claimed3, err)
@@ -146,11 +150,34 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		if err != nil {
 			t.Fatalf("complete retried submission: %s", err)
 		}
+		finalizedRound, finalized, err := store.FinalizeEligibleRound(ctx, settings)
+		if err != nil || !finalized || finalizedRound == nil ||
+			finalizedRound.WinnerJobId == nil || *finalizedRound.WinnerJobId != job1.JobId {
+			t.Fatalf("round finalization = %#v, %v, %v", finalizedRound, finalized, err)
+		}
+		if _, finalized, err := store.FinalizeEligibleRound(ctx, settings); err != nil || finalized {
+			t.Fatalf("finalized round was published twice: %v, %v", finalized, err)
+		}
+		leaderboards, err := store.Leaderboards(ctx, settings)
+		if err != nil || len(leaderboards.Epochs) != 1 ||
+			len(leaderboards.Epochs[0].Entries) != 1 ||
+			!leaderboards.Epochs[0].Entries[0].Winner {
+			t.Fatalf("leaderboard = %#v, %v", leaderboards, err)
+		}
+		nextRound, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
+			OpensAt: now.Add(time.Hour), ClosesAt: now.Add(2 * time.Hour), RevealAt: now.Add(2 * time.Hour),
+		})
+		if err != nil || nextRound.Epoch != 2 {
+			t.Fatalf("next epoch = %#v, %v", nextRound, err)
+		}
 
 		checkA := passingHostCheck(settings)
-		checkA.RebaselineRoundId = &round.RoundId
+		checkA.RebaselineRoundId = &nextRound.RoundId
 		if err := store.RegisterHost(ctx, settings, checkA); err != nil {
 			t.Fatalf("register host: %s", err)
+		}
+		if err := refreshOperationalMetrics(ctx, settings); err != nil {
+			t.Fatalf("refresh competition metrics: %s", err)
 		}
 		checks, err := store.Readiness(ctx, settings)
 		if err != nil || !allChecks(checks) {

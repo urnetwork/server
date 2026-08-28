@@ -42,6 +42,15 @@ func InfoHandler(w http.ResponseWriter, r *http.Request) {
 	writeCompetitionJson(w, http.StatusOK, result)
 }
 
+func LeaderboardHandler(w http.ResponseWriter, r *http.Request) {
+	result, evalError := DefaultService().Leaderboards(r.Context())
+	if evalError != nil {
+		writeCompetitionJson(w, http.StatusServiceUnavailable, evalError)
+		return
+	}
+	writeCompetitionJson(w, http.StatusOK, result)
+}
+
 func GetRoundWorkloadHandler(w http.ResponseWriter, r *http.Request) {
 	values := router.GetPathValues(r)
 	if len(values) != 1 {

@@ -57,6 +57,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer pollTicker.Stop()
 
 	for {
+		if err := w.advanceSeason(ctx); err != nil {
+			return fmt.Errorf("advance competition season: %w", err)
+		}
 		job, err := w.store.Claim(ctx, w.settings, w.workerId)
 		if err != nil {
 			return fmt.Errorf("claim competition job: %w", err)
@@ -87,8 +90,64 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+func (w *Worker) advanceSeason(ctx context.Context) error {
+	finalizedRound, finalized, err := w.store.FinalizeEligibleRound(ctx, w.settings)
+	if err != nil {
+		return err
+	}
+	if finalized {
+		winner := "none"
+		if finalizedRound.WinnerJobId != nil {
+			winner = finalizedRound.WinnerJobId.String()
+		}
+		glog.Infof(
+			"[competition]epoch %d finalized round=%s winner=%s\n",
+			finalizedRound.Epoch,
+			finalizedRound.RoundId,
+			winner,
+		)
+	}
+	latest, err := w.store.CurrentRound(ctx, w.settings)
+	if err != nil || latest == nil || latest.FinalizedAt == nil ||
+		w.settings.SeasonPolicy.EpochCount <= latest.Epoch {
+		return err
+	}
+	opensAt := server.NowUtc().Add(
+		time.Duration(w.settings.SeasonPolicy.PreparationWindowSeconds) * time.Second,
+	)
+	closesAt := opensAt.Add(
+		time.Duration(w.settings.SeasonPolicy.SubmissionWindowSeconds) * time.Second,
+	)
+	if w.settings.SeasonEndsAt.Before(closesAt) {
+		return errors.New("next automatic epoch would exceed season_ends_at")
+	}
+	next, err := w.store.CreateRound(ctx, w.settings, GenerateRoundArgs{
+		OpensAt: opensAt, ClosesAt: closesAt, RevealAt: closesAt,
+	})
+	if errors.Is(err, ErrConflict) || errors.Is(err, ErrPreviousEpochOpen) || errors.Is(err, ErrSeasonComplete) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	glog.Infof(
+		"[competition]prepared epoch %d round=%s opens_at=%s\n",
+		next.Epoch,
+		next.RoundId,
+		next.OpensAt.Format(time.RFC3339),
+	)
+	return nil
+}
+
 func (w *Worker) evaluateOne(parent context.Context, job *queuedJob, hostCheck HostSelfCheck) error {
+	startedAt := time.Now()
+	metricOutcome := "infrastructure_failed"
+	defer func() {
+		competitionEvaluationSeconds.Observe(time.Since(startedAt).Seconds())
+		competitionEvaluations.WithLabelValues(metricOutcome).Inc()
+	}()
 	if !hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != job.RoundId {
+		metricOutcome = "rebaseline_mismatch"
 		_ = w.handBack(job.JobId, "round_rebaseline_mismatch")
 		return fmt.Errorf("competition evaluator host is not re-baselined for round %s", job.RoundId)
 	}
@@ -118,7 +177,12 @@ func (w *Worker) evaluateOne(parent context.Context, job *queuedJob, hostCheck H
 				return fmt.Errorf("complete competition job %s: %w", job.JobId, err)
 			}
 			if retry {
+				metricOutcome = "infrastructure_retry"
 				glog.Infof("[competition]job %s retained for infrastructure retry\n", job.JobId)
+			} else if result.outcome.Score != nil && result.outcome.Error == nil {
+				metricOutcome = "succeeded"
+			} else if result.outcome.Error != nil && result.outcome.Error.Kind == "submission" {
+				metricOutcome = "submission_failed"
 			}
 			return nil
 		case <-heartbeatTicker.C:

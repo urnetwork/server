@@ -308,6 +308,48 @@
                     "legendFormat": "{{direction}} {{op}}"
                 }
             ]
+        },
+        {
+            "id": 12,
+            "type": "timeseries",
+            "title": "H3 listener health",
+            "description": "Listener availability plus supervised restart and failure rates by transport, port, and lifecycle stage.",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 30},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "min by (transport, port) (urnetwork_connect_h3_listener_up{env=\"$env\",block=~\"$block\",host=~\"$host\"})",
+                    "legendFormat": "up {{transport}} :{{port}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (transport, port) (rate(urnetwork_connect_h3_listener_restarts_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "restarts {{transport}} :{{port}}"
+                },
+                {
+                    "refId": "C",
+                    "expr": "sum by (transport, stage) (rate(urnetwork_connect_h3_listener_failures_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "failures {{transport}} {{stage}}"
+                }
+            ]
+        },
+        {
+            "id": 13,
+            "type": "timeseries",
+            "title": "Proxy Protocol UDP drops",
+            "description": "Packets rejected at the Proxy Protocol socket before QUIC, grouped by bounded reason.",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 30},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {"unit": "pps", "min": 0}, "overrides": []},
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (reason) (rate(urnetwork_connect_pp_dropped_packets_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+                    "legendFormat": "{{reason}}"
+                }
+            ]
         }
     ]
 }

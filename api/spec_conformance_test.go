@@ -632,6 +632,7 @@ func competitionRegistry() []specEndpoint {
 		{"GET", "/competition/healthz", nil, rt(competition.HealthResult{})},
 		{"GET", "/competition/readyz", nil, rt(competition.ReadinessResult{})},
 		{"GET", "/competition/info", nil, rt(competition.InfoResult{})},
+		{"GET", "/competition/leaderboard", nil, rt(competition.SeasonLeaderboardResult{})},
 		{"POST", "/competition/generate-round", rt(competition.GenerateRoundArgs{}), rt(competition.RoundResult{})},
 		{"GET", "/competition/round/{roundId}/providers.yml", nil, nil},
 		{"POST", "/competition/score", rt(competition.ScoreArgs{}), rt(competition.ScoreAcceptedResult{})},
@@ -685,6 +686,7 @@ func TestCompetitionSpecSecurity(t *testing.T) {
 	public := map[string]bool{
 		"GET /competition/healthz":                       true,
 		"GET /competition/info":                          true,
+		"GET /competition/leaderboard":                   true,
 		"GET /competition/round/{roundId}/providers.yml": true,
 	}
 	for path, methodsAny := range spec.paths {

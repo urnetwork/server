@@ -508,10 +508,19 @@ func registeredApplicationMetrics(t *testing.T) []string {
 
 	err := filepath.WalkDir("..", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if strings.HasPrefix(
+				filepath.ToSlash(path),
+				"../connect/sim-latency/eval-",
+			) {
+				return filepath.SkipDir
+			}
 			return walkErr
 		}
 		if entry.IsDir() {
-			if entry.Name() == ".git" || entry.Name() == "vendor" {
+			if entry.Name() == ".git" || entry.Name() == "vendor" || strings.HasPrefix(
+				filepath.ToSlash(path),
+				"../connect/sim-latency/eval-",
+			) {
 				return filepath.SkipDir
 			}
 			return nil

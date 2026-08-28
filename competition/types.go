@@ -63,6 +63,12 @@ type EvaluationPolicy struct {
 	ScoreTimeoutSeconds     int     `json:"score_timeout_seconds" yaml:"score_timeout_seconds"`
 }
 
+type SeasonPolicy struct {
+	EpochCount               int `json:"epoch_count" yaml:"epoch_count"`
+	SubmissionWindowSeconds  int `json:"submission_window_seconds" yaml:"submission_window_seconds"`
+	PreparationWindowSeconds int `json:"preparation_window_seconds" yaml:"preparation_window_seconds"`
+}
+
 type InfoResult struct {
 	CompetitionId        string           `json:"competition_id"`
 	Enabled              bool             `json:"enabled"`
@@ -72,6 +78,7 @@ type InfoResult struct {
 	EvaluatorImageDigest string           `json:"evaluator_image_digest"`
 	PatchPolicy          PatchPolicy      `json:"patch_policy"`
 	EvaluationPolicy     EvaluationPolicy `json:"evaluation_policy"`
+	SeasonPolicy         SeasonPolicy     `json:"season_policy"`
 	ActiveRound          *RoundResult     `json:"active_round,omitempty"`
 }
 
@@ -82,17 +89,45 @@ type GenerateRoundArgs struct {
 }
 
 type RoundResult struct {
-	RoundId            server.Id `json:"round_id"`
-	Status             string    `json:"status"`
-	WorkloadCommitment string    `json:"workload_commitment"`
-	ProvidersSha256    string    `json:"providers_sha256"`
-	ScoreSchema        int       `json:"score_schema"`
-	OpensAt            time.Time `json:"opens_at"`
-	ClosesAt           time.Time `json:"closes_at"`
-	RevealAt           time.Time `json:"reveal_at"`
-	CreatedAt          time.Time `json:"created_at"`
-	RevealedSeed       *string   `json:"revealed_seed,omitempty"`
-	ProvidersUrl       string    `json:"providers_url,omitempty"`
+	RoundId            server.Id  `json:"round_id"`
+	Epoch              int        `json:"epoch"`
+	Status             string     `json:"status"`
+	WorkloadCommitment string     `json:"workload_commitment"`
+	ProvidersSha256    string     `json:"providers_sha256"`
+	ScoreSchema        int        `json:"score_schema"`
+	OpensAt            time.Time  `json:"opens_at"`
+	ClosesAt           time.Time  `json:"closes_at"`
+	RevealAt           time.Time  `json:"reveal_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	FinalizedAt        *time.Time `json:"finalized_at,omitempty"`
+	WinnerJobId        *server.Id `json:"winner_job_id,omitempty"`
+	RevealedSeed       *string    `json:"revealed_seed,omitempty"`
+	ProvidersUrl       string     `json:"providers_url,omitempty"`
+}
+
+type SeasonLeaderboardResult struct {
+	CompetitionId string              `json:"competition_id"`
+	Epochs        []LeaderboardResult `json:"epochs"`
+}
+
+type LeaderboardResult struct {
+	CompetitionId string             `json:"competition_id"`
+	RoundId       server.Id          `json:"round_id"`
+	Epoch         int                `json:"epoch"`
+	Status        string             `json:"status"`
+	FinalizedAt   time.Time          `json:"finalized_at"`
+	WinnerJobId   *server.Id         `json:"winner_job_id,omitempty"`
+	Entries       []LeaderboardEntry `json:"entries"`
+}
+
+type LeaderboardEntry struct {
+	Rank           int         `json:"rank"`
+	JobId          server.Id   `json:"job_id"`
+	PatchSha256    string      `json:"patch_sha256"`
+	SubmittedAt    time.Time   `json:"submitted_at"`
+	Winner         bool        `json:"winner"`
+	Score          ScoreResult `json:"score"`
+	SubmitterCount int         `json:"submitter_count"`
 }
 
 type ScoreArgs struct {

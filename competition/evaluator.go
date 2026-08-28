@@ -117,6 +117,7 @@ type artifactManifest struct {
 	ResultSha256           string               `json:"result_sha256"`
 	Security               evaluationSecurity   `json:"security"`
 	Artifacts              []evaluationArtifact `json:"artifacts"`
+	Retention              *artifactRetention   `json:"retention,omitempty"`
 }
 
 func (CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) (HostSelfCheck, error) {
@@ -168,7 +169,7 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 			return infrastructureFailure("local_configuration_mismatch", "frozen local configuration failed authentication")
 		}
 	}
-	providers, err := readRoundWorkload(settings, &job.Round)
+	providers, err := readRoundWorkload(ctx, settings, &job.Round)
 	if err != nil {
 		return infrastructureFailure("round_workload_unavailable", "committed round workload failed authentication")
 	}
@@ -259,16 +260,28 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 		ResultSha256: hex.EncodeToString(resultHash[:]), Security: result.Security,
 		Artifacts: artifacts,
 	}
-	manifestBytes, err := json.Marshal(manifest)
-	if err != nil {
+	if _, err := json.Marshal(manifest); err != nil {
 		return infrastructureFailure("artifact_manifest_failed", "artifact manifest could not be encoded")
 	}
 	if err := sealArtifactDirectory(attemptDir); err != nil {
 		return infrastructureFailure("artifact_seal_failed", "artifact directory could not be sealed read-only")
 	}
+	if settings.artifactArchive == nil {
+		return infrastructureFailure("artifact_archive_unavailable", "durable artifact retention is unavailable")
+	}
+	archivedManifest, err := settings.artifactArchive.ArchiveAttempt(
+		ctx,
+		settings,
+		job,
+		attemptDir,
+		manifest,
+	)
+	if err != nil {
+		return infrastructureFailure("artifact_archive_failed", "durable artifact retention failed")
+	}
 	return EvaluationOutcome{
 		Score: result.Score, Error: result.EvalError,
-		ArtifactManifest: manifestBytes,
+		ArtifactManifest: archivedManifest,
 		Infrastructure:   result.EvalError != nil && result.EvalError.Kind == "infrastructure",
 	}
 }

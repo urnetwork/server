@@ -35,6 +35,7 @@ type Settings struct {
 	EvaluatorImageDigest       string           `yaml:"evaluator_image_digest"`
 	PatchPolicy                PatchPolicy      `yaml:"patch_policy"`
 	EvaluationPolicy           EvaluationPolicy `yaml:"evaluation_policy"`
+	SeasonPolicy               SeasonPolicy     `yaml:"season_policy"`
 	ArtifactRoot               string           `yaml:"artifact_root"`
 	ConfigLocalDirectory       string           `yaml:"config_local_directory"`
 	VaultLocalDirectory        string           `yaml:"vault_local_directory"`
@@ -52,6 +53,7 @@ type Settings struct {
 	Tokens                     []Token          `yaml:"-"`
 	SeedKey                    []byte           `yaml:"-"`
 	workloadGenerator          WorkloadGenerator
+	artifactArchive            artifactArchive
 }
 
 type settingsFile struct {
@@ -61,6 +63,7 @@ type settingsFile struct {
 	EvaluatorImageDigest       string           `yaml:"evaluator_image_digest"`
 	PatchPolicy                PatchPolicy      `yaml:"patch_policy"`
 	EvaluationPolicy           EvaluationPolicy `yaml:"evaluation_policy"`
+	SeasonPolicy               SeasonPolicy     `yaml:"season_policy"`
 	ArtifactRoot               string           `yaml:"artifact_root"`
 	ConfigLocalDirectory       string           `yaml:"config_local_directory"`
 	VaultLocalDirectory        string           `yaml:"vault_local_directory"`
@@ -116,6 +119,7 @@ func LoadSettings() (*Settings, error) {
 		EvaluatorImageDigest:       strings.TrimSpace(public.EvaluatorImageDigest),
 		PatchPolicy:                public.PatchPolicy,
 		EvaluationPolicy:           public.EvaluationPolicy,
+		SeasonPolicy:               public.SeasonPolicy,
 		ArtifactRoot:               filepath.Clean(public.ArtifactRoot),
 		ConfigLocalDirectory:       filepath.Clean(public.ConfigLocalDirectory),
 		VaultLocalDirectory:        filepath.Clean(public.VaultLocalDirectory),
@@ -132,6 +136,10 @@ func LoadSettings() (*Settings, error) {
 		SelfCheckCommandSha256:     strings.TrimSpace(public.SelfCheckCommandSha256),
 		Tokens:                     secret.Tokens,
 		SeedKey:                    seedKey,
+	}
+	s.artifactArchive, err = loadArtifactArchive()
+	if err != nil {
+		return nil, err
 	}
 	if err := s.Validate(); err != nil {
 		return nil, err
@@ -181,6 +189,11 @@ func (s *Settings) Validate() error {
 		return err
 	}
 	p := s.EvaluationPolicy
+	season := s.SeasonPolicy
+	if season.EpochCount != 6 || season.SubmissionWindowSeconds != 7*24*60*60 ||
+		season.PreparationWindowSeconds < 0 || 7*24*60*60 < season.PreparationWindowSeconds {
+		return errors.New("season_policy must freeze six seven-day submission epochs and a preparation window of at most seven days")
+	}
 	if p.HardwareId == "" ||
 		!sha256Pattern.MatchString(p.HostQualificationSha256) ||
 		!sha256Pattern.MatchString(p.ConfigLocalSha256) ||
@@ -349,6 +362,7 @@ func (s *Settings) PublicInfo() InfoResult {
 		EvaluatorImageDigest: s.EvaluatorImageDigest,
 		PatchPolicy:          s.PatchPolicy,
 		EvaluationPolicy:     s.EvaluationPolicy,
+		SeasonPolicy:         s.SeasonPolicy,
 	}
 }
 

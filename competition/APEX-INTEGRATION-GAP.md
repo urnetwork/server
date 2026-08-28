@@ -1,11 +1,14 @@
 # Apex integration decision record
 
-Status date: 2026-08-16
+Status date: 2026-08-28
 
 The UR competition control plane and evaluator protocol are implemented for a
 dedicated external scoring service. They cannot truthfully be described as a
 drop-in deployment of the current public Apex runner contract without a
 Macrocosmos integration decision.
+
+The concrete asynchronous adapter mapping and external acceptance fields are
+prepared in [`APEX-HANDOFF.md`](APEX-HANDOFF.md).
 
 ## Current public Apex contract
 
@@ -23,6 +26,12 @@ requires a qualified 12-CPU/128-GB host class, approximately 13 GiB for the
 simulator at the present frontier point, dedicated PostgreSQL and Redis in the
 same resource boundary, and a paired multi-replicate baseline/candidate job.
 Those requirements do not fit the standard public sandbox contract.
+
+The season contract also batches work: an epoch accepts submissions for seven
+days, grading starts only after close, and one calibrated job may take up to
+49,392 seconds. The next of six epochs begins only after the prior FIFO drains
+and its winner is finalized. A synchronous solo-referee result cannot preserve
+that timing or cache identity without an accepted asynchronous adapter.
 
 The standard solo leaderboard also applies a one-percent takeover rule. This
 competition deliberately freezes its takeover margin only after same-seed,

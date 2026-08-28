@@ -34,6 +34,30 @@ func (fakeWorkloadGenerator) Generate(_ context.Context, settings *Settings, rou
 	}, nil
 }
 
+type fakeArtifactArchive struct{}
+
+func (fakeArtifactArchive) Check(context.Context) error {
+	return nil
+}
+
+func (fakeArtifactArchive) ArchiveRound(context.Context, *Settings, *roundRecord, workloadArtifact) error {
+	return nil
+}
+
+func (fakeArtifactArchive) ArchiveAttempt(
+	context.Context,
+	*Settings,
+	*queuedJob,
+	string,
+	artifactManifest,
+) (json.RawMessage, error) {
+	return json.RawMessage(`{"schema":1}`), nil
+}
+
+func (fakeArtifactArchive) ReadRoundWorkload(context.Context, *Settings, *roundRecord) ([]byte, error) {
+	return nil, errors.New("unused")
+}
+
 func validSettings() *Settings {
 	submitHash := sha256.Sum256([]byte("submit-secret"))
 	operatorHash := sha256.Sum256([]byte("operator-secret"))
@@ -62,6 +86,10 @@ func validSettings() *Settings {
 			ImpairmentEnabled: true,
 			TakeoverMargin:    .12, QueueLimit: 16, ScoreTimeoutSeconds: 28800,
 		},
+		SeasonPolicy: SeasonPolicy{
+			EpochCount: 6, SubmissionWindowSeconds: 7 * 24 * 60 * 60,
+			PreparationWindowSeconds: 16 * 60 * 60,
+		},
 		ArtifactRoot:         "/var/lib/urnetwork/competition",
 		ConfigLocalDirectory: "/srv/warp/config/local",
 		VaultLocalDirectory:  "/srv/warp/vault/local",
@@ -80,6 +108,7 @@ func validSettings() *Settings {
 		},
 		SeedKey:           []byte("0123456789abcdef0123456789abcdef"),
 		workloadGenerator: fakeWorkloadGenerator{},
+		artifactArchive:   fakeArtifactArchive{},
 	}
 }
 
@@ -349,19 +378,26 @@ func jsonUnmarshal(value []byte, out any) error {
 }
 
 type fakeStore struct {
-	mu         sync.Mutex
-	claimJobs  []*queuedJob
-	claims     int
-	heartbeats int
-	completed  []EvaluationOutcome
-	handbacks  int
-	readiness  map[string]bool
-	readyErr   error
-	round      *roundRecord
+	mu              sync.Mutex
+	claimJobs       []*queuedJob
+	claims          int
+	heartbeats      int
+	completed       []EvaluationOutcome
+	handbacks       int
+	readiness       map[string]bool
+	readyErr        error
+	round           *roundRecord
+	finalizeRound   *roundRecord
+	finalized       bool
+	finalizeErr     error
+	createRound     *roundRecord
+	createErr       error
+	createRoundArgs []GenerateRoundArgs
 }
 
-func (f *fakeStore) CreateRound(context.Context, *Settings, GenerateRoundArgs) (*roundRecord, error) {
-	return nil, errors.New("unused")
+func (f *fakeStore) CreateRound(_ context.Context, _ *Settings, args GenerateRoundArgs) (*roundRecord, error) {
+	f.createRoundArgs = append(f.createRoundArgs, args)
+	return f.createRound, f.createErr
 }
 func (f *fakeStore) CurrentRound(context.Context, *Settings) (*roundRecord, error) {
 	return f.round, nil
@@ -371,6 +407,12 @@ func (f *fakeStore) GetRound(_ context.Context, _ *Settings, roundId server.Id) 
 		return nil, ErrNotFound
 	}
 	return f.round, nil
+}
+func (f *fakeStore) FinalizeEligibleRound(context.Context, *Settings) (*roundRecord, bool, error) {
+	return f.finalizeRound, f.finalized, f.finalizeErr
+}
+func (f *fakeStore) Leaderboards(context.Context, *Settings) (*SeasonLeaderboardResult, error) {
+	return &SeasonLeaderboardResult{CompetitionId: "test", Epochs: []LeaderboardResult{}}, nil
 }
 func (f *fakeStore) Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string) (*queuedJob, bool, error) {
 	return nil, false, errors.New("unused")
@@ -442,6 +484,58 @@ func passingHostCheck(settings *Settings) HostSelfCheck {
 		NoProductionSecrets: true, CleanupVerified: true, ResourceLimitsVerified: true,
 		ManagementCpuReserved: true, ManagementMemoryReserved: true, ResourceBombCleanupVerified: true,
 		RebaselinePassed: true, RebaselineRoundId: &rebaselineRoundId, Checks: map[string]bool{"all": true},
+	}
+}
+
+func TestWorkerAdvanceSeasonCreatesNextSevenDayEpoch(t *testing.T) {
+	settings := validSettings()
+	finalizedAt := server.NowUtc()
+	current := &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 1, Status: "finalized", FinalizedAt: &finalizedAt,
+	}}
+	next := &roundRecord{RoundResult: RoundResult{RoundId: server.NewId(), Epoch: 2}}
+	store := &fakeStore{
+		round: current, finalizeRound: current, finalized: true, createRound: next,
+	}
+	worker, err := NewWorker(settings, store, &fakeEvaluator{}, "box-a-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := server.NowUtc()
+	if err := worker.advanceSeason(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	endedAt := server.NowUtc()
+	if len(store.createRoundArgs) != 1 {
+		t.Fatalf("created rounds = %d, want 1", len(store.createRoundArgs))
+	}
+	args := store.createRoundArgs[0]
+	preparation := time.Duration(settings.SeasonPolicy.PreparationWindowSeconds) * time.Second
+	window := time.Duration(settings.SeasonPolicy.SubmissionWindowSeconds) * time.Second
+	if args.OpensAt.Before(startedAt.Add(preparation)) || endedAt.Add(preparation).Before(args.OpensAt) {
+		t.Fatalf("next opens_at = %s, call window = [%s, %s]", args.OpensAt, startedAt, endedAt)
+	}
+	if args.ClosesAt.Sub(args.OpensAt) != window || !args.RevealAt.Equal(args.ClosesAt) {
+		t.Fatalf("next epoch times = open %s, close %s, reveal %s", args.OpensAt, args.ClosesAt, args.RevealAt)
+	}
+}
+
+func TestWorkerAdvanceSeasonStopsAfterSixEpochs(t *testing.T) {
+	settings := validSettings()
+	finalizedAt := server.NowUtc()
+	current := &roundRecord{RoundResult: RoundResult{
+		RoundId: server.NewId(), Epoch: 6, Status: "finalized", FinalizedAt: &finalizedAt,
+	}}
+	store := &fakeStore{round: current, finalizeRound: current, finalized: true}
+	worker, err := NewWorker(settings, store, &fakeEvaluator{}, "box-a-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.advanceSeason(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.createRoundArgs) != 0 {
+		t.Fatalf("created rounds after epoch six = %d", len(store.createRoundArgs))
 	}
 }
 

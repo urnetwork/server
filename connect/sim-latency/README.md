@@ -14,6 +14,19 @@ websockets, get geolocated, latency/speed-tested, reliability-scored, and
 selected by the real `FindProviders2`. Improving the algorithms improves the
 measured numbers.
 
+Build and test the host tool from this directory. The package gate is Go-only
+and uses the same local service environment and race-detector profile as the
+other server packages:
+
+```bash
+make
+./tests.sh
+```
+
+`run-main.sh` runs the local checkout against port-forwarded main PostgreSQL and
+Redis endpoints, following the same environment contract as
+`server/bringyourctl/run-main.sh`.
+
 ## What you optimize
 
 - **`model.FindProviders2`** and the score pipeline it reads
@@ -69,9 +82,10 @@ workload — whether an observed difference is *real* is decided statistically
 
 The historical [eval-48](#the-eval-48-evaluation-environment) environment is a
 local/directional workstation profile, not the Apex production environment.
-The Apex host/runner contract is in [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md): two
-identical 12-core, 128 GB Ubuntu 24.04 machines, with scale and replicate count
-frozen only after production-box calibration. The full-scale configuration —
+The Apex host/runner contract is in [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md): one
+authoritative 12-core, 128 GB Ubuntu 24.04 machine, with 10 evaluation cores
+and 2 management cores. A second image-identical host is optional failover, not
+a launch gate. The full-scale configuration —
 **~100,000 providers, ~1,000 clients/min** — remains available for stress
 runs and targets a big-memory Linux box:
 

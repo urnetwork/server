@@ -20,6 +20,10 @@ func CompetitionInfo(w http.ResponseWriter, r *http.Request) {
 	competition.InfoHandler(w, r)
 }
 
+func CompetitionLeaderboard(w http.ResponseWriter, r *http.Request) {
+	competition.LeaderboardHandler(w, r)
+}
+
 func CompetitionGetRoundWorkload(w http.ResponseWriter, r *http.Request) {
 	competition.GetRoundWorkloadHandler(w, r)
 }

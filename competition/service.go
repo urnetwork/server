@@ -66,7 +66,7 @@ func (s *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionError
 		result.Checks["configuration"] = false
 		return result, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
-	checks, err := s.store.Readiness(ctx, settings)
+	checks, err := s.readinessChecks(ctx, settings)
 	if err != nil {
 		result.Checks["database"] = false
 		return result, infrastructureError("readiness_failed", "competition dependencies did not pass readiness")
@@ -77,6 +77,18 @@ func (s *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionError
 		return result, infrastructureError("not_ready", "competition evaluator is not ready")
 	}
 	return result, nil
+}
+
+func (s *Service) readinessChecks(ctx context.Context, settings *Settings) (map[string]bool, error) {
+	checks, err := s.store.Readiness(ctx, settings)
+	if err != nil {
+		return checks, err
+	}
+	if checks == nil {
+		checks = map[string]bool{}
+	}
+	checks["artifact_archive"] = settings.artifactArchive != nil && settings.artifactArchive.Check(ctx) == nil
+	return checks, nil
 }
 
 func allChecks(checks map[string]bool) bool {
@@ -121,7 +133,7 @@ func roundGenerationChecksPass(checks map[string]bool) bool {
 }
 
 func (s *Service) requireSecureEvaluator(ctx context.Context, settings *Settings) *CompetitionError {
-	checks, err := s.store.Readiness(ctx, settings)
+	checks, err := s.readinessChecks(ctx, settings)
 	if err != nil || !secureEvaluatorChecksPass(checks) {
 		return infrastructureError("not_ready", "competition evaluator containment is not ready")
 	}
@@ -129,7 +141,7 @@ func (s *Service) requireSecureEvaluator(ctx context.Context, settings *Settings
 }
 
 func (s *Service) requireRoundGenerationInfrastructure(ctx context.Context, settings *Settings) *CompetitionError {
-	checks, err := s.store.Readiness(ctx, settings)
+	checks, err := s.readinessChecks(ctx, settings)
 	if err != nil || !roundGenerationChecksPass(checks) {
 		return infrastructureError("not_ready", "competition evaluator infrastructure is not ready for round generation")
 	}
@@ -163,8 +175,9 @@ func (s *Service) GenerateRound(ctx context.Context, args GenerateRoundArgs) (*R
 	}
 	args.OpensAt, args.ClosesAt, args.RevealAt = args.OpensAt.UTC(), args.ClosesAt.UTC(), args.RevealAt.UTC()
 	if args.OpensAt.IsZero() || args.ClosesAt.IsZero() || args.RevealAt.IsZero() ||
-		!args.OpensAt.Before(args.ClosesAt) || args.RevealAt.Before(args.ClosesAt) {
-		return nil, submissionError("invalid_round_times", "require opens_at < closes_at <= reveal_at")
+		!args.OpensAt.Before(args.ClosesAt) || !args.RevealAt.Equal(args.ClosesAt) ||
+		args.ClosesAt.Sub(args.OpensAt) != time.Duration(settings.SeasonPolicy.SubmissionWindowSeconds)*time.Second {
+		return nil, submissionError("invalid_round_times", "round must use the frozen seven-day window with reveal_at equal to closes_at")
 	}
 	if args.OpensAt.Before(server.NowUtc().Add(-time.Minute)) {
 		return nil, submissionError("invalid_round_times", "opens_at may not be in the past")
@@ -179,19 +192,40 @@ func (s *Service) GenerateRound(ctx context.Context, args GenerateRoundArgs) (*R
 	if errors.Is(err, ErrConflict) {
 		return nil, &CompetitionError{Kind: "submission", Code: "round_overlap", Message: "round overlaps an existing round", Retriable: false}
 	}
+	if errors.Is(err, ErrPreviousEpochOpen) {
+		return nil, &CompetitionError{Kind: "submission", Code: "previous_epoch_open", Message: "the previous epoch has not finished grading", Retriable: false}
+	}
+	if errors.Is(err, ErrSeasonComplete) {
+		return nil, &CompetitionError{Kind: "submission", Code: "season_complete", Message: "all six competition epochs already exist", Retriable: false}
+	}
 	if err != nil {
 		return nil, infrastructureError("round_create_failed", "round could not be committed")
 	}
 	return &round.RoundResult, nil
 }
 
+func (s *Service) Leaderboards(ctx context.Context) (*SeasonLeaderboardResult, *CompetitionError) {
+	settings, err := s.Settings()
+	if err != nil {
+		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
+	}
+	result, err := s.store.Leaderboards(ctx, settings)
+	if err != nil {
+		return nil, infrastructureError("storage_unavailable", "competition leaderboard storage is unavailable")
+	}
+	return result, nil
+}
+
 func (s *Service) Submit(ctx context.Context, args ScoreArgs, principal *Principal) (*ScoreAcceptedResult, int, *CompetitionError) {
+	metricOutcome := "infrastructure_error"
+	defer func() { competitionSubmissions.WithLabelValues(metricOutcome).Inc() }()
 	settings, err := s.Settings()
 	if err != nil {
 		return nil, 503, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
 	patch, patchErr := ValidateAndCanonicalizePatch(args.Patch, settings.PatchPolicy)
 	if patchErr != nil {
+		metricOutcome = "rejected"
 		status := 422
 		if patchErr.Code == "patch_too_large" {
 			status = 413
@@ -204,10 +238,13 @@ func (s *Service) Submit(ctx context.Context, args ScoreArgs, principal *Princip
 	job, hit, err := s.store.Enqueue(ctx, settings, args.RoundId, patch, principal.Id)
 	switch {
 	case errors.Is(err, ErrNotFound):
+		metricOutcome = "rejected"
 		return nil, 404, submissionError("round_not_found", "round does not exist")
 	case errors.Is(err, ErrRoundClosed):
+		metricOutcome = "rejected"
 		return nil, 409, submissionError("round_not_open", "round is not open for submissions")
 	case errors.Is(err, ErrQueueFull):
+		metricOutcome = "queue_full"
 		return nil, 429, &CompetitionError{Kind: "infrastructure", Code: "queue_full", Message: "evaluation queue admission limit reached", Retriable: true}
 	case err != nil:
 		return nil, 503, infrastructureError("enqueue_failed", "submission could not be durably enqueued")
@@ -215,6 +252,11 @@ func (s *Service) Submit(ctx context.Context, args ScoreArgs, principal *Princip
 	result := &ScoreAcceptedResult{
 		JobId: job.JobId, RoundId: job.RoundId, PatchSha256: job.PatchSha256,
 		State: job.State, CacheHit: hit, StatusUrl: "/competition/score/" + job.JobId.String(),
+	}
+	if hit {
+		metricOutcome = "cache_hit"
+	} else {
+		metricOutcome = "accepted"
 	}
 	return result, 202, nil
 }
@@ -254,7 +296,7 @@ func (s *Service) GetRoundWorkload(ctx context.Context, roundId server.Id) ([]by
 	if round.Canceled || server.NowUtc().Before(round.RevealAt) {
 		return nil, "", 409, submissionError("round_not_revealed", "round workload is unavailable until reveal_at")
 	}
-	providers, err := readRoundWorkload(settings, round)
+	providers, err := readRoundWorkload(ctx, settings, round)
 	if err != nil {
 		return nil, "", 503, infrastructureError("round_workload_unavailable", "committed round workload failed authentication")
 	}

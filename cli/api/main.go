@@ -17,6 +17,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
+	"github.com/urnetwork/server/competition"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/stats"
@@ -64,6 +65,7 @@ Options:
 	// exit, after the final flush (APIDRAIN1.md §2.5)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	competition.StartMetrics(ctx)
 
 	// the serve ctx ends at SIGTERM, which starts the http drain sequence:
 	// keepalive retire grace, then graceful shutdown bounded by

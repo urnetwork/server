@@ -53,6 +53,9 @@ Options:
 	quit := server.NewEventWithContext(context.Background())
 	closeSignals := quit.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
 	defer closeSignals()
+	competition.StartMetrics(quit.Ctx)
+	flushStats := server.StartStatsPusher(quit.Ctx)
+	defer flushStats()
 	if err := worker.Run(quit.Ctx); err != nil && !errors.Is(err, context.Canceled) {
 		panic(fmt.Errorf("competition worker: %w", err))
 	}
