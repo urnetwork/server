@@ -78,6 +78,13 @@ READINESS = ROOT / "production-readiness-final.json"
 REMEDIATION_AMENDMENT = (
     ROOT / "production-staging-attempt-06-remediation-amendment.json"
 )
+EVIDENCE_BINDING_AMENDMENT = (
+    ROOT / "production-staging-attempt-06-evidence-binding-amendment.json"
+)
+STAGING_DRIVER = ROOT / "run-production-staging.sh"
+EVIDENCE_BINDING_TEST = (
+    ROOT / "test-production-readiness-remediation-binding.py"
+)
 
 REPORT = SERVER / "finalize-report.html"
 PREVIEW = SERVER / "final-preview.html"
@@ -126,6 +133,15 @@ HOST_QUALIFICATION_SHA256 = (
 )
 REMEDIATION_AMENDMENT_SHA256 = (
     "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d"
+)
+EVIDENCE_BINDING_AMENDMENT_SHA256 = (
+    "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752"
+)
+STAGING_DRIVER_SHA256 = (
+    "e3a68400a430522059d54dee6853f308a9f2ea34f192ec51ee6908f1e56b0f3b"
+)
+EVIDENCE_BINDING_TEST_SHA256 = (
+    "e26bcb770865cac207bf4d74ae4848c434417c78eb44790a2b42ce4b3b841cb2"
 )
 PLACEABILITY_POLICY_SHA256 = (
     "359fe89572c81d6602cbf0ece03e5128c5ccbf38bf2d20f22fcdbadd30f2f638"
@@ -321,9 +337,15 @@ def validate_terminal_inputs() -> dict[str, Any]:
         (STRICT_SAME_ANALYSIS, STRICT_SAME_ANALYSIS_SHA256),
         (PRE_REPAIR_PROGRESS, PRE_REPAIR_PROGRESS_SHA256),
         (REMEDIATION_AMENDMENT, REMEDIATION_AMENDMENT_SHA256),
+        (EVIDENCE_BINDING_AMENDMENT, EVIDENCE_BINDING_AMENDMENT_SHA256),
     ):
         exact_mode(path, 0o400)
         require(sha256(path) == expected_hash, f"authenticated input changed: {path}")
+    require(
+        sha256(STAGING_DRIVER) == STAGING_DRIVER_SHA256
+        and sha256(EVIDENCE_BINDING_TEST) == EVIDENCE_BINDING_TEST_SHA256,
+        "attempt-06 evidence-binding implementation changed",
+    )
     source_lock = load_object(SOURCE_LOCK)
     season_base = load_object(SEASON_BASE_EQUIVALENCE)
     frontier = load_object(FRONTIER)
@@ -348,6 +370,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
     reference_v5_qualification = load_object(REFERENCE_V5_QUALIFICATION)
     staging_reference_v5_amendment = load_object(STAGING_REFERENCE_V5_AMENDMENT)
     remediation = load_object(REMEDIATION_AMENDMENT)
+    evidence_binding = load_object(EVIDENCE_BINDING_AMENDMENT)
     readiness = load_object(READINESS)
 
     require(
@@ -384,6 +407,34 @@ def validate_terminal_inputs() -> dict[str, Any]:
         )
         is True,
         "attempt-06 remediation lineage",
+    )
+    correction = evidence_binding.get("correction")
+    boundary = evidence_binding.get("live_script_boundary")
+    retained = evidence_binding.get("retained_invariants")
+    require(
+        evidence_binding.get("schema") == 1
+        and evidence_binding.get("kind")
+        == "sim-latency-production-staging-attempt-06-evidence-binding-amendment"
+        and evidence_binding.get("authorized") is True
+        and evidence_binding.get("defect", {}).get("measurement_effect") is False
+        and isinstance(correction, dict)
+        and correction.get("generated_records_changed") == 5
+        and correction.get("production_staging_script_sha256_after")
+        == STAGING_DRIVER_SHA256
+        and correction.get("deterministic_test_sha256")
+        == EVIDENCE_BINDING_TEST_SHA256
+        and correction.get("deterministic_test_passed") is True
+        and isinstance(boundary, dict)
+        and boundary.get("script_inode_before")
+        == boundary.get("script_inode_after")
+        and boundary.get("fd_offset_before_patch", 0)
+        < boundary.get("first_changed_byte_offset", 0)
+        and boundary.get("changed_bytes_were_unread") is True
+        and boundary.get("active_evaluator_process_unchanged") is True
+        and isinstance(retained, dict)
+        and len(retained) == 12
+        and all(value is True for value in retained.values()),
+        "attempt-06 evidence-binding lineage",
     )
     authoring = season_base.get("public_authoring_base")
     evaluator = season_base.get("authoritative_evaluator")
@@ -1147,6 +1198,10 @@ def validate_terminal_inputs() -> dict[str, Any]:
             "production_staging_attempt_06_remediation_amendment_sha256"
         )
         == REMEDIATION_AMENDMENT_SHA256
+        and readiness.get(
+            "production_staging_attempt_06_evidence_binding_amendment_sha256"
+        )
+        == EVIDENCE_BINDING_AMENDMENT_SHA256
         and readiness.get("independent_attestation_sha256")
         == sha256(INDEPENDENT_ATTESTATION)
         and readiness.get("independent_attestation_repair_sha256")
@@ -1568,6 +1623,7 @@ def render_html(data: dict[str, Any]) -> str:
       {metric('evaluator source', compact_sha(BASE_SHA))}
       {metric('host qualification', compact_sha(HOST_QUALIFICATION_SHA256))}
     </div>
+    <div class="disclosure">A terminal evidence-metadata defect was corrected without changing the evaluator, workload, orchestration, seed, replicate policy, or measurements. Amendment <code>{EVIDENCE_BINDING_AMENDMENT_SHA256}</code> records the live shell read boundary and deterministic regression test.</div>
   </section>
 
   <footer>Generated {generated_at} from content-addressed local evidence. Public patch tag <code>{PUBLIC_AUTHORING_TAG}</code> at <code>{PUBLIC_AUTHORING_COMMIT}</code>; authoritative evaluator commit <code>{BASE_SHA}</code>; simulator <code>{SIMULATOR_SHA256}</code>.</footer>
@@ -1752,6 +1808,7 @@ Score schema: `1`
 Source lock: `{SOURCE_LOCK_SHA256}`
 Historical calibration source lock: `{HISTORICAL_SOURCE_LOCK_SHA256}`
 Attempt-06 remediation amendment: `{REMEDIATION_AMENDMENT_SHA256}`
+Attempt-06 evidence-binding amendment: `{EVIDENCE_BINDING_AMENDMENT_SHA256}`
 Season-base equivalence: `{SEASON_BASE_EQUIVALENCE_SHA256}`
 
 This is the terminal local calibration for the sim-latency competition. It
@@ -1774,6 +1831,10 @@ on-call ownership are separate operational decisions.
   measured under historical source lock `{HISTORICAL_SOURCE_LOCK_SHA256}`. The
   authorized correctness remediation `{REMEDIATION_AMENDMENT_SHA256}` binds it
   to this evaluator through a clean same-round R=9 baseline/no-op bridge.
+- The evidence-only staging correction
+  `{EVIDENCE_BINDING_AMENDMENT_SHA256}` repaired terminal readiness metadata
+  after the running shell had read none of the changed bytes; evaluator,
+  orchestration, workload, and all completed measurements remained unchanged.
 - Host: one authoritative 12-physical-core, 128 GiB machine; SMT and turbo off;
   performance governor; fixed affinity and IRQ placement.
 - Evaluation boundary: physical CPUs `0,2,4,6,8,10,12,14,16,18`, 72 GiB runner
@@ -2004,6 +2065,9 @@ def render_outputs(data: dict[str, Any]) -> None:
         ),
         "production_staging_attempt_06_remediation_amendment_sha256": (
             REMEDIATION_AMENDMENT_SHA256
+        ),
+        "production_staging_attempt_06_evidence_binding_amendment_sha256": (
+            EVIDENCE_BINDING_AMENDMENT_SHA256
         ),
         "season_base_equivalence_sha256": (
             SEASON_BASE_EQUIVALENCE_SHA256

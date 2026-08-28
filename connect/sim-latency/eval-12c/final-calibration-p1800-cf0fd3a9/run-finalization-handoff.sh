@@ -19,6 +19,7 @@ readonly AUDITOR="$ROOT/audit-finalization.py"
 readonly SOURCE_LOCK="$ROOT/source-lock.json"
 readonly HISTORICAL_SOURCE_LOCK="$HISTORICAL_ROOT/source-lock.json"
 readonly REMEDIATION="$ROOT/production-staging-attempt-06-remediation-amendment.json"
+readonly EVIDENCE_BINDING_AMENDMENT="$ROOT/production-staging-attempt-06-evidence-binding-amendment.json"
 readonly READINESS="$ROOT/production-readiness-final.json"
 readonly REPORT="$SERVER/finalize-report.html"
 readonly PREVIEW="$SERVER/final-preview.html"
@@ -28,9 +29,10 @@ readonly FINAL_AUDIT="$HANDOFF/finalization-audit.json"
 readonly SOURCE_LOCK_SHA=94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022
 readonly HISTORICAL_SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
 readonly REMEDIATION_SHA=7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d
-readonly SEALER_SHA=26e5bbf59778b5c951d13c890505717d689c6c22b0e35dbc89fc651bcc8f3c53
-readonly RENDERER_SHA=ef055b961cfbedb77ada85f98aebbc986800da02ba8e43d64d3ce99f62e8ad34
-readonly AUDITOR_SHA=5655b4993bbcfd03b6a302fa87b6933c8eb3565d1e324ebf7f04de0ba3ea9b9f
+readonly EVIDENCE_BINDING_AMENDMENT_SHA=40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752
+readonly SEALER_SHA=954f499e90ac795633f140c015da54185f6af5502feef62dfb547d79e4d3d656
+readonly RENDERER_SHA=668dcfa4912254f5049df6acb55287cdb8b573e0fb7a7eac37ca896d448163ca
+readonly AUDITOR_SHA=2e5de349246914029641548b04ee1ad7e488f72534751319bbaa6e69a69cbc21
 readonly BOOT_ID=34760d1b-a0b6-46a0-b8c1-264abd1affba
 
 readonly -a STAGING_CHECKS=(
@@ -62,6 +64,7 @@ write_terminal_status() {
         --arg source_lock_sha256 "$SOURCE_LOCK_SHA" \
         --arg historical_source_lock_sha256 "$HISTORICAL_SOURCE_LOCK_SHA" \
         --arg remediation_sha256 "$REMEDIATION_SHA" \
+        --arg evidence_binding_amendment_sha256 "$EVIDENCE_BINDING_AMENDMENT_SHA" \
         --arg boot_id "$BOOT_ID" \
         --arg readiness_sha256 "$([ -f "$READINESS" ] && sha256_file "$READINESS" || printf '')" \
         --arg report_sha256 "$([ -f "$REPORT" ] && sha256_file "$REPORT" || printf '')" \
@@ -74,6 +77,7 @@ write_terminal_status() {
           source_lock_sha256:$source_lock_sha256,
           historical_calibration_source_lock_sha256:$historical_source_lock_sha256,
           production_staging_attempt_06_remediation_amendment_sha256:$remediation_sha256,
+          production_staging_attempt_06_evidence_binding_amendment_sha256:$evidence_binding_amendment_sha256,
           boot_id:$boot_id,evidence_sha256:{production_readiness:$readiness_sha256,
             final_report:$report_sha256,final_preview:$preview_sha256,
             final_report_evidence:$report_evidence_sha256,
@@ -105,6 +109,7 @@ verify_dependencies() {
 $SOURCE_LOCK $SOURCE_LOCK_SHA
 $HISTORICAL_SOURCE_LOCK $HISTORICAL_SOURCE_LOCK_SHA
 $REMEDIATION $REMEDIATION_SHA
+$EVIDENCE_BINDING_AMENDMENT $EVIDENCE_BINDING_AMENDMENT_SHA
 $SEALER $SEALER_SHA
 $RENDERER $RENDERER_SHA
 $AUDITOR $AUDITOR_SHA

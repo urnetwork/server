@@ -85,6 +85,13 @@ RELEASE_OCI_VERIFIER = ROOT / "verify-release-oci.py"
 REMEDIATION_AMENDMENT = (
     ROOT / "production-staging-attempt-06-remediation-amendment.json"
 )
+EVIDENCE_BINDING_AMENDMENT = (
+    ROOT / "production-staging-attempt-06-evidence-binding-amendment.json"
+)
+STAGING_DRIVER = ROOT / "run-production-staging.sh"
+EVIDENCE_BINDING_TEST = (
+    ROOT / "test-production-readiness-remediation-binding.py"
+)
 
 HISTORICAL_SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
@@ -104,6 +111,15 @@ CONTROL_SOURCE_RELEASE_SHA256 = (
 )
 REMEDIATION_AMENDMENT_SHA256 = (
     "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d"
+)
+EVIDENCE_BINDING_AMENDMENT_SHA256 = (
+    "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752"
+)
+STAGING_DRIVER_SHA256 = (
+    "e3a68400a430522059d54dee6853f308a9f2ea34f192ec51ee6908f1e56b0f3b"
+)
+EVIDENCE_BINDING_TEST_SHA256 = (
+    "e26bcb770865cac207bf4d74ae4848c434417c78eb44790a2b42ce4b3b841cb2"
 )
 RELEASE_SELF_CHECK_AMENDMENT_SHA256 = (
     "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d"
@@ -724,6 +740,65 @@ def main() -> int:
         is True,
         "attempt-06 remediation amendment is not authenticated",
     )
+    require(
+        EVIDENCE_BINDING_AMENDMENT.stat().st_mode & 0o777 == 0o400
+        and sha256(EVIDENCE_BINDING_AMENDMENT)
+        == EVIDENCE_BINDING_AMENDMENT_SHA256
+        and sha256(STAGING_DRIVER) == STAGING_DRIVER_SHA256
+        and sha256(EVIDENCE_BINDING_TEST)
+        == EVIDENCE_BINDING_TEST_SHA256,
+        "attempt-06 evidence-binding inputs changed",
+    )
+    evidence_binding = load(EVIDENCE_BINDING_AMENDMENT)
+    retained_invariants = evidence_binding.get("retained_invariants")
+    require(
+        evidence_binding.get("schema") == 1
+        and evidence_binding.get("kind")
+        == "sim-latency-production-staging-attempt-06-evidence-binding-amendment"
+        and evidence_binding.get("authorized") is True
+        and evidence_binding.get("defect", {}).get("measurement_effect")
+        is False
+        and evidence_binding.get("correction", {}).get(
+            "generated_records_changed"
+        )
+        == 5
+        and evidence_binding.get("correction", {}).get(
+            "production_staging_script_sha256_after"
+        )
+        == STAGING_DRIVER_SHA256
+        and evidence_binding.get("correction", {}).get(
+            "deterministic_test_sha256"
+        )
+        == EVIDENCE_BINDING_TEST_SHA256
+        and evidence_binding.get("correction", {}).get(
+            "deterministic_test_passed"
+        )
+        is True
+        and evidence_binding.get("live_script_boundary", {}).get(
+            "script_inode_before"
+        )
+        == evidence_binding.get("live_script_boundary", {}).get(
+            "script_inode_after"
+        )
+        and evidence_binding.get("live_script_boundary", {}).get(
+            "fd_offset_before_patch", 0
+        )
+        < evidence_binding.get("live_script_boundary", {}).get(
+            "first_changed_byte_offset", 0
+        )
+        and evidence_binding.get("live_script_boundary", {}).get(
+            "changed_bytes_were_unread"
+        )
+        is True
+        and evidence_binding.get("live_script_boundary", {}).get(
+            "active_evaluator_process_unchanged"
+        )
+        is True
+        and isinstance(retained_invariants, dict)
+        and len(retained_invariants) == 12
+        and all(value is True for value in retained_invariants.values()),
+        "attempt-06 evidence-binding amendment is not authenticated",
+    )
     for path, expected_hash in (
         (PLACEABILITY_POLICY, PLACEABILITY_POLICY_SHA256),
         (POSTPROCESSING_REPAIR, POSTPROCESSING_REPAIR_SHA256),
@@ -1186,6 +1261,9 @@ def main() -> int:
         ),
         "production_staging_attempt_06_remediation_amendment_sha256": (
             REMEDIATION_AMENDMENT_SHA256
+        ),
+        "production_staging_attempt_06_evidence_binding_amendment_sha256": (
+            EVIDENCE_BINDING_AMENDMENT_SHA256
         ),
         "control_plane_commit": CONTROL_COMMIT,
         "control_plane_source_release_sha256": CONTROL_SOURCE_RELEASE_SHA256,

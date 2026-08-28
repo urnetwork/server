@@ -102,6 +102,13 @@ READINESS = ROOT / "production-readiness-final.json"
 REMEDIATION_AMENDMENT = (
     ROOT / "production-staging-attempt-06-remediation-amendment.json"
 )
+EVIDENCE_BINDING_AMENDMENT = (
+    ROOT / "production-staging-attempt-06-evidence-binding-amendment.json"
+)
+STAGING_DRIVER = ROOT / "run-production-staging.sh"
+EVIDENCE_BINDING_TEST = (
+    ROOT / "test-production-readiness-remediation-binding.py"
+)
 HOST_SELF_CHECK = ROOT / "host-self-check-attempt-06.json"
 CALIBRATION_MD = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
 FINAL_REPORT = SERVER / "finalize-report.html"
@@ -132,6 +139,15 @@ HOST_QUALIFICATION_SHA256 = (
 )
 REMEDIATION_AMENDMENT_SHA256 = (
     "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d"
+)
+EVIDENCE_BINDING_AMENDMENT_SHA256 = (
+    "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752"
+)
+STAGING_DRIVER_SHA256 = (
+    "e3a68400a430522059d54dee6853f308a9f2ea34f192ec51ee6908f1e56b0f3b"
+)
+EVIDENCE_BINDING_TEST_SHA256 = (
+    "e26bcb770865cac207bf4d74ae4848c434417c78eb44790a2b42ce4b3b841cb2"
 )
 RELEASE_SELF_CHECK_AMENDMENT_SHA256 = (
     "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d"
@@ -369,6 +385,44 @@ def load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AuditError(f"{path}: expected an object")
     return value
+
+
+def load_evidence_binding_amendment() -> dict[str, Any]:
+    amendment = load_json(EVIDENCE_BINDING_AMENDMENT)
+    correction = amendment.get("correction")
+    boundary = amendment.get("live_script_boundary")
+    retained = amendment.get("retained_invariants")
+    if not (
+        EVIDENCE_BINDING_AMENDMENT.stat().st_mode & 0o777 == 0o400
+        and sha256(EVIDENCE_BINDING_AMENDMENT)
+        == EVIDENCE_BINDING_AMENDMENT_SHA256
+        and sha256(STAGING_DRIVER) == STAGING_DRIVER_SHA256
+        and sha256(EVIDENCE_BINDING_TEST) == EVIDENCE_BINDING_TEST_SHA256
+        and amendment.get("schema") == 1
+        and amendment.get("kind")
+        == "sim-latency-production-staging-attempt-06-evidence-binding-amendment"
+        and amendment.get("authorized") is True
+        and amendment.get("defect", {}).get("measurement_effect") is False
+        and isinstance(correction, dict)
+        and correction.get("generated_records_changed") == 5
+        and correction.get("production_staging_script_sha256_after")
+        == STAGING_DRIVER_SHA256
+        and correction.get("deterministic_test_sha256")
+        == EVIDENCE_BINDING_TEST_SHA256
+        and correction.get("deterministic_test_passed") is True
+        and isinstance(boundary, dict)
+        and boundary.get("script_inode_before")
+        == boundary.get("script_inode_after")
+        and boundary.get("fd_offset_before_patch", 0)
+        < boundary.get("first_changed_byte_offset", 0)
+        and boundary.get("changed_bytes_were_unread") is True
+        and boundary.get("active_evaluator_process_unchanged") is True
+        and isinstance(retained, dict)
+        and len(retained) == 12
+        and all(value is True for value in retained.values())
+    ):
+        raise AuditError("attempt-06 evidence-binding amendment is not authenticated")
+    return amendment
 
 
 def finite_positive(value: Any, label: str) -> float:
@@ -909,6 +963,7 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
         if not isinstance(repositories, dict):
             raise AuditError("source-lock repositories are missing")
         remediation = load_json(REMEDIATION_AMENDMENT)
+        evidence_binding = load_evidence_binding_amendment()
         season_base = load_json(SEASON_BASE_EQUIVALENCE)
         policy = load_json(PATCH_POLICY)
         authoring = season_base.get("public_authoring_base")
@@ -1030,6 +1085,10 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
                     "production_staging_attempt_06_remediation_amendment_sha256"
                 )
                 == REMEDIATION_AMENDMENT_SHA256
+                and report_evidence.get(
+                    "production_staging_attempt_06_evidence_binding_amendment_sha256"
+                )
+                == EVIDENCE_BINDING_AMENDMENT_SHA256
                 and report_evidence.get("calibration_document_sha256")
                 == sha256(CALIBRATION_MD)
             ):
@@ -1055,6 +1114,13 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
                 "editable_blob": editable.get("authoritative_evaluator_blob"),
                 "season_base_equivalence_sha256": (
                     SEASON_BASE_EQUIVALENCE_SHA256
+                ),
+                "production_staging_attempt_06_evidence_binding_amendment_sha256": (
+                    EVIDENCE_BINDING_AMENDMENT_SHA256
+                ),
+                "live_staging_measurements_unchanged": (
+                    evidence_binding.get("defect", {}).get("measurement_effect")
+                    is False
                 ),
                 "result_document_overlay": result_document_overlay,
             },
@@ -1965,6 +2031,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
         try:
             readiness = load_json(READINESS)
             remediation = load_json(REMEDIATION_AMENDMENT)
+            load_evidence_binding_amendment()
             staging_amendment = load_json(STAGING_REFERENCE_V5_AMENDMENT)
             commitment = load_json(INDEPENDENT_COMMITMENT)
             (
@@ -2055,6 +2122,10 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                     "production_staging_attempt_06_remediation_amendment_sha256"
                 )
                 == REMEDIATION_AMENDMENT_SHA256
+                and readiness.get(
+                    "production_staging_attempt_06_evidence_binding_amendment_sha256"
+                )
+                == EVIDENCE_BINDING_AMENDMENT_SHA256
                 and readiness.get("control_plane_commit")
                 == CONTROL_SOURCE_COMMIT
                 and readiness.get("control_plane_source_release_sha256")
@@ -2156,6 +2227,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
             and SOURCE_LOCK_SHA256 in text
             and HISTORICAL_SOURCE_LOCK_SHA256 in text
             and REMEDIATION_AMENDMENT_SHA256 in text
+            and EVIDENCE_BINDING_AMENDMENT_SHA256 in text
             and SEASON_BASE_EQUIVALENCE_SHA256 in text
             and SERVER_COMMIT in text
             and all(term in text.lower() for term in required_terms)
@@ -2255,6 +2327,10 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                     "production_staging_attempt_06_remediation_amendment_sha256"
                 )
                 == REMEDIATION_AMENDMENT_SHA256
+                and evidence.get(
+                    "production_staging_attempt_06_evidence_binding_amendment_sha256"
+                )
+                == EVIDENCE_BINDING_AMENDMENT_SHA256
                 and evidence.get("season_base_equivalence_sha256")
                 == SEASON_BASE_EQUIVALENCE_SHA256
                 and evidence.get("report_sha256") == report_sha
@@ -2373,6 +2449,9 @@ def audit() -> dict[str, Any]:
         ),
         "production_staging_attempt_06_remediation_amendment_sha256": (
             REMEDIATION_AMENDMENT_SHA256
+        ),
+        "production_staging_attempt_06_evidence_binding_amendment_sha256": (
+            EVIDENCE_BINDING_AMENDMENT_SHA256
         ),
         "local_finalization_complete": all(item["state"] == "pass" for item in required),
         "required_passes": sum(item["state"] == "pass" for item in required),
