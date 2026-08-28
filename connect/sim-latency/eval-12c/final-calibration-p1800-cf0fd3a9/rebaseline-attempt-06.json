@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-round-rebaseline",
+  "promoted_at": "2026-08-28T05:05:02Z",
+  "round_id": "a5587856-2b8c-4e42-8091-dab0e308c5e9",
+  "job_id": "8851e2aa-9ce7-4728-a882-fe84cf83a008",
+  "image_digest": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+  "baseline_sha256": "49c94fdedce7a1d78f51aaa7e07fa5ebf444bb8cbf3c05f7f9d951ec01feaf5d",
+  "evidence_manifest_sha256": "dd611ff45ce840ba2ddfcabeee073908899549d55ee865c31220b9f0e711b0be",
+  "passed": true
+}

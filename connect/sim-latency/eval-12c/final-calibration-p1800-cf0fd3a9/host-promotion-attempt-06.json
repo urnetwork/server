@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-attempt-06-host-promotion",
+  "completed_at": "2026-08-28T05:05:06Z",
+  "passed": true,
+  "job_id": "8851e2aa-9ce7-4728-a882-fe84cf83a008",
+  "round_id": "a5587856-2b8c-4e42-8091-dab0e308c5e9",
+  "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+  "evaluator_image_digest": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+  "host_qualification_sha256": "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3",
+  "scale": {
+    "provider_count": 1800,
+    "client_pool_size": 200,
+    "arrivals_per_minute": 80,
+    "quality_window_size": 2,
+    "exchange_hosts": 4,
+    "fleet_shards": 4,
+    "duration_ms": 180000,
+    "impairment_enabled": true,
+    "replicates_per_side": 1
+  },
+  "elapsed_seconds": 1556,
+  "baseline_raw_score_ms": 39283.86374999999,
+  "candidate_raw_score_ms": 38411.79429999994,
+  "evidence_sha256": {
+    "request": "217c58ff57721e4173c30eea5817c973bfcf000b1b5e20e815a849b07ac364c2",
+    "worker_result": "7a7ffe46489c5ffb6661e9119ff6e415af2ac268575221265278bbd156ce57db",
+    "evidence_manifest": "dd611ff45ce840ba2ddfcabeee073908899549d55ee865c31220b9f0e711b0be",
+    "containment_promotion": "d3872b65c9d13b23b1f0c58face35b5d123df0be6067a57d26512d0a1a44bec3",
+    "rebaseline": "4245fc22895e48286904a42d281ccfa44f72a33dbc508f6bbfab57045a3ca40d",
+    "self_check": "4e65e8d0c2a83c352b8e5f903427df6193aaf9cc67ce1b2191e8d5f62f78271b",
+    "resource_bomb": "08296c7ff35edefb09eae50cd9e415dad86ae37d4347a64022da3d5dcfa841bc"
+  },
+  "assertions": {
+    "all_six_gates_passed": true,
+    "cleanup_complete": true,
+    "fresh_cpu_memory_bomb_cleanup": true,
+    "isolated_self_check_passed": true,
+    "active_self_check_identical": true,
+    "previous_state_retained": true
+  }
+}
