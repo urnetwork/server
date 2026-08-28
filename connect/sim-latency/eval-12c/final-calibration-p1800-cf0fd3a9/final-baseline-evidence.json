@@ -1,0 +1,92 @@
+{
+  "all_thresholds_have_significant_improvement_fringes": true,
+  "baseline_ids": [
+    "calibration-policy",
+    "independent-designated-baseline",
+    "product-speed",
+    "product-ttfb",
+    "production-staging-baseline",
+    "same-seed-calibration"
+  ],
+  "calibration": {
+    "baseline_mean_ms": 43101.69114999998,
+    "replicates": 9,
+    "significantly_better_threshold_ms": 36162.31887484998,
+    "takeover_margin": 0.161
+  },
+  "completion_audit": {
+    "required_failures": 0,
+    "required_passes": 10,
+    "required_pending": 0
+  },
+  "evidence_report_sha256": "3eae32c77b862b5d77c8fd4d490f63747e85a8b632bf54335a1bcb71821966b8",
+  "evidence_sha256": {
+    "baseline.json": "84d49d0847104ae79b878a6cbf6eaef7675ef8234e0d8df2615f324e85da623f",
+    "evidence-manifest.json": "378be6195463f55bcae1bdfb57008a3d0f34eb141c08b8b33258091b372a9fd9",
+    "final-calibration-selection.json": "5838b36d8414162497c4537f8ac07d46b3c74badcb6083cae4d71a9e40517042",
+    "finalization-audit.json": "f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423",
+    "finalize-report-evidence.json": "ce6b3daa416c70b388e991b1f0a521e296699b6be91f44afe78d87c5ef653696",
+    "hidden-launch-decision.json": "3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835",
+    "point-summary.json": "f0789d4ccf7f310cb8c480ea5bd248469eaa4a3813a1b751f526093c9fc3e721",
+    "same-seed-analysis.json": "41325e3aabd98495afb22264ab2981ad690e4e2ca7ebb295b40c40ea96d0de9c",
+    "worker-result.json": "5b9c57ea35346ffd9b281e4cc6e49bb56485770e62dca5a55f1d1f3b9c0573ec"
+  },
+  "improvement_fringe_ids": [
+    "calibration-policy",
+    "independent-designated-baseline",
+    "product-speed",
+    "product-ttfb",
+    "production-staging-baseline",
+    "same-seed-calibration"
+  ],
+  "kind": "sim-latency-final-baseline-evidence",
+  "product_projection": {
+    "disclosure": "future gains are hypothetical and are not the competition takeover contract",
+    "kind": "illustrative_compounding_projection",
+    "rounds": [
+      {"round": 0, "throughput_p50_mbps": 1.7248732251358256, "ttfb_p95_ms": 666.9146721499995},
+      {"round": 1, "throughput_p50_mbps": 2.0025778143826938, "ttfb_p95_ms": 559.5414099338496},
+      {"round": 2, "throughput_p50_mbps": 2.3249928424983075, "ttfb_p95_ms": 469.4552429344998},
+      {"round": 3, "throughput_p50_mbps": 2.6993166901405345, "ttfb_p95_ms": 393.8729488220453},
+      {"round": 4, "throughput_p50_mbps": 3.133906677253161, "ttfb_p95_ms": 330.459404061696},
+      {"round": 5, "throughput_p50_mbps": 3.63846565229092, "ttfb_p95_ms": 277.2554400077629},
+      {"round": 6, "throughput_p50_mbps": 4.224258622309758, "ttfb_p95_ms": 232.6173141665131}
+    ],
+    "run_manifest_sha256": {
+      "evidence/scorer-input/baseline-01-01a04755/run.json": "5dae73f1e255f5791fe9441cb5b547c2cfbfa2f6c30defcd1230862ed664649e",
+      "evidence/scorer-input/baseline-02-01a04755/run.json": "3d3cd409afbee6c59332f191303acf9cab6c36e359338d6d9a37fac6f47ae383",
+      "evidence/scorer-input/baseline-03-01a04755/run.json": "6ed9ab001683222f7733f99f10e853c19e9c84dd34b942bb273491739af4f96a",
+      "evidence/scorer-input/baseline-04-01a04755/run.json": "490677133ca3483fc0ac87597e86a1a097bc9528a55a4a0278062d9b5d8fddeb",
+      "evidence/scorer-input/baseline-05-01a04755/run.json": "1ac38d90dd8ecfe93f39a5fd1bbe9cba784bfdf3d4cb06f820262005add4f098",
+      "evidence/scorer-input/baseline-06-01a04755/run.json": "9b0ffd84eb8ae746c9e30b87cf58fab183925e61302fd23b8ecfc3da9fe59b9f",
+      "evidence/scorer-input/baseline-07-01a04755/run.json": "8154bebc40a5c76490ac844672aa32bf5b306fc9c9394d5886ca305959d460ca",
+      "evidence/scorer-input/baseline-08-01a04755/run.json": "69f011cb36123e5703078f27682a2a8da03509e2cb27b1d29c4df2608933f1e8",
+      "evidence/scorer-input/baseline-09-01a04755/run.json": "6610ee782d05465db30fef97c8e3a7bfb24e7690ed8d025b16afaeaa69736fa6"
+    },
+    "source": "median of nine authenticated production staging baseline run manifests",
+    "throughput_metric": "throughput_p50_bytes_per_s converted to decimal Mbps",
+    "throughput_round_multiplier": 1.161,
+    "ttfb_metric": "ttfb_p95_ms",
+    "ttfb_round_multiplier": 0.839
+  },
+  "production_staging": {
+    "baseline_median_ms": 39996.14554999987,
+    "candidate_median_ms": 40476.36540000001,
+    "gates_passed": 6,
+    "normalized_score": 98.81357961552511,
+    "security_assertions_passed": 15,
+    "significantly_better_threshold_ms": 33556.76611644989
+  },
+  "report_sha256": "3eae32c77b862b5d77c8fd4d490f63747e85a8b632bf54335a1bcb71821966b8",
+  "schema": 1,
+  "section_svg_counts": [1, 1, 1, 1, 1, 1, 1],
+  "sections": 7,
+  "threshold_ids": [
+    "calibration-policy",
+    "independent-designated-baseline",
+    "product-speed",
+    "product-ttfb",
+    "production-staging-baseline",
+    "same-seed-calibration"
+  ]
+}

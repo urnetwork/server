@@ -1,15 +1,20 @@
 {
   "all_baselines_have_threshold_lines": true,
+  "all_thresholds_have_improvement_fringes": true,
   "baseline_ids": [
     "independent-designated-baseline-ratio",
     "same-seed-score"
   ],
-  "calibration_document_sha256": "103424b828aa6356701d844bb5e80ac60e351cf2b03763af0b09f0dc0c924936",
-  "evidence_calibration_document_sha256": "103424b828aa6356701d844bb5e80ac60e351cf2b03763af0b09f0dc0c924936",
-  "evidence_preview_sha256": "9d6426124adf86256e0de3921f6c390a5ffa2cc64ff1ca45248b21997b97724b",
-  "evidence_report_sha256": "f77c75945cc1d9aa551a6c77fe8037a902abbbb47b8de5afea42459277c27e15",
-  "generated_at": "2026-08-28T11:16:26Z",
+  "calibration_document_sha256": "dc473cecc91b9eea993fd3e43e2230e0a235bfc30771e6a9c65de2db284b2090",
+  "evidence_calibration_document_sha256": "dc473cecc91b9eea993fd3e43e2230e0a235bfc30771e6a9c65de2db284b2090",
+  "evidence_preview_sha256": "0529ab0059dbac235667e6fca417b6aba3b8ac200fbb1fda89b95d067d6d912c",
+  "evidence_report_sha256": "f81211d11aec2dca7705a941c1481b75c7c7f35ae847f986b168579c3ce76f52",
+  "generated_at": "2026-08-28T11:26:41Z",
   "historical_calibration_source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "improvement_fringe_ids": [
+    "independent-designated-baseline-ratio",
+    "same-seed-score"
+  ],
   "independent_attestation_repair_script_sha256": "a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0",
   "independent_attestation_repair_sha256": "499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d",
   "independent_attestation_sha256": "b96b216022b34e2bf0e9838ca51380431d9f97e95121610951c37d0274cc5c02",
@@ -29,7 +34,12 @@
   "placeability_policy_amendment_sha256": "359fe89572c81d6602cbf0ece03e5128c5ccbf38bf2d20f22fcdbadd30f2f638",
   "pre_repair_same_seed_progress_sha256": "6dca4d29e1a61df3427229923dfa22bbc4ac776c30db3f8f2e7a6bc574dcf8f0",
   "preview_all_baselines_have_threshold_lines": true,
+  "preview_all_thresholds_have_improvement_fringes": true,
   "preview_baseline_ids": [
+    "independent-designated-baseline-ratio",
+    "same-seed-score"
+  ],
+  "preview_improvement_fringe_ids": [
     "independent-designated-baseline-ratio",
     "same-seed-score"
   ],
@@ -40,7 +50,7 @@
     1
   ],
   "preview_sections": 4,
-  "preview_sha256": "9d6426124adf86256e0de3921f6c390a5ffa2cc64ff1ca45248b21997b97724b",
+  "preview_sha256": "0529ab0059dbac235667e6fca417b6aba3b8ac200fbb1fda89b95d067d6d912c",
   "production_readiness_sha256": "bc56f7b02a1cfcfb5cd91eca0e885bc6aedb2b216d336bbb7b1f1288cd7e2f2d",
   "production_staging_attempt_06_evidence_binding_amendment_sha256": "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752",
   "production_staging_attempt_06_remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
@@ -51,7 +61,7 @@
     "worse": 0
   },
   "reference_v5_qualification_sha256": "8bdc86dcf68a8f8a4c686d8d6267510e121ab7800c9bbcc7cfa4dbce1ac1ca10",
-  "report_sha256": "f77c75945cc1d9aa551a6c77fe8037a902abbbb47b8de5afea42459277c27e15",
+  "report_sha256": "f81211d11aec2dca7705a941c1481b75c7c7f35ae847f986b168579c3ce76f52",
   "same_seed_analysis_sha256": "41325e3aabd98495afb22264ab2981ad690e4e2ca7ebb295b40c40ea96d0de9c",
   "same_seed_postprocessing_repair_sha256": "62c7e8c1398d8619bf9bfb4645b0e7965a4e9a83713d47e0da86fc705ecd59dd",
   "same_seed_selection_sha256": "5838b36d8414162497c4537f8ac07d46b3c74badcb6083cae4d71a9e40517042",
@@ -65,5 +75,12 @@
   ],
   "sections": 4,
   "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
-  "strict_same_seed_analysis_sha256": "7d11b12fba4b0168f52430cf55e2a3cfbc2df286193cfc9909f9d0aff5088741"
+  "strict_same_seed_analysis_sha256": "7d11b12fba4b0168f52430cf55e2a3cfbc2df286193cfc9909f9d0aff5088741",
+  "threshold_fringe_remediation": {
+    "applied": true,
+    "prior_calibration_document_sha256": "103424b828aa6356701d844bb5e80ac60e351cf2b03763af0b09f0dc0c924936",
+    "prior_preview_sha256": "9d6426124adf86256e0de3921f6c390a5ffa2cc64ff1ca45248b21997b97724b",
+    "prior_report_evidence_sha256": "33cf779d4d50a0404ed187bc49317ef2086b1e6461600b169481cec47e400c8d",
+    "prior_report_sha256": "f77c75945cc1d9aa551a6c77fe8037a902abbbb47b8de5afea42459277c27e15"
+  }
 }

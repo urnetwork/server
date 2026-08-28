@@ -2,7 +2,7 @@
 
 Status: **LOCALLY QUALIFIED — technical launch gate open**
 
-Generated: `2026-08-28T11:16:26Z`  
+Generated: `2026-08-28T11:26:41Z`  
 Score schema: `1`  
 Source lock: `94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022`
 Historical calibration source lock: `0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838`

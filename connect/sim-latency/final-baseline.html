@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sim-latency final baseline</title>
+  <style>
+    :root {
+      --ink:#102035; --muted:#607086; --paper:#eef3f8; --card:#ffffff;
+      --line:#d4deea; --navy:#143f73; --blue:#1688bd; --cyan:#17a8c2;
+      --green:#14815d; --green-soft:#dff5e9; --red:#ca4252;
+      --amber:#d48717; --violet:#7258b7; --shadow:0 14px 38px rgba(26,52,80,.08);
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:linear-gradient(180deg,#e8f0f7 0,#f5f7fa 420px); color:var(--ink); font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1180px; margin:0 auto; padding:54px 26px 84px; }
+    header { padding:14px 4px 34px; }
+    .eyebrow,.section-index { color:var(--cyan); font-size:12px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; }
+    h1 { max-width:980px; margin:10px 0 18px; font-size:clamp(40px,7vw,76px); line-height:.98; letter-spacing:-.05em; }
+    h2 { margin:3px 0 8px; font-size:30px; line-height:1.12; letter-spacing:-.025em; }
+    p { color:var(--muted); }
+    .lead { max-width:890px; font-size:19px; }
+    .chips { display:flex; flex-wrap:wrap; gap:9px; margin-top:24px; }
+    .chip { padding:7px 12px; border:1px solid var(--line); border-radius:999px; background:#fff; color:var(--navy); font-size:12px; font-weight:800; }
+    .chip.ready { background:var(--green-soft); border-color:#94cfb5; color:#075c40; }
+    section { margin:24px 0; padding:30px; border:1px solid var(--line); border-radius:24px; background:var(--card); box-shadow:var(--shadow); }
+    .section-head { display:flex; align-items:flex-start; justify-content:space-between; gap:28px; margin-bottom:20px; }
+    .section-head p { max-width:790px; margin-bottom:0; }
+    .section-kpi { min-width:150px; color:var(--navy); font-size:23px; font-weight:900; text-align:right; }
+    .section-kpi small { display:block; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+    svg { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:16px; background:#f9fbfd; }
+    svg text { font-family:inherit; }
+    .axis { stroke:#aebccc; stroke-width:1; }
+    .grid { stroke:#e1e7ef; stroke-width:1; }
+    .axis-label { fill:var(--muted); font-size:11px; }
+    .axis-title { fill:var(--muted); font-size:12px; font-weight:750; }
+    .baseline { fill:none; stroke:var(--navy); stroke-width:3; }
+    .candidate { fill:none; stroke:var(--cyan); stroke-width:3; }
+    .better { fill:none; stroke:var(--green); stroke-width:3; }
+    .noop { fill:none; stroke:var(--violet); stroke-width:3; }
+    .worse { fill:none; stroke:var(--amber); stroke-width:3; }
+    .projection-ttfb { fill:none; stroke:var(--cyan); stroke-width:3.5; }
+    .projection-speed { fill:none; stroke:var(--green); stroke-width:3.5; }
+    .projection-dot-ttfb { fill:var(--cyan); stroke:#fff; stroke-width:2; }
+    .projection-dot-speed { fill:var(--green); stroke:#fff; stroke-width:2; }
+    .projection-fringe-ttfb { fill:rgba(23,168,194,.12); }
+    .projection-fringe-speed { fill:rgba(20,129,93,.13); }
+    .dot-baseline { fill:var(--navy); }
+    .dot-candidate { fill:var(--cyan); }
+    .dot-better { fill:var(--green); }
+    .dot-noop { fill:var(--violet); }
+    .dot-worse { fill:var(--amber); }
+    .baseline-line { stroke:var(--navy); stroke-width:2.2; stroke-dasharray:4 4; }
+    .threshold-line { stroke:var(--red); stroke-width:3; stroke-dasharray:9 5; }
+    .threshold-label { fill:var(--red); font-size:12px; font-weight:900; }
+    .baseline-label { fill:var(--navy); font-size:12px; font-weight:900; }
+    .improvement-fringe { fill:rgba(20,129,93,.13); }
+    .fringe-label { fill:#075c40; font-size:10px; font-weight:950; letter-spacing:.08em; }
+    .visual-title { fill:var(--navy); font-size:14px; font-weight:900; letter-spacing:.04em; }
+    .box { fill:#fff; stroke:#c7d4e2; }
+    .box-green { fill:#e1f4e9; stroke:#76bc99; }
+    .box-blue { fill:#e4f2fa; stroke:#7bb9d4; }
+    .box-amber { fill:#fff4df; stroke:#d8ac5d; }
+    .box-red { fill:#fff0ee; stroke:#df938d; }
+    .box-title { fill:var(--navy); font-size:11px; font-weight:900; letter-spacing:.08em; }
+    .box-value { fill:var(--ink); font-size:14px; font-weight:800; }
+    .small { fill:var(--muted); font-size:11px; }
+    .check-circle { fill:var(--green); }
+    .check-mark { fill:none; stroke:#fff; stroke-width:3; stroke-linecap:round; stroke-linejoin:round; }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:16px; }
+    .metric { min-height:88px; padding:14px 15px; border:1px solid var(--line); border-radius:14px; background:#fbfcfe; }
+    .metric strong { display:block; color:var(--navy); font-size:18px; overflow-wrap:anywhere; }
+    .metric span { display:block; margin-top:4px; color:var(--muted); font-size:12px; }
+    .legend { display:flex; flex-wrap:wrap; gap:16px; margin:13px 2px 0; color:var(--muted); font-size:12px; font-weight:700; }
+    .legend i { display:inline-block; width:18px; height:4px; margin-right:6px; border-radius:4px; vertical-align:middle; }
+    .notice { margin-top:16px; padding:14px 17px; border-left:4px solid var(--amber); background:#fff8e8; color:#765114; font-size:13px; }
+    footer { margin-top:30px; color:var(--muted); font-size:12px; }
+    code { font-size:12px; overflow-wrap:anywhere; }
+    @media(max-width:780px) {
+      main { padding:30px 14px 56px; }
+      section { padding:20px; }
+      .section-head { display:block; }
+      .section-kpi { margin-top:12px; text-align:left; }
+      .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    }
+    @media print { body { background:#fff; } section { break-inside:avoid; box-shadow:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">URnetwork · sim-latency · authenticated final baseline</div>
+    <h1>What “significantly better” means on the final evaluator.</h1>
+    <p class="lead">The competition uses a lower-is-better, failure-charged latency score. Twelve same-seed calibration pairs select a median-of-nine evaluation and a 16.1% takeover margin. Each live round still generates its own hidden-seed baseline; the fixed calibration below controls the policy, while the staging draw shows the path working end to end.</p>
+    <div class="chips">
+      <span class="chip ready">LOCAL TECHNICAL GATE · 10/10</span>
+      <span class="chip">1,800 providers · 200 clients</span>
+      <span class="chip">3-minute measured window</span>
+      <span class="chip">R=9 · median</span>
+      <span class="chip">16.1% significant-better margin</span>
+      <span class="chip">score schema 1</span>
+    </div>
+  </header>
+
+  <section id="policy-baseline">
+    <div class="section-head">
+      <div><div class="section-index">01 · POLICY BASELINE</div><h2>The calibrated scoring line</h2><p>The 12-pair baseline population averages 43.102 seconds. A submission must land at or below 36.162 seconds under the selected aggregation to cross the significant-better line. The green band is the full qualifying fringe; lower is better.</p></div>
+      <div class="section-kpi">≤36.162 s<small>significantly better</small></div>
+    </div>
+    <svg viewBox="0 0 1000 260" role="img" aria-label="Calibration baseline gauge with significant-better threshold and shaded improvement fringe">
+      <text class="visual-title" x="80" y="38">FAILURE-CHARGED RAW SCORE · LOWER IS BETTER</text>
+      <rect class="improvement-fringe" data-improvement-fringe-for="calibration-policy" x="80" y="74" width="552.3" height="88" rx="10"/>
+      <line class="axis" x1="80" y1="118" x2="920" y2="118"/>
+      <line class="threshold-line" data-threshold-for="calibration-policy" x1="632.3" y1="64" x2="632.3" y2="174"/>
+      <text class="threshold-label" data-threshold-label-for="calibration-policy" x="624" y="194" text-anchor="end">threshold 36.162 s</text>
+      <line class="baseline-line" data-baseline-id="calibration-policy" x1="738.3" y1="72" x2="738.3" y2="164"/>
+      <text class="baseline-label" x="746" y="92">baseline mean 43.102 s</text>
+      <circle class="dot-candidate" cx="724.5" cy="118" r="8"/>
+      <text class="axis-label" x="724.5" y="145" text-anchor="middle">paired no-op mean 42.197 s</text>
+      <text class="fringe-label" x="96" y="103">SIGNIFICANT-IMPROVEMENT FRINGE · 0–36.162 s</text>
+      <text class="axis-label" x="80" y="220" text-anchor="middle">0 s</text><text class="axis-label" x="386" y="220" text-anchor="middle">20 s</text><text class="axis-label" x="691" y="220" text-anchor="middle">40 s</text><text class="axis-label" x="920" y="220" text-anchor="middle">55 s</text>
+    </svg>
+    <div class="metrics">
+      <div class="metric"><strong>43.102 s</strong><span>12-pair calibration baseline mean</span></div>
+      <div class="metric"><strong>36.162 s</strong><span>mean × 0.839 significant-better line</span></div>
+      <div class="metric"><strong>R=9</strong><span>median of nine baseline and candidate replicates</span></div>
+      <div class="metric"><strong>16.1%</strong><span>takeover margin / minimum detectable delta</span></div>
+    </div>
+  </section>
+
+  <section id="same-seed-stability">
+    <div class="section-head">
+      <div><div class="section-index">02 · SAME-SEED STABILITY</div><h2>Twelve uncensored A/A pairs</h2><p>Every completed result remains in the population, including non-placeable no-op draws. The plot shows the full baseline and comment-only no-op series, the baseline mean, the exact threshold, and the shaded significant-improvement fringe.</p></div>
+      <div class="section-kpi">10.127% CV<small>baseline run noise</small></div>
+    </div>
+    <svg viewBox="0 0 1000 350" role="img" aria-label="Twelve same-seed baseline and no-op measurements with threshold and significant-improvement fringe">
+      <rect class="improvement-fringe" data-improvement-fringe-for="same-seed-calibration" x="80" y="243.3" width="840" height="56.7"/>
+      <line class="grid" x1="80" y1="70" x2="920" y2="70"/><line class="grid" x1="80" y1="162" x2="920" y2="162"/><line class="grid" x1="80" y1="254" x2="920" y2="254"/>
+      <line class="axis" x1="80" y1="300" x2="920" y2="300"/><line class="axis" x1="80" y1="70" x2="80" y2="300"/>
+      <polyline class="baseline" data-baseline-id="same-seed-calibration" points="80.0,153.3 156.4,201.4 232.7,253.0 309.1,155.2 385.5,205.8 461.8,161.6 538.2,210.3 614.5,180.5 690.9,90.3 767.3,198.2 843.6,161.9 920.0,182.0"/>
+      <polyline class="candidate" points="80.0,211.1 156.4,223.0 232.7,154.7 309.1,218.2 385.5,185.5 461.8,212.7 538.2,189.8 614.5,189.0 690.9,117.1 767.3,210.4 843.6,170.7 920.0,171.3"/>
+      <line class="baseline-line" data-baseline-id="same-seed-calibration" x1="80" y1="179.5" x2="920" y2="179.5"/><text class="baseline-label" x="912" y="171" text-anchor="end">baseline mean 43.102 s</text>
+      <line class="threshold-line" data-threshold-for="same-seed-calibration" x1="80" y1="243.3" x2="920" y2="243.3"/><text class="threshold-label" data-threshold-label-for="same-seed-calibration" x="912" y="235" text-anchor="end">significant-better ≤36.162 s</text>
+      <text class="fringe-label" x="92" y="286">SIGNIFICANT-IMPROVEMENT FRINGE</text>
+      <text class="axis-label" x="58" y="74" text-anchor="end">55 s</text><text class="axis-label" x="58" y="166" text-anchor="end">45 s</text><text class="axis-label" x="58" y="258" text-anchor="end">35 s</text>
+      <text class="axis-title" x="500" y="332" text-anchor="middle">authenticated same-seed pair 1–12</text>
+    </svg>
+    <div class="legend"><span><i style="background:#143f73"></i>baseline</span><span><i style="background:#17a8c2"></i>comment-only no-op</span><span><i style="background:#ca4252"></i>threshold</span><span><i style="background:#b8e2cd"></i>significant-improvement fringe</span></div>
+    <div class="metrics">
+      <div class="metric"><strong>4.365 s</strong><span>baseline sample standard deviation</span></div>
+      <div class="metric"><strong>35.107–52.789 s</strong><span>observed baseline range</span></div>
+      <div class="metric"><strong>42.197 s</strong><span>paired no-op mean</span></div>
+      <div class="metric"><strong>94.614%</strong><span>estimated single-evaluation no-op placeability at R=9</span></div>
+    </div>
+  </section>
+
+  <section id="production-staging">
+    <div class="section-head">
+      <div><div class="section-index">03 · PRODUCTION STAGING DRAW</div><h2>The final API/worker path reproduced the baseline</h2><p>The terminal staging job ran nine pristine baseline and nine exact no-op candidate replicates. Its same-round baseline median was 39.996 seconds, so this round’s takeover line was 33.557 seconds. The no-op median was 40.476 seconds: placeable, but correctly not takeover-eligible.</p></div>
+      <div class="section-kpi">18/18 clean<small>staging measurements</small></div>
+    </div>
+    <svg viewBox="0 0 1000 350" role="img" aria-label="Nine production staging baseline and no-op measurements with threshold and significant-improvement fringe">
+      <rect class="improvement-fringe" data-improvement-fringe-for="production-staging-baseline" x="100" y="259.1" width="800" height="40.9"/>
+      <line class="grid" x1="100" y1="70" x2="900" y2="70"/><line class="grid" x1="100" y1="185" x2="900" y2="185"/><line class="axis" x1="100" y1="300" x2="900" y2="300"/><line class="axis" x1="100" y1="70" x2="100" y2="300"/>
+      <polyline class="baseline" data-baseline-id="production-staging-baseline" points="100.0,131.3 200.0,115.6 300.0,185.0 400.0,169.0 500.0,234.4 600.0,211.4 700.0,181.6 800.0,197.1 900.0,198.8"/>
+      <polyline class="candidate" points="100.0,204.2 200.0,178.8 300.0,156.7 400.0,164.0 500.0,179.5 600.0,235.0 700.0,156.1 800.0,196.5 900.0,209.5"/>
+      <line class="baseline-line" data-baseline-id="production-staging-baseline" x1="100" y1="185.0" x2="900" y2="185.0"/><text class="baseline-label" x="892" y="176" text-anchor="end">same-round baseline median 39.996 s</text>
+      <line class="candidate" x1="100" y1="179.5" x2="900" y2="179.5"/><text class="axis-label" x="108" y="170">no-op median 40.476 s</text>
+      <line class="threshold-line" data-threshold-for="production-staging-baseline" x1="100" y1="259.1" x2="900" y2="259.1"/><text class="threshold-label" data-threshold-label-for="production-staging-baseline" x="892" y="250" text-anchor="end">significant-better ≤33.557 s</text>
+      <text class="fringe-label" x="112" y="287">SIGNIFICANT-IMPROVEMENT FRINGE</text>
+      <text class="axis-label" x="78" y="74" text-anchor="end">50 s</text><text class="axis-label" x="78" y="189" text-anchor="end">40 s</text><text class="axis-label" x="78" y="304" text-anchor="end">30 s</text>
+      <text class="axis-title" x="500" y="332" text-anchor="middle">production staging replicate 1–9 · failure-charged raw score</text>
+    </svg>
+    <div class="metrics">
+      <div class="metric"><strong>39.996 s</strong><span>staging same-round baseline median</span></div>
+      <div class="metric"><strong>33.557 s</strong><span>staging significant-better threshold</span></div>
+      <div class="metric"><strong>40.476 s</strong><span>exact no-op candidate median · 1.201% slower</span></div>
+      <div class="metric"><strong>98.814</strong><span>normalized score · G1–G6 all passed</span></div>
+    </div>
+    <div class="notice">The 39.996-second value is a production staging observation, not a permanent absolute target. Every live round derives a fresh hidden-seed same-round baseline and applies the same 16.1% margin.</div>
+  </section>
+
+  <section id="environment">
+    <div class="section-head">
+      <div><div class="section-index">04 · FINAL ENVIRONMENT</div><h2>One bounded 12-core host at p1800</h2><p>The selected point is the highest authenticated scale below the measured quality frontier. Ten physical cores and the untrusted memory boundary belong to the evaluation; two physical cores and at least 24 GiB remain available to the management and cleanup plane.</p></div>
+      <div class="section-kpi">p1800<small>frozen competition scale</small></div>
+    </div>
+    <svg viewBox="0 0 1000 350" role="img" aria-label="Final evaluator host, resource boundaries, and workload topology">
+      <rect class="box-blue" x="34" y="40" width="560" height="260" rx="20"/><text class="visual-title" x="58" y="70">AUTHORITATIVE HOST · 12 PHYSICAL CORES · 128 GiB</text>
+      <rect class="box" x="58" y="92" width="326" height="84" rx="13"/><text class="box-title" x="80" y="120">EVALUATION BOUNDARY</text><text class="box-value" x="80" y="149">10 cores · 72 GiB runner</text>
+      <rect class="box-green" x="402" y="92" width="168" height="84" rx="13"/><text class="box-title" x="423" y="120">MANAGEMENT</text><text class="box-value" x="423" y="149">2 cores · ≥24 GiB</text>
+      <rect class="box" x="58" y="196" width="150" height="70" rx="12"/><text class="box-title" x="78" y="222">POSTGRESQL</text><text class="box-value" x="78" y="248">16 GiB</text>
+      <rect class="box" x="224" y="196" width="150" height="70" rx="12"/><text class="box-title" x="248" y="222">REDIS</text><text class="box-value" x="248" y="248">8 GiB</text>
+      <rect class="box" x="390" y="196" width="180" height="70" rx="12"/><text class="box-title" x="414" y="222">SUBMISSION IMAGE</text><text class="small" x="414" y="247">offline · no network · RO local leaves</text>
+      <line class="axis" x1="594" y1="166" x2="642" y2="166"/>
+      <rect class="box-green" x="654" y="54" width="308" height="116" rx="16"/><text class="box-title" x="682" y="84">SELECTED · p1800-c200-r80-q2</text><text class="box-value" x="682" y="116">1,800 providers · 200 clients</text><text class="small" x="682" y="142">80 arrivals/min · 4 hosts · 4 shards · 98.680% floor</text>
+      <rect class="box-red" x="654" y="194" width="308" height="106" rx="16"/><text class="box-title" x="682" y="224">REJECTED UPPER BOUND · p2700</text><text class="box-value" x="682" y="254">2,700 providers · 300 clients</text><text class="small" x="682" y="280">96.980% fell below the 97% quality gate</text>
+      <text class="axis-label" x="34" y="330">SMT and turbo off · performance governor · fixed IRQ placement · management-controlled kill and cleanup</text>
+    </svg>
+    <div class="metrics">
+      <div class="metric"><strong>4.606 / 10 cores</strong><span>maximum selected-point mean CPU use</span></div>
+      <div class="metric"><strong>11.851 GiB</strong><span>maximum selected-point peak RSS</span></div>
+      <div class="metric"><strong>1.019 s</strong><span>adversarial 72 GiB OOM cleanup time</span></div>
+      <div class="metric"><strong>0 residuals</strong><span>containers, networks, or evidence mounts after cleanup</span></div>
+    </div>
+  </section>
+
+  <section id="references">
+    <div class="section-head">
+      <div><div class="section-index">05 · INDEPENDENT REFERENCES</div><h2>Better, no-op, and worse across hidden seeds</h2><p>Each seed uses one precommitted designated baseline. Candidate raw scores are divided by that baseline; lower is better. The authorized launch screen passed 4/5 correct orderings. The green fringe below 0.839 is where a candidate is significantly better than its designated same-round baseline.</p></div>
+      <div class="section-kpi">4/5 ordered<small>authorized launch screen</small></div>
+    </div>
+    <svg viewBox="0 0 1000 350" role="img" aria-label="Independent reference ratios with baseline, significant-better threshold, and improvement fringe">
+      <rect class="improvement-fringe" data-improvement-fringe-for="independent-designated-baseline" x="100" y="280.5" width="800" height="19.5"/>
+      <line class="grid" x1="100" y1="70" x2="900" y2="70"/><line class="grid" x1="100" y1="179.5" x2="900" y2="179.5"/><line class="axis" x1="100" y1="300" x2="900" y2="300"/>
+      <line class="baseline-line" data-baseline-id="independent-designated-baseline" x1="100" y1="245.2" x2="900" y2="245.2"/><text class="baseline-label" x="892" y="237" text-anchor="end">designated same-round baseline = 1.000</text>
+      <line class="threshold-line" data-threshold-for="independent-designated-baseline" x1="100" y1="280.5" x2="900" y2="280.5"/><text class="threshold-label" data-threshold-label-for="independent-designated-baseline" x="892" y="272" text-anchor="end">significant-better ratio ≤0.839</text>
+      <text class="fringe-label" x="112" y="295">SIGNIFICANT-IMPROVEMENT FRINGE</text>
+      <polyline class="better" points="100.0,265.1 300.0,245.9 500.0,211.2 700.0,250.9 900.0,280.2"/><polyline class="noop" points="100.0,263.3 300.0,231.5 500.0,235.4 700.0,196.9 900.0,268.1"/><polyline class="worse" points="100.0,125.1 300.0,191.9 500.0,82.9 700.0,89.2 900.0,195.1"/>
+      <circle class="dot-better" cx="100" cy="265.1" r="5"/><circle class="dot-better" cx="300" cy="245.9" r="5"/><circle class="dot-better" cx="500" cy="211.2" r="5"/><circle class="dot-better" cx="700" cy="250.9" r="5"/><circle class="dot-better" cx="900" cy="280.2" r="5"/>
+      <circle class="dot-noop" cx="100" cy="263.3" r="5"/><circle class="dot-noop" cx="300" cy="231.5" r="5"/><circle class="dot-noop" cx="500" cy="235.4" r="5"/><circle class="dot-noop" cx="700" cy="196.9" r="5"/><circle class="dot-noop" cx="900" cy="268.1" r="5"/>
+      <circle class="dot-worse" cx="100" cy="125.1" r="5"/><circle class="dot-worse" cx="300" cy="191.9" r="5"/><circle class="dot-worse" cx="500" cy="82.9" r="5"/><circle class="dot-worse" cx="700" cy="89.2" r="5"/><circle class="dot-worse" cx="900" cy="195.1" r="5"/>
+      <text class="axis-label" x="100" y="326" text-anchor="middle">seed 1</text><text class="axis-label" x="300" y="326" text-anchor="middle">seed 2</text><text class="axis-label" x="500" y="326" text-anchor="middle">seed 3</text><text class="axis-label" x="700" y="326" text-anchor="middle">seed 4</text><text class="axis-label" x="900" y="326" text-anchor="middle">seed 5</text>
+    </svg>
+    <div class="legend"><span><i style="background:#14815d"></i>better reference</span><span><i style="background:#7258b7"></i>no-op reference</span><span><i style="background:#d48717"></i>worse reference</span><span><i style="background:#b8e2cd"></i>significant-improvement fringe</span></div>
+    <div class="metrics">
+      <div class="metric"><strong>4 / 5</strong><span>better &lt; no-op &lt; worse orderings</span></div>
+      <div class="metric"><strong>5 hidden seeds</strong><span>independently generated and precommitted</span></div>
+      <div class="metric"><strong>R=1 references</strong><span>diagnostic screen; competition scoring remains R=9</span></div>
+      <div class="metric"><strong>3 / 3 / 0</strong><span>better / no-op / worse placeable seeds; diagnostic only</span></div>
+    </div>
+    <div class="notice">Launch compromise disclosure: the five-seed 4/5 screen is explicitly not confidence-equivalent to the original 20-seed 19/20 design. It is the authorized speed-to-launch compromise, and all failed orderings remain visible.</div>
+  </section>
+
+  <section id="product-projection">
+    <div class="section-head">
+      <div><div class="section-index">06 · SIX-ROUND PRODUCT PROJECTION</div><h2>Compounding threshold wins change the experience</h2><p>The sealed production baseline run manifests measure a median p95 TTFB of 666.915 ms and median p50 large-transfer throughput of 1.725 Mbps. This illustrative projection makes each winning result the next round's baseline, lowers TTFB by exactly 16.1%, and raises throughput by exactly 16.1% in each of six successive rounds.</p></div>
+      <div class="section-kpi">232.617 ms · 4.224 Mbps<small>projected after round 6</small></div>
+    </div>
+    <svg viewBox="0 0 1000 460" role="img" aria-label="Six-round projected p95 TTFB and p50 throughput when each round reaches the 16.1 percent significant-improvement threshold">
+      <text class="visual-title" x="52" y="38">P95 TTFB · LOWER IS BETTER</text>
+      <text class="visual-title" x="552" y="38">P50 LARGE-TRANSFER SPEED · HIGHER IS BETTER</text>
+
+      <path class="projection-fringe-ttfb" data-improvement-fringe-for="product-ttfb" d="M70 107.2 L135 163.0 L200 209.9 L265 249.2 L330 282.1 L395 309.8 L460 333.0 L460 370 L70 370 Z"/>
+      <line class="grid" x1="70" y1="90" x2="460" y2="90"/><line class="grid" x1="70" y1="194" x2="460" y2="194"/><line class="grid" x1="70" y1="298" x2="460" y2="298"/>
+      <line class="axis" x1="70" y1="370" x2="460" y2="370"/><line class="axis" x1="70" y1="70" x2="70" y2="370"/>
+      <line class="baseline-line" data-baseline-id="product-ttfb" x1="70" y1="107.2" x2="460" y2="107.2"/>
+      <text class="baseline-label" x="452" y="99" text-anchor="end">baseline 666.915 ms</text>
+      <polyline class="projection-ttfb" data-threshold-for="product-ttfb" points="70,107.2 135,163.0 200,209.9 265,249.2 330,282.1 395,309.8 460,333.0"/>
+      <text class="threshold-label" data-threshold-label-for="product-ttfb" x="452" y="350" text-anchor="end">round 6 threshold 232.617 ms</text>
+      <circle class="projection-dot-ttfb" cx="70" cy="107.2" r="5"/><circle class="projection-dot-ttfb" cx="135" cy="163.0" r="5"/><circle class="projection-dot-ttfb" cx="200" cy="209.9" r="5"/><circle class="projection-dot-ttfb" cx="265" cy="249.2" r="5"/><circle class="projection-dot-ttfb" cx="330" cy="282.1" r="5"/><circle class="projection-dot-ttfb" cx="395" cy="309.8" r="5"/><circle class="projection-dot-ttfb" cx="460" cy="333.0" r="5"/>
+      <text class="fringe-label" x="82" y="355">SIGNIFICANT-IMPROVEMENT FRINGE</text>
+      <text class="axis-label" x="58" y="94" text-anchor="end">700</text><text class="axis-label" x="58" y="198" text-anchor="end">500</text><text class="axis-label" x="58" y="302" text-anchor="end">300</text>
+
+      <path class="projection-fringe-speed" data-improvement-fringe-for="product-speed" d="M552 330.5 L617 306.4 L682 278.5 L747 246.1 L812 208.4 L877 164.7 L942 113.9 L942 70 L552 70 Z"/>
+      <line class="grid" x1="552" y1="90" x2="942" y2="90"/><line class="grid" x1="552" y1="220" x2="942" y2="220"/><line class="grid" x1="552" y1="350" x2="942" y2="350"/>
+      <line class="axis" x1="552" y1="370" x2="942" y2="370"/><line class="axis" x1="552" y1="70" x2="552" y2="370"/>
+      <line class="baseline-line" data-baseline-id="product-speed" x1="552" y1="330.5" x2="942" y2="330.5"/>
+      <text class="baseline-label" x="560" y="322">baseline 1.725 Mbps</text>
+      <polyline class="projection-speed" data-threshold-for="product-speed" points="552,330.5 617,306.4 682,278.5 747,246.1 812,208.4 877,164.7 942,113.9"/>
+      <text class="threshold-label" data-threshold-label-for="product-speed" x="934" y="104" text-anchor="end">round 6 threshold 4.224 Mbps</text>
+      <circle class="projection-dot-speed" cx="552" cy="330.5" r="5"/><circle class="projection-dot-speed" cx="617" cy="306.4" r="5"/><circle class="projection-dot-speed" cx="682" cy="278.5" r="5"/><circle class="projection-dot-speed" cx="747" cy="246.1" r="5"/><circle class="projection-dot-speed" cx="812" cy="208.4" r="5"/><circle class="projection-dot-speed" cx="877" cy="164.7" r="5"/><circle class="projection-dot-speed" cx="942" cy="113.9" r="5"/>
+      <text class="fringe-label" x="566" y="86">SIGNIFICANT-IMPROVEMENT FRINGE</text>
+      <text class="axis-label" x="540" y="94" text-anchor="end">4.5</text><text class="axis-label" x="540" y="224" text-anchor="end">3.0</text><text class="axis-label" x="540" y="354" text-anchor="end">1.5</text>
+
+      <text class="axis-label" x="70" y="397" text-anchor="middle">base</text><text class="axis-label" x="135" y="397" text-anchor="middle">R1</text><text class="axis-label" x="200" y="397" text-anchor="middle">R2</text><text class="axis-label" x="265" y="397" text-anchor="middle">R3</text><text class="axis-label" x="330" y="397" text-anchor="middle">R4</text><text class="axis-label" x="395" y="397" text-anchor="middle">R5</text><text class="axis-label" x="460" y="397" text-anchor="middle">R6</text>
+      <text class="axis-label" x="552" y="397" text-anchor="middle">base</text><text class="axis-label" x="617" y="397" text-anchor="middle">R1</text><text class="axis-label" x="682" y="397" text-anchor="middle">R2</text><text class="axis-label" x="747" y="397" text-anchor="middle">R3</text><text class="axis-label" x="812" y="397" text-anchor="middle">R4</text><text class="axis-label" x="877" y="397" text-anchor="middle">R5</text><text class="axis-label" x="942" y="397" text-anchor="middle">R6</text>
+      <text class="axis-title" x="500" y="434" text-anchor="middle">successive competition round · exact 16.1% modeled improvement from the prior round</text>
+    </svg>
+    <div class="legend"><span><i style="background:#17a8c2"></i>projected p95 TTFB threshold</span><span><i style="background:#14815d"></i>projected p50 throughput threshold</span><span><i style="background:#143f73"></i>measured starting baseline</span><span><i style="background:#b8e2cd"></i>significant-improvement fringe</span></div>
+    <div class="metrics">
+      <div class="metric"><strong>666.915 → 232.617 ms</strong><span>projected p95 TTFB · 65.120% cumulative reduction</span></div>
+      <div class="metric"><strong>1.725 → 4.224 Mbps</strong><span>projected p50 large-transfer speed · 2.449× baseline</span></div>
+      <div class="metric"><strong>×0.839 / round</strong><span>TTFB target at the exact lower-is-better margin</span></div>
+      <div class="metric"><strong>×1.161 / round</strong><span>throughput modeling assumption at the same relative margin</span></div>
+    </div>
+    <div class="notice">Projection, not a performance promise: the measured starting values are authenticated, but future improvements are hypothetical. The competition takeover decision is based on failure-charged p95 total latency with G1–G6, not independent TTFB or throughput thresholds; the throughput curve assumes the same 16.1% relative gain for illustration.</div>
+  </section>
+
+  <section id="readiness">
+    <div class="section-head">
+      <div><div class="section-index">07 · COMPETITION STATUS</div><h2>The local technical launch chain is sealed</h2><p>Source identity, frontier selection, baseline calibration, measurement protocol, reference ordering, containment, API/miner package, production staging, calibration documentation, and final reporting all pass the fail-closed completion audit.</p></div>
+      <div class="section-kpi">10 / 10<small>required checks passed</small></div>
+    </div>
+    <svg viewBox="0 0 1000 330" role="img" aria-label="Ten-stage authenticated competition readiness chain">
+      <text class="visual-title" x="40" y="42">AUTHENTICATED LOCAL TECHNICAL LAUNCH CHAIN</text>
+      <g>
+        <rect class="box-green" x="38" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="65" cy="101" r="13"/><path class="check-mark" d="M58 101l5 5 10-12"/><text class="box-title" x="88" y="105">SOURCE + SCALE</text><text class="small" x="58" y="137">identity · frontier · p1800</text>
+        <rect class="box-green" x="226" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="253" cy="101" r="13"/><path class="check-mark" d="M246 101l5 5 10-12"/><text class="box-title" x="276" y="105">BASELINE</text><text class="small" x="246" y="137">12 pairs · R=9 · 16.1%</text>
+        <rect class="box-green" x="414" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="441" cy="101" r="13"/><path class="check-mark" d="M434 101l5 5 10-12"/><text class="box-title" x="464" y="105">REFERENCES</text><text class="small" x="434" y="137">hidden seeds · 4/5 order</text>
+        <rect class="box-green" x="602" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="629" cy="101" r="13"/><path class="check-mark" d="M622 101l5 5 10-12"/><text class="box-title" x="652" y="105">SECURITY</text><text class="small" x="622" y="137">15/15 · bomb cleanup</text>
+        <rect class="box-green" x="790" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="817" cy="101" r="13"/><path class="check-mark" d="M810 101l5 5 10-12"/><text class="box-title" x="840" y="105">STAGING</text><text class="small" x="810" y="137">generate → reveal · 7/7</text>
+      </g>
+      <rect class="box-blue" x="38" y="190" width="922" height="86" rx="16"/><text class="box-title" x="66" y="220">READY FOR OPERATOR DEPLOYMENT</text><text class="box-value" x="66" y="250">FIFO · cache · failover · immutable artifacts · default-deny network · config/local + vault/local only</text>
+      <text class="axis-label" x="40" y="309">External Apex registry activation, partner acceptance, production credentials, and organizational on-call ownership remain external/operator follow-through.</text>
+    </svg>
+    <div class="metrics">
+      <div class="metric"><strong>10 / 10</strong><span>local required completion checks passed</span></div>
+      <div class="metric"><strong>7 / 7</strong><span>production readiness records sealed</span></div>
+      <div class="metric"><strong>15 / 15</strong><span>security assertions true in terminal staging</span></div>
+      <div class="metric"><strong>0 failures</strong><span>required pending and failed audit checks</span></div>
+    </div>
+  </section>
+
+  <footer>
+    Generated from the authenticated finalization chain sealed 2026-08-28. Evaluator source <code>46515d82fe98ff666c61b2b5bb1d34a89cf4dad8</code>; evaluator image <code>sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c</code>; completion audit <code>f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423</code>. Lower raw scores are better.
+  </footer>
+</main>
+</body>
+</html>

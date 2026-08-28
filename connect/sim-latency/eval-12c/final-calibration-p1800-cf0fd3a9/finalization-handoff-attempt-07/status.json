@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-finalization-handoff",
+  "attempt": 7,
+  "supersedes_failed_attempt": 6,
+  "state": "complete",
+  "stage": "complete",
+  "recorded_at": "2026-08-28T11:26:45Z",
+  "exit_code": 0,
+  "boot_id": "34760d1b-a0b6-46a0-b8c1-264abd1affba",
+  "script_sha256": "5422c4e808ee09d2e073017b93bdde5bcfc745990f3e20b365dd826b09a1b269",
+  "prior_status_sha256": "a826b65299b61b67595e06c42b3be99452cab45568673a5207ea1fd3726f0ffc",
+  "prior_audit_sha256": "a2d2fc0673b9e275a7cc112a238b5119ca5ea1a5cacc0ff2dbba5904f5b519f7",
+  "remediation_sha256": "18c2bbbfcddb7b7540ced09dbcd61d1283a4264e6407b34391eccb8a6666cafa",
+  "auditor_sha256": "e8f1c530b499ca79f9d17d0686075952722b3e4f476f1ac9ed8aa512010a0a98",
+  "renderer_sha256": "0b4cf2968b4d2ac2333b1984beb05c32b53119af28e6b1c79959f21386006e1a",
+  "evidence_sha256": {
+    "production_readiness": "bc56f7b02a1cfcfb5cd91eca0e885bc6aedb2b216d336bbb7b1f1288cd7e2f2d",
+    "final_report": "f81211d11aec2dca7705a941c1481b75c7c7f35ae847f986b168579c3ce76f52",
+    "final_preview": "0529ab0059dbac235667e6fca417b6aba3b8ac200fbb1fda89b95d067d6d912c",
+    "calibration_document": "dc473cecc91b9eea993fd3e43e2230e0a235bfc30771e6a9c65de2db284b2090",
+    "final_report_evidence": "ce6b3daa416c70b388e991b1f0a521e296699b6be91f44afe78d87c5ef653696",
+    "final_audit": "f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423"
+  }
+}
