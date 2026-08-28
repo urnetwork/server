@@ -15,13 +15,21 @@ import (
 )
 
 type testDashboard struct {
-	Uid        string   `json:"uid"`
-	Title      string   `json:"title"`
-	Tags       []string `json:"tags"`
+	Uid        string              `json:"uid"`
+	Title      string              `json:"title"`
+	Tags       []string            `json:"tags"`
+	Links      []testDashboardLink `json:"links"`
 	Templating struct {
 		List []any `json:"list"`
 	} `json:"templating"`
 	Panels []testPanel `json:"panels"`
+}
+
+type testDashboardLink struct {
+	Title       string `json:"title"`
+	Url         string `json:"url"`
+	KeepTime    bool   `json:"keepTime"`
+	IncludeVars bool   `json:"includeVars"`
 }
 
 type testPanel struct {
@@ -138,6 +146,26 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 			t.Errorf("public dashboard %s uses template variables, which Grafana public dashboards do not support", entry.Name())
 		}
 	}
+}
+
+func TestServiceLogsLinksToLogsDrilldown(t *testing.T) {
+	dashboard := readTestDashboard(t, "service-logs.json")
+	for _, link := range dashboard.Links {
+		if link.Title != "Logs Drilldown" {
+			continue
+		}
+		if link.Url != "/a/grafana-lokiexplore-app/explore?var-ds=warp-loki" {
+			t.Fatalf("Logs Drilldown URL = %q", link.Url)
+		}
+		if !link.KeepTime {
+			t.Fatal("Logs Drilldown link must preserve the dashboard time range")
+		}
+		if link.IncludeVars {
+			t.Fatal("service dashboard variables are not Logs Drilldown variables")
+		}
+		return
+	}
+	t.Fatal("service logs dashboard is missing its Logs Drilldown link")
 }
 
 func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
