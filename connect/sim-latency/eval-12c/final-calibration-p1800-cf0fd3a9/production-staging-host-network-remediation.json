@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-staging-host-network-remediation",
+  "generated_at": "2026-08-28T01:11:52Z",
+  "passed": true,
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+  "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "expected_host_qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+  "failure": {
+    "retained_attempt": "production-readiness/.staging-round-attempt-05",
+    "worker_log_sha256": "5ae3336616f7f203d026823cd0d0a9f51ca758e4818c3b512047d48eded87c11",
+    "stack_log_sha256": "ef9f87fb506cd4b78ac8771881c89a86b24c3b1897dbc51134c9f2b41dcb98a9",
+    "provision_log_sha256": "1610531f6a408cd6e3b0c0a6eb423cf29284d9f7ae2b088a8712374d91b9e137",
+    "observed_host_qualification_sha256": "983eedd15d0cb19135060e6601c6c4ac8c17da6aa56f6e5c620ce300cc9b902d",
+    "round_generated": false,
+    "submission_created": false,
+    "benchmark_started": false
+  },
+  "root_cause": {
+    "summary": "A previously force-killed local backing-service log wrapper could not execute run-local.sh cleanup, leaving its transient host network tuning active. Starting the same helper would also tune those values before the worker host check.",
+    "changed_qualification_facts": {
+      "net.core.somaxconn": {
+        "frozen": 4096,
+        "observed": 65535
+      },
+      "net.ipv4.ip_local_port_range": {
+        "frozen": "32768 60999",
+        "observed": "10240 65535"
+      }
+    },
+    "exact_hash_reproduction": true,
+    "other_restored_local_tuning": {
+      "net.ipv4.tcp_max_syn_backlog": {
+        "frozen": 4096,
+        "observed": 65535
+      },
+      "net.core.netdev_max_backlog": {
+        "frozen": 1000,
+        "observed": 65535
+      },
+      "net.netfilter.nf_conntrack_max": {
+        "frozen": 262144,
+        "observed": 1048576
+      }
+    }
+  },
+  "remediation": {
+    "production_staging_script_sha256": "39f60971ef29d44eb2336882070f6fb69f0aebeeb531f7c0fc45bea42dd0a530",
+    "service_gate_script_sha256": "ccdfd2a19fefd7338f55ba5f15b7dd7735ba7ad2bfa30a924bc02a059d0169a2",
+    "local_stack_targets_frozen_values": true,
+    "preflight_rejects_nonfrozen_values": true,
+    "cleanup_restores_only_recognized_local_tuned_values": true,
+    "cleanup_refuses_external_values": true,
+    "conntrack_lowering_checks_live_entry_count": true
+  },
+  "validation": {
+    "production_staging_bash_parse": true,
+    "service_gate_bash_parse": true,
+    "production_staging_static_self_test": true,
+    "service_gate_static_self_test": true,
+    "production_staging_root_preflight": true,
+    "host_self_check_clean_runs": 3,
+    "host_self_check_report_sha256": "90f663d9ec73cafb5f3a382e63adaa568795a63ad0a2cf75d63994e24d4794a1",
+    "host_self_check_reports_byte_identical": true,
+    "host_self_check_all_gates_passed": true
+  },
+  "retained_invariants": {
+    "measurement_commit_unchanged": true,
+    "source_lock_unchanged": true,
+    "control_plane_commit_unchanged": true,
+    "evaluator_image_unchanged": true,
+    "simulator_and_scorer_unchanged": true,
+    "scale_and_replicate_count_unchanged": true,
+    "baseline_and_takeover_threshold_unchanged": true,
+    "hidden_seed_evidence_unchanged": true,
+    "reference_patch_decision_unchanged": true,
+    "local_only_secret_mount_policy_unchanged": true
+  }
+}

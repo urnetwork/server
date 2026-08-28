@@ -21,6 +21,17 @@ readonly BOOT_ID=34760d1b-a0b6-46a0-b8c1-264abd1affba
 readonly SERVICE_IP=10.213.0.1
 readonly MANAGEMENT_CPUS=20,22
 readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+readonly FROZEN_EPHEMERAL_PORT_LOW=32768
+readonly FROZEN_EPHEMERAL_PORT_HIGH=60999
+readonly FROZEN_SOMAXCONN=4096
+readonly FROZEN_SYN_BACKLOG=4096
+readonly FROZEN_NETDEV_BACKLOG=1000
+readonly FROZEN_CONNTRACK_MAX=262144
+readonly LOCAL_TUNED_EPHEMERAL_RANGE="10240 65535"
+readonly LOCAL_TUNED_SOMAXCONN=65535
+readonly LOCAL_TUNED_SYN_BACKLOG=65535
+readonly LOCAL_TUNED_NETDEV_BACKLOG=65535
+readonly LOCAL_TUNED_CONNTRACK_MAX=1048576
 
 stack_pid=""
 stack_stopped=false
@@ -31,6 +42,91 @@ log() { printf '[service-backed-gate] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+
+local_stack_env() {
+    env \
+        WARP_ENV=local \
+        WARP_CONFIG_HOME=/home/by/urnetwork/config \
+        WARP_VAULT_HOME=/home/by/urnetwork/vault \
+        BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com \
+        BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com \
+        LOCAL_HOST_IP="$SERVICE_IP" \
+        LOCAL_EPHEMERAL_PORT_LOW="$FROZEN_EPHEMERAL_PORT_LOW" \
+        LOCAL_EPHEMERAL_PORT_HIGH="$FROZEN_EPHEMERAL_PORT_HIGH" \
+        LOCAL_TCP_LISTEN_BACKLOG="$FROZEN_SOMAXCONN" \
+        LOCAL_NETDEV_MAX_BACKLOG="$FROZEN_NETDEV_BACKLOG" \
+        LOCAL_NF_CONNTRACK_MAX="$FROZEN_CONNTRACK_MAX" \
+        "$@"
+}
+
+ephemeral_port_range() {
+    local low high
+    read -r low high < /proc/sys/net/ipv4/ip_local_port_range || return 1
+    printf '%s %s\n' "$low" "$high"
+}
+
+network_restore_action() {
+    local current="$1" frozen="$2" locally_tuned="$3"
+    if [ "$current" = "$frozen" ]; then
+        printf 'unchanged\n'
+    elif [ "$current" = "$locally_tuned" ]; then
+        printf 'restore\n'
+    else
+        return 1
+    fi
+}
+
+host_network_controls_match_frozen() {
+    [ "$(ephemeral_port_range)" = "$FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH" ] &&
+        [ "$(sysctl -n net.core.somaxconn)" = "$FROZEN_SOMAXCONN" ] &&
+        [ "$(sysctl -n net.ipv4.tcp_max_syn_backlog)" = "$FROZEN_SYN_BACKLOG" ] &&
+        [ "$(sysctl -n net.core.netdev_max_backlog)" = "$FROZEN_NETDEV_BACKLOG" ] &&
+        [ "$(sysctl -n net.netfilter.nf_conntrack_max)" = "$FROZEN_CONNTRACK_MAX" ]
+}
+
+restore_owned_scalar_network_control() {
+    local key="$1" frozen="$2" locally_tuned="$3" current action count
+    current="$(sysctl -n "$key")" || return 1
+    if ! action="$(network_restore_action "$current" "$frozen" "$locally_tuned")"; then
+        log "refusing to overwrite externally changed $key=$current"
+        return 1
+    fi
+    [ "$action" = restore ] || return 0
+    if [ "$key" = net.netfilter.nf_conntrack_max ]; then
+        count="$(sysctl -n net.netfilter.nf_conntrack_count)" || return 1
+        if [ "$count" -gt "$frozen" ]; then
+            log "cannot restore $key to $frozen while $count entries remain"
+            return 1
+        fi
+    fi
+    log "restoring recognized local-stack setting $key: $current -> $frozen"
+    sudo -n sysctl -q -w "$key=$frozen" || return 1
+    [ "$(sysctl -n "$key")" = "$frozen" ]
+}
+
+restore_owned_host_network_controls() {
+    local current action rc=0
+    current="$(ephemeral_port_range)" || return 1
+    if ! action="$(network_restore_action "$current" \
+        "$FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH" \
+        "$LOCAL_TUNED_EPHEMERAL_RANGE")"; then
+        log "refusing to overwrite externally changed net.ipv4.ip_local_port_range=$current"
+        rc=1
+    elif [ "$action" = restore ]; then
+        log "restoring recognized local-stack setting net.ipv4.ip_local_port_range: $current -> $FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH"
+        sudo -n sysctl -q -w "net.ipv4.ip_local_port_range=$FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH" || rc=1
+    fi
+    restore_owned_scalar_network_control net.core.somaxconn \
+        "$FROZEN_SOMAXCONN" "$LOCAL_TUNED_SOMAXCONN" || rc=1
+    restore_owned_scalar_network_control net.ipv4.tcp_max_syn_backlog \
+        "$FROZEN_SYN_BACKLOG" "$LOCAL_TUNED_SYN_BACKLOG" || rc=1
+    restore_owned_scalar_network_control net.core.netdev_max_backlog \
+        "$FROZEN_NETDEV_BACKLOG" "$LOCAL_TUNED_NETDEV_BACKLOG" || rc=1
+    restore_owned_scalar_network_control net.netfilter.nf_conntrack_max \
+        "$FROZEN_CONNTRACK_MAX" "$LOCAL_TUNED_CONNTRACK_MAX" || rc=1
+    host_network_controls_match_frozen || rc=1
+    return "$rc"
+}
 
 remove_managed_hosts_block() {
     local marker_begin marker_end temporary
@@ -83,6 +179,7 @@ stop_stack() {
     fi
     sudo -n ip address del "$SERVICE_IP/32" dev lo >/dev/null 2>&1 || true
     remove_managed_hosts_block || rc=1
+    restore_owned_host_network_controls || rc=1
     [ -z "$(sudo -n docker ps -aq --filter 'name=^/urnetwork-local-pg$')" ] || rc=1
     [ -z "$(sudo -n docker ps -aq --filter 'name=^/urnetwork-local-redis$')" ] || rc=1
     ! sudo -n docker network inspect urnetwork-local >/dev/null 2>&1 || rc=1
@@ -109,7 +206,7 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for command in awk chmod chown cp date docker env getent git go install ip jq kill mktemp mv readlink rg rm seq sha256sum sleep stat sudo systemctl taskset; do
+for command in awk chmod chown cp date docker env getent git go install ip jq kill mktemp mv readlink rg rm seq sha256sum sleep stat sudo sysctl systemctl taskset; do
     require_command "$command"
 done
 
@@ -124,7 +221,13 @@ case "${1:-}" in
             die "service evidence does not cross the privileged boundary by exact install"
         ! rg -q '\}\x27 >"\$OUTPUT"' "$SCRIPT_PATH" ||
             die "service gate writes directly through the privileged readiness boundary"
-        log "self-test passed: root-only readiness evidence uses exact privileged installs"
+        local_environment="$(local_stack_env sh -c 'printf "%s|%s|%s|%s|%s" "$LOCAL_EPHEMERAL_PORT_LOW" "$LOCAL_EPHEMERAL_PORT_HIGH" "$LOCAL_TCP_LISTEN_BACKLOG" "$LOCAL_NETDEV_MAX_BACKLOG" "$LOCAL_NF_CONNTRACK_MAX"')"
+        expected_environment="$FROZEN_EPHEMERAL_PORT_LOW|$FROZEN_EPHEMERAL_PORT_HIGH|$FROZEN_SOMAXCONN|$FROZEN_NETDEV_BACKLOG|$FROZEN_CONNTRACK_MAX"
+        [ "$local_environment" = "$expected_environment" ] || die "local stack changed the frozen network-control contract"
+        [ "$(network_restore_action 4096 4096 65535)" = unchanged ] || die "frozen network-control restore decision"
+        [ "$(network_restore_action 65535 4096 65535)" = restore ] || die "owned network-control restore decision"
+        ! network_restore_action 8192 4096 65535 >/dev/null || die "external network-control change was accepted"
+        log "self-test passed: privileged installs and frozen network-control cleanup"
         exit 0
         ;;
     '') [ "$#" -eq 0 ] || die "unexpected arguments" ;;
@@ -154,6 +257,7 @@ done
 ! ip -brief address show dev lo | rg -q "(^|[[:space:]])$SERVICE_IP/32([[:space:]]|$)" || die "local service alias already exists"
 ! rg -q --fixed-strings '# >>> urnetwork local-env (server/local/run-local.sh) >>>' /etc/hosts ||
     die "managed local-service hosts block already exists"
+host_network_controls_match_frozen || die "host network controls differ from the frozen qualification"
 
 if awk '$0 !~ /^[[:space:]]*#/ && $1 == "127.0.0.1" && ($0 ~ /local-pg\.bringyour\.com/ || $0 ~ /local-redis\.bringyour\.com/) {found=1} END {exit !found}' /etc/hosts; then
     die "/etc/hosts contains a forbidden localhost database mapping"
@@ -163,15 +267,9 @@ sudo -n install -d -o root -g root -m 0700 "$OUTPUT_ROOT"
 LOG_ROOT="$(mktemp -d "$ROOT/control-plane-release/.service-backed-gate.XXXXXXXX")"
 log "retained service-gate workspace: $LOG_ROOT"
 
-log "starting the dedicated local PostgreSQL/Redis stack"
+log "starting the dedicated local PostgreSQL/Redis stack with frozen host network controls"
 stack_armed=true
-env \
-    WARP_ENV=local \
-    WARP_CONFIG_HOME=/home/by/urnetwork/config \
-    WARP_VAULT_HOME=/home/by/urnetwork/vault \
-    BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com \
-    BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com \
-    LOCAL_HOST_IP="$SERVICE_IP" \
+local_stack_env \
     "$SERVER/local/run-local.sh" >"$LOG_ROOT/stack.log" 2>&1 &
 stack_pid=$!
 

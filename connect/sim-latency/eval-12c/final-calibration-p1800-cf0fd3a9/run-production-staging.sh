@@ -62,6 +62,17 @@ readonly SERVICE_IP=10.213.0.1
 readonly API_PORT=18080
 readonly API_BASE="http://127.0.0.1:$API_PORT/competition"
 readonly OPERATIONAL_LOCK=/run/urnetwork/competition-operational.lock
+readonly FROZEN_EPHEMERAL_PORT_LOW=32768
+readonly FROZEN_EPHEMERAL_PORT_HIGH=60999
+readonly FROZEN_SOMAXCONN=4096
+readonly FROZEN_SYN_BACKLOG=4096
+readonly FROZEN_NETDEV_BACKLOG=1000
+readonly FROZEN_CONNTRACK_MAX=262144
+readonly LOCAL_TUNED_EPHEMERAL_RANGE="10240 65535"
+readonly LOCAL_TUNED_SOMAXCONN=65535
+readonly LOCAL_TUNED_SYN_BACKLOG=65535
+readonly LOCAL_TUNED_NETDEV_BACKLOG=65535
+readonly LOCAL_TUNED_CONNTRACK_MAX=1048576
 
 stack_pid=""
 api_pid=""
@@ -77,6 +88,91 @@ log() { printf '[production-staging] %s %s\n' "$(date -u '+%FT%TZ')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+
+local_stack_env() {
+    env \
+        WARP_ENV=local \
+        WARP_CONFIG_HOME=/home/by/urnetwork/config \
+        WARP_VAULT_HOME=/home/by/urnetwork/vault \
+        BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com \
+        BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com \
+        LOCAL_HOST_IP="$SERVICE_IP" \
+        LOCAL_EPHEMERAL_PORT_LOW="$FROZEN_EPHEMERAL_PORT_LOW" \
+        LOCAL_EPHEMERAL_PORT_HIGH="$FROZEN_EPHEMERAL_PORT_HIGH" \
+        LOCAL_TCP_LISTEN_BACKLOG="$FROZEN_SOMAXCONN" \
+        LOCAL_NETDEV_MAX_BACKLOG="$FROZEN_NETDEV_BACKLOG" \
+        LOCAL_NF_CONNTRACK_MAX="$FROZEN_CONNTRACK_MAX" \
+        "$@"
+}
+
+ephemeral_port_range() {
+    local low high
+    read -r low high < /proc/sys/net/ipv4/ip_local_port_range || return 1
+    printf '%s %s\n' "$low" "$high"
+}
+
+network_restore_action() {
+    local current="$1" frozen="$2" locally_tuned="$3"
+    if [ "$current" = "$frozen" ]; then
+        printf 'unchanged\n'
+    elif [ "$current" = "$locally_tuned" ]; then
+        printf 'restore\n'
+    else
+        return 1
+    fi
+}
+
+host_network_controls_match_frozen() {
+    [ "$(ephemeral_port_range)" = "$FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH" ] &&
+        [ "$(sysctl -n net.core.somaxconn)" = "$FROZEN_SOMAXCONN" ] &&
+        [ "$(sysctl -n net.ipv4.tcp_max_syn_backlog)" = "$FROZEN_SYN_BACKLOG" ] &&
+        [ "$(sysctl -n net.core.netdev_max_backlog)" = "$FROZEN_NETDEV_BACKLOG" ] &&
+        [ "$(sysctl -n net.netfilter.nf_conntrack_max)" = "$FROZEN_CONNTRACK_MAX" ]
+}
+
+restore_owned_scalar_network_control() {
+    local key="$1" frozen="$2" locally_tuned="$3" current action count
+    current="$(sysctl -n "$key")" || return 1
+    if ! action="$(network_restore_action "$current" "$frozen" "$locally_tuned")"; then
+        log "refusing to overwrite externally changed $key=$current"
+        return 1
+    fi
+    [ "$action" = restore ] || return 0
+    if [ "$key" = net.netfilter.nf_conntrack_max ]; then
+        count="$(sysctl -n net.netfilter.nf_conntrack_count)" || return 1
+        if [ "$count" -gt "$frozen" ]; then
+            log "cannot restore $key to $frozen while $count entries remain"
+            return 1
+        fi
+    fi
+    log "restoring recognized local-stack setting $key: $current -> $frozen"
+    sysctl -q -w "$key=$frozen" || return 1
+    [ "$(sysctl -n "$key")" = "$frozen" ]
+}
+
+restore_owned_host_network_controls() {
+    local current action rc=0
+    current="$(ephemeral_port_range)" || return 1
+    if ! action="$(network_restore_action "$current" \
+        "$FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH" \
+        "$LOCAL_TUNED_EPHEMERAL_RANGE")"; then
+        log "refusing to overwrite externally changed net.ipv4.ip_local_port_range=$current"
+        rc=1
+    elif [ "$action" = restore ]; then
+        log "restoring recognized local-stack setting net.ipv4.ip_local_port_range: $current -> $FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH"
+        sysctl -q -w "net.ipv4.ip_local_port_range=$FROZEN_EPHEMERAL_PORT_LOW $FROZEN_EPHEMERAL_PORT_HIGH" || rc=1
+    fi
+    restore_owned_scalar_network_control net.core.somaxconn \
+        "$FROZEN_SOMAXCONN" "$LOCAL_TUNED_SOMAXCONN" || rc=1
+    restore_owned_scalar_network_control net.ipv4.tcp_max_syn_backlog \
+        "$FROZEN_SYN_BACKLOG" "$LOCAL_TUNED_SYN_BACKLOG" || rc=1
+    restore_owned_scalar_network_control net.core.netdev_max_backlog \
+        "$FROZEN_NETDEV_BACKLOG" "$LOCAL_TUNED_NETDEV_BACKLOG" || rc=1
+    restore_owned_scalar_network_control net.netfilter.nf_conntrack_max \
+        "$FROZEN_CONNTRACK_MAX" "$LOCAL_TUNED_CONNTRACK_MAX" || rc=1
+    host_network_controls_match_frozen || rc=1
+    return "$rc"
+}
 
 stop_process() {
     local pid="$1" label="$2" unused
@@ -172,6 +268,7 @@ cleanup_runtime() {
     fi
     ip address del "$SERVICE_IP/32" dev lo >/dev/null 2>&1 || true
     remove_managed_hosts_block || rc=1
+    restore_owned_host_network_controls || rc=1
 
     [ -z "$(docker ps -aq --filter label=com.urnetwork.competition.job-id)" ] || rc=1
     [ -z "$(docker network ls -q --filter label=com.urnetwork.competition.job-id)" ] || rc=1
@@ -397,13 +494,21 @@ write_check() {
 }
 
 static_self_test() {
-    local child_pid environment expected probe_pid probe_root request unused
+    local action child_pid environment expected local_environment local_expected probe_pid probe_root request unused
     if rg -n '[[:space:]][+][[:space:]]{4}' "$0" >/dev/null; then
         die "patch-marker shell arguments remain in the staging driver"
     fi
     environment="$(runtime_env sh -c 'printf "%s|%s|%s|%s|%s" "$WARP_CONFIG_HOME" "$WARP_VAULT_HOME" "$WARP_BLOCK" "$BRINGYOUR_POSTGRES_HOSTNAME" "$WARP_VERSION"')"
     expected="$API_CONFIG|$API_VAULT|competition|local-pg.bringyour.com|0.0.0-competition-2ee4883f"
     [ "$environment" = "$expected" ] || die "control-plane runtime environment"
+    local_environment="$(local_stack_env sh -c 'printf "%s|%s|%s|%s|%s" "$LOCAL_EPHEMERAL_PORT_LOW" "$LOCAL_EPHEMERAL_PORT_HIGH" "$LOCAL_TCP_LISTEN_BACKLOG" "$LOCAL_NETDEV_MAX_BACKLOG" "$LOCAL_NF_CONNTRACK_MAX"')"
+    local_expected="$FROZEN_EPHEMERAL_PORT_LOW|$FROZEN_EPHEMERAL_PORT_HIGH|$FROZEN_SOMAXCONN|$FROZEN_NETDEV_BACKLOG|$FROZEN_CONNTRACK_MAX"
+    [ "$local_environment" = "$local_expected" ] || die "local stack changed the frozen network-control contract"
+    action="$(network_restore_action 4096 4096 65535)"
+    [ "$action" = unchanged ] || die "frozen network-control restore decision"
+    action="$(network_restore_action 65535 4096 65535)"
+    [ "$action" = restore ] || die "owned network-control restore decision"
+    ! network_restore_action 8192 4096 65535 >/dev/null || die "external network-control change was accepted"
     request="$(jq -cn --arg opens 2026-01-01T00:00:00Z \
         --arg closes 2026-01-01T01:00:00Z \
         --arg reveal 2026-01-01T02:00:00Z \
@@ -429,10 +534,10 @@ static_self_test() {
     kill -TERM "$probe_pid"
     wait "$probe_pid" 2>/dev/null || true
     rm -rf -- "$probe_root"
-    log "static self-test passed: continuations, environment, process ownership, and JSON construction"
+    log "static self-test passed: continuations, environments, network restoration, process ownership, and JSON construction"
 }
 
-for command in awk cat chmod cp curl date docker env find flock getent git id install ip jq kill mktemp mv openssl python3 readlink realpath rg rm runuser seq sh sha256sum sleep sort stat systemctl taskset xargs; do
+for command in awk cat chmod cp curl date docker env find flock getent git id install ip jq kill mktemp mv openssl python3 readlink realpath rg rm runuser seq sh sha256sum sleep sort stat sysctl systemctl taskset xargs; do
     require_command "$command"
 done
 case "${1:-}" in
@@ -557,6 +662,7 @@ done
 ! ip -brief address show dev lo | rg -q "(^|[[:space:]])$SERVICE_IP/32([[:space:]]|$)" || die "local service alias already exists"
 ! rg -q --fixed-strings '# >>> urnetwork local-env (server/local/run-local.sh) >>>' /etc/hosts ||
     die "managed local-service hosts block already exists"
+host_network_controls_match_frozen || die "host network controls differ from the frozen qualification"
 
 for binary in api competitionworker competitionrebaseline competitiondbinit; do
     path="$RELEASE/binaries/$binary"
@@ -597,15 +703,9 @@ done
 [ "$operator_token" != "$submit_a_token" ] && [ "$operator_token" != "$submit_b_token" ] &&
     [ "$submit_a_token" != "$submit_b_token" ] || die "credentials are not unique"
 
-log "starting dedicated PostgreSQL and Redis"
+log "starting dedicated PostgreSQL and Redis with frozen host network controls"
 runtime_armed=true
-env \
-    WARP_ENV=local \
-    WARP_CONFIG_HOME=/home/by/urnetwork/config \
-    WARP_VAULT_HOME=/home/by/urnetwork/vault \
-    BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com \
-    BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com \
-    LOCAL_HOST_IP="$SERVICE_IP" \
+local_stack_env \
     "$SERVER/local/run-local.sh" >"$STAGING/stack.log" 2>&1 &
 stack_pid=$!
 wait_stack
