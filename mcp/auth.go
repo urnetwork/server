@@ -209,12 +209,9 @@ func clientAddress(req *mcpsdk.CallToolRequest) string {
 		header = http.Header{}
 	}
 
-	// The fleet-standard attribution (session.ResolveClientAddressFromRequest):
-	// X-UR-Forwarded-For then X-Forwarded-For, honored only when the peer is
-	// an enumerated proxy. The truthful peer is X-UR-Remote-Addr, which the
-	// mcp middleware sets unconditionally from the connection (server.go) —
-	// a caller cannot spoof it, so it stands in for http.Request.RemoteAddr
-	// here, where tool handlers only see headers.
+	// The fleet-standard resolver accepts only X-UR-Forwarded-For. The truthful
+	// peer is X-UR-Remote-Addr, which middleware sets from the connection and
+	// which stands in for RemoteAddr because tool handlers see only headers.
 	httpReq := &http.Request{
 		RemoteAddr: header.Get("X-UR-Remote-Addr"),
 		Header:     header,

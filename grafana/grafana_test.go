@@ -208,6 +208,31 @@ func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
 	}
 }
 
+func TestSubtensorDashboardSeparatesArchiveAndLightnodeMetrics(t *testing.T) {
+	dashboard := readTestDashboard(t, "subtensor.json")
+	queries := dashboardExpressions(dashboard)
+	for _, query := range queries {
+		if strings.Contains(query, "substrate_") && !strings.Contains(query, `job=~"$node"`) {
+			t.Errorf("Subtensor query does not honor the archive/lightnode selector: %s", query)
+		}
+	}
+	raw, err := dashboardsFs.ReadFile("dashboards/subtensor.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	for _, required := range []string{
+		`"name": "node"`,
+		`subtensor(|-lightnode)`,
+		`max by (job)`,
+		`{{job}}`,
+	} {
+		if !strings.Contains(content, required) {
+			t.Errorf("Subtensor dashboard does not separate both node jobs: missing %s", required)
+		}
+	}
+}
+
 // the scalar operator network measurements (controller/stats_collector.go).
 // every taskworker publishes the same value, so a dashboard must read each
 // with max — never sum or avg — to select the measurement without replica

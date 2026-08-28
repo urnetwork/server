@@ -1036,12 +1036,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	connectedGauge.Add(1)
 	defer connectedGauge.Sub(1)
 
-	// The fleet-standard attribution (session.ResolveClientAddressFromRequest):
-	// X-UR-Forwarded-For then X-Forwarded-For from the warp lb, honored only
-	// when the peer is an enumerated proxy — so a direct connection to the
-	// service port can no longer choose its own address (and rate-limit
-	// bucket) by sending the header itself, which the previous unguarded
-	// header read here allowed.
+	// The fleet-standard resolver accepts only the header overwritten by Warp.
+	// Backend service ports must remain unreachable outside the ingress network.
 	clientAddress, resolveErr := session.ResolveClientAddressFromRequest(r)
 	if resolveErr != nil {
 		// unparseable remote address — keep the raw value; the parse below

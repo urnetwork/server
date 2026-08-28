@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-subtensor",
   "title": "urnetwork / subtensor",
-  "description": "Bittensor Subtensor archive-node health: chain progress and finality, sync state, peers, transaction pool, RPC sessions, caches, and host pressure.",
+  "description": "Bittensor Subtensor archive- and lightnode health: chain progress and finality, sync state, peers, transaction pool, RPC sessions, caches, and host pressure.",
   "tags": ["urnetwork", "subtensor", "bittensor", "infrastructure"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -14,7 +14,7 @@
         "label": "env",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-        "query": "label_values(substrate_block_height{job=\"subtensor\"}, env)",
+        "query": "label_values(substrate_block_height{job=~\"subtensor(|-lightnode)\"}, env)",
         "refresh": 2,
         "sort": 1
       },
@@ -23,7 +23,18 @@
         "label": "host",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-        "query": "label_values(substrate_block_height{env=\"$env\",job=\"subtensor\"}, host)",
+        "query": "label_values(substrate_block_height{env=\"$env\",job=~\"subtensor(|-lightnode)\"}, host)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      },
+      {
+        "name": "node",
+        "label": "node",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(substrate_block_height{env=\"$env\",host=~\"$host\",job=~\"subtensor(|-lightnode)\"}, job)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -34,7 +45,7 @@
         "label": "chain",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "warp-mimir"},
-        "query": "label_values(substrate_block_height{env=\"$env\",host=~\"$host\",job=\"subtensor\"}, chain)",
+        "query": "label_values(substrate_block_height{env=\"$env\",host=~\"$host\",job=~\"$node\"}, chain)",
         "refresh": 2,
         "sort": 1,
         "multi": true,
@@ -52,7 +63,7 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "locale"}, "overrides": []},
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"refId": "A", "expr": "max(substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\",status=\"best\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "max by (job) (substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\",status=\"best\"})", "legendFormat": "{{job}}", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 2,
@@ -63,18 +74,18 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 64}, {"color": "red", "value": 256}]}}, "overrides": []},
       "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"refId": "A", "expr": "max(substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\",status=\"best\"}) - max(substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\",status=\"finalized\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "max by (job) (substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\",status=\"best\"}) - max by (job) (substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\",status=\"finalized\"})", "legendFormat": "{{job}}", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 3,
       "title": "connected peers",
-      "description": "Libp2p/litep2p peers. Zero means the archive cannot advance.",
+      "description": "Libp2p/litep2p peers. Zero means the selected node cannot advance.",
       "type": "stat",
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 1}, {"color": "green", "value": 5}]}}, "overrides": []},
       "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"refId": "A", "expr": "max(substrate_sub_libp2p_peers_count{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "max by (job) (substrate_sub_libp2p_peers_count{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}}", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 4,
@@ -85,7 +96,7 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "short", "mappings": [{"type": "value", "options": {"0": {"text": "converged", "color": "green"}, "1": {"text": "syncing", "color": "orange"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}, "overrides": []},
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"refId": "A", "expr": "max(substrate_sub_libp2p_is_major_syncing{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "max by (job) (substrate_sub_libp2p_is_major_syncing{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}}", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 5,
@@ -96,7 +107,7 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "locale", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 8, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [{"refId": "A", "expr": "max by (host, status) (substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "legendFormat": "{{host}} {{status}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "max by (job, host, status) (substrate_block_height{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}} {{host}} {{status}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 6,
@@ -108,8 +119,8 @@
       "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "min"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
-        {"refId": "A", "expr": "max by (host) (substrate_sub_libp2p_peers_count{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "legendFormat": "{{host}} connected", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
-        {"refId": "B", "expr": "max by (host) (substrate_sub_libp2p_peerset_num_discovered{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "legendFormat": "{{host}} discovered", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+        {"refId": "A", "expr": "max by (job, host) (substrate_sub_libp2p_peers_count{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}} {{host}} connected", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "max by (job, host) (substrate_sub_libp2p_peerset_num_discovered{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}} {{host}} discovered", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
       ]
     },
     {
@@ -121,7 +132,7 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "Bps", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [{"refId": "A", "expr": "sum by (host, direction) (rate(substrate_sub_libp2p_network_bytes_total{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"}[$__rate_interval]))", "legendFormat": "{{host}} {{direction}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "sum by (job, host, direction) (rate(substrate_sub_libp2p_network_bytes_total{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"}[$__rate_interval]))", "legendFormat": "{{job}} {{host}} {{direction}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 8,
@@ -132,7 +143,7 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [{"refId": "A", "expr": "max by (host) (substrate_ready_transactions_number{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "legendFormat": "{{host}} ready", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "max by (job, host) (substrate_ready_transactions_number{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}} {{host}} ready", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 9,
@@ -143,7 +154,7 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
-      "targets": [{"refId": "A", "expr": "sum by (host) (substrate_rpc_sessions_opened{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"}) - sum by (host) (substrate_rpc_sessions_closed{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "legendFormat": "{{host}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "sum by (job, host) (substrate_rpc_sessions_opened{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"}) - sum by (job, host) (substrate_rpc_sessions_closed{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}} {{host}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 10,
@@ -155,14 +166,14 @@
       "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
-        {"refId": "A", "expr": "sum by (host) (substrate_state_cache_bytes{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "legendFormat": "{{host}} state", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
-        {"refId": "B", "expr": "sum by (host) (substrate_database_cache_bytes{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=\"subtensor\"})", "legendFormat": "{{host}} database", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+        {"refId": "A", "expr": "sum by (job, host) (substrate_state_cache_bytes{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}} {{host}} state", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum by (job, host) (substrate_database_cache_bytes{env=\"$env\",host=~\"$host\",chain=~\"$chain\",job=~\"$node\"})", "legendFormat": "{{job}} {{host}} database", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
       ]
     },
     {
       "id": 11,
-      "title": "archive disk used",
-      "description": "Host root-filesystem consumption by the archive database under /data/subtensor.",
+      "title": "node data disk used",
+      "description": "Host root-filesystem consumption by the archive and lightnode databases.",
       "type": "timeseries",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},

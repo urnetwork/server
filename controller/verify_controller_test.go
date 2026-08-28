@@ -8,9 +8,7 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
-	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -137,134 +135,36 @@ func TestVerifySyntheticSeedId(t *testing.T) {
 	}
 }
 
-// TestVerifySourceIpPrecedence pins the source-ip precedence the whole /verify
-// subsystem's soundness rests on. Forwarded headers are honored only for an
-// explicitly trusted immediate peer; nginx also force-overwrites them at the
-// edge, giving attribution two independent boundaries.
-func TestVerifySourceIpPrecedence(t *testing.T) {
-	trusted := []netip.Prefix{netip.MustParsePrefix("10.9.9.9/32")}
-	newReq := func() *http.Request {
-		req := httptest.NewRequest("POST", "/verify", nil)
-		req.RemoteAddr = "10.9.9.9:5555"
-		return req
-	}
-	addr := func(req *http.Request) (string, error) {
-		return session.ResolveClientAddress(req, trusted)
-	}
-	mustAddr := func(req *http.Request) string {
-		address, err := addr(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return address
-	}
-
-	// 1. X-UR-Forwarded-For's ip:port wins over the bare form and its port
-	// companion, when the two headers name the SAME client. That is what a
-	// proxy setting both correctly sends, and it is the precedence /verify
-	// depends on: the port comes from the header that carries one.
-	req := newReq()
-	req.Header.Set("X-UR-Forwarded-For", "203.0.113.1:1111")
-	req.Header.Set("X-Forwarded-For", "203.0.113.1")
-	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := mustAddr(req); got != "203.0.113.1:1111" {
-		t.Fatalf("X-UR-Forwarded-For must win over the bare form of the same client, got %q", got)
-	}
-
-	// 1b. Two forwarding headers naming two DIFFERENT clients resolve to
-	// NEITHER -- they fall back to the immediate peer.
-	//
-	// This case used to assert that X-UR-Forwarded-For simply wins here. That
-	// was the forgery this precedence exists to prevent, wearing the other
-	// header name: a proxy overwrites the header IT sets and passes the
-	// client's other headers through untouched, so on any deployment whose
-	// proxy owns X-Forwarded-For (Caddy, ALB, CloudFront, Cloudflare) the
-	// client is the one that can set X-UR-Forwarded-For. Both ownership shapes
-	// exist in this project -- the warp load balancer force-overwrites
-	// X-UR-Forwarded-For, the beta Caddy front end has to strip it by hand --
-	// so neither header can be declared the authentic one, and /verify egress
-	// identity must not be a value the caller picked. See
-	// session.TestASecondForwardingHeaderCannotChooseTheBucket.
-	req = newReq()
-	req.Header.Set("X-UR-Forwarded-For", "203.0.113.1:1111")
+// Pins the source address used by verify trails and per-address limits.
+func TestVerifyUsesUrForwardedAddress(t *testing.T) {
+	req := httptest.NewRequest("POST", "/verify", nil)
+	req.RemoteAddr = "65.49.70.82:5555"
+	req.Header.Set("X-UR-Forwarded-For", "173.25.160.143:1111")
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := mustAddr(req); got != "10.9.9.9:5555" {
-		t.Fatalf(
-			"two forwarding headers named two different clients and /verify attributed "+
-				"the request to %q; neither can be shown to be the value the trusted proxy "+
-				"vouched for, so the only safe answer is the peer 10.9.9.9:5555",
-			got,
-		)
-	}
 
-	// 2. without X-UR-Forwarded-For: X-Forwarded-For + X-Forwarded-Source-Port
-	req = newReq()
+	clientAddress, err := session.ResolveClientAddress(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientAddress != "173.25.160.143:1111" {
+		t.Fatalf("verify resolved %q, want the UR ingress address", clientAddress)
+	}
+}
+
+// Prevents the removed alternate headers from changing verify attribution.
+func TestVerifyIgnoresLegacyForwardedAddress(t *testing.T) {
+	req := httptest.NewRequest("POST", "/verify", nil)
+	req.RemoteAddr = "65.49.70.82:5555"
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := mustAddr(req); got != "198.51.100.2:2222" {
-		t.Fatalf("X-Forwarded-For+port expected, got %q", got)
-	}
 
-	// 3. A trusted proxy sending X-Forwarded-For WITHOUT the source port is the
-	// ordinary case, not an error: stock nginx
-	// (proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for), ALB,
-	// CloudFront and Cloudflare all send a bare ip and no port header. It must
-	// resolve to the CLIENT.
-	//
-	// This case used to assert the opposite -- that a bare X-Forwarded-For is
-	// rejected -- on the reasoning that rejecting is safer than silently
-	// re-attributing the request to the proxy. The premise was right and the
-	// conclusion was wrong: the rejection is an ERROR, and router.wrap /
-	// router.wrapWithInput turn a session construction failure into HTTP 500 on
-	// every endpoint, so "reject" meant the api was down for any deployment
-	// that enumerated a normal proxy. Attribution is preserved by reading the
-	// client out of the header, which is what this now checks. The port is
-	// genuinely unknown, and 0 is how that is spelled; every /verify hash keys
-	// on the ip alone (model.ParseVerifyEgressIp, server.ClientIpHash).
-	req = newReq()
-	req.Header.Set("X-Forwarded-For", "198.51.100.2")
-	if got := mustAddr(req); got != "198.51.100.2:0" {
-		t.Fatalf("bare X-Forwarded-For from a trusted proxy resolved as %q, want 198.51.100.2:0", got)
+	clientAddress, err := session.ResolveClientAddress(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// 3b. The safety half the old assertion was protecting is unchanged: a
-	// header the service genuinely cannot read is never re-attributed to
-	// anything the caller chose. It falls back to the immediate peer -- the
-	// most restrictive answer available -- and the running service emits an
-	// operator report naming that peer (pinned in
-	// session.TestUnreadableForwardingHeaderFromATrustedPeerDegradesAndIsReported,
-	// which can reach the log seam from inside that package).
-	req = newReq()
-	req.Header.Set("X-Forwarded-For", "not-an-address")
-	if got := mustAddr(req); got != "10.9.9.9:5555" {
-		t.Fatalf("an unreadable forwarding header resolved as %q, want the peer 10.9.9.9:5555", got)
-	}
-
-	// 3c. And a chain is read as a chain: the entry the trusted hop appended,
-	// never the entry the client prepended.
-	req = newReq()
-	req.Header.Set("X-Forwarded-For", "6.6.6.6, 198.51.100.2")
-	if got := mustAddr(req); got != "198.51.100.2:0" {
-		t.Fatalf(
-			"a client behind the trusted proxy prepended X-Forwarded-For: 6.6.6.6 and "+
-				"/verify attributed the request to %q; it just chose its own egress "+
-				"identity",
-			got,
-		)
-	}
-
-	// 4. no forwarding headers → RemoteAddr
-	if got := mustAddr(newReq()); got != "10.9.9.9:5555" {
-		t.Fatalf("RemoteAddr fallback expected, got %q", got)
-	}
-
-	// 5. an untrusted direct caller cannot spoof either forwarding form.
-	req = newReq()
-	req.RemoteAddr = "198.18.0.4:4444"
-	req.Header.Set("X-UR-Forwarded-For", "203.0.113.99:1")
-	if got, err := session.ResolveClientAddress(req, trusted); err != nil || got != "198.18.0.4:4444" {
-		t.Fatalf("untrusted forwarding spoof resolved as %q, %v", got, err)
+	if clientAddress != "65.49.70.82:5555" {
+		t.Fatalf("legacy headers changed verify attribution to %q", clientAddress)
 	}
 }
 

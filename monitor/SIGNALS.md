@@ -86,6 +86,16 @@ A post-deploy P2P audit then found snow listening on 30333 but accepting zero
 inbound sessions because the site's upstream NAT did not expose the port.
 Section 17 distinguishes that public-path failure from host firewall,
 conntrack, DNS, and bootnode failures.
+Updated 2026-08-27 after a live api/connect/proxy audit caught four more split
+signals that green process checks concealed: a config-generation restart wave
+caused a 6x reconnect storm while every public front door still answered; a
+lazy `verify.yml` lookup made only `/verify/*` return 500 while `/hello` stayed
+200; PgBouncer client-write timeouts appeared while direct-postgres active
+load remained low; and crisp accepted public SYNs but sent its SYN-ACKs out the
+LAN NIC, so TCP-open probes disagreed with every application handshake. The
+same audit identified a payment-completion update whose indexed lookup still
+fans out to millions of contract rows per call. Sections 2.7, 2.10-2.11,
+4, 8.6-8.7, and 14.5 record the discriminators.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -347,6 +357,17 @@ GROUP BY 1 ORDER BY 1;
   churn-inflated median). Judge recovery against a pre-incident window; the
   probes fall back to the trailing-6h median whenever the hour median is
   >= 1.5x it.
+- CONFIG-GENERATION VARIANT (2026-08-27): compare binary AND config versions.
+  During a cross-service config rollout, `warpctl ls versions --sample` showed
+  old api/connect binaries reporting the new config generation while same-tag
+  containers had fresh `Up` times. New connects rose from 2.4-3.0k/min to
+  14.7k/min (6.2x the matching hour-ago minute), the disconnected-session
+  median lifetime fell 44.9s -> 14.3s, and 72,564 of 83,444 connections in the
+  current 10-minute window had already disconnected. Contract creation rose
+  to 33.1k/min and the open set to 292k because churn creates contracts; those
+  high-side values were NOT organic demand or proof of health. Use §8.6 to
+  distinguish this from a crash loop, then require the rate, lifetime, and open
+  set to recover after the last restart.
 
 ### 2.8 Provider-selection freshness — the score-cache staleness canary
 `FindProviders2` (the app's provider list) reads ONLY the redis
@@ -447,6 +468,68 @@ quality+speed caches decoded to 0, ForceMinimum held ~74.6k, and BOTH egress
 probe tables held 0 rows. The score writer had activated a fail-closed egress
 gate before the probe pipeline was populated. This signal, not 2.8 alone,
 localized the outage.
+
+### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
+`CompletePayment` stamps `transfer_contract.reap_time` for every contract in a
+payment's `transfer_escrow_sweep`. The lookup is indexed by `payment_id`, so an
+indexed plan can still be catastrophically expensive when one payment owns
+millions of contracts. Track the exact statement separately from the generic
+top-total-time list:
+```sql
+SELECT queryid, calls,
+       round(mean_exec_time::numeric, 1) AS mean_ms,
+       round(max_exec_time::numeric, 1) AS max_ms,
+       round(rows::numeric / NULLIF(calls, 0), 0) AS rows_per_call,
+       shared_blks_hit, shared_blks_read, shared_blks_dirtied,
+       shared_blks_written
+FROM pg_stat_statements
+WHERE queryid = -3312164664690273449;
+
+SELECT count(*) AS active,
+       max(clock_timestamp() - query_start) AS oldest
+FROM pg_stat_activity
+WHERE state = 'active' AND query_id = -3312164664690273449;
+```
+2026-08-27 signature since the pgss reset: 18 calls, 338,497ms mean,
+544,554ms max, 2,209,550 updated rows/call, 1.48B shared hits, and 54.7M
+dirtied blocks. One to three copies remained active for tens of seconds to
+minutes while the storage device ran in high-utilization write bursts.
+
+- WARN: one execution active >30s, or >=2 concurrent executions for two
+  samples. Include rows/call and storage/WAL signals; backend count alone
+  understates this load.
+- This is not the rare-value planner landmine (§2.3):
+  `transfer_escrow_sweep_payment_id` exists and is used to find the fan-out.
+  `ANALYZE` and larger PgBouncer pools do not reduce millions of updates.
+- Action: make retention stamping bounded/chunked or decouple it from the
+  synchronous payment transaction. During an incident, correlate it with
+  §2.6 growth and §2.11 pool-path timeouts; do not kill a payment transaction
+  without first proving retry/idempotency safety.
+
+### 2.11 PgBouncer client-write stall — pool path vs postgres load
+The application-side error
+`pgproto3.writeError=write failed: write tcp <app>:<ephemeral>-><pg>:6432: i/o timeout`
+is distinct from PgBouncer's `FATAL: query_wait_timeout`. The client could not
+write the request to the 6432 frontend before its socket deadline; the query
+may never have reached a postgres backend. A healthy direct-5432 snapshot can
+therefore coexist with real route failures.
+
+Diagnosis order:
+1. Sample `pg_stat_activity` through direct 5432. Low active count/no blockers
+   rules out a postgres CPU or lock wall but does NOT clear the pool path.
+2. On the db host, remember 6432 is nginx in front of the 32 PgBouncer shards
+   (6433-6464). Check `ss` listen/accept queues, nginx errors, every shard unit,
+   and `SHOW POOLS`/`SHOW STATS` on the shards rather than the intentionally
+   unused default `pgbouncer.service`.
+3. Group the timeout logs by route and app host. On 2026-08-27 they clustered
+   on `/stats/providers` plus one connect announce while direct pg remained
+   lightly active. The provider route compounds the pool pressure with query
+   ids `8120731601370473026` (hundreds of thousands of provider ids returned
+   per call) and `6264993620546911677` (~3.3s lifetime mean aggregate).
+4. A route-specific cluster means bound/cache/page that route's database work;
+   a fleet-wide cluster with full shard queues means pool-path saturation.
+   Raising the socket timeout only hides either failure and retains scarce
+   connections longer.
 
 ---
 
@@ -594,6 +677,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `panic: Missing host port for service port <port>` (LB startup) | The image's nginx config contains a logical listener absent from runtime `WARP_PORTS`; usually services.yml/image generation is newer than the systemd unit's baked `--portblocks`/`--forwardports`. The desired LB version may look deployed while the new container is Exited(2) and the old LB keeps serving. | Compare `systemctl cat`, container `WARP_PORTS`, and baked nginx listeners; regenerate and deploy units (§11.8), then require the new LB to stay `Up` before evaluating its behavior. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
+| `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
@@ -604,6 +688,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
 | `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, circle payment path) | The payout wallet cannot cover pending payouts (usdc on solana — mint EPjFWdd5...Dt1v in the error text). NOT an api failure: every AdvancePayment retry 400s until the wallet is funded, parking the tasks on backoff (decoded 2026-07-18 from the novel class — the full error text names the wallet id, its balance, and the required amount). | Finance/ops: fund the payout wallet (or pause payouts). Task-side symptoms clear on their own once funded and the backoff run_at arrives. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
+| `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved required resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-27, `/verify/keys` and `/verify/stats` returned 500 on every probe while `/hello` remained 200 because `verify.yml` was absent. | Compare the route's running config generation with the mounted vault files, add/deploy the required resource, and probe the affected route—not just `/hello`—on every active generation (§8.7). |
+| `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
+| `[netescrow]negative counter after <site>` | A Redis reservation mirror went below zero after settlement/release. The durable pg ledger says bytes were released that the mirror never reserved (lost create mirror or double release); the negative value overstates available balance until reconciliation. Any occurrence is a defect. | Run `bringyourctl contracts reconcile-net-escrow --dry-run`, group by `site` and balance, verify the recurring reconcile task, then repair the create/release ordering before applying reconciliation. |
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
 Extract (class, target ip:port, innermost app frame) as the alert identity;
@@ -886,11 +973,20 @@ Tier-1 (warn):
 | open-set-size | pg | 2.6 open-contract count | > 150k sustained 10 min |
 | stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, or any open-partial index reltuples=0 after analyze | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
+| connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
+| retention-fanout | pg | 2.10 active query id `-3312164664690273449` | one execution > 30s or >= 2 concurrent for 2 probes |
+| pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
 | missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` 5-minute rate vs its ~90/min background | > 500/min for 5 min |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
+| required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
+| source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
+| netescrow-negative | logs | `[netescrow]negative counter after` | any; payload includes site (never raw balance/contract ids) |
+| proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
+| policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
+| edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
 
 Every alert carries: identity (class+target+frame), rate, one sample, the
 matching playbook section (5.x), the ACTION line, and last control-plane
@@ -1025,6 +1121,91 @@ Observed 2026-07-19 22:53–22:55: edges 0/1/4 all logged
   pre-incident baseline within ~10 min of the final burst, old same-tag
   containers gone by their stop timeout, no residual page-tier tickets
   except known standing ones.
+
+### 8.6 Config-generation restart wave — binary version alone is incomplete
+
+Warp reports two independently useful identities:
+```bash
+warpctl ls versions main api beta g1 g2 g3 g4 --sample
+warpctl ls versions main connect beta g1 g2 g3 g4 --sample
+```
+Read both the `<service> versions` and `config versions` sections. A block can
+serve the old binary with the new config generation, and same-image containers
+can be recreated while a new binary canary is also present. The 2026-08-27
+signature was:
+
+- api beta/g1 served `2026.8.27+1030474020`; api g2-g4 and all sampled connect
+  blocks still served `2026.8.26+1029569170`;
+- every sampled block reported config `2026.8.27+1030474020`;
+- `docker ps` showed fresh same-old-image api/connect containers across hosts,
+  plus new-version beta/g1 canaries and clean `Exited (0)` drain ancestors;
+- new connects and contract creation jumped with those creation times (§2.7),
+  while `/hello` and the unauthenticated connect handshake remained available.
+
+This is neither proof the new binary is fully deployed nor a crash loop. Emit
+one control-plane event keyed by `(service, binary generation, config
+generation)` and annotate every rate change until all three converge:
+
+1. active public samples report the intended binary AND config generation;
+2. old/same-tag drain containers disappear on every reachable host;
+3. the reconnect rate/lifetime and open-contract set return to their
+   pre-rollout bands.
+
+An unreachable known host (for example edge-5 during this audit) belongs in
+the coverage field. Exclude it from denominators only when the operator has
+explicitly declared it offline; never silently turn an SSH failure into a
+healthy sample.
+
+### 8.7 Lazy required-vault resource — green startup, route-specific 500
+
+`Resolver.RequireSimpleResource` is evaluated lazily by some controllers. A
+missing resource therefore does not necessarily crash startup or fail
+`/hello`; the first request to its route panics inside the router and returns
+500. On 2026-08-27 the deployed config omitted `verify.yml`: 20/20 probes to
+each of `/verify/keys` and `/verify/stats` returned 500 while 20/20 `/hello`
+probes returned 200.
+
+- Log signal: `Resource not found in vault (<resource>.yml)`, grouped by
+  resource + route + config generation. One occurrence is a deterministic
+  configuration defect, not an intermittent application panic.
+- Deployment gate: enumerate every resource declared required by newly added
+  routes, confirm it exists in the mounted vault generation, and probe at
+  least one dependent route. A liveness-only canary cannot cover this class.
+- Mixed generations matter: sample enough times to reach every active binary
+  generation. A route may be 404 on an old binary and 500 on a new binary;
+  neither result proves the intended route is healthy.
+- Recovery requires a 2xx response from the dependent route on every active
+  generation and zero new missing-resource lines for five minutes. Restarting
+  the process without deploying the resource reproduces the failure.
+
+### 8.8 Source attribution — liveness can be green while every client is the ingress
+
+Probe `api-v4.bringyour.com/my-ip-info` over IPv4 and
+`api-v6.bringyour.com/my-ip-info` over IPv6 from a runner whose public source
+addresses are known. Require all three properties independently:
+
+1. both responses are 2xx;
+2. each returned `info.ip` has the same address family as the connection;
+3. each returned address equals that runner's public source address, not an
+   API or Warp address.
+
+On 2026-08-27 both endpoints were live but returned `65.49.70.82`, the Warp
+peer. API logs showed the supplied `X-UR-Forwarded-For` being rejected because
+the ingress was outside an undeployed trusted-CIDR setting. The application
+therefore collapsed every user behind Warp onto one address; IPv6 also became
+`null` on ur.io because its IPv6 request returned an IPv4 address.
+
+The fleet contract is now singular: Warp overwrites
+`X-UR-Forwarded-For: <bracket-safe-ip>:<source-port>`, strips
+`X-Forwarded-For` and `X-Forwarded-Source-Port`, and API/Connect ignore those
+alternate headers. There is no trusted-proxy environment setting. This makes
+backend isolation a security invariant: allocations must remain unreachable
+from public networks, because a direct caller that can reach one could supply
+the UR header. Check public port exposure whenever this contract changes.
+
+Healthy recovery is the correct known address from both family-specific
+endpoints on every active generation, no new malformed-value resolver lines,
+and no legacy untrusted-peer lines. `/hello` alone proves none of this.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
@@ -2010,6 +2191,87 @@ are pushed by the standard stats pusher {env, service=proxy, block, host}.
   deploy-window burst of client-side connection resets that immediately
   reconnect is this mechanism working; sustained resets outside deploys
   are worth investigating (source flow state being lost somewhere).
+
+### 14.5 Public proxy protocol and return-path proof
+
+Proxy health has five layers; none substitutes for the next:
+
+1. **Current allocation readiness:** resolve the running container's current
+   `WARP_PORTS` and request `/status` through the host/LAN address. Never cache
+   the allocation across a rollout: crisp g1 moved status `12688 -> 12689`
+   and SOCKS `12718 -> 12719` while this audit was running. A stale direct
+   probe produces a false failure.
+2. **Full public TCP handshake:** SYN, SYN-ACK, and final ACK must all cross the
+   public interface. `nc -z`/a listening socket is weaker than a packet-level
+   proof and says nothing about DNAT or the return route.
+3. **Protocol negotiation:** SOCKS greeting should select username/password
+   (`05 02`); HTTP and HTTPS-proxy requests with deliberately bad credentials
+   must reach a prompt authentication rejection instead of timing out. This
+   proves the correct process, not egress.
+4. **Authenticated egress:** use a valid proxy-client fixture and fetch an
+   external target through SOCKS, HTTP CONNECT, and TLS-to-proxy HTTPS. An
+   invalid login fixture or a test-account signup blocked on verification
+   makes the probe `BLOCKED`; it does not make the data plane PASS or FAIL.
+5. **WireGuard traffic:** require a valid peer handshake and tunneled bytes in
+   both directions. A UDP socket or `nc -u` result cannot prove WireGuard.
+
+The proxy service intentionally has no normal public 443 status endpoint;
+`warpctl ls versions main proxy --sample` can therefore return a uniform 404.
+That is a probe-method mismatch, not evidence that all blocks are down. Use the
+host-side deploy worker's readiness result or resolve each block's live
+allocation and query it directly.
+
+**Asymmetric-return signature (crisp, 2026-08-27):** every current container's
+internal `/status` returned 200 and g1's direct SOCKS listener returned `05 02`,
+but public SOCKS/HTTP/HTTPS handshakes timed out. A capture showed public SYNs
+arriving on `eno1np0`, SYN-ACKs leaving on the LAN NIC `eno3`, repeated SYN-ACK
+retransmits, no final ACK, and therefore no packet reaching the DNAT listener:
+```bash
+tcpdump -nn -tttt -i any \
+  '(tcp port <public-port> or tcp port <current-allocation>)'
+ip -4 route get <client-v4> from <public-v4>
+ip -6 route get <client-v6> from <public-v6>
+ip -4 rule show
+ip -6 rule show
+```
+The host had no source-policy rules and the DHCP LAN default route had metric
+50 versus 100 for the public default. `ip route get ... from 65.49.70.94`
+selected the LAN gateway; IPv6 also selected the LAN route/source. The repair
+belongs in the persistent Warp routing-table reconciler: traffic sourced from
+each public address must use that address's public gateway/interface, while
+management/LAN traffic keeps its LAN route. Do not lower the public main-table
+metric as a workaround; that would move management traffic too.
+
+The discriminator for the 2026-08-27 failure was the service clock. Crisp's
+transparent LB had been active since 00:35, while `systemd-networkd` restarted
+at 06:45. The LB startup journal proved Warp had installed the public subnet
+routes and inspected existing rules. After the networkd restart, table 100
+retained only Docker-interface routes; its public-interface subnet/default
+routes and all policy rules were gone. Check this explicitly:
+```bash
+systemctl show -p ExecMainStartTimestamp systemd-networkd.service \
+  warp-main-lb-<public-interface>.service
+ip -4 route show table <rttable>; ip -6 route show table <rttable>
+ip -4 rule show; ip -6 rule show
+```
+If networkd is newer than a still-running transparent LB and that table is
+partial, classify it as routing-state drift, not a proxy/container failure.
+On Crisp, `apt-daily-upgrade.service` invoked post-upgrade service restarts at
+06:45 on August 27 and again at 06:19 on August 28; systemd reexecuted and
+networkd restarted both times. Neither run upgraded systemd itself: the first
+included OpenSSL and the second included PAM/Perl updates. This is therefore a
+potential daily production risk from ordinary unattended library/security
+updates, not a reboot-only corner case. Edge provisioning sets
+`APT::Periodic::Enable "0"` and masks `apt-daily*` plus
+`unattended-upgrades.service`; check both configuration and unit masks, because
+either layer can drift. Apply OS/security updates only in a controlled
+maintenance window with proxy return-path verification afterward.
+`warpctl service run ... lb ... --transparent=true` must periodically restore
+its owned routes/rules, use replay-safe `route replace`, and copy each real
+main-table gateway (especially an IPv6 link-local RA gateway) instead of
+assuming subnet `::1`. Verify both families with source-aware `route get`,
+packet captures, and application handshakes after applying it; an internal 200
+alone cannot close the incident.
 
 ---
 
