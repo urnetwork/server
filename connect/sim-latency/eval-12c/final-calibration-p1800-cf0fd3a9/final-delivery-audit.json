@@ -1,0 +1,47 @@
+{
+  "artifacts": {
+    "calibration": "dc473cecc91b9eea993fd3e43e2230e0a235bfc30771e6a9c65de2db284b2090",
+    "final_baseline": "3eae32c77b862b5d77c8fd4d490f63747e85a8b632bf54335a1bcb71821966b8",
+    "final_baseline_evidence": "0f02578e72b83e4e2909caa837de9cb9ddaf8efb6b8056833246d703099c0318",
+    "final_baseline_validator": "a9e021b52b2a9b46118cf8fc9000a2909f53100732db182d3c52a8efc42d9dea",
+    "final_preview": "0529ab0059dbac235667e6fca417b6aba3b8ac200fbb1fda89b95d067d6d912c",
+    "final_report": "f81211d11aec2dca7705a941c1481b75c7c7f35ae847f986b168579c3ce76f52",
+    "finalization_plan": "1925142238a93e9fd5f47dd7e743a0458fa874f5a6a03d94575abf67d9366edf",
+    "finalization_status": "6c6ca200a9ef1ec10820f7cd37e026d6e79113acdf7a4b876eafb6c9e9464c4d",
+    "parent_completion_audit": "f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423",
+    "playbook": "22fff87155ce79853a5af43d6b8aa9c9c100844ed6e5c78a4a4bf6a34cb9878a"
+  },
+  "external_apex_handoff_complete": false,
+  "external_apex_handoff_launch_required_for_local_gate": false,
+  "final_baseline": {
+    "all_thresholds_have_significant_improvement_fringes": true,
+    "sections": 7,
+    "six_round_projection": [
+      {"round": 0, "throughput_p50_mbps": 1.7248732251358256, "ttfb_p95_ms": 666.9146721499995},
+      {"round": 1, "throughput_p50_mbps": 2.0025778143826938, "ttfb_p95_ms": 559.5414099338496},
+      {"round": 2, "throughput_p50_mbps": 2.3249928424983075, "ttfb_p95_ms": 469.4552429344998},
+      {"round": 3, "throughput_p50_mbps": 2.6993166901405345, "ttfb_p95_ms": 393.8729488220453},
+      {"round": 4, "throughput_p50_mbps": 3.133906677253161, "ttfb_p95_ms": 330.459404061696},
+      {"round": 5, "throughput_p50_mbps": 3.63846565229092, "ttfb_p95_ms": 277.2554400077629},
+      {"round": 6, "throughput_p50_mbps": 4.224258622309758, "ttfb_p95_ms": 232.6173141665131}
+    ],
+    "svg_per_section": true
+  },
+  "kind": "sim-latency-final-delivery-audit",
+  "local_finalization_complete": true,
+  "parent_completion_audit": {
+    "required_failures": 0,
+    "required_passes": 10,
+    "required_pending": 0,
+    "sha256": "f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423"
+  },
+  "playbook": {
+    "candidate_readable_api_resources_absent": true,
+    "operator_or_external_items_pending": 11,
+    "private_api_resources_present": true,
+    "raw_credentials_root_only": true,
+    "technical_items_complete": 8
+  },
+  "public_launch_follow_through_required": true,
+  "schema": 1
+}

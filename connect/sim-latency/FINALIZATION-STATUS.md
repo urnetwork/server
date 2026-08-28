@@ -1,6 +1,31 @@
 # sim-latency finalization status
 
-Status date: 2026-08-27
+Status date: 2026-08-28
+
+## Terminal disposition
+
+The local technical finalization is complete. The authenticated completion
+audit passes `10/10` required checks with zero pending and zero failed checks;
+its SHA-256 is
+`f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423`.
+The frozen evaluator source is
+`46515d82fe98ff666c61b2b5bb1d34a89cf4dad8`, the evaluator image is
+`sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c`,
+and the selected workload is `p1800-c200-r80-q2` with a 180-second measured
+window, median-of-nine scoring, and a 16.1% takeover margin.
+
+The accepted launch compromise retains all 12 same-seed pairs and uses five
+independent hidden seeds with a 4/5 reference-ordering gate. It explicitly
+supersedes the original 20-run/20-seed/19-of-20 design and is not statistically
+confidence-equivalent to it. That difference remains disclosed in
+[`APEX-CALIBRATION.md`](APEX-CALIBRATION.md).
+
+Final deliverables are [`final-baseline.html`](final-baseline.html),
+[`APEX-CALIBRATION.md`](APEX-CALIBRATION.md), and the live-deployment
+[`playbook.md`](playbook.md). Public service activation still requires the
+operator and external items in the playbook; those are not missing local
+calibration or evaluator gates. The historical campaign narrative below is
+retained for provenance and should not be read as the current terminal state.
 
 Topology decision: production qualification uses one authoritative evaluator
 host. A second image-identical host is not a launch gate. All containment,
@@ -36,12 +61,11 @@ vet checks pass. Production evidence resumes only from a clean pushed source
 lock, rebuilt image, host requalification, and fresh campaign; none of the 15
 invalidated pairs can be promoted.
 
-The integration is
-**not Apex launch-finalized**: this checkout has neither the accepted
-production calibration, published final image digests, Macrocosmos staging
-decision, production credentials, or on-call organization required by
-`FINALIZE.md`. Those gates remain explicit rather than being replaced with
-partial campaign evidence.
+The integration is **locally launch-qualified**. Calibration, final image
+identity, secure evaluator, release artifacts, and a complete authenticated
+generate-to-reveal staging round are accepted. External Apex registry
+activation, live credentials, public ingress, and organizational on-call
+ownership remain deployment follow-through rather than local technical gates.
 
 ## Complete in this checkout
 
@@ -550,39 +574,20 @@ invocation without the `test.sh` environment was rejected at the documented
 `WARP_ENV` harness precondition; the correctly configured runs above are the
 recorded results.
 
-## Deliberately still open
+## Operator and external follow-through
 
-- UR engineering review/signature and Macrocosmos confirmation of the score
-  contract, submit/poll timeout, hidden-seed flow, and reveal policy.
-- Official-box frontier sweep and 20-run reproduction, at least 20 independent
-  seeds, execution of the provisional no-op/worse/better references after
-  promotion to the frozen season base, 19/20 separability, accepted noise
-  policy, and a signed production `APEX-CALIBRATION.md`.
-- Rebuild and requalify the evaluator from a clean pushed source lock containing
-  the sample-coverage correction, then restart the official frontier plus
-  20-run campaign from a fresh round.
-- Frozen production scale, duration, replicate count, takeover margin, tuning,
-  base tag, exact patch allowlist, and immutable evaluator image.
-- The single authoritative host qualified on the current boot for the
-  invalidated image with exactly 12 physical CPUs online, 10 evaluation CPUs
-  and 2 management CPUs, SMT and turbo disabled, `performance` governor, NUMA node
-  0, a 96 GiB active boundary plus 24 GiB management reserve, PostgreSQL/Redis
-  inside the job boundary, local-only read-only config/vault mounts, immutable
-  reports, and adversarial CPU/OOM cleanup. The complete qualification must be
-  repeated against the rebuilt image/source lock; production monitoring and
-  operational ownership remain open.
-- Final source-bound patch-policy digest/base tag and promotion or regeneration
-  of the provisional reference patches against them; the literal pre-freeze
-  file review is complete, but must be re-authenticated after the pending main
-  fixes. Root-owned worker deployment, the adversarial probe day, published
-  API/worker/evaluator image digests, and production credentials also remain.
-- A Macrocosmos decision between an external scoring-service adapter and a
-  dedicated-host referee profile. The current public Apex sandbox is limited
-  to 4 CPUs/4 GiB and has no external generate/submit/poll adapter, so its stock
-  contract cannot contain this evaluator. Real contract harness/staging,
-  HANDOFF acceptance, registry activation, and on-call ownership follow that
-  decision.
+Local finalization does not silently invent organizational or partner
+decisions. Before public submissions open, complete the launch-blocking
+checklist in [`playbook.md`](playbook.md), including final season dates,
+credential/seed-key promotion or rotation, durable control-plane data services,
+API/worker supervision, public DNS/TLS ingress, artifact backups, monitoring,
+on-call ownership, miner onboarding, and leaderboard/reward rules.
 
-The launch gate remains closed until that external evidence exists. In
-particular, the invalidated `a2bec3bd` campaign must not be copied into a signed
-round baseline.
+If Apex is the public launch surface, Macrocosmos must still accept an external
+scoring-service adapter or dedicated-host referee path, stage it, and activate
+the private registry entry. The local completion audit records that external
+handoff as non-local and not required for the local technical gate.
+
+The invalidated `a2bec3bd` campaign remains historical only and must never be
+copied into a signed round baseline. The accepted terminal evidence is the
+`final-calibration-p1800-cf0fd3a9` chain named above.

@@ -1,27 +1,49 @@
 # Apex integration finalization plan
 
-Status date: 2026-08-17
+Status date: 2026-08-28
+
+## Terminal disposition
+
+The local sim-latency finalization objective is complete. The final
+machine-readable audit passes `10/10` required checks with no pending or failed
+local gate; audit SHA-256
+`f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423`.
+The accepted result freezes evaluator source
+`46515d82fe98ff666c61b2b5bb1d34a89cf4dad8`, image
+`sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c`,
+scale `p1800-c200-r80-q2`, a 180-second measured window, `R=9` median
+aggregation, and a 16.1% takeover margin.
+
+The authorized speed-to-launch compromise uses all 12 retained same-seed
+pairs and five independent hidden seeds with a 4/5 reference-ordering gate. It
+supersedes, and is explicitly not confidence-equivalent to, the original
+20-run/20-seed/19-of-20 plan below. The secure evaluator, adversarial cleanup,
+release artifacts, authenticated API, one-job FIFO/cache/failover, same-round
+rebaseline, reveal, immutable retention, and full production staging round all
+pass.
+
+The final calibration is [`APEX-CALIBRATION.md`](APEX-CALIBRATION.md), the
+infographic report is [`final-baseline.html`](final-baseline.html), and the
+operator launch sequence plus remaining configuration is
+[`playbook.md`](playbook.md). Public ingress, organizational operation, and
+external Apex activation remain deployment follow-through; they are not open
+local measurement or evaluator gates.
 
 This plan takes `sim-latency` from a working local benchmark to a launch-ready
 Apex competition evaluation system. The current public-platform mismatch and
 the integration decision required from Macrocosmos are recorded in
 [`../../competition/APEX-INTEGRATION-GAP.md`](../../competition/APEX-INTEGRATION-GAP.md).
 
-The simulator itself is substantially built. The remaining work is to freeze
-the Apex scoring contract, close correctness and anti-gaming gaps, qualify the
-harness on official hardware, build the scoring/evaluation service, and pass
-the Macrocosmos staging handoff.
+The detailed plan below is retained as the design and provenance record. Where
+its original sample counts or topology language conflict with the terminal
+disposition above, the signed launch compromise and one-host decision control.
 
-Local implementation update: the score contract, simulator correctness work,
-official scorer/baseline builder, fail-closed runner, competition API/control
-plane, worker protocol, host attestation, and Python miner package are
-implemented. The corrected 20-run `eval-12c` campaign and the locally built
-no-op/worse/better reference images are authenticated development evidence;
-neither is production calibration or reference separability. See
-`FINALIZATION-STATUS.md` and
-`eval-12c/frontier-summary-doublecleanup.md`. Production host qualification,
-recalibration, root-owned evaluator deployment, image publication, Macrocosmos
-integration, staging, monitoring, and ownership gates remain open.
+The score contract, simulator correctness work, scorer/baseline builder,
+fail-closed runner, competition API/control plane, worker protocol, host
+attestation, miner package, production calibration, final evaluator image, and
+local production staging are implemented and accepted. See
+`FINALIZATION-STATUS.md` for the terminal evidence chain and `playbook.md` for
+the smaller set of live operator and external tasks.
 
 ## Current state
 
