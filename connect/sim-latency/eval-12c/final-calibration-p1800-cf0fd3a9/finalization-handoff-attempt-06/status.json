@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-finalization-handoff",
+  "state": "failed",
+  "stage": "completion_audit",
+  "recorded_at": "2026-08-28T11:16:30Z",
+  "exit_code": 1,
+  "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+  "historical_calibration_source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "production_staging_attempt_06_remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
+  "production_staging_attempt_06_evidence_binding_amendment_sha256": "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752",
+  "boot_id": "34760d1b-a0b6-46a0-b8c1-264abd1affba",
+  "evidence_sha256": {
+    "production_readiness": "bc56f7b02a1cfcfb5cd91eca0e885bc6aedb2b216d336bbb7b1f1288cd7e2f2d",
+    "final_report": "f77c75945cc1d9aa551a6c77fe8037a902abbbb47b8de5afea42459277c27e15",
+    "final_preview": "9d6426124adf86256e0de3921f6c390a5ffa2cc64ff1ca45248b21997b97724b",
+    "final_report_evidence": "33cf779d4d50a0404ed187bc49317ef2086b1e6461600b169481cec47e400c8d",
+    "calibration_document": "103424b828aa6356701d844bb5e80ac60e351cf2b03763af0b09f0dc0c924936",
+    "final_audit": ""
+  }
+}

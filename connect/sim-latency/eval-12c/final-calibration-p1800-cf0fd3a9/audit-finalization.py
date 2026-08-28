@@ -123,6 +123,18 @@ FINAL_REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 SOURCE_LOCK_SHA256 = (
     "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022"
 )
+PRIOR_REPORT_SHA256 = (
+    "f77c75945cc1d9aa551a6c77fe8037a902abbbb47b8de5afea42459277c27e15"
+)
+PRIOR_PREVIEW_SHA256 = (
+    "9d6426124adf86256e0de3921f6c390a5ffa2cc64ff1ca45248b21997b97724b"
+)
+PRIOR_CALIBRATION_SHA256 = (
+    "103424b828aa6356701d844bb5e80ac60e351cf2b03763af0b09f0dc0c924936"
+)
+PRIOR_REPORT_EVIDENCE_SHA256 = (
+    "33cf779d4d50a0404ed187bc49317ef2086b1e6461600b169481cec47e400c8d"
+)
 HISTORICAL_SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
 )
@@ -327,6 +339,18 @@ PRODUCTION_ASSERTIONS = {
     },
 }
 
+STAGING_RETAINED_INVARIANTS = {
+    "all_original_release_gates_unchanged": True,
+    "all_original_security_gates_unchanged": True,
+    "all_original_staging_round_gates_unchanged": True,
+    "baseline_measurements_censored": False,
+    "evaluator_image_changed": False,
+    "failed_reference_draws_censored": False,
+    "frozen_scale_changed": False,
+    "production_source_changed": False,
+    "scorer_changed": False,
+}
+
 
 class AuditError(RuntimeError):
     pass
@@ -340,6 +364,7 @@ class FinalReportParser(HTMLParser):
         self.baseline_ids: set[str] = set()
         self.threshold_line_ids: set[str] = set()
         self.threshold_label_ids: set[str] = set()
+        self.improvement_fringe_ids: set[str] = set()
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -359,6 +384,11 @@ class FinalReportParser(HTMLParser):
         threshold_label_for = attributes.get("data-threshold-label-for")
         if threshold_label_for:
             self.threshold_label_ids.add(threshold_label_for)
+        improvement_fringe_for = attributes.get(
+            "data-improvement-fringe-for"
+        )
+        if tag == "rect" and improvement_fringe_for:
+            self.improvement_fringe_ids.add(improvement_fringe_for)
 
     def handle_startendtag(
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -445,6 +475,14 @@ def security_evidence_authenticated(value: Any) -> bool:
             isinstance(value[key], str) and bool(value[key])
             for key in SECURITY_ID_IDS
         )
+    )
+
+
+def staging_retained_invariants_authenticated(value: Any) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and value == STAGING_RETAINED_INVARIANTS
+        and all(isinstance(item, bool) for item in value.values())
     )
 
 
@@ -2084,9 +2122,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 == INDEPENDENT_REQUIRED_PASSES
                 and replacement.get("selected_competition_replicates") == 9
                 and replacement.get("takeover_margin") == 0.161
-                and isinstance(retained, dict)
-                and retained
-                and all(value is True for value in retained.values())
+                and staging_retained_invariants_authenticated(retained)
                 and sha256(REMEDIATION_AMENDMENT)
                 == REMEDIATION_AMENDMENT_SHA256
                 and REMEDIATION_AMENDMENT.stat().st_mode & 0o777 == 0o400
@@ -2283,6 +2319,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and parser.baseline_ids
                 and parser.baseline_ids == parser.threshold_line_ids
                 and parser.baseline_ids == parser.threshold_label_ids
+                and parser.baseline_ids == parser.improvement_fringe_ids
                 and FINAL_REPORT.stat().st_mode & 0o777 == 0o444
                 and EVIDENCE_FINAL_REPORT.stat().st_mode & 0o777 == 0o444
                 and evidence_report_text == text
@@ -2294,6 +2331,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 == preview_parser.threshold_line_ids
                 and preview_parser.baseline_ids
                 == preview_parser.threshold_label_ids
+                and preview_parser.baseline_ids
+                == preview_parser.improvement_fringe_ids
                 and preview_parser.baseline_ids == parser.baseline_ids
                 and FINAL_PREVIEW.stat().st_mode & 0o777 == 0o444
                 and EVIDENCE_FINAL_PREVIEW.stat().st_mode & 0o777 == 0o444
@@ -2312,12 +2351,29 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and "94.614%" in text
                 and "86.612%" in text
                 and "placeability is a separate diagnostic" in text.lower()
+                and text.lower().count("significant-improvement fringe") >= 2
+                and preview_text.lower().count(
+                    "significant-improvement fringe"
+                )
+                >= 2
                 and "apex-season-1" in text
                 and SERVER_COMMIT in text
                 and SERVER_COMMIT in preview_text
                 and EVALUATOR_IMAGE.removeprefix("sha256:")[:12] in preview_text
                 and evidence.get("schema") == 1
                 and evidence.get("kind") == "sim-latency-finalize-report-evidence"
+                and evidence.get("threshold_fringe_remediation")
+                == {
+                    "applied": True,
+                    "prior_calibration_document_sha256": (
+                        PRIOR_CALIBRATION_SHA256
+                    ),
+                    "prior_preview_sha256": PRIOR_PREVIEW_SHA256,
+                    "prior_report_evidence_sha256": (
+                        PRIOR_REPORT_EVIDENCE_SHA256
+                    ),
+                    "prior_report_sha256": PRIOR_REPORT_SHA256,
+                }
                 and evidence.get("source_lock_sha256") == SOURCE_LOCK_SHA256
                 and evidence.get(
                     "historical_calibration_source_lock_sha256"
@@ -2380,13 +2436,23 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 == parser.section_visuals
                 and set(evidence.get("baseline_ids", []))
                 == parser.baseline_ids
+                and set(evidence.get("improvement_fringe_ids", []))
+                == parser.improvement_fringe_ids
                 and evidence.get("all_baselines_have_threshold_lines") is True
+                and evidence.get("all_thresholds_have_improvement_fringes")
+                is True
                 and evidence.get("preview_sections") == 4
                 and evidence.get("preview_section_svg_counts")
                 == preview_parser.section_visuals
                 and set(evidence.get("preview_baseline_ids", []))
                 == preview_parser.baseline_ids
+                and set(evidence.get("preview_improvement_fringe_ids", []))
+                == preview_parser.improvement_fringe_ids
                 and evidence.get("preview_all_baselines_have_threshold_lines")
+                is True
+                and evidence.get(
+                    "preview_all_thresholds_have_improvement_fringes"
+                )
                 is True
                 and FINAL_REPORT_EVIDENCE.stat().st_mode & 0o777 == 0o400
             ):
@@ -2397,7 +2463,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 checks,
                 "final_html_report",
                 "pass",
-                "The authenticated final report and shareable preview each have four sections, a visual in each, and a mapped threshold line and label for every baseline.",
+                "The authenticated final report and shareable preview each have four sections, a visual in each, and a mapped threshold line, label, and significant-improvement fringe for every baseline.",
                 {
                     "sha256": report_sha,
                     "preview_sha256": preview_sha,
@@ -2501,6 +2567,60 @@ def self_test() -> None:
         for value in invalid_security.values()
     ):
         raise AuditError("security evidence self-test accepted invalid evidence")
+    if not staging_retained_invariants_authenticated(
+        STAGING_RETAINED_INVARIANTS.copy()
+    ):
+        raise AuditError("retained-invariant self-test rejected valid evidence")
+    invalid_retained_invariants: list[Any] = [
+        {
+            **STAGING_RETAINED_INVARIANTS,
+            "baseline_measurements_censored": True,
+        },
+        {
+            **STAGING_RETAINED_INVARIANTS,
+            "all_original_release_gates_unchanged": False,
+        },
+        {
+            **STAGING_RETAINED_INVARIANTS,
+            "unfrozen_invariant": True,
+        },
+        {
+            key: value
+            for key, value in STAGING_RETAINED_INVARIANTS.items()
+            if key != "scorer_changed"
+        },
+    ]
+    if any(
+        staging_retained_invariants_authenticated(value)
+        for value in invalid_retained_invariants
+    ):
+        raise AuditError("retained-invariant self-test accepted invalid evidence")
+    parser = FinalReportParser()
+    parser.feed(
+        '<section><svg><line data-baseline-id="baseline"/>'
+        '<line data-threshold-for="baseline"/>'
+        '<text data-threshold-label-for="baseline">threshold</text>'
+        '<rect data-improvement-fringe-for="baseline"/></svg></section>'
+    )
+    if not (
+        parser.section_depth == 0
+        and parser.section_visuals == [1]
+        and parser.baseline_ids
+        == parser.threshold_line_ids
+        == parser.threshold_label_ids
+        == parser.improvement_fringe_ids
+        == {"baseline"}
+    ):
+        raise AuditError("report-fringe self-test rejected valid mapping")
+    missing_fringe = FinalReportParser()
+    missing_fringe.feed(
+        '<section><svg><line data-baseline-id="baseline"/>'
+        '<line data-threshold-for="baseline"/>'
+        '<text data-threshold-label-for="baseline">threshold</text>'
+        "</svg></section>"
+    )
+    if missing_fringe.improvement_fringe_ids == missing_fringe.baseline_ids:
+        raise AuditError("report-fringe self-test accepted missing fringe")
     payload = b"authenticated evidence\n"
     payload_sha256 = hashlib.sha256(payload).hexdigest()
     with tempfile.TemporaryDirectory(

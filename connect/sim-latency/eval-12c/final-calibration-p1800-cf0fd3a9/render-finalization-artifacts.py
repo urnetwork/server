@@ -111,6 +111,18 @@ CALIBRATION_TEMPLATE_SHA256 = (
 PREVIEW_TEMPLATE_SHA256 = (
     "2011ec4cc129819d24c1f4726a0f5fbfa268f22d633b86c24cba58bf7246a027"
 )
+PRIOR_REPORT_SHA256 = (
+    "f77c75945cc1d9aa551a6c77fe8037a902abbbb47b8de5afea42459277c27e15"
+)
+PRIOR_PREVIEW_SHA256 = (
+    "9d6426124adf86256e0de3921f6c390a5ffa2cc64ff1ca45248b21997b97724b"
+)
+PRIOR_CALIBRATION_SHA256 = (
+    "103424b828aa6356701d844bb5e80ac60e351cf2b03763af0b09f0dc0c924936"
+)
+PRIOR_REPORT_EVIDENCE_SHA256 = (
+    "33cf779d4d50a0404ed187bc49317ef2086b1e6461600b169481cec47e400c8d"
+)
 BASE_SHA = "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8"
 HISTORICAL_BASE_SHA = "5ca3d5242f4a7d40efe4415635608023b05a0956"
 PUBLIC_AUTHORING_TAG = "apex-season-1"
@@ -217,6 +229,7 @@ class ReportShapeParser(HTMLParser):
         self.baseline_ids: set[str] = set()
         self.threshold_line_ids: set[str] = set()
         self.threshold_label_ids: set[str] = set()
+        self.improvement_fringe_ids: set[str] = set()
 
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -236,6 +249,11 @@ class ReportShapeParser(HTMLParser):
         threshold_label_for = attributes.get("data-threshold-label-for")
         if threshold_label_for:
             self.threshold_label_ids.add(threshold_label_for)
+        improvement_fringe_for = attributes.get(
+            "data-improvement-fringe-for"
+        )
+        if tag == "rect" and improvement_fringe_for:
+            self.improvement_fringe_ids.add(improvement_fringe_for)
 
     def handle_startendtag(
         self, tag: str, attrs: list[tuple[str, str | None]]
@@ -1353,7 +1371,8 @@ def same_seed_svg(data: dict[str, Any]) -> str:
             f'<text class="axis-label" x="{base_x:.1f}" y="302" text-anchor="middle">{index}</text>'
         )
     return f"""
-      <svg viewBox="0 0 900 330" role="img" aria-label="Twelve same-seed baseline and no-op measurements with the significant-better threshold">
+      <svg viewBox="0 0 900 330" role="img" aria-label="Twelve same-seed baseline and no-op measurements with the significant-better threshold and improvement fringe">
+        <rect class="improvement-fringe" data-improvement-fringe-for="same-seed-score" x="70" y="{y(threshold):.1f}" width="780" height="{275 - y(threshold):.1f}"/>
         <line class="axis" x1="70" y1="275" x2="850" y2="275"/>
         <line class="axis" x1="70" y1="48" x2="70" y2="275"/>
         <polyline class="baseline-series" data-baseline-id="same-seed-score" points="{point_string(baseline_points)}"/>
@@ -1362,6 +1381,7 @@ def same_seed_svg(data: dict[str, Any]) -> str:
         <text class="baseline-label" x="846" y="{y(baseline_mean) - 7:.1f}" text-anchor="end">baseline mean {fmt_ms(baseline_mean)}</text>
         <line class="threshold" data-threshold-for="same-seed-score" x1="70" y1="{y(threshold):.1f}" x2="850" y2="{y(threshold):.1f}"/>
         <text class="threshold-label" data-threshold-label-for="same-seed-score" x="846" y="{y(threshold) - 7:.1f}" text-anchor="end">significant-better threshold ≤ {fmt_ms(threshold)}</text>
+        <text class="fringe-label" x="82" y="268">SIGNIFICANT-IMPROVEMENT FRINGE</text>
         {''.join(dots)}
         {''.join(labels)}
         <text class="axis-title" x="460" y="324" text-anchor="middle">authenticated same-seed pair</text>
@@ -1465,13 +1485,15 @@ def independent_svg(data: dict[str, Any]) -> str:
             f'<text class="axis-label" x="{x:.1f}" y="302" text-anchor="middle">{index}</text>'
         )
     return f"""
-      <svg viewBox="0 0 900 330" role="img" aria-label="Independent-seed better, no-op, and worse designated-baseline ratios with baseline and threshold">
+      <svg viewBox="0 0 900 330" role="img" aria-label="Independent-seed better, no-op, and worse designated-baseline ratios with baseline, threshold, and improvement fringe">
+        <rect class="improvement-fringe" data-improvement-fringe-for="independent-designated-baseline-ratio" x="70" y="{y(threshold_ratio):.1f}" width="780" height="{275 - y(threshold_ratio):.1f}"/>
         <line class="axis" x1="70" y1="275" x2="850" y2="275"/>
         <line class="axis" x1="70" y1="60" x2="70" y2="275"/>
         <line class="baseline-mean" data-baseline-id="independent-designated-baseline-ratio" x1="70" y1="{y(baseline_ratio):.1f}" x2="850" y2="{y(baseline_ratio):.1f}"/>
         <text class="baseline-label" x="846" y="{y(baseline_ratio) - 7:.1f}" text-anchor="end">designated same-round baseline = 1.000</text>
         <line class="threshold" data-threshold-for="independent-designated-baseline-ratio" x1="70" y1="{y(threshold_ratio):.1f}" x2="850" y2="{y(threshold_ratio):.1f}"/>
         <text class="threshold-label" data-threshold-label-for="independent-designated-baseline-ratio" x="846" y="{y(threshold_ratio) - 7:.1f}" text-anchor="end">significant-better ratio ≤ {threshold_ratio:.3f}</text>
+        <text class="fringe-label" x="82" y="268">SIGNIFICANT-IMPROVEMENT FRINGE</text>
         {''.join(series_markup)}
         {''.join(seed_labels)}
         <text class="axis-title" x="460" y="324" text-anchor="middle">independent hidden seed · candidate ÷ one precommitted designated baseline</text>
@@ -1566,6 +1588,7 @@ def render_html(data: dict[str, Any]) -> str:
   <title>Sim-latency competition finalization</title>
   <style>
     :root{{--ink:#122033;--muted:#617087;--paper:#f3f6fa;--card:#fff;--line:#d8e0ea;--navy:#173f70;--cyan:#17a9c5;--green:#15805d;--lime:#b6df55;--amber:#d78818;--red:#ca3d4c;--violet:#7357b7}}
+    .improvement-fringe{{fill:rgba(21,128,93,.12)}} .fringe-label{{fill:#075c40;font-size:10px;font-weight:900;letter-spacing:.08em}}
     *{{box-sizing:border-box}} body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}} main{{max-width:1120px;margin:0 auto;padding:56px 28px 80px}} h1{{font-size:clamp(36px,6vw,68px);line-height:1.02;letter-spacing:-.045em;margin:10px 0 18px;max-width:900px}} h2{{font-size:29px;line-height:1.15;letter-spacing:-.025em;margin:4px 0 8px}} p{{color:var(--muted);max-width:780px}} .eyebrow,.index{{font-size:12px;font-weight:850;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan)}} .summary{{font-size:18px;max-width:850px}} .stamp{{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0 44px}} .pill{{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:750}} .pill.ready{{background:#dff5eb;border-color:#98d5bc;color:#075c40}} section{{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:30px;margin:24px 0;box-shadow:0 10px 28px rgba(27,55,87,.055)}} .section-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:20px}} .section-head>strong{{font-size:18px;color:var(--navy);white-space:nowrap}} svg{{width:100%;height:auto;background:#f9fbfd;border:1px solid var(--line);border-radius:15px}} svg text{{font-family:inherit}} .axis{{stroke:#a9b6c6;stroke-width:1}} .axis-label,.small{{fill:var(--muted);font-size:11px}} .axis-title{{fill:var(--muted);font-size:12px;font-weight:700}} .baseline-series{{fill:none;stroke:var(--navy);stroke-width:2.5}} .noop-series{{fill:none;stroke:var(--cyan);stroke-width:2.5}} .baseline-dot{{fill:var(--navy)}} .noop-dot{{fill:var(--cyan)}} .baseline-mean{{stroke:var(--navy);stroke-width:2;stroke-dasharray:3 4}} .baseline-label{{fill:var(--navy);font-size:11px;font-weight:800}} .threshold{{stroke:var(--red);stroke-width:2.5;stroke-dasharray:8 5}} .threshold-label{{fill:var(--red);font-size:11px;font-weight:850}} .legend{{fill:var(--muted);font-size:11px;font-weight:700}} .metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:16px}} .metric{{padding:15px;border:1px solid var(--line);border-radius:13px;background:#fbfcfe}} .metric strong{{display:block;color:var(--navy);font-size:17px;overflow-wrap:anywhere}} .metric span{{display:block;color:var(--muted);font-size:12px;margin-top:4px}} .host-box{{fill:#eef3f9;stroke:#b9c8d9}} .eval-box{{fill:#e7f3fb;stroke:#86c4d5}} .manage-box{{fill:#e5f5ee;stroke:#8ac6aa}} .service-box{{fill:#fff;stroke:#c8d4e1}} .box-title{{fill:var(--navy);font-size:11px;font-weight:850;letter-spacing:.09em}} .box-value{{fill:var(--ink);font-size:12px;font-weight:700}} .box-value.large{{font-size:14px}} .visual-title{{fill:var(--navy);font-size:13px;font-weight:850;letter-spacing:.04em}} .flow,.ready-arrow{{stroke:#98a9bc;stroke-width:2}} .frontier-selected{{fill:#e4f6ed;stroke:#69b78f;stroke-width:2}} .frontier-rejected{{fill:#fff1ee;stroke:#df948d}} .rejected{{fill:var(--red)}} .ratio-better{{fill:none;stroke:var(--green);stroke-width:2.2}} .ratio-noop{{fill:none;stroke:var(--violet);stroke-width:2.2}} .ratio-worse{{fill:none;stroke:var(--amber);stroke-width:2.2}} .ratio-dot.better{{fill:var(--green)}} .ratio-dot.noop{{fill:var(--violet)}} .ratio-dot.worse{{fill:var(--amber)}} .ready-node{{fill:#fff;stroke:#a9cdbd}} .check{{fill:var(--green)}} .check-mark{{fill:none;stroke:#fff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}} .node-label{{fill:var(--navy);font-size:10px;font-weight:850}} .node-detail{{fill:var(--muted);font-size:10px}} .ready-banner{{fill:#dcf4e8;stroke:#8bcbae}} .ready-banner-text{{fill:#075c40;font-size:12px;font-weight:800}} .disclosure{{margin-top:16px;padding:14px 16px;border-left:4px solid var(--amber);background:#fff8e9;color:#785114;font-size:13px}} footer{{color:var(--muted);font-size:12px;margin-top:28px}} code{{font-size:12px;overflow-wrap:anywhere}}
     @media(max-width:760px){{main{{padding:30px 14px 56px}}section{{padding:20px}}.section-head{{display:block}}.section-head>strong{{display:block;margin-top:12px}}.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
   </style>
@@ -1670,8 +1693,9 @@ def validate_report_shape(report: str) -> ReportShapeParser:
     require(
         parser.baseline_ids
         == parser.threshold_line_ids
-        == parser.threshold_label_ids,
-        "every baseline needs one threshold line and label mapping",
+        == parser.threshold_label_ids
+        == parser.improvement_fringe_ids,
+        "every baseline needs one threshold line, label, and improvement fringe",
     )
     lowered = report.lower()
     require("preview-only" not in lowered and "pending" not in lowered, "draft language")
@@ -2014,34 +2038,68 @@ def atomic_pending(path: Path, content: str, mode: int) -> Path:
     return pending
 
 
-def render_outputs(data: dict[str, Any]) -> None:
-    require(not REPORT.exists(), f"final report already exists: {REPORT}")
-    require(
-        not EVIDENCE_REPORT.exists(),
-        f"evidence report already exists: {EVIDENCE_REPORT}",
-    )
-    require(
-        PREVIEW.is_file()
-        and not PREVIEW.is_symlink()
-        and sha256(PREVIEW) == PREVIEW_TEMPLATE_SHA256,
-        "preview template changed",
-    )
-    require(
-        EVIDENCE_PREVIEW.is_file()
-        and not EVIDENCE_PREVIEW.is_symlink()
-        and sha256(EVIDENCE_PREVIEW) == PREVIEW_TEMPLATE_SHA256,
-        "evidence preview template changed",
-    )
-    require(
-        not REPORT_EVIDENCE.exists(),
-        f"final report evidence already exists: {REPORT_EVIDENCE}",
-    )
-    require(
-        sha256(CALIBRATION_DOCUMENT) == CALIBRATION_TEMPLATE_SHA256
-        and sha256(EVIDENCE_CALIBRATION_DOCUMENT)
-        == CALIBRATION_TEMPLATE_SHA256,
-        "calibration template changed",
-    )
+def render_outputs(
+    data: dict[str, Any], *, remediate_threshold_fringes: bool = False
+) -> None:
+    if remediate_threshold_fringes:
+        require(
+            REPORT.is_file()
+            and not REPORT.is_symlink()
+            and sha256(REPORT) == PRIOR_REPORT_SHA256
+            and EVIDENCE_REPORT.is_file()
+            and not EVIDENCE_REPORT.is_symlink()
+            and sha256(EVIDENCE_REPORT) == PRIOR_REPORT_SHA256,
+            "prior final report changed",
+        )
+        require(
+            PREVIEW.is_file()
+            and not PREVIEW.is_symlink()
+            and sha256(PREVIEW) == PRIOR_PREVIEW_SHA256
+            and EVIDENCE_PREVIEW.is_file()
+            and not EVIDENCE_PREVIEW.is_symlink()
+            and sha256(EVIDENCE_PREVIEW) == PRIOR_PREVIEW_SHA256,
+            "prior final preview changed",
+        )
+        require(
+            sha256(CALIBRATION_DOCUMENT) == PRIOR_CALIBRATION_SHA256
+            and sha256(EVIDENCE_CALIBRATION_DOCUMENT)
+            == PRIOR_CALIBRATION_SHA256,
+            "prior calibration document changed",
+        )
+        require(
+            REPORT_EVIDENCE.is_file()
+            and not REPORT_EVIDENCE.is_symlink()
+            and sha256(REPORT_EVIDENCE) == PRIOR_REPORT_EVIDENCE_SHA256,
+            "prior report evidence changed",
+        )
+    else:
+        require(not REPORT.exists(), f"final report already exists: {REPORT}")
+        require(
+            not EVIDENCE_REPORT.exists(),
+            f"evidence report already exists: {EVIDENCE_REPORT}",
+        )
+        require(
+            PREVIEW.is_file()
+            and not PREVIEW.is_symlink()
+            and sha256(PREVIEW) == PREVIEW_TEMPLATE_SHA256,
+            "preview template changed",
+        )
+        require(
+            EVIDENCE_PREVIEW.is_file()
+            and not EVIDENCE_PREVIEW.is_symlink()
+            and sha256(EVIDENCE_PREVIEW) == PREVIEW_TEMPLATE_SHA256,
+            "evidence preview template changed",
+        )
+        require(
+            not REPORT_EVIDENCE.exists(),
+            f"final report evidence already exists: {REPORT_EVIDENCE}",
+        )
+        require(
+            sha256(CALIBRATION_DOCUMENT) == CALIBRATION_TEMPLATE_SHA256
+            and sha256(EVIDENCE_CALIBRATION_DOCUMENT)
+            == CALIBRATION_TEMPLATE_SHA256,
+            "calibration template changed",
+        )
     report = render_html(data)
     parser = validate_report_shape(report)
     preview = render_preview_html(data)
@@ -2059,6 +2117,25 @@ def render_outputs(data: dict[str, Any]) -> None:
         "schema": 1,
         "kind": "sim-latency-finalize-report-evidence",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "threshold_fringe_remediation": {
+            "applied": remediate_threshold_fringes,
+            "prior_report_sha256": (
+                PRIOR_REPORT_SHA256 if remediate_threshold_fringes else None
+            ),
+            "prior_preview_sha256": (
+                PRIOR_PREVIEW_SHA256 if remediate_threshold_fringes else None
+            ),
+            "prior_calibration_document_sha256": (
+                PRIOR_CALIBRATION_SHA256
+                if remediate_threshold_fringes
+                else None
+            ),
+            "prior_report_evidence_sha256": (
+                PRIOR_REPORT_EVIDENCE_SHA256
+                if remediate_threshold_fringes
+                else None
+            ),
+        },
         "source_lock_sha256": SOURCE_LOCK_SHA256,
         "historical_calibration_source_lock_sha256": (
             HISTORICAL_SOURCE_LOCK_SHA256
@@ -2116,11 +2193,17 @@ def render_outputs(data: dict[str, Any]) -> None:
         "sections": 4,
         "section_svg_counts": parser.section_visuals,
         "baseline_ids": sorted(parser.baseline_ids),
+        "improvement_fringe_ids": sorted(parser.improvement_fringe_ids),
         "all_baselines_have_threshold_lines": True,
+        "all_thresholds_have_improvement_fringes": True,
         "preview_sections": 4,
         "preview_section_svg_counts": preview_parser.section_visuals,
         "preview_baseline_ids": sorted(preview_parser.baseline_ids),
+        "preview_improvement_fringe_ids": sorted(
+            preview_parser.improvement_fringe_ids
+        ),
         "preview_all_baselines_have_threshold_lines": True,
+        "preview_all_thresholds_have_improvement_fringes": True,
     }
     pending_paths: list[Path] = []
     try:
@@ -2313,6 +2396,10 @@ def self_test() -> None:
             == {"same-seed-score", "independent-designated-baseline-ratio"},
             "self-test baseline mapping",
         )
+        require(
+            parser.improvement_fringe_ids == parser.baseline_ids,
+            "self-test improvement-fringe mapping",
+        )
         lowered_report = rendered.lower()
         require(
             "original familywise placeability rule produced no eligible"
@@ -2327,6 +2414,8 @@ def self_test() -> None:
         preview_parser = validate_report_shape(preview)
         require(
             preview_parser.baseline_ids == parser.baseline_ids
+            and preview_parser.improvement_fringe_ids
+            == parser.improvement_fringe_ids
             and "shareable final preview" in preview
             and "launch-ready preview" in preview,
             "self-test preview rendering",
@@ -2366,9 +2455,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--remediate-threshold-fringes", action="store_true")
     args = parser.parse_args()
     require(
-        not (args.self_test and args.preflight),
+        sum(
+            (
+                args.self_test,
+                args.preflight,
+                args.remediate_threshold_fringes,
+            )
+        )
+        <= 1,
         "diagnostic modes are mutually exclusive",
     )
     if args.self_test:
@@ -2379,7 +2476,10 @@ def main() -> int:
         print("finalization artifact inputs: terminal and authenticated")
         return 0
     require(os.geteuid() == 0, "render final artifacts as root to read sealed evidence")
-    render_outputs(data)
+    render_outputs(
+        data,
+        remediate_threshold_fringes=args.remediate_threshold_fringes,
+    )
     return 0
 
 

@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-finalization-handoff-attempt-07-remediation",
+  "authorized": true,
+  "recorded_at": "2026-08-28T11:24:08Z",
+  "prior_handoff": {
+    "attempt": 6,
+    "state": "failed",
+    "stage": "completion_audit",
+    "measurement_effect": false,
+    "status_sha256": "a826b65299b61b67595e06c42b3be99452cab45568673a5207ea1fd3726f0ffc",
+    "audit_sha256": "a2d2fc0673b9e275a7cc112a238b5119ca5ea1a5cacc0ff2dbba5904f5b519f7",
+    "required_passes": 9,
+    "required_failures": 1,
+    "only_failed_check": "production_staging"
+  },
+  "defect": {
+    "component": "audit-finalization.py",
+    "summary": "The production-staging predicate required every retained-invariant value to be true, but unchanged negative facts are authenticated by false values.",
+    "affected_evidence_field": "production-staging-reference-v5-amendment.json#retained_invariants",
+    "evaluator_changed": false,
+    "source_changed": false,
+    "scorer_changed": false,
+    "workload_changed": false,
+    "seed_or_measurements_changed": false,
+    "readiness_seal_changed": false
+  },
+  "expected_retained_invariants": {
+    "all_original_release_gates_unchanged": true,
+    "all_original_security_gates_unchanged": true,
+    "all_original_staging_round_gates_unchanged": true,
+    "baseline_measurements_censored": false,
+    "evaluator_image_changed": false,
+    "failed_reference_draws_censored": false,
+    "frozen_scale_changed": false,
+    "production_source_changed": false,
+    "scorer_changed": false
+  },
+  "correction": {
+    "audit_finalization_sha256": "e8f1c530b499ca79f9d17d0686075952722b3e4f476f1ac9ed8aa512010a0a98",
+    "render_finalization_artifacts_sha256": "0b4cf2968b4d2ac2333b1984beb05c32b53119af28e6b1c79959f21386006e1a",
+    "exact_value_authentication": true,
+    "valid_and_negative_self_tests_added": true,
+    "threshold_line_label_and_fringe_mapping_required": true
+  },
+  "threshold_fringe_remediation": {
+    "requested": true,
+    "direction": "lower_is_better",
+    "prior_report_sha256": "f77c75945cc1d9aa551a6c77fe8037a902abbbb47b8de5afea42459277c27e15",
+    "prior_preview_sha256": "9d6426124adf86256e0de3921f6c390a5ffa2cc64ff1ca45248b21997b97724b",
+    "prior_calibration_document_sha256": "103424b828aa6356701d844bb5e80ac60e351cf2b03763af0b09f0dc0c924936",
+    "prior_report_evidence_sha256": "33cf779d4d50a0404ed187bc49317ef2086b1e6461600b169481cec47e400c8d",
+    "atomic_exact_hash_replacement_required": true
+  },
+  "successor": {
+    "attempt": 7,
+    "required_passes": 10,
+    "required_pending": 0,
+    "required_failures": 0,
+    "preserve_prior_failure": true
+  }
+}
