@@ -1,0 +1,16 @@
+{
+  "allowed_paths": [
+    "connect/resident_contract_manager.go"
+  ],
+  "forbidden_paths": [
+    "connect/sim-latency/**",
+    "stats/**",
+    "db_migrations.go",
+    "db_migrations_*.go",
+    "go.mod",
+    "go.sum",
+    "vendor/**",
+    ".github/**"
+  ],
+  "max_patch_bytes": 262144
+}

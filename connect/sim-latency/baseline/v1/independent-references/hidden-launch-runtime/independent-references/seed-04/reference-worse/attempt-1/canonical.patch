@@ -1,0 +1,116 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -2,7 +2,12 @@ package connect
+ 
+ import (
+ 	"context"
++	"math/bits"
++	"os"
++	"path/filepath"
++	"runtime"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	// "fmt"
+@@ -13,6 +18,99 @@ import (
+ 	"github.com/urnetwork/server/model"
+ )
+ 
++const (
++	residentContractReferenceLoadStartDelay = 5 * time.Minute
++	residentContractReferenceLoadBusy       = 90 * time.Millisecond
++	residentContractReferenceLoadIdle       = 10 * time.Millisecond
++)
++
++var residentContractReferenceLoadSink atomic.Uint64
++
++// Restricts the controlled reference load to scored fleet processes. The
++// central run process, migration, preflight, scoring, and ordinary server
++// commands remain unaffected.
++func residentContractReferenceLoadWorkers(arguments []string) int {
++	if len(arguments) < 2 || filepath.Base(arguments[0]) != "sim-latency" {
++		return 0
++	}
++	switch arguments[1] {
++	case "run":
++		return 0
++	case "fleet":
++		return 2
++	default:
++		return 0
++	}
++}
++
++// Waits for one phase boundary and makes cancellation observable without a
++// leaked timer.
++func waitResidentContractReferenceLoad(ctx context.Context, delay time.Duration) bool {
++	timer := time.NewTimer(delay)
++	defer timer.Stop()
++	select {
++	case <-ctx.Done():
++		return false
++	case <-timer.C:
++		return true
++	}
++}
++
++// Consumes one bounded CPU interval. The sink makes the work observable to
++// the compiler while remaining process-local and independent of application
++// state.
++func burnResidentContractReferenceLoad(duration time.Duration) {
++	deadline := time.Now().Add(duration)
++	value := residentContractReferenceLoadSink.Load()
++	for time.Now().Before(deadline) {
++		value = bits.RotateLeft64(
++			value*6364136223846793005+1442695040888963407,
++			17,
++		)
++	}
++	residentContractReferenceLoadSink.Store(value)
++}
++
++// Runs fixed busy and idle phases after setup is complete. Injected phase
++// functions keep the sequencing and cancellation boundary deterministic in
++// tests.
++func runResidentContractReferenceLoad(
++	ctx context.Context,
++	startDelay time.Duration,
++	busyDuration time.Duration,
++	idleDuration time.Duration,
++	limit func(int) int,
++	burn func(time.Duration),
++	wait func(context.Context, time.Duration) bool,
++) {
++	if !wait(ctx, startDelay) {
++		return
++	}
++	limit(2)
++
++	for ctx.Err() == nil {
++		burn(busyDuration)
++		if !wait(ctx, idleDuration) {
++			return
++		}
++	}
++}
++
++// Starts a fixed process-local worker count only for scored simulator roles.
++func init() {
++	for range residentContractReferenceLoadWorkers(os.Args) {
++		go runResidentContractReferenceLoad(
++			context.Background(),
++			residentContractReferenceLoadStartDelay,
++			residentContractReferenceLoadBusy,
++			residentContractReferenceLoadIdle,
++			runtime.GOMAXPROCS,
++			burnResidentContractReferenceLoad,
++			waitResidentContractReferenceLoad,
++		)
++	}
++}
++
+ type residentContractManager struct {
+ 	ctx    context.Context
+ 	cancel context.CancelFunc

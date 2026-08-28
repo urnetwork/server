@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-baseline-preservation-index",
+  "version": "v1",
+  "recorded_at": "2026-08-28",
+  "evaluated_server_commit": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+  "evaluator_image_digest": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+  "workload": {
+    "providers": 1800,
+    "clients": 200,
+    "arrivals_per_minute": 80,
+    "quality_window": 2,
+    "duration_seconds": 180,
+    "impairment": true,
+    "replicates": 9,
+    "takeover_margin": 0.161
+  },
+  "snapshot": {
+    "files": 2700,
+    "bytes": 562708406,
+    "excluded": [
+      "generated Python __pycache__ directories"
+    ]
+  },
+  "datasets": [
+    {
+      "id": "frontier",
+      "path": "v1/frontier",
+      "files": 245,
+      "bytes": 63994913,
+      "summary_path": "v1/frontier/p1800-c200-r80-q2/point-summary.json",
+      "summary_sha256": "f0789d4ccf7f310cb8c480ea5bd248469eaa4a3813a1b751f526093c9fc3e721"
+    },
+    {
+      "id": "same-seed",
+      "path": "v1/same-seed",
+      "files": 797,
+      "bytes": 161060266,
+      "summary_path": "v1/same-seed/p1800-c200-r80-q2/same-seed-analysis.json",
+      "summary_sha256": "41325e3aabd98495afb22264ab2981ad690e4e2ca7ebb295b40c40ea96d0de9c",
+      "selection_path": "v1/same-seed/final-calibration-selection.json",
+      "selection_sha256": "5838b36d8414162497c4537f8ac07d46b3c74badcb6083cae4d71a9e40517042"
+    },
+    {
+      "id": "independent-references",
+      "path": "v1/independent-references",
+      "files": 1253,
+      "bytes": 243652260,
+      "decision_path": "v1/independent-references/hidden-launch-decision.json",
+      "decision_sha256": "3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835"
+    },
+    {
+      "id": "production-staging",
+      "path": "v1/production-staging",
+      "files": 394,
+      "bytes": 93956683,
+      "round_id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+      "job_id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+      "attempt": 2,
+      "baseline_path": "v1/production-staging/baseline.json",
+      "baseline_sha256": "84d49d0847104ae79b878a6cbf6eaef7675ef8234e0d8df2615f324e85da623f",
+      "worker_result_path": "v1/production-staging/worker-result.json",
+      "worker_result_sha256": "5b9c57ea35346ffd9b281e4cc6e49bb56485770e62dca5a55f1d1f3b9c0573ec",
+      "evidence_manifest_path": "v1/production-staging/evidence-manifest.json",
+      "evidence_manifest_sha256": "378be6195463f55bcae1bdfb57008a3d0f34eb141c08b8b33258091b372a9fd9"
+    },
+    {
+      "id": "lineage",
+      "path": "v1/lineage",
+      "files": 11,
+      "bytes": 44284,
+      "source_lock_path": "v1/lineage/source-lock.json",
+      "finalization_audit_path": "v1/lineage/finalization-audit.json",
+      "final_baseline_evidence_path": "v1/lineage/final-baseline-evidence.json",
+      "final_delivery_audit_path": "v1/lineage/final-delivery-audit.json"
+    }
+  ]
+}

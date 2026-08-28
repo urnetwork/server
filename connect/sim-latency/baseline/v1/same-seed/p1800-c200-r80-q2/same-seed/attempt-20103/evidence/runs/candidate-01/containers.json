@@ -1,0 +1,184 @@
+[
+  {
+    "id": "81bfdcf39ed797663d5848e894b126bbd84f45cce34bf2012800bb612c19b94a",
+    "name": "/urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01-runner-1",
+    "image_id": "sha256:d107de220500748e6c05a7b609c4a69101e3bf94be58c1d9021f538c72324e00",
+    "config": {
+      "image": "sha256:d107de220500748e6c05a7b609c4a69101e3bf94be58c1d9021f538c72324e00",
+      "user": "65532:65532",
+      "labels": {
+        "com.docker.compose.config-hash": "60ab60e9b6e3038f16375ae72a3587897c2a2d1f323d9628c52e63bd6a072f59",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:d107de220500748e6c05a7b609c4a69101e3bf94be58c1d9021f538c72324e00",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01",
+        "com.docker.compose.project.config_files": "/home/by/urnetwork/server/competition/container/compose.yml",
+        "com.docker.compose.project.environment_file": "/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9/post-frontier/p1800-c200-r80-q2/same-seed/attempt-20103/.evidence-runtime/runs/candidate-01/compose.env",
+        "com.docker.compose.project.working_dir": "/home/by/urnetwork/server/competition/container",
+        "com.docker.compose.service": "runner",
+        "com.docker.compose.version": "5.5.0",
+        "com.urnetwork.competition.base-sha": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+        "com.urnetwork.competition.builder-sha256": "624f52c6752c6d6119b50b8219769ba695c86cbc58fb8113d800e3781f12fdb7",
+        "com.urnetwork.competition.development-snapshot": "false",
+        "com.urnetwork.competition.image-key": "4dec6a3b52f4b06879e1959b56008712bf517575708c2c228ac18fd5c18202dd",
+        "com.urnetwork.competition.image-kind": "submission",
+        "com.urnetwork.competition.job-id": "0e18cf93-9f6e-4520-8b1d-6ce1c622aff9",
+        "com.urnetwork.competition.patch-sha256": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+        "com.urnetwork.competition.policy-sha256": "0a1cb9032ee630042f1a1fe585493fba6f7b3fc10b71b697de39cebe43e00a1e",
+        "com.urnetwork.competition.round-id": "f71b7ed2-78ec-4aaa-9fdc-f9b75c66e665",
+        "com.urnetwork.competition.source-lock-sha256": "3e916937920677e6d1a40acfbf8511a07297a1c66e1246070535bf5f84949de8",
+        "com.urnetwork.competition.stage": "candidate",
+        "org.opencontainers.image.revision": "1315fd8749929656d7cce26a90cb9c2d3f0d73d9",
+        "org.opencontainers.image.title": "URnetwork sim-latency submission",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "host_config": {
+      "readonly_rootfs": true,
+      "memory": 77309411328,
+      "memory_swap": 77309411328,
+      "pids_limit": 65536,
+      "cgroup_parent": "urnetwork-evaluation-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01.slice",
+      "cpuset_cpus": "0,2,4,6,8,10,12,14,16,18",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "network_mode": "urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01_evaluation"
+    },
+    "mounts": [
+      {
+        "type": "bind",
+        "destination": "/runtime/config/local",
+        "rw": false
+      },
+      {
+        "type": "bind",
+        "destination": "/runtime/vault/local",
+        "rw": false
+      },
+      {
+        "type": "bind",
+        "destination": "/input",
+        "rw": false
+      },
+      {
+        "type": "bind",
+        "destination": "/artifacts",
+        "rw": true
+      }
+    ],
+    "state": {
+      "status": "exited",
+      "exit_code": 0,
+      "oom_killed": false,
+      "started_at": "2026-08-27T04:23:05.947290224Z",
+      "finished_at": "2026-08-27T04:31:24.404993425Z"
+    }
+  },
+  {
+    "id": "4784b915fe437f3cc2433a976775e78d5a0dc8dd8835ab3e0f999ae8a8effbf4",
+    "name": "/urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01-postgres-1",
+    "image_id": "sha256:8d6ed4b5a1f44557313cab42a8951c53d1b86ccc899266bcee2ee1ee84076c14",
+    "config": {
+      "image": "postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
+      "user": "999:999",
+      "labels": {
+        "com.docker.compose.config-hash": "ea4c6510c03640d23419b79730879fcb07a4d0b1e68b5e0fe1170eef1dc2b1eb",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:8d6ed4b5a1f44557313cab42a8951c53d1b86ccc899266bcee2ee1ee84076c14",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01",
+        "com.docker.compose.project.config_files": "/home/by/urnetwork/server/competition/container/compose.yml",
+        "com.docker.compose.project.environment_file": "/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9/post-frontier/p1800-c200-r80-q2/same-seed/attempt-20103/.evidence-runtime/runs/candidate-01/compose.env",
+        "com.docker.compose.project.working_dir": "/home/by/urnetwork/server/competition/container",
+        "com.docker.compose.service": "postgres",
+        "com.docker.compose.version": "5.5.0",
+        "com.urnetwork.competition.job-id": "0e18cf93-9f6e-4520-8b1d-6ce1c622aff9",
+        "com.urnetwork.competition.round-id": "f71b7ed2-78ec-4aaa-9fdc-f9b75c66e665",
+        "com.urnetwork.competition.stage": "candidate"
+      }
+    },
+    "host_config": {
+      "readonly_rootfs": true,
+      "memory": 17179869184,
+      "memory_swap": 17179869184,
+      "pids_limit": 4096,
+      "cgroup_parent": "urnetwork-evaluation-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01.slice",
+      "cpuset_cpus": "0,2,4,6,8,10,12,14,16,18",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "network_mode": "urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01_evaluation"
+    },
+    "mounts": [
+      {
+        "type": "bind",
+        "destination": "/docker-entrypoint-initdb.d/10-competition-app.sh",
+        "rw": false
+      }
+    ],
+    "state": {
+      "status": "running",
+      "exit_code": 0,
+      "oom_killed": false,
+      "started_at": "2026-08-27T04:22:56.364486631Z",
+      "finished_at": "0001-01-01T00:00:00Z"
+    }
+  },
+  {
+    "id": "222417e2bd257ea9a6f2caad72f2d2ac1d290c7e217d73efdbe5e11768e8e9df",
+    "name": "/urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01-redis-1",
+    "image_id": "sha256:4326c43a061bc3984d6fcb5acd34f6cf363523a76920eee2a405f5b7fd55aa92",
+    "config": {
+      "image": "redis:8-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78",
+      "user": "999:999",
+      "labels": {
+        "com.docker.compose.config-hash": "bc3df558f284ebcf5b099b4dd12a1e4cc59c3bc049d5b505eadbd587500191bc",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:4326c43a061bc3984d6fcb5acd34f6cf363523a76920eee2a405f5b7fd55aa92",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01",
+        "com.docker.compose.project.config_files": "/home/by/urnetwork/server/competition/container/compose.yml",
+        "com.docker.compose.project.environment_file": "/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9/post-frontier/p1800-c200-r80-q2/same-seed/attempt-20103/.evidence-runtime/runs/candidate-01/compose.env",
+        "com.docker.compose.project.working_dir": "/home/by/urnetwork/server/competition/container",
+        "com.docker.compose.service": "redis",
+        "com.docker.compose.version": "5.5.0",
+        "com.urnetwork.competition.job-id": "0e18cf93-9f6e-4520-8b1d-6ce1c622aff9",
+        "com.urnetwork.competition.round-id": "f71b7ed2-78ec-4aaa-9fdc-f9b75c66e665",
+        "com.urnetwork.competition.stage": "candidate"
+      }
+    },
+    "host_config": {
+      "readonly_rootfs": true,
+      "memory": 8589934592,
+      "memory_swap": 8589934592,
+      "pids_limit": 4096,
+      "cgroup_parent": "urnetwork-evaluation-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01.slice",
+      "cpuset_cpus": "0,2,4,6,8,10,12,14,16,18",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "network_mode": "urnetwork-eval-0e18cf939f6e45208b1d6ce1c622aff9-candidate-01_evaluation"
+    },
+    "mounts": [],
+    "state": {
+      "status": "running",
+      "exit_code": 0,
+      "oom_killed": false,
+      "started_at": "2026-08-27T04:22:56.357338271Z",
+      "finished_at": "0001-01-01T00:00:00Z"
+    }
+  }
+]

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-worker-evaluation-complete",
+  "job_id": "c137c615-f70c-4959-8278-c5a459e53032",
+  "round_id": "e9cb32e8-69ed-4193-a2af-750e6d9dc134",
+  "attempt": 18021,
+  "base_image_id": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "candidate_image_id": "sha256:d107de220500748e6c05a7b609c4a69101e3bf94be58c1d9021f538c72324e00",
+  "patch_sha256": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+  "providers_sha256": "589d04b48c4ea3c8febf3187c8d71820f54b6668606ddbe4bf68b7d1444ffcb9",
+  "cleanup_complete": true,
+  "artifacts": {
+    "accounting": "612e6846248ced8c007d047159f31eb928fd492b8216bdc4ad22f4c593f43eaa",
+    "baseline": "42c85597391f12be5d97e7aa9b3e7d7cf984664940ee410cb8da22be3db8947a",
+    "resources": "c9642c07c5f2891d9b45a736ba9d41d97aef98debffa8ac32904e239c0664ec2",
+    "score": "b643764f5fd41900aee432dcd67d95271b608a1a1380c4111490a81fe73bb18d",
+    "evidence_manifest": "29a6909f61477250a0fb44bde11e18eed0e3732e9f6a8ab251691d40351c225a"
+  }
+}

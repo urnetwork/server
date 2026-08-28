@@ -1,0 +1,5 @@
+[env]glog not configured from command line. Using default configuration.
+I0827 18:14:09.529405      16 env.go:755] [env]try /srv/warp/config, [settings.yml]
+I0827 18:14:09.529519      16 env.go:755] [env]try /srv/warp/site, [settings.yml]
+I0827 18:14:09.529536      16 env.go:68] [env]settings = map[]
+[official-run] baseline manifest written: /score-output/baseline.json sha256=9584d125125f8e9f753e6536be0ac291e7f882670a5fdc530210a6b49d055102

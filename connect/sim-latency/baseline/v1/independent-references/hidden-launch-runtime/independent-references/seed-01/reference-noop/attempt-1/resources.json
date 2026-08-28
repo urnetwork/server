@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-evaluation-resources",
+  "job_id": "00049651-f542-4147-8ed1-01dead9684d3",
+  "round_id": "39ee5928-ffab-4ce2-83f9-d6efd1c546ca",
+  "complete": true,
+  "runs": [
+    {
+      "evaluation_id": "baseline-01-00049651",
+      "role": "baseline",
+      "path": "/artifacts/baseline-01-00049651/resources.json",
+      "sha256": "2d2669910f5d434442e5e632e3c9253cc3b02e35ee3448abeefc35689cec1e81",
+      "bytes": 477,
+      "cpu_seconds": 2276.124406,
+      "peak_rss_bytes": 12888600576
+    },
+    {
+      "evaluation_id": "candidate-01-00049651",
+      "role": "candidate",
+      "path": "/artifacts/candidate-01-00049651/resources.json",
+      "sha256": "37c8848a6e041c8848b4d971888a0a1721616f9591bd3ab543cd09845552e367",
+      "bytes": 479,
+      "cpu_seconds": 2279.085109,
+      "peak_rss_bytes": 12439236608
+    }
+  ]
+}

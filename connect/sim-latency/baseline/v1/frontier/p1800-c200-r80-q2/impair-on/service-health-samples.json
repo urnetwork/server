@@ -1,0 +1,637 @@
+{
+  "generated_at": "2026-08-27T02:36:32Z",
+  "job_id": "3a649e77-11ac-4804-a70e-9a66f2f37b23",
+  "kind": "sim-latency-frontier-service-health",
+  "round_id": "11ac4862-f391-403f-a9e0-5499da86f65f",
+  "samples": [
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.360214,
+      "observed_at": "2026-08-27T02:19:51Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.260847,
+      "observed_at": "2026-08-27T02:19:51Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.551318,
+      "observed_at": "2026-08-27T02:20:21Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.330556,
+      "observed_at": "2026-08-27T02:20:21Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.234744,
+      "observed_at": "2026-08-27T02:20:52Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.210981,
+      "observed_at": "2026-08-27T02:20:52Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.645688,
+      "observed_at": "2026-08-27T02:21:22Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.165112,
+      "observed_at": "2026-08-27T02:21:22Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.242863,
+      "observed_at": "2026-08-27T02:21:52Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.18425,
+      "observed_at": "2026-08-27T02:21:52Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 165.487145,
+      "observed_at": "2026-08-27T02:22:23Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.506218,
+      "observed_at": "2026-08-27T02:22:23Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.238001,
+      "observed_at": "2026-08-27T02:22:53Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 115.467342,
+      "observed_at": "2026-08-27T02:22:53Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 166.32209,
+      "observed_at": "2026-08-27T02:23:23Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.403674,
+      "observed_at": "2026-08-27T02:23:24Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.623768,
+      "observed_at": "2026-08-27T02:23:54Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.392477,
+      "observed_at": "2026-08-27T02:23:54Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.34505,
+      "observed_at": "2026-08-27T02:24:24Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 115.336444,
+      "observed_at": "2026-08-27T02:24:24Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.389853,
+      "observed_at": "2026-08-27T02:24:54Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 116.1141,
+      "observed_at": "2026-08-27T02:24:55Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 165.696074,
+      "observed_at": "2026-08-27T02:25:25Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.448896,
+      "observed_at": "2026-08-27T02:25:25Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.824506,
+      "observed_at": "2026-08-27T02:25:55Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 119.957986,
+      "observed_at": "2026-08-27T02:25:55Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.47674,
+      "observed_at": "2026-08-27T02:26:25Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 115.055087,
+      "observed_at": "2026-08-27T02:26:26Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.290698,
+      "observed_at": "2026-08-27T02:26:56Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.337776,
+      "observed_at": "2026-08-27T02:26:56Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "9fbcf1947a69",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 165.091122,
+      "observed_at": "2026-08-27T02:27:26Z",
+      "service": "postgres",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "daee4439cb1a",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.254985,
+      "observed_at": "2026-08-27T02:27:26Z",
+      "service": "redis",
+      "stage": "baseline"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 165.442361,
+      "observed_at": "2026-08-27T02:27:56Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 115.949726,
+      "observed_at": "2026-08-27T02:27:57Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.317131,
+      "observed_at": "2026-08-27T02:28:27Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 115.808671,
+      "observed_at": "2026-08-27T02:28:27Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 165.061086,
+      "observed_at": "2026-08-27T02:28:57Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 116.182487,
+      "observed_at": "2026-08-27T02:28:57Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 173.150166,
+      "observed_at": "2026-08-27T02:29:28Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 117.213557,
+      "observed_at": "2026-08-27T02:29:28Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.36117,
+      "observed_at": "2026-08-27T02:29:58Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.278935,
+      "observed_at": "2026-08-27T02:29:58Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.282894,
+      "observed_at": "2026-08-27T02:30:28Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.342964,
+      "observed_at": "2026-08-27T02:30:28Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 167.213926,
+      "observed_at": "2026-08-27T02:30:59Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 115.224465,
+      "observed_at": "2026-08-27T02:30:59Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.757585,
+      "observed_at": "2026-08-27T02:31:29Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.61373,
+      "observed_at": "2026-08-27T02:31:29Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.593633,
+      "observed_at": "2026-08-27T02:31:59Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.385598,
+      "observed_at": "2026-08-27T02:31:59Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 214.815972,
+      "observed_at": "2026-08-27T02:32:30Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.648064,
+      "observed_at": "2026-08-27T02:32:30Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 165.447563,
+      "observed_at": "2026-08-27T02:33:00Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 117.315948,
+      "observed_at": "2026-08-27T02:33:00Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 214.713817,
+      "observed_at": "2026-08-27T02:33:30Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.774179,
+      "observed_at": "2026-08-27T02:33:30Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 166.418662,
+      "observed_at": "2026-08-27T02:34:01Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.486535,
+      "observed_at": "2026-08-27T02:34:01Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.380433,
+      "observed_at": "2026-08-27T02:34:31Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.646731,
+      "observed_at": "2026-08-27T02:34:31Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.603813,
+      "observed_at": "2026-08-27T02:35:01Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.46643,
+      "observed_at": "2026-08-27T02:35:02Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 165.281176,
+      "observed_at": "2026-08-27T02:35:32Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 114.836377,
+      "observed_at": "2026-08-27T02:35:32Z",
+      "service": "redis",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "03bfefe88156",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 164.358402,
+      "observed_at": "2026-08-27T02:36:02Z",
+      "service": "postgres",
+      "stage": "candidate"
+    },
+    {
+      "container_id": "4eb7f828e48d",
+      "exit_code": 0,
+      "healthy": true,
+      "latency_ms": 117.796889,
+      "observed_at": "2026-08-27T02:36:02Z",
+      "service": "redis",
+      "stage": "candidate"
+    }
+  ],
+  "schema": 1,
+  "summary": {
+    "baseline": {
+      "postgres": {
+        "maximum_latency_ms": 166.32209,
+        "mean_latency_ms": 164.73874212500002,
+        "samples": 16,
+        "stable_after_ready": true,
+        "successful_samples": 16
+      },
+      "redis": {
+        "maximum_latency_ms": 119.957986,
+        "mean_latency_ms": 114.9641706875,
+        "samples": 16,
+        "stable_after_ready": true,
+        "successful_samples": 16
+      }
+    },
+    "candidate": {
+      "postgres": {
+        "maximum_latency_ms": 214.815972,
+        "mean_latency_ms": 171.36469352941177,
+        "samples": 17,
+        "stable_after_ready": true,
+        "successful_samples": 17
+      },
+      "redis": {
+        "maximum_latency_ms": 117.796889,
+        "mean_latency_ms": 115.35125211764705,
+        "samples": 17,
+        "stable_after_ready": true,
+        "successful_samples": 17
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "image": "urnetwork/sim-latency-submission:41f635e55da1750ca349b5e270630ad1",
+  "image_id": "sha256:487a5a9e06fdd4b5908d8dbc4657d6a0a2d5eb245afef5453de4c0a815494b3f",
+  "base_image_id": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "base_sha": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "candidate_sha": "59127bf075e59d0fadf077ff1ceafac00c99d970",
+  "patch_sha256": "982b192198ffa63942db1804629844f1cf9801bd4a71f64d2847a305217257a0",
+  "policy_sha256": "0a1cb9032ee630042f1a1fe585493fba6f7b3fc10b71b697de39cebe43e00a1e",
+  "builder_sha256": "624f52c6752c6d6119b50b8219769ba695c86cbc58fb8113d800e3781f12fdb7",
+  "image_key": "41f635e55da1750ca349b5e270630ad1f570bcbd0a1bdb5669ba67634aa523b0"
+}

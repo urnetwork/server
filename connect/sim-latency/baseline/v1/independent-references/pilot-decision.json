@@ -1,0 +1,66 @@
+{
+  "accepted": true,
+  "better_and_noop_placeable": false,
+  "campaign_commitment_sha256": "080f4330aed9bde0b6bb32fee6f686fa8d49626169e97cff7deae1ce3e8b3fcf",
+  "campaign_exit_code": 0,
+  "candidate_raw_score_ms": {
+    "better": 35391.23925,
+    "noop": 38802.5505,
+    "worse": 46422.22729999996
+  },
+  "cleanup": {
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0
+  },
+  "decided_at": "2026-08-27T18:51:38Z",
+  "design_sha256": "6e05b1872648a0d9f28755e5ca4b0470445ea40e95b4fdb991e676d2d453ffa1",
+  "designated_baseline": {
+    "raw_score_ms": 36599.16254999997,
+    "reference": "better"
+  },
+  "designated_baseline_ratios": {
+    "better": 0.9669958759753104,
+    "noop": 1.0602032340764591,
+    "worse": 1.268395888473683
+  },
+  "failed_gate_ids": {
+    "better": [],
+    "noop": [
+      "G4_matchmaking"
+    ],
+    "worse": [
+      "G4_matchmaking"
+    ]
+  },
+  "kind": "sim-latency-reference-v5-pilot-decision",
+  "one_designated_same_round_baseline_per_seed": true,
+  "ordering_metric": "candidate_raw_score_ms_over_designated_baseline_raw_score_ms",
+  "pilot_seed_reuse_in_hidden_campaign_forbidden": true,
+  "pilot_source_sha256": "c347d61a959d4ba18282737077a22ec13b14c152e52b8a8ad4b351f2d0e626a2",
+  "placeability_is_diagnostic_only": true,
+  "placeable": {
+    "better": true,
+    "noop": false,
+    "worse": false
+  },
+  "private_paired_ratios_diagnostic_only": {
+    "better": 0.9669958759753104,
+    "noop": 1.1202934716121529,
+    "worse": 1.234983894981159
+  },
+  "promotion_scope": "Admission to a fresh hidden-seed campaign only; this disclosed pilot is not separability evidence.",
+  "protocol_sha256": "ebeab6e8be0422b57994a6e668107b8be33cd3ca3f7ee3423402fbb2a6daec9c",
+  "retired_seed_commitments_sha256": "1a17718ead0b2d5114be670a2b155679c92ac95d79a58160b161c8f0b03a7a04",
+  "runner_sha256": "4a290509307a84fadf0866e1836c617f78e1f7b01fd00a8fd4f5bc2afc50a17f",
+  "schema": 1,
+  "seed_result_sha256": "e4e139fc6da757dc1f8bf57b4a53dd844f03de8cfb55449795533c95561a0b2f",
+  "seed_reveal_sha256": "91fc9fa3dcc76a0d811be852d2f403b2bffabd7fcf8f1a3e3b871c29a5595e52",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "static_qualification_sha256": "4b51548ff4910cd8d1b79247973cd47e65680b814b4ffa5c1b9153bf61d718fd",
+  "strict_ordering_passed": true,
+  "transformed_campaign_shell_sha256": "77c66465fb27b4bd8ee84aede3f03803349e1d62c9bb824396a224a8889f9078",
+  "v1_rejection_sha256": "2a7ed54c73c7d07c27abde6b84a6147c577d199d47ce48e56c9f7ec843420bbf",
+  "v2_invalid_pilot_rejection_sha256": "89205a071866417fd768364539aa8092eea5d3bd5156a6507969fa37abe6b4a4",
+  "v3_pilot_rejection_sha256": "f160ef6188e3f962317355a6971cea8b8dbadfb84f62d499be7f5f49cc39620c",
+  "v4_hidden_campaign_rejection_sha256": "d1a782831e9cfedfbe9c5835385f490e655ca38856698b88c59ee91f1ca993e1"
+}

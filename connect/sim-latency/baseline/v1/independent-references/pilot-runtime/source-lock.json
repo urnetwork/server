@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-local-validation-source-lock",
+  "frozen_at": "2026-08-27T00:58:51Z",
+  "authority": "local-commits",
+  "origin_policy": "ignore origin movement after this lock",
+  "tracked_worktrees_clean": true,
+  "repositories": {
+    "server": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+    "connect": "4f3f017f5448c18620b9eb3aab8c1002e869536d",
+    "proxy": "17f929c926d49c27138569c85899bd2e98ec0ec1",
+    "sdk": "3c2d56b47155cd026c2f572337d45bd0210f5bf5",
+    "glog": "13fba7d8f57e2c37274dd2e348578d5de9d66a59",
+    "goidenticons": "d18ccd3ecedee274067577c498affee6a8b06718",
+    "userwireguard": "4e3ead3f712c2557efeb91b0bb5ea6b7909171e7",
+    "sn": "420587eafbeb6d5ebd739862678161a7ad9c19a1",
+    "warp": "678b25a8bbd2e564cc9d8fa954322b99af6bba0e"
+  },
+  "evaluator": {
+    "image_tag": "urnetwork/sim-latency-evaluator-base:5ca3d5242f4a7d40efe44156",
+    "image_id": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+    "image_created_at": "2026-08-27T00:22:57.674028811Z",
+    "embedded_source_lock_sha256": "3e916937920677e6d1a40acfbf8511a07297a1c66e1246070535bf5f84949de8",
+    "simulator_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
+    "builder_sha256": "624f52c6752c6d6119b50b8219769ba695c86cbc58fb8113d800e3781f12fdb7",
+    "patch_policy_sha256": "2dba553cd94d6d901e0fc590fd147d3e39273b41c24317e987b1bbf479382460"
+  },
+  "host": {
+    "boot_id": "34760d1b-a0b6-46a0-b8c1-264abd1affba",
+    "hardware_id": "sille-macpro6-1-single-host",
+    "evaluation_cpu_list": "0,2,4,6,8,10,12,14,16,18",
+    "management_cpu_list": "20,22",
+    "qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+    "irq_policy_sha256": "8b235b88a0b117cc6271a9158cbd2415ae7f12fc885945dfbd855d9536f754f2",
+    "config_local_sha256": "f2fd41f07258389a5b8cbfd12af69c7e71124755432e48e115933a66f835962d",
+    "vault_local_sha256": "f84b7bdd1976c5e404c196584025287ab346f4bcfd60196da9ca46191a39f3fa",
+    "host_config_sha256": "51d8a08a4488a917c011a0edb83a0b72237ba09ae9ce1a2407f54c53fc12e696",
+    "reboot_proof_sha256": "2522dcc04deeccd44d8f44fb8f2e996fe6d3e4e5d59c9dd9bbd8f80699f25ee7",
+    "resource_bomb_report_sha256": "f1330f3c47856135823221fa153b6253d432d46be368baac9ea3a008bc781bfe",
+    "corrected_image_smoke_proof_sha256": "f5c06909bb2b27b29440797009507b8e8f3665a62132f87fa7c2a56b68f255ba"
+  },
+  "pre_measurement_gates": {
+    "server_sim_latency_package_tests": true,
+    "deterministic_measured_target_tests": true,
+    "measured_target_exposure_probe": true,
+    "full_scale_p1800_a_a": true,
+    "full_scale_p1800_a_a_sha256": "6b8973ecec6168dcba1066f1a1186a0dbafc91b72590817cd00ed4d7c282b19c",
+    "full_scale_worker_result_sha256": "2d62ebb36f08678efb35b20c51e7c78a4f162803a61290a69d24bed5fe6a9ea5",
+    "full_scale_evidence_manifest_sha256": "a0d713828aaa695091547d5b746535e6c413c831ab72575acb574fcc64f6bf04",
+    "origin_before_local_migrations": true,
+    "database_migration_application": true,
+    "race_detector_and_vet": true,
+    "source_correction_commit_pushed": true,
+    "direct_local_mount_container_smoke": true,
+    "corrected_full_window_sampling": true,
+    "malicious_build_isolation": true,
+    "post_reboot_host_controls": true,
+    "production_resource_bomb_cleanup": true,
+    "residual_competition_containers": 0
+  },
+  "development_snapshot": false
+}

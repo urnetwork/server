@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-docker-id-map",
+  "image_id": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "container_uid": 65532,
+  "host_uid": 165532,
+  "container_gid": 65532,
+  "host_gid": 165532,
+  "root_host_uid": 100000,
+  "root_host_gid": 100000,
+  "uid_map_sha256": "54060bf227070b8d3dd1370ff9b04f3c97c252c16c70de3e0340393d543b20e1",
+  "gid_map_sha256": "54060bf227070b8d3dd1370ff9b04f3c97c252c16c70de3e0340393d543b20e1",
+  "remapped": true,
+  "daemon_security_options": [
+    "name=apparmor",
+    "name=seccomp,profile=builtin",
+    "name=userns",
+    "name=cgroupns",
+    "name=no-new-privileges"
+  ]
+}

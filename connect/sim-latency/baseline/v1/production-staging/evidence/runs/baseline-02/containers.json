@@ -1,0 +1,183 @@
+[
+  {
+    "id": "3451378019bcd391ca83374e008186ef704649616acfe851c7e33b24e73be1d4",
+    "name": "/urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1",
+    "image_id": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+    "config": {
+      "image": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+      "user": "65532:65532",
+      "labels": {
+        "com.docker.compose.config-hash": "39dcd39335faad4a76bb777100e172fa5864daa723cdab9db3fe85bc36c0b3a2",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02",
+        "com.docker.compose.project.config_files": "/usr/local/libexec/urnetwork/competition-2abcf145/container/compose.yml",
+        "com.docker.compose.project.environment_file": "/var/lib/urnetwork/competition/01a04755-63f0-041c-60bb-47b92ccbcf8c/attempt-02/.evidence-runtime/runs/baseline-02/compose.env",
+        "com.docker.compose.project.working_dir": "/usr/local/libexec/urnetwork/competition-2abcf145/container",
+        "com.docker.compose.service": "runner",
+        "com.docker.compose.version": "5.5.0",
+        "com.urnetwork.competition.base-sha": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+        "com.urnetwork.competition.development-snapshot": "false",
+        "com.urnetwork.competition.image-kind": "evaluator-base",
+        "com.urnetwork.competition.job-id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+        "com.urnetwork.competition.round-id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+        "com.urnetwork.competition.source-lock-sha256": "39283e4d7c0898ae2a8ffc709c0e8efcc3b4976d6a3317663d1a7f208900af3a",
+        "com.urnetwork.competition.stage": "baseline",
+        "org.opencontainers.image.revision": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+        "org.opencontainers.image.title": "URnetwork sim-latency evaluator base",
+        "org.opencontainers.image.version": "24.04"
+      }
+    },
+    "host_config": {
+      "readonly_rootfs": true,
+      "memory": 77309411328,
+      "memory_swap": 77309411328,
+      "cpu_shares": 1024,
+      "pids_limit": 65536,
+      "cgroup_parent": "urnetwork-evaluation-01a0475563f0041c60bb47b92ccbcf8c-baseline-02.slice",
+      "cpuset_cpus": "0,2,4,6,8,10,12,14,16,18",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "network_mode": "urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation"
+    },
+    "mounts": [
+      {
+        "type": "bind",
+        "destination": "/runtime/vault/local",
+        "rw": false
+      },
+      {
+        "type": "bind",
+        "destination": "/input",
+        "rw": false
+      },
+      {
+        "type": "bind",
+        "destination": "/artifacts",
+        "rw": true
+      },
+      {
+        "type": "bind",
+        "destination": "/runtime/config/local",
+        "rw": false
+      }
+    ],
+    "state": {
+      "status": "exited",
+      "exit_code": 0,
+      "oom_killed": false,
+      "started_at": "2026-08-28T07:55:17.119033031Z",
+      "finished_at": "2026-08-28T08:03:42.254813345Z"
+    }
+  },
+  {
+    "id": "3404aa9e7692e09133e92261c81f5f5a4a91d4f201d6b82e41089edd6db91dc8",
+    "name": "/urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1",
+    "image_id": "sha256:8d6ed4b5a1f44557313cab42a8951c53d1b86ccc899266bcee2ee1ee84076c14",
+    "config": {
+      "image": "postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
+      "user": "999:999",
+      "labels": {
+        "com.docker.compose.config-hash": "24c16575d38987143607c192ccde87ee2ab621453dbe99f2d8430f120aedb321",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:8d6ed4b5a1f44557313cab42a8951c53d1b86ccc899266bcee2ee1ee84076c14",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02",
+        "com.docker.compose.project.config_files": "/usr/local/libexec/urnetwork/competition-2abcf145/container/compose.yml",
+        "com.docker.compose.project.environment_file": "/var/lib/urnetwork/competition/01a04755-63f0-041c-60bb-47b92ccbcf8c/attempt-02/.evidence-runtime/runs/baseline-02/compose.env",
+        "com.docker.compose.project.working_dir": "/usr/local/libexec/urnetwork/competition-2abcf145/container",
+        "com.docker.compose.service": "postgres",
+        "com.docker.compose.version": "5.5.0",
+        "com.urnetwork.competition.job-id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+        "com.urnetwork.competition.round-id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+        "com.urnetwork.competition.stage": "baseline"
+      }
+    },
+    "host_config": {
+      "readonly_rootfs": true,
+      "memory": 17179869184,
+      "memory_swap": 17179869184,
+      "cpu_shares": 4096,
+      "pids_limit": 4096,
+      "cgroup_parent": "urnetwork-evaluation-01a0475563f0041c60bb47b92ccbcf8c-baseline-02.slice",
+      "cpuset_cpus": "0,2,4,6,8,10,12,14,16,18",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "network_mode": "urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation"
+    },
+    "mounts": [
+      {
+        "type": "bind",
+        "destination": "/docker-entrypoint-initdb.d/10-competition-app.sh",
+        "rw": false
+      }
+    ],
+    "state": {
+      "status": "running",
+      "exit_code": 0,
+      "oom_killed": false,
+      "started_at": "2026-08-28T07:55:07.407801879Z",
+      "finished_at": "0001-01-01T00:00:00Z"
+    }
+  },
+  {
+    "id": "7a3e866988fdf1baa9067d13982b04e6f9d6c3716bc9f0c777d33cf029b0da26",
+    "name": "/urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1",
+    "image_id": "sha256:4326c43a061bc3984d6fcb5acd34f6cf363523a76920eee2a405f5b7fd55aa92",
+    "config": {
+      "image": "redis:8-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78",
+      "user": "999:999",
+      "labels": {
+        "com.docker.compose.config-hash": "c66447b403ae983a13d28a45309588c900dba0f609d14e0cdf354d507289ec59",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:4326c43a061bc3984d6fcb5acd34f6cf363523a76920eee2a405f5b7fd55aa92",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02",
+        "com.docker.compose.project.config_files": "/usr/local/libexec/urnetwork/competition-2abcf145/container/compose.yml",
+        "com.docker.compose.project.environment_file": "/var/lib/urnetwork/competition/01a04755-63f0-041c-60bb-47b92ccbcf8c/attempt-02/.evidence-runtime/runs/baseline-02/compose.env",
+        "com.docker.compose.project.working_dir": "/usr/local/libexec/urnetwork/competition-2abcf145/container",
+        "com.docker.compose.service": "redis",
+        "com.docker.compose.version": "5.5.0",
+        "com.urnetwork.competition.job-id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+        "com.urnetwork.competition.round-id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+        "com.urnetwork.competition.stage": "baseline"
+      }
+    },
+    "host_config": {
+      "readonly_rootfs": true,
+      "memory": 8589934592,
+      "memory_swap": 8589934592,
+      "cpu_shares": 2048,
+      "pids_limit": 4096,
+      "cgroup_parent": "urnetwork-evaluation-01a0475563f0041c60bb47b92ccbcf8c-baseline-02.slice",
+      "cpuset_cpus": "0,2,4,6,8,10,12,14,16,18",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "network_mode": "urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation"
+    },
+    "mounts": [],
+    "state": {
+      "status": "running",
+      "exit_code": 0,
+      "oom_killed": false,
+      "started_at": "2026-08-28T07:55:07.400705315Z",
+      "finished_at": "0001-01-01T00:00:00Z"
+    }
+  }
+]

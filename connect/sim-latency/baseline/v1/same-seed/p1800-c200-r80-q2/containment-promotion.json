@@ -1,0 +1,27 @@
+{
+  "job_id": "6880c697-2b8a-46a9-b2b8-21d0efc0842b",
+  "kind": "sim-latency-host-containment-promotion",
+  "markers": {
+    "cleanup": {
+      "path": "/run/urnetwork/cleanup.json",
+      "sha256": "d918447ff4803278969ea06d4f9d0877568db2e6d44b712e0e012596c3bcab93"
+    },
+    "immutable_reports": {
+      "path": "/run/urnetwork/immutable-reports.json",
+      "sha256": "a098d6694b8d37439728a9d8300fff1efeeacf4b9b7c7cb53667567d7375a604"
+    },
+    "redis_reset": {
+      "path": "/run/urnetwork/redis-reset.json",
+      "sha256": "edc32d381e740a5b370ad45a49fae09eba406551f2e2ff75e385984f0bb3be11"
+    },
+    "template_database": {
+      "path": "/run/urnetwork/template-database.json",
+      "sha256": "ab0383e72f9b7f2465f9a39e42af5c8e5794434433c556faf488d09eff6bf8f0"
+    }
+  },
+  "path": "/run/urnetwork/cleanup.json",
+  "promoted": true,
+  "round_id": "f71b7ed2-78ec-4aaa-9fdc-f9b75c66e665",
+  "schema": 1,
+  "sha256": "d918447ff4803278969ea06d4f9d0877568db2e6d44b712e0e012596c3bcab93"
+}

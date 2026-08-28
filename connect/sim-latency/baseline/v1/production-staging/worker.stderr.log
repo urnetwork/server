@@ -1,0 +1,1414 @@
+[competition-evaluator] building authenticated candidate image offline
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-migrate-run-059a2257452b Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-migrate-run-059a2257452b Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 07:46:39.679023       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 07:46:39.679250       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 07:46:39.679612       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 07:46:39.679636       7 env.go:68] [env]settings = map[]
+I0828 07:46:39.680068       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 07:46:39.680145       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 07:46:39.680253       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 07:46:39.680293       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 07:46:39.680362       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 07:46:39.680396       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 07:46:39.680454       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 07:46:39.680488       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 07:46:39.680646       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 07:46:39.680659       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 07:46:39.680671       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 07:46:39.680845       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 07:46:39.680887       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 07:46:39.680930       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 07:46:39.680941       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 07:46:39.680980       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 07:46:40.025856       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 07:46:40.025980       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 07:46:40.026064       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 07:46:40.026106       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 07:46:40.026276       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 07:46:40.026291       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 07:46:40.026305       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 07:46:40.026516       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 07:46:40.026577       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 07:46:40.026629       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 07:46:40.026641       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 07:46:40.026674       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-run-f4b979a78de0 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-run-f4b979a78de0 Created 
+[official-run] preflight passed: eval=baseline-01-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Started 
+[official-run] preflight passed: eval=baseline-01-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-01-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/baseline-01-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-01_evaluation Removed 
+[competition-evaluator] baseline-01 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-migrate-run-309959da14fc Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-migrate-run-309959da14fc Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 07:55:13.736004       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 07:55:13.736177       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 07:55:13.736539       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 07:55:13.736562       7 env.go:68] [env]settings = map[]
+I0828 07:55:13.736997       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 07:55:13.737056       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 07:55:13.737133       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 07:55:13.737180       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 07:55:13.737261       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 07:55:13.737308       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 07:55:13.737375       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 07:55:13.737411       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 07:55:13.737531       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 07:55:13.737544       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 07:55:13.737579       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 07:55:13.737774       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 07:55:13.737821       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 07:55:13.737860       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 07:55:13.737872       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 07:55:13.737929       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 07:55:14.081313       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 07:55:14.081449       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 07:55:14.081532       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 07:55:14.081572       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 07:55:14.081734       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 07:55:14.081750       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 07:55:14.081763       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 07:55:14.081926       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 07:55:14.081969       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 07:55:14.082031       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 07:55:14.082045       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 07:55:14.082084       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-run-b5e620578c8a Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-run-b5e620578c8a Created 
+[official-run] preflight passed: eval=baseline-02-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Started 
+[official-run] preflight passed: eval=baseline-02-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-02-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/baseline-02-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-02_evaluation Removed 
+[competition-evaluator] baseline-02 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-migrate-run-8a44104d94f4 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-migrate-run-8a44104d94f4 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 08:03:50.552168       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 08:03:50.552309       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 08:03:50.552677       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 08:03:50.552699       7 env.go:68] [env]settings = map[]
+I0828 08:03:50.553102       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:03:50.553167       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:03:50.553246       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 08:03:50.553284       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 08:03:50.553367       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:03:50.553405       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:03:50.553463       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 08:03:50.553496       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 08:03:50.553617       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:03:50.553630       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:03:50.553652       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:03:50.553805       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:03:50.553861       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:03:50.553898       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:03:50.553909       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:03:50.553960       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 08:03:50.887753       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:03:50.887877       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:03:50.887964       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:03:50.888003       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:03:50.888233       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:03:50.888248       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:03:50.888262       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:03:50.888437       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:03:50.888480       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:03:50.888523       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:03:50.888534       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:03:50.888562       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-run-a5e67044ef95 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-run-a5e67044ef95 Created 
+[official-run] preflight passed: eval=baseline-03-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Started 
+[official-run] preflight passed: eval=baseline-03-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-03-01a04755
+/artifacts/baseline-03-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-03_evaluation Removed 
+[competition-evaluator] baseline-03 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-migrate-run-1f6b1550b652 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-migrate-run-1f6b1550b652 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 08:12:31.002735       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 08:12:31.002897       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 08:12:31.003309       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 08:12:31.003333       7 env.go:68] [env]settings = map[]
+I0828 08:12:31.003663       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:12:31.003744       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:12:31.003837       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 08:12:31.003877       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 08:12:31.003943       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:12:31.003978       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:12:31.004035       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 08:12:31.004067       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 08:12:31.004216       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:12:31.004230       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:12:31.004242       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:12:31.004402       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:12:31.004435       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:12:31.004479       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:12:31.004491       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:12:31.004525       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 08:12:31.339463       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:12:31.339591       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:12:31.339675       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:12:31.339714       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:12:31.339877       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:12:31.339892       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:12:31.339905       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:12:31.340067       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:12:31.340104       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:12:31.340153       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:12:31.340175       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:12:31.340205       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-run-9aeccd6d044c Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-run-9aeccd6d044c Created 
+[official-run] preflight passed: eval=baseline-04-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Started 
+[official-run] preflight passed: eval=baseline-04-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-04-01a04755
+/artifacts/baseline-04-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-04_evaluation Removed 
+[competition-evaluator] baseline-04 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-migrate-run-4f34c254e7ac Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-migrate-run-4f34c254e7ac Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 08:21:06.757904       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 08:21:06.758092       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 08:21:06.758463       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 08:21:06.758489       7 env.go:68] [env]settings = map[]
+I0828 08:21:06.758857       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:21:06.758937       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:21:06.759028       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 08:21:06.759066       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 08:21:06.759134       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:21:06.759184       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:21:06.759246       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 08:21:06.759280       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 08:21:06.759421       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:21:06.759434       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:21:06.759447       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:21:06.759601       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:21:06.759643       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:21:06.759679       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:21:06.759690       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:21:06.759727       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 08:21:07.089562       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:21:07.089688       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:21:07.089777       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:21:07.089818       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:21:07.089993       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:21:07.090008       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:21:07.090021       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:21:07.090191       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:21:07.090245       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:21:07.090298       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:21:07.090312       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:21:07.090349       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-run-13f4615bab1f Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-run-13f4615bab1f Created 
+[official-run] preflight passed: eval=baseline-05-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Started 
+[official-run] preflight passed: eval=baseline-05-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-05-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/baseline-05-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-05_evaluation Removed 
+[competition-evaluator] baseline-05 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-migrate-run-55ce081f9509 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-migrate-run-55ce081f9509 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 08:29:35.931121       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 08:29:35.931272       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 08:29:35.931633       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 08:29:35.931656       7 env.go:68] [env]settings = map[]
+I0828 08:29:35.932092       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:29:35.932149       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:29:35.932239       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 08:29:35.932277       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 08:29:35.932358       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:29:35.932403       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:29:35.932470       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 08:29:35.932504       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 08:29:35.932627       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:29:35.932641       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:29:35.932673       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:29:35.932872       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:29:35.932916       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:29:35.932964       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:29:35.932976       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:29:35.933012       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 08:29:36.265071       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:29:36.265206       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:29:36.265293       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:29:36.265343       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:29:36.265521       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:29:36.265536       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:29:36.265549       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:29:36.265709       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:29:36.265770       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:29:36.265832       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:29:36.265845       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:29:36.265878       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-run-7431bb6e0e74 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-run-7431bb6e0e74 Created 
+[official-run] preflight passed: eval=baseline-06-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Started 
+[official-run] preflight passed: eval=baseline-06-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-06-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/baseline-06-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-06_evaluation Removed 
+[competition-evaluator] baseline-06 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-migrate-run-343c859cae60 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-migrate-run-343c859cae60 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 08:38:13.675072       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 08:38:13.675248       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 08:38:13.675609       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 08:38:13.675641       7 env.go:68] [env]settings = map[]
+I0828 08:38:13.676083       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:38:13.676153       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:38:13.676261       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 08:38:13.676299       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 08:38:13.676366       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:38:13.676400       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:38:13.676457       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 08:38:13.676490       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 08:38:13.676649       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:38:13.676662       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:38:13.676675       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:38:13.676896       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:38:13.676938       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:38:13.676978       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:38:13.676989       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:38:13.677027       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 08:38:14.007380       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:38:14.007494       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:38:14.007575       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:38:14.007627       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:38:14.007806       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:38:14.007821       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:38:14.007834       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:38:14.007985       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:38:14.008036       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:38:14.008094       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:38:14.008131       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:38:14.008175       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-run-be8aaec3110f Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-run-be8aaec3110f Created 
+[official-run] preflight passed: eval=baseline-07-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Started 
+[official-run] preflight passed: eval=baseline-07-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-07-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/baseline-07-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-07_evaluation Removed 
+[competition-evaluator] baseline-07 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-migrate-run-67a24e395cad Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-migrate-run-67a24e395cad Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 08:46:46.437600       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 08:46:46.437766       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 08:46:46.438177       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 08:46:46.438202       7 env.go:68] [env]settings = map[]
+I0828 08:46:46.438549       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:46:46.438626       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:46:46.438719       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 08:46:46.438759       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 08:46:46.438827       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:46:46.438862       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:46:46.438921       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 08:46:46.438957       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 08:46:46.439103       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:46:46.439117       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:46:46.439129       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:46:46.439339       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:46:46.439382       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:46:46.439420       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:46:46.439432       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:46:46.439466       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 08:46:46.775725       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:46:46.775847       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:46:46.775932       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:46:46.775974       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:46:46.776146       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:46:46.776169       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:46:46.776183       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:46:46.776361       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:46:46.776409       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:46:46.776465       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:46:46.776479       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:46:46.776511       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-run-7feae149fecf Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-run-7feae149fecf Created 
+[official-run] preflight passed: eval=baseline-08-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Started 
+[official-run] preflight passed: eval=baseline-08-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-08-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/baseline-08-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-08_evaluation Removed 
+[competition-evaluator] baseline-08 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-migrate-run-61ab4f8485fa Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-migrate-run-61ab4f8485fa Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 08:55:14.691212       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 08:55:14.691363       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 08:55:14.691708       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 08:55:14.691732       7 env.go:68] [env]settings = map[]
+I0828 08:55:14.692100       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:55:14.692177       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:55:14.692261       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 08:55:14.692300       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 08:55:14.692377       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:55:14.692414       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:55:14.692474       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 08:55:14.692507       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 08:55:14.692642       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:55:14.692656       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:55:14.692676       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:55:14.692838       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:55:14.692893       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:55:14.692930       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:55:14.692941       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:55:14.692987       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 08:55:15.023129       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 08:55:15.023250       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 08:55:15.023330       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 08:55:15.023369       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 08:55:15.023542       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 08:55:15.023557       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 08:55:15.023570       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 08:55:15.023763       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 08:55:15.023810       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 08:55:15.023857       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 08:55:15.023869       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 08:55:15.023902       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-run-02a29d8fc090 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-run-02a29d8fc090 Created 
+[official-run] preflight passed: eval=baseline-09-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Started 
+[official-run] preflight passed: eval=baseline-09-01a04755 build=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/baseline-09-01a04755
+/artifacts/baseline-09-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-09_evaluation Removed 
+[competition-evaluator] baseline-09 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-migrate-run-65f636cc4ab2 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-migrate-run-65f636cc4ab2 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 09:03:48.764425       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 09:03:48.764589       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 09:03:48.764945       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 09:03:48.764967       7 env.go:68] [env]settings = map[]
+I0828 09:03:48.765437       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:03:48.765513       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:03:48.765611       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 09:03:48.765649       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 09:03:48.765715       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:03:48.765750       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:03:48.765807       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 09:03:48.765844       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 09:03:48.766005       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:03:48.766019       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:03:48.766031       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:03:48.766218       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:03:48.766262       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:03:48.766301       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:03:48.766313       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:03:48.766354       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 09:03:49.106799       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:03:49.106916       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:03:49.106996       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:03:49.107036       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:03:49.107207       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:03:49.107223       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:03:49.107236       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:03:49.107408       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:03:49.107450       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:03:49.107502       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:03:49.107516       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:03:49.107552       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-run-1bb7409e2a29 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-run-1bb7409e2a29 Created 
+[official-run] preflight passed: eval=candidate-01-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Started 
+[official-run] preflight passed: eval=candidate-01-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-01-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/candidate-01-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-01_evaluation Removed 
+[competition-evaluator] candidate-01 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-migrate-run-f6026c14e2b3 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-migrate-run-f6026c14e2b3 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 09:12:22.537630       8 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 09:12:22.537804       8 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 09:12:22.538186       8 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 09:12:22.538221       8 env.go:68] [env]settings = map[]
+I0828 09:12:22.538750       8 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:12:22.538825       8 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:12:22.538927       8 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 09:12:22.538966       8 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 09:12:22.539035       8 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:12:22.539069       8 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:12:22.539128       8 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 09:12:22.539210       8 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 09:12:22.539380       8 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:12:22.539394       8 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:12:22.539406       8 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:12:22.539582       8 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:12:22.539624       8 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:12:22.539664       8 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:12:22.539675       8 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:12:22.539713       8 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 09:12:22.871024       8 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:12:22.871149       8 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:12:22.871243       8 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:12:22.871284       8 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:12:22.871464       8 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:12:22.871480       8 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:12:22.871494       8 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:12:22.871655       8 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:12:22.871692       8 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:12:22.871748       8 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:12:22.871762       8 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:12:22.871801       8 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-run-b80c55dcc5b2 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-run-b80c55dcc5b2 Created 
+[official-run] preflight passed: eval=candidate-02-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Started 
+[official-run] preflight passed: eval=candidate-02-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-02-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/candidate-02-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-02_evaluation Removed 
+[competition-evaluator] candidate-02 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-migrate-run-652769b9e672 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-migrate-run-652769b9e672 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 09:20:46.877154       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 09:20:46.877377       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 09:20:46.877743       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 09:20:46.877767       7 env.go:68] [env]settings = map[]
+I0828 09:20:46.878205       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:20:46.878274       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:20:46.878356       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 09:20:46.878396       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 09:20:46.878477       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:20:46.878516       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:20:46.878576       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 09:20:46.878612       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 09:20:46.878735       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:20:46.878749       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:20:46.878772       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:20:46.878939       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:20:46.878993       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:20:46.879032       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:20:46.879043       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:20:46.879098       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 09:20:47.210395       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:20:47.210530       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:20:47.210614       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:20:47.210656       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:20:47.210815       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:20:47.210830       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:20:47.210844       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:20:47.211011       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:20:47.211060       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:20:47.211110       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:20:47.211122       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:20:47.211177       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-run-49a2022d1eff Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-run-49a2022d1eff Created 
+[official-run] preflight passed: eval=candidate-03-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Started 
+[official-run] preflight passed: eval=candidate-03-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-03-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/candidate-03-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-03_evaluation Removed 
+[competition-evaluator] candidate-03 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-migrate-run-9125d392c346 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-migrate-run-9125d392c346 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 09:29:30.825003       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 09:29:30.825184       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 09:29:30.825547       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 09:29:30.825570       7 env.go:68] [env]settings = map[]
+I0828 09:29:30.826060       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:29:30.826133       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:29:30.826250       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 09:29:30.826292       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 09:29:30.826362       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:29:30.826398       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:29:30.826456       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 09:29:30.826493       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 09:29:30.826654       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:29:30.826667       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:29:30.826680       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:29:30.826857       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:29:30.826900       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:29:30.826940       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:29:30.826952       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:29:30.826989       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 09:29:31.165658       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:29:31.165794       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:29:31.165875       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:29:31.165914       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:29:31.166089       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:29:31.166103       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:29:31.166117       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:29:31.166309       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:29:31.166359       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:29:31.166409       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:29:31.166421       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:29:31.166453       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-run-3d290f1e4b04 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-run-3d290f1e4b04 Created 
+[official-run] preflight passed: eval=candidate-04-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Started 
+[official-run] preflight passed: eval=candidate-04-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-04-01a04755
+/artifacts/candidate-04-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-04_evaluation Removed 
+[competition-evaluator] candidate-04 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-migrate-run-c9afc9fa5678 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-migrate-run-c9afc9fa5678 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 09:37:57.607273       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 09:37:57.607429       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 09:37:57.607795       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 09:37:57.607819       7 env.go:68] [env]settings = map[]
+I0828 09:37:57.608285       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:37:57.608353       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:37:57.608433       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 09:37:57.608474       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 09:37:57.608555       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:37:57.608593       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:37:57.608652       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 09:37:57.608686       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 09:37:57.608809       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:37:57.608823       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:37:57.608846       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:37:57.608998       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:37:57.609055       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:37:57.609091       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:37:57.609102       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:37:57.609153       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 09:37:57.940873       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:37:57.940999       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:37:57.941083       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:37:57.941122       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:37:57.941305       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:37:57.941321       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:37:57.941333       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:37:57.941500       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:37:57.941540       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:37:57.941587       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:37:57.941599       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:37:57.941626       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-run-eafff08e9a13 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-run-eafff08e9a13 Created 
+[official-run] preflight passed: eval=candidate-05-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Started 
+[official-run] preflight passed: eval=candidate-05-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-05-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/candidate-05-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-05_evaluation Removed 
+[competition-evaluator] candidate-05 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-migrate-run-1b842a64b557 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-migrate-run-1b842a64b557 Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 09:46:26.951483       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 09:46:26.951638       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 09:46:26.951993       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 09:46:26.952015       7 env.go:68] [env]settings = map[]
+I0828 09:46:26.952450       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:46:26.952525       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:46:26.952627       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 09:46:26.952666       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 09:46:26.952732       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:46:26.952767       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:46:26.952824       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 09:46:26.952865       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 09:46:26.953024       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:46:26.953038       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:46:26.953050       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:46:26.953234       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:46:26.953278       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:46:26.953318       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:46:26.953329       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:46:26.953368       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 09:46:27.295324       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:46:27.295446       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:46:27.295527       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:46:27.295567       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:46:27.295733       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:46:27.295749       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:46:27.295761       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:46:27.295952       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:46:27.295991       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:46:27.296050       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:46:27.296064       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:46:27.296097       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-run-e8cdf4b519b6 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-run-e8cdf4b519b6 Created 
+[official-run] preflight passed: eval=candidate-06-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Started 
+[official-run] preflight passed: eval=candidate-06-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-06-01a04755
+/artifacts/candidate-06-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-06_evaluation Removed 
+[competition-evaluator] candidate-06 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-migrate-run-4620ecc0e08d Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-migrate-run-4620ecc0e08d Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 09:55:05.474859       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 09:55:05.475072       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 09:55:05.475442       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 09:55:05.475465       7 env.go:68] [env]settings = map[]
+I0828 09:55:05.475914       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:55:05.475972       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:55:05.476050       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 09:55:05.476088       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 09:55:05.476175       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:55:05.476216       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:55:05.476277       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 09:55:05.476313       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 09:55:05.476435       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:55:05.476448       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:55:05.476470       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:55:05.476610       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:55:05.476678       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:55:05.476714       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:55:05.476725       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:55:05.476781       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 09:55:05.813165       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 09:55:05.813330       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 09:55:05.813413       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 09:55:05.813454       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 09:55:05.813614       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 09:55:05.813629       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 09:55:05.813642       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 09:55:05.813818       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 09:55:05.813863       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 09:55:05.813926       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 09:55:05.813940       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 09:55:05.813971       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-run-c21a187942f9 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-run-c21a187942f9 Created 
+[official-run] preflight passed: eval=candidate-07-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Started 
+[official-run] preflight passed: eval=candidate-07-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-07-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/candidate-07-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-07_evaluation Removed 
+[competition-evaluator] candidate-07 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-migrate-run-a59707362d7b Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-migrate-run-a59707362d7b Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 10:03:40.673564       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 10:03:40.673724       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 10:03:40.674091       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 10:03:40.674115       7 env.go:68] [env]settings = map[]
+I0828 10:03:40.674559       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 10:03:40.674638       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 10:03:40.674736       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 10:03:40.674775       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 10:03:40.674844       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 10:03:40.674880       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 10:03:40.674940       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 10:03:40.674975       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 10:03:40.675136       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 10:03:40.675150       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 10:03:40.675170       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 10:03:40.675344       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 10:03:40.675388       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 10:03:40.675427       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 10:03:40.675439       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 10:03:40.675481       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 10:03:41.007453       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 10:03:41.007567       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 10:03:41.007648       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 10:03:41.007702       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 10:03:41.007866       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 10:03:41.007882       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 10:03:41.007895       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 10:03:41.008069       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 10:03:41.008107       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 10:03:41.008164       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 10:03:41.008178       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 10:03:41.008207       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-run-9d2600366730 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-run-9d2600366730 Created 
+[official-run] preflight passed: eval=candidate-08-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Started 
+[official-run] preflight passed: eval=candidate-08-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-08-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/candidate-08-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-08_evaluation Removed 
+[competition-evaluator] candidate-08 complete
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09_evaluation Creating 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09_evaluation Created 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09_evaluation Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Started 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Waiting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Healthy 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-migrate-run-11db69075a0d Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-migrate-run-11db69075a0d Created 
+[env]glog not configured from command line. Using default configuration.
+I0828 10:12:16.636808       7 env.go:755] [env]try /runtime/config, [settings.yml]
+I0828 10:12:16.636969       7 env.go:755] [env]try /runtime/config/local, [settings.yml]
+I0828 10:12:16.637350       7 env.go:755] [env]try /runtime/site, [settings.yml]
+I0828 10:12:16.637374       7 env.go:68] [env]settings = map[]
+I0828 10:12:16.637757       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 10:12:16.637848       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 10:12:16.637952       7 env.go:755] [env]try /runtime/vault, [pg_maintenance.yml]
+I0828 10:12:16.637991       7 env.go:755] [env]try /runtime/vault/local, [pg_maintenance.yml]
+I0828 10:12:16.638061       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 10:12:16.638095       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 10:12:16.638164       7 env.go:755] [env]try /runtime/config, [db_maintenance.yml]
+I0828 10:12:16.638202       7 env.go:755] [env]try /runtime/config/local, [db_maintenance.yml]
+I0828 10:12:16.638350       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 10:12:16.638364       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 10:12:16.638377       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 10:12:16.638540       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 10:12:16.638584       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 10:12:16.638620       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 10:12:16.638631       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 10:12:16.638663       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+I0828 10:12:16.969003       7 env.go:755] [env]try /runtime/vault, [pg.yml]
+I0828 10:12:16.969129       7 env.go:755] [env]try /runtime/vault/local, [pg.yml]
+I0828 10:12:16.969223       7 env.go:755] [env]try /runtime/config, [db.yml]
+I0828 10:12:16.969266       7 env.go:755] [env]try /runtime/config/local, [db.yml]
+I0828 10:12:16.969441       7 env.go:641] [env]/runtime/config/local/db.yml[min_connections] = 4
+I0828 10:12:16.969457       7 env.go:641] [env]/runtime/config/local/db.yml[max_connections] = 16
+I0828 10:12:16.969469       7 db.go:194] [db]options = map[connect_timeout:30 pool_health_check_period:1s pool_max_conn_idle_time:60m pool_max_conn_lifetime:8h pool_max_conn_lifetime_jitter:15m pool_max_conns:32 pool_min_conns:4 sslmode:disable]
+I0828 10:12:16.969634       7 env.go:657] [env]/runtime/vault/local/pg.yml[user] = br***ur
+I0828 10:12:16.969683       7 env.go:657] [env]/runtime/vault/local/pg.yml[password] = pi***ur
+I0828 10:12:16.969747       7 env.go:690] [env]lookup env var "BRINGYOUR_POSTGRES_HOSTNAME"
+I0828 10:12:16.969761       7 env.go:657] [env]/runtime/vault/local/pg.yml[authority] = po***32
+I0828 10:12:16.969787       7 env.go:657] [env]/runtime/vault/local/pg.yml[db] = br***ur
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-run-68264e5421b4 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-run-68264e5421b4 Created 
+[official-run] preflight passed: eval=candidate-09-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Started 
+[official-run] preflight passed: eval=candidate-09-01a04755 build=480b98ba65da186b3a056ab4ad9e056b6a70e480 hardware=sille-macpro6-1-single-host
+[official-run] starting simulator; artifacts=/artifacts/candidate-09-01a04755
+[official-run] simulator complete; the worker must now write immutable accounting.json and resources.json
+/artifacts/candidate-09-01a04755
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-runner-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-redis-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09-postgres-1 Removed 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09_evaluation Removing 
+ Network urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-09_evaluation Removed 
+[competition-evaluator] candidate-09 complete
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Started 
+[env]glog not configured from command line. Using default configuration.
+I0828 10:20:39.942133      16 env.go:755] [env]try /srv/warp/config, [settings.yml]
+I0828 10:20:39.942269      16 env.go:755] [env]try /srv/warp/site, [settings.yml]
+I0828 10:20:39.942287      16 env.go:68] [env]settings = map[]
+[official-run] baseline manifest written: /score-output/baseline.json sha256=84d49d0847104ae79b878a6cbf6eaef7675ef8234e0d8df2615f324e85da623f
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-baseline-score-scorer-1 Removed 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Creating 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Created 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Starting 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Started 
+[env]glog not configured from command line. Using default configuration.
+I0828 10:20:45.283366      19 env.go:755] [env]try /srv/warp/config, [settings.yml]
+I0828 10:20:45.283491      19 env.go:755] [env]try /srv/warp/site, [settings.yml]
+I0828 10:20:45.283518      19 env.go:68] [env]settings = map[]
+[official-run] score written to /score-output/score.json
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Stopping 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Stopped 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Removing 
+ Container urnetwork-eval-01a0475563f0041c60bb47b92ccbcf8c-candidate-score-scorer-1 Removed 
+[competition-evaluator] evaluation complete: job=01a04755-63f0-041c-60bb-47b92ccbcf8c candidate=480b98ba65da186b3a056ab4ad9e056b6a70e480

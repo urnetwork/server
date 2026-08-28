@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-independent-seed-campaign-commitment",
+  "committed_at": "2026-08-27T18:58:35Z",
+  "target_independent_seeds": 5,
+  "independent_reference_replicates": 1,
+  "calibration_decision_sha256": "ba49014d7ceef1ff044a2d799f7911868b2eb159a6c587425a9c9f3d4fac2649",
+  "measurement_amendment_sha256": "9d453d7b1d763a7c0975bae8275985ef3b7fc3367535f67ccd79ac1afe9e0f61",
+  "independent_reference_r1_correction_sha256": "b500ac07ac7272e8ff839d3bdf6f5ebcdc327d254b1a6d0a5d6078b64831dafa",
+  "seeds": [
+    {
+      "seed_index": 1,
+      "round_id": "39ee5928-ffab-4ce2-83f9-d6efd1c546ca",
+      "seed_commitment": "a4150cc341964b459bd95506586c2750d0863eb877a9bd1f5a62e4a075209fe0",
+      "providers_sha256": "c49a0752fc3e89d41a9a69db6b3bc2768c239a9a0b35d62d3f93afbaa7806d4f"
+    },
+    {
+      "seed_index": 2,
+      "round_id": "eff3624a-7ff4-41ad-b63b-d7b2e5dfba44",
+      "seed_commitment": "5ff8b592bab291f02bfe06c76793afb30763f0e0a5411a865b94147bb6dd1857",
+      "providers_sha256": "e2a1ee5352ff0f40d9b0fa7ddcd5d2651acd80d4c3bcbbabbe781b6da2e7b9e5"
+    },
+    {
+      "seed_index": 3,
+      "round_id": "9bc5f20b-2c8e-496d-8cca-6e854ee3d999",
+      "seed_commitment": "a888713d8cd95d0ee470ab8491ec9e0def829e9a0f55e5419f410ece8734cfb1",
+      "providers_sha256": "38c23b0872e6837eabdef2dc8900469b32803909e6845578a4ed0760b838b047"
+    },
+    {
+      "seed_index": 4,
+      "round_id": "c3d8a569-a4f4-47a9-935f-0223516c0852",
+      "seed_commitment": "842ebeb82682ec9929450d953f2babb4bc9b4331f472d3454fb479b3f74fffcd",
+      "providers_sha256": "6503919f4cd2b00e56826d9e2d910f4627a2255199380c40ef7306e3e34e4383"
+    },
+    {
+      "seed_index": 5,
+      "round_id": "9ce9e76c-1e2a-4844-adb3-43bdb31d696b",
+      "seed_commitment": "40df4db6b253ce42612984c0ef142479a81a8738189301bede1de64323cb864d",
+      "providers_sha256": "0cbf27009c6e52c3558255b98ea3f26167ec819743d58d5dfb3e46634736fc3f"
+    }
+  ]
+}

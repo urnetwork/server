@@ -1,0 +1,43 @@
+{
+  "attempt_directory_count_after": 15,
+  "attempt_directory_count_before": 15,
+  "attempt_snapshot_sha256": "9e18af67e5720375797dfd3a713314cb7171b9c7a444a3aa8305fb1cd3c5ce16",
+  "attestation_sha256": "50ffce32792a9ecc73c7b135a0f9050727d4ad467c6f26a87bd09f18d68a925f",
+  "campaign_reveal_sha256": "57435cb82f1a0d4689f1ba32d56fba6483d8fc233eb3569697171c981aad3441",
+  "cleanup_after": {
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0
+  },
+  "cleanup_before": {
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0
+  },
+  "kind": "sim-latency-hidden-attestation-path-postprocessing-repair",
+  "measurements_censored": false,
+  "original_runner_sha256": "a889248bf2b2175e79ce0f5526cfa294fea17700f56f6eec46eda8f53aae519e",
+  "original_service_state": {
+    "active_state": "failed",
+    "exec_main_status": 1,
+    "invocation_id": "6f54d4a8727b4351ba122022f6c79b13",
+    "restarts": 0,
+    "result": "exit-code",
+    "sub_state": "failed"
+  },
+  "private_reveal_artifacts_exportable": false,
+  "repair": "Mirror the already-sealed terminal reveal byte-for-byte to the verifier-required campaign path, then re-enter the frozen runner's existing-decision branch to create only the attestation.",
+  "repair_evidence_contains_seed_material": false,
+  "repair_script_sha256": "2f7a961f55aa7f0ba278d2d5c062e699c09786840150ed412104ba20bfa033bb",
+  "repaired_at": "2026-08-27T23:28:42Z",
+  "reveal_bytes_changed": false,
+  "root_cause": "The measurement runner wrote the terminal seed reveal at the reference-v5 campaign root, while its attestation function read the legacy independent-references/seed-reveal.json path.",
+  "schema": 1,
+  "seed_results_or_worker_evidence_changed": false,
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "statistical_measurements_rerun": false,
+  "terminal_decision_sha256": "3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835",
+  "terminal_only_runner_exit_code": 0,
+  "terminal_only_runner_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "terminal_only_runner_stdout_sha256": "941d276507978ed9be8787605941f285091e87ee95f5b87c8bd82b50e034770e",
+  "terminal_progress_sha256": "f2bbe8797dc463bb85d576cea29575579757df3eb7109a2170fd0566008d1e8b",
+  "terminal_reveal_sha256": "57435cb82f1a0d4689f1ba32d56fba6483d8fc233eb3569697171c981aad3441"
+}

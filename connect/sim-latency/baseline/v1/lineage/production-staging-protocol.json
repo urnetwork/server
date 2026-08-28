@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-staging-protocol",
+  "frozen_at": "2026-08-27T07:20:00Z",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "season_server_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+  "control_plane_source_release_sha256": "b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940",
+  "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "host_qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+  "simulator_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
+  "competition_openapi_sha256": "3fadfe3ecc23fcc262776d4e6321001e013a53c501574d32d615eb0f0353c289",
+  "noop_patch_sha256": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+  "measurement_dependencies": {
+    "same_seed_pairs": 12,
+    "independent_seeds": 12,
+    "required_reference_ordering_passes": 11,
+    "selection_chain_must_pass_before_round_generation": true,
+    "measurement_services_must_be_inactive_before_service_or_image_load": true
+  },
+  "host_boundary": {
+    "evaluation_cpu_list": "0,2,4,6,8,10,12,14,16,18",
+    "management_cpu_list": "20,22",
+    "single_official_host": true,
+    "unchanged_boot_id_required": "34760d1b-a0b6-46a0-b8c1-264abd1affba",
+    "dedicated_test_service_ip": "10.213.0.1",
+    "localhost_database_target_forbidden": true
+  },
+  "release_gates": [
+    "build_latest control-plane API, worker, and rebaseline binaries with CGO_ENABLED=0 and trimpath",
+    "record exact binary SHA-256, source commit, build command, Go version, and read-only mode",
+    "build API and worker images from the same control-plane commit and record immutable local sha256 image IDs",
+    "record Dockerfile, OpenAPI, provenance-metadata, and SBOM hashes without embedding config or vault",
+    "prove the evaluator image and season candidate base remain unchanged"
+  ],
+  "service_backed_gate": {
+    "test": "TestPostgresStoreQueueCacheFailoverAndImmutability",
+    "database_address": "local-pg.bringyour.com via 10.213.0.1",
+    "redis_address": "local-redis.bringyour.com via 10.213.0.1",
+    "requires_origin_migrations_before_local_migrations": true,
+    "requires_fifo_singleton_cache_acl_lease_retry_and_immutability": true
+  },
+  "staging_round_gate": [
+    "start API with separate control-plane config and vault roots that are never evaluator mounts",
+    "authenticate operator generate-round and bind the returned commitment and providers SHA-256",
+    "hold the global worker lock while running trusted exact-noop same-round rebaseline",
+    "root-promote the exact rebaseline and host-containment evidence, then require readyz all true",
+    "authenticate submitter score submission, worker evaluation, polling, and terminal result",
+    "submit the same canonical patch from a second principal and prove an authorized cache hit",
+    "prove active-round raw-score and diagnostic redaction for non-operators",
+    "after reveal_at, authenticate commitment reveal and byte-for-byte providers download hash",
+    "prove one-job FIFO, infrastructure retry/failover, cleanup, monitoring, and retained immutable artifacts"
+  ],
+  "security_gate": {
+    "evaluator_mounts": [
+      "/runtime/config/local:ro",
+      "/runtime/vault/local:ro"
+    ],
+    "forbidden_evaluator_mount_roots": [
+      "config/all",
+      "config/main",
+      "config/site",
+      "vault/all",
+      "vault/main",
+      "vault/site",
+      "competition control-plane config",
+      "competition control-plane vault",
+      "Docker socket"
+    ],
+    "default_deny_candidate_network": true,
+    "offline_submission_build": true,
+    "adversarial_cpu_and_memory_cleanup_required": true,
+    "raw_tokens_or_round_keys_in_evidence_forbidden": true
+  },
+  "final_evidence": {
+    "manifest": "production-readiness-final.json",
+    "all_check_records_require_content_sha256": true,
+    "boolean_only_attestation_forbidden": true,
+    "completion_audit_must_fail_closed": true
+  }
+}

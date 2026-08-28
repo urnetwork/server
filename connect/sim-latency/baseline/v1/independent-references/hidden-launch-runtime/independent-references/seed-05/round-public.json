@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-independent-seed-public",
+  "created_at": "2026-08-27T18:58:35Z",
+  "seed_index": 5,
+  "round_id": "9ce9e76c-1e2a-4844-adb3-43bdb31d696b",
+  "seed_commitment": "40df4db6b253ce42612984c0ef142479a81a8738189301bede1de64323cb864d",
+  "reference_order": [
+    "noop",
+    "worse",
+    "better"
+  ],
+  "providers_sha256": "0cbf27009c6e52c3558255b98ea3f26167ec819743d58d5dfb3e46634736fc3f",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "calibration_decision_sha256": "ba49014d7ceef1ff044a2d799f7911868b2eb159a6c587425a9c9f3d4fac2649"
+}

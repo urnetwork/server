@@ -1,0 +1,18 @@
+{
+  "accepted": true,
+  "all_existing_complete_measurements_retained": true,
+  "attested_at": "2026-08-27T08:36:37Z",
+  "calibration_selection_sha256": "5838b36d8414162497c4537f8ac07d46b3c74badcb6083cae4d71a9e40517042",
+  "compromise_analyzer_sha256": "c321211a4c5119df16e2b2d4a56ba5bc857822d8f49509a7e0731d8d487ccc40",
+  "compromise_runner_sha256": "8c7cfc98336f1236e5a99c4924e1a037bd3e9f1a5183e1df0ec41f73d0978518",
+  "confidence_equivalent_to_original_protocol": false,
+  "fresh_hidden_seed_material_created": false,
+  "independent_seed_target": 12,
+  "kind": "sim-latency-launch-compromise-selection-attestation",
+  "measurement_amendment_sha256": "3bd163e339cc7dc8e23757dd23ea238607f7eb6eaecc1959acd412661b9a770f",
+  "reference_required_passes": 11,
+  "same_seed_analysis_sha256": "41325e3aabd98495afb22264ab2981ad690e4e2ca7ebb295b40c40ea96d0de9c",
+  "same_seed_progress_sha256": "468fc8c9e3f1fd13a2d99e68ce1e680cc46a73e8c65c2ae7e9ad86a7121e0ffe",
+  "same_seed_target": 12,
+  "schema": 1
+}

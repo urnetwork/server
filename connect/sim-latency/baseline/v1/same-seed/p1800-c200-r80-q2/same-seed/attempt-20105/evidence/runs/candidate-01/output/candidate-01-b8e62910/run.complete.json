@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-complete",
+  "score_schema": 1,
+  "scorer_version": "sim-latency-score/1",
+  "evaluation_id": "candidate-01-b8e62910",
+  "run_manifest_sha256": "cb5af58e90e1972164393dfc29fb1e460a9ea3794d909f0d295de3285e344c36",
+  "run_manifest_bytes": 3230,
+  "completed_unix_ms": 1787811747322
+}

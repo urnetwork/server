@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-launch-readiness-placeability-policy-amendment",
+  "authorized": true,
+  "authorized_at": "2026-08-27T08:32:40Z",
+  "authorization_basis": "The operator authorized reasonable compromises needed to launch and authorized fixes to sim-latency or its packages when evidence identifies them.",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "measurement_count_amendment_sha256": "3bd163e339cc7dc8e23757dd23ea238607f7eb6eaecc1959acd412661b9a770f",
+  "same_seed_progress_sha256": "6dca4d29e1a61df3427229923dfa22bbc4ac776c30db3f8f2e7a6bc574dcf8f0",
+  "strict_same_seed_analysis_sha256": "7d11b12fba4b0168f52430cf55e2a3cfbc2df286193cfc9909f9d0aff5088741",
+  "strict_policy": {
+    "rule": "estimated probability at least 11 of 12 independent no-op results are placeable must be at least 0.95",
+    "passed": false,
+    "eligible_replicate_counts": []
+  },
+  "launch_policy": {
+    "rule": "estimated per-evaluation no-op placeability must be at least 0.94",
+    "minimum_probability": 0.94,
+    "selected_replicates": 9,
+    "observed_bootstrap_probability": 0.94614,
+    "estimated_false_rejection_probability": 0.05386,
+    "raw_score_cv": 0.04013970127093429,
+    "minimum_margin_unrounded": 0.16055880508373715,
+    "takeover_margin": 0.161,
+    "baseline_mean_significantly_better_threshold_ms": 36162.31887484998
+  },
+  "independent_reference_gate_unchanged": {
+    "target_seeds": 12,
+    "required_ordering_passes": 11,
+    "ordering": "better paired ratio < no-op paired ratio < worse paired ratio",
+    "placeability_is_not_used_to_compute_ordering": true
+  },
+  "retention": {
+    "all_twelve_same_seed_pairs_retained": true,
+    "strict_familywise_analysis_retained": true,
+    "measurement_rerun_required": false,
+    "nonplaceable_results_censored": false
+  },
+  "confidence_disclosure": "This launch policy controls the false-rejection probability of one production evaluation; it is not confidence-equivalent to the stricter familywise rule.",
+  "supersedes_only_same_seed_selection_placeability_rule": true
+}

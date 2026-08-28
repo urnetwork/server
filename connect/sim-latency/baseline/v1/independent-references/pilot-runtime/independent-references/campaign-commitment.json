@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-independent-seed-campaign-commitment",
+  "committed_at": "2026-08-27T17:54:53Z",
+  "target_independent_seeds": 1,
+  "independent_reference_replicates": 1,
+  "calibration_decision_sha256": "a7ba1c594bef6924c66bf38932bac709ebcbe7218ae037b57abafcad561222af",
+  "measurement_amendment_sha256": "3bd163e339cc7dc8e23757dd23ea238607f7eb6eaecc1959acd412661b9a770f",
+  "independent_reference_r1_correction_sha256": "b500ac07ac7272e8ff839d3bdf6f5ebcdc327d254b1a6d0a5d6078b64831dafa",
+  "seeds": [
+    {
+      "seed_index": 1,
+      "round_id": "38557a5e-e860-4186-aeff-2d7ce0350bd1",
+      "seed_commitment": "4632b5cd4cbccf7fe71c6063b29959374572f03d943f38c1c003dbb1def31797",
+      "providers_sha256": "daf6f487fda9a6b8c1ae84dcdf611567d65a5e6de3cd68b2ead73f0895dc14b5"
+    }
+  ]
+}

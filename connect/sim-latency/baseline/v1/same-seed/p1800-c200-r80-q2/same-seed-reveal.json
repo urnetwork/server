@@ -1,0 +1,15 @@
+{
+  "all_commitments_revealed": true,
+  "classification": "accepted_post_frontier_calibration",
+  "frontier_decision_sha256": "ab9e605bf5887138f752e5703140ca954786961c46fdbeb5e5e9c28c1b401b11",
+  "generator_seed": 7019782277117874504,
+  "hidden_reference_seed_material_created": false,
+  "kind": "sim-latency-same-seed-reveal",
+  "providers_sha256": "97228442a8cde02962e7b032aa2eef3de5ffa5dfd7532a4f353a559212390971",
+  "revealed_at": "2026-08-27T08:36:37Z",
+  "round_id": "f71b7ed2-78ec-4aaa-9fdc-f9b75c66e665",
+  "round_seed_hex": "7b06c4bd9e7ef6090bf44bdbd58bab916473ff3dadda04e2139bbed862fa6a85",
+  "schema": 1,
+  "seed_commitment": "7180a80f89db3341f651b6f9685fb8ccd43a1e223af6f9b7d897102082659590",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
+}

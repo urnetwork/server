@@ -1,0 +1,37 @@
+{
+  "base_sha": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "duration_ms": 180000,
+  "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "frontier_seed_disclosed": true,
+  "frozen_at": "2026-08-27T02:55:46Z",
+  "generator_seed": 48,
+  "host_qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+  "kind": "sim-latency-exact-frontier-point-lock",
+  "point_id": "p2700-c300-r120-q2",
+  "requests": {
+    "impair_off": {
+      "directory": "/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9/exact-frontier/p2700-c300-r120-q2/impair-off",
+      "request_sha256": "8aec9f316f09a54b383ac80f3860c30a2480c177ba53839b673806624d12f8a3"
+    },
+    "impair_on": {
+      "directory": "/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9/exact-frontier/p2700-c300-r120-q2/impair-on",
+      "request_sha256": "246ac374c6209f3a3c5e056ab7ba594a295f9a16eb6f3e5118e6b3e4feb07567"
+    }
+  },
+  "runner_sha256": "59bbb2911a964b4102ad552da9934336870479155a7797334300f75c8d879f91",
+  "scale": {
+    "arrivals_per_minute": 120,
+    "client_pool_size": 300,
+    "exchange_hosts": 4,
+    "fleet_shards": 4,
+    "provider_count": 2700,
+    "quality_window_size": 2
+  },
+  "schema": 1,
+  "simulator_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "workload": {
+    "providers_path": "/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9/exact-frontier/p2700-c300-r120-q2/workload/providers.yml",
+    "providers_sha256": "589d04b48c4ea3c8febf3187c8d71820f54b6668606ddbe4bf68b7d1444ffcb9"
+  }
+}

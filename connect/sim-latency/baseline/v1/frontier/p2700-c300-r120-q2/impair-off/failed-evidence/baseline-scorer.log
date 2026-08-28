@@ -1,0 +1,5 @@
+[env]glog not configured from command line. Using default configuration.
+I0827 03:37:49.744471      16 env.go:755] [env]try /srv/warp/config, [settings.yml]
+I0827 03:37:49.744574      16 env.go:755] [env]try /srv/warp/site, [settings.yml]
+I0827 03:37:49.744592      16 env.go:68] [env]settings = map[]
+[sim-latency] score baseline: baseline replicate 1 fails the 97% success floor

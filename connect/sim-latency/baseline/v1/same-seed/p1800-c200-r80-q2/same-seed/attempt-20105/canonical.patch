@@ -1,0 +1,12 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -53,7 +53,7 @@ func handleContractManagerDone(do func()) {
+ 	do()
+ }
+ 
+-// all other controller activity moved to `controller.resident_oob_controller` via the api
++// All other controller activity moved to `controller.resident_oob_controller` via the api.
+ 
+ func (self *residentContractManager) HasActiveContract(sourceId server.Id, destinationId server.Id) bool {
+ 	if self.ctx.Err() != nil {

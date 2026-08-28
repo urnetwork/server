@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "job_id": "3a649e77-11ac-4804-a70e-9a66f2f37b23",
+  "score": {
+    "score_schema": 1,
+    "raw_score": 41275.15100000008,
+    "normalized_score": 99.33289329456332,
+    "placeable": true,
+    "takeover_eligible": false,
+    "gates": {
+      "G1_success": {
+        "passed": true,
+        "details": {
+          "absolute_min_inclusive": 0.97,
+          "baseline": 0.9874952633573323,
+          "baseline_minus_max": 0.9774952633573323,
+          "candidate": 0.9870486656200942
+        }
+      },
+      "G2_volume": {
+        "passed": true,
+        "details": {
+          "bytes_max": 3372126724.05,
+          "bytes_min": 3050971797.95,
+          "candidate_bytes": 3162023209,
+          "candidate_requests": 2548,
+          "request_max": 2770.9500000000003,
+          "request_min": 2507.0499999999997
+        }
+      },
+      "G3_path_integrity": {
+        "passed": true,
+        "details": {
+          "minimum_inclusive": 0.95,
+          "minimum_replicate_coverage": 1.2434720740849565
+        }
+      },
+      "G4_matchmaking": {
+        "passed": true,
+        "details": {
+          "all_pools_nonempty": true,
+          "all_replicates_have_samples": true,
+          "all_replicates_span_at_least_minimum": true,
+          "baseline_load_p95_ms": 30.514909648895262,
+          "baseline_minimum_replicate_sample_span_fraction": 0.9444611111111111,
+          "baseline_pool_p05": 1095,
+          "candidate_load_p95_ms": 29.714516353607177,
+          "candidate_pool_p05": 1088.85,
+          "maximum_inclusive_ms": 38.14363706111908,
+          "minimum_replicate_sample_span_fraction": 0.9444444444444444,
+          "pool_minimum_inclusive": 985.5,
+          "sample_span_minimum_inclusive": 0.9
+        }
+      },
+      "G5_stability": {
+        "passed": true,
+        "details": {
+          "all_replicates_clean": true
+        }
+      },
+      "G6_resources": {
+        "passed": true,
+        "details": {
+          "all_replicates_within_limits": true
+        }
+      }
+    },
+    "diagnostics": {
+      "round_id": "11ac4862-f391-403f-a9e0-5499da86f65f",
+      "replicate_count": 1,
+      "request_timeout_ms": 120000,
+      "takeover_margin": 0.5,
+      "baseline_takeover_raw_max": 20499.90084999998,
+      "baseline_takeover_eligible": false,
+      "baseline": {
+        "raw_score": 40999.80169999996,
+        "success_rate": 0.9874952633573323,
+        "request_count": 2639,
+        "received_bytes": 3211549261,
+        "findproviders_load_p95_ms": 30.514909648895262,
+        "findproviders_pool_p05": 1095,
+        "findproviders_sample_span_fraction": 0.9444611111111111
+      },
+      "candidate": {
+        "raw_score": 41275.15100000008,
+        "success_rate": 0.9870486656200942,
+        "request_count": 2548,
+        "received_bytes": 3162023209,
+        "accounting_coverage": 1.2434720740849565,
+        "findproviders_load_p95_ms": 29.714516353607177,
+        "findproviders_pool_p05": 1088.85,
+        "findproviders_sample_span_fraction": 0.9444444444444444
+      },
+      "replicates": [
+        {
+          "evaluation_id": "candidate-01-3a649e77",
+          "raw_score": 41275.15100000008,
+          "success_rate": 0.9870486656200942,
+          "request_count": 2548,
+          "received_bytes": 3162023209,
+          "provider_egress_bytes": 3931887558,
+          "accounting_coverage": 1.2434720740849565,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 29.714516353607177,
+          "findproviders_pool_p05": 1088.85,
+          "findproviders_sample_span_fraction": 0.9444444444444444,
+          "stability_findings": [],
+          "resource_findings": []
+        }
+      ]
+    }
+  },
+  "eval_error": null,
+  "security": {
+    "template_database_reset": true,
+    "redis_reset": true,
+    "cgroup_contained": true,
+    "resource_limits": true,
+    "management_cpu_reserved": true,
+    "management_memory_reserved": true,
+    "default_deny_network": true,
+    "offline_build": true,
+    "offline_build_resource_limits": true,
+    "no_production_secrets": true,
+    "structural_patch_check": true,
+    "accounting_complete": true,
+    "resource_report_complete": true,
+    "cleanup_complete": true,
+    "immutable_reports": true,
+    "cgroup_id": "urnetwork-evaluation-3a649e7711ac4804a70e9a66f2f37b23.slice",
+    "template_database_id": "811e579e84bc1563ff658e35ba64d9914aecb8e77a449caf3fc7827d8a1b01b5",
+    "redis_generation_id": "7fe9853d890eee2d49418b5973836e4a020a3121aad87e57583103d7eaf397b5"
+  },
+  "artifacts": [
+    {
+      "path": "accounting.json",
+      "sha256": "d3150241d92f98986658e4055ad7dae0ee8195e22db619de823cc8dfdc35464b",
+      "bytes": 804
+    },
+    {
+      "path": "baseline.json",
+      "sha256": "4a5bb0dc42a8f12f1d918d189033c19a479f92a57268ef34daad130592cec64e",
+      "bytes": 1240
+    },
+    {
+      "path": "resources.json",
+      "sha256": "9251b26a93da56f249a77ba5b37d53bc27a66b7e96420ed470ebd06eac8d5eab",
+      "bytes": 857
+    },
+    {
+      "path": "score.json",
+      "sha256": "3e7ee0c7433674c9d7c452fe63309696bd0b4cd988fd63a01c9d98dd811ca4e3",
+      "bytes": 3422
+    },
+    {
+      "path": "evaluation.complete.json",
+      "sha256": "158c7252b6f9b29664feeef341daa018bda3acb8c76f721b137148744d0cf777",
+      "bytes": 1043
+    },
+    {
+      "path": "evidence-manifest.json",
+      "sha256": "671fc7f5b8975fac57bdf16247791259ca1663a6901f0a3a07b632d7eac5091b",
+      "bytes": 10720
+    }
+  ]
+}

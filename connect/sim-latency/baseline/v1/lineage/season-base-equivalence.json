@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-season-base-equivalence",
+  "verified_at": "2026-08-27T19:19:22Z",
+  "public_authoring_base": {
+    "tag": "apex-season-1",
+    "annotated_tag_object": "887c59c3a83c85906ec9a81f87f43398ba286616",
+    "commit": "eb697281cbe0a19a27d7771fe69fb24c2c3dab8c",
+    "remote_tag_matches_local": true
+  },
+  "authoritative_evaluator": {
+    "commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+    "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+    "image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+  },
+  "patch_policy": {
+    "sha256": "2dba553cd94d6d901e0fc590fd147d3e39273b41c24317e987b1bbf479382460",
+    "allowed_paths": [
+      "connect/resident_contract_manager.go"
+    ],
+    "max_patch_bytes": 262144
+  },
+  "editable_blobs": {
+    "connect/resident_contract_manager.go": {
+      "public_authoring_base_blob": "66e2d39956b958749dfdfd00f408d4c05f874833",
+      "authoritative_evaluator_blob": "66e2d39956b958749dfdfd00f408d4c05f874833",
+      "identical": true
+    }
+  },
+  "public_base_is_ancestor_of_evaluator": true,
+  "commits_between_public_base_and_evaluator": 23,
+  "all_allowed_path_blobs_identical": true,
+  "tag_role": "Public authoring base for the single structurally allowed source file.",
+  "evaluator_role": "Authoritative build, simulator, scorer, dependencies, and containment source identity.",
+  "local_reproduction_uses_evaluator_image": true,
+  "force_move_published_tag_required": false,
+  "seed_material_included": false
+}

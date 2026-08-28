@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-independent-seed-private",
+  "created_at": "2026-08-27T18:58:33Z",
+  "seed_index": 2,
+  "round_id": "eff3624a-7ff4-41ad-b63b-d7b2e5dfba44",
+  "round_seed_hex": "d02b3cbd0c9650da94ab7b8c6b9e6e81d9605fe0ab126fd9658f7173e95b606f",
+  "seed_commitment": "5ff8b592bab291f02bfe06c76793afb30763f0e0a5411a865b94147bb6dd1857",
+  "generator_seed": 1689700605250456718,
+  "reference_order": [
+    "noop",
+    "better",
+    "worse"
+  ],
+  "providers_sha256": "e2a1ee5352ff0f40d9b0fa7ddcd5d2651acd80d4c3bcbbabbe781b6da2e7b9e5",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "calibration_decision_sha256": "ba49014d7ceef1ff044a2d799f7911868b2eb159a6c587425a9c9f3d4fac2649"
+}

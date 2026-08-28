@@ -1,0 +1,4 @@
+# The immutable dataset is authenticated by MANIFEST.sha256. Suppress enormous
+# text diffs for raw JSON/CSV/log artifacts while retaining ordinary Git blobs.
+v1/** -diff
+MANIFEST.sha256 -diff

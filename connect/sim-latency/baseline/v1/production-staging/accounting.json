@@ -1,0 +1,153 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-evaluation-accounting",
+  "job_id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+  "round_id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+  "complete": true,
+  "runs": [
+    {
+      "evaluation_id": "baseline-01-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-01-01a04755/accounting.json",
+      "sha256": "80fb43b45dfa5e42b089810bb8faa529f17af2b3a2e1b4d3aeff5644d1b8133f",
+      "bytes": 228,
+      "provider_egress_bytes": 3177356749
+    },
+    {
+      "evaluation_id": "baseline-02-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-02-01a04755/accounting.json",
+      "sha256": "9ea570438b6cfef440491e159dbc7c84752f9f251f5bc414f6686f482e64584d",
+      "bytes": 228,
+      "provider_egress_bytes": 3318156435
+    },
+    {
+      "evaluation_id": "baseline-03-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-03-01a04755/accounting.json",
+      "sha256": "aaf4d90cf2e687ac3344e3476859283dbb6377044c631ac6d83639e74896411c",
+      "bytes": 228,
+      "provider_egress_bytes": 3183063432
+    },
+    {
+      "evaluation_id": "baseline-04-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-04-01a04755/accounting.json",
+      "sha256": "fcabf0cfd84e2de226bf96cd02b299259b996a37f747350b106bbda6b44c5964",
+      "bytes": 228,
+      "provider_egress_bytes": 3309901934
+    },
+    {
+      "evaluation_id": "baseline-05-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-05-01a04755/accounting.json",
+      "sha256": "eeec6164154c497ddbc437a601555980ca751a8cecca30a5025073b7921a8a38",
+      "bytes": 228,
+      "provider_egress_bytes": 3324120969
+    },
+    {
+      "evaluation_id": "baseline-06-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-06-01a04755/accounting.json",
+      "sha256": "c59a1c4b8223486123ca4b0c24e50f1ad80657680dfaea5456ce90579c85fd9b",
+      "bytes": 228,
+      "provider_egress_bytes": 3299508053
+    },
+    {
+      "evaluation_id": "baseline-07-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-07-01a04755/accounting.json",
+      "sha256": "c23484161b0d76a8e3a92b1c0876627b2cc9af87094bd188e686a83b3d4bfd90",
+      "bytes": 228,
+      "provider_egress_bytes": 3308647912
+    },
+    {
+      "evaluation_id": "baseline-08-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-08-01a04755/accounting.json",
+      "sha256": "eaffb4c57cb36ce3e6c265e5493dfde3be9e1190b3ad55955b7a763a4b0624d2",
+      "bytes": 228,
+      "provider_egress_bytes": 3341333392
+    },
+    {
+      "evaluation_id": "baseline-09-01a04755",
+      "role": "baseline",
+      "path": "/artifacts/baseline-09-01a04755/accounting.json",
+      "sha256": "bdc57644cac4396f73e2d85cc0d8ee3165fcead3919f6ed73525218eea68c0d0",
+      "bytes": 228,
+      "provider_egress_bytes": 3328972979
+    },
+    {
+      "evaluation_id": "candidate-01-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-01-01a04755/accounting.json",
+      "sha256": "0b9f1ff2c21be3e2340eb01635ede17d2c425f373369ca19bba880df0c1d0fd4",
+      "bytes": 229,
+      "provider_egress_bytes": 3387639263
+    },
+    {
+      "evaluation_id": "candidate-02-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-02-01a04755/accounting.json",
+      "sha256": "4af79b891dfea1168bf909013f3f6fbd08ba28f5e45469f4051165520a6ebc0c",
+      "bytes": 229,
+      "provider_egress_bytes": 3274646443
+    },
+    {
+      "evaluation_id": "candidate-03-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-03-01a04755/accounting.json",
+      "sha256": "4c69189088d83fdc6e131c6a9223f79d217036cf9413187c1fe949fe30f8fe7f",
+      "bytes": 229,
+      "provider_egress_bytes": 3311889724
+    },
+    {
+      "evaluation_id": "candidate-04-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-04-01a04755/accounting.json",
+      "sha256": "c72d5e60bc9f9001d308c7036ab6e610d91fdb83bb76188b38560b7ebdb69961",
+      "bytes": 229,
+      "provider_egress_bytes": 3267479628
+    },
+    {
+      "evaluation_id": "candidate-05-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-05-01a04755/accounting.json",
+      "sha256": "c1629a3ce3e5e91276c20bb3dfaeebfa45b1e1717932fb90ec0a67521b190bca",
+      "bytes": 229,
+      "provider_egress_bytes": 3265137694
+    },
+    {
+      "evaluation_id": "candidate-06-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-06-01a04755/accounting.json",
+      "sha256": "51dbd8c86d7863485b0e9dd5bd045b3423149eab180f8aff79ba20602c666b0a",
+      "bytes": 229,
+      "provider_egress_bytes": 3382130155
+    },
+    {
+      "evaluation_id": "candidate-07-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-07-01a04755/accounting.json",
+      "sha256": "b74e9e9b83d585f76e46725f52bbec5d802afe934dffe23ac9e1f6a5a6f121ec",
+      "bytes": 229,
+      "provider_egress_bytes": 3393675934
+    },
+    {
+      "evaluation_id": "candidate-08-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-08-01a04755/accounting.json",
+      "sha256": "d2d8ac342cf67b4699a3c94f95ee7dcbec8a91b57aa81fb5c866d96ad781824c",
+      "bytes": 229,
+      "provider_egress_bytes": 3302788510
+    },
+    {
+      "evaluation_id": "candidate-09-01a04755",
+      "role": "candidate",
+      "path": "/artifacts/candidate-09-01a04755/accounting.json",
+      "sha256": "521c87f0d4c6701630187fc857d54306b870a03406001b313afd5eaeaa88d835",
+      "bytes": 229,
+      "provider_egress_bytes": 3239202001
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-resource-report",
+  "evaluation_id": "baseline-03-01a04755",
+  "cgroup_id": "urnetwork-evaluation-01a0475563f0041c60bb47b92ccbcf8c-baseline-03.slice",
+  "measurement_start_ms": 1787904233890,
+  "measurement_end_ms": 1787904742481,
+  "complete": true,
+  "exit_code": 0,
+  "oom_killed": false,
+  "hard_killed": false,
+  "limit_escape": false,
+  "measurement_missing": false,
+  "cpu_seconds": 2108.229114,
+  "peak_rss_bytes": 12380258304
+}

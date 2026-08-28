@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-reference-v5-design",
+  "created_at": "2026-08-27T16:32:36Z",
+  "draft": false,
+  "authorized": true,
+  "authorized_at": "2026-08-27T17:52:15Z",
+  "authorization_basis": "Strengthen production-valid reference controls after the first three v4 hidden seeds made the frozen four-of-five gate mathematically unreachable; preserve the frozen evaluator, source, scale, scorer, baseline, and every prior measurement.",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "boot_id": "34760d1b-a0b6-46a0-b8c1-264abd1affba",
+  "static_qualification_sha256": "4b51548ff4910cd8d1b79247973cd47e65680b814b4ffa5c1b9153bf61d718fd",
+  "retired_seed_commitments_sha256": "1a17718ead0b2d5114be670a2b155679c92ac95d79a58160b161c8f0b03a7a04",
+  "pilot_source_sha256": "c347d61a959d4ba18282737077a22ec13b14c152e52b8a8ad4b351f2d0e626a2",
+  "transformed_campaign_shell_sha256": "77c66465fb27b4bd8ee84aede3f03803349e1d62c9bb824396a224a8889f9078",
+  "v4_campaign_commitment_sha256": "78e5105e12945ee89cdacb4efc0818811dd3c51752d842acbb4f8f6af76b6bce",
+  "v4_hidden_campaign_rejection_sha256": "d1a782831e9cfedfbe9c5835385f490e655ca38856698b88c59ee91f1ca993e1",
+  "ordering_metric": "candidate_raw_score_ms_over_designated_baseline_raw_score_ms",
+  "ordering_metric_definition": "For each seed, choose the pristine baseline attached to the first reference in the precommitted random reference order before any result exists. Divide all three candidate raw scores by that one positive designated baseline score and require better < noop < worse. The common denominator makes this algebraically equivalent to raw candidate ordering.",
+  "v4_diagnosis": {
+    "gate_unreachable_after_completed_seed": 3,
+    "passes_after_completed_seed": 1,
+    "required_passes": 4,
+    "target_seeds": 5,
+    "infrastructure_failures": 0,
+    "failed_draws_censored": false,
+    "remaining_precommitted_draws_retained": true,
+    "final_completed_seeds": 5,
+    "final_ordering_passes": 2,
+    "final_failed_seed_indices": [
+      1,
+      3,
+      4
+    ],
+    "authenticated_jobs": 15,
+    "infrastructure_retries": 0,
+    "all_evaluator_security_assertions_true": true,
+    "residual_competition_containers": 0,
+    "residual_competition_networks": 0,
+    "candidate_raw_score_ms": [
+      {
+        "seed_index": 1,
+        "better": 41794.1603,
+        "noop": 37707.3215,
+        "worse": 44587.00045,
+        "ordering_passed": false
+      },
+      {
+        "seed_index": 2,
+        "better": 36498.5124,
+        "noop": 39957.2339,
+        "worse": 43435.1848,
+        "ordering_passed": true
+      },
+      {
+        "seed_index": 3,
+        "better": 38603.2518,
+        "noop": 42921.2324,
+        "worse": 42298.8518,
+        "ordering_passed": false
+      },
+      {
+        "seed_index": 4,
+        "better": 46103.7714,
+        "noop": 34899.08135,
+        "worse": 38875.99175,
+        "ordering_passed": false
+      },
+      {
+        "seed_index": 5,
+        "better": 35317.1425,
+        "noop": 36497.889,
+        "worse": 46524.7479,
+        "ordering_passed": true
+      }
+    ],
+    "root_cause": "The v4 controls do not create separation reliably above the approximately ten-percent frozen baseline variation. Seed 3's worse control was 622.381 ms, or 1.45%, faster than noop, while seed 1's better control was slower than noop. All authenticated evaluator, security, and cleanup evidence remained valid.",
+    "production_correctness_defect_identified": false
+  },
+  "placeability_boundary": {
+    "frozen_r9_launch_gate_unchanged": true,
+    "single_reference_pilot_gate": false,
+    "reported_as_diagnostic": true,
+    "evidence": "The frozen same-seed calibration placed an unchanged no-op in only 8 of 12 individual pairs. Requiring placeability on a one-replicate reference pilot tests ordinary baseline draw noise rather than strict reference ordering.",
+    "ordering_gate_weakened": false
+  },
+  "stronger_controls": {
+    "better": {
+      "patch_sha256": "1a81e5a5fb7897cee38eb3952ed0db82a6cccb4a7821eb9db84d93eb55d9ff82",
+      "production_valid": true,
+      "simulator_only_branch": false,
+      "timeout_changed": false,
+      "mechanism": "Bulk-fetch open contracts, cache unordered pair activity, reuse an authoritative per-source snapshot during the existing five-second cache window, and coalesce simultaneous misses."
+    },
+    "noop": {
+      "patch_sha256": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+      "production_valid": true,
+      "behavior_changed": false
+    },
+    "worse": {
+      "patch_sha256": "982b192198ffa63942db1804629844f1cf9801bd4a71f64d2847a305217257a0",
+      "production_valid": true,
+      "scope": "fleet-role process only",
+      "activation_delay": "5m0s",
+      "maximum_workers_per_shard": 2,
+      "worker_gomaxprocs": 2,
+      "busy_interval": "90ms",
+      "idle_interval": "10ms",
+      "ordinary_commands_affected": false
+    }
+  },
+  "frozen_inputs": {
+    "base_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+    "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+    "simulator_scorer_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
+    "host_qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+    "scale": {
+      "providers": 1800,
+      "clients": 200,
+      "arrivals_per_minute": 80,
+      "quality_window": 2,
+      "exchange_hosts": 4,
+      "fleet_shards": 4,
+      "duration": "3m0s",
+      "impairment": true
+    },
+    "reference_replicates": 1,
+    "baseline_replicates": 12,
+    "baseline_mean_ms": 43101.69115,
+    "baseline_cv_fraction": 0.10126992272527378,
+    "significant_better_threshold_ms": 36162.31887485,
+    "takeover_margin": 0.161
+  },
+  "fresh_pilot": {
+    "target_fresh_seeds": 1,
+    "reference_required_passes": 1,
+    "strict_order_required": "better < noop < worse",
+    "placeability_is_diagnostic_only": true,
+    "all_prior_seed_commitments_forbidden": true,
+    "reference_order_randomized_before_measurement": true,
+    "designated_baseline_is_first_randomized_reference_baseline": true,
+    "authenticated_evidence_required": true,
+    "zero_residual_evaluator_resources_required": true,
+    "all_measurements_retained": true,
+    "failed_draws_censored": false
+  },
+  "hidden_launch_on_pilot_pass": {
+    "target_fresh_seeds": 5,
+    "reference_required_passes": 4,
+    "all_seeds_precommitted_before_first_result": true,
+    "pilot_and_all_prior_seed_reuse_forbidden": true,
+    "placeability_is_diagnostic_only": true,
+    "failed_statistical_draws_retried": false,
+    "infrastructure_retries_only": true,
+    "confidence_equivalent_to_original_19_of_20_protocol": false
+  },
+  "production_source_change_required": false,
+  "fresh_seed_material_created": false
+}

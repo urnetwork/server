@@ -1,0 +1,23 @@
+{
+  "complete": true,
+  "completed_points": 2,
+  "generated_at": "2026-08-27T03:38:12Z",
+  "kind": "sim-latency-exact-frontier-progress",
+  "points": [
+    {
+      "accepted": true,
+      "point_id": "p1800-c200-r80-q2",
+      "summary_sha256": "f0789d4ccf7f310cb8c480ea5bd248469eaa4a3813a1b751f526093c9fc3e721"
+    },
+    {
+      "accepted": false,
+      "point_id": "p2700-c300-r120-q2",
+      "summary_sha256": "fe8789caf3d688889b0aae1e04fed72d4ba6e206c233c2d793dbf63b429990d9"
+    }
+  ],
+  "runner_sha256": "59bbb2911a964b4102ad552da9934336870479155a7797334300f75c8d879f91",
+  "schema": 1,
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "status": "complete",
+  "upper_bound_observed": true
+}

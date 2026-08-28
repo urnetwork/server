@@ -1,0 +1,56 @@
+{
+  "accepted": true,
+  "base_sha": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "containment_and_killability_hard_gates": true,
+  "cpu_utilization_informational": true,
+  "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "hidden_seed_material_created": false,
+  "host_qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+  "kind": "sim-latency-exact-image-frontier-decision",
+  "measured_points": [
+    {
+      "accepted": true,
+      "max_mean_cpu_cores": 4.60621888151736,
+      "max_peak_rss_bytes": 12724850688,
+      "minimum_success_rate": 0.9867961165048543,
+      "point_id": "p1800-c200-r80-q2",
+      "summary_sha256": "f0789d4ccf7f310cb8c480ea5bd248469eaa4a3813a1b751f526093c9fc3e721"
+    },
+    {
+      "accepted": false,
+      "max_mean_cpu_cores": 5.79473525485121,
+      "max_peak_rss_bytes": 18750111744,
+      "minimum_success_rate": 0.969804134929271,
+      "point_id": "p2700-c300-r120-q2",
+      "summary_sha256": "fe8789caf3d688889b0aae1e04fed72d4ba6e206c233c2d793dbf63b429990d9"
+    }
+  ],
+  "method": "largest exact-image impairment-on/off point below the first authenticated quality/capacity rejection",
+  "post_frontier_same_seed_status": "pending",
+  "post_frontier_same_seed_target": 20,
+  "progress_sha256": "7fb33122ae5388aeff2c5426b715743eecc475b9fd5792d1537cc2aa81cc5c45",
+  "rejected_upper_bound": {
+    "minimum_success_rate": 0.969804134929271,
+    "point_id": "p2700-c300-r120-q2",
+    "reason": "quality_or_capacity_gate",
+    "summary_sha256": "fe8789caf3d688889b0aae1e04fed72d4ba6e206c233c2d793dbf63b429990d9"
+  },
+  "runner_sha256": "59bbb2911a964b4102ad552da9934336870479155a7797334300f75c8d879f91",
+  "schema": 1,
+  "selected": {
+    "arrivals_per_minute": 80,
+    "client_pool_size": 200,
+    "duration_ms": 180000,
+    "exchange_hosts": 4,
+    "fleet_shards": 4,
+    "forward_idle_timeout_ms": 5000,
+    "impairment_enabled": true,
+    "provider_count": 1800,
+    "quality_window_size": 2
+  },
+  "selected_at": "2026-08-27T03:38:12Z",
+  "selected_point_id": "p1800-c200-r80-q2",
+  "selected_summary_sha256": "f0789d4ccf7f310cb8c480ea5bd248469eaa4a3813a1b751f526093c9fc3e721",
+  "simulator_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
+}

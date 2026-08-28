@@ -1,0 +1,295 @@
+{
+  "schema": 1,
+  "job_id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+  "score": {
+    "score_schema": 1,
+    "raw_score": 40476.36540000001,
+    "normalized_score": 98.81357961552511,
+    "placeable": true,
+    "takeover_eligible": false,
+    "gates": {
+      "G1_success": {
+        "passed": true,
+        "details": {
+          "absolute_min_inclusive": 0.97,
+          "baseline": 0.9854389721627409,
+          "baseline_minus_max": 0.9754389721627409,
+          "candidate": 0.9879116298457691
+        }
+      },
+      "G2_volume": {
+        "passed": true,
+        "details": {
+          "bytes_max": 3016137570.6,
+          "bytes_min": 2728886373.4,
+          "candidate_bytes": 2919449552,
+          "candidate_requests": 2330,
+          "request_max": 2429.7000000000003,
+          "request_min": 2198.2999999999997
+        }
+      },
+      "G3_path_integrity": {
+        "passed": true,
+        "details": {
+          "minimum_inclusive": 0.95,
+          "minimum_replicate_coverage": 1.1241170632823445
+        }
+      },
+      "G4_matchmaking": {
+        "passed": true,
+        "details": {
+          "all_pools_nonempty": true,
+          "all_replicates_have_samples": true,
+          "all_replicates_span_at_least_minimum": true,
+          "baseline_load_p95_ms": 32.30637283325195,
+          "baseline_minimum_replicate_sample_span_fraction": 0.9444111111111111,
+          "baseline_pool_p05": 1072,
+          "candidate_load_p95_ms": 39.57319927215572,
+          "candidate_pool_p05": 1072,
+          "maximum_inclusive_ms": 40.382966041564934,
+          "minimum_replicate_sample_span_fraction": 0.9444388888888889,
+          "pool_minimum_inclusive": 964.8000000000001,
+          "sample_span_minimum_inclusive": 0.9
+        }
+      },
+      "G5_stability": {
+        "passed": true,
+        "details": {
+          "all_replicates_clean": true
+        }
+      },
+      "G6_resources": {
+        "passed": true,
+        "details": {
+          "all_replicates_within_limits": true
+        }
+      }
+    },
+    "diagnostics": {
+      "round_id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+      "replicate_count": 9,
+      "request_timeout_ms": 120000,
+      "takeover_margin": 0.161,
+      "baseline_takeover_raw_max": 33556.76611644989,
+      "baseline_takeover_eligible": false,
+      "baseline": {
+        "raw_score": 39996.14554999987,
+        "success_rate": 0.9854389721627409,
+        "request_count": 2314,
+        "received_bytes": 2872511972,
+        "findproviders_load_p95_ms": 32.30637283325195,
+        "findproviders_pool_p05": 1072,
+        "findproviders_sample_span_fraction": 0.9444111111111111
+      },
+      "candidate": {
+        "raw_score": 40476.36540000001,
+        "success_rate": 0.9879116298457691,
+        "request_count": 2330,
+        "received_bytes": 2919449552,
+        "accounting_coverage": 1.1241170632823445,
+        "findproviders_load_p95_ms": 39.57319927215572,
+        "findproviders_pool_p05": 1072,
+        "findproviders_sample_span_fraction": 0.9444388888888889
+      },
+      "replicates": [
+        {
+          "evaluation_id": "candidate-01-01a04755",
+          "raw_score": 38327.208399999996,
+          "success_rate": 0.9879116298457691,
+          "request_count": 2399,
+          "received_bytes": 2968947531,
+          "provider_egress_bytes": 3387639263,
+          "accounting_coverage": 1.141023621208616,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 38.65140552520743,
+          "findproviders_pool_p05": 1072,
+          "findproviders_sample_span_fraction": 0.94445,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-02-01a04755",
+          "raw_score": 40537.51305000001,
+          "success_rate": 0.9868881118881119,
+          "request_count": 2288,
+          "received_bytes": 2808726374,
+          "provider_egress_bytes": 3274646443,
+          "accounting_coverage": 1.1658830398407474,
+          "findproviders_samples": 219,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 44.68643569946284,
+          "findproviders_pool_p05": 1073,
+          "findproviders_sample_span_fraction": 0.9962277777777778,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-03-01a04755",
+          "raw_score": 42463.58745000005,
+          "success_rate": 0.9806560134566863,
+          "request_count": 2378,
+          "received_bytes": 2946214262,
+          "provider_egress_bytes": 3311889724,
+          "accounting_coverage": 1.1241170632823445,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 80.01527099609368,
+          "findproviders_pool_p05": 1071.85,
+          "findproviders_sample_span_fraction": 0.9444444444444444,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-04-01a04755",
+          "raw_score": 41822.41855000001,
+          "success_rate": 0.9849007765314927,
+          "request_count": 2318,
+          "received_bytes": 2861914345,
+          "provider_egress_bytes": 3267479628,
+          "accounting_coverage": 1.1417111884248234,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 44.825492477416965,
+          "findproviders_pool_p05": 1071,
+          "findproviders_sample_span_fraction": 0.94445,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-05-01a04755",
+          "raw_score": 40476.36540000001,
+          "success_rate": 0.9871410201457351,
+          "request_count": 2333,
+          "received_bytes": 2858619791,
+          "provider_egress_bytes": 3265137694,
+          "accounting_coverage": 1.14220775504314,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 39.57319927215572,
+          "findproviders_pool_p05": 1072,
+          "findproviders_sample_span_fraction": 0.9444611111111111,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-06-01a04755",
+          "raw_score": 35652.27075,
+          "success_rate": 0.9922613929492692,
+          "request_count": 2326,
+          "received_bytes": 2931693310,
+          "provider_egress_bytes": 3382130155,
+          "accounting_coverage": 1.153643917480577,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 30.42753524780273,
+          "findproviders_pool_p05": 1065,
+          "findproviders_sample_span_fraction": 0.9444388888888889,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-07-01a04755",
+          "raw_score": 42515.971499999934,
+          "success_rate": 0.9909871244635193,
+          "request_count": 2330,
+          "received_bytes": 2919449552,
+          "provider_egress_bytes": 3393675934,
+          "accounting_coverage": 1.1624369161217827,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 65.62278785705553,
+          "findproviders_pool_p05": 1070,
+          "findproviders_sample_span_fraction": 0.9444666666666667,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-08-01a04755",
+          "raw_score": 39000.53194999998,
+          "success_rate": 0.9914675767918089,
+          "request_count": 2344,
+          "received_bytes": 2929373598,
+          "provider_egress_bytes": 3302788510,
+          "accounting_coverage": 1.1274726147101706,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 32.80638942718504,
+          "findproviders_pool_p05": 1074,
+          "findproviders_sample_span_fraction": 0.94445,
+          "stability_findings": [],
+          "resource_findings": []
+        },
+        {
+          "evaluation_id": "candidate-09-01a04755",
+          "raw_score": 37870.11799999999,
+          "success_rate": 0.9906956136464333,
+          "request_count": 2257,
+          "received_bytes": 2802633901,
+          "provider_egress_bytes": 3239202001,
+          "accounting_coverage": 1.1557706484047843,
+          "findproviders_samples": 218,
+          "findproviders_empty_pools": 0,
+          "findproviders_load_p95_ms": 35.79133987426756,
+          "findproviders_pool_p05": 1073,
+          "findproviders_sample_span_fraction": 0.9444555555555556,
+          "stability_findings": [],
+          "resource_findings": []
+        }
+      ]
+    }
+  },
+  "eval_error": null,
+  "security": {
+    "template_database_reset": true,
+    "redis_reset": true,
+    "cgroup_contained": true,
+    "resource_limits": true,
+    "management_cpu_reserved": true,
+    "management_memory_reserved": true,
+    "default_deny_network": true,
+    "offline_build": true,
+    "offline_build_resource_limits": true,
+    "no_production_secrets": true,
+    "structural_patch_check": true,
+    "accounting_complete": true,
+    "resource_report_complete": true,
+    "cleanup_complete": true,
+    "immutable_reports": true,
+    "cgroup_id": "urnetwork-evaluation-01a0475563f0041c60bb47b92ccbcf8c.slice",
+    "template_database_id": "6eabecd3f7691bb038c123e4748f355fcacf2f4b5291baef63b87d1d06e55550",
+    "redis_generation_id": "d34ef6c40df428f4e2a03fb662797f5705de975cff6dd3fc4aedd161f59b77a7"
+  },
+  "artifacts": [
+    {
+      "path": "accounting.json",
+      "sha256": "64093a842a36864e95e65c3c1fc48f97e4c633cb6737b1a6b276a9007285da3f",
+      "bytes": 5580
+    },
+    {
+      "path": "baseline.json",
+      "sha256": "84d49d0847104ae79b878a6cbf6eaef7675ef8234e0d8df2615f324e85da623f",
+      "bytes": 3719
+    },
+    {
+      "path": "resources.json",
+      "sha256": "3c084c566f80e2d66feff527e7953e0ef0f87f301fb22e6bbc894fb59067e15e",
+      "bytes": 6065
+    },
+    {
+      "path": "score.json",
+      "sha256": "8df3e1246c0bad5beb12e48bccfbd8240b3519c5d521cdb9bdf765ae7721b12d",
+      "bytes": 8360
+    },
+    {
+      "path": "evaluation.complete.json",
+      "sha256": "55bffe9d69a8911bf3a601b3f4d37056ece3302d6fd741be663933084af173f9",
+      "bytes": 1039
+    },
+    {
+      "path": "evidence-manifest.json",
+      "sha256": "378be6195463f55bcae1bdfb57008a3d0f34eb141c08b8b33258091b372a9fd9",
+      "bytes": 79358
+    }
+  ]
+}

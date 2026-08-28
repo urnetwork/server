@@ -1,0 +1,114 @@
+{
+  "score_schema": 1,
+  "kind": "sim-latency-score-baseline",
+  "scorer_version": "sim-latency-score/1",
+  "round_id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+  "config_sha256": "2fdf36542adc2fa55b40e9bce82ac095aa5b0e80b15f9c958c9b3ea058b9442e",
+  "request_timeout_ms": 120000,
+  "run_flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "true",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "takeover_margin": 0.161,
+  "replicates": [
+    {
+      "raw_score": 44672.0529999999,
+      "success_rate": 0.977728285077951,
+      "request_count": 2245,
+      "received_bytes": 2768660584,
+      "findproviders_load_p95_ms": 31.50296049118038,
+      "findproviders_pool_p05": 1068,
+      "findproviders_sample_span_fraction": 0.9444611111111111
+    },
+    {
+      "raw_score": 46038.77025,
+      "success_rate": 0.9848222029488292,
+      "request_count": 2306,
+      "received_bytes": 2872511972,
+      "findproviders_load_p95_ms": 40.49604206085205,
+      "findproviders_pool_p05": 1071,
+      "findproviders_sample_span_fraction": 0.9444333333333333
+    },
+    {
+      "raw_score": 39996.14554999987,
+      "success_rate": 0.9835555555555555,
+      "request_count": 2250,
+      "received_bytes": 2777323362,
+      "findproviders_load_p95_ms": 32.30637283325195,
+      "findproviders_pool_p05": 1072,
+      "findproviders_sample_span_fraction": 0.9919
+    },
+    {
+      "raw_score": 41388.63579999996,
+      "success_rate": 0.9843020789138736,
+      "request_count": 2357,
+      "received_bytes": 2893190752,
+      "findproviders_load_p95_ms": 31.95456447601318,
+      "findproviders_pool_p05": 1075,
+      "findproviders_sample_span_fraction": 0.9840611111111112
+    },
+    {
+      "raw_score": 35705.42170000001,
+      "success_rate": 0.9919423240033927,
+      "request_count": 2358,
+      "received_bytes": 2954007919,
+      "findproviders_load_p95_ms": 39.20151767730706,
+      "findproviders_pool_p05": 1073,
+      "findproviders_sample_span_fraction": 0.9444111111111111
+    },
+    {
+      "raw_score": 37707.308199999985,
+      "success_rate": 0.9892565535023635,
+      "request_count": 2327,
+      "received_bytes": 2864427703,
+      "findproviders_load_p95_ms": 29.53120098114013,
+      "findproviders_pool_p05": 1075,
+      "findproviders_sample_span_fraction": 0.9847777777777778
+    },
+    {
+      "raw_score": 40299.3401999999,
+      "success_rate": 0.9854389721627409,
+      "request_count": 2335,
+      "received_bytes": 2891729833,
+      "findproviders_load_p95_ms": 28.23812990188593,
+      "findproviders_pool_p05": 1070,
+      "findproviders_sample_span_fraction": 0.9444444444444444
+    },
+    {
+      "raw_score": 38946.577999999994,
+      "success_rate": 0.9873029772329247,
+      "request_count": 2284,
+      "received_bytes": 2824698682,
+      "findproviders_load_p95_ms": 50.220457267761155,
+      "findproviders_pool_p05": 1073,
+      "findproviders_sample_span_fraction": 0.9444166666666667
+    },
+    {
+      "raw_score": 38797.15919999997,
+      "success_rate": 0.9870354364736387,
+      "request_count": 2314,
+      "received_bytes": 2890704803,
+      "findproviders_load_p95_ms": 75.13280487060523,
+      "findproviders_pool_p05": 1071.85,
+      "findproviders_sample_span_fraction": 0.94445
+    }
+  ]
+}

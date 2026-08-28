@@ -1,0 +1,54 @@
+{
+  "commitment_count": 22,
+  "commitments": [
+    "284a269c7489861b7d7b5be5d07e585da1337d4da598a3b38e2a0c6f07d9f9aa",
+    "2b12c1ce95aa6281147955e816607f7e48dfeb7a26f5652edac2b38b70982c13",
+    "4632b5cd4cbccf7fe71c6063b29959374572f03d943f38c1c003dbb1def31797",
+    "49cdc9ff49578b28572027056cfe4b7f3fc52debc706a761832428c69742bfc7",
+    "4da8cb5436d057d2cd9e5bb21d6e5f511886e4648193eb1c1d1642921281aad7",
+    "5b45c56dee6c83fef9d5d3f3da16a33e93b429dfb2f19ced8cec91ab86d49518",
+    "65d64336c82057b226ff94c38442f4973fd3893a28cade081678df28a07b49e5",
+    "6f69bcab97ef3550c4f78ad56d6e673c853a59c0fa42f74c19fc312db4bfb56e",
+    "7180a80f89db3341f651b6f9685fb8ccd43a1e223af6f9b7d897102082659590",
+    "7b7f1fe4f4763549998646625ec69be47fd8281ee5695c4e8c48e8b3f5d9f7ca",
+    "88c1cd741d689df46221033bea16038df03e2cb992fdbba857f3c5ce907aa73c",
+    "8ffd7e5902d6f25b4114b9e013620b4f0f33838e9961cfc9c542169b68d3915a",
+    "aa300c1c0c9146f4e109ba3cf9a08d5faa9291ba67e23e8a89e97a7eb7fde964",
+    "b01f43a65c8672afe54c6c780526e9acb49e83cda4506a43f259e91d16f49441",
+    "c3487fd30c1d83290a1116a0a0ec4226e377ecef1f91efd00db5a0c9da6f3eed",
+    "c86c283a263e1fc823cfaacc851798f98f58b464afe13d4a8d90660efa00c3e5",
+    "d7092c087055fa92a391d54109ec0b4a0d31817da17aafb3b6ca8d3bbe1e53d7",
+    "dfc3052d12eb8c0eb49a2d7234abfc886de4947fd37cf9c27e8eb578942ad9c3",
+    "f9961d25f1f1c6b842cd1be61a7eea7e22e0c4ddc7ed125560f163474901ad6d",
+    "fa65f42f7216629cd05fcbd5f5c462a23f388811c4eee3c9bb643b7b458913e8",
+    "fb0a6c4fb7727c14a3089c58a32e8a8b4a459d5ff3a02ffadcab75ccfa14ccc2",
+    "fddac982fe30f7873f1fc4bf60c0ea12c32394462afa1d8587e4fff86d0168e2"
+  ],
+  "created_at": "2026-08-27T17:59:01Z",
+  "kind": "sim-latency-retired-seed-commitment-set",
+  "retirement_rule": "A commitment is retired when its campaign is precommitted; completion, acceptance, rejection, or infrastructure status does not make it reusable.",
+  "rules": {
+    "failed_statistical_draws_may_be_reused": false,
+    "infrastructure_retries_reuse_only_the_same_precommitted_seed": true,
+    "v5_hidden_commitments_must_not_match": true,
+    "v5_pilot_commitment_added_before_hidden_launch": true
+  },
+  "schema": 1,
+  "scope": "Every seed commitment created before a reference-v5 hidden launch, including the frozen same-seed round, the twelve-seed compromise campaign, all v2-v5 pilots, and all five precommitted v4 hidden seeds.",
+  "seed_material_included": false,
+  "source_artifacts": [
+    {
+      "commitment_count": 21,
+      "path": "reference-requalification-v5/retired-seed-commitments.json",
+      "sha256": "1a17718ead0b2d5114be670a2b155679c92ac95d79a58160b161c8f0b03a7a04"
+    },
+    {
+      "commitment_count": 1,
+      "path": "reference-requalification-v5/pilot-runtime/independent-references/campaign-commitment.json",
+      "sha256": "080f4330aed9bde0b6bb32fee6f686fa8d49626169e97cff7deae1ce3e8b3fcf"
+    }
+  ],
+  "v5_pilot_campaign_commitment_sha256": "080f4330aed9bde0b6bb32fee6f686fa8d49626169e97cff7deae1ce3e8b3fcf",
+  "v5_pilot_launch_sha256": "f6846ca73c059987d6d64a4517950dcdb77e18c698a8989e29917a48ba517d5f",
+  "v5_pilot_seed_commitment": "4632b5cd4cbccf7fe71c6063b29959374572f03d943f38c1c003dbb1def31797"
+}

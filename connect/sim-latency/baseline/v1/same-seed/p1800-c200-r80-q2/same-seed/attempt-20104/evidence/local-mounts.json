@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-local-mounts",
+  "direct_bind": true,
+  "read_only": true,
+  "parent_mounts": false,
+  "all_main_site_absent": true,
+  "config": {
+    "target": "/runtime/config/local",
+    "sha256": "f2fd41f07258389a5b8cbfd12af69c7e71124755432e48e115933a66f835962d"
+  },
+  "vault": {
+    "target": "/runtime/vault/local",
+    "sha256": "f84b7bdd1976c5e404c196584025287ab346f4bcfd60196da9ca46191a39f3fa"
+  }
+}

@@ -1,0 +1,269 @@
+{
+  "checks": [
+    {
+      "evidence": {
+        "editable_blob": "66e2d39956b958749dfdfd00f408d4c05f874833",
+        "evaluator_image_digest": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+        "live_staging_measurements_unchanged": true,
+        "production_staging_attempt_06_evidence_binding_amendment_sha256": "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752",
+        "public_authoring_commit": "eb697281cbe0a19a27d7771fe69fb24c2c3dab8c",
+        "public_authoring_tag": "apex-season-1",
+        "repository_count": 9,
+        "result_document_overlay": {
+          "path": "connect/sim-latency/APEX-CALIBRATION.md",
+          "sha256": "dc473cecc91b9eea993fd3e43e2230e0a235bfc30771e6a9c65de2db284b2090"
+        },
+        "season_base_equivalence_sha256": "6bce6a80cecfee0297bcc11afbaa390576d8f542980d8797e4da33046daa07b3",
+        "server_commit": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+        "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022"
+      },
+      "id": "source_identity",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "All nine repositories match the frozen commits; the public authoring tag is blob-identical across the entire one-file patch surface, and the sole allowed tracked overlay is the immutable terminal calibration result."
+    },
+    {
+      "evidence": {
+        "arrivals_per_minute": 80,
+        "client_pool_size": 200,
+        "frontier_sha256": "ab9e605bf5887138f752e5703140ca954786961c46fdbeb5e5e9c28c1b401b11",
+        "minimum_accepted_success_rate": 0.9867961165048543,
+        "point_summary_sha256": "f0789d4ccf7f310cb8c480ea5bd248469eaa4a3813a1b751f526093c9fc3e721",
+        "provider_count": 1800,
+        "rejected_upper_bound_success_rate": 0.969804134929271
+      },
+      "id": "frontier_and_scale",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "The exact-image impairment on/off frontier selected p1800 and rejected p2700."
+    },
+    {
+      "evidence": {
+        "analysis_sha256": "41325e3aabd98495afb22264ab2981ad690e4e2ca7ebb295b40c40ea96d0de9c",
+        "baseline_cv": 0.10126992272527378,
+        "baseline_mean_ms": 43101.69114999998,
+        "decision_sha256": "424dcda0c7ac76640a73e828536f870ef76939a5d3d4e153adb08e9c2067b176",
+        "placeability_policy_sha256": "359fe89572c81d6602cbf0ece03e5128c5ccbf38bf2d20f22fcdbadd30f2f638",
+        "postprocessing_repair_sha256": "62c7e8c1398d8619bf9bfb4645b0e7965a4e9a83713d47e0da86fc705ecd59dd",
+        "progress_sha256": "468fc8c9e3f1fd13a2d99e68ce1e680cc46a73e8c65c2ae7e9ad86a7121e0ffe",
+        "r9_noop_placeability_probability": 0.94614,
+        "selected_replicates": 9,
+        "selection_sha256": "5838b36d8414162497c4537f8ac07d46b3c74badcb6083cae4d71a9e40517042",
+        "significantly_better_threshold_ms": 36162.31887484998,
+        "strict_analysis_sha256": "7d11b12fba4b0168f52430cf55e2a3cfbc2df286193cfc9909f9d0aff5088741",
+        "takeover_margin": 0.161
+      },
+      "id": "same_seed_calibration",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "Twelve uncensored pairs retained the strict familywise failure and selected R=9 under the authorized single-evaluation placeability rule."
+    },
+    {
+      "evidence": {
+        "measurement_amendment_sha256": "3bd163e339cc7dc8e23757dd23ea238607f7eb6eaecc1959acd412661b9a770f",
+        "placeability_policy_sha256": "359fe89572c81d6602cbf0ece03e5128c5ccbf38bf2d20f22fcdbadd30f2f638",
+        "postprocessing_repair_sha256": "62c7e8c1398d8619bf9bfb4645b0e7965a4e9a83713d47e0da86fc705ecd59dd",
+        "r1_correction_sha256": "b500ac07ac7272e8ff839d3bdf6f5ebcdc327d254b1a6d0a5d6078b64831dafa",
+        "r1_protocol_sha256": "3e0a5cd98a2a96b2f1a4b59c5628c3d5e3d81de08bdbe52d82b83e2d9a20c583",
+        "reference_evaluation_jobs": 15,
+        "reference_required_passes": 4,
+        "reference_v5_design_sha256": "6e05b1872648a0d9f28755e5ca4b0470445ea40e95b4fdb991e676d2d453ffa1",
+        "reference_v5_measurement_amendment_sha256": "9d453d7b1d763a7c0975bae8275985ef3b7fc3367535f67ccd79ac1afe9e0f61",
+        "reference_v5_protocol_sha256": "4969535eb343049d7b790c5fff8e82b7eb7a60b6e92d2e2aa94e6466e7789fad",
+        "reference_v5_qualification_sha256": "8bdc86dcf68a8f8a4c686d8d6267510e121ab7800c9bbcc7cfa4dbce1ac1ca10",
+        "target_independent_seeds": 5
+      },
+      "id": "measurement_protocol",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "The 12-run baseline and authorized v5 five-seed/four-pass R=1 screen are hash-bound, with placeability kept diagnostic-only for reference controls."
+    },
+    {
+      "evidence": {
+        "attestation_repair_script_sha256": "a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0",
+        "attestation_repair_sha256": "499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d",
+        "attestation_sha256": "b96b216022b34e2bf0e9838ca51380431d9f97e95121610951c37d0274cc5c02",
+        "authenticated_manifest_bytes": 195988712,
+        "authenticated_manifest_entries": 836,
+        "commitment_sha256": "c79798ad1769fda861fd86da0cdec7bd2f12f11f5964e2582cfe84a69c9afd69",
+        "compatibility_decision_sha256": "ba49014d7ceef1ff044a2d799f7911868b2eb159a6c587425a9c9f3d4fac2649",
+        "independent_seed_result_hashes": {
+          "01": "c87690bcd312f9eeb816917f3bca82d868ae1f465cbc9e5494165efde3b6f01d",
+          "02": "4f919811f5b9a65c9817549c1308b08c7ce1576e26c5ed066fd2d0872aaed780",
+          "03": "b25bd34552b8e467102bbb10bb6976876c227040dc8a29355f804c502383d304",
+          "04": "e4602fa82217c5ea49a168ee59d386fe85df596ed914f65728969c851352c77e",
+          "05": "d1f9d57766edda226a3ed8e4c71746b256ca580c77200d5135809b3448d473d9"
+        },
+        "independent_seed_results_sha256": "d6cbc607c3b90011cca8908e9090b11aa48db1cd4656220842fc18d36b9c8b13",
+        "progress_sha256": "f2bbe8797dc463bb85d576cea29575579757df3eb7109a2170fd0566008d1e8b",
+        "protocol_sha256": "4969535eb343049d7b790c5fff8e82b7eb7a60b6e92d2e2aa94e6466e7789fad",
+        "reference_ordering_passes": 4,
+        "reference_placeability_counts": {
+          "better": 3,
+          "noop": 3,
+          "worse": 0
+        },
+        "reference_required_passes": 4,
+        "reveal_sha256": "06c80eb4516125d8074a1293e0586e2928d03754776c6656da783bcb5ed465ac",
+        "source_calibration_selection_sha256": "5838b36d8414162497c4537f8ac07d46b3c74badcb6083cae4d71a9e40517042",
+        "terminal_decision_sha256": "3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835",
+        "terminal_reveal_sha256": "57435cb82f1a0d4689f1ba32d56fba6483d8fc233eb3569697171c981aad3441",
+        "terminal_seed_result_aggregate_sha256": "21c39ae83d314983c82bd84672561c22d3eba792e7009b3b70a410246f47526f"
+      },
+      "id": "independent_reference_separability",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "Five fresh precommitted independent seeds passed the authorized 4/5 reference-ordering launch screen."
+    },
+    {
+      "evidence": {
+        "control_plane_secret_boundary_sha256": "56256912a912d7d0c5de1a1c7c6399eefa460fc69a187eac564062e49a769568",
+        "host_self_check_sha256": "4e65e8d0c2a83c352b8e5f903427df6193aaf9cc67ce1b2191e8d5f62f78271b",
+        "resource_bomb_sha256": "08296c7ff35edefb09eae50cd9e415dad86ae37d4347a64022da3d5dcfa841bc",
+        "security_boolean_count": 15,
+        "worker_result_sha256": "ad77a4bfce7f6d83664eeddba3d0b51509208416785e89d928ed2eb4385df685"
+      },
+      "id": "secure_evaluator",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "The production-scale evaluator, local-only mounts, userns, default-deny network, and hostile-job cleanup are authenticated."
+    },
+    {
+      "evidence": {
+        "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+        "control_plane_source_release_sha256": "0fdf035ee23fb030936d1340ddfaeb80cbcb23fde4c0000bff9f93e70e736818",
+        "parallel_readiness_evidence_sha256": "f8fb1f228a610fe8715b861d927982ab58fd6075d1b400d21f5953af18bcf828"
+      },
+      "id": "api_and_miner_package",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "Competition package, dual OpenAPI conformance, miner package, and the pushed trusted-rebaseline release are authenticated."
+    },
+    {
+      "evidence": {
+        "content_addressed_check_records": {
+          "artifact_retention": {
+            "assertion_count": 5,
+            "evidence_path": "production-readiness/artifact-retention.json",
+            "evidence_sha256": "f73afac58ec57d4d851ead70e5d290ce528f0fcd75184b1854778d63e2bf74e5"
+          },
+          "authenticated_api_generate_submit_poll": {
+            "assertion_count": 7,
+            "evidence_path": "production-readiness/authenticated-api.json",
+            "evidence_sha256": "67d02e5db9775bbc1ebbcc2c64e544691965a8095db6d3a19ec25242cc3ad15a"
+          },
+          "full_staging_round": {
+            "assertion_count": 7,
+            "evidence_path": "production-readiness/full-staging-round.json",
+            "evidence_sha256": "0b92332a83efd09c0e9be5b63c94dcc4c6a8ef5a096c4272b76a82014a7c7242"
+          },
+          "monitoring_and_recovery": {
+            "assertion_count": 5,
+            "evidence_path": "production-readiness/monitoring-and-recovery.json",
+            "evidence_sha256": "26af808a653575c4d23c9aadaecbf56843c9f596a8ca302d20ab81fc7cd0b2b3"
+          },
+          "no_secrets_audit": {
+            "assertion_count": 8,
+            "evidence_path": "production-readiness/no-secrets-audit.json",
+            "evidence_sha256": "90052103ffcdcf34ef77bfd6f0b095b8200cab1d4c402cd8193e843838862231"
+          },
+          "release_artifacts": {
+            "assertion_count": 17,
+            "evidence_path": "production-readiness/release-artifacts.json",
+            "evidence_sha256": "381a5b12432f577689a16d9dfbb878127fc27ec900ac7318243ef9a53ef7a559"
+          },
+          "service_backed_fifo_cache_failover": {
+            "assertion_count": 12,
+            "evidence_path": "production-readiness/service-backed-fifo-cache-failover.json",
+            "evidence_sha256": "c36762a44251ebdc67d4097defe34fb8da700002a001859eb5c289548263d965"
+          }
+        },
+        "independent_seed_result_hashes": {
+          "01": "c87690bcd312f9eeb816917f3bca82d868ae1f465cbc9e5494165efde3b6f01d",
+          "02": "4f919811f5b9a65c9817549c1308b08c7ce1576e26c5ed066fd2d0872aaed780",
+          "03": "b25bd34552b8e467102bbb10bb6976876c227040dc8a29355f804c502383d304",
+          "04": "e4602fa82217c5ea49a168ee59d386fe85df596ed914f65728969c851352c77e",
+          "05": "d1f9d57766edda226a3ed8e4c71746b256ca580c77200d5135809b3448d473d9"
+        },
+        "independent_seed_results_sha256": "d6cbc607c3b90011cca8908e9090b11aa48db1cd4656220842fc18d36b9c8b13",
+        "production_readiness_sha256": "bc56f7b02a1cfcfb5cd91eca0e885bc6aedb2b216d336bbb7b1f1288cd7e2f2d",
+        "production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
+        "production_staging_reference_v5_amendment_sha256": "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695",
+        "reference_placeability_counts": {
+          "better": 3,
+          "noop": 3,
+          "worse": 0
+        }
+      },
+      "id": "production_staging",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "The API/store path, monitoring/recovery, retention, and full staging round pass."
+    },
+    {
+      "evidence": {
+        "sha256": "dc473cecc91b9eea993fd3e43e2230e0a235bfc30771e6a9c65de2db284b2090"
+      },
+      "id": "calibration_document",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "APEX-CALIBRATION.md contains the required sizing and statistical disclosures."
+    },
+    {
+      "evidence": {
+        "baseline_ids": [
+          "independent-designated-baseline-ratio",
+          "same-seed-score"
+        ],
+        "evidence_calibration_sha256": "dc473cecc91b9eea993fd3e43e2230e0a235bfc30771e6a9c65de2db284b2090",
+        "evidence_preview_sha256": "0529ab0059dbac235667e6fca417b6aba3b8ac200fbb1fda89b95d067d6d912c",
+        "evidence_report_sha256": "f81211d11aec2dca7705a941c1481b75c7c7f35ae847f986b168579c3ce76f52",
+        "evidence_sha256": "ce6b3daa416c70b388e991b1f0a521e296699b6be91f44afe78d87c5ef653696",
+        "independent_seed_results_sha256": "d6cbc607c3b90011cca8908e9090b11aa48db1cd4656220842fc18d36b9c8b13",
+        "preview_section_svg_counts": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "preview_sections": 4,
+        "preview_sha256": "0529ab0059dbac235667e6fca417b6aba3b8ac200fbb1fda89b95d067d6d912c",
+        "reference_placeability_counts": {
+          "better": 3,
+          "noop": 3,
+          "worse": 0
+        },
+        "section_svg_counts": [
+          1,
+          1,
+          1,
+          1
+        ],
+        "sections": 4,
+        "sha256": "f81211d11aec2dca7705a941c1481b75c7c7f35ae847f986b168579c3ce76f52"
+      },
+      "id": "final_html_report",
+      "launch_required": true,
+      "state": "pass",
+      "summary": "The authenticated final report and shareable preview each have four sections, a visual in each, and a mapped threshold line, label, and significant-improvement fringe for every baseline."
+    },
+    {
+      "evidence": {},
+      "id": "external_apex_handoff",
+      "launch_required": false,
+      "state": "pending",
+      "summary": "Registry activation, partner acceptance, credentials, and organizational on-call ownership are external launch gates."
+    }
+  ],
+  "external_handoff_complete": false,
+  "historical_calibration_source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "kind": "sim-latency-finalization-audit",
+  "local_finalization_complete": true,
+  "production_staging_attempt_06_evidence_binding_amendment_sha256": "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752",
+  "production_staging_attempt_06_remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
+  "required_failures": 0,
+  "required_passes": 10,
+  "required_pending": 0,
+  "schema": 1,
+  "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022"
+}

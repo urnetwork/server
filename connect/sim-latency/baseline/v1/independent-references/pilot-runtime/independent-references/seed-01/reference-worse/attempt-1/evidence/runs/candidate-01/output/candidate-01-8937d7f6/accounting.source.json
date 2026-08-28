@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-provider-accounting-source",
+  "evaluation_id": "candidate-01-8937d7f6",
+  "complete": true,
+  "measure_start_ms": 1787855327365,
+  "measure_end_ms": 1787855507365,
+  "provider_egress_bytes": 3054790558,
+  "counter_start_bytes": 15837128,
+  "counter_end_bytes": 3070627686,
+  "counter_kind": "provider_remote_egress_packet_bytes"
+}

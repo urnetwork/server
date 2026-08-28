@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-accounting",
+  "evaluation_id": "candidate-01-8d6e0dd3",
+  "complete": true,
+  "measure_start_ms": 1787866290113,
+  "measure_end_ms": 1787866470113,
+  "provider_egress_bytes": 2986383558
+}

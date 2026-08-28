@@ -9,3 +9,9 @@ baseline*.json
 run.json
 *.csv
 providers.yml
+
+# Curated, terminal baseline snapshots are source artifacts rather than run
+# scratch. Keep this exception last so their run.json, CSV, providers.yml, and
+# baseline JSON files are all versioned.
+!baseline/
+!baseline/**

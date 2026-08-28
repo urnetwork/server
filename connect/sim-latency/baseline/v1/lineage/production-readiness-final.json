@@ -1,0 +1,67 @@
+{
+  "checks": {
+    "artifact_retention": {
+      "evidence_path": "production-readiness/artifact-retention.json",
+      "evidence_sha256": "f73afac58ec57d4d851ead70e5d290ce528f0fcd75184b1854778d63e2bf74e5",
+      "passed": true
+    },
+    "authenticated_api_generate_submit_poll": {
+      "evidence_path": "production-readiness/authenticated-api.json",
+      "evidence_sha256": "67d02e5db9775bbc1ebbcc2c64e544691965a8095db6d3a19ec25242cc3ad15a",
+      "passed": true
+    },
+    "full_staging_round": {
+      "evidence_path": "production-readiness/full-staging-round.json",
+      "evidence_sha256": "0b92332a83efd09c0e9be5b63c94dcc4c6a8ef5a096c4272b76a82014a7c7242",
+      "passed": true
+    },
+    "monitoring_and_recovery": {
+      "evidence_path": "production-readiness/monitoring-and-recovery.json",
+      "evidence_sha256": "26af808a653575c4d23c9aadaecbf56843c9f596a8ca302d20ab81fc7cd0b2b3",
+      "passed": true
+    },
+    "no_secrets_audit": {
+      "evidence_path": "production-readiness/no-secrets-audit.json",
+      "evidence_sha256": "90052103ffcdcf34ef77bfd6f0b095b8200cab1d4c402cd8193e843838862231",
+      "passed": true
+    },
+    "release_artifacts": {
+      "evidence_path": "production-readiness/release-artifacts.json",
+      "evidence_sha256": "381a5b12432f577689a16d9dfbb878127fc27ec900ac7318243ef9a53ef7a559",
+      "passed": true
+    },
+    "service_backed_fifo_cache_failover": {
+      "evidence_path": "production-readiness/service-backed-fifo-cache-failover.json",
+      "evidence_sha256": "c36762a44251ebdc67d4097defe34fb8da700002a001859eb5c289548263d965",
+      "passed": true
+    }
+  },
+  "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+  "control_plane_source_release_sha256": "0fdf035ee23fb030936d1340ddfaeb80cbcb23fde4c0000bff9f93e70e736818",
+  "evaluator_image_digest": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+  "historical_calibration_source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "host_qualification_sha256": "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3",
+  "independent_attestation_repair_script_sha256": "a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0",
+  "independent_attestation_repair_sha256": "499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d",
+  "independent_attestation_sha256": "b96b216022b34e2bf0e9838ca51380431d9f97e95121610951c37d0274cc5c02",
+  "independent_calibration_decision_sha256": "ba49014d7ceef1ff044a2d799f7911868b2eb159a6c587425a9c9f3d4fac2649",
+  "independent_protocol_sha256": "4969535eb343049d7b790c5fff8e82b7eb7a60b6e92d2e2aa94e6466e7789fad",
+  "independent_seed_commitment_sha256": "c79798ad1769fda861fd86da0cdec7bd2f12f11f5964e2582cfe84a69c9afd69",
+  "independent_seed_results_sha256": "d6cbc607c3b90011cca8908e9090b11aa48db1cd4656220842fc18d36b9c8b13",
+  "independent_terminal_decision_sha256": "3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835",
+  "kind": "sim-latency-production-readiness-final",
+  "placeability_policy_amendment_sha256": "359fe89572c81d6602cbf0ece03e5128c5ccbf38bf2d20f22fcdbadd30f2f638",
+  "pre_repair_same_seed_progress_sha256": "6dca4d29e1a61df3427229923dfa22bbc4ac776c30db3f8f2e7a6bc574dcf8f0",
+  "production_release_self_check_contract_amendment_sha256": "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d",
+  "production_staging_attempt_06_evidence_binding_amendment_sha256": "40ecb634563fa58fc41e346efdba6b604b2b86c7cb4fea820cc893e363191752",
+  "production_staging_attempt_06_remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
+  "production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
+  "production_staging_reference_v5_amendment_sha256": "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695",
+  "reference_v5_qualification_sha256": "8bdc86dcf68a8f8a4c686d8d6267510e121ab7800c9bbcc7cfa4dbce1ac1ca10",
+  "same_seed_postprocessing_repair_sha256": "62c7e8c1398d8619bf9bfb4645b0e7965a4e9a83713d47e0da86fc705ecd59dd",
+  "same_seed_selection_sha256": "5838b36d8414162497c4537f8ac07d46b3c74badcb6083cae4d71a9e40517042",
+  "schema": 1,
+  "sealed_at": "2026-08-28T11:16:25Z",
+  "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+  "strict_same_seed_analysis_sha256": "7d11b12fba4b0168f52430cf55e2a3cfbc2df286193cfc9909f9d0aff5088741"
+}

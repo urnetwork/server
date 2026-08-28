@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-evaluator-failure",
+  "job_id": "977bdff8-c316-41a5-bd48-7d7feb4c29d2",
+  "round_id": "e8fb6d9b-14ed-41af-90ec-735cbc3df46c",
+  "attempt": 18022,
+  "exit_code": 1,
+  "evaluator_line": 1095,
+  "sanitized": true,
+  "excluded": [
+    "input",
+    "scorer-input",
+    "score-runtime",
+    "runtime",
+    "*.env",
+    "*.env.new",
+    "non-regular entries"
+  ]
+}

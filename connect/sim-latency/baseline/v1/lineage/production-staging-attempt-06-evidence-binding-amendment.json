@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-staging-attempt-06-evidence-binding-amendment",
+  "recorded_at": "2026-08-28T05:46:04Z",
+  "patched_at": "2026-08-28T05:43:22Z",
+  "authorized": true,
+  "authorization_basis": "The operator authorized correctness fixes that improve finalization and required every phase to be committed and pushed.",
+  "defect": {
+    "path": "run-production-staging.sh",
+    "scope": "terminal readiness metadata only",
+    "observed": "The five staging-generated readiness records omitted production_staging_attempt_06_remediation_amendment_sha256 even though write_check required that exact field.",
+    "terminal_effect_without_fix": "All measurements would finish, then the first generated readiness record would be rejected before sealing.",
+    "measurement_effect": false
+  },
+  "correction": {
+    "common_argument_added": "remediation_amendment",
+    "generated_records_changed": 5,
+    "generated_field": "production_staging_attempt_06_remediation_amendment_sha256",
+    "expected_value": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
+    "production_staging_script_sha256_before": "092ccecdc2c9298695f42985dfe3e732117ff574baf65ccdde765b7c7f31a540",
+    "production_staging_script_sha256_after": "e3a68400a430522059d54dee6853f308a9f2ea34f192ec51ee6908f1e56b0f3b",
+    "deterministic_test_path": "test-production-readiness-remediation-binding.py",
+    "deterministic_test_sha256": "e26bcb770865cac207bf4d74ae4848c434417c78eb44790a2b42ce4b3b841cb2",
+    "deterministic_test_passed": true,
+    "fix_commit": "80d1048014ff04e8d320bcd4eb14087e1d8c0b87",
+    "remote_branch": "refs/heads/sim-latency-finalization-evidence",
+    "remote_commit_verified": true
+  },
+  "live_script_boundary": {
+    "shell_pid": 1150032,
+    "script_fd": 255,
+    "script_inode_before": 33559465,
+    "script_inode_after": 33559465,
+    "fd_offset_before_patch": 41011,
+    "first_changed_byte_offset": 50544,
+    "changed_bytes_were_unread": true,
+    "completed_replicates_before_patch": 3,
+    "active_replicate_during_patch": "baseline-04",
+    "active_evaluator_process_unchanged": true
+  },
+  "retained_invariants": {
+    "season_base_commit_unchanged": true,
+    "source_lock_unchanged": true,
+    "evaluator_image_unchanged": true,
+    "simulator_unchanged": true,
+    "scorer_unchanged": true,
+    "providers_unchanged": true,
+    "seed_unchanged": true,
+    "scale_unchanged": true,
+    "replicate_count_unchanged": true,
+    "takeover_margin_unchanged": true,
+    "run_orchestration_unchanged": true,
+    "completed_measurements_retained_uncensored": true
+  }
+}

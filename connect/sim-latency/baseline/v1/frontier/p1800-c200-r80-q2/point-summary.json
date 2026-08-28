@@ -1,0 +1,181 @@
+{
+  "accepted": true,
+  "base_sha": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "containment_and_killability_hard_gates": true,
+  "cpu_utilization_informational": true,
+  "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "generated_at": "2026-08-27T02:55:44Z",
+  "impairment_modes_completed": true,
+  "kind": "sim-latency-exact-frontier-point-summary",
+  "max_mean_cpu_cores": 4.60621888151736,
+  "max_peak_rss_bytes": 12724850688,
+  "minimum_success_rate": 0.9867961165048543,
+  "outcomes": {
+    "impair_off": {
+      "candidate_build_sha256": "43eef789c28ba5c9898373ccfb2ecc36a78ba9113dbdc84d80cc1bc5fb102f0a",
+      "candidate_image_id": "sha256:d107de220500748e6c05a7b609c4a69101e3bf94be58c1d9021f538c72324e00",
+      "evidence_kind": "complete",
+      "evidence_manifest_sha256": "9379546cbf07520648eeb32731fa52e89bbb7be5b96e271dc773e06218b3d797",
+      "placeable": true,
+      "quality_passed": true,
+      "raw_score_ms": {
+        "baseline": 44203.96549999985,
+        "candidate": 38277.22
+      },
+      "runs": {
+        "baseline": {
+          "clients_established": 200,
+          "evaluation_id": "baseline-01-ce46d86a",
+          "fail_rate": 0.01320388349514563,
+          "findproviders_sample_span_fraction": 0.94445,
+          "goodput_bytes_per_s": 17639326.555555556,
+          "mean_cpu_cores": 4.560113617375081,
+          "peak_rss_bytes": 12452868096,
+          "rows_in_window": 2575,
+          "run_sha256": "300f24c609f19491591d48b3b6fabce684e9cf5319eb74696a546ffbd2359d51",
+          "success_rate": 0.9867961165048543,
+          "total_p95_ms": 37467.624697
+        },
+        "candidate": {
+          "clients_established": 200,
+          "evaluation_id": "candidate-01-ce46d86a",
+          "fail_rate": 0.01093926820067899,
+          "findproviders_sample_span_fraction": 0.94445,
+          "goodput_bytes_per_s": 18003992.6,
+          "mean_cpu_cores": 4.509827067893796,
+          "peak_rss_bytes": 12637499392,
+          "rows_in_window": 2651,
+          "run_sha256": "ffe55f115b8bed66129e1eda6edacf55d1f42cf40a46276c50c67db2a38e2ba5",
+          "success_rate": 0.989060731799321,
+          "total_p95_ms": 32636.69025624995
+        }
+      },
+      "service_health": {
+        "baseline": {
+          "postgres": {
+            "maximum_latency_ms": 170.043907,
+            "mean_latency_ms": 165.1259153125,
+            "samples": 16,
+            "stable_after_ready": true,
+            "successful_samples": 16
+          },
+          "redis": {
+            "maximum_latency_ms": 118.826126,
+            "mean_latency_ms": 115.1915358125,
+            "samples": 16,
+            "stable_after_ready": true,
+            "successful_samples": 16
+          }
+        },
+        "candidate": {
+          "postgres": {
+            "maximum_latency_ms": 168.05697,
+            "mean_latency_ms": 164.8332448235294,
+            "samples": 17,
+            "stable_after_ready": true,
+            "successful_samples": 17
+          },
+          "redis": {
+            "maximum_latency_ms": 117.31186,
+            "mean_latency_ms": 114.99428117647058,
+            "samples": 17,
+            "stable_after_ready": true,
+            "successful_samples": 17
+          }
+        }
+      },
+      "service_health_sha256": "f6447242068a04fa8ef3fe77b0f88608a895e96f94478fd56a3799a5ff88209f",
+      "worker_result_sha256": "a6cf7bc4e22c473c71d024311456b52e8eff86b61b9efc647a3fac2c01aad13a"
+    },
+    "impair_on": {
+      "candidate_build_sha256": "43eef789c28ba5c9898373ccfb2ecc36a78ba9113dbdc84d80cc1bc5fb102f0a",
+      "candidate_image_id": "sha256:d107de220500748e6c05a7b609c4a69101e3bf94be58c1d9021f538c72324e00",
+      "evidence_kind": "complete",
+      "evidence_manifest_sha256": "671fc7f5b8975fac57bdf16247791259ca1663a6901f0a3a07b632d7eac5091b",
+      "placeable": true,
+      "quality_passed": true,
+      "raw_score_ms": {
+        "baseline": 40999.80169999996,
+        "candidate": 41275.15100000008
+      },
+      "runs": {
+        "baseline": {
+          "clients_established": 200,
+          "evaluation_id": "baseline-01-3a649e77",
+          "fail_rate": 0.012504736642667677,
+          "findproviders_sample_span_fraction": 0.9444611111111111,
+          "goodput_bytes_per_s": 17841940.338888887,
+          "mean_cpu_cores": 4.60621888151736,
+          "peak_rss_bytes": 12461035520,
+          "rows_in_window": 2639,
+          "run_sha256": "ab4499e25a4b26510e4019a33a6310e152e3a0246766cc4efee30431a38b3d88",
+          "success_rate": 0.9874952633573323,
+          "total_p95_ms": 36447.56051525001
+        },
+        "candidate": {
+          "clients_established": 200,
+          "evaluation_id": "candidate-01-3a649e77",
+          "fail_rate": 0.012951334379905808,
+          "findproviders_sample_span_fraction": 0.9444444444444444,
+          "goodput_bytes_per_s": 17566795.605555557,
+          "mean_cpu_cores": 4.499439928025963,
+          "peak_rss_bytes": 12724850688,
+          "rows_in_window": 2548,
+          "run_sha256": "4607e22e18e3a2bbf2518010685c4672437aa8abed2e7203c969eeec9abcdb76",
+          "success_rate": 0.9870486656200942,
+          "total_p95_ms": 35248.2671680999
+        }
+      },
+      "service_health": {
+        "baseline": {
+          "postgres": {
+            "maximum_latency_ms": 166.32209,
+            "mean_latency_ms": 164.73874212500002,
+            "samples": 16,
+            "stable_after_ready": true,
+            "successful_samples": 16
+          },
+          "redis": {
+            "maximum_latency_ms": 119.957986,
+            "mean_latency_ms": 114.9641706875,
+            "samples": 16,
+            "stable_after_ready": true,
+            "successful_samples": 16
+          }
+        },
+        "candidate": {
+          "postgres": {
+            "maximum_latency_ms": 214.815972,
+            "mean_latency_ms": 171.36469352941177,
+            "samples": 17,
+            "stable_after_ready": true,
+            "successful_samples": 17
+          },
+          "redis": {
+            "maximum_latency_ms": 117.796889,
+            "mean_latency_ms": 115.35125211764705,
+            "samples": 17,
+            "stable_after_ready": true,
+            "successful_samples": 17
+          }
+        }
+      },
+      "service_health_sha256": "e48800e614549d0674724873da60d62b2379a2d38685abbd3cff90787eec7649",
+      "worker_result_sha256": "2ed6ce3a5e77991eec599f9e8a3e7eef961270db6750ed9477886f92ff167d1a"
+    }
+  },
+  "point_id": "p1800-c200-r80-q2",
+  "point_lock_sha256": "12e24d2442425ff92bbc03742adc57d576cbd230f19187aa510bf7c4768afe05",
+  "quality_passed": true,
+  "scale": {
+    "arrivals_per_minute": 80,
+    "client_pool_size": 200,
+    "exchange_hosts": 4,
+    "fleet_shards": 4,
+    "provider_count": 1800,
+    "quality_window_size": 2
+  },
+  "schema": 1,
+  "simulator_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
+}

@@ -1,0 +1,14 @@
+{
+  "campaign_commitment_sha256": "080f4330aed9bde0b6bb32fee6f686fa8d49626169e97cff7deae1ce3e8b3fcf",
+  "generator_seed": 5691279396340533546,
+  "kind": "sim-latency-reference-v5-pilot-seed-reveal",
+  "pilot_seed_reuse_in_hidden_campaign_forbidden": true,
+  "providers_sha256": "daf6f487fda9a6b8c1ae84dcdf611567d65a5e6de3cd68b2ead73f0895dc14b5",
+  "retired_seed_commitments_sha256": "1a17718ead0b2d5114be670a2b155679c92ac95d79a58160b161c8f0b03a7a04",
+  "revealed_at": "2026-08-27T18:51:38Z",
+  "round_id": "38557a5e-e860-4186-aeff-2d7ce0350bd1",
+  "round_seed_hex": "1b5a2cb8e8dea850bfd8d737a8414eaebd561a0d012c17b0db3bb4759175b95b",
+  "schema": 1,
+  "seed_commitment": "4632b5cd4cbccf7fe71c6063b29959374572f03d943f38c1c003dbb1def31797",
+  "v4_hidden_campaign_rejection_sha256": "d1a782831e9cfedfbe9c5835385f490e655ca38856698b88c59ee91f1ca993e1"
+}

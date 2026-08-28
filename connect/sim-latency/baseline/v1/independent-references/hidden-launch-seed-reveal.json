@@ -1,0 +1,52 @@
+{
+  "all_prior_seed_reuse_forbidden": true,
+  "campaign_commitment_sha256": "c79798ad1769fda861fd86da0cdec7bd2f12f11f5964e2582cfe84a69c9afd69",
+  "kind": "sim-latency-reference-v5-hidden-launch-seed-reveal",
+  "pilot_seed_reuse_forbidden": true,
+  "retired_seed_commitments_sha256": "4fe791ae5cc6fd838fad7cba6727c7325f27e5dda8fb5f4731b15359ddbd7eaf",
+  "revealed_at": "2026-08-27T23:22:37Z",
+  "schema": 1,
+  "seed_material_retired": true,
+  "seeds": [
+    {
+      "generator_seed": 4078255177641303162,
+      "providers_sha256": "c49a0752fc3e89d41a9a69db6b3bc2768c239a9a0b35d62d3f93afbaa7806d4f",
+      "round_id": "39ee5928-ffab-4ce2-83f9-d6efd1c546ca",
+      "round_seed_hex": "85b4f43cb6eea5051d4963f9143755ab2119496bed80b516ec783716f5da0192",
+      "seed_commitment": "a4150cc341964b459bd95506586c2750d0863eb877a9bd1f5a62e4a075209fe0",
+      "seed_index": 1
+    },
+    {
+      "generator_seed": 1689700605250456718,
+      "providers_sha256": "e2a1ee5352ff0f40d9b0fa7ddcd5d2651acd80d4c3bcbbabbe781b6da2e7b9e5",
+      "round_id": "eff3624a-7ff4-41ad-b63b-d7b2e5dfba44",
+      "round_seed_hex": "d02b3cbd0c9650da94ab7b8c6b9e6e81d9605fe0ab126fd9658f7173e95b606f",
+      "seed_commitment": "5ff8b592bab291f02bfe06c76793afb30763f0e0a5411a865b94147bb6dd1857",
+      "seed_index": 2
+    },
+    {
+      "generator_seed": 3836224606097704964,
+      "providers_sha256": "38c23b0872e6837eabdef2dc8900469b32803909e6845578a4ed0760b838b047",
+      "round_id": "9bc5f20b-2c8e-496d-8cca-6e854ee3d999",
+      "round_seed_hex": "5d34dd19fe9ae5effb3798a7dc5b2e5de6f6afec845035f1c76db15dc49f707c",
+      "seed_commitment": "a888713d8cd95d0ee470ab8491ec9e0def829e9a0f55e5419f410ece8734cfb1",
+      "seed_index": 3
+    },
+    {
+      "generator_seed": 2657538481588401002,
+      "providers_sha256": "6503919f4cd2b00e56826d9e2d910f4627a2255199380c40ef7306e3e34e4383",
+      "round_id": "c3d8a569-a4f4-47a9-935f-0223516c0852",
+      "round_seed_hex": "ff265734e696031b5bff2e6ceef043c21e5a321215abdaf4ad4afc0a93b2699d",
+      "seed_commitment": "842ebeb82682ec9929450d953f2babb4bc9b4331f472d3454fb479b3f74fffcd",
+      "seed_index": 4
+    },
+    {
+      "generator_seed": 1999568403125583422,
+      "providers_sha256": "0cbf27009c6e52c3558255b98ea3f26167ec819743d58d5dfb3e46634736fc3f",
+      "round_id": "9ce9e76c-1e2a-4844-adb3-43bdb31d696b",
+      "round_seed_hex": "54b5a04ec39f4c0a2be5f2179420dbf0c8fb92adcb710feb1be8cc9854374d6d",
+      "seed_commitment": "40df4db6b253ce42612984c0ef142479a81a8738189301bede1de64323cb864d",
+      "seed_index": 5
+    }
+  ]
+}

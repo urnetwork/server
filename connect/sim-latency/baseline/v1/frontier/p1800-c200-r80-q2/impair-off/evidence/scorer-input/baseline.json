@@ -1,0 +1,42 @@
+{
+  "score_schema": 1,
+  "kind": "sim-latency-score-baseline",
+  "scorer_version": "sim-latency-score/1",
+  "round_id": "f1bbf344-a2c1-4e9b-a8ab-c253899c2613",
+  "config_sha256": "de574d5b29b0d0482972995cbc49322bf0391863617c7d3194cbf0403a2423ff",
+  "request_timeout_ms": 120000,
+  "run_flags": {
+    "announce_timeout": "2s",
+    "api_port": "7640",
+    "client_warmup_timeout": "20m0s",
+    "duration": "3m0s",
+    "exchange_port_base": "7750",
+    "fleet_shards": "4",
+    "forward_idle_timeout": "5s",
+    "hosts": "4",
+    "impair": "false",
+    "matchmaking_probe_interval": "10s",
+    "matchmaking_sample_span_minimum": "0.90",
+    "pipeline_interval": "10s",
+    "prewarm": "13h0m0s",
+    "ramp": "1m0s",
+    "request_timeout": "2m0s",
+    "reset": "true",
+    "settle": "1m0s",
+    "site_listen": "127.0.0.1:0",
+    "test_timeout": "3s",
+    "ws_port_base": "7650"
+  },
+  "takeover_margin": 0.5,
+  "replicates": [
+    {
+      "raw_score": 44203.96549999985,
+      "success_rate": 0.9867961165048543,
+      "request_count": 2575,
+      "received_bytes": 3175078780,
+      "findproviders_load_p95_ms": 38.70000572204575,
+      "findproviders_pool_p05": 1091,
+      "findproviders_sample_span_fraction": 0.94445
+    }
+  ]
+}

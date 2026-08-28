@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-independent-reference-progress",
+  "replicates_per_reference": 1,
+  "generated_at": "2026-08-27T18:51:38Z",
+  "calibration_decision_sha256": "a7ba1c594bef6924c66bf38932bac709ebcbe7218ae037b57abafcad561222af",
+  "completed_independent_seeds": 1,
+  "target_independent_seeds": 1,
+  "designated_independent_baselines": 1,
+  "reference_ordering_passes": 1,
+  "reference_required_passes": 1,
+  "failed_ordering_seed_indices": [],
+  "complete": true,
+  "separability_passed": true
+}

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-evidence-quota",
+  "filesystem": "tmpfs",
+  "mount_options": "rw,nosuid,nodev,noexec,relatime,size=33554432k,mode=700,inode64",
+  "limit_bytes": 34359738368,
+  "hard_limit": true
+}

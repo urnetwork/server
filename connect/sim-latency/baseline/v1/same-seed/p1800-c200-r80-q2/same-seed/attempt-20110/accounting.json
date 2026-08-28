@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-evaluation-accounting",
+  "job_id": "c94cc029-4410-4f55-8f98-3f9e3b090564",
+  "round_id": "f71b7ed2-78ec-4aaa-9fdc-f9b75c66e665",
+  "complete": true,
+  "runs": [
+    {
+      "evaluation_id": "baseline-01-c94cc029",
+      "role": "baseline",
+      "path": "/artifacts/baseline-01-c94cc029/accounting.json",
+      "sha256": "84bc8d66eff2ec9a1c888746595396db7dae75fe5d12dce4753556c8866a8dc6",
+      "bytes": 228,
+      "provider_egress_bytes": 4144711105
+    },
+    {
+      "evaluation_id": "candidate-01-c94cc029",
+      "role": "candidate",
+      "path": "/artifacts/candidate-01-c94cc029/accounting.json",
+      "sha256": "95ad61a720820cd6de01ec7fca8d51f407382d69689575173118dad8e93c8216",
+      "bytes": 229,
+      "provider_egress_bytes": 4149423480
+    }
+  ]
+}

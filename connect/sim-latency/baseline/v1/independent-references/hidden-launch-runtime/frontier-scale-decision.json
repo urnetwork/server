@@ -1,0 +1,22 @@
+{
+  "accepted": true,
+  "compatibility_projection": true,
+  "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "exact_frontier_decision_sha256": "ab9e605bf5887138f752e5703140ca954786961c46fdbeb5e5e9c28c1b401b11",
+  "kind": "sim-latency-frontier-scale-decision",
+  "max_mean_cpu_cores": 4.60621888151736,
+  "max_peak_rss_bytes": 12724850688,
+  "resource_headroom_passed": true,
+  "schema": 1,
+  "selected": {
+    "arrivals_per_minute": 80,
+    "client_pool_size": 200,
+    "duration_ms": 180000,
+    "exchange_hosts": 4,
+    "fleet_shards": 4,
+    "provider_count": 1800,
+    "quality_window_size": 2
+  },
+  "selected_point_summary_sha256": "f0789d4ccf7f310cb8c480ea5bd248469eaa4a3813a1b751f526093c9fc3e721",
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
+}

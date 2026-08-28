@@ -1,0 +1,47 @@
+{
+  "authorized": true,
+  "authorization_basis": "The operator authorized a reasonable time-to-launch compromise: twelve same-seed pairs remain frozen, while a production-valid stronger-control pilot followed by five hidden seeds with four required strict orderings replaces the superseded independent-reference count only.",
+  "authorized_at": "2026-08-27T23:36:24Z",
+  "created_at": "2026-08-27T18:02:28Z",
+  "draft": false,
+  "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+  "hidden_attestation_repair_script_sha256": "a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0",
+  "hidden_attestation_repair_sha256": "499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d",
+  "hidden_campaign_attestation_sha256": "b96b216022b34e2bf0e9838ca51380431d9f97e95121610951c37d0274cc5c02",
+  "hidden_campaign_decision_sha256": "3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835",
+  "hidden_campaign_protocol_sha256": "4969535eb343049d7b790c5fff8e82b7eb7a60b6e92d2e2aa94e6466e7789fad",
+  "hidden_campaign_runner_sha256": "a889248bf2b2175e79ce0f5526cfa294fea17700f56f6eec46eda8f53aae519e",
+  "host_qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
+  "kind": "sim-latency-production-staging-reference-v5-amendment",
+  "original_production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
+  "pilot_decision_sha256": "cf539704ee1dd80c5df93e4d417cbac4abcbe037a1b89c63c60534851eac8100",
+  "reference_v5_design_sha256": "6e05b1872648a0d9f28755e5ca4b0470445ea40e95b4fdb991e676d2d453ffa1",
+  "reference_v5_qualification_sha256": "8bdc86dcf68a8f8a4c686d8d6267510e121ab7800c9bbcc7cfa4dbce1ac1ca10",
+  "replacement_measurement_dependencies": {
+    "independent_reference_replicates": 1,
+    "independent_seeds": 5,
+    "required_reference_ordering_passes": 4,
+    "same_seed_pairs": 12,
+    "selected_competition_replicates": 9,
+    "takeover_margin": 0.161
+  },
+  "retained_invariants": {
+    "all_original_release_gates_unchanged": true,
+    "all_original_security_gates_unchanged": true,
+    "all_original_staging_round_gates_unchanged": true,
+    "baseline_measurements_censored": false,
+    "evaluator_image_changed": false,
+    "failed_reference_draws_censored": false,
+    "frozen_scale_changed": false,
+    "production_source_changed": false,
+    "scorer_changed": false
+  },
+  "schema": 1,
+  "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+  "superseded_measurement_dependencies": {
+    "independent_seeds": 12,
+    "required_reference_ordering_passes": 11,
+    "same_seed_pairs": 12
+  },
+  "v4_hidden_campaign_rejection_sha256": "d1a782831e9cfedfbe9c5835385f490e655ca38856698b88c59ee91f1ca993e1"
+}

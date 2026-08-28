@@ -1,0 +1,253 @@
+diff --git a/connect/resident_contract_manager.go b/connect/resident_contract_manager.go
+index 66e2d399..de8db929 100644
+--- a/connect/resident_contract_manager.go
++++ b/connect/resident_contract_manager.go
+@@ -21,8 +21,10 @@ type residentContractManager struct {
+ 
+ 	settings *ExchangeSettings
+ 
+-	stateLock       sync.Mutex
+-	activeContracts map[model.TransferPair]*activeContractEntry
++	lookupLock            sync.Mutex
++	stateLock             sync.Mutex
++	activeContracts       map[model.TransferPair]*activeContractEntry
++	activeContractSources map[server.Id]*activeContractSourceEntry
+ }
+ 
+ func newResidentContractManager(
+@@ -32,11 +34,12 @@ func newResidentContractManager(
+ 	settings *ExchangeSettings,
+ ) *residentContractManager {
+ 	residentContractManager := &residentContractManager{
+-		ctx:             ctx,
+-		cancel:          cancel,
+-		clientId:        clientId,
+-		settings:        settings,
+-		activeContracts: map[model.TransferPair]*activeContractEntry{},
++		ctx:                   ctx,
++		cancel:                cancel,
++		clientId:              clientId,
++		settings:              settings,
++		activeContracts:       map[model.TransferPair]*activeContractEntry{},
++		activeContractSources: map[server.Id]*activeContractSourceEntry{},
+ 	}
+ 
+ 	return residentContractManager
+@@ -55,81 +58,166 @@ func handleContractManagerDone(do func()) {
+ 
+ // all other controller activity moved to `controller.resident_oob_controller` via the api
+ 
+-func (self *residentContractManager) HasActiveContract(sourceId server.Id, destinationId server.Id) bool {
+-	if self.ctx.Err() != nil {
+-		return false
++func updateActiveContractCache(
++	activeContracts map[model.TransferPair]*activeContractEntry,
++	activeContractSources map[server.Id]*activeContractSourceEntry,
++	sourceId server.Id,
++	requestedPair model.TransferPair,
++	pairContractParties map[model.TransferPair]map[server.Id]model.ContractParty,
++	checkTime time.Time,
++) *activeContractEntry {
++	for pair, entry := range activeContracts {
++		if pair.A != sourceId && pair.B != sourceId {
++			continue
++		}
++		if _, ok := pairContractParties[pair]; ok {
++			continue
++		}
++		if entry == nil || !checkTime.Before(entry.checkTime) {
++			activeContracts[pair] = &activeContractEntry{
++				checkTime: checkTime,
++				active:    false,
++			}
++		}
+ 	}
+ 
+-	transferPair := model.NewTransferPair(sourceId, destinationId)
++	for pair, contractParties := range pairContractParties {
++		active := false
++		for _, partialCloseParty := range contractParties {
++			if partialCloseParty == "" {
++				active = true
++				break
++			}
++		}
++		if entry := activeContracts[pair]; entry == nil || !checkTime.Before(entry.checkTime) {
++			activeContracts[pair] = &activeContractEntry{
++				checkTime: checkTime,
++				active:    active,
++			}
++		}
++	}
+ 
+-	// entry is either not expired or nil
+-	var entry *activeContractEntry
+-	refresh := false
++	if entry := activeContractSources[sourceId]; entry == nil || !checkTime.Before(entry.checkTime) {
++		activeContractSources[sourceId] = &activeContractSourceEntry{checkTime: checkTime}
++	}
++	if _, ok := pairContractParties[requestedPair]; !ok {
++		if entry := activeContracts[requestedPair]; entry == nil || !checkTime.Before(entry.checkTime) {
++			activeContracts[requestedPair] = &activeContractEntry{
++				checkTime: checkTime,
++				active:    false,
++			}
++		}
++	}
++	return activeContracts[requestedPair]
++}
+ 
+-	if 0 < self.settings.ContractManagerCheckTimeout {
+-		func() {
+-			self.stateLock.Lock()
+-			defer self.stateLock.Unlock()
++func (self *residentContractManager) cachedActiveContract(
++	sourceId server.Id,
++	transferPair model.TransferPair,
++	allowRefresh bool,
++) (entry *activeContractEntry, cached bool, refresh bool) {
++	timeout := self.settings.ContractManagerCheckTimeout
++	if timeout <= 0 {
++		return nil, false, false
++	}
+ 
+-			var ok bool
+-			entry, ok = self.activeContracts[transferPair]
+-			if ok {
+-				if entry.checkTime.Add(self.settings.ContractManagerCheckTimeout).Before(time.Now()) {
+-					entry = nil
+-				} else if !entry.refresh && entry.checkTime.Add(self.settings.ContractManagerCheckTimeout/2).Before(time.Now()) {
+-					entry.refresh = true
+-					refresh = true
++	now := time.Now()
++	self.stateLock.Lock()
++	defer self.stateLock.Unlock()
++
++	if sourceEntry := self.activeContractSources[sourceId]; sourceEntry != nil {
++		if sourceEntry.checkTime.Add(timeout).Before(now) {
++			delete(self.activeContractSources, sourceId)
++		} else {
++			entry = self.activeContracts[transferPair]
++			if entry == nil || entry.checkTime.Before(sourceEntry.checkTime) {
++				entry = &activeContractEntry{
++					checkTime: sourceEntry.checkTime,
++					active:    false,
+ 				}
++				self.activeContracts[transferPair] = entry
++			}
++			if allowRefresh &&
++				!sourceEntry.refresh &&
++				sourceEntry.checkTime.Add(timeout/2).Before(now) {
++				sourceEntry.refresh = true
++				refresh = true
+ 			}
+-		}()
++			return entry, true, refresh
++		}
+ 	}
+ 
+-	next := func() (nextEntry *activeContractEntry) {
+-		handleContractManagerDone(func() {
+-			c := func() bool {
+-				contractIds1 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
+-				if 0 < len(contractIds1) {
+-					return true
+-				}
++	entry = self.activeContracts[transferPair]
++	if entry == nil {
++		return nil, false, false
++	}
++	if entry.checkTime.Add(timeout).Before(now) {
++		delete(self.activeContracts, transferPair)
++		return nil, false, false
++	}
++	if allowRefresh && !entry.refresh && entry.checkTime.Add(timeout/2).Before(now) {
++		entry.refresh = true
++		refresh = true
++	}
++	return entry, true, refresh
++}
+ 
+-				contractIds2 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId)
+-				if 0 < len(contractIds2) {
+-					return true
+-				}
++func (self *residentContractManager) HasActiveContract(sourceId server.Id, destinationId server.Id) bool {
++	if self.ctx.Err() != nil {
++		return false
++	}
++
++	transferPair := model.NewUnorderedTransferPair(sourceId, destinationId)
++	entry, cached, refresh := self.cachedActiveContract(sourceId, transferPair, true)
++
++	next := func(forceRefresh bool) (nextEntry *activeContractEntry) {
++		self.lookupLock.Lock()
++		defer self.lookupLock.Unlock()
+ 
+-				return false
++		if !forceRefresh {
++			if cachedEntry, ok, _ := self.cachedActiveContract(sourceId, transferPair, false); ok {
++				return cachedEntry
+ 			}
+-			hasActiveContract := c()
+-
+-			func() {
+-				self.stateLock.Lock()
+-				defer self.stateLock.Unlock()
+-				if hasActiveContract {
+-					nextEntry = &activeContractEntry{
+-						checkTime: time.Now(),
+-						refresh:   false,
+-					}
+-					self.activeContracts[transferPair] = nextEntry
+-				} else {
+-					delete(self.activeContracts, transferPair)
+-				}
+-			}()
++		}
++		handleContractManagerDone(func() {
++			pairContractParties := model.GetOpenContractIdsForSourceOrDestination(
++				self.ctx,
++				sourceId,
++			)
++			checkTime := time.Now()
++
++			self.stateLock.Lock()
++			defer self.stateLock.Unlock()
++			nextEntry = updateActiveContractCache(
++				self.activeContracts,
++				self.activeContractSources,
++				sourceId,
++				transferPair,
++				pairContractParties,
++				checkTime,
++			)
+ 		})
+ 		return
+ 	}
+ 
+-	if entry == nil {
+-		entry = next()
++	if !cached {
++		entry = next(false)
+ 	} else if refresh {
+ 		go server.HandleError(func() {
+-			next()
++			next(true)
+ 		})
+ 	}
+ 
+-	return entry != nil
++	return entry != nil && entry.active
+ }
+ 
+ type activeContractEntry struct {
+ 	checkTime time.Time
+ 	refresh   bool
++	active    bool
++}
++
++type activeContractSourceEntry struct {
++	checkTime time.Time
++	refresh   bool
+ }
