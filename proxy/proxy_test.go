@@ -16,8 +16,8 @@ package proxy
 // client, loading https://ur.io through each path.
 //
 // The SDK is pointed at the local servers via sdk.Testing_NewNetworkSpaceWithUrls.
-// The default platform transport mode (auto) uses H1 (plain websocket), so no
-// TLS/quic is required between the SDK and the local servers.
+// Hosted proxy devices are pinned to H1 (plain websocket), so no TLS/quic is
+// required between the SDK and the local servers.
 //
 // NOTE: like connect_test, this expects the standard local test environment
 // (WARP_ENV=local plus the local postgres/redis and vault, e.g. via test.sh)
@@ -829,18 +829,12 @@ func TestProxyIdleDeviceRecreate(t *testing.T) {
 	})
 }
 
-// TestProxyDeadDeviceRecreate covers the case the idle path does not: the
-// device's egress dies while its context stays live. In production this is the
-// resident moving / the connection idling out and the egress window collapsing —
-// none of which cancel the proxy device context, so UpdateActivity (a context-only
-// check) keeps reporting the device active. OpenProxyDevice must instead notice
-// the device can no longer serve and recreate it.
-//
-// The egress death is simulated by closing the DeviceLocal directly, which leaves
-// the proxy device context live but collapses the egress window
-// (GetWindowStatus().MinSatisfied == false) — the same observable a real resident
-// move / idle collapse produces.
-func TestProxyDeadDeviceRecreate(t *testing.T) {
+// TestProxyClosedDeviceRecreate covers the case the proxy context alone does
+// not: its DeviceLocal lifecycle can be closed directly while the outer proxy
+// context remains live. OpenProxyDevice must replace that truly closed device,
+// while TestProxyDeviceActiveKeepsUnsatisfiedWindowForForeverRetry separately
+// proves that a live but unsatisfied window is retained.
+func TestProxyClosedDeviceRecreate(t *testing.T) {
 	if testing.Short() {
 		return
 	}
@@ -858,14 +852,14 @@ func TestProxyDeadDeviceRecreate(t *testing.T) {
 		if ready := pd1.WaitForReady(h.ctx, 60*time.Second); !ready {
 			t.Fatalf("proxy device did not become ready")
 		}
-		// confirm it serves https, which also marks it everReady via the reuse gate
+		// confirm it serves https before closing the inner lifecycle
 		testProxyHttps(t, h)
 
 		// ---- kill the egress without canceling the device context ----
 		pd1.deviceLocal.Close()
 
-		// precondition: the old context-only check still reports the dead device
-		// as active (this is the bug), but its egress window is gone
+		// The outer proxy context remains live, while DeviceLocal now reports its
+		// distinct lifecycle completion and the egress window is gone.
 		if !pd1.UpdateActivity() {
 			t.Fatalf("precondition: expected pd1 context still live after deviceLocal.Close()")
 		}

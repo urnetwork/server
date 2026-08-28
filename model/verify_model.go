@@ -816,23 +816,45 @@ func IncrVerifySeedRates(
 	vpk []byte,
 	settings *VerifySettings,
 ) (ipCount int64, vpkCount int64) {
-	ipHash, err := server.ClientIpHash(clientIp)
+	rateLimitClient, err := server.NewRateLimitClientIp(clientIp)
 	server.Raise(err)
+	return incrVerifySeedRatesForClient(
+		ctx,
+		rateLimitClient.IpHash(),
+		rateLimitClient.Excluded(),
+		vpk,
+		settings,
+	)
+}
+
+func incrVerifySeedRatesForClient(
+	ctx context.Context,
+	ipHash [32]byte,
+	ipExcluded bool,
+	vpk []byte,
+	settings *VerifySettings,
+) (ipCount int64, vpkCount int64) {
+	if !ipExcluded {
+		client := server.NewStoredRateLimitClient(ipHash)
+		var err error
+		ipCount, err = server.IncrementIpRateLimit(
+			ctx,
+			client,
+			verifySeedIpRateKey(ipHash),
+			settings.SeedRateWindow,
+		)
+		server.Raise(err)
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		incrWindow := func(key string) int64 {
-			var countCmd *redis.IntCmd
-			_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-				countCmd = pipe.Incr(ctx, key)
-				pipe.Expire(ctx, key, settings.SeedRateWindow)
-				return nil
-			})
-			server.Raise(err)
-			count, err := countCmd.Result()
-			server.Raise(err)
-			return count
-		}
-		ipCount = incrWindow(verifySeedIpRateKey(ipHash))
-		vpkCount = incrWindow(verifySeedVpkRateKey(vpk))
+		var countCmd *redis.IntCmd
+		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			countCmd = pipe.Incr(ctx, verifySeedVpkRateKey(vpk))
+			pipe.Expire(ctx, verifySeedVpkRateKey(vpk), settings.SeedRateWindow)
+			return nil
+		})
+		server.Raise(err)
+		vpkCount, err = countCmd.Result()
+		server.Raise(err)
 	})
 	return
 }
@@ -849,20 +871,34 @@ func IncrVerifyExtendRate(
 	clientIp string,
 	settings *VerifySettings,
 ) (ipCount int64) {
-	ipHash, err := server.ClientIpHash(clientIp)
+	rateLimitClient, err := server.NewRateLimitClientIp(clientIp)
 	server.Raise(err)
-	server.Redis(ctx, func(r server.RedisClient) {
-		var countCmd *redis.IntCmd
-		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			countCmd = pipe.Incr(ctx, verifyExtendIpRateKey(ipHash))
-			pipe.Expire(ctx, verifyExtendIpRateKey(ipHash), settings.SeedRateWindow)
-			return nil
-		})
-		server.Raise(err)
-		ipCount, err = countCmd.Result()
-		server.Raise(err)
-	})
-	return
+	return incrVerifyExtendRateForClient(
+		ctx,
+		rateLimitClient.IpHash(),
+		rateLimitClient.Excluded(),
+		settings,
+	)
+}
+
+func incrVerifyExtendRateForClient(
+	ctx context.Context,
+	ipHash [32]byte,
+	ipExcluded bool,
+	settings *VerifySettings,
+) (ipCount int64) {
+	if ipExcluded {
+		return 0
+	}
+	client := server.NewStoredRateLimitClient(ipHash)
+	ipCount, err := server.IncrementIpRateLimit(
+		ctx,
+		client,
+		verifyExtendIpRateKey(ipHash),
+		settings.SeedRateWindow,
+	)
+	server.Raise(err)
+	return ipCount
 }
 
 // IncrVerifyActiveTrails counts a new active trail against the vpk's

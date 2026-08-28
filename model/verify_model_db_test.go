@@ -240,6 +240,36 @@ func TestVerifyRateMeters(t *testing.T) {
 	})
 }
 
+// An infrastructure exclusion removes only the source-ip meters. The VPK
+// meter remains an independent abuse bound and must continue advancing.
+func TestVerifyRateMetersExcludeOnlySourceIp(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultVerifySettings()
+		ipHash := [32]byte{4, 5, 6}
+		vpk := []byte("excluded-source-vpk")
+
+		if ip, vpkCount := incrVerifySeedRatesForClient(ctx, ipHash, true, vpk, settings); ip != 0 || vpkCount != 1 {
+			t.Fatalf("first excluded seed = (%d, %d), want (0, 1)", ip, vpkCount)
+		}
+		if ip, vpkCount := incrVerifySeedRatesForClient(ctx, ipHash, true, vpk, settings); ip != 0 || vpkCount != 2 {
+			t.Fatalf("second excluded seed = (%d, %d), want (0, 2)", ip, vpkCount)
+		}
+		if extendCount := incrVerifyExtendRateForClient(ctx, ipHash, true, settings); extendCount != 0 {
+			t.Fatalf("excluded extend count = %d, want 0", extendCount)
+		}
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			if count := r.Exists(ctx, verifySeedIpRateKey(ipHash), verifyExtendIpRateKey(ipHash)).Val(); count != 0 {
+				t.Fatalf("excluded source created %d ip counter keys, want 0", count)
+			}
+			if count := r.Exists(ctx, verifySeedVpkRateKey(vpk)).Val(); count != 1 {
+				t.Fatalf("vpk counter keys = %d, want 1", count)
+			}
+		})
+	})
+}
+
 func TestVerifyEligibilityTokens(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

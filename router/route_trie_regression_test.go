@@ -27,6 +27,7 @@ var realApiRoutes = [][2]string{
 	{"GET", "/terms.txt"},
 	{"GET", "/vdp.txt"},
 	{"GET", "/status"},
+	{"GET", "/clock"},
 	{"GET", "/stats/last-90"},
 	{"GET", "/stats/providers-overview-last-90"},
 	{"GET", "/stats/providers"},

@@ -1786,6 +1786,7 @@ func CloseContract(
 
 func settleContract(ctx context.Context, contractId server.Id) (closed bool, returnErr error) {
 	var posts []func() any
+	var clockTransferByteCount ByteCount
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		// party -> close record. Pull all close rows (checkpoint or not).
@@ -1873,12 +1874,18 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 			} else {
 				// nothing to settle, just close the transaction
 				closed = claimContractOutcomeInTx(ctx, tx, contractId, ContractOutcomeSettled)
+				if closed {
+					clockTransferByteCount = destinationUsedTransferByteCount
+				}
 			}
 		}
 	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return
+	}
+	if closed && 0 < clockTransferByteCount {
+		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
 	}
 	server.RunPosts(ctx, posts...)
 	return
@@ -1929,6 +1936,7 @@ func settleEscrowInTx(
 	outcome ContractOutcome,
 ) (posts []func() any, closed bool, returnErr error) {
 	var usedTransferByteCount ByteCount
+	var clockTransferByteCount ByteCount
 
 	switch outcome {
 	case ContractOutcomeSettled:
@@ -1966,6 +1974,9 @@ func settleEscrowInTx(
 					checkpointCount += 1
 				}
 				netUsedTransferByteCount += usedTransferByteCountForParty
+				if party == ContractPartyDestination {
+					clockTransferByteCount = usedTransferByteCountForParty
+				}
 				partyCount += 1
 			}
 		})
@@ -2004,8 +2015,28 @@ func settleEscrowInTx(
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&usedTransferByteCount))
+				if party == ContractPartyDestination {
+					clockTransferByteCount = usedTransferByteCount
+				}
 			}
 		})
+		if party != ContractPartyDestination {
+			result, err = tx.Query(
+				ctx,
+				`
+                    SELECT used_transfer_byte_count
+                    FROM contract_close
+                    WHERE contract_id = $1 AND party = $2
+                `,
+				contractId,
+				ContractPartyDestination,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&clockTransferByteCount))
+				}
+			})
+		}
 	default:
 		returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
 		return
@@ -2136,6 +2167,9 @@ func settleEscrowInTx(
 		return
 	}
 	closed = true
+	if 0 < clockTransferByteCount {
+		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
+	}
 
 	// run all the posts in parallel in as small blocks as reasonable to minimize the work for serialization errors
 
@@ -2891,6 +2925,10 @@ func ForceCloseOpenContractIds(
 		// it into the net escrow counter. only when this call claimed the
 		// contract -- otherwise a concurrent settle/dispute owns the release.
 		if claimed {
+			server.RunPosts(
+				ctx,
+				clockTransferPost(ctx, clockContractTransferByteCount(ctx, openContract.contractId)),
+			)
 			releaseNetEscrowForContract(ctx, openContract.contractId)
 		}
 	}

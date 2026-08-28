@@ -4,7 +4,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -837,29 +836,4 @@ func semverSortWithBuild(versions []semver.Version) {
 		}
 		return 0
 	})
-}
-
-var LimitExcludePrefixes = sync.OnceValue(limitExcludePrefixes)
-
-func limitExcludePrefixes() []netip.Prefix {
-	subnets := strings.Split(os.Getenv("WARP_LIMIT_EXCLUDE_SUBNETS"), ";")
-	prefixes := []netip.Prefix{}
-	for _, subnet := range subnets {
-		subnet = strings.TrimSpace(subnet)
-		if 0 < len(subnet) {
-			prefix := netip.MustParsePrefix(subnet)
-			prefixes = append(prefixes, prefix)
-		}
-	}
-	glog.Infof("[env]found limit exclude prefixes=%s\n", prefixes)
-	return prefixes
-}
-
-func IsLimitExcludeAddr(addr netip.Addr) bool {
-	for _, prefix := range LimitExcludePrefixes() {
-		if prefix.Contains(addr) {
-			return true
-		}
-	}
-	return false
 }

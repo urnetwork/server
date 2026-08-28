@@ -15,15 +15,17 @@ func pushTestsAuthPolicy(t testing.TB, yaml string) {
 
 func TestTestAuthPolicyExactIdentityAndFailClosed(t *testing.T) {
 	tests := []struct {
-		name     string
-		yaml     string
-		userAuth string
-		bypass   bool
-		suppress bool
+		name      string
+		yaml      string
+		userAuth  string
+		bypass    bool
+		rateLimit bool
+		repair    bool
+		suppress  bool
 	}{
 		{
 			name:     "exact domain",
-			yaml:     "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\n  suppress_account_messages: true\n",
+			yaml:     "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\n  suppress_account_messages: true\nsignup:\n  password: 'Acceptance-password-123!'\n",
 			userAuth: "Acceptance@SIGNUP-TEST.EXAMPLE",
 			bypass:   true,
 			suppress: true,
@@ -45,11 +47,19 @@ func TestTestAuthPolicyExactIdentityAndFailClosed(t *testing.T) {
 			userAuth: "acceptance@signup-test.example.attacker.invalid",
 		},
 		{
-			name:     "exact normalized phone",
-			yaml:     "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\n  suppress_account_messages: true\nsignup:\n  phone:\n    number: '+13125550100'\n",
+			name:      "exact normalized phone",
+			yaml:      "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\n  suppress_account_messages: true\nsignup:\n  password: 'Acceptance-password-123!'\n  phone:\n    number: '+13125550100'\n",
+			userAuth:  "312-555-0100",
+			bypass:    true,
+			rateLimit: true,
+			repair:    true,
+			suppress:  true,
+		},
+		{
+			name:     "phone without configured password only bypasses verification",
+			yaml:     "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\nsignup:\n  phone:\n    number: '+13125550100'\n",
 			userAuth: "312-555-0100",
 			bypass:   true,
-			suppress: true,
 		},
 		{
 			name:     "different phone does not match",
@@ -85,11 +95,50 @@ func TestTestAuthPolicyExactIdentityAndFailClosed(t *testing.T) {
 			if policy.BypassVerification != test.bypass {
 				t.Fatalf("BypassVerification = %t, want %t", policy.BypassVerification, test.bypass)
 			}
+			if policy.BypassRateLimits != test.rateLimit {
+				t.Fatalf("BypassRateLimits = %t, want %t", policy.BypassRateLimits, test.rateLimit)
+			}
+			if policy.AllowPasswordRepair != test.repair {
+				t.Fatalf("AllowPasswordRepair = %t, want %t", policy.AllowPasswordRepair, test.repair)
+			}
 			if policy.SuppressAccountMessages != test.suppress {
 				t.Fatalf("SuppressAccountMessages = %t, want %t", policy.SuppressAccountMessages, test.suppress)
 			}
 		})
 	}
+}
+
+func TestConfiguredPhoneBypassesAttemptLimit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		pushTestsAuthPolicy(t, "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\nsignup:\n  password: 'Acceptance-password-123!'\n  phone:\n    number: '+13125550100'\n")
+
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "198.51.100.240:443", nil)
+		configuredPhone := "312-555-0100"
+		for attempt := 0; attempt < AttemptFailedCountThreshold+2; attempt++ {
+			if _, allow := UserAuthAttempt(&configuredPhone, clientSession); !allow {
+				t.Fatalf("configured phone attempt %d was rate limited", attempt+1)
+			}
+		}
+	})
+}
+
+func TestConfiguredEmailRetainsAttemptLimit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		pushTestsAuthPolicy(t, "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\nsignup:\n  phone:\n    number: '+13125550100'\n")
+
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "198.51.100.241:443", nil)
+		configuredEmail := "acceptance@signup-test.example"
+		for attempt := 1; attempt < AttemptFailedCountThreshold; attempt++ {
+			if _, allow := UserAuthAttempt(&configuredEmail, clientSession); !allow {
+				t.Fatalf("configured email attempt %d was limited early", attempt)
+			}
+		}
+		if _, allow := UserAuthAttempt(&configuredEmail, clientSession); allow {
+			t.Fatalf("configured email attempt %d bypassed the normal limit", AttemptFailedCountThreshold)
+		}
+	})
 }
 
 func TestNetworkCreateTestAuthIsImmediatelyVerified(t *testing.T) {
@@ -188,6 +237,52 @@ func TestNetworkCreateTestAuthIsImmediatelyVerified(t *testing.T) {
 		}
 		if ordinary.Network == nil || ordinary.Network.ByJwt != nil {
 			t.Fatal("ordinary unverified signup returned an authenticated network")
+		}
+	})
+}
+
+func TestConfiguredPhoneLoginRepairsStaleFixturePassword(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		configuredPassword := "Acceptance-password-123!"
+		pushTestsAuthPolicy(t, "version: 1\nemail_verification:\n  bypass_domains: [signup-test.example]\nsignup:\n  password: '"+configuredPassword+"'\n  phone:\n    number: '+13125550100'\n")
+
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "198.51.100.242:443", nil)
+		phone := "+13125550100"
+		stalePassword := "Stale-password-456!"
+		created, err := NetworkCreate(NetworkCreateArgs{
+			UserAuth:    &phone,
+			Password:    &stalePassword,
+			NetworkName: "acceptance-stale-phone",
+			Terms:       true,
+		}, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if created.Network == nil || created.Network.ByJwt == nil {
+			t.Fatalf("could not create stale configured-phone fixture: %#v", created)
+		}
+
+		repaired, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
+			UserAuth: phone,
+			Password: configuredPassword,
+		}, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if repaired.Network == nil || repaired.Network.ByJwt == nil {
+			t.Fatalf("configured password did not repair stale phone fixture: %#v", repaired)
+		}
+
+		staleLogin, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
+			UserAuth: phone,
+			Password: stalePassword,
+		}, clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if staleLogin.Network != nil || staleLogin.Error == nil {
+			t.Fatalf("stale password remained valid after fixture repair: %#v", staleLogin)
 		}
 	})
 }

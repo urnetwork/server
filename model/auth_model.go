@@ -3,6 +3,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"strings"
@@ -756,12 +757,37 @@ func AuthLoginWithPassword(
 	}
 
 	// server.Logger().Printf("Comparing password hashes\n")
+	testAuthPolicy := testAuthPolicyForUserAuth(userAuth)
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), passwordSalt)
-	if bytes.Equal(passwordHash, loginPasswordHash) {
+	passwordMatches := bytes.Equal(passwordHash, loginPasswordHash)
+	if !passwordMatches && testAuthPolicy.AllowPasswordRepair && subtle.ConstantTimeCompare(
+		[]byte(loginWithPassword.Password),
+		[]byte(testAuthPolicy.ConfiguredPassword),
+	) == 1 {
+		// This is intentionally narrower than password reset: it applies only to
+		// the exact fixed phone fixture and requires its vault-held password. Keep
+		// the existing salt and replace the derived hash atomically.
+		server.Db(session.Ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(
+				session.Ctx,
+				`
+					UPDATE network_user_auth_password
+					SET password_hash = $1, verified = true
+					WHERE user_id = $2 AND user_auth = $3
+				`,
+				loginPasswordHash,
+				userId,
+				userAuth,
+			))
+		})
+		passwordMatches = true
+		userVerified = true
+	}
+	if passwordMatches {
 		// A configured acceptance identity must never get stranded behind a code
 		// prompt. This also repairs an unverified fixture left by a run against an
 		// older server, but only after its password has been proven.
-		if !userVerified && testAuthPolicyForUserAuth(userAuth).BypassVerification {
+		if !userVerified && testAuthPolicy.BypassVerification {
 			server.Db(session.Ctx, func(conn server.PgConn) {
 				server.RaisePgResult(conn.Exec(
 					session.Ctx,

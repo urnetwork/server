@@ -41,74 +41,35 @@ func CheckNetworkCreateRateLimit(
 	ctx context.Context,
 	session *session.ClientSession,
 ) error {
-	clientAddressHash, _, err := session.ClientAddressHashPort()
+	rateLimitClient, err := server.NewRateLimitClient(session.ClientAddress)
 	if err != nil {
-		// can't determine client address — allow
-		return nil
-	}
-
-	var count int
-	// seconds until the oldest attempt still inside the window expires, which
-	// is when one slot frees up. Computed in the same statement, against the
-	// same clock, so the Retry-After we hand the client is the real wait and
-	// not a flat restatement of the window length.
-	var retryAfterSeconds int
-
-	server.Tx(ctx, func(tx server.PgTx) {
-		// Count how many network creates this IP has done in the last 24 hours
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-					COUNT(*),
-					COALESCE(
-						CEIL(EXTRACT(EPOCH FROM (
-							MIN(create_time) + INTERVAL '1 seconds' * $2 - now()
-						)))::bigint,
-						0
-					)
-				FROM network_create_attempt
-				WHERE
-					client_address_hash = $1 AND
-					now() - INTERVAL '1 seconds' * $2 <= create_time
-			`,
-			clientAddressHash[:],
-			int(NetworkCreateDailyWindow/time.Second),
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&count, &retryAfterSeconds))
-			}
-		})
-
-		if count >= NetworkCreateDailyLimit {
-			return
+		// Deferred sessions can carry only the persisted privacy-preserving
+		// address hash. They cannot be newly classified, but retain their
+		// original budget ownership.
+		clientAddressHash, _, err := session.ClientAddressHashPort()
+		if err != nil {
+			// Can't determine client address — allow.
+			return nil
 		}
+		rateLimitClient = server.NewStoredRateLimitClient(clientAddressHash)
+	}
+	result := server.CheckNetworkCreateIpRateLimit(
+		ctx,
+		rateLimitClient,
+		NetworkCreateDailyLimit,
+		NetworkCreateDailyWindow,
+	)
 
-		// Record this attempt
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_create_attempt
-				(network_create_attempt_id, client_address_hash, create_time)
-				VALUES ($1, $2, $3)
-			`,
-			server.NewId(),
-			clientAddressHash[:],
-			server.NowUtc(),
-		))
-	})
-
-	if count >= NetworkCreateDailyLimit {
+	if result.Count >= NetworkCreateDailyLimit {
 		// clamp: a clock skew or a just-expired row must never produce a
 		// nonsensical hint, and the wait can never exceed the window itself
-		if retryAfterSeconds < 1 {
-			retryAfterSeconds = 1
+		if result.RetryAfterSeconds < 1 {
+			result.RetryAfterSeconds = 1
 		}
-		if maxSeconds := int(NetworkCreateDailyWindow / time.Second); maxSeconds < retryAfterSeconds {
-			retryAfterSeconds = maxSeconds
+		if maxSeconds := int(NetworkCreateDailyWindow / time.Second); maxSeconds < result.RetryAfterSeconds {
+			result.RetryAfterSeconds = maxSeconds
 		}
-		return maxNetworkCreateAttemptsError(retryAfterSeconds)
+		return maxNetworkCreateAttemptsError(result.RetryAfterSeconds)
 	}
 
 	return nil
@@ -116,14 +77,5 @@ func CheckNetworkCreateRateLimit(
 
 // RemoveExpiredNetworkCreateAttempts cleans up attempts older than the window.
 func RemoveExpiredNetworkCreateAttempts(ctx context.Context, minTime time.Time) {
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_create_attempt
-				WHERE create_time < $1
-			`,
-			minTime.UTC(),
-		))
-	})
+	server.RemoveExpiredNetworkCreateIpRateLimitAttempts(ctx, minTime)
 }

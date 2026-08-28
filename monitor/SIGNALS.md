@@ -2278,6 +2278,33 @@ That is a probe-method mismatch, not evidence that all blocks are down. Use the
 host-side deploy worker's readiness result or resolve each block's live
 allocation and query it directly.
 
+**Public-identity drift signature (fireside, 2026-08-28):** a proxy host may be
+healthy at its current address while a future deploy is configured from a
+stale address. Compare all five sources before changing routing: the live
+public-interface address, public DNS, the XOps netplan, the active
+`vault/main/services.yml` LB entry, and the upstream router route/whitelist.
+Fireside's live interface, DNS, netplan, and router agreed on
+`65.49.70.92` / `2001:470:99:5960:3a05:25ff:fe32:e5ab`, while three active
+Vault version sections still named `.90` / `...:e5ac`. Crisp consistently used
+`65.49.70.94` / `2001:470:99:5940:3a05:25ff:fe37:292a`. Do not classify an
+arbitrary occurrence of `.90` as a host mapping: XOps router snapshots also
+use it as a DHCP-pool lower bound.
+
+Prove the routed identity against every block, on both address families. For
+SOCKS, a greeting is enough to prove DNAT and protocol ownership without a
+credential:
+```bash
+ip -4 -o addr show dev <public-interface> scope global
+ip -6 -o addr show dev <public-interface> scope global
+dig +short A <proxy-host>; dig +short AAAA <proxy-host>
+printf '\005\001\002' | timeout 4 nc -4 -w 2 <proxy-host> <socks-port> | xxd -p
+printf '\005\001\002' | timeout 4 nc -6 -w 2 <proxy-host> <socks-port> | xxd -p
+```
+Expect `0502` for every block. On 2026-08-28, all ten fireside and all ten
+crisp blocks returned `0502` over both IPv4 and IPv6, and every HTTP proxy port
+accepted TCP. That proves the router currently reaches `.92` / `...:e5ab`; it
+does not excuse stale deploy metadata.
+
 **Asymmetric-return signature (crisp, 2026-08-27):** every current container's
 internal `/status` returned 200 and g1's direct SOCKS listener returned `05 02`,
 but public SOCKS/HTTP/HTTPS handshakes timed out. A capture showed public SYNs
@@ -2329,6 +2356,65 @@ main-table gateway (especially an IPv6 link-local RA gateway) instead of
 assuming subnet `::1`. Verify both families with source-aware `route get`,
 packet captures, and application handshakes after applying it; an internal 200
 alone cannot close the incident.
+
+### 14.6 Hosted DeviceLocal carrier-budget saturation
+
+`providers-unresponsive` is not sufficient evidence that providers failed.
+The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy
+RPC/API access, H1 correctly pinned, and fill retries still running. The
+deployed process instead showed one process-global platform-transport budget
+shared by every hosted DeviceLocal: 16 MiB total, 8 MiB used, all 16/16 carrier
+slots acquired, and 146 H1 reservations (about 76.5 MiB) pending. A fresh
+standalone DeviceLocal worked because it did not arrive behind that saturated
+process queue. `WindowStatus.Failed` remained a presentation latch; it did not
+stop enumeration or retry.
+
+Current proxy builds give each hosted DeviceLocal one private carrier budget
+derived from `config/main/proxy.yml: device_memory_budget` (24 MiB in main).
+Devices share one manager-lifetime NetworkSpace/client strategy, but not
+mutable JWT/refresh sessions or memory admission. Use these aggregate,
+identity-free metrics:
+
+- `urnetwork_proxy_device_memory_target_bytes`: should equal approximately
+  `urnetwork_proxy_devices_live * 24 MiB` in main.
+- `urnetwork_proxy_platform_transports_max`: should scale as
+  `urnetwork_proxy_devices_live * 16`; a flat 16 with multiple live devices is
+  a pre-fix/shared-budget deployment.
+- `urnetwork_proxy_platform_transports_used` and
+  `urnetwork_proxy_platform_transport_used_bytes`: acquired carriers.
+- `urnetwork_proxy_platform_transports_pending_h1` and
+  `urnetwork_proxy_platform_transports_pending_h1_bytes`: the direct starvation
+  signature. A short nonzero value can be normal during an overlapping
+  replacement; sustained pending H1 together with a locally full budget and an
+  unsatisfied window is not.
+- `urnetwork_proxy_device_memory_tracked_used_bytes` is live budget-accounted
+  use, not RSS; allocator/runtime and bounded NAT endpoint memory remain outside
+  that tracked sum.
+
+For a reported proxy failure, correlate pending H1 with the window status and
+retry logs. If pending remains zero while the window repeatedly enumerates and
+evaluates candidates, investigate provider reachability/auth. If pending is
+sustained, compare `transports_used` with `transports_max` and verify both the
+24 MiB config and the per-device SDK build before blaming the provider fleet.
+
+**Hosted-device recreation loop:** repeated
+`[pd][<same-proxy-id>]window identity restore` lines without a proxy deploy are
+proof that one logical proxy is being torn down and reconstructed. They are not
+ordinary window retries. The idle timeout is 90 minutes, so repetitions minutes
+or seconds apart under active traffic are also not idle reaping:
+```bash
+warpctl logs main proxy --query='window identity restore' --since=30m --limit=2000
+```
+The 2026-08-28 pre-fix selector treated a live DeviceLocal's transient
+`MinSatisfied=false` as terminal after it had once been ready. The next
+HTTP/SOCKS/WireGuard lookup canceled the whole DeviceLocal, aborting the very
+multi-window retry intended to refill it, and restored the same identities into
+a new instance. Correct behavior retains the same hosted device while its
+lifecycle is live, regardless of readiness; only proxy-context cancellation,
+DeviceLocal lifecycle completion, or the real idle reaper may replace it.
+Correlate this signature with carrier saturation: a shared full carrier budget
+makes the replacement less likely to fill and turns selection churn into an
+amplifier. A `Failed` window presentation status is never a replacement reason.
 
 ---
 
