@@ -206,7 +206,7 @@ request_path="$(realpath -e "$request_path")"
 artifact_dir="$(dirname "$request_path")"
 [ "$result_path" = "$artifact_dir/worker-result.json" ] || die "result path is outside the attempt directory"
 
-readonly request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_id","round_seed_hex","schema","scorer_version","vault_local_directory","worker_image_digest"]'
+readonly request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_id","round_seed_hex","schema","scorer_version","source_epoch","vault_local_directory","worker_image_digest"]'
 readonly patch_policy_keys='["allowed_paths","forbidden_paths","max_patch_bytes"]'
 readonly evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
 jq -e \
@@ -221,6 +221,7 @@ jq -e \
 
 job_id="$(jq -er '.job_id' "$request_path")"
 round_id="$(jq -er '.round_id' "$request_path")"
+source_epoch="$(jq -er '.source_epoch' "$request_path")"
 attempt="$(jq -er '.attempt' "$request_path")"
 competition_id="$(jq -er '.competition_id' "$request_path")"
 base_sha="$(jq -er '.base_sha' "$request_path")"
@@ -241,6 +242,7 @@ replicates="$(jq -er '.evaluation_policy.replicates' "$request_path")"
 
 [[ "$job_id" =~ ^[0-9a-f-]{36}$ ]] || die "job id is invalid"
 [[ "$round_id" =~ ^[0-9a-f-]{36}$ ]] || die "round id is invalid"
+[[ "$source_epoch" =~ ^[0-6]$ ]] || die "source epoch is invalid"
 [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || die "attempt is invalid"
 [[ "$competition_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "competition id is invalid"
 [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || die "base SHA is invalid"
@@ -394,9 +396,10 @@ image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"
 base_identity="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
     --security-opt no-new-privileges:true "$base_image_id" identity)"
-jq -e --arg base_sha "$base_sha" --arg empty_patch "$EMPTY_PATCH_SHA256" \
+jq -e --arg base_sha "$base_sha" --arg empty_patch "$EMPTY_PATCH_SHA256" --argjson source_epoch "$source_epoch" \
     '.schema == 1 and .image_kind == "evaluator-base" and
      .base_sha == $base_sha and .build_sha == $base_sha and
+     .source_epoch == $source_epoch and
      .patch_sha256 == $empty_patch and (.simulator_sha256 | test("^[0-9a-f]{64}$"))' \
     <<<"$base_identity" >/dev/null || die "base image identity is invalid"
 base_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$base_identity")"
@@ -475,6 +478,7 @@ write_runner_env() {
         "APEX_PROVIDERS_SHA256=$providers_sha256" \
         'APEX_ARTIFACT_ROOT=/artifacts' \
         "APEX_EVALUATION_ID=$evaluation_id" \
+        "APEX_EPOCH=$source_epoch" \
         "APEX_API_IMAGE_DIGEST=$image_id" \
         "APEX_HARDWARE_ID=$hardware_id" \
         "APEX_HOST_QUALIFICATION_SHA256=$qualification_sha256" \

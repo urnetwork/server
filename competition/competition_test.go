@@ -141,10 +141,14 @@ func TestEvaluatorRequestBindsControlPlaneImageDigests(t *testing.T) {
 			ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
 		},
 		AttemptCount: 1,
+		Round:        roundRecord{RoundResult: RoundResult{Epoch: 1}},
 	}
 	request := evaluatorRequestForJob(settings, job, strings.Repeat("9", 64), "/tmp/attempt", "/tmp/attempt/canonical.patch")
 	if request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
 		t.Fatalf("request image identity = %q, %q", request.ApiImageDigest, request.WorkerImageDigest)
+	}
+	if request.SourceEpoch != 0 {
+		t.Fatalf("request source epoch = %d, want 0", request.SourceEpoch)
 	}
 }
 

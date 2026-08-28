@@ -20,13 +20,16 @@ func TestEvaluatorRequestBindsCanonicalPatchDigest(t *testing.T) {
 		},
 		AttemptCount: 2,
 		Round: roundRecord{
-			RoundResult:   RoundResult{ProvidersSha256: strings.Repeat("d", 64)},
+			RoundResult:   RoundResult{Epoch: 1, ProvidersSha256: strings.Repeat("d", 64)},
 			ProvidersPath: "/trusted/round/providers.yml",
 		},
 	}
 	request := evaluatorRequestForJob(settings, job, strings.Repeat("e", 64), "/artifacts/attempt-02", "/artifacts/attempt-02/canonical.patch")
 	if request.PatchSha256 != job.PatchSha256 {
 		t.Fatalf("patch SHA-256 = %q, want %q", request.PatchSha256, job.PatchSha256)
+	}
+	if request.SourceEpoch != 0 {
+		t.Fatalf("source epoch = %d, want baseline epoch 0", request.SourceEpoch)
 	}
 	if request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
 		t.Fatal("evaluator request did not bind the exact control-plane image identities")

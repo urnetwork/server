@@ -36,6 +36,7 @@ type evaluatorRequest struct {
 	Schema               int              `json:"schema"`
 	JobId                string           `json:"job_id"`
 	RoundId              string           `json:"round_id"`
+	SourceEpoch          int              `json:"source_epoch"`
 	Attempt              int              `json:"attempt"`
 	CompetitionId        string           `json:"competition_id"`
 	BaseSha              string           `json:"base_sha"`
@@ -110,6 +111,7 @@ type artifactManifest struct {
 	Schema                 int                  `json:"schema"`
 	JobId                  string               `json:"job_id"`
 	RoundId                string               `json:"round_id"`
+	SourceEpoch            int                  `json:"source_epoch"`
 	Attempt                int                  `json:"attempt"`
 	EvaluatorImageDigest   string               `json:"evaluator_image_digest"`
 	ApiImageDigest         string               `json:"api_image_digest"`
@@ -160,6 +162,9 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 	}
 	if !storedPolicyMatches(settings, job.Round.PolicyJson) {
 		return infrastructureFailure("round_policy_mismatch", "round policy does not match the frozen evaluator policy")
+	}
+	if job.Round.Epoch < 1 || settings.SeasonPolicy.EpochCount < job.Round.Epoch {
+		return infrastructureFailure("source_epoch_invalid", "round does not map to a configured measured-source epoch")
 	}
 	for _, local := range []struct {
 		path     string
@@ -258,7 +263,8 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 	}
 	manifest := artifactManifest{
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
-		Attempt: job.AttemptCount, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		SourceEpoch: job.Round.Epoch - 1,
+		Attempt:     job.AttemptCount, EvaluatorImageDigest: settings.EvaluatorImageDigest,
 		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
 		RequestSha256:          requestHash, PatchSha256: patchHash, StderrSha256: stderrHash,
@@ -295,7 +301,8 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir, patchPath string) evaluatorRequest {
 	return evaluatorRequest{
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
-		Attempt: job.AttemptCount, CompetitionId: settings.CompetitionId,
+		SourceEpoch: job.Round.Epoch - 1,
+		Attempt:     job.AttemptCount, CompetitionId: settings.CompetitionId,
 		BaseSha: settings.BaseSha, EvaluatorImageDigest: settings.EvaluatorImageDigest,
 		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		ScorerVersion: ScorerVersion, RoundSeedHex: seed, PatchPath: patchPath,
