@@ -1,6 +1,7 @@
 package competition
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -10,6 +11,64 @@ import (
 
 	"github.com/urnetwork/server"
 )
+
+// Executes one exact self-check payload through the production strict decoder.
+func runSelfCheckPayload(t *testing.T, settings *Settings, payload []byte) (HostSelfCheck, error) {
+	t.Helper()
+	directory := t.TempDir()
+	command := filepath.Join(directory, "self-check")
+	script := []byte("#!/bin/sh\ncat <<'SELF_CHECK_EOF'\n")
+	script = append(script, payload...)
+	script = append(script, []byte("\nSELF_CHECK_EOF\n")...)
+	if err := os.WriteFile(command, script, 0500); err != nil {
+		t.Fatal(err)
+	}
+	digest, _, err := hashRegularFile(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.ArtifactRoot = directory
+	settings.SelfCheckCommand = command
+	settings.SelfCheckCommandSha256 = digest
+	return (CommandEvaluator{}).SelfCheck(context.Background(), settings)
+}
+
+func TestCommandEvaluatorAcceptsExactIrqSelfCheckEvidence(t *testing.T) {
+	settings := validSettings()
+	payload, err := json.Marshal(passingHostCheck(settings))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check, err := runSelfCheckPayload(t, settings, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.IrqAffinitySha256 != strings.Repeat("5", 64) ||
+		check.IrqPolicySha256 != strings.Repeat("6", 64) {
+		t.Fatalf("decoded IRQ evidence = %#v", check)
+	}
+}
+
+func TestCommandEvaluatorStillRejectsUnknownSelfCheckFields(t *testing.T) {
+	settings := validSettings()
+	payload, err := json.Marshal(passingHostCheck(settings))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		t.Fatal(err)
+	}
+	wire["unexpected"] = true
+	payload, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runSelfCheckPayload(t, settings, payload); err == nil ||
+		!strings.Contains(err.Error(), `unknown field "unexpected"`) {
+		t.Fatalf("unknown self-check field error = %v", err)
+	}
+}
 
 func TestEvaluatorRequestBindsCanonicalPatchDigest(t *testing.T) {
 	settings := validSettings()

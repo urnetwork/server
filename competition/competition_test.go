@@ -435,7 +435,8 @@ func passingHostCheck(settings *Settings) HostSelfCheck {
 	return HostSelfCheck{
 		Schema: 1, HostId: "box-a", HardwareId: settings.EvaluationPolicy.HardwareId,
 		QualificationSha256: settings.EvaluationPolicy.HostQualificationSha256,
-		ImageDigest:         settings.EvaluatorImageDigest, KernelRelease: "6.8.0", MicrocodeRevision: "0x42", LogicalCpuCount: 12,
+		ImageDigest:         settings.EvaluatorImageDigest, KernelRelease: "6.8.0", MicrocodeRevision: "0x42",
+		IrqAffinitySha256: strings.Repeat("5", 64), IrqPolicySha256: strings.Repeat("6", 64), LogicalCpuCount: 12,
 		SMTDisabled: true, GovernorPinned: true, TurboPinned: true, NumaPinned: true, IrqPinned: true,
 		CgroupV2: true, ServicesInJobCgroup: true, DefaultDenyNetwork: true, OfflineBuildCache: true,
 		TemplateDatabase: true, RedisReset: true, ArtifactStorage: true, ImmutableReports: true,
@@ -456,6 +457,27 @@ func TestHostEligibilityAllowsPreRoundHeartbeatButRejectsMalformedRebaseline(t *
 	check.RebaselinePassed = true
 	if check.Eligible(settings) {
 		t.Fatal("host claimed a re-baseline without binding a round")
+	}
+}
+
+func TestHostEligibilityRejectsMissingOrMalformedIrqEvidence(t *testing.T) {
+	settings := validSettings()
+	for _, test := range []struct {
+		name              string
+		irqAffinitySha256 string
+		irqPolicySha256   string
+	}{
+		{name: "missing affinity", irqAffinitySha256: "", irqPolicySha256: strings.Repeat("6", 64)},
+		{name: "malformed affinity", irqAffinitySha256: strings.Repeat("g", 64), irqPolicySha256: strings.Repeat("6", 64)},
+		{name: "missing policy", irqAffinitySha256: strings.Repeat("5", 64), irqPolicySha256: ""},
+		{name: "malformed policy", irqAffinitySha256: strings.Repeat("5", 64), irqPolicySha256: strings.Repeat("A", 64)},
+	} {
+		check := passingHostCheck(settings)
+		check.IrqAffinitySha256 = test.irqAffinitySha256
+		check.IrqPolicySha256 = test.irqPolicySha256
+		if check.Eligible(settings) {
+			t.Errorf("%s IRQ evidence was eligible", test.name)
+		}
 	}
 }
 

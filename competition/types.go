@@ -190,6 +190,8 @@ type HostSelfCheck struct {
 	ImageDigest                 string          `json:"image_digest"`
 	KernelRelease               string          `json:"kernel_release"`
 	MicrocodeRevision           string          `json:"microcode_revision"`
+	IrqAffinitySha256           string          `json:"irq_affinity_sha256"`
+	IrqPolicySha256             string          `json:"irq_policy_sha256"`
 	LogicalCpuCount             int             `json:"logical_cpu_count"`
 	SMTDisabled                 bool            `json:"smt_disabled"`
 	GovernorPinned              bool            `json:"governor_pinned"`
@@ -215,21 +217,23 @@ type HostSelfCheck struct {
 	Checks                      map[string]bool `json:"checks"`
 }
 
-func (s HostSelfCheck) Eligible(settings *Settings) bool {
-	return s.Schema == 1 &&
-		s.HostId != "" &&
-		s.HardwareId == settings.EvaluationPolicy.HardwareId &&
-		s.QualificationSha256 == settings.EvaluationPolicy.HostQualificationSha256 &&
-		s.ImageDigest == settings.EvaluatorImageDigest &&
-		s.KernelRelease != "" && s.MicrocodeRevision != "" &&
-		s.LogicalCpuCount == 12 &&
-		s.SMTDisabled && s.GovernorPinned && s.TurboPinned && s.NumaPinned && s.IrqPinned &&
-		s.CgroupV2 && s.ServicesInJobCgroup && s.DefaultDenyNetwork &&
-		s.OfflineBuildCache && s.TemplateDatabase && s.RedisReset &&
-		s.ArtifactStorage && s.ImmutableReports && s.NoProductionSecrets &&
-		s.CleanupVerified && s.ResourceLimitsVerified &&
-		s.ManagementCpuReserved && s.ManagementMemoryReserved &&
-		s.ResourceBombCleanupVerified &&
-		(!s.RebaselinePassed || s.RebaselineRoundId != nil) &&
-		allChecks(s.Checks)
+func (self HostSelfCheck) Eligible(settings *Settings) bool {
+	return self.Schema == 1 &&
+		self.HostId != "" &&
+		self.HardwareId == settings.EvaluationPolicy.HardwareId &&
+		self.QualificationSha256 == settings.EvaluationPolicy.HostQualificationSha256 &&
+		self.ImageDigest == settings.EvaluatorImageDigest &&
+		self.KernelRelease != "" && self.MicrocodeRevision != "" &&
+		sha256Pattern.MatchString(self.IrqAffinitySha256) &&
+		sha256Pattern.MatchString(self.IrqPolicySha256) &&
+		self.LogicalCpuCount == 12 &&
+		self.SMTDisabled && self.GovernorPinned && self.TurboPinned && self.NumaPinned && self.IrqPinned &&
+		self.CgroupV2 && self.ServicesInJobCgroup && self.DefaultDenyNetwork &&
+		self.OfflineBuildCache && self.TemplateDatabase && self.RedisReset &&
+		self.ArtifactStorage && self.ImmutableReports && self.NoProductionSecrets &&
+		self.CleanupVerified && self.ResourceLimitsVerified &&
+		self.ManagementCpuReserved && self.ManagementMemoryReserved &&
+		self.ResourceBombCleanupVerified &&
+		(!self.RebaselinePassed || self.RebaselineRoundId != nil) &&
+		allChecks(self.Checks)
 }

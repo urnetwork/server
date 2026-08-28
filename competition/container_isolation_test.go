@@ -731,6 +731,8 @@ func TestAuthoritativeHostControlsAreFailClosed(t *testing.T) {
 		`irq_report="$($IRQ_CONTROL --check`,
 		`[ "$irq_live_passed" = true ]`,
 		`[ "$irq_policy_sha256" = "$expected_irq_policy_sha" ]`,
+		`irq_affinity_sha256:$irq_affinity_sha256`,
+		`irq_policy_sha256:$irq_policy_sha256`,
 	} {
 		if !strings.Contains(hostCheck, required) {
 			t.Errorf("host IRQ qualification is missing %q", required)
