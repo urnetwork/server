@@ -688,6 +688,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl > 120 days, or a raw Go `time.Duration` command/eval arg — go-redis serializes Durations as int64 NANOSECONDS, so an 8h ttl becomes `EXPIRE <key> 28800000000000` (~913,000 years). The 2026-07-20 signature: ~1.1M immortal `s2_sk_*` stream keys from exactly this in the AddToStream eval; nothing in the system keeps a >120d ttl intentionally. | The warning names the command + key: find the write site, pass seconds/ms ints to evals (never a Duration). Clean already-written keys with `bringyourctl streams expire-leaked-ttls`; per-key check: `TTL <key>` in the trillions = this bug. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
+| `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
 | `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, circle payment path) | The payout wallet cannot cover pending payouts (usdc on solana — mint EPjFWdd5...Dt1v in the error text). NOT an api failure: every AdvancePayment retry 400s until the wallet is funded, parking the tasks on backoff (decoded 2026-07-18 from the novel class — the full error text names the wallet id, its balance, and the required amount). | Finance/ops: fund the payout wallet (or pause payouts). Task-side symptoms clear on their own once funded and the backoff run_at arrives. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
@@ -2415,6 +2416,17 @@ DeviceLocal lifecycle completion, or the real idle reaper may replace it.
 Correlate this signature with carrier saturation: a shared full carrier budget
 makes the replacement less likely to fill and turns selection churn into an
 amplifier. A `Failed` window presentation status is never a replacement reason.
+
+**DoH route-observation panic:**
+`dohRouteForConn.func1` in an `Unexpected error` stack means HTTP/2 supplied a
+connection wrapper with a nil local or remote address. Route metadata is only
+diagnostic, but the pre-fix callback dereferenced the missing endpoint and lost
+that DNS result. `HandleError` keeps the process up, so container readiness and
+public handshakes stay green while one proxied request can time out. Current
+Connect returns no route metadata for nil or typed-nil endpoints and continues
+processing the DNS response. Count this stack independently from window stalls;
+after deploying the fix, require zero new occurrences throughout the sustained
+acceptance window.
 
 ---
 
