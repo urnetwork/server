@@ -1,6 +1,6 @@
 schema: 1
 status_date: 2026-08-28
-launch_state: implementation_complete_release_and_external_actions_pending
+launch_state: local_validation_complete_release_and_external_actions_pending
 
 evaluation_host:
   authoritative_hosts_required: 1
@@ -23,14 +23,35 @@ season:
   baseline_source_policy: approval_required
 
 release_record:
-  server_commit: null
-  sn_commit: null
-  warp_commit: null
+  server_commit: 928a40106aa2a45ed6ba113d1025a5913f262b8b
+  server_metadata_commit: recorded_by_the_following_commit
+  sn_commit: 68f21fe916bf0d78943874e9561d303da035c10b
+  warp_commit: 160a56ddd2e3d3107e8905824ff69fab210deee1
   main_api_image_digest: null
   competition_worker_image_or_archive_digest: null
-  openapi_sha256: null
-  recorded_by: null
-  recorded_at: null
+  openapi_sha256: 161f534b77265ae91ccbbeb771a8d408e50546d453e9b1bc811792e56c6c0fe6
+  recorded_by: local_finalization
+  recorded_at: 2026-08-28T15:39:21Z
+
+validation:
+  completed_at: 2026-08-28T15:39:21Z
+  sim_latency_go_race_suite: pass
+  competition_api_go_race_suite: pass
+  go_vet: pass
+  migration_order_and_application: pass
+  postgres_redis_lifecycle_integration: pass
+  openapi_conformance: pass
+  grafana_dashboard_and_alert_tests: pass
+  adversarial_cleanup:
+    status: pass
+    evaluation_cpuset: "0,2,4,6,8,10,12,14,16,18"
+    management_cpuset: "20,22"
+    memory_exit_code: 137
+    memory_oom_killed: true
+    cleanup_elapsed_ms: 655
+    cleanup_limit_ms: 10000
+    residual_containers: 0
+    residual_networks: 0
 
 retention:
   backend: server/blob

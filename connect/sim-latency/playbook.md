@@ -4,7 +4,7 @@ Status date: 2026-08-28
 
 Evaluator/baseline qualification: **complete — 10/10 required gates pass**
 
-Launch-control implementation: **implemented; final commit/release validation in progress**
+Launch-control validation: **complete locally; release deployment and external actions pending**
 
 Deployment model: one authoritative 12-physical-core host; 10 evaluation cores,
 2 management cores; one content-addressed image per canonical submission patch.
@@ -35,7 +35,7 @@ Read these first:
 |---|---|
 | Public patch-authoring tag | `apex-season-1` at `eb697281cbe0a19a27d7771fe69fb24c2c3dab8c` |
 | Evaluator source | `46515d82fe98ff666c61b2b5bb1d34a89cf4dad8` |
-| Control-plane source | Record the final pushed server commit and main-API/worker image digests in `playbook.yml`; the older staging release is evidence, not the launch control plane |
+| Control-plane source | Server code `928a40106aa2a45ed6ba113d1025a5913f262b8b`; API contract `68f21fe916bf0d78943874e9561d303da035c10b`; alert provisioning `160a56ddd2e3d3107e8905824ff69fab210deee1`; the following server commit contains metadata only |
 | Evaluator image | `sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c` |
 | Host qualification | `acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3` |
 | Simulator / scorer | `bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997` |
@@ -50,6 +50,8 @@ Read these first:
 | Artifact retention | versioned MinIO object storage with compliance retention and post-upload SHA-256 authentication; score commit fails closed |
 | Monitoring | main Grafana dashboard plus provisioned page/warn rules in `warp/grafana/alerting/competition.yml` |
 | Local evaluator audit | 10 passed, 0 pending, 0 failed |
+| Final Go validation | sim-latency and competition/API race suites, migration application/order, PostgreSQL/Redis lifecycle integration, vet, OpenAPI conformance, dashboards, and alerts pass on 2026-08-28 |
+| Fresh hostile cleanup | CPU bomb covered all ten evaluation CPUs; memory bomb exited 137 with `OOMKilled=true`; management cleanup took 655 ms and left zero containers/networks |
 
 The host controls, hardened Docker boundary, trusted commands, `/etc` host
 manifest, production-pressure CPU/memory-bomb cleanup, API/worker release
@@ -102,7 +104,7 @@ has an owner and a recorded value.
 | Control-plane data services | **Complete by operator confirmation.** Queue/round/result state uses the main PostgreSQL and the existing main Redis/restore boundary. | Run the normal migration verification for the final commit; no new durable data service is needed. |
 | Service supervision | **Complete by operator confirmation.** Main API plus one competition worker use the reviewed main-environment migration and boot ordering. | Verify the final deployed versions and singleton worker heartbeat. |
 | Public ingress | **Complete by operator confirmation.** DNS/TLS/reverse proxy/firewall/rate limits are provided by main. | Smoke the final `/competition/*` routes, including the 262,144-byte request ceiling and 429 behavior. |
-| Release distribution | Evaluator and historical control-plane evidence are sealed. | Record the final pushed server commit and main API/worker image/archive digests after these lifecycle changes. A registry is optional on one host; a verified sealed-archive load record is sufficient. |
+| Release distribution | Evaluator and historical control-plane evidence are sealed. The final server/API/alert source commits and OpenAPI digest are recorded in `playbook.yml`. | Build and record the main API/worker image or sealed-archive digests. A registry is optional on one host; a verified sealed-archive load record is sufficient. |
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` fails if object lock or versioning is absent. | Prove the live bucket check, capacity, backup replication, and the named post-`retain_until` deletion owner. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, and provisioned Grafana alert rules are implemented for the main Mimir/Grafana pipeline. | Deploy the final server and warp commits and map `severity=page|warn` through the existing main contact policy; record the human roster/incident contact in the operator record. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. | Distribute endpoint/token/onboarding instructions and exercise revocation once. No separate API is required. |
@@ -505,8 +507,9 @@ Still to add or approve before a public competition starts:
   six-epoch weekly cadence and close-time reveal are already frozen);
 - [ ] atomic live credential/seed-key rotation or explicit approval to promote
   the staging-generated bundle;
-- [ ] recorded final main-API/worker release plus either a verified local load
-  record or approved digest-pinned registry publication;
+- [ ] build and record the final main-API/worker image/archive digests, then add
+  either a verified local load record or approved digest-pinned registry
+  publication (the source commits and OpenAPI digest are already recorded);
 - [ ] live MinIO `/readyz` proof, backup-replication record, capacity check, and
   the owner authorized to delete evidence after `retain_until`;
 - [ ] deploy the final server/warp monitoring commits and bind `severity` labels
