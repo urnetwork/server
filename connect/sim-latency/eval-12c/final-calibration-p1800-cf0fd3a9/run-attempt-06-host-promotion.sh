@@ -30,6 +30,7 @@ readonly SUMMARY="$ROOT/host-promotion-attempt-06.json"
 readonly PROMOTION="$ROOT/containment-promotion-attempt-06.json"
 readonly REBASELINE="$ROOT/rebaseline-attempt-06.json"
 readonly SELF_CHECK="$ROOT/host-self-check-attempt-06.json"
+readonly PROMOTED_HOST_CONFIG="$ROOT/competition-host.2abcf145-promoted.json"
 readonly BASE_SHA=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8
 readonly BASE_IMAGE=sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c
 readonly SIMULATOR_SHA=bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997
@@ -130,9 +131,21 @@ done
     die "another evaluation is active"
 [ -z "$(sudo -n docker ps -aq --filter 'name=^/urnetwork-local-pg$')" ] || die "local PostgreSQL is active"
 [ -z "$(sudo -n docker ps -aq --filter 'name=^/urnetwork-local-redis$')" ] || die "local Redis is active"
-[ ! -e "$STATE_BACKUP" ] || die "previous host-state archive already exists"
-[ ! -e "$SUMMARY" ] && [ ! -e "$PROMOTION" ] && [ ! -e "$REBASELINE" ] && [ ! -e "$SELF_CHECK" ] ||
+[ ! -e "$SUMMARY" ] && [ ! -e "$PROMOTION" ] && [ ! -e "$REBASELINE" ] &&
+    [ ! -e "$SELF_CHECK" ] && [ ! -e "$PROMOTED_HOST_CONFIG" ] ||
     die "host-promotion evidence already exists"
+if [ -e "$STATE_BACKUP" ]; then
+    [ "$resume_only" = true ] || [ "$verify_only" = true ] || die "previous host-state archive already exists"
+    [ "$(sudo -n stat -c %u "$STATE_BACKUP")" -eq 0 ] || die "host-state archive is not root-owned"
+    [ "$(sudo -n stat -c %a "$STATE_BACKUP")" = 500 ] || die "host-state archive mode changed"
+    [ "$(sudo -n sha256sum "$STATE_BACKUP/competition-host.json" | awk '{print $1}')" = "$PREVIOUS_HOST_CONFIG_SHA" ] ||
+        die "archived host config changed"
+    for index in "${!MARKERS[@]}"; do
+        backup="$STATE_BACKUP/${MARKERS[$index]##*/}"
+        [ "$(sudo -n sha256sum "$backup" | awk '{print $1}')" = "${MARKER_HASHES[$index]}" ] ||
+            die "archived runtime marker changed: ${MARKERS[$index]}"
+    done
+fi
 if [ "$preflight_only" = true ]; then
     [ ! -e "$ATTEMPT_ROOT" ] || die "host requalification attempt already exists"
     log "preflight passed: replacement image, pending host identity, hostile-job proof, and rollback state are authenticated"
@@ -247,13 +260,17 @@ if [ "$verify_only" = true ]; then
 fi
 
 log "backing up the active host config and runtime markers"
-sudo -n install -d -o root -g root -m 0700 "$STATE_BACKUP"
-sudo -n install -o root -g root -m 0400 "$HOST_CONFIG" "$STATE_BACKUP/competition-host.json"
-for marker in "${MARKERS[@]}"; do
-    sudo -n install -o root -g root -m 0400 "$marker" "$STATE_BACKUP/${marker##*/}"
-done
+if [ ! -e "$STATE_BACKUP" ]; then
+    sudo -n install -d -o root -g root -m 0700 "$STATE_BACKUP"
+    sudo -n install -o root -g root -m 0400 "$HOST_CONFIG" "$STATE_BACKUP/competition-host.json"
+    for marker in "${MARKERS[@]}"; do
+        sudo -n install -o root -g root -m 0400 "$marker" "$STATE_BACKUP/${marker##*/}"
+    done
+    sudo -n chmod 0500 "$STATE_BACKUP"
+else
+    log "reusing the authenticated cf0fd3a9 rollback archive"
+fi
 state_backed_up=true
-sudo -n chmod 0500 "$STATE_BACKUP"
 sudo -n install -o root -g root -m 0600 "$PENDING_HOST_CONFIG" "$RUNTIME_PENDING_HOST_CONFIG"
 
 log "promoting containment markers against the replacement image"
@@ -275,10 +292,10 @@ chmod 0400 "$REBASELINE.new"
 mv "$REBASELINE.new" "$REBASELINE"
 rebaseline_sha="$(sha256_file "$REBASELINE")"
 sudo -n install -o root -g root -m 0600 "$REBASELINE" /run/urnetwork/rebaseline.json
-jq --arg marker_sha "$rebaseline_sha" '.rebaseline_manifest_sha256 = $marker_sha' \
-    "$RUNTIME_PENDING_HOST_CONFIG" >"$ROOT/competition-host.2abcf145-promoted.json"
-chmod 0400 "$ROOT/competition-host.2abcf145-promoted.json"
-sudo -n install -o root -g root -m 0600 "$ROOT/competition-host.2abcf145-promoted.json" \
+sudo -n jq --arg marker_sha "$rebaseline_sha" '.rebaseline_manifest_sha256 = $marker_sha' \
+    "$RUNTIME_PENDING_HOST_CONFIG" >"$PROMOTED_HOST_CONFIG"
+chmod 0400 "$PROMOTED_HOST_CONFIG"
+sudo -n install -o root -g root -m 0600 "$PROMOTED_HOST_CONFIG" \
     "$RUNTIME_PENDING_HOST_CONFIG"
 
 log "validating the complete replacement host state before activation"
