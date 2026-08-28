@@ -106,6 +106,11 @@ HOST_SELF_CHECK = ROOT / "host-self-check-attempt-06.json"
 CALIBRATION_MD = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
 FINAL_REPORT = SERVER / "finalize-report.html"
 FINAL_PREVIEW = SERVER / "final-preview.html"
+EVIDENCE_CALIBRATION_MD = (
+    EVIDENCE_WORKTREE / "connect/sim-latency/APEX-CALIBRATION.md"
+)
+EVIDENCE_FINAL_REPORT = EVIDENCE_WORKTREE / "finalize-report.html"
+EVIDENCE_FINAL_PREVIEW = EVIDENCE_WORKTREE / "final-preview.html"
 FINAL_REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 
 SOURCE_LOCK_SHA256 = (
@@ -2181,6 +2186,12 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
             preview_text = FINAL_PREVIEW.read_text(encoding="utf-8")
             preview_parser = FinalReportParser()
             preview_parser.feed(preview_text)
+            evidence_report_text = EVIDENCE_FINAL_REPORT.read_text(
+                encoding="utf-8"
+            )
+            evidence_preview_text = EVIDENCE_FINAL_PREVIEW.read_text(
+                encoding="utf-8"
+            )
             evidence = load_json(FINAL_REPORT_EVIDENCE)
             commitment = load_json(INDEPENDENT_COMMITMENT)
             (
@@ -2201,6 +2212,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and parser.baseline_ids == parser.threshold_line_ids
                 and parser.baseline_ids == parser.threshold_label_ids
                 and FINAL_REPORT.stat().st_mode & 0o777 == 0o444
+                and EVIDENCE_FINAL_REPORT.stat().st_mode & 0o777 == 0o444
+                and evidence_report_text == text
                 and len(preview_parser.section_visuals) == 4
                 and all(count >= 1 for count in preview_parser.section_visuals)
                 and preview_parser.section_depth == 0
@@ -2211,6 +2224,11 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 == preview_parser.threshold_label_ids
                 and preview_parser.baseline_ids == parser.baseline_ids
                 and FINAL_PREVIEW.stat().st_mode & 0o777 == 0o444
+                and EVIDENCE_FINAL_PREVIEW.stat().st_mode & 0o777 == 0o444
+                and evidence_preview_text == preview_text
+                and EVIDENCE_CALIBRATION_MD.stat().st_mode & 0o777 == 0o444
+                and EVIDENCE_CALIBRATION_MD.read_bytes()
+                == CALIBRATION_MD.read_bytes()
                 and "preview-only" not in text.lower()
                 and "pending" not in text.lower()
                 and "shareable final preview" in preview_text.lower()
@@ -2241,6 +2259,12 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 == SEASON_BASE_EQUIVALENCE_SHA256
                 and evidence.get("report_sha256") == report_sha
                 and evidence.get("preview_sha256") == preview_sha
+                and evidence.get("evidence_report_sha256")
+                == sha256(EVIDENCE_FINAL_REPORT)
+                and evidence.get("evidence_preview_sha256")
+                == sha256(EVIDENCE_FINAL_PREVIEW)
+                and evidence.get("evidence_calibration_document_sha256")
+                == sha256(EVIDENCE_CALIBRATION_MD)
                 and evidence.get("same_seed_selection_sha256")
                 == sha256(SELECTION)
                 and evidence.get("strict_same_seed_analysis_sha256")
@@ -2301,6 +2325,11 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 {
                     "sha256": report_sha,
                     "preview_sha256": preview_sha,
+                    "evidence_report_sha256": sha256(EVIDENCE_FINAL_REPORT),
+                    "evidence_preview_sha256": sha256(EVIDENCE_FINAL_PREVIEW),
+                    "evidence_calibration_sha256": sha256(
+                        EVIDENCE_CALIBRATION_MD
+                    ),
                     "evidence_sha256": sha256(FINAL_REPORT_EVIDENCE),
                     "sections": len(parser.section_visuals),
                     "section_svg_counts": parser.section_visuals,

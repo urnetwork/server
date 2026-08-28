@@ -18,8 +18,9 @@ from typing import Any
 
 
 SERVER = Path("/home/by/urnetwork/server")
+EVIDENCE_SERVER = Path("/home/by/urnetwork/server-finalization-evidence")
 ROOT = (
-    Path("/home/by/urnetwork/server-finalization-evidence")
+    EVIDENCE_SERVER
     / "connect/sim-latency/eval-12c/"
     "final-calibration-p1800-cf0fd3a9"
 )
@@ -80,8 +81,13 @@ REMEDIATION_AMENDMENT = (
 
 REPORT = SERVER / "finalize-report.html"
 PREVIEW = SERVER / "final-preview.html"
+EVIDENCE_REPORT = EVIDENCE_SERVER / "finalize-report.html"
+EVIDENCE_PREVIEW = EVIDENCE_SERVER / "final-preview.html"
 REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 CALIBRATION_DOCUMENT = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
+EVIDENCE_CALIBRATION_DOCUMENT = (
+    EVIDENCE_SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
+)
 
 SOURCE_LOCK_SHA256 = (
     "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022"
@@ -1950,17 +1956,29 @@ def atomic_pending(path: Path, content: str, mode: int) -> Path:
 def render_outputs(data: dict[str, Any]) -> None:
     require(not REPORT.exists(), f"final report already exists: {REPORT}")
     require(
+        not EVIDENCE_REPORT.exists(),
+        f"evidence report already exists: {EVIDENCE_REPORT}",
+    )
+    require(
         PREVIEW.is_file()
         and not PREVIEW.is_symlink()
         and sha256(PREVIEW) == PREVIEW_TEMPLATE_SHA256,
         "preview template changed",
     )
     require(
+        EVIDENCE_PREVIEW.is_file()
+        and not EVIDENCE_PREVIEW.is_symlink()
+        and sha256(EVIDENCE_PREVIEW) == PREVIEW_TEMPLATE_SHA256,
+        "evidence preview template changed",
+    )
+    require(
         not REPORT_EVIDENCE.exists(),
         f"final report evidence already exists: {REPORT_EVIDENCE}",
     )
     require(
-        sha256(CALIBRATION_DOCUMENT) == CALIBRATION_TEMPLATE_SHA256,
+        sha256(CALIBRATION_DOCUMENT) == CALIBRATION_TEMPLATE_SHA256
+        and sha256(EVIDENCE_CALIBRATION_DOCUMENT)
+        == CALIBRATION_TEMPLATE_SHA256,
         "calibration template changed",
     )
     report = render_html(data)
@@ -2028,6 +2046,9 @@ def render_outputs(data: dict[str, Any]) -> None:
         "calibration_document_sha256": sha256_text(calibration),
         "report_sha256": sha256_text(report),
         "preview_sha256": sha256_text(preview),
+        "evidence_calibration_document_sha256": sha256_text(calibration),
+        "evidence_report_sha256": sha256_text(report),
+        "evidence_preview_sha256": sha256_text(preview),
         "sections": 4,
         "section_svg_counts": parser.section_visuals,
         "baseline_ids": sorted(parser.baseline_ids),
@@ -2041,12 +2062,24 @@ def render_outputs(data: dict[str, Any]) -> None:
     try:
         report_pending = atomic_pending(REPORT, report, 0o444)
         pending_paths.append(report_pending)
+        evidence_report_pending = atomic_pending(
+            EVIDENCE_REPORT, report, 0o444
+        )
+        pending_paths.append(evidence_report_pending)
         preview_pending = atomic_pending(PREVIEW, preview, 0o444)
         pending_paths.append(preview_pending)
+        evidence_preview_pending = atomic_pending(
+            EVIDENCE_PREVIEW, preview, 0o444
+        )
+        pending_paths.append(evidence_preview_pending)
         calibration_pending = atomic_pending(
             CALIBRATION_DOCUMENT, calibration, 0o444
         )
         pending_paths.append(calibration_pending)
+        evidence_calibration_pending = atomic_pending(
+            EVIDENCE_CALIBRATION_DOCUMENT, calibration, 0o444
+        )
+        pending_paths.append(evidence_calibration_pending)
         evidence_pending = atomic_pending(
             REPORT_EVIDENCE,
             json.dumps(evidence, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -2055,16 +2088,22 @@ def render_outputs(data: dict[str, Any]) -> None:
         pending_paths.append(evidence_pending)
 
         calibration_pending.replace(CALIBRATION_DOCUMENT)
+        evidence_calibration_pending.replace(EVIDENCE_CALIBRATION_DOCUMENT)
         preview_pending.replace(PREVIEW)
+        evidence_preview_pending.replace(EVIDENCE_PREVIEW)
         report_pending.replace(REPORT)
+        evidence_report_pending.replace(EVIDENCE_REPORT)
         evidence_pending.replace(REPORT_EVIDENCE)
     except Exception:
         for pending in pending_paths:
             pending.unlink(missing_ok=True)
         raise
     exact_mode(CALIBRATION_DOCUMENT, 0o444)
+    exact_mode(EVIDENCE_CALIBRATION_DOCUMENT, 0o444)
     exact_mode(PREVIEW, 0o444)
+    exact_mode(EVIDENCE_PREVIEW, 0o444)
     exact_mode(REPORT, 0o444)
+    exact_mode(EVIDENCE_REPORT, 0o444)
     exact_mode(REPORT_EVIDENCE, 0o400)
     print(sha256(REPORT))
 
