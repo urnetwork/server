@@ -37,7 +37,7 @@ require_common() {
     local names=(
         APEX_BASE_SHA APEX_BUILD_SHA APEX_SCORER_BIN APEX_SCORER_SHA256
         APEX_SIM_BIN APEX_SIM_SHA256 APEX_PROVIDERS_FILE APEX_PROVIDERS_SHA256
-        APEX_ARTIFACT_ROOT APEX_EVALUATION_ID APEX_API_IMAGE_DIGEST
+        APEX_ARTIFACT_ROOT APEX_EVALUATION_ID APEX_EPOCH APEX_API_IMAGE_DIGEST
         APEX_HARDWARE_ID APEX_HOST_QUALIFICATION_SHA256
         APEX_KERNEL_RELEASE APEX_MICROCODE_REVISION
         APEX_PATCH_FILE APEX_PATCH_SHA256
@@ -58,6 +58,7 @@ require_common() {
     require_sha256 "$APEX_PATCH_SHA256"
     require_sha256 "$APEX_HOST_QUALIFICATION_SHA256"
     require_evaluation_id
+    [[ "$APEX_EPOCH" =~ ^[0-6]$ ]] || die "APEX_EPOCH must be an integer in 0..6"
     [[ "$APEX_API_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
         die "APEX_API_IMAGE_DIGEST must be a sha256 digest"
     [[ "$APEX_ARTIFACT_ROOT" = /* && "$APEX_ARTIFACT_ROOT" != / ]] ||
@@ -182,6 +183,9 @@ run_one() {
 
     local args=(
         run --official --reset
+        --epoch "$APEX_EPOCH"
+        --source-config /opt/urnetwork/sim-latency.yml
+        --repos-root /workspace
         --expected-revision "$APEX_BUILD_SHA"
         --evaluation-id "$APEX_EVALUATION_ID"
         --providers "$APEX_PROVIDERS_FILE"
@@ -218,7 +222,8 @@ run_one() {
     [ -s "$meta" ] || die "simulator emitted no run manifest"
     [ -s "$marker" ] || die "simulator emitted no completion marker"
     [ -s "$accounting_source" ] || die "simulator emitted no provider accounting source"
-    jq -e '.schema == 2 and .score_schema == 1 and .completion_state == "complete"' "$meta" >/dev/null ||
+    jq -e --argjson source_epoch "$APEX_EPOCH" \
+        '.schema == 2 and .source_epoch == $source_epoch and .score_schema == 1 and .completion_state == "complete"' "$meta" >/dev/null ||
         die "run manifest is not complete schema 2"
     jq -e --arg evaluation_id "$APEX_EVALUATION_ID" \
         '.schema == 1 and

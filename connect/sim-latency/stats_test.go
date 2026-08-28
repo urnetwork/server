@@ -528,6 +528,7 @@ func TestBaselineRoundTrip(t *testing.T) {
 // replicate subprocess, always with --reset and the replicate's meta path.
 func TestReplicateRunArgs(t *testing.T) {
 	opts := docopt.Opts{
+		"--epoch":     "0",
 		"--providers": "p.yml",
 		"--duration":  "5m",
 		"--no-impair": true,
@@ -535,7 +536,7 @@ func TestReplicateRunArgs(t *testing.T) {
 	args := replicateRunArgs(opts, "dir/baseline-3.run.json")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		"run", "--reset", "--meta dir/baseline-3.run.json",
+		"run", "--epoch 0", "--reset", "--meta dir/baseline-3.run.json",
 		"--providers=p.yml", "--duration=5m", "--no-impair",
 	} {
 		if !strings.Contains(joined, want) {

@@ -88,6 +88,7 @@ Build the season base only from reviewed commits:
 
 ```bash
 ./competition/container/build-base.sh \
+  --epoch 0 \
   --tag registry.example/urnetwork/sim-latency-evaluator-base:season-1
 sudo docker push registry.example/urnetwork/sim-latency-evaluator-base:season-1
 ```

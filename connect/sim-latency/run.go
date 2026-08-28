@@ -35,9 +35,12 @@ import (
 )
 
 type RunOptions struct {
-	ConfigPath string
-	SiteHome   string
-	Ramp       time.Duration
+	Epoch            int
+	SourceConfig     string
+	RepositoriesRoot string
+	ConfigPath       string
+	SiteHome         string
+	Ramp             time.Duration
 	// reliability history backfilled so providers are established without the
 	// ~8.4h cold-start warm-up (0 = pure organic warm-up)
 	Prewarm  time.Duration
@@ -661,6 +664,7 @@ func newRunStats(options *RunOptions, config *Config) (*RunStats, error) {
 	return &RunStats{
 		Schema:           runStatsSchema,
 		Kind:             runStatsKind,
+		SourceEpoch:      options.Epoch,
 		ScoreSchema:      apexScoreSchema,
 		ScorerVersion:    officialScorerVersion,
 		EvaluationId:     options.EvaluationId,
@@ -1233,6 +1237,9 @@ func spawnFleetShards(options *RunOptions, config *Config, services *Services) (
 		}
 		cmd := exec.Command(self,
 			"fleet",
+			"--epoch", strconv.Itoa(options.Epoch),
+			"--source-config", options.SourceConfig,
+			"--repos-root", options.RepositoriesRoot,
 			"--providers", options.ConfigPath,
 			"--shard", intToStr(i)+"/"+intToStr(options.FleetShards),
 			"--api-url", services.ApiUrl(),

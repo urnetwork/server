@@ -6,7 +6,7 @@
 #
 # Usage: ./run-local.sh <init|run|fleet> [args...]
 #   ./run-local.sh init --count 2000 --clients 200 --out providers.yml
-#   ./run-local.sh run --providers providers.yml > results.csv
+#   ./run-local.sh run --epoch 0 --providers providers.yml > results.csv
 
 export WARP_HOST="127.0.0.1"
 export WARP_BLOCK="sim"

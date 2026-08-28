@@ -15,9 +15,11 @@ readonly WORKSPACE_ROOT="$(cd "$SERVER_ROOT/.." && pwd -P)"
 
 include_worktree=false
 image_tag=""
+source_epoch=""
+source_config="$WORKSPACE_ROOT/config/main/sim-latency.yml"
 
 usage() {
-    printf '%s\n' 'usage: build-base.sh [--include-worktree] [--tag IMAGE]'
+    printf '%s\n' 'usage: build-base.sh --epoch 0..6 [--source-config FILE] [--include-worktree] [--tag IMAGE]'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -26,9 +28,13 @@ while [ "$#" -gt 0 ]; do
             include_worktree=true
             shift
             ;;
-        --tag)
+        --epoch|--source-config|--tag)
             [ "$#" -ge 2 ] || { usage >&2; exit 2; }
-            image_tag="$2"
+            case "$1" in
+                --epoch) source_epoch="$2" ;;
+                --source-config) source_config="$2" ;;
+                --tag) image_tag="$2" ;;
+            esac
             shift 2
             ;;
         -h|--help)
@@ -42,7 +48,28 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-for command in git jq sha256sum mktemp stat sudo; do
+[[ "$source_epoch" =~ ^[0-6]$ ]] || { usage >&2; exit 2; }
+[ -f "$source_config" ] && [ ! -L "$source_config" ] || {
+    printf 'source epoch config must be a regular non-symlink file: %s\n' "$source_config" >&2
+    exit 1
+}
+source_config="$(realpath -e "$source_config")"
+config_root="$(git -C "$(dirname "$source_config")" rev-parse --show-toplevel)" || {
+    printf 'source epoch config is not in a git repository\n' >&2
+    exit 1
+}
+source_config_relative="$(realpath --relative-to="$config_root" "$source_config")"
+git -C "$config_root" ls-files --error-unmatch -- "$source_config_relative" >/dev/null || {
+    printf 'source epoch config is not committed: %s\n' "$source_config" >&2
+    exit 1
+}
+git -C "$config_root" diff --quiet HEAD -- "$source_config_relative" &&
+    git -C "$config_root" diff --cached --quiet -- "$source_config_relative" || {
+    printf 'source epoch config has uncommitted changes: %s\n' "$source_config" >&2
+    exit 1
+}
+
+for command in git jq sha256sum mktemp realpath stat sudo; do
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
 sudo -n docker info >/dev/null
@@ -59,6 +86,7 @@ trap cleanup EXIT INT TERM
 install -d -m 0700 "$build_context/source" "$build_context/evaluator"
 install -m 0555 "$SCRIPT_DIR/entrypoint.sh" "$build_context/evaluator/entrypoint.sh"
 install -m 0555 "$SERVER_ROOT/connect/sim-latency/official-run.sh" "$build_context/evaluator/official-run.sh"
+install -m 0444 "$source_config" "$build_context/sim-latency.yml"
 
 readonly REPOSITORIES=(server connect proxy sdk glog goidenticons userwireguard sn)
 declare -A revisions
@@ -124,6 +152,7 @@ jq -n \
 
 base_sha="${revisions[server]}"
 source_lock_sha256="$(sha256sum "$build_context/source-lock.json" | awk '{print $1}')"
+source_config_sha256="$(sha256sum "$build_context/sim-latency.yml" | awk '{print $1}')"
 if [ -z "$image_tag" ]; then
     image_tag="urnetwork/sim-latency-evaluator-base:${base_sha:0:24}"
 fi
@@ -133,8 +162,11 @@ DOCKER_BUILDKIT=1 sudo -n docker build \
     --network default \
     --file "$SCRIPT_DIR/Dockerfile.base" \
     --build-arg "BASE_SHA=$base_sha" \
+    --build-arg "SOURCE_EPOCH=$source_epoch" \
+    --build-arg "SOURCE_CONFIG_SHA256=$source_config_sha256" \
     --build-arg "SOURCE_LOCK_SHA256=$source_lock_sha256" \
     --label "com.urnetwork.competition.development-snapshot=$include_worktree" \
+    --label "com.urnetwork.competition.source-epoch=$source_epoch" \
     --tag "$image_tag" \
     "$build_context" >&2
 
@@ -150,8 +182,11 @@ jq -n \
     --arg image "$image_tag" \
     --arg image_id "$image_id" \
     --arg base_sha "$base_sha" \
+    --argjson source_epoch "$source_epoch" \
+    --arg source_config_sha256 "$source_config_sha256" \
     --arg source_lock_sha256 "$source_lock_sha256" \
     --argjson development_snapshot "$include_worktree" \
     '{schema: 1, image: $image, image_id: $image_id, base_sha: $base_sha,
+      source_epoch: $source_epoch, source_config_sha256: $source_config_sha256,
       source_lock_sha256: $source_lock_sha256,
       development_snapshot: $development_snapshot}'
