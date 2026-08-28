@@ -61,6 +61,8 @@ active_pid=""
 state_backed_up=false
 promotion_committed=false
 preflight_only=false
+resume_only=false
+verify_only=false
 
 log() { printf '[host-promotion-2abcf145] %s %s\n' "$(date -u '+%FT%TZ')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -97,9 +99,11 @@ for command in awk chmod date docker find flock git install jq kill mv paste rea
     command -v "$command" >/dev/null 2>&1 || die "missing command: $command"
 done
 case "${1:-}" in
-    --preflight) [ "$#" -eq 1 ] || die "usage: $0 [--preflight]"; preflight_only=true ;;
-    "") [ "$#" -eq 0 ] || die "usage: $0 [--preflight]" ;;
-    *) die "usage: $0 [--preflight]" ;;
+    --preflight) [ "$#" -eq 1 ] || die "usage: $0 [--preflight|--verify-attempt|--resume]"; preflight_only=true ;;
+    --verify-attempt) [ "$#" -eq 1 ] || die "usage: $0 [--preflight|--verify-attempt|--resume]"; verify_only=true ;;
+    --resume) [ "$#" -eq 1 ] || die "usage: $0 [--preflight|--verify-attempt|--resume]"; resume_only=true ;;
+    "") [ "$#" -eq 0 ] || die "usage: $0 [--preflight|--verify-attempt|--resume]" ;;
+    *) die "usage: $0 [--preflight|--verify-attempt|--resume]" ;;
 esac
 [ "$(id -u)" -ne 0 ] || die "run as the evaluator operator, not root"
 [ "$(< /proc/sys/kernel/random/boot_id)" = "$BOOT_ID" ] || die "host rebooted"
@@ -126,16 +130,24 @@ done
     die "another evaluation is active"
 [ -z "$(sudo -n docker ps -aq --filter 'name=^/urnetwork-local-pg$')" ] || die "local PostgreSQL is active"
 [ -z "$(sudo -n docker ps -aq --filter 'name=^/urnetwork-local-redis$')" ] || die "local Redis is active"
-[ ! -e "$ATTEMPT_ROOT" ] || die "host requalification attempt already exists"
 [ ! -e "$STATE_BACKUP" ] || die "previous host-state archive already exists"
 [ ! -e "$SUMMARY" ] && [ ! -e "$PROMOTION" ] && [ ! -e "$REBASELINE" ] && [ ! -e "$SELF_CHECK" ] ||
     die "host-promotion evidence already exists"
 if [ "$preflight_only" = true ]; then
+    [ ! -e "$ATTEMPT_ROOT" ] || die "host requalification attempt already exists"
     log "preflight passed: replacement image, pending host identity, hostile-job proof, and rollback state are authenticated"
     promotion_committed=true
     exit 0
 fi
 
+if [ "$resume_only" = true ] || [ "$verify_only" = true ]; then
+    [ -d "$ATTEMPT" ] || die "completed host requalification attempt is unavailable"
+    job_id="$(jq -er '.job_id' "$ATTEMPT/worker-request.json")"
+    round_id="$(jq -er '.round_id' "$ATTEMPT/worker-request.json")"
+    start_epoch="$(stat -c '%Y' "$ATTEMPT/worker-request.json")"
+    log "resuming promotion from completed pair: job=$job_id round=$round_id"
+else
+    [ ! -e "$ATTEMPT_ROOT" ] || die "host requalification attempt already exists"
 sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$ATTEMPT_ROOT" "$ATTEMPT"
 install -m 0400 "$REFERENCE_PATCH" "$ATTEMPT/canonical.patch"
 job_id="$(< /proc/sys/kernel/random/uuid)"
@@ -198,18 +210,41 @@ if [ "$evaluator_rc" -ne 0 ]; then
     tail -n 160 "$ATTEMPT/evaluator.log" >&2 || true
     die "host-promotion evaluator exited $evaluator_rc"
 fi
+fi
 for artifact in worker-result.json baseline.json score.json resources.json accounting.json evidence-manifest.json evaluation.complete.json; do
     [ -s "$ATTEMPT/$artifact" ] || die "missing evaluator artifact: $artifact"
 done
-jq -e --arg image "$BASE_IMAGE" \
-    '.eval_error == null and .base_image_id == $image and .score.score_schema == 1 and
+jq -e --arg job "$job_id" \
+    '.job_id == $job and .eval_error == null and .score.score_schema == 1 and
      .score.placeable == true and ([.score.gates[].passed] | all) and
      ([.security | to_entries[] | select(.value | type == "boolean") | .value] | all)' \
     "$ATTEMPT/worker-result.json" >/dev/null || die "host-promotion pair did not pass"
+jq -e --arg image "$BASE_IMAGE" --arg job "$job_id" --arg round "$round_id" --arg patch "$PATCH_SHA" \
+    '.base_image_id == $image and .job_id == $job and .round_id == $round and
+     .patch_sha256 == $patch and .cleanup_complete == true' \
+    "$ATTEMPT/evaluation.complete.json" >/dev/null || die "host-promotion completion identity is invalid"
+jq -e --arg image "$BASE_IMAGE" --arg job "$job_id" --arg round "$round_id" \
+    --arg patch "$PATCH_SHA" --arg base "$BASE_SHA" --arg host "$HOST_QUALIFICATION_SHA" \
+    '.job_id == $job and .round_id == $round and .patch_sha256 == $patch and
+     .base_sha == $base and .evaluator_image_digest == $image and
+     .evaluation_policy.host_qualification_sha256 == $host' \
+    "$ATTEMPT/worker-request.json" >/dev/null || die "host-promotion request identity is invalid"
+[ "$(sha256_file "$ATTEMPT/canonical.patch")" = "$PATCH_SHA" ] || die "host-promotion patch changed"
+for artifact in baseline.json score.json resources.json accounting.json evidence-manifest.json evaluation.complete.json; do
+    expected_sha="$(jq -er --arg path "$artifact" \
+        '[.artifacts[] | select(.path == $path) | .sha256] | if length == 1 then .[0] else error("artifact digest missing") end' \
+        "$ATTEMPT/worker-result.json")"
+    [ "$(sha256_file "$ATTEMPT/$artifact")" = "$expected_sha" ] || die "artifact digest changed: $artifact"
+done
 [ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
     die "containers remain after host-promotion evaluation"
 [ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
     die "networks remain after host-promotion evaluation"
+if [ "$verify_only" = true ]; then
+    log "completed pair passed immutable artifact-contract verification"
+    promotion_committed=true
+    exit 0
+fi
 
 log "backing up the active host config and runtime markers"
 sudo -n install -d -o root -g root -m 0700 "$STATE_BACKUP"
