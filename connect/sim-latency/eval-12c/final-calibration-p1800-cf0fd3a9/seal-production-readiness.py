@@ -15,39 +15,46 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(
+HISTORICAL_ROOT = Path(
     "/home/by/urnetwork/server/connect/sim-latency/eval-12c/"
     "final-calibration-p1800-cf0fd3a9"
 )
+ROOT = Path(
+    "/home/by/urnetwork/server-finalization-evidence/connect/sim-latency/"
+    "eval-12c/final-calibration-p1800-cf0fd3a9"
+)
 EVIDENCE_ROOT = ROOT / "production-readiness"
 OUTPUT = ROOT / "production-readiness-final.json"
-SELECTION = ROOT / "post-frontier/final-calibration-selection.json"
+SELECTION = HISTORICAL_ROOT / "post-frontier/final-calibration-selection.json"
 SELECTION_ATTESTATION = (
-    ROOT / "post-frontier/launch-compromise-selection-attestation.json"
+    HISTORICAL_ROOT / "post-frontier/launch-compromise-selection-attestation.json"
 )
 SAME_PROGRESS = (
-    ROOT / "post-frontier/p1800-c200-r80-q2/same-seed/progress.json"
+    HISTORICAL_ROOT
+    / "post-frontier/p1800-c200-r80-q2/same-seed/progress.json"
 )
 PRE_REPAIR_PROGRESS = (
-    ROOT
+    HISTORICAL_ROOT
     / "post-frontier/p1800-c200-r80-q2/same-seed/"
     "progress-before-postprocessing-repair.json"
 )
 SAME_ANALYSIS = (
-    ROOT / "post-frontier/p1800-c200-r80-q2/same-seed-analysis.json"
+    HISTORICAL_ROOT
+    / "post-frontier/p1800-c200-r80-q2/same-seed-analysis.json"
 )
 SAME_DECISION = (
-    ROOT / "post-frontier/p1800-c200-r80-q2/calibration-decision.json"
+    HISTORICAL_ROOT
+    / "post-frontier/p1800-c200-r80-q2/calibration-decision.json"
 )
 STRICT_SAME_ANALYSIS = (
-    ROOT
+    HISTORICAL_ROOT
     / "post-frontier/p1800-c200-r80-q2/same-seed-analysis-familywise.json"
 )
 PLACEABILITY_POLICY = (
-    ROOT / "launch-readiness-placeability-policy-amendment.json"
+    HISTORICAL_ROOT / "launch-readiness-placeability-policy-amendment.json"
 )
-POSTPROCESSING_REPAIR = ROOT / "same-seed-postprocessing-repair.json"
-REFERENCE_V5 = ROOT / "reference-requalification-v5"
+POSTPROCESSING_REPAIR = HISTORICAL_ROOT / "same-seed-postprocessing-repair.json"
+REFERENCE_V5 = HISTORICAL_ROOT / "reference-requalification-v5"
 INDEPENDENT_ROOT = REFERENCE_V5 / "hidden-launch-runtime"
 INDEPENDENT = INDEPENDENT_ROOT / "independent-campaign-attestation.json"
 INDEPENDENT_DECISION = INDEPENDENT_ROOT / "calibration-decision.json"
@@ -65,7 +72,7 @@ INDEPENDENT_MEASUREMENT_AMENDMENT = (
 )
 REFERENCE_V5_QUALIFICATION = REFERENCE_V5 / "qualification.json"
 STAGING_REFERENCE_V5_AMENDMENT = (
-    ROOT / "production-staging-reference-v5-amendment.json"
+    HISTORICAL_ROOT / "production-staging-reference-v5-amendment.json"
 )
 INDEPENDENT_COMMITMENT = (
     INDEPENDENT_ROOT / "independent-references/campaign-commitment.json"
@@ -75,9 +82,15 @@ SOURCE_RELEASE = ROOT / "control-plane-release/source-release.json"
 RELEASE_ROOT = ROOT / "control-plane-release/final"
 RELEASE_MANIFEST = RELEASE_ROOT / "release-build.json"
 RELEASE_OCI_VERIFIER = ROOT / "verify-release-oci.py"
+REMEDIATION_AMENDMENT = (
+    ROOT / "production-staging-attempt-06-remediation-amendment.json"
+)
 
-SOURCE_LOCK_SHA256 = (
+HISTORICAL_SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
+)
+SOURCE_LOCK_SHA256 = (
+    "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022"
 )
 PROTOCOL_SHA256 = (
     "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af"
@@ -85,22 +98,28 @@ PROTOCOL_SHA256 = (
 STAGING_REFERENCE_V5_AMENDMENT_SHA256 = (
     "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695"
 )
-CONTROL_COMMIT = "5070445ddb1764ad80f999102a9d71946e5a9e29"
+CONTROL_COMMIT = "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36"
 CONTROL_SOURCE_RELEASE_SHA256 = (
-    "b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940"
+    "0fdf035ee23fb030936d1340ddfaeb80cbcb23fde4c0000bff9f93e70e736818"
+)
+REMEDIATION_AMENDMENT_SHA256 = (
+    "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d"
+)
+RELEASE_SELF_CHECK_AMENDMENT_SHA256 = (
+    "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d"
 )
 RELEASE_OCI_VERIFIER_SHA256 = (
     "b4a0316f591f1963110e5a328adee56a9a6d091a6c1deef8b0e6015d5f9cff2b"
 )
 RELEASE_IMAGE_TAGS = {
-    "api": "urnetwork/sim-latency-competition-api:5070445d",
-    "worker": "urnetwork/sim-latency-competition-worker:5070445d",
+    "api": "urnetwork/sim-latency-competition-api:2ee4883f-2abcf145",
+    "worker": "urnetwork/sim-latency-competition-worker:2ee4883f-2abcf145",
 }
 EVALUATOR_IMAGE = (
-    "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+    "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c"
 )
 HOST_QUALIFICATION_SHA256 = (
-    "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f"
+    "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3"
 )
 PLACEABILITY_POLICY_SHA256 = (
     "359fe89572c81d6602cbf0ece03e5128c5ccbf38bf2d20f22fcdbadd30f2f638"
@@ -162,6 +181,8 @@ CHECKS: dict[str, tuple[str, set[str]]] = {
             "api_spdx_sbom_verified",
             "worker_spdx_sbom_verified",
             "no_config_or_vault_in_images",
+            "attempt_06_remediation_bound",
+            "candidate_base_change_authorized",
         },
     ),
     "service_backed_fifo_cache_failover": (
@@ -178,6 +199,7 @@ CHECKS: dict[str, tuple[str, set[str]]] = {
             "terminal_fields_immutable",
             "event_log_append_only",
             "test_exit_zero",
+            "attempt_06_remediation_bound",
         },
     ),
     "authenticated_api_generate_submit_poll": (
@@ -347,7 +369,7 @@ def independent_seed_results_digest(
             f"independent seed result {index} ordering changed",
         )
         result_sha256 = sha256(path)
-        relative = path.relative_to(ROOT).as_posix()
+        relative = path.relative_to(HISTORICAL_ROOT).as_posix()
         digest.update(
             f"{index:02d}\t{relative}\t{result_sha256}\n".encode("utf-8")
         )
@@ -383,6 +405,13 @@ def verify_release_content(check: dict[str, Any]) -> None:
         manifest.get("control_plane_commit") == CONTROL_COMMIT
         and manifest.get("source_lock_sha256") == SOURCE_LOCK_SHA256
         and manifest.get("production_staging_protocol_sha256") == PROTOCOL_SHA256
+        and manifest.get("control_plane_source_release_sha256")
+        == CONTROL_SOURCE_RELEASE_SHA256
+        and manifest.get("production_staging_attempt_06_remediation_amendment_sha256")
+        == REMEDIATION_AMENDMENT_SHA256
+        and manifest.get("evaluator_image_digest") == EVALUATOR_IMAGE
+        and manifest.get("candidate_base_change_authorized") is True
+        and manifest.get("candidate_base_unchanged") is False
         and manifest.get("image_contexts_contain_config_or_vault") is False,
         "release manifest identity failed",
     )
@@ -632,6 +661,17 @@ def verify_check(check_id: str, name: str, expected: set[str]) -> dict[str, Any]
             == STAGING_REFERENCE_V5_AMENDMENT_SHA256,
             f"reference-v5 staging amendment is unbound: {check_id}",
         )
+        require(
+            value.get("production_release_self_check_contract_amendment_sha256")
+            == RELEASE_SELF_CHECK_AMENDMENT_SHA256,
+            f"release self-check amendment is unbound: {check_id}",
+        )
+    else:
+        require(
+            value.get("production_staging_attempt_06_remediation_amendment_sha256")
+            == REMEDIATION_AMENDMENT_SHA256,
+            f"attempt-06 remediation is unbound: {check_id}",
+        )
     require(isinstance(evidence, dict) and evidence, f"check has no content evidence: {check_id}")
     serialized = path.read_text(encoding="utf-8").lower()
     require(
@@ -653,6 +693,38 @@ def main() -> int:
     require(os.geteuid() == 0, "production readiness sealing must run as root")
     require(not OUTPUT.exists(), f"final readiness already exists: {OUTPUT}")
     require(sha256(SOURCE_RELEASE) == CONTROL_SOURCE_RELEASE_SHA256, "source release changed")
+    require(
+        REMEDIATION_AMENDMENT.stat().st_mode & 0o777 == 0o400
+        and sha256(REMEDIATION_AMENDMENT) == REMEDIATION_AMENDMENT_SHA256,
+        "attempt-06 remediation amendment changed",
+    )
+    remediation = load(REMEDIATION_AMENDMENT)
+    require(
+        remediation.get("kind")
+        == "sim-latency-production-staging-attempt-06-remediation-amendment"
+        and remediation.get("authorized") is True
+        and remediation.get("historical_calibration", {}).get(
+            "source_lock_sha256"
+        )
+        == HISTORICAL_SOURCE_LOCK_SHA256
+        and remediation.get("replacement", {}).get("source_lock_sha256")
+        == SOURCE_LOCK_SHA256
+        and remediation.get("replacement", {}).get("evaluator_image_digest")
+        == EVALUATOR_IMAGE
+        and remediation.get("replacement", {}).get(
+            "host_qualification_sha256"
+        )
+        == HOST_QUALIFICATION_SHA256
+        and remediation.get("required_measurement_bridge", {}).get(
+            "replicates_per_side"
+        )
+        == LAUNCH_REPLICATES
+        and remediation.get("required_measurement_bridge", {}).get(
+            "all_eighteen_replicates_must_be_clean"
+        )
+        is True,
+        "attempt-06 remediation amendment is not authenticated",
+    )
     for path, expected_hash in (
         (PLACEABILITY_POLICY, PLACEABILITY_POLICY_SHA256),
         (POSTPROCESSING_REPAIR, POSTPROCESSING_REPAIR_SHA256),
@@ -692,7 +764,7 @@ def main() -> int:
         and staging_reference_v5_amendment.get("draft") is False
         and staging_reference_v5_amendment.get("authorized") is True
         and staging_reference_v5_amendment.get("source_lock_sha256")
-        == SOURCE_LOCK_SHA256
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and staging_reference_v5_amendment.get(
             "original_production_staging_protocol_sha256"
         )
@@ -741,7 +813,7 @@ def main() -> int:
         and independent_attestation_repair.get("kind")
         == "sim-latency-hidden-attestation-schema-postprocessing-repair"
         and independent_attestation_repair.get("source_lock_sha256")
-        == SOURCE_LOCK_SHA256
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and independent_attestation_repair.get("campaign_commitment_sha256")
         == sha256(INDEPENDENT_COMMITMENT)
         and independent_attestation_repair.get("terminal_decision_sha256")
@@ -773,7 +845,7 @@ def main() -> int:
         policy.get("kind")
         == "sim-latency-launch-readiness-placeability-policy-amendment"
         and policy.get("authorized") is True
-        and policy.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+        and policy.get("source_lock_sha256") == HISTORICAL_SOURCE_LOCK_SHA256
         and policy.get("same_seed_progress_sha256")
         == PRE_REPAIR_PROGRESS_SHA256
         and policy.get("strict_same_seed_analysis_sha256")
@@ -888,7 +960,8 @@ def main() -> int:
     )
     require(
         selection.get("accepted") is True
-        and selection.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+        and selection.get("source_lock_sha256")
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and selection.get("same_seed_pairs") == 12
         and selection.get("independent_seed_target") == 12
         and selection.get("reference_required_passes") == 11
@@ -943,7 +1016,7 @@ def main() -> int:
     require(
         repair.get("kind") == "sim-latency-same-seed-postprocessing-repair"
         and repair.get("passed") is True
-        and repair.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+        and repair.get("source_lock_sha256") == HISTORICAL_SOURCE_LOCK_SHA256
         and repair.get("placeability_policy_amendment_sha256")
         == PLACEABILITY_POLICY_SHA256
         and repair.get("strict_familywise_analysis_sha256")
@@ -1007,7 +1080,7 @@ def main() -> int:
     require(
         independent_decision.get("decision_ready") is True
         and independent_decision.get("source_lock_sha256")
-        == SOURCE_LOCK_SHA256
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and independent_decision.get("source_calibration_decision_sha256")
         == sha256(SAME_DECISION)
         and independent_decision.get("source_calibration_selection_sha256")
@@ -1102,9 +1175,18 @@ def main() -> int:
         "kind": "sim-latency-production-readiness-final",
         "sealed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source_lock_sha256": SOURCE_LOCK_SHA256,
+        "historical_calibration_source_lock_sha256": (
+            HISTORICAL_SOURCE_LOCK_SHA256
+        ),
         "production_staging_protocol_sha256": PROTOCOL_SHA256,
         "production_staging_reference_v5_amendment_sha256": (
             STAGING_REFERENCE_V5_AMENDMENT_SHA256
+        ),
+        "production_release_self_check_contract_amendment_sha256": (
+            RELEASE_SELF_CHECK_AMENDMENT_SHA256
+        ),
+        "production_staging_attempt_06_remediation_amendment_sha256": (
+            REMEDIATION_AMENDMENT_SHA256
         ),
         "control_plane_commit": CONTROL_COMMIT,
         "control_plane_source_release_sha256": CONTROL_SOURCE_RELEASE_SHA256,

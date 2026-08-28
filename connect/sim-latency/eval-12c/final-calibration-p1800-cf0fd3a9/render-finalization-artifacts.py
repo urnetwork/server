@@ -19,19 +19,24 @@ from typing import Any
 
 SERVER = Path("/home/by/urnetwork/server")
 ROOT = (
+    Path("/home/by/urnetwork/server-finalization-evidence")
+    / "connect/sim-latency/eval-12c/"
+    "final-calibration-p1800-cf0fd3a9"
+)
+HISTORICAL_ROOT = (
     SERVER
     / "connect/sim-latency/eval-12c/"
     "final-calibration-p1800-cf0fd3a9"
 )
-ROUND = ROOT / "post-frontier/p1800-c200-r80-q2"
-REFERENCE_V5 = ROOT / "reference-requalification-v5"
+ROUND = HISTORICAL_ROOT / "post-frontier/p1800-c200-r80-q2"
+REFERENCE_V5 = HISTORICAL_ROOT / "reference-requalification-v5"
 INDEPENDENT_ROOT = REFERENCE_V5 / "hidden-launch-runtime"
 INDEPENDENT = INDEPENDENT_ROOT / "independent-references"
 
 SOURCE_LOCK = ROOT / "source-lock.json"
-SEASON_BASE_EQUIVALENCE = ROOT / "season-base-equivalence.json"
-FRONTIER = ROOT / "exact-frontier/frontier-decision.json"
-POINT = ROOT / "exact-frontier/p1800-c200-r80-q2/point-summary.json"
+SEASON_BASE_EQUIVALENCE = HISTORICAL_ROOT / "season-base-equivalence.json"
+FRONTIER = HISTORICAL_ROOT / "exact-frontier/frontier-decision.json"
+POINT = HISTORICAL_ROOT / "exact-frontier/p1800-c200-r80-q2/point-summary.json"
 FROZEN_ROUND = ROUND / "frozen-round.json"
 SAME_PROGRESS = ROUND / "same-seed/progress.json"
 SAME_ANALYSIS = ROUND / "same-seed-analysis.json"
@@ -40,14 +45,14 @@ SAME_DECISION = ROUND / "calibration-decision.json"
 PRE_REPAIR_PROGRESS = (
     ROUND / "same-seed/progress-before-postprocessing-repair.json"
 )
-SELECTION = ROOT / "post-frontier/final-calibration-selection.json"
+SELECTION = HISTORICAL_ROOT / "post-frontier/final-calibration-selection.json"
 SELECTION_ATTESTATION = (
-    ROOT / "post-frontier/launch-compromise-selection-attestation.json"
+    HISTORICAL_ROOT / "post-frontier/launch-compromise-selection-attestation.json"
 )
 PLACEABILITY_POLICY = (
-    ROOT / "launch-readiness-placeability-policy-amendment.json"
+    HISTORICAL_ROOT / "launch-readiness-placeability-policy-amendment.json"
 )
-POSTPROCESSING_REPAIR = ROOT / "same-seed-postprocessing-repair.json"
+POSTPROCESSING_REPAIR = HISTORICAL_ROOT / "same-seed-postprocessing-repair.json"
 INDEPENDENT_PROGRESS = INDEPENDENT / "progress.json"
 INDEPENDENT_ATTESTATION = INDEPENDENT_ROOT / "independent-campaign-attestation.json"
 INDEPENDENT_DECISION = INDEPENDENT_ROOT / "calibration-decision.json"
@@ -66,15 +71,21 @@ INDEPENDENT_MEASUREMENT_AMENDMENT = (
 )
 REFERENCE_V5_QUALIFICATION = REFERENCE_V5 / "qualification.json"
 STAGING_REFERENCE_V5_AMENDMENT = (
-    ROOT / "production-staging-reference-v5-amendment.json"
+    HISTORICAL_ROOT / "production-staging-reference-v5-amendment.json"
 )
 READINESS = ROOT / "production-readiness-final.json"
+REMEDIATION_AMENDMENT = (
+    ROOT / "production-staging-attempt-06-remediation-amendment.json"
+)
 
 REPORT = SERVER / "finalize-report.html"
 REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 CALIBRATION_DOCUMENT = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
 
 SOURCE_LOCK_SHA256 = (
+    "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022"
+)
+HISTORICAL_SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
 )
 SEASON_BASE_EQUIVALENCE_SHA256 = (
@@ -83,18 +94,28 @@ SEASON_BASE_EQUIVALENCE_SHA256 = (
 CALIBRATION_TEMPLATE_SHA256 = (
     "ff4883f7b9d0776ebe0e91d33e91a25d1f8a5bbb616776a135e1e1c06e8cc7cc"
 )
-BASE_SHA = "5ca3d5242f4a7d40efe4415635608023b05a0956"
+BASE_SHA = "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8"
+HISTORICAL_BASE_SHA = "5ca3d5242f4a7d40efe4415635608023b05a0956"
 PUBLIC_AUTHORING_TAG = "apex-season-1"
 PUBLIC_AUTHORING_COMMIT = "eb697281cbe0a19a27d7771fe69fb24c2c3dab8c"
 EDITABLE_BLOB = "66e2d39956b958749dfdfd00f408d4c05f874833"
 EVALUATOR_IMAGE = (
-    "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+    "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c"
 )
 SIMULATOR_SHA256 = (
+    "bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997"
+)
+HISTORICAL_EVALUATOR_IMAGE = (
+    "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+)
+HISTORICAL_SIMULATOR_SHA256 = (
     "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d"
 )
 HOST_QUALIFICATION_SHA256 = (
-    "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f"
+    "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3"
+)
+REMEDIATION_AMENDMENT_SHA256 = (
+    "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d"
 )
 PLACEABILITY_POLICY_SHA256 = (
     "359fe89572c81d6602cbf0ece03e5128c5ccbf38bf2d20f22fcdbadd30f2f638"
@@ -236,7 +257,7 @@ def independent_seed_results_digest() -> tuple[str, dict[str, str]]:
         path = INDEPENDENT / f"seed-{index:02d}/seed-result.json"
         result_sha256 = sha256(path)
         file_hashes[f"{index:02d}"] = result_sha256
-        relative = path.relative_to(ROOT).as_posix()
+        relative = path.relative_to(HISTORICAL_ROOT).as_posix()
         digest.update(
             f"{index:02d}\t{relative}\t{result_sha256}\n".encode("utf-8")
         )
@@ -289,6 +310,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
         (POSTPROCESSING_REPAIR, POSTPROCESSING_REPAIR_SHA256),
         (STRICT_SAME_ANALYSIS, STRICT_SAME_ANALYSIS_SHA256),
         (PRE_REPAIR_PROGRESS, PRE_REPAIR_PROGRESS_SHA256),
+        (REMEDIATION_AMENDMENT, REMEDIATION_AMENDMENT_SHA256),
     ):
         exact_mode(path, 0o400)
         require(sha256(path) == expected_hash, f"authenticated input changed: {path}")
@@ -315,6 +337,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
     independent_protocol = load_object(INDEPENDENT_PROTOCOL)
     reference_v5_qualification = load_object(REFERENCE_V5_QUALIFICATION)
     staging_reference_v5_amendment = load_object(STAGING_REFERENCE_V5_AMENDMENT)
+    remediation = load_object(REMEDIATION_AMENDMENT)
     readiness = load_object(READINESS)
 
     require(
@@ -323,6 +346,34 @@ def validate_terminal_inputs() -> dict[str, Any]:
         and source_lock.get("evaluator", {}).get("simulator_sha256")
         == SIMULATOR_SHA256,
         "source-lock evaluator identity",
+    )
+    require(
+        remediation.get("kind")
+        == "sim-latency-production-staging-attempt-06-remediation-amendment"
+        and remediation.get("authorized") is True
+        and remediation.get("historical_calibration", {}).get(
+            "source_lock_sha256"
+        )
+        == HISTORICAL_SOURCE_LOCK_SHA256
+        and remediation.get("replacement", {}).get("source_lock_sha256")
+        == SOURCE_LOCK_SHA256
+        and remediation.get("replacement", {}).get("evaluator_image_digest")
+        == EVALUATOR_IMAGE
+        and remediation.get("replacement", {}).get("simulator_sha256")
+        == SIMULATOR_SHA256
+        and remediation.get("replacement", {}).get(
+            "host_qualification_sha256"
+        )
+        == HOST_QUALIFICATION_SHA256
+        and remediation.get("required_measurement_bridge", {}).get(
+            "replicates_per_side"
+        )
+        == LAUNCH_REPLICATES
+        and remediation.get("required_measurement_bridge", {}).get(
+            "all_eighteen_replicates_must_be_clean"
+        )
+        is True,
+        "attempt-06 remediation lineage",
     )
     authoring = season_base.get("public_authoring_base")
     evaluator = season_base.get("authoritative_evaluator")
@@ -340,9 +391,10 @@ def validate_terminal_inputs() -> dict[str, Any]:
         and authoring.get("commit") == PUBLIC_AUTHORING_COMMIT
         and authoring.get("remote_tag_matches_local") is True
         and isinstance(evaluator, dict)
-        and evaluator.get("commit") == BASE_SHA
-        and evaluator.get("source_lock_sha256") == SOURCE_LOCK_SHA256
-        and evaluator.get("image_digest") == EVALUATOR_IMAGE
+        and evaluator.get("commit") == HISTORICAL_BASE_SHA
+        and evaluator.get("source_lock_sha256")
+        == HISTORICAL_SOURCE_LOCK_SHA256
+        and evaluator.get("image_digest") == HISTORICAL_EVALUATOR_IMAGE
         and isinstance(policy, dict)
         and policy.get("allowed_paths")
         == ["connect/resident_contract_manager.go"]
@@ -358,8 +410,10 @@ def validate_terminal_inputs() -> dict[str, Any]:
     require(
         frontier.get("accepted") is True
         and frontier.get("selected_point_id") == "p1800-c200-r80-q2"
-        and frontier.get("source_lock_sha256") == SOURCE_LOCK_SHA256
-        and frontier.get("evaluator_image_digest") == EVALUATOR_IMAGE,
+        and frontier.get("source_lock_sha256")
+        == HISTORICAL_SOURCE_LOCK_SHA256
+        and frontier.get("evaluator_image_digest")
+        == HISTORICAL_EVALUATOR_IMAGE,
         "frontier selection",
     )
     rejected = frontier.get("rejected_upper_bound")
@@ -373,7 +427,8 @@ def validate_terminal_inputs() -> dict[str, Any]:
     require(
         point.get("accepted") is True
         and point.get("impairment_modes_completed") is True
-        and point.get("source_lock_sha256") == SOURCE_LOCK_SHA256,
+        and point.get("source_lock_sha256")
+        == HISTORICAL_SOURCE_LOCK_SHA256,
         "selected frontier evidence",
     )
     require(
@@ -412,7 +467,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
         == "sim-latency-launch-readiness-placeability-policy-amendment"
         and placeability_policy.get("authorized") is True
         and placeability_policy.get("source_lock_sha256")
-        == SOURCE_LOCK_SHA256
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and placeability_policy.get("same_seed_progress_sha256")
         == PRE_REPAIR_PROGRESS_SHA256
         and placeability_policy.get("strict_same_seed_analysis_sha256")
@@ -475,7 +530,8 @@ def validate_terminal_inputs() -> dict[str, Any]:
     )
     require(
         selection.get("accepted") is True
-        and selection.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+        and selection.get("source_lock_sha256")
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and selection.get("same_seed_pairs") == SAME_SEED_TARGET
         and selection.get("independent_seed_target") == PRIOR_INDEPENDENT_TARGET
         and selection.get("reference_required_passes") == PRIOR_REQUIRED_PASSES
@@ -496,7 +552,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
         == "sim-latency-same-seed-postprocessing-repair"
         and postprocessing_repair.get("passed") is True
         and postprocessing_repair.get("source_lock_sha256")
-        == SOURCE_LOCK_SHA256
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and postprocessing_repair.get("placeability_policy_amendment_sha256")
         == PLACEABILITY_POLICY_SHA256
         and postprocessing_repair.get("strict_familywise_analysis_sha256")
@@ -637,7 +693,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
         independent_attestation_repair.get("kind")
         == "sim-latency-hidden-attestation-schema-postprocessing-repair"
         and independent_attestation_repair.get("source_lock_sha256")
-        == SOURCE_LOCK_SHA256
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and independent_attestation_repair.get("repair_script_sha256")
         == sha256(INDEPENDENT_ATTESTATION_REPAIR_SCRIPT)
         and independent_attestation_repair.get("campaign_commitment_sha256")
@@ -704,7 +760,7 @@ def validate_terminal_inputs() -> dict[str, Any]:
     require(
         independent_decision.get("decision_ready") is True
         and independent_decision.get("source_lock_sha256")
-        == SOURCE_LOCK_SHA256
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and independent_decision.get("source_calibration_decision_sha256")
         == sha256(SAME_DECISION)
         and independent_decision.get("source_calibration_selection_sha256")
@@ -1059,6 +1115,8 @@ def validate_terminal_inputs() -> dict[str, Any]:
     require(
         readiness.get("kind") == "sim-latency-production-readiness-final"
         and readiness.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+        and readiness.get("historical_calibration_source_lock_sha256")
+        == HISTORICAL_SOURCE_LOCK_SHA256
         and readiness.get("evaluator_image_digest") == EVALUATOR_IMAGE
         and readiness.get("host_qualification_sha256")
         == HOST_QUALIFICATION_SHA256
@@ -1075,6 +1133,10 @@ def validate_terminal_inputs() -> dict[str, Any]:
             "production_staging_reference_v5_amendment_sha256"
         )
         == sha256(STAGING_REFERENCE_V5_AMENDMENT)
+        and readiness.get(
+            "production_staging_attempt_06_remediation_amendment_sha256"
+        )
+        == REMEDIATION_AMENDMENT_SHA256
         and readiness.get("independent_attestation_sha256")
         == sha256(INDEPENDENT_ATTESTATION)
         and readiness.get("independent_attestation_repair_sha256")
@@ -1655,6 +1717,8 @@ Status: **LOCALLY QUALIFIED — technical launch gate open**
 Generated: `{generated_at}`  
 Score schema: `1`  
 Source lock: `{SOURCE_LOCK_SHA256}`
+Historical calibration source lock: `{HISTORICAL_SOURCE_LOCK_SHA256}`
+Attempt-06 remediation amendment: `{REMEDIATION_AMENDMENT_SHA256}`
 Season-base equivalence: `{SEASON_BASE_EQUIVALENCE_SHA256}`
 
 This is the terminal local calibration for the sim-latency competition. It
@@ -1673,6 +1737,10 @@ on-call ownership are separate operational decisions.
 - Evaluator image: `{EVALUATOR_IMAGE}`
 - Simulator and scorer SHA-256: `{SIMULATOR_SHA256}`
 - Host qualification SHA-256: `{HOST_QUALIFICATION_SHA256}`
+- The p1800 frontier, baseline-noise, and reference-separability evidence was
+  measured under historical source lock `{HISTORICAL_SOURCE_LOCK_SHA256}`. The
+  authorized correctness remediation `{REMEDIATION_AMENDMENT_SHA256}` binds it
+  to this evaluator through a clean same-round R=9 baseline/no-op bridge.
 - Host: one authoritative 12-physical-core, 128 GiB machine; SMT and turbo off;
   performance governor; fixed affinity and IRQ placement.
 - Evaluation boundary: physical CPUs `0,2,4,6,8,10,12,14,16,18`, 72 GiB runner
@@ -1878,6 +1946,12 @@ def render_outputs(data: dict[str, Any]) -> None:
         "kind": "sim-latency-finalize-report-evidence",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source_lock_sha256": SOURCE_LOCK_SHA256,
+        "historical_calibration_source_lock_sha256": (
+            HISTORICAL_SOURCE_LOCK_SHA256
+        ),
+        "production_staging_attempt_06_remediation_amendment_sha256": (
+            REMEDIATION_AMENDMENT_SHA256
+        ),
         "season_base_equivalence_sha256": (
             SEASON_BASE_EQUIVALENCE_SHA256
         ),

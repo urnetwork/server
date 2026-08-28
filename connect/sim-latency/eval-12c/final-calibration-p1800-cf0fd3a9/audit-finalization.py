@@ -18,27 +18,38 @@ import uuid
 
 SERVER = Path("/home/by/urnetwork/server")
 URNETWORK = Path("/home/by/urnetwork")
-ROOT = SERVER / "connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9"
-ROUND = ROOT / "post-frontier/p1800-c200-r80-q2"
+ROOT = Path(
+    "/home/by/urnetwork/server-finalization-evidence/connect/sim-latency/"
+    "eval-12c/final-calibration-p1800-cf0fd3a9"
+)
+EVIDENCE_WORKTREE = Path("/home/by/urnetwork/server-finalization-evidence")
+HISTORICAL_ROOT = (
+    SERVER / "connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9"
+)
+ROUND = HISTORICAL_ROOT / "post-frontier/p1800-c200-r80-q2"
 SAME = ROUND / "same-seed"
-REFERENCE_V5 = ROOT / "reference-requalification-v5"
+REFERENCE_V5 = HISTORICAL_ROOT / "reference-requalification-v5"
 INDEPENDENT_ROOT = REFERENCE_V5 / "hidden-launch-runtime"
 INDEPENDENT = INDEPENDENT_ROOT / "independent-references"
 
 SOURCE_LOCK = ROOT / "source-lock.json"
-SEASON_BASE_EQUIVALENCE = ROOT / "season-base-equivalence.json"
+SEASON_BASE_EQUIVALENCE = HISTORICAL_ROOT / "season-base-equivalence.json"
 PATCH_POLICY = SERVER / "competition/container/policy.example.json"
-FRONTIER = ROOT / "exact-frontier/frontier-decision.json"
-POINT = ROOT / "exact-frontier/p1800-c200-r80-q2/point-summary.json"
-AMENDMENT = ROOT / "launch-readiness-measurement-amendment.json"
-PLACEABILITY_POLICY = ROOT / "launch-readiness-placeability-policy-amendment.json"
-POSTPROCESSING_REPAIR = ROOT / "same-seed-postprocessing-repair.json"
-R1_CORRECTION = ROOT / "independent-reference-r1-correction.json"
-R1_PROTOCOL = ROOT / "independent-launch-compromise-protocol.json"
-R1_LAUNCH = ROOT / "independent-r1-launch.json"
-PARALLEL_EVIDENCE = ROOT / "parallel-readiness-evidence.json"
-CONTROL_BOUNDARY = ROOT / "control-plane-secret-boundary.json"
-CONTROL_BOUNDARY_VERIFIER = ROOT / "verify-control-plane-secret-boundary.py"
+FRONTIER = HISTORICAL_ROOT / "exact-frontier/frontier-decision.json"
+POINT = HISTORICAL_ROOT / "exact-frontier/p1800-c200-r80-q2/point-summary.json"
+AMENDMENT = HISTORICAL_ROOT / "launch-readiness-measurement-amendment.json"
+PLACEABILITY_POLICY = (
+    HISTORICAL_ROOT / "launch-readiness-placeability-policy-amendment.json"
+)
+POSTPROCESSING_REPAIR = HISTORICAL_ROOT / "same-seed-postprocessing-repair.json"
+R1_CORRECTION = HISTORICAL_ROOT / "independent-reference-r1-correction.json"
+R1_PROTOCOL = HISTORICAL_ROOT / "independent-launch-compromise-protocol.json"
+R1_LAUNCH = HISTORICAL_ROOT / "independent-r1-launch.json"
+PARALLEL_EVIDENCE = HISTORICAL_ROOT / "parallel-readiness-evidence.json"
+CONTROL_BOUNDARY = HISTORICAL_ROOT / "control-plane-secret-boundary.json"
+CONTROL_BOUNDARY_VERIFIER = (
+    HISTORICAL_ROOT / "verify-control-plane-secret-boundary.py"
+)
 CONTROL_SOURCE_RELEASE = ROOT / "control-plane-release/source-release.json"
 CONTROL_SOURCE_WORKTREE = Path("/home/by/urnetwork/server-finalization-control-plane")
 SAME_PROGRESS = SAME / "progress.json"
@@ -46,9 +57,9 @@ SAME_ANALYSIS = ROUND / "same-seed-analysis.json"
 STRICT_SAME_ANALYSIS = ROUND / "same-seed-analysis-familywise.json"
 PRE_REPAIR_PROGRESS = SAME / "progress-before-postprocessing-repair.json"
 SAME_DECISION = ROUND / "calibration-decision.json"
-SELECTION = ROOT / "post-frontier/final-calibration-selection.json"
+SELECTION = HISTORICAL_ROOT / "post-frontier/final-calibration-selection.json"
 SELECTION_ATTESTATION = (
-    ROOT / "post-frontier/launch-compromise-selection-attestation.json"
+    HISTORICAL_ROOT / "post-frontier/launch-compromise-selection-attestation.json"
 )
 INDEPENDENT_PROGRESS = INDEPENDENT / "progress.json"
 INDEPENDENT_COMMITMENT = INDEPENDENT / "campaign-commitment.json"
@@ -81,21 +92,44 @@ REFERENCE_V5_PRE_PILOT_RETIRED_COMMITMENTS = (
     REFERENCE_V5 / "retired-seed-commitments.json"
 )
 REFERENCE_V4_REJECTION = (
-    ROOT / "reference-requalification-v4/hidden-campaign-rejection.json"
+    HISTORICAL_ROOT / "reference-requalification-v4/hidden-campaign-rejection.json"
 )
 STAGING_REFERENCE_V5_AMENDMENT = (
-    ROOT / "production-staging-reference-v5-amendment.json"
+    HISTORICAL_ROOT / "production-staging-reference-v5-amendment.json"
 )
-PRODUCTION_PROTOCOL = ROOT / "production-staging-protocol.json"
+PRODUCTION_PROTOCOL = HISTORICAL_ROOT / "production-staging-protocol.json"
 READINESS = ROOT / "production-readiness-final.json"
+REMEDIATION_AMENDMENT = (
+    ROOT / "production-staging-attempt-06-remediation-amendment.json"
+)
+HOST_SELF_CHECK = ROOT / "host-self-check-attempt-06.json"
 CALIBRATION_MD = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
 FINAL_REPORT = SERVER / "finalize-report.html"
 FINAL_REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 
 SOURCE_LOCK_SHA256 = (
+    "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022"
+)
+HISTORICAL_SOURCE_LOCK_SHA256 = (
     "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838"
 )
-SERVER_COMMIT = "5ca3d5242f4a7d40efe4415635608023b05a0956"
+SERVER_COMMIT = "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8"
+HISTORICAL_SERVER_COMMIT = "5ca3d5242f4a7d40efe4415635608023b05a0956"
+EVALUATOR_IMAGE = (
+    "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c"
+)
+HISTORICAL_EVALUATOR_IMAGE = (
+    "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+)
+HOST_QUALIFICATION_SHA256 = (
+    "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3"
+)
+REMEDIATION_AMENDMENT_SHA256 = (
+    "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d"
+)
+RELEASE_SELF_CHECK_AMENDMENT_SHA256 = (
+    "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d"
+)
 SEASON_BASE_EQUIVALENCE_SHA256 = (
     "6bce6a80cecfee0297bcc11afbaa390576d8f542980d8797e4da33046daa07b3"
 )
@@ -138,9 +172,13 @@ CONTROL_BOUNDARY_VERIFIER_SHA256 = (
     "70c42b13b623ba92c81dc9089232fe216d1d13029bcb257d677133977e953fb6"
 )
 CONTROL_SOURCE_RELEASE_SHA256 = (
+    "0fdf035ee23fb030936d1340ddfaeb80cbcb23fde4c0000bff9f93e70e736818"
+)
+CONTROL_SOURCE_COMMIT = "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36"
+HISTORICAL_CONTROL_SOURCE_COMMIT = "5070445ddb1764ad80f999102a9d71946e5a9e29"
+HISTORICAL_CONTROL_SOURCE_RELEASE_SHA256 = (
     "b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940"
 )
-CONTROL_SOURCE_COMMIT = "5070445ddb1764ad80f999102a9d71946e5a9e29"
 PRODUCTION_PROTOCOL_SHA256 = (
     "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af"
 )
@@ -206,6 +244,8 @@ PRODUCTION_ASSERTIONS = {
         "api_spdx_sbom_verified",
         "worker_spdx_sbom_verified",
         "no_config_or_vault_in_images",
+        "attempt_06_remediation_bound",
+        "candidate_base_change_authorized",
     },
     "service_backed_fifo_cache_failover": {
         "postgres_dedicated_address",
@@ -219,6 +259,7 @@ PRODUCTION_ASSERTIONS = {
         "terminal_fields_immutable",
         "event_log_append_only",
         "test_exit_zero",
+        "attempt_06_remediation_bound",
     },
     "authenticated_api_generate_submit_poll": {
         "operator_generate_authenticated",
@@ -660,7 +701,7 @@ def independent_seed_result_evidence(
             raise AuditError(f"seed {index} ordering projection is invalid")
         result_sha256 = sha256(path)
         result_hashes[f"{index:02d}"] = result_sha256
-        relative_path = path.relative_to(ROOT).as_posix()
+        relative_path = path.relative_to(HISTORICAL_ROOT).as_posix()
         digest.update(
             f"{index:02d}\t{relative_path}\t{result_sha256}\n".encode(
                 "utf-8"
@@ -794,6 +835,28 @@ def load_production_check(
         raise AuditError(
             f"production check {check_id!r} is not bound to the v5 staging amendment"
         )
+    if check_id not in {
+        "release_artifacts",
+        "service_backed_fifo_cache_failover",
+    } and evidence.get(
+        "production_release_self_check_contract_amendment_sha256"
+    ) != readiness.get(
+        "production_release_self_check_contract_amendment_sha256"
+    ):
+        raise AuditError(
+            f"production check {check_id!r} is not bound to the release self-check amendment"
+        )
+    if check_id in {
+        "release_artifacts",
+        "service_backed_fifo_cache_failover",
+    } and evidence.get(
+        "production_staging_attempt_06_remediation_amendment_sha256"
+    ) != readiness.get(
+        "production_staging_attempt_06_remediation_amendment_sha256"
+    ):
+        raise AuditError(
+            f"production check {check_id!r} is not bound to the attempt-06 remediation"
+        )
     return {
         "evidence_path": relative,
         "evidence_sha256": expected_sha,
@@ -842,6 +905,7 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
         repositories = lock.get("repositories")
         if not isinstance(repositories, dict):
             raise AuditError("source-lock repositories are missing")
+        remediation = load_json(REMEDIATION_AMENDMENT)
         season_base = load_json(SEASON_BASE_EQUIVALENCE)
         policy = load_json(PATCH_POLICY)
         authoring = season_base.get("public_authoring_base")
@@ -857,6 +921,21 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
         if not (
             sha256(SEASON_BASE_EQUIVALENCE)
             == SEASON_BASE_EQUIVALENCE_SHA256
+            and repositories.get("server") == SERVER_COMMIT
+            and lock.get("evaluator", {}).get("image_id") == EVALUATOR_IMAGE
+            and lock.get("host", {}).get("qualification_sha256")
+            == HOST_QUALIFICATION_SHA256
+            and sha256(REMEDIATION_AMENDMENT) == REMEDIATION_AMENDMENT_SHA256
+            and REMEDIATION_AMENDMENT.stat().st_mode & 0o777 == 0o400
+            and remediation.get("authorized") is True
+            and remediation.get("historical_calibration", {}).get(
+                "source_lock_sha256"
+            )
+            == HISTORICAL_SOURCE_LOCK_SHA256
+            and remediation.get("replacement", {}).get("source_lock_sha256")
+            == SOURCE_LOCK_SHA256
+            and remediation.get("replacement", {}).get("evaluator_image_digest")
+            == EVALUATOR_IMAGE
             and SEASON_BASE_EQUIVALENCE.stat().st_mode & 0o777 == 0o400
             and season_base.get("kind")
             == "sim-latency-season-base-equivalence"
@@ -870,10 +949,10 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
             and command(["git", "rev-parse", "apex-season-1^{}"], SERVER)
             == authoring.get("commit")
             and isinstance(evaluator, dict)
-            and evaluator.get("commit") == repositories.get("server")
-            and evaluator.get("source_lock_sha256") == SOURCE_LOCK_SHA256
-            and evaluator.get("image_digest")
-            == lock.get("evaluator", {}).get("image_id")
+            and evaluator.get("commit") == HISTORICAL_SERVER_COMMIT
+            and evaluator.get("source_lock_sha256")
+            == HISTORICAL_SOURCE_LOCK_SHA256
+            and evaluator.get("image_digest") == HISTORICAL_EVALUATOR_IMAGE
             and sha256(PATCH_POLICY) == PATCH_POLICY_SHA256
             and policy.get("allowed_paths") == [editable_path]
             and policy.get("max_patch_bytes") == 262144
@@ -899,6 +978,11 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
                     "rev-parse",
                     f"{evaluator.get('commit')}:{editable_path}",
                 ],
+                SERVER,
+            )
+            and editable.get("authoritative_evaluator_blob")
+            == command(
+                ["git", "rev-parse", f"{SERVER_COMMIT}:{editable_path}"],
                 SERVER,
             )
             and editable.get("public_authoring_base_blob")
@@ -935,6 +1019,14 @@ def audit_source(checks: list[dict[str, Any]]) -> None:
                 == "sim-latency-finalize-report-evidence"
                 and report_evidence.get("source_lock_sha256")
                 == SOURCE_LOCK_SHA256
+                and report_evidence.get(
+                    "historical_calibration_source_lock_sha256"
+                )
+                == HISTORICAL_SOURCE_LOCK_SHA256
+                and report_evidence.get(
+                    "production_staging_attempt_06_remediation_amendment_sha256"
+                )
+                == REMEDIATION_AMENDMENT_SHA256
                 and report_evidence.get("calibration_document_sha256")
                 == sha256(CALIBRATION_MD)
             ):
@@ -976,7 +1068,8 @@ def audit_frontier(checks: list[dict[str, Any]]) -> None:
         rejected = frontier.get("rejected_upper_bound")
         if not (
             frontier.get("accepted") is True
-            and frontier.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+            and frontier.get("source_lock_sha256")
+            == HISTORICAL_SOURCE_LOCK_SHA256
             and frontier.get("selected_point_id") == "p1800-c200-r80-q2"
             and isinstance(selected, dict)
             and selected.get("provider_count") == 1800
@@ -986,6 +1079,8 @@ def audit_frontier(checks: list[dict[str, Any]]) -> None:
             and rejected.get("point_id") == "p2700-c300-r120-q2"
             and rejected.get("minimum_success_rate", 1) < 0.97
             and point.get("accepted") is True
+            and point.get("source_lock_sha256")
+            == HISTORICAL_SOURCE_LOCK_SHA256
             and point.get("impairment_modes_completed") is True
         ):
             raise AuditError("exact-image frontier decision is not the frozen p1800 result")
@@ -1446,7 +1541,7 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
             == R1_CORRECTION_SHA256
             and independent_decision.get("decision_ready") is True
             and independent_decision.get("source_lock_sha256")
-            == SOURCE_LOCK_SHA256
+            == HISTORICAL_SOURCE_LOCK_SHA256
             and independent_decision.get("source_calibration_decision_sha256")
             == sha256(SAME_DECISION)
             and independent_decision.get("source_calibration_selection_sha256")
@@ -1545,7 +1640,7 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
             and attestation_repair.get("kind")
             == "sim-latency-hidden-attestation-schema-postprocessing-repair"
             and attestation_repair.get("source_lock_sha256")
-            == SOURCE_LOCK_SHA256
+            == HISTORICAL_SOURCE_LOCK_SHA256
             and attestation_repair.get("original_runner_sha256")
             == sha256(REFERENCE_V5_RUNNER)
             and attestation_repair.get("repair_script_sha256")
@@ -1684,7 +1779,7 @@ def audit_independent_results(checks: list[dict[str, Any]]) -> None:
 def audit_security_and_packages(checks: list[dict[str, Any]]) -> None:
     try:
         source_lock = load_json(SOURCE_LOCK)
-        host = load_json(ROOT / "host-qualification/self-check.promoted.json")
+        host = load_json(HOST_SELF_CHECK)
         pair = load_json(SAME / "attempt-20104/worker-result.json")
         control_boundary = load_json(CONTROL_BOUNDARY)
         pre_measurement = source_lock.get("pre_measurement_gates", {})
@@ -1723,7 +1818,7 @@ def audit_security_and_packages(checks: list[dict[str, Any]]) -> None:
             "The production-scale evaluator, local-only mounts, userns, default-deny network, and hostile-job cleanup are authenticated.",
             {
                 "host_self_check_sha256": sha256(
-                    ROOT / "host-qualification/self-check.promoted.json"
+                    HOST_SELF_CHECK
                 ),
                 "resource_bomb_sha256": source_lock.get("host", {}).get(
                     "resource_bomb_report_sha256"
@@ -1760,22 +1855,35 @@ def audit_security_and_packages(checks: list[dict[str, Any]]) -> None:
             == CONTROL_SOURCE_COMMIT
             and control_release.get("origin_control_plane_commit")
             == CONTROL_SOURCE_COMMIT
-            and control_release.get("candidate_base_unchanged") is True
-            and control_release.get("evaluator_image_unchanged") is True
+            and control_release.get("candidate_base_unchanged") is False
+            and control_release.get("candidate_base_change_authorized") is True
+            and control_release.get("evaluator_image_unchanged") is False
+            and control_release.get("scorer_source_unchanged") is True
+            and control_release.get("simulator_source_unchanged") is True
+            and control_release.get("remediation_amendment_sha256")
+            == REMEDIATION_AMENDMENT_SHA256
             and isinstance(release_checks, list)
             and {item.get("id") for item in release_checks}
             == {
-                "isolated_unit_suite",
-                "focused_race_suite",
-                "go_vet",
-                "dual_openapi_conformance",
-                "shell_syntax",
+                "deterministic_wrapped_connection_regression",
+                "exact_image_regression",
+                "evaluator_docker_smoke",
+                "reference_patch_static_qualification",
+                "remote_commit_verified",
             }
             and all(item.get("exit_code") == 0 for item in release_checks)
             and isinstance(release_sources, dict)
             and release_sources
             and all(
-                sha256(CONTROL_SOURCE_WORKTREE / relative_path) == digest
+                sha256(
+                    (
+                        SERVER
+                        if relative_path in {"db.go", "db_error_test.go"}
+                        else EVIDENCE_WORKTREE
+                    )
+                    / relative_path
+                )
+                == digest
                 for relative_path, digest in release_sources.items()
             )
             and command(["git", "rev-parse", "HEAD"], CONTROL_SOURCE_WORKTREE)
@@ -1812,12 +1920,14 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
             and PRODUCTION_PROTOCOL.stat().st_mode & 0o777 == 0o400
             and protocol.get("kind")
             == "sim-latency-production-staging-protocol"
-            and protocol.get("source_lock_sha256") == SOURCE_LOCK_SHA256
-            and protocol.get("control_plane_commit") == CONTROL_SOURCE_COMMIT
+            and protocol.get("source_lock_sha256")
+            == HISTORICAL_SOURCE_LOCK_SHA256
+            and protocol.get("control_plane_commit")
+            == HISTORICAL_CONTROL_SOURCE_COMMIT
             and protocol.get("control_plane_source_release_sha256")
-            == CONTROL_SOURCE_RELEASE_SHA256
+            == HISTORICAL_CONTROL_SOURCE_RELEASE_SHA256
             and protocol.get("evaluator_image_digest")
-            == "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+            == HISTORICAL_EVALUATOR_IMAGE
             and protocol.get("measurement_dependencies", {}).get(
                 "same_seed_pairs"
             )
@@ -1851,6 +1961,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
     elif protocol_valid:
         try:
             readiness = load_json(READINESS)
+            remediation = load_json(REMEDIATION_AMENDMENT)
             staging_amendment = load_json(STAGING_REFERENCE_V5_AMENDMENT)
             commitment = load_json(INDEPENDENT_COMMITMENT)
             (
@@ -1875,7 +1986,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and staging_amendment.get("draft") is False
                 and staging_amendment.get("authorized") is True
                 and staging_amendment.get("source_lock_sha256")
-                == SOURCE_LOCK_SHA256
+                == HISTORICAL_SOURCE_LOCK_SHA256
                 and staging_amendment.get(
                     "original_production_staging_protocol_sha256"
                 )
@@ -1906,23 +2017,49 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and isinstance(retained, dict)
                 and retained
                 and all(value is True for value in retained.values())
+                and sha256(REMEDIATION_AMENDMENT)
+                == REMEDIATION_AMENDMENT_SHA256
+                and REMEDIATION_AMENDMENT.stat().st_mode & 0o777 == 0o400
+                and remediation.get("authorized") is True
+                and remediation.get("historical_calibration", {}).get(
+                    "source_lock_sha256"
+                )
+                == HISTORICAL_SOURCE_LOCK_SHA256
+                and remediation.get("replacement", {}).get(
+                    "source_lock_sha256"
+                )
+                == SOURCE_LOCK_SHA256
+                and remediation.get("replacement", {}).get(
+                    "evaluator_image_digest"
+                )
+                == EVALUATOR_IMAGE
                 and readiness.get("schema") == 1
                 and readiness.get("kind") == "sim-latency-production-readiness-final"
                 and readiness.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+                and readiness.get("historical_calibration_source_lock_sha256")
+                == HISTORICAL_SOURCE_LOCK_SHA256
                 and readiness.get("production_staging_protocol_sha256")
                 == PRODUCTION_PROTOCOL_SHA256
                 and readiness.get(
                     "production_staging_reference_v5_amendment_sha256"
                 )
                 == sha256(STAGING_REFERENCE_V5_AMENDMENT)
+                and readiness.get(
+                    "production_release_self_check_contract_amendment_sha256"
+                )
+                == RELEASE_SELF_CHECK_AMENDMENT_SHA256
+                and readiness.get(
+                    "production_staging_attempt_06_remediation_amendment_sha256"
+                )
+                == REMEDIATION_AMENDMENT_SHA256
                 and readiness.get("control_plane_commit")
                 == CONTROL_SOURCE_COMMIT
                 and readiness.get("control_plane_source_release_sha256")
                 == CONTROL_SOURCE_RELEASE_SHA256
                 and readiness.get("evaluator_image_digest")
-                == "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+                == EVALUATOR_IMAGE
                 and readiness.get("host_qualification_sha256")
-                == "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f"
+                == HOST_QUALIFICATION_SHA256
                 and readiness.get("same_seed_selection_sha256")
                 == sha256(SELECTION)
                 and readiness.get("placeability_policy_amendment_sha256")
@@ -2014,6 +2151,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
             "pass"
             if not superseded_template
             and SOURCE_LOCK_SHA256 in text
+            and HISTORICAL_SOURCE_LOCK_SHA256 in text
+            and REMEDIATION_AMENDMENT_SHA256 in text
             and SEASON_BASE_EQUIVALENCE_SHA256 in text
             and SERVER_COMMIT in text
             and all(term in text.lower() for term in required_terms)
@@ -2072,6 +2211,14 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and evidence.get("schema") == 1
                 and evidence.get("kind") == "sim-latency-finalize-report-evidence"
                 and evidence.get("source_lock_sha256") == SOURCE_LOCK_SHA256
+                and evidence.get(
+                    "historical_calibration_source_lock_sha256"
+                )
+                == HISTORICAL_SOURCE_LOCK_SHA256
+                and evidence.get(
+                    "production_staging_attempt_06_remediation_amendment_sha256"
+                )
+                == REMEDIATION_AMENDMENT_SHA256
                 and evidence.get("season_base_equivalence_sha256")
                 == SEASON_BASE_EQUIVALENCE_SHA256
                 and evidence.get("report_sha256") == report_sha
@@ -2163,6 +2310,12 @@ def audit() -> dict[str, Any]:
         "schema": 1,
         "kind": "sim-latency-finalization-audit",
         "source_lock_sha256": SOURCE_LOCK_SHA256,
+        "historical_calibration_source_lock_sha256": (
+            HISTORICAL_SOURCE_LOCK_SHA256
+        ),
+        "production_staging_attempt_06_remediation_amendment_sha256": (
+            REMEDIATION_AMENDMENT_SHA256
+        ),
         "local_finalization_complete": all(item["state"] == "pass" for item in required),
         "required_passes": sum(item["state"] == "pass" for item in required),
         "required_pending": sum(item["state"] == "pending" for item in required),
