@@ -11,6 +11,7 @@ export LANG=C LC_ALL=C
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 readonly BUILD_SUBMISSION="$SCRIPT_DIR/build-submission.sh"
+readonly PREPARE_EVALUATION_SOURCE="$SCRIPT_DIR/prepare-evaluation-source.sh"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/docker-id-map.sh"
 readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"
@@ -64,6 +65,7 @@ active_sampler_pid=""
 active_work_mount=""
 active_build_log_pid=""
 active_build_log_pipe=""
+active_source_root=""
 cleanup_complete=false
 failure_line=0
 worker_uid="$(id -u)"
@@ -190,6 +192,7 @@ for command in awk cat cp date df find findmnt git head install jq mkfifo mount 
 done
 sudo -n docker info >/dev/null
 [ -x "$BUILD_SUBMISSION" ] || die "trusted submission builder is not executable"
+[ -x "$PREPARE_EVALUATION_SOURCE" ] || die "trusted evaluation source preparer is not executable"
 [ -x "$RESOURCE_BOUNDARY" ] || die "trusted resource boundary is not executable"
 [ -x "$DOCKER_ID_MAP" ] || die "trusted Docker id-map resolver is not executable"
 [ -x "$HASH_LOCAL_MOUNT" ] || die "trusted local-mount digest helper is not executable"
@@ -408,6 +411,47 @@ policy_simulator_sha256="$(jq -er '.evaluation_policy.simulator_sha256' "$reques
 [ "$policy_scorer_sha256" = "$base_simulator_sha256" ] || die "frozen scorer digest does not match pristine image"
 [ "$policy_simulator_sha256" = "$base_simulator_sha256" ] || die "frozen simulator digest does not match pristine image"
 
+# Every attempt gets independent baseline and candidate source checkouts. They
+# are copied from the authenticated base image into this attempt's bounded
+# tmpfs, never from the API/worker repository worktrees. The preparer creates
+# a local sim-latency branch at each source-lock commit; only the candidate
+# checkout is subsequently patched by the trusted builder.
+active_source_root="$(mktemp -d "$work_dir/evaluation-sources.XXXXXXXX")"
+baseline_source_root="$active_source_root/baseline"
+candidate_source_root="$active_source_root/candidate"
+baseline_source_identity="$($PREPARE_EVALUATION_SOURCE \
+    --base-image "$base_image_id" --destination "$baseline_source_root")" ||
+    die "could not prepare the temporary baseline source checkout"
+candidate_source_identity="$($PREPARE_EVALUATION_SOURCE \
+    --base-image "$base_image_id" --destination "$candidate_source_root")" ||
+    die "could not prepare the temporary candidate source checkout"
+for prepared_identity in "$baseline_source_identity" "$candidate_source_identity"; do
+    jq -e --arg base_image_id "$base_image_id" --arg base_sha "$base_sha" \
+        --argjson source_epoch "$source_epoch" \
+        '.schema == 1 and .kind == "sim-latency-evaluation-source" and
+         .temporary == true and .base_image_id == $base_image_id and
+         .base_sha == $base_sha and .source_epoch == $source_epoch and
+         .branch == "sim-latency" and .candidate_patch_sha256 == null' \
+        <<<"$prepared_identity" >/dev/null || die "temporary evaluation source identity is invalid"
+done
+source_evidence_path="$work_dir/evaluation-sources.json"
+write_source_evidence() {
+    local cleanup_complete="$1"
+    local pending="${source_evidence_path}.new"
+    jq -nS \
+        --argjson baseline "$(jq -c . "$baseline_source_root/.evaluation-source.json")" \
+        --argjson candidate "$(jq -c . "$candidate_source_root/.evaluation-source.json")" \
+        --argjson cleanup_complete "$cleanup_complete" \
+        '{schema:1,kind:"sim-latency-temporary-evaluation-sources",
+          origin:"authenticated_evaluator_image",host_repositories_used:false,
+          runtime_target:"/workspace",read_only_mount:true,
+          baseline:$baseline,candidate:$candidate,
+          cleanup_complete:$cleanup_complete}' > "$pending"
+    chmod 0400 "$pending"
+    mv -f -- "$pending" "$source_evidence_path"
+}
+write_source_evidence false
+
 kernel_release="$(uname -r)"
 microcode_revision="$(awk -F: '$1 ~ /^microcode/ {gsub(/[[:space:]]/, "", $2); print $2}' /proc/cpuinfo | sort -u | paste -sd, -)"
 [ -n "$microcode_revision" ] || die "microcode identity is unavailable"
@@ -430,6 +474,7 @@ site_listen="$(jq -er '.evaluation_policy.site_listen' "$request_path")"
 api_port="$(jq -er '.evaluation_policy.api_port' "$request_path")"
 impairment_enabled="$(jq -r '.evaluation_policy.impairment_enabled' "$request_path")"
 takeover_margin="$(jq -er '.evaluation_policy.takeover_margin' "$request_path")"
+queue_limit="$(jq -er '.evaluation_policy.queue_limit' "$request_path")"
 score_timeout_seconds="$(jq -er '.evaluation_policy.score_timeout_seconds' "$request_path")"
 for numeric in client_warmup_timeout_ms duration_ms request_timeout_ms pipeline_interval_ms test_timeout_ms announce_timeout_ms exchange_hosts api_port score_timeout_seconds; do
     [[ "${!numeric}" =~ ^[1-9][0-9]*$ ]] || die "invalid positive policy field: $numeric"
@@ -438,17 +483,13 @@ for numeric in ramp_ms prewarm_ms settle_ms fleet_shards; do
     [[ "${!numeric}" =~ ^[0-9]+$ ]] || die "invalid nonnegative policy field: $numeric"
 done
 [ "$impairment_enabled" = true ] || [ "$impairment_enabled" = false ] || die "impairment policy is invalid"
+[ "$queue_limit" -eq 0 ] || die "queue limit is not the frozen unbounded sentinel"
 if [ "$impairment_enabled" = true ]; then no_impair=no; else no_impair=yes; fi
 wall_timeout_seconds="$(
     "$TIMEOUT_BUDGET" stage \
         "$ramp_ms" "$settle_ms" "$client_warmup_timeout_ms" "$duration_ms" "$request_timeout_ms"
 )" || die "could not calculate the stage timeout budget"
-minimum_score_timeout_seconds="$(
-    "$TIMEOUT_BUDGET" score "$replicates" \
-        "$ramp_ms" "$settle_ms" "$client_warmup_timeout_ms" "$duration_ms" "$request_timeout_ms"
-)" || die "could not calculate the score timeout budget"
-[ "$minimum_score_timeout_seconds" -le "$score_timeout_seconds" ] ||
-    die "score timeout does not cover paired stage and cleanup budgets"
+[ "$score_timeout_seconds" -eq 10800 ] || die "score timeout is not the frozen three-hour submission limit"
 
 compose_with() {
     local project="$1" env_file="$2"
@@ -510,7 +551,7 @@ write_runner_env() {
 }
 
 write_compose_env() {
-    local path="$1" project="$2" stage="$3" image="$4" runner_env="$5" input="$6" output="$7" cgroup_parent="$8"
+    local path="$1" project="$2" stage="$3" image="$4" runner_env="$5" input="$6" output="$7" cgroup_parent="$8" source="$9"
     local pending="${path}.new"
     [ ! -e "$pending" ] || die "pending Compose environment already exists"
     printf '%s\n' \
@@ -524,6 +565,7 @@ write_compose_env() {
         "EVALUATION_IMAGE=$image" \
         "EVALUATOR_BASE_IMAGE=$base_image_id" \
         "EVALUATION_ENV_FILE=$runner_env" \
+        "EVALUATION_SOURCE_DIR=$source" \
         "EVALUATION_CONFIG_LOCAL_DIR=$config_local_directory" \
         "EVALUATION_VAULT_LOCAL_DIR=$vault_local_directory" \
         "EVALUATION_INPUT_DIR=$input" \
@@ -570,6 +612,50 @@ validate_output_tree() {
         die "candidate output contains a non-regular entry"
 }
 
+seal_evaluation_source() {
+    local root="$1" expected_server="$2" expected_patch="$3"
+    [ "$root" = "$baseline_source_root" ] || [ "$root" = "$candidate_source_root" ] ||
+        die "refusing to seal an unexpected source directory"
+    for repository in server connect sdk proxy; do
+        local repository_root="$root/$repository"
+        local expected_commit
+        expected_commit="$(jq -er --arg repository "$repository" \
+            '.repositories[$repository]' "$root/.evaluation-source.json")"
+        [ "$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" = sim-latency ] &&
+            [ "$(git -C "$repository_root" rev-parse HEAD)" = "$expected_commit" ] &&
+            [ -z "$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ] ||
+            die "temporary $repository source checkout is not clean and identity-bound"
+    done
+    [ "$(git -C "$root/server" rev-parse HEAD)" = "$expected_server" ] ||
+        die "temporary server source checkout has the wrong commit"
+    [ "$(jq -er '.candidate_patch_sha256 // ""' "$root/.evaluation-source.json")" = "$expected_patch" ] ||
+        die "temporary source patch identity mismatch"
+
+    # Preserve tracked executable bits while making both the bind itself and
+    # the underlying host tree non-writable. The Docker bind adds a second,
+    # independently inspected read-only boundary.
+    sudo -n find "$root" -type d -exec chmod 0555 {} +
+    sudo -n find "$root" -type f -perm /111 -exec chmod 0555 {} +
+    sudo -n find "$root" -type f ! -perm /111 -exec chmod 0444 {} +
+    sudo -n chown -R "$container_host_uid:$container_host_gid" "$root"
+}
+
+remove_evaluation_sources() {
+    [ -n "${active_source_root:-}" ] || return 0
+    case "$active_source_root" in
+        "$work_dir"/evaluation-sources.*) ;;
+        *) die "refusing to remove an unexpected source directory" ;;
+    esac
+    [ "$(realpath -e "$(dirname "$active_source_root")")" = "$work_dir" ] ||
+        die "temporary source directory escaped the attempt tmpfs"
+    sudo -n rm -rf -- "$active_source_root"
+    [ ! -e "$active_source_root" ] || die "temporary evaluation sources survived cleanup"
+    active_source_root=""
+    jq -S '.cleanup_complete = true' "$source_evidence_path" > "$source_evidence_path.new"
+    chmod 0400 "$source_evidence_path.new"
+    mv -f -- "$source_evidence_path.new" "$source_evidence_path"
+}
+
 persist_evidence_tree() {
     sudo -n chown -R "$worker_uid:$worker_gid" "$work_dir"
     find "$work_dir" -type d -exec chmod u+rwx,go-rwx {} +
@@ -606,6 +692,7 @@ write_evidence_manifest() {
 
 emit_candidate_build_failure() {
     local build_log="$1"
+    write_evaluation_progress failed 0 0
     if [ -f "$build_log" ] && [ "$MAX_BUILD_LOG_BYTES" -lt "$(file_bytes "$build_log")" ]; then
         tail -c "$MAX_BUILD_LOG_BYTES" "$build_log" > "$build_log.tail"
         mv "$build_log.tail" "$build_log"
@@ -615,6 +702,7 @@ emit_candidate_build_failure() {
         die "candidate build failure left job containers"
     [ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
         die "candidate build failure left job networks"
+    remove_evaluation_sources
 
     local submission_error="$artifact_dir/submission-error.json"
     jq -n --arg job_id "$job_id" --arg round_id "$round_id" \
@@ -646,7 +734,7 @@ emit_candidate_build_failure() {
 
     local artifact_records=()
     local relative path
-    for relative in submission-error.json evaluation.complete.json evidence-manifest.json; do
+    for relative in submission-error.json evaluation-progress.json evaluation.complete.json evidence-manifest.json; do
         path="$artifact_dir/$relative"
         artifact_records+=("$(jq -cn --arg path "$relative" --arg sha256 "$(sha256_file "$path")" \
             --argjson bytes "$(file_bytes "$path")" '{path:$path,sha256:$sha256,bytes:$bytes}')")
@@ -738,20 +826,139 @@ baseline_accounting=()
 baseline_samples=()
 baseline_resources=()
 baseline_markers=()
+baseline_manifests=()
 candidate_csv=()
 candidate_stderr=()
 candidate_accounting=()
 candidate_samples=()
 candidate_resources=()
 candidate_markers=()
+candidate_manifests=()
 run_accounting_records=()
 run_resource_records=()
 migration_hashes=()
 redis_generations=()
+progress_records=()
+progress_path="$artifact_dir/evaluation-progress.json"
+
+join_csv() {
+    local IFS=,
+    printf '%s' "$*"
+}
+
+write_evaluation_progress() {
+    local phase="$1" baseline_completed="$2" candidate_completed="$3"
+    local pending="$progress_path.new"
+    printf '%s\n' "${progress_records[@]}" | jq -s \
+        --arg job_id "$job_id" --arg round_id "$round_id" --arg phase "$phase" \
+        --argjson replicate_count "$replicates" \
+        --argjson baseline_completed "$baseline_completed" \
+        --argjson candidate_completed "$candidate_completed" \
+        --argjson updated_unix_ms "$(date +%s%3N)" \
+        '{schema:1,kind:"sim-latency-evaluation-progress",job_id:$job_id,
+          round_id:$round_id,phase:$phase,replicate_count:$replicate_count,
+          baseline_completed:$baseline_completed,
+          candidate_completed:$candidate_completed,
+          updated_unix_ms:$updated_unix_ms,metrics:.}' > "$pending"
+    chmod 0400 "$pending"
+    mv -f -- "$pending" "$progress_path"
+    sync -d "$progress_path"
+}
+
+run_live_comparison() {
+    local index="$1" ordinal compare_name compare_cgroup comparison
+    ordinal="$(printf '%02d' "$index")"
+    compare_name="urnetwork-eval-${job_id//-/}-live-${ordinal}"
+    compare_name="${compare_name:0:63}"
+    compare_cgroup="urnetwork-evaluation-${job_id//-/}-live-${ordinal}.slice"
+    compare_cgroup="${compare_cgroup:0:95}.slice"
+    compare_cgroup="${compare_cgroup/.slice.slice/.slice}"
+    comparison="$(sudo -n docker run --rm --name "$compare_name" \
+        --network none --read-only --user 65532:65532 \
+        --cpuset-cpus "$cpuset" \
+        --memory "$SCORER_MEMORY_BYTES" --memory-swap "$SCORER_MEMORY_BYTES" \
+        --pids-limit "$SCORER_PIDS_LIMIT" --cgroup-parent "$compare_cgroup" \
+        --cap-drop ALL --security-opt no-new-privileges:true \
+        --label "com.urnetwork.competition.job-id=$job_id" \
+        --label 'com.urnetwork.competition.stage=live-progress' \
+        --label "com.urnetwork.competition.round-id=$round_id" \
+        --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
+        --entrypoint /opt/urnetwork/bin/sim-latency \
+        "$base_image_id" compare \
+        --a "$(join_csv "${candidate_manifests[@]}")" \
+        --b "$(join_csv "${baseline_manifests[@]}")" \
+        --p 0.05 --json)" || die "candidate-$ordinal live comparison failed"
+    jq -e \
+        '.alpha == 0.05 and (.metrics | type == "array") and
+         ([.metrics[] | select(.name == "ttfb_p50_ms" or
+             .name == "ttfb_p95_ms" or
+             .name == "throughput_p50_bytes_per_s" or
+             .name == "throughput_p95_bytes_per_s")] | length) == 4' \
+        <<<"$comparison" >/dev/null || die "candidate-$ordinal live comparison is invalid"
+    printf '%s' "$comparison"
+}
+
+record_stage_progress() {
+    local role="$1" index="$2" run_manifest="$3"
+    local comparison_json=null metric quantile value metric_comparison
+    local p_improvement p_regression significance
+    if [ "$role" = candidate ]; then
+        comparison_json="$(run_live_comparison "$index")"
+    fi
+    for metric in \
+        ttfb_p50_ms ttfb_p95_ms \
+        throughput_p50_bytes_per_s throughput_p95_bytes_per_s; do
+        value="$(sudo -n jq -er --arg metric "$metric" \
+            '.metrics[$metric].value |
+             select(type == "number" and isfinite and . >= 0)' \
+            "$run_manifest")" || die "$role-$index live metric $metric is invalid"
+        case "$metric" in
+            *_p50_*) quantile=p50 ;;
+            *_p95_*) quantile=p95 ;;
+            *) die "unsupported live metric $metric" ;;
+        esac
+        if [ "$role" = baseline ]; then
+            p_improvement=null
+            p_regression=null
+            significance=baseline
+        else
+            metric_comparison="$(jq -ec --arg metric "$metric" \
+                '.metrics[] | select(.name == $metric)' <<<"$comparison_json")" ||
+                die "candidate-$index comparison omitted $metric"
+            p_improvement="$(jq -c 'if .testable then (.p_a // 0) else null end' \
+                <<<"$metric_comparison")"
+            p_regression="$(jq -c 'if .testable then (.p_b // 0) else null end' \
+                <<<"$metric_comparison")"
+            significance="$(jq -r --argjson alpha 0.05 \
+                'if .testable != true then "not_testable"
+                 elif (.p_a // 0) <= $alpha then "improved"
+                 elif (.p_b // 0) <= $alpha then "regressed"
+                 else "not_significant" end' <<<"$metric_comparison")"
+        fi
+        progress_records+=("$(jq -cn \
+            --arg role "$role" --argjson replicate "$index" \
+            --arg metric "$metric" --arg quantile "$quantile" \
+            --argjson value "$value" \
+            --argjson p_improvement "$p_improvement" \
+            --argjson p_regression "$p_regression" \
+            --arg significance "$significance" \
+            '{role:$role,replicate:$replicate,metric:$metric,
+              quantile:$quantile,value:$value,
+              p_improvement:$p_improvement,p_regression:$p_regression,
+              significance:$significance}')")
+    done
+    if [ "$role" = baseline ]; then
+        write_evaluation_progress baseline "$index" 0
+    else
+        write_evaluation_progress candidate "$replicates" "$index"
+    fi
+}
+
+write_evaluation_progress preparing 0 0
 
 run_stage() {
     local role="$1" index="$2" image="$3" build_sha="$4" simulator_sha="$5" candidate_patch_sha="$6"
-    local ordinal evaluation_id stage_token project cgroup_parent stage_root output runner_env compose_env
+    local ordinal evaluation_id stage_token project cgroup_parent stage_root output runner_env compose_env source
     ordinal="$(printf '%02d' "$index")"
     evaluation_id="${role}-${ordinal}-${job_id:0:8}"
     stage_token="${role}-${ordinal}"
@@ -764,6 +971,11 @@ run_stage() {
     output="$stage_root/output"
     runner_env="$stage_root/runner.env"
     compose_env="$stage_root/compose.env"
+    if [ "$role" = baseline ]; then
+        source="$baseline_source_root"
+    else
+        source="$candidate_source_root"
+    fi
     install -d -m 0700 "$stage_root" "$output"
 
     stage_db_admin_password="$(new_secret)"
@@ -772,7 +984,7 @@ run_stage() {
     authenticate_local_mounts
     write_runner_env "$runner_env" "$evaluation_id" "$build_sha" "$simulator_sha" "$image" "$candidate_patch_sha"
     write_compose_env "$compose_env" "$project" "$role" "$image" "$runner_env" \
-        "$work_dir/input" "$output" "$cgroup_parent"
+        "$work_dir/input" "$output" "$cgroup_parent" "$source"
     sudo -n chown -R "$container_host_uid:$container_host_gid" "$output"
     sudo -n chmod 0700 "$output"
 
@@ -834,6 +1046,7 @@ run_stage() {
         --arg cpuset "$cpuset" \
         --arg config_local "$config_local_directory" \
         --arg vault_local "$vault_local_directory" \
+        --arg source "$source" \
         --argjson runner_memory "$RUNNER_MEMORY_BYTES" \
         --argjson runner_pids "$RUNNER_PIDS_LIMIT" \
         --argjson postgres_memory "$POSTGRES_MEMORY_BYTES" \
@@ -853,7 +1066,9 @@ run_stage() {
           (any(.Mounts[]; .Type == "bind" and .Source == $config_local and
             .Destination == "/runtime/config/local" and .RW == false)) and
           (any(.Mounts[]; .Type == "bind" and .Source == $vault_local and
-            .Destination == "/runtime/vault/local" and .RW == false))) and
+            .Destination == "/runtime/vault/local" and .RW == false)) and
+          (any(.Mounts[]; .Type == "bind" and .Source == $source and
+            .Destination == "/workspace" and .RW == false))) and
          (map(select(.Name | endswith("-postgres-1"))) | length == 1) and
          (map(select(.Name | endswith("-postgres-1")))[0] |
           .Config.User == "999:999" and .HostConfig.Memory == $postgres_memory and
@@ -935,6 +1150,7 @@ run_stage() {
     local accounting="/artifacts/$evaluation_id/accounting.json"
     local resources="/artifacts/$evaluation_id/resources.json"
     local marker="/artifacts/$evaluation_id/run.complete.json"
+    local manifest="/artifacts/$evaluation_id/run.json"
     if [ "$role" = baseline ]; then
         baseline_csv+=("$csv")
         baseline_stderr+=("$stderr")
@@ -942,6 +1158,7 @@ run_stage() {
         baseline_samples+=("$stats_root")
         baseline_resources+=("$resources")
         baseline_markers+=("$marker")
+        baseline_manifests+=("$manifest")
     else
         candidate_csv+=("$csv")
         candidate_stderr+=("$stderr")
@@ -949,6 +1166,7 @@ run_stage() {
         candidate_samples+=("$stats_root")
         candidate_resources+=("$resources")
         candidate_markers+=("$marker")
+        candidate_manifests+=("$manifest")
     fi
     local provider_bytes
     provider_bytes="$(sudo -n jq -er '.provider_egress_bytes' "$run_dir/accounting.json")"
@@ -971,6 +1189,7 @@ run_stage() {
         --filter "label=com.urnetwork.competition.stage=$role")" ] || die "$stage_token cleanup left containers"
     sudo -n cp -a "$output/." "$work_dir/scorer-input/"
     validate_output_tree "$work_dir/scorer-input"
+    record_stage_progress "$role" "$index" "$run_dir/run.json"
     authenticate_local_mounts
     active_project=""
     active_compose_env=""
@@ -979,6 +1198,7 @@ run_stage() {
     log "$stage_token complete"
 }
 
+write_evaluation_progress building 0 0
 log "building authenticated candidate image offline"
 candidate_build_json="$work_dir/candidate-build.json"
 candidate_build_log="$work_dir/candidate-build.log"
@@ -991,6 +1211,7 @@ active_build_log_pipe="$candidate_build_pipe"
 trap - ERR
 set +e
 $BUILD_SUBMISSION --allow-local-base --base-image "$base_build_ref" \
+    --source-root "$candidate_source_root" \
     --patch "$patch_path" --policy "$policy_path" \
     > "$candidate_build_json" 2> "$candidate_build_pipe"
 candidate_build_status=$?
@@ -1033,6 +1254,10 @@ candidate_sha="$(jq -er '.candidate_sha' "$candidate_build_json")"
 [ "$(jq -er '.policy_sha256' "$candidate_build_json")" = "$policy_sha256" ] || die "candidate policy identity mismatch"
 [ "$(jq -er '.builder_sha256' "$candidate_build_json")" = "$builder_sha256" ] || die "candidate builder identity mismatch"
 [ "$(jq -er '.image_key' "$candidate_build_json")" = "$image_key" ] || die "candidate image key mismatch"
+[ "$(jq -er '.repositories.server' "$candidate_source_root/.evaluation-source.json")" = "$candidate_sha" ] ||
+    die "temporary candidate checkout does not match the candidate image"
+[ "$(jq -er '.candidate_patch_sha256' "$candidate_source_root/.evaluation-source.json")" = "$patch_sha256" ] ||
+    die "temporary candidate checkout does not match the canonical patch"
 [ "$(sudo -n docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
     die "candidate image id is unavailable or changed"
 candidate_identity="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
@@ -1047,6 +1272,12 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
      .image_key == $image_key and (.simulator_sha256 | test("^[0-9a-f]{64}$")) and
      (.paths | type == "array")' \
     <<<"$candidate_identity" >/dev/null || die "candidate image identity is invalid"
+[ "$(git -C "$candidate_source_root/server" rev-parse HEAD:connect/sim-latency)" = \
+    "$(git -C "$baseline_source_root/server" rev-parse HEAD:connect/sim-latency)" ] ||
+    die "candidate changed the protected sim-latency source tree"
+write_source_evidence false
+seal_evaluation_source "$baseline_source_root" "$base_sha" ""
+seal_evaluation_source "$candidate_source_root" "$candidate_sha" "$patch_sha256"
 
 for ((i = 1; i <= replicates; i++)); do
     run_stage baseline "$i" "$base_image_id" "$base_sha" "$base_simulator_sha256" "$EMPTY_PATCH_SHA256"
@@ -1054,11 +1285,7 @@ done
 for ((i = 1; i <= replicates; i++)); do
     run_stage candidate "$i" "$candidate_image_id" "$candidate_sha" "$candidate_simulator_sha256" "$patch_sha256"
 done
-
-join_csv() {
-    local IFS=,
-    printf '%s' "$*"
-}
+write_evaluation_progress scoring "$replicates" "$replicates"
 
 score_runner_env="$work_dir/scorer.env"
 score_compose_env="$work_dir/scorer-compose.env"
@@ -1088,7 +1315,7 @@ score_project="urnetwork-eval-${job_id//-/}-baseline-score"
 score_project="${score_project:0:63}"
 score_cgroup_parent="urnetwork-evaluation-${job_id//-/}-baseline-score.slice"
 write_compose_env "$score_compose_env" "$score_project" score "$base_image_id" "$score_runner_env" \
-    "$work_dir/scorer-input" "$baseline_score_output" "$score_cgroup_parent"
+    "$work_dir/scorer-input" "$baseline_score_output" "$score_cgroup_parent" "$baseline_source_root"
 sed -i 's/^EVALUATION_ACTION=.*/EVALUATION_ACTION=baseline/' "$score_compose_env"
 active_project="$score_project"
 active_compose_env="$score_compose_env"
@@ -1147,7 +1374,7 @@ score_project="urnetwork-eval-${job_id//-/}-candidate-score"
 score_project="${score_project:0:63}"
 score_cgroup_parent="urnetwork-evaluation-${job_id//-/}-candidate-score.slice"
 write_compose_env "$score_compose_env" "$score_project" score "$base_image_id" "$score_runner_env" \
-    "$work_dir/scorer-input" "$candidate_score_output" "$score_cgroup_parent"
+    "$work_dir/scorer-input" "$candidate_score_output" "$score_cgroup_parent" "$baseline_source_root"
 sed -i 's/^EVALUATION_ACTION=.*/EVALUATION_ACTION=score/' "$score_compose_env"
 active_project="$score_project"
 active_compose_env="$score_compose_env"
@@ -1189,6 +1416,7 @@ chmod 0400 "$artifact_dir/accounting.json" "$artifact_dir/resources.json"
 
 rm -f -- "$score_runner_env" "$score_compose_env"
 authenticate_local_mounts
+remove_evaluation_sources
 persist_evidence_tree
 write_evidence_manifest
 
@@ -1199,6 +1427,7 @@ redis_generation_id="$(printf '%s\n' "${redis_generations[@]}" | sha256sum | awk
 [ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
     die "final cleanup left job networks"
 cleanup_complete=true
+write_evaluation_progress complete "$replicates" "$replicates"
 
 complete_path="$artifact_dir/evaluation.complete.json"
 jq -n \
@@ -1223,7 +1452,7 @@ sync -d "$artifact_dir/accounting.json" "$artifact_dir/baseline.json" \
 sync "$artifact_dir"
 
 artifact_records=()
-for relative in accounting.json baseline.json resources.json score.json evaluation.complete.json evidence-manifest.json; do
+for relative in accounting.json baseline.json resources.json score.json evaluation-progress.json evaluation.complete.json evidence-manifest.json; do
     path="$artifact_dir/$relative"
     artifact_records+=("$(jq -cn --arg path "$relative" --arg sha256 "$(sha256_file "$path")" \
         --argjson bytes "$(file_bytes "$path")" '{path:$path,sha256:$sha256,bytes:$bytes}')")
@@ -1247,7 +1476,7 @@ if jq -e '.eval_error == null' "$artifact_dir/score.json" >/dev/null; then
     score_json="$(jq \
         '{score_schema,raw_score,normalized_score,placeable,
           takeover_eligible:(.diagnostics.baseline_takeover_eligible // false),
-          gates,diagnostics}' "$artifact_dir/score.json")"
+          gates,significance,diagnostics}' "$artifact_dir/score.json")"
     eval_error_json=null
 else
     score_json=null

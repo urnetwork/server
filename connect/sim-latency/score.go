@@ -171,6 +171,7 @@ type ScoreResult struct {
 	NormalizedScore float64              `json:"normalized_score"`
 	Placeable       bool                 `json:"placeable"`
 	Gates           map[string]ScoreGate `json:"gates"`
+	Significance    *ScoreSignificance   `json:"significance"`
 	Diagnostics     ScoreDiagnostics     `json:"diagnostics"`
 	EvalError       *ScoreEvalError      `json:"eval_error"`
 }
@@ -253,6 +254,7 @@ func Score(inputs ScoreInputs) *ScoreResult {
 
 	baseAggregate := aggregateBaseline(baseline.Replicates)
 	candidateAggregate := aggregateCandidate(replicates)
+	significance := scoreSignificance(baseline.Replicates, replicates, baseline.TakeoverMargin)
 	gates := buildScoreGates(baseAggregate, candidateAggregate, replicates)
 	rawScore := candidateAggregate.RawScore
 	normalized := clampScore(100*baseAggregate.RawScore/rawScore, 1, 200)
@@ -276,6 +278,7 @@ func Score(inputs ScoreInputs) *ScoreResult {
 		RawScore:        rawScore,
 		NormalizedScore: normalized,
 		Gates:           gates,
+		Significance:    significance,
 		Diagnostics:     diagnostics,
 	}
 	result.Placeable = allScoreGatesPass(gates)
@@ -294,7 +297,9 @@ func Score(inputs ScoreInputs) *ScoreResult {
 			Message: "the candidate violated or escaped an evaluation resource boundary",
 		}
 	}
-	takeoverEligible := result.Placeable && rawScore <= takeoverRawMax
+	takeoverEligible := result.Placeable && rawScore <= takeoverRawMax &&
+		significance.StatisticallySignificant &&
+		significance.RecommendedNextEpochTakeoverMarginSupported
 	result.Diagnostics.BaselineTakeoverEligible = &takeoverEligible
 	return result
 }

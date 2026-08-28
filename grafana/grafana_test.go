@@ -33,9 +33,28 @@ type testDashboardLink struct {
 }
 
 type testPanel struct {
-	Id      int    `json:"id"`
-	Type    string `json:"type"`
-	Title   string `json:"title"`
+	Id          int    `json:"id"`
+	Type        string `json:"type"`
+	Title       string `json:"title"`
+	FieldConfig struct {
+		Defaults struct {
+			Thresholds struct {
+				Steps []struct {
+					Color string   `json:"color"`
+					Value *float64 `json:"value"`
+				} `json:"steps"`
+			} `json:"thresholds"`
+		} `json:"defaults"`
+		Overrides []struct {
+			Matcher struct {
+				Options string `json:"options"`
+			} `json:"matcher"`
+			Properties []struct {
+				Id    string          `json:"id"`
+				Value json.RawMessage `json:"value"`
+			} `json:"properties"`
+		} `json:"overrides"`
+	} `json:"fieldConfig"`
 	GridPos struct {
 		H int `json:"h"`
 		W int `json:"w"`
@@ -56,6 +75,68 @@ type testPanel struct {
 		} `json:"layers"`
 	} `json:"options"`
 	Targets []testTarget `json:"targets"`
+}
+
+func TestCompetitionDashboardOperationalSignals(t *testing.T) {
+	dashboard := readTestDashboard(t, "competition.json")
+	joined := strings.Join(dashboardExpressions(dashboard), "\n")
+	for _, metric := range []string{
+		"urnetwork_competition_runner_heartbeat_timestamp_seconds",
+		"urnetwork_competition_submission_queue_size",
+		"urnetwork_competition_current_evaluation_info",
+		"urnetwork_competition_current_evaluation_elapsed_seconds",
+		"urnetwork_competition_significant_submission_found",
+		"urnetwork_competition_evaluation_duration_estimate_seconds",
+		"urnetwork_competition_submission_backlog_estimated_seconds",
+		"urnetwork_competition_live_evaluation_metric_value",
+	} {
+		if !strings.Contains(joined, metric) {
+			t.Errorf("competition dashboard is missing %s", metric)
+		}
+	}
+
+	heartbeat := dashboardPanelById(dashboard, 15)
+	if heartbeat == nil || heartbeat.Title != "runner heartbeat age" || len(heartbeat.Targets) != 1 {
+		t.Fatal("competition runner heartbeat panel is missing")
+	}
+	if !strings.Contains(heartbeat.Targets[0].Expr, "time() - max(") {
+		t.Errorf("runner heartbeat panel does not calculate heartbeat age: %s", heartbeat.Targets[0].Expr)
+	}
+	foundWarning := false
+	for _, step := range heartbeat.FieldConfig.Defaults.Thresholds.Steps {
+		if step.Color == "orange" && step.Value != nil && *step.Value == 30 {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatal("runner heartbeat panel must warn at 30 seconds")
+	}
+	for _, panelId := range []int{22, 23, 24, 25} {
+		panel := dashboardPanelById(dashboard, panelId)
+		if panel == nil || panel.Type != "bargauge" || len(panel.Targets) != 1 ||
+			!strings.Contains(panel.Targets[0].Expr, "urnetwork_competition_live_evaluation_metric_value") {
+			t.Errorf("live evaluation plot %d is missing or invalid", panelId)
+		}
+		colors := map[string]string{}
+		if panel != nil {
+			for _, override := range panel.FieldConfig.Overrides {
+				for _, property := range override.Properties {
+					if property.Id == "color" {
+						var color struct {
+							FixedColor string `json:"fixedColor"`
+						}
+						if err := json.Unmarshal(property.Value, &color); err != nil {
+							t.Fatalf("parse live plot color override: %v", err)
+						}
+						colors[override.Matcher.Options] = color.FixedColor
+					}
+				}
+			}
+		}
+		if colors[`.*\[improved\].*`] != "#3987e5" || colors[`.*\[regressed\].*`] != "#e02f44" {
+			t.Errorf("live evaluation plot %d does not map improvement blue and regression red: %#v", panelId, colors)
+		}
+	}
 }
 
 type testTarget struct {

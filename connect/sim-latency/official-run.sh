@@ -264,6 +264,20 @@ build_baseline_bundle() {
     [ "$(sha256_file "$APEX_SCORER_BIN")" = "$APEX_SCORER_SHA256" ] ||
         die "scorer binary hash mismatch"
 
+    local source_epoch
+    source_epoch="$(
+        "$APEX_SIM_BIN" source-check \
+            --epoch "$APEX_EPOCH" \
+            --source-config /opt/urnetwork/sim-latency.yml \
+            --repos-root /workspace \
+            --json
+    )" || die "source epoch threshold preflight failed"
+    jq -e --argjson margin "$APEX_TAKEOVER_MARGIN" \
+        '.schema == 1 and .epoch >= 0 and
+         .significant_improvement_percent == ($margin * 100)' \
+        <<<"$source_epoch" >/dev/null ||
+        die "takeover margin does not match the configured source epoch"
+
     "$APEX_SCORER_BIN" score-baseline \
         --run "$APEX_BASELINE_RUNS" \
         --stderr "$APEX_BASELINE_STDERR" \

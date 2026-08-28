@@ -75,8 +75,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer pollTicker.Stop()
 
 	for {
-		if err := w.advanceSeason(ctx); err != nil {
-			return fmt.Errorf("advance competition season: %w", err)
+		finished, err := w.finishEpoch(ctx)
+		if err != nil {
+			return fmt.Errorf("finish competition epoch: %w", err)
+		}
+		if finished {
+			return nil
 		}
 		job, err := w.store.Claim(ctx, w.settings, w.workerId, w.workerImageDigest)
 		if err != nil {
@@ -108,53 +112,49 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) advanceSeason(ctx context.Context) error {
-	finalizedRound, finalized, err := w.store.FinalizeEligibleRound(ctx, w.settings)
+// Seals the one round owned by this process after admission closes and the
+// immediate FIFO drains, including work that extends beyond closes_at. A
+// significant candidate is left embargoed for the operator-controlled honesty
+// review gate; the worker never selects or publishes a winner by itself.
+func (w *Worker) finishEpoch(ctx context.Context) (bool, error) {
+	latest, err := w.store.CurrentRound(ctx, w.settings)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if finalized {
+	if latest == nil {
+		return false, nil
+	}
+	if latest.FinalizedAt != nil {
+		return true, nil
+	}
+	state, err := w.store.PrepareCandidateReview(ctx, w.settings, latest.Epoch)
+	if err != nil {
+		return false, err
+	}
+	if state.Status == "pending_review" {
+		glog.Infof(
+			"[competition]epoch %d sealed round=%s candidate=%s rank=%d awaiting_honesty_review=true\n",
+			state.Epoch,
+			state.RoundId,
+			state.Candidate.JobId,
+			state.Candidate.Rank,
+		)
+		return true, nil
+	}
+	if state.Status == "finalized" {
 		winner := "none"
-		if finalizedRound.WinnerJobId != nil {
-			winner = finalizedRound.WinnerJobId.String()
+		if state.WinnerJobId != nil {
+			winner = state.WinnerJobId.String()
 		}
 		glog.Infof(
 			"[competition]epoch %d finalized round=%s winner=%s\n",
-			finalizedRound.Epoch,
-			finalizedRound.RoundId,
+			state.Epoch,
+			state.RoundId,
 			winner,
 		)
+		return true, nil
 	}
-	latest, err := w.store.CurrentRound(ctx, w.settings)
-	if err != nil || latest == nil || latest.FinalizedAt == nil ||
-		w.settings.SeasonPolicy.EpochCount <= latest.Epoch {
-		return err
-	}
-	opensAt := server.NowUtc().Add(
-		time.Duration(w.settings.SeasonPolicy.PreparationWindowSeconds) * time.Second,
-	)
-	closesAt := opensAt.Add(
-		time.Duration(w.settings.SeasonPolicy.SubmissionWindowSeconds) * time.Second,
-	)
-	if w.settings.SeasonEndsAt.Before(closesAt) {
-		return errors.New("next automatic epoch would exceed season_ends_at")
-	}
-	next, err := w.store.CreateRound(ctx, w.settings, GenerateRoundArgs{
-		OpensAt: opensAt, ClosesAt: closesAt, RevealAt: closesAt,
-	})
-	if errors.Is(err, ErrConflict) || errors.Is(err, ErrPreviousEpochOpen) || errors.Is(err, ErrSeasonComplete) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	glog.Infof(
-		"[competition]prepared epoch %d round=%s opens_at=%s\n",
-		next.Epoch,
-		next.RoundId,
-		next.OpensAt.Format(time.RFC3339),
-	)
-	return nil
+	return false, nil
 }
 
 func (w *Worker) evaluateOne(parent context.Context, job *queuedJob, hostCheck HostSelfCheck) error {
@@ -169,7 +169,37 @@ func (w *Worker) evaluateOne(parent context.Context, job *queuedJob, hostCheck H
 		_ = w.handBack(job.JobId, "round_rebaseline_mismatch")
 		return fmt.Errorf("competition evaluator host is not re-baselined for round %s", job.RoundId)
 	}
-	evalCtx, cancel := context.WithCancel(parent)
+	if job.StartedAt == nil {
+		_ = w.handBack(job.JobId, "missing_execution_start")
+		return fmt.Errorf("competition job %s has no execution start", job.JobId)
+	}
+	executionDeadline := job.StartedAt.Add(
+		time.Duration(w.settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second,
+	)
+	if !server.NowUtc().Before(executionDeadline) {
+		outcome := EvaluationOutcome{
+			Error: infrastructureError(
+				"evaluation_time_budget_exhausted",
+				"submission exhausted its total evaluation time budget",
+			),
+			Infrastructure: false,
+		}
+		retry, err := w.store.Complete(
+			context.WithoutCancel(parent),
+			w.settings,
+			w.workerId,
+			job.JobId,
+			outcome,
+		)
+		if err != nil {
+			return fmt.Errorf("complete expired competition job %s: %w", job.JobId, err)
+		}
+		if retry {
+			return fmt.Errorf("expired competition job %s was retained for retry", job.JobId)
+		}
+		return nil
+	}
+	evalCtx, cancel := context.WithDeadline(parent, executionDeadline)
 	defer cancel()
 	type evalReturn struct{ outcome EvaluationOutcome }
 	done := make(chan evalReturn, 1)

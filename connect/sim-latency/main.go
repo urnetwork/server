@@ -21,6 +21,12 @@ package main
 //   score-baseline
 //             validate trusted same-round baseline artifacts and write the
 //             signed-manifest payload consumed by score
+//   score     validate and score a complete candidate artifact bundle
+//   source-check
+//             verify one frozen source epoch against the measured repositories
+//   epoch-review
+//             enumerate, reject, or approve ranked significant candidates
+//   promote   publish a significant winner or no-winner source transition
 //   reset     clear cross-run reliability state so runs are independent
 
 import (
@@ -55,8 +61,11 @@ Usage:
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
-  sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>]
-  sim-latency promote --epoch=<n> --winner=<dir> --winner-job-id=<id> [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
+  sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
+  sim-latency epoch-review --epoch=<n> next [--out-dir=<dir>]
+  sim-latency epoch-review --epoch=<n> reject --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path> [--out-dir=<dir>]
+  sim-latency epoch-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
+  sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
   sim-latency reset
   sim-latency -h | --help
   sim-latency --version
@@ -64,11 +73,16 @@ Usage:
 Options:
   -h --help              Show this screen.
   --version              Show version.
-  --epoch=<n>            Source epoch: 0 is baseline; 1..6 follow winning promotions.
+  --epoch=<n>            Source epoch: 0 is baseline; 1..6 follow finalized epoch transitions.
   --source-config=<path> Epoch ledger path [default: discovered config/main/sim-latency.yml].
   --repos-root=<dir>     Parent of connect, sdk, server, and proxy [default: discovered workspace].
-  --winner=<dir>         Winner directory containing one or more <repository>.patch files.
+  --winner=<dir>         Winner directory containing score.json and one or more patch files.
   --winner-job-id=<id>   Published winning competition job id recorded in the next epoch.
+  --job-id=<id>          Exact candidate job id currently presented for honesty review.
+  --reviewer=<id>        Stable operator or agent-harness reviewer identity.
+  --reason=<text>        Concise honesty-review finding recorded append-only.
+  --evidence=<path>      JSON honesty-review report; its SHA-256 is recorded with the decision.
+  --no-winner            Carry the prior repository commits forward after an epoch with no significant winner.
   --message=<text>       Promotion commit message suffix.
   --dry-run              Validate and stage a promotion without pushing or updating local branches.
   --out=<path>           Output path for the selected file-producing command.
@@ -159,7 +173,11 @@ Options:
 		runScore(opts)
 	case optBool(opts, "source-check"):
 		runSourceCheck(opts)
+	case optBool(opts, "epoch-review"):
+		requireMainEnvironment("epoch-review")
+		runEpochReview(opts)
 	case optBool(opts, "promote"):
+		requireMainEnvironment("promote")
 		runPromote(opts)
 	case optBool(opts, "reset"):
 		requireLocalEnvironment("reset")
@@ -349,11 +367,25 @@ func validateEnvironment(command string, env string) error {
 				env,
 			)
 		}
+	case "epoch-review", "promote":
+		if env != "main" {
+			return fmt.Errorf(
+				"sim-latency %s is main-only: refusing WARP_ENV=%q",
+				command,
+				env,
+			)
+		}
 	}
 	return nil
 }
 
 func requireLocalEnvironment(command string) {
+	if err := validateEnvironment(command, server.RequireEnv()); err != nil {
+		fatalf("%s", err)
+	}
+}
+
+func requireMainEnvironment(command string) {
 	if err := validateEnvironment(command, server.RequireEnv()); err != nil {
 		fatalf("%s", err)
 	}

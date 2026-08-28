@@ -1,10 +1,12 @@
 package competition
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +31,41 @@ func writeArchiveTestFile(t *testing.T, root string, path string, content []byte
 	}
 }
 
+func TestBlobArtifactArchiveRetainsSubmissionBeforeEvaluation(t *testing.T) {
+	settings := validSettings()
+	settings.RetainUntil = server.NowUtc().Add(24 * time.Hour).Truncate(time.Second)
+	store := server.NewLocalBlobStore(t.TempDir(), "evidence").(server.RetainedBlobStore)
+	archive := &blobArtifactArchive{store: store}
+	settings.artifactArchive = archive
+
+	patchBytes := []byte("diff --git a/connect/example.go b/connect/example.go\n")
+	digest := sha256.Sum256(patchBytes)
+	patch := &CanonicalPatch{Bytes: patchBytes, Sha256: hex.EncodeToString(digest[:])}
+	retained, err := archive.ArchiveSubmission(
+		context.Background(),
+		settings,
+		server.NewId(),
+		patch,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.Path != "canonical.patch" || retained.Sha256 != patch.Sha256 ||
+		retained.Bytes != int64(len(patch.Bytes)) || retained.Mode != "LOCAL" ||
+		!strings.Contains(retained.Key, "/submissions/sha256/"+patch.Sha256+"/") {
+		t.Fatalf("submission retention = %+v", retained)
+	}
+	reader, err := store.GetVersion(context.Background(), retained.Key, retained.VersionId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedBytes, err := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil || !bytes.Equal(retainedBytes, patchBytes) {
+		t.Fatalf("retained submission = %q, read=%v close=%v", retainedBytes, err, closeErr)
+	}
+}
+
 func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *testing.T) {
 	settings := validSettings()
 	settings.RetainUntil = server.NowUtc().Add(24 * time.Hour).Truncate(time.Second)
@@ -40,7 +77,8 @@ func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *tes
 	job := &queuedJob{
 		ScoreJobResult: ScoreJobResult{
 			JobId: jobId, RoundId: roundId, PatchSha256: strings.Repeat("a", 64),
-			ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+			EvaluatorImageDigest: settings.EvaluatorImageDigest,
+			ApiImageDigest:       testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
 		},
 		AttemptCount: 1,
 	}
@@ -54,7 +92,8 @@ func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *tes
 
 	manifestBytes, err := archive.ArchiveAttempt(context.Background(), settings, job, attemptDirectory, artifactManifest{
 		Schema: 1, JobId: jobId.String(), RoundId: roundId.String(), Attempt: 1,
-		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
+		EvaluatorImageDigest: job.EvaluatorImageDigest,
+		ApiImageDigest:       job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		PatchSha256: patch.Sha256, ResultSha256: result.Sha256,
 		StderrSha256: stderr.Sha256, Artifacts: []evaluationArtifact{declared},
 	})
@@ -70,8 +109,9 @@ func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *tes
 		manifest.Retention.ObjectCount != 4 {
 		t.Fatalf("retention manifest = %+v", manifest.Retention)
 	}
-	if manifest.ApiImageDigest != job.ApiImageDigest || manifest.WorkerImageDigest != job.WorkerImageDigest {
-		t.Fatal("retention manifest lost control-plane image provenance")
+	if manifest.EvaluatorImageDigest != job.EvaluatorImageDigest ||
+		manifest.ApiImageDigest != job.ApiImageDigest || manifest.WorkerImageDigest != job.WorkerImageDigest {
+		t.Fatal("retention manifest lost evaluation image provenance")
 	}
 	objects, err := store.List(context.Background(), "evidence/competition/v1/")
 	if err != nil {

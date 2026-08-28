@@ -23,13 +23,24 @@ and scorer-input copies when the original evidence manifest binds both. The
 small `lineage` directory also brings the terminal audit records that previously
 lived only on the finalization-evidence branch into this self-contained package.
 
+[`final-baseline.html`](final-baseline.html) is the human-readable visual report
+for this evidence. It is covered by the directory manifest alongside this
+README, the index, verifier, and immutable `v1` data.
+
 ## Identity
 
 - Evaluated server source: `46515d82fe98ff666c61b2b5bb1d34a89cf4dad8`
 - Evaluator image: `sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c`
 - Scale: 1,800 providers, 200 clients, 80 arrivals/minute, quality window 2
 - Measurement: 180 seconds, impairment enabled, median of 9 replicates
-- Takeover margin: 16.1% (`candidate <= same-round baseline * 0.839`), plus G1–G6
+- Initial takeover margin: 16.1%
+  (`candidate <= same-round baseline * 0.839`), plus G1–G6
+
+The live scorer additionally requires a one-sided run-level Welch result at
+`p <= 0.05` and records baseline/candidate sample variances with every
+evaluation. A significant winner's supported recommendation becomes the next
+source epoch's percentage; without a significant winner, that percentage and
+the source commits carry forward unchanged.
 
 Machine-readable dataset counts, key artifact hashes, and source lineage are in
 [`INDEX.json`](INDEX.json). Every regular file in this directory except the

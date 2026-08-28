@@ -7,6 +7,7 @@ set -Eeuo pipefail
 umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly PREPARE_EVALUATION_SOURCE="$SCRIPT_DIR/prepare-evaluation-source.sh"
 
 base_image=""
 policy_path=""
@@ -47,6 +48,10 @@ for command in git jq mktemp realpath sed sha256sum sudo; do
     }
 done
 sudo -n docker info >/dev/null
+[ -x "$PREPARE_EVALUATION_SOURCE" ] || {
+    printf 'evaluation source preparer is not executable\n' >&2
+    exit 1
+}
 [ -f "$policy_path" ] && [ ! -L "$policy_path" ] || {
     printf 'policy must be a regular non-symlink file\n' >&2
     exit 1
@@ -58,14 +63,12 @@ if [ "$allow_local_base" != true ]; then
         exit 1
     }
 fi
+build_args=()
+if [ "$allow_local_base" = true ]; then build_args+=(--allow-local-base); fi
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/urnetwork-build-isolation.XXXXXXXX")"
-source_container=""
 test_image=""
 cleanup() {
-    if [ -n "${source_container:-}" ]; then
-        sudo -n docker rm -f "$source_container" >/dev/null 2>&1 || true
-    fi
     if [ -n "${test_image:-}" ]; then
         test_containers="$(sudo -n docker ps -aq --filter "ancestor=$test_image")"
         if [ -z "$test_containers" ]; then
@@ -80,14 +83,39 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
-source_container="$(sudo -n docker create "$base_image_id")"
-sudo -n docker cp "$source_container:/workspace/server" "$test_root/server"
-sudo -n docker rm "$source_container" >/dev/null
-source_container=""
-sudo -n chown -R "$(id -u):$(id -g)" "$test_root/server"
-test -z "$(git -C "$test_root/server" status --porcelain --untracked-files=all)"
+evaluation_source_root="$test_root/evaluation-source"
+$PREPARE_EVALUATION_SOURCE --base-image "$base_image_id" \
+    --destination "$evaluation_source_root" >/dev/null
+test -z "$(git -C "$evaluation_source_root/server" status --porcelain --untracked-files=all)"
 
-target="$test_root/server/connect/resident_contract_manager.go"
+# Even a deliberately malformed operator policy cannot open the trusted
+# simulator tree. Exercise the builder's post-apply tree authentication, not
+# only the API validator used on the normal submission path.
+protected_target="$evaluation_source_root/server/connect/sim-latency/main.go"
+printf '\n// protectedSimulatorTreeProbe must never survive patch validation.\n' >> "$protected_target"
+protected_patch="$test_root/protected-sim-latency.patch"
+git -C "$evaluation_source_root/server" diff --binary HEAD -- connect/sim-latency/main.go > "$protected_patch"
+test -s "$protected_patch"
+git -C "$evaluation_source_root/server" checkout -- connect/sim-latency/main.go
+malformed_policy="$test_root/malformed-policy.json"
+jq '.allowed_paths = ["connect/sim-latency/main.go"] |
+    .forbidden_paths = ["unrelated/**"]' "$policy_path" > "$malformed_policy"
+protected_tag="urnetwork/sim-latency-protected-reject:$(sha256sum "$protected_patch" | awk '{print substr($1,1,32)}')"
+if "$SCRIPT_DIR/build-submission.sh" \
+    "${build_args[@]}" \
+    --base-image "$base_image" \
+    --source-root "$evaluation_source_root" \
+    --patch "$protected_patch" \
+    --policy "$malformed_policy" \
+    --tag "$protected_tag"; then
+    printf 'builder accepted a patch to the protected sim-latency tree\n' >&2
+    exit 1
+fi
+git -C "$evaluation_source_root/server" checkout -- connect/sim-latency/main.go
+test -z "$(git -C "$evaluation_source_root/server" status --porcelain --untracked-files=all)"
+! sudo -n docker image inspect "$protected_tag" >/dev/null 2>&1
+
+target="$evaluation_source_root/server/connect/resident_contract_manager.go"
 sed -i '/^import ($/a\	"os"' "$target"
 printf '%s\n' \
     '' \
@@ -107,23 +135,38 @@ printf '%s\n' \
     >> "$target"
 
 patch_path="$test_root/isolation.patch"
-git -C "$test_root/server" diff --binary HEAD -- connect/resident_contract_manager.go > "$patch_path"
+git -C "$evaluation_source_root/server" diff --binary HEAD -- connect/resident_contract_manager.go > "$patch_path"
 test -s "$patch_path"
+git -C "$evaluation_source_root/server" checkout -- connect/resident_contract_manager.go
 patch_sha256="$(sha256sum "$patch_path" | awk '{print $1}')"
 test_image="urnetwork/sim-latency-build-isolation:${patch_sha256:0:32}"
 
-build_args=()
-if [ "$allow_local_base" = true ]; then build_args+=(--allow-local-base); fi
 build_json="$(
     "$SCRIPT_DIR/build-submission.sh" \
         "${build_args[@]}" \
         --base-image "$base_image" \
+        --source-root "$evaluation_source_root" \
         --patch "$patch_path" \
         --policy "$policy_path" \
         --tag "$test_image"
 )"
 candidate_image_id="$(jq -er '.image_id' <<<"$build_json")"
 [ "$(sudo -n docker image inspect --format '{{.Id}}' "$test_image")" = "$candidate_image_id" ]
+
+base_simulator_tree="$(
+    sudo -n docker run --rm --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges:true --entrypoint /usr/bin/git \
+        "$base_image_id" -C /workspace/server rev-parse HEAD:connect/sim-latency
+)"
+candidate_simulator_tree="$(
+    sudo -n docker run --rm --network none --read-only --cap-drop ALL \
+        --security-opt no-new-privileges:true --entrypoint /usr/bin/git \
+        "$candidate_image_id" -C /workspace/server rev-parse HEAD:connect/sim-latency
+)"
+[ "$candidate_simulator_tree" = "$base_simulator_tree" ] || {
+    printf 'candidate changed the protected sim-latency Git tree\n' >&2
+    exit 1
+}
 
 readonly protected_paths=(
     /usr/local/libexec/competition-container
@@ -166,4 +209,5 @@ jq -n \
     '{schema:1,status:"passed",base_image_id:$base_image_id,
       candidate_image_id:$candidate_image_id,patch_sha256:$patch_sha256,
       builder_sha256:$builder_sha256,checks_executed_unprivileged:true,
-      check_stage_discarded:true,protected_path_count:$protected_path_count}'
+      check_stage_discarded:true,simulator_tree_immutable:true,
+      protected_path_count:$protected_path_count}'

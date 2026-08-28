@@ -183,6 +183,10 @@ services:
     networks: [evaluation]
     volumes:
       - type: bind
+        source: ${EVALUATION_SOURCE_DIR:?set the per-evaluation temporary source checkout}
+        target: /workspace
+        read_only: true
+      - type: bind
         source: ${EVALUATION_CONFIG_LOCAL_DIR:?set frozen direct config/local directory}
         target: /runtime/config/local
         read_only: true

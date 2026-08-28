@@ -61,6 +61,7 @@
       }
     }
   },
+  "significance": null,
   "diagnostics": {
     "round_id": "boundary-fixture",
     "replicate_count": 1,

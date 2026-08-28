@@ -2,15 +2,16 @@
 
 This is the operator contract for [`official-run.sh`](official-run.sh) and
 `score_schema: 1`. The script is deliberately fail-closed and has no scale,
-duration, replicate-count, kernel, or takeover defaults. Those values become
-official only after the production hardware campaign is recorded in
-`APEX-CALIBRATION.md` and Macrocosmos accepts the corresponding signed baseline
-manifest.
+duration, replicate-count, kernel, or takeover defaults. Production
+calibration is preserved under [`baseline/`](baseline/README.md); the current
+source epoch and significant-improvement percentage are frozen in
+`config/main/sim-latency.yml`, and the same-round manifest freezes the exact
+workload and replicate policy.
 
-Until that calibration and acceptance exist, set neither
-`APEX_CALIBRATION_ACCEPTED=yes` nor advertise this runner as launch-qualified.
-The script can still be exercised in staging with a separately labeled staging
-manifest.
+Set `APEX_CALIBRATION_ACCEPTED=yes` only after the worker authenticates the
+selected epoch, evaluator image, host facts, local-leaf hashes, and promoted
+same-round baseline. Macrocosmos acceptance is a separate public-launch action
+tracked in [`PLAYBOOK.md`](PLAYBOOK.md); it does not alter score calculation.
 
 ## Immutable components
 
@@ -172,7 +173,10 @@ APEX_NO_IMPAIR=no
 
 The providers file is generated from the hidden CSPRNG round seed by the
 control plane. Only its SHA-256 commitment is public during the round. The seed
-and file are revealed after the configured delay.
+and file are revealed only after admission has closed, all accepted work is
+terminal, and post-honesty-review epoch finalization commits. `APEX_TAKEOVER_MARGIN` must exactly
+equal the selected source epoch's `significant_improvement_percent / 100`;
+`official-run.sh baseline` verifies that binding before it creates a manifest.
 
 ## Run and external snapshots
 
@@ -308,7 +312,11 @@ Then run:
 The scorer is file-only and returns a typed JSON result even for non-placeable
 or invalid submissions. Missing/malformed artifacts are infrastructure errors;
 the worker may retry those under the same cached patch identity without
-granting a new candidate noise draw.
+granting a new candidate noise draw. Every successful score also records the
+baseline and candidate run-level sample variances, observed improvement,
+one-sided Welch p-value, current minimum, and supported next-epoch threshold.
+A takeover requires the raw-score margin, `p <= 0.05`, G1–G6, and a supported
+next-epoch recommendation.
 
 ## Immutable bundle and checksums
 
@@ -333,20 +341,22 @@ id, and score for the full season.
 
 ## Qualification and launch evidence
 
-The runner is not launch-qualified merely because its tests pass. Before
-setting `APEX_CALIBRATION_ACCEPTED=yes`, preserve and review:
+The accepted speed-to-launch calibration is immutable under
+[`baseline/v1`](baseline/README.md). It selected p1800 after the impairment
+on/off frontier, retained twelve uncensored same-seed A/A pairs, selected
+median-of-nine with an initial 16.1% margin, and passed the authorized
+independent reference screen on four of five seeds. That 4/5 screen is an
+explicit compromise and is not confidence-equivalent to the original 19/20
+design.
 
-- 20 consecutive clean frontier runs at selected scale;
-- 20 same-seed repetitions and at least 20 independent hidden seeds;
-- no-op, deliberately worse, and plausibly better reference patches ranking in
-  order on at least 19/20 seeds;
-- `sigma_run <= 0.25 * takeover_margin` after the selected aggregation;
-- CPU at or below the accepted headroom, no measured-window `ENOBUFS`, complete
-  warm pools, and clean Postgres/Redis/socket/memory/teardown behavior;
-- wall time within the agreed Apex submit/poll timeout;
-- a fresh-image reproduction and byte-identical re-score.
+The same evidence records complete warm pools, bounded CPU and memory,
+PostgreSQL/Redis/socket behavior, teardown, hostile CPU/memory-bomb cleanup,
+production-staging API/worker execution, and deterministic re-scoring. Verify
+the dataset with `baseline/verify.sh`; do not substitute ignored host run
+directories for the versioned evidence.
 
-Write the raw data and chosen scale/duration/replicate count/margin to
-`APEX-CALIBRATION.md`. Macrocosmos acceptance and the staging handoff remain
-external launch gates; they must never be represented by a locally fabricated
-checkbox or report.
+Each source epoch still requires an authenticated evaluator image, source
+ledger match, fresh hidden workload, promoted R=9 same-round baseline, and
+passing readiness. Macrocosmos adapter/staging/registry acceptance and signed
+public handoff artifacts remain external launch gates and must not be
+represented by a locally fabricated checkbox or report.

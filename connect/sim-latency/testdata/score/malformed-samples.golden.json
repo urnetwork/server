@@ -4,6 +4,7 @@
   "normalized_score": 0,
   "placeable": false,
   "gates": {},
+  "significance": null,
   "diagnostics": {},
   "eval_error": {
     "kind": "infrastructure",

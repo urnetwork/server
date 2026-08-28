@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,12 +13,22 @@ import (
 type launchPlaybook struct {
 	Schema int `yaml:"schema"`
 	Season struct {
-		EpochCount               int `yaml:"epoch_count"`
-		SubmissionWindowSeconds  int `yaml:"submission_window_seconds"`
-		PreparationWindowSeconds int `yaml:"preparation_window_seconds"`
-		QueueLimit               int `yaml:"queue_limit"`
-		ScoreTimeoutSeconds      int `yaml:"score_timeout_seconds"`
+		EpochCount               int    `yaml:"epoch_count"`
+		SubmissionWindowSeconds  int    `yaml:"submission_window_seconds"`
+		PreparationWindowSeconds int    `yaml:"preparation_window_seconds"`
+		SubmissionFeeUsd         int    `yaml:"submission_fee_usd"`
+		QueueLimit               int    `yaml:"queue_limit"`
+		ScoreTimeoutSeconds      int    `yaml:"score_timeout_seconds"`
+		BaselineSourcePolicy     string `yaml:"baseline_source_policy"`
 	} `yaml:"season"`
+	Significance struct {
+		Authority                 string  `yaml:"authority"`
+		Method                    string  `yaml:"method"`
+		Alpha                     float64 `yaml:"alpha"`
+		InitialImprovementPercent float64 `yaml:"initial_improvement_percent"`
+		ThresholdScope            string  `yaml:"threshold_scope"`
+		NoWinnerPolicy            string  `yaml:"no_winner_policy"`
+	} `yaml:"significance"`
 	Checklist []struct {
 		Id     string `yaml:"id"`
 		Status string `yaml:"status"`
@@ -83,8 +95,18 @@ func TestLaunchPlaybookFreezesWeeklySixEpochContract(t *testing.T) {
 	if playbook.Schema != 1 || playbook.Season.EpochCount != 6 ||
 		playbook.Season.SubmissionWindowSeconds != 7*24*60*60 ||
 		playbook.Season.PreparationWindowSeconds != 16*60*60 ||
-		playbook.Season.QueueLimit != 10 || playbook.Season.ScoreTimeoutSeconds != 49392 {
+		playbook.Season.SubmissionFeeUsd != 20 || playbook.Season.QueueLimit != 0 ||
+		playbook.Season.ScoreTimeoutSeconds != 10800 ||
+		playbook.Season.BaselineSourcePolicy != "promote_significant_winner_or_carry_forward_unchanged" {
 		t.Fatalf("launch season is not frozen: %+v", playbook.Season)
+	}
+	if playbook.Significance.Authority != "config/main/sim-latency.yml" ||
+		playbook.Significance.Method != scoreSignificanceMethod ||
+		playbook.Significance.Alpha != scoreSignificanceAlpha ||
+		playbook.Significance.InitialImprovementPercent != 16.1 ||
+		playbook.Significance.ThresholdScope != "per_source_epoch" ||
+		playbook.Significance.NoWinnerPolicy != "carry_commits_and_threshold_forward_when_none_significant_or_all_rejected" {
+		t.Fatalf("launch significance policy is not frozen: %+v", playbook.Significance)
 	}
 	statuses := map[string]string{}
 	for _, item := range playbook.Checklist {
@@ -98,14 +120,92 @@ func TestLaunchPlaybookFreezesWeeklySixEpochContract(t *testing.T) {
 		"api_migration_worker_ordering",
 		"public_ingress_controls",
 		"competition_api_and_leaderboard",
-		"six_epoch_batch_lifecycle",
+		"six_epoch_immediate_fifo_lifecycle",
 		"immutable_artifact_implementation",
 		"grafana_implementation",
 		"runtime_control_plane_identity",
 		"winner_source_policy",
+		"winner_honesty_review_gate",
 	} {
 		if !strings.HasPrefix(statuses[completeId], "complete") {
 			t.Errorf("checklist item %q = %q, want complete", completeId, statuses[completeId])
+		}
+	}
+}
+
+func TestOnlyCurrentEntrypointsRemainAtPackageRoot(t *testing.T) {
+	archived := []string{
+		"APEX-CALIBRATION.md",
+		"APEX-SCORE-SPEC.md",
+		"EVALUATION2.md",
+		"FINALIZATION-STATUS.md",
+		"FINALIZE.md",
+		"eval-48.sh",
+		"eval-frontier-12c.sh",
+		"finalize-local-baseline.sh",
+		"run-reserved-boundary-baseline.sh",
+		"sample-host-resources.sh",
+		"sample-rss.sh",
+		"sample-service-resources.sh",
+		"summarize-baseline.py",
+		"summarize-frontier.py",
+		"verify-local-baseline.sh",
+		"final-baseline2.html",
+		"final-preview.html",
+	}
+	for _, name := range archived {
+		if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("archived file remains at package root: %s", name)
+		}
+		if info, err := os.Stat(filepath.Join("old", name)); err != nil || !info.Mode().IsRegular() {
+			t.Errorf("archived file is not preserved under old/: %s", name)
+		}
+	}
+
+	for _, name := range []string{
+		"README.md",
+		"OFFICIAL-RUN.md",
+		"PLAYBOOK.md",
+		"playbook.yml",
+		"official-run.sh",
+		"baseline/README.md",
+		"baseline/final-baseline.html",
+		"baseline/verify.sh",
+	} {
+		if info, err := os.Stat(name); err != nil || !info.Mode().IsRegular() {
+			t.Errorf("current package file is missing: %s", name)
+		}
+	}
+
+	pythonFiles, err := filepath.Glob("*.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pythonFiles) != 0 {
+		t.Errorf("live package root contains Python utilities: %v", pythonFiles)
+	}
+}
+
+func TestCurrentDocumentationDoesNotLinkArchivedContracts(t *testing.T) {
+	documents := []string{"README.md", "OFFICIAL-RUN.md", "PLAYBOOK.md"}
+	archivedReferences := []string{
+		"APEX-CALIBRATION.md",
+		"APEX-SCORE-SPEC.md",
+		"EVALUATION2.md",
+		"FINALIZATION-STATUS.md",
+		"FINALIZE.md",
+		"final-preview.html",
+		"final-baseline2.html",
+	}
+	for _, document := range documents {
+		contents, err := os.ReadFile(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, archived := range archivedReferences {
+			if strings.Contains(string(contents), archived) {
+				t.Errorf("%s still references archived %s", document, archived)
+			}
 		}
 	}
 }

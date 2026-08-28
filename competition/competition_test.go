@@ -44,6 +44,18 @@ func (fakeArtifactArchive) ArchiveRound(context.Context, *Settings, *roundRecord
 	return nil
 }
 
+func (fakeArtifactArchive) ArchiveSubmission(
+	context.Context,
+	*Settings,
+	server.Id,
+	*CanonicalPatch,
+) (*retainedArtifact, error) {
+	return &retainedArtifact{
+		Path: "canonical.patch", Key: "test/submission.patch", Sha256: strings.Repeat("a", 64),
+		Bytes: 1, Mode: "LOCAL", RetainUntil: server.NowUtc().Add(time.Hour),
+	}, nil
+}
+
 func (fakeArtifactArchive) ArchiveAttempt(
 	context.Context,
 	*Settings,
@@ -69,7 +81,7 @@ func validSettings() *Settings {
 		PatchPolicy: PatchPolicy{
 			MaxPatchBytes:  262144,
 			AllowedPaths:   []string{"connect/example.go", "model/example.go"},
-			ForbiddenPaths: []string{"connect/payment/**", "model/payment*.go"},
+			ForbiddenPaths: []string{protectedSimulatorTreePattern, "connect/payment/**", "model/payment*.go"},
 		},
 		EvaluationPolicy: EvaluationPolicy{
 			HardwareId:              "xeon-e5-2697v2-12c-v1",
@@ -84,11 +96,11 @@ func validSettings() *Settings {
 			DurationMs: 1800000, RequestTimeoutMs: 120000, Replicates: 3,
 			PipelineIntervalMs: 10000, TestTimeoutMs: 3000, AnnounceTimeoutMs: 2000,
 			ImpairmentEnabled: true,
-			TakeoverMargin:    .12, QueueLimit: 16, ScoreTimeoutSeconds: 28800,
+			TakeoverMargin:    .12, QueueLimit: 0, ScoreTimeoutSeconds: submissionEvaluationTimeoutSeconds,
 		},
 		SeasonPolicy: SeasonPolicy{
 			EpochCount: 6, SubmissionWindowSeconds: 7 * 24 * 60 * 60,
-			PreparationWindowSeconds: 16 * 60 * 60,
+			PreparationWindowSeconds: 16 * 60 * 60, SubmissionFeeUsd: 20,
 		},
 		ArtifactRoot:         "/var/lib/urnetwork/competition",
 		ConfigLocalDirectory: "/srv/warp/config/local",
@@ -120,6 +132,43 @@ func testWorkerImageDigest() string {
 	return "sha256:" + strings.Repeat("7", 64)
 }
 
+func testScoreSignificance(significant bool) *ScoreSignificance {
+	baselineVariance := 4.0
+	candidateVariance := 4.0
+	minimumPercent := 2.0
+	requiredPercent := 12.0
+	pValue := 0.5
+	observedPercent := 5.0
+	if significant {
+		pValue = 0.01
+		observedPercent = 20
+	}
+	welchT := 3.0
+	degreesOfFreedom := 4.0
+	nextEpochMinimumPercent := 2.0
+	recommendedPercent := 12.0
+	return &ScoreSignificance{
+		Method:                                      "one-sided-welch-t",
+		Alpha:                                       0.05,
+		ReplicateCount:                              3,
+		BaselineMeanRawScore:                        100,
+		CandidateMeanRawScore:                       100 - observedPercent,
+		BaselineSampleVariance:                      &baselineVariance,
+		CandidateSampleVariance:                     &candidateVariance,
+		ObservedImprovementPercent:                  observedPercent,
+		TakeoverMarginPercent:                       12,
+		MinimumSignificantImprovementPercent:        &minimumPercent,
+		RequiredImprovementPercent:                  &requiredPercent,
+		OneSidedPValue:                              &pValue,
+		WelchT:                                      &welchT,
+		WelchDegreesOfFreedom:                       &degreesOfFreedom,
+		StatisticallySignificant:                    significant,
+		NextEpochMinimumImprovementPercent:          &nextEpochMinimumPercent,
+		RecommendedNextEpochTakeoverMarginPercent:   &recommendedPercent,
+		RecommendedNextEpochTakeoverMarginSupported: true,
+	}
+}
+
 func TestRuntimeImageDigestRequiresExactSha256Identity(t *testing.T) {
 	want := testApiImageDigest()
 	t.Setenv(runtimeImageDigestEnvironment, "  "+want+"\n")
@@ -138,14 +187,21 @@ func TestEvaluatorRequestBindsControlPlaneImageDigests(t *testing.T) {
 	job := &queuedJob{
 		ScoreJobResult: ScoreJobResult{
 			JobId: server.NewId(), RoundId: server.NewId(), PatchSha256: strings.Repeat("8", 64),
-			ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+			EvaluatorImageDigest: settings.EvaluatorImageDigest,
+			ApiImageDigest:       testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
 		},
 		AttemptCount: 1,
 		Round:        roundRecord{RoundResult: RoundResult{Epoch: 1}},
 	}
 	request := evaluatorRequestForJob(settings, job, strings.Repeat("9", 64), "/tmp/attempt", "/tmp/attempt/canonical.patch")
-	if request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
-		t.Fatalf("request image identity = %q, %q", request.ApiImageDigest, request.WorkerImageDigest)
+	if request.EvaluatorImageDigest != job.EvaluatorImageDigest ||
+		request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
+		t.Fatalf(
+			"request image identity = %q, %q, %q",
+			request.EvaluatorImageDigest,
+			request.ApiImageDigest,
+			request.WorkerImageDigest,
+		)
 	}
 	if request.SourceEpoch != 0 {
 		t.Fatalf("request source epoch = %d, want 0", request.SourceEpoch)
@@ -173,18 +229,6 @@ func TestTimeoutBudgetMatchesEvaluator(t *testing.T) {
 		t.Fatalf("shell stage timeout = %d, Go = %d", stageSeconds, want)
 	}
 
-	scoreArgs := append([]string{"score", strconv.Itoa(p.Replicates)}, args...)
-	scoreOut, err := exec.Command("container/timeout-budget.sh", scoreArgs...).Output()
-	if err != nil {
-		t.Fatalf("score timeout calculator: %s", err)
-	}
-	scoreSeconds, err := strconv.ParseInt(strings.TrimSpace(string(scoreOut)), 10, 64)
-	if err != nil {
-		t.Fatalf("parse score timeout: %s", err)
-	}
-	if want := minimumScoreTimeoutSeconds(p); scoreSeconds != want {
-		t.Fatalf("shell score timeout = %d, Go = %d", scoreSeconds, want)
-	}
 }
 
 func TestSettingsValidateFrozenPolicy(t *testing.T) {
@@ -205,6 +249,11 @@ func TestSettingsValidateFrozenPolicy(t *testing.T) {
 	settings.PatchPolicy.ForbiddenPaths = nil
 	if err := settings.Validate(); err == nil {
 		t.Fatal("empty hard-forbidden path list accepted")
+	}
+	settings = validSettings()
+	settings.PatchPolicy.ForbiddenPaths = []string{"connect/payment/**"}
+	if err := settings.Validate(); err == nil {
+		t.Fatal("policy without an explicit protected simulator tree accepted")
 	}
 	settings = validSettings()
 	settings.PatchPolicy.AllowedPaths = []string{"connect/**"}
@@ -237,11 +286,24 @@ func TestSettingsValidateFrozenPolicy(t *testing.T) {
 		t.Fatal("unfrozen direct config/local digest accepted")
 	}
 	settings = validSettings()
-	p := settings.EvaluationPolicy
-	oldPerRunMs := p.RampMs + p.SettleMs + p.DurationMs + p.RequestTimeoutMs
-	settings.EvaluationPolicy.ScoreTimeoutSeconds = int((2*int64(p.Replicates)*oldPerRunMs + 999) / 1000)
+	settings.SeasonPolicy.SubmissionFeeUsd = 19
 	if err := settings.Validate(); err == nil {
-		t.Fatal("score timeout that omits client warm-up accepted")
+		t.Fatal("submission fee other than $20 accepted")
+	}
+	settings = validSettings()
+	settings.EvaluationPolicy.QueueLimit = 1
+	if err := settings.Validate(); err == nil {
+		t.Fatal("bounded epoch queue accepted")
+	}
+	settings = validSettings()
+	settings.EvaluationPolicy.ScoreTimeoutSeconds = submissionEvaluationTimeoutSeconds - 1
+	if err := settings.Validate(); err == nil {
+		t.Fatal("submission timeout below three hours accepted")
+	}
+	settings = validSettings()
+	settings.EvaluationPolicy.ScoreTimeoutSeconds = submissionEvaluationTimeoutSeconds + 1
+	if err := settings.Validate(); err == nil {
+		t.Fatal("submission timeout above three hours accepted")
 	}
 	settings = validSettings()
 	settings.EvaluationPolicy.ClientWarmupTimeoutMs = 0
@@ -285,14 +347,15 @@ func TestAuthenticateOpaqueTokens(t *testing.T) {
 	}
 }
 
-func TestSecureEvaluatorChecksKeepQueueAdmissionSeparate(t *testing.T) {
+func TestSecureEvaluatorChecksRequireUnboundedAdmissionReadiness(t *testing.T) {
 	checks := map[string]bool{
 		"configuration": true, "database": true, "queue_admission": false,
 		"authoritative_evaluator_host": true, "host_rebaseline": true,
 	}
-	if !secureEvaluatorChecksPass(checks) {
-		t.Fatal("a full queue should retain the endpoint's explicit 429 path")
+	if secureEvaluatorChecksPass(checks) {
+		t.Fatal("unavailable admission path was treated as ready")
 	}
+	checks["queue_admission"] = true
 	checks["host_rebaseline"] = false
 	if secureEvaluatorChecksPass(checks) {
 		t.Fatal("failed evaluator qualification was treated as ready")
@@ -301,7 +364,7 @@ func TestSecureEvaluatorChecksKeepQueueAdmissionSeparate(t *testing.T) {
 
 func TestRoundGenerationReadinessPrecedesRoundRebaseline(t *testing.T) {
 	checks := map[string]bool{
-		"configuration": true, "database": true, "queue_admission": false,
+		"configuration": true, "database": true, "queue_admission": true,
 		"authoritative_evaluator_host": true, "host_rebaseline": false,
 	}
 	if !roundGenerationChecksPass(checks) {
@@ -352,6 +415,35 @@ func TestPatchValidationAndCanonicalIdentity(t *testing.T) {
 			_, got := ValidateAndCanonicalizePatch(test.patch, policy)
 			if got == nil || got.Code != test.code {
 				t.Fatalf("got %#v, want code %s", got, test.code)
+			}
+		})
+	}
+}
+
+func TestPatchValidationAlwaysProtectsSimulatorTree(t *testing.T) {
+	paths := []string{
+		"connect/sim-latency/main.go",
+		"connect/sim-latency/score.go",
+		"connect/sim-latency/internal/probe.go",
+	}
+	for _, filePath := range paths {
+		t.Run(filePath, func(t *testing.T) {
+			// Deliberately allowlist the protected file and omit it from the
+			// caller-supplied denylist. The hard boundary must still win if a
+			// malformed policy reaches the standalone image validator.
+			policy := PatchPolicy{
+				MaxPatchBytes:  4096,
+				AllowedPaths:   []string{filePath},
+				ForbiddenPaths: []string{"unrelated/**"},
+			}
+			patch := "diff --git a/" + filePath + " b/" + filePath + "\n" +
+				"index 1111111..2222222 100644\n" +
+				"--- a/" + filePath + "\n" +
+				"+++ b/" + filePath + "\n" +
+				"@@ -1 +1 @@\n-old\n+new\n"
+			_, evalError := ValidateAndCanonicalizePatch(patch, policy)
+			if evalError == nil || evalError.Code != "path_not_allowed" || evalError.Retriable {
+				t.Fatalf("protected simulator patch result = %#v", evalError)
 			}
 		})
 	}
@@ -412,6 +504,30 @@ func TestPolicySnapshotSurvivesJsonbNormalization(t *testing.T) {
 	}
 }
 
+func TestEvaluatorImageDigestFromPolicyRetainsHistoricalIdentity(t *testing.T) {
+	settings := validSettings()
+	want := settings.EvaluatorImageDigest
+	stored, err := policySnapshot(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.EvaluatorImageDigest = "sha256:" + strings.Repeat("c", 64)
+	got, err := evaluatorImageDigestFromPolicy(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("historical evaluator image digest = %q, want %q", got, want)
+	}
+}
+
+func TestEvaluatorImageDigestFromPolicyRejectsUnpinnedIdentity(t *testing.T) {
+	stored := json.RawMessage(`{"evaluator_image_digest":"evaluator:latest"}`)
+	if _, err := evaluatorImageDigestFromPolicy(stored); err == nil {
+		t.Fatal("mutable evaluator image identity accepted from round policy")
+	}
+}
+
 func jsonUnmarshal(value []byte, out any) error {
 	// Kept as a tiny seam so this test never depends on textual field order.
 	return json.Unmarshal(value, out)
@@ -427,12 +543,14 @@ type fakeStore struct {
 	readiness       map[string]bool
 	readyErr        error
 	round           *roundRecord
-	finalizeRound   *roundRecord
-	finalized       bool
-	finalizeErr     error
+	reviewState     *CandidateReviewState
+	reviewErr       error
+	reviewCalls     int
 	createRound     *roundRecord
 	createErr       error
 	createRoundArgs []GenerateRoundArgs
+	getJob          *queuedJob
+	getJobErr       error
 }
 
 func (f *fakeStore) CreateRound(_ context.Context, _ *Settings, args GenerateRoundArgs) (*roundRecord, error) {
@@ -448,8 +566,12 @@ func (f *fakeStore) GetRound(_ context.Context, _ *Settings, roundId server.Id) 
 	}
 	return f.round, nil
 }
-func (f *fakeStore) FinalizeEligibleRound(context.Context, *Settings) (*roundRecord, bool, error) {
-	return f.finalizeRound, f.finalized, f.finalizeErr
+func (f *fakeStore) PrepareCandidateReview(context.Context, *Settings, int) (*CandidateReviewState, error) {
+	f.reviewCalls++
+	return f.reviewState, f.reviewErr
+}
+func (f *fakeStore) RecordCandidateReview(context.Context, *Settings, int, CandidateReviewDecision) (*CandidateReviewState, error) {
+	return nil, errors.New("unused")
 }
 func (f *fakeStore) Leaderboards(context.Context, *Settings) (*SeasonLeaderboardResult, error) {
 	return &SeasonLeaderboardResult{CompetitionId: "test", Epochs: []LeaderboardResult{}}, nil
@@ -458,7 +580,7 @@ func (f *fakeStore) Enqueue(context.Context, *Settings, server.Id, *CanonicalPat
 	return nil, false, errors.New("unused")
 }
 func (f *fakeStore) GetJob(context.Context, *Settings, server.Id, *Principal) (*queuedJob, error) {
-	return nil, errors.New("unused")
+	return f.getJob, f.getJobErr
 }
 func (f *fakeStore) Readiness(context.Context, *Settings) (map[string]bool, error) {
 	return f.readiness, f.readyErr
@@ -528,55 +650,145 @@ func passingHostCheck(settings *Settings) HostSelfCheck {
 	}
 }
 
-func TestWorkerAdvanceSeasonCreatesNextSevenDayEpoch(t *testing.T) {
+func TestWorkerExitsAfterSealingEpochForHonestyReview(t *testing.T) {
 	settings := validSettings()
-	finalizedAt := server.NowUtc()
 	current := &roundRecord{RoundResult: RoundResult{
-		RoundId: server.NewId(), Epoch: 1, Status: "finalized", FinalizedAt: &finalizedAt,
+		RoundId: server.NewId(), Epoch: 1, Status: "grading",
 	}}
-	next := &roundRecord{RoundResult: RoundResult{RoundId: server.NewId(), Epoch: 2}}
+	candidateId := server.NewId()
 	store := &fakeStore{
-		round: current, finalizeRound: current, finalized: true, createRound: next,
+		round: current,
+		reviewState: &CandidateReviewState{
+			CompetitionId: settings.CompetitionId,
+			RoundId:       current.RoundId,
+			Epoch:         current.Epoch,
+			Status:        "pending_review",
+			Candidate:     &CandidateReviewCandidate{Rank: 1, JobId: candidateId},
+		},
 	}
-	worker, err := newWorkerWithImageDigest(settings, store, &fakeEvaluator{}, "box-a-worker", testWorkerImageDigest())
+	evaluator := &fakeEvaluator{check: passingHostCheck(settings)}
+	worker, err := newWorkerWithImageDigest(settings, store, evaluator, "box-a-worker", testWorkerImageDigest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	startedAt := server.NowUtc()
-	if err := worker.advanceSeason(context.Background()); err != nil {
+	if err := worker.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	endedAt := server.NowUtc()
-	if len(store.createRoundArgs) != 1 {
-		t.Fatalf("created rounds = %d, want 1", len(store.createRoundArgs))
-	}
-	args := store.createRoundArgs[0]
-	preparation := time.Duration(settings.SeasonPolicy.PreparationWindowSeconds) * time.Second
-	window := time.Duration(settings.SeasonPolicy.SubmissionWindowSeconds) * time.Second
-	if args.OpensAt.Before(startedAt.Add(preparation)) || endedAt.Add(preparation).Before(args.OpensAt) {
-		t.Fatalf("next opens_at = %s, call window = [%s, %s]", args.OpensAt, startedAt, endedAt)
-	}
-	if args.ClosesAt.Sub(args.OpensAt) != window || !args.RevealAt.Equal(args.ClosesAt) {
-		t.Fatalf("next epoch times = open %s, close %s, reveal %s", args.OpensAt, args.ClosesAt, args.RevealAt)
+	if store.claims != 0 || store.reviewCalls != 1 || len(store.createRoundArgs) != 0 {
+		t.Fatalf("post-seal work: claims=%d reviews=%d created_rounds=%d", store.claims, store.reviewCalls, len(store.createRoundArgs))
 	}
 }
 
-func TestWorkerAdvanceSeasonStopsAfterSixEpochs(t *testing.T) {
+func TestWorkerExitsWhenEpochWasAlreadyFinalized(t *testing.T) {
 	settings := validSettings()
 	finalizedAt := server.NowUtc()
 	current := &roundRecord{RoundResult: RoundResult{
-		RoundId: server.NewId(), Epoch: 6, Status: "finalized", FinalizedAt: &finalizedAt,
+		RoundId: server.NewId(), Epoch: 2, Status: "finalized", FinalizedAt: &finalizedAt,
 	}}
-	store := &fakeStore{round: current, finalizeRound: current, finalized: true}
+	store := &fakeStore{round: current}
 	worker, err := newWorkerWithImageDigest(settings, store, &fakeEvaluator{}, "box-a-worker", testWorkerImageDigest())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.advanceSeason(context.Background()); err != nil {
+	finished, err := worker.finishEpoch(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(store.createRoundArgs) != 0 {
-		t.Fatalf("created rounds after epoch six = %d", len(store.createRoundArgs))
+	if !finished || len(store.createRoundArgs) != 0 {
+		t.Fatalf("finished=%t created_rounds=%d", finished, len(store.createRoundArgs))
+	}
+}
+
+func TestScoreResultsRemainEmbargoedUntilWinnerFinalization(t *testing.T) {
+	settings := validSettings()
+	raw, normalized := 10.0, 112.0
+	completedAt := server.NowUtc()
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{
+			JobId: server.NewId(), RoundId: server.NewId(), State: "succeeded",
+			CompletedAt: &completedAt,
+			Score: &ScoreResult{
+				ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized,
+				Placeable: true, TakeoverEligible: true,
+				Gates:        map[string]Gate{"G1": {Passed: true, Details: map[string]any{}}},
+				Significance: testScoreSignificance(true),
+			},
+		},
+		Round: roundRecord{RoundResult: RoundResult{RevealAt: completedAt.Add(-time.Minute)}},
+	}
+	service := newServiceWithImageDigest(settings, &fakeStore{getJob: job}, testApiImageDigest(), nil)
+	submitter := &Principal{Id: "apex", Role: "submitter"}
+	result, status, evalError := service.GetScore(context.Background(), job.JobId, submitter)
+	if evalError != nil || status != 200 || result.State != "completed" ||
+		result.Score != nil || result.EvalError != nil {
+		t.Fatalf("embargoed result = %#v, %d, %#v", result, status, evalError)
+	}
+	operator := &Principal{Id: "ops", Role: "operator"}
+	result, status, evalError = service.GetScore(context.Background(), job.JobId, operator)
+	if evalError != nil || status != 200 || result.State != "succeeded" || result.Score == nil {
+		t.Fatalf("operator result = %#v, %d, %#v", result, status, evalError)
+	}
+	job.State = "failed"
+	job.Score = nil
+	job.EvalError = submissionError("candidate_build_failed", "candidate did not build")
+	result, _, _ = service.GetScore(context.Background(), job.JobId, submitter)
+	if result.State != "completed" || result.EvalError != nil {
+		t.Fatalf("embargoed failure = %#v", result)
+	}
+	job.Round.FinalizedAt = &completedAt
+	result, status, evalError = service.GetScore(context.Background(), job.JobId, submitter)
+	if evalError != nil || status != 200 || result.State != "failed" || result.EvalError == nil {
+		t.Fatalf("published failure = %#v, %d, %#v", result, status, evalError)
+	}
+}
+
+func TestInfrastructureRetryHonorsSubmissionExecutionDeadline(t *testing.T) {
+	settings := validSettings()
+	settings.EvaluationPolicy.ScoreTimeoutSeconds = 120
+	startedAt := time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		completedAt time.Time
+		attempts    int
+		wantRetry   bool
+	}{
+		{completedAt: startedAt.Add(80 * time.Second), attempts: 1, wantRetry: true},
+		{completedAt: startedAt.Add(110 * time.Second), attempts: 1, wantRetry: false},
+		{completedAt: startedAt.Add(10 * time.Second), attempts: 3, wantRetry: false},
+	}
+	for _, c := range cases {
+		_, retry := infrastructureRetrySchedule(settings, startedAt, c.completedAt, c.attempts)
+		if retry != c.wantRetry {
+			t.Errorf("retry at completed=%s attempts=%d: got %t, want %t", c.completedAt, c.attempts, retry, c.wantRetry)
+		}
+	}
+}
+
+func TestWorkerDoesNotLaunchExpiredSubmission(t *testing.T) {
+	settings := validSettings()
+	hostCheck := passingHostCheck(settings)
+	startedAt := server.NowUtc().Add(
+		-time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds+1) * time.Second,
+	)
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{
+			JobId: server.NewId(), RoundId: *hostCheck.RebaselineRoundId,
+			StartedAt: &startedAt, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+			ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+		},
+	}
+	store := &fakeStore{}
+	evaluator := &fakeEvaluator{}
+	worker, err := newWorkerWithImageDigest(settings, store, evaluator, "box-a-worker", testWorkerImageDigest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.evaluateOne(context.Background(), job, hostCheck); err != nil {
+		t.Fatal(err)
+	}
+	outcomes := store.outcomes()
+	if evaluator.calls != 0 || len(outcomes) != 1 || outcomes[0].Error == nil ||
+		outcomes[0].Error.Code != "evaluation_time_budget_exhausted" {
+		t.Fatalf("expired execution: evaluator_calls=%d outcomes=%#v", evaluator.calls, outcomes)
 	}
 }
 
@@ -600,16 +812,23 @@ func TestWorkerRetriesInfrastructureUnderSameJob(t *testing.T) {
 	jobId := server.NewId()
 	hostCheck := passingHostCheck(settings)
 	roundId := *hostCheck.RebaselineRoundId
+	startedAt := server.NowUtc()
 	jobs := []*queuedJob{
-		{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: roundId, ApiImageDigest: testApiImageDigest()}, AttemptCount: 1},
-		{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: roundId, ApiImageDigest: testApiImageDigest()}, AttemptCount: 2},
+		{ScoreJobResult: ScoreJobResult{
+			JobId: jobId, RoundId: roundId, StartedAt: &startedAt,
+			EvaluatorImageDigest: settings.EvaluatorImageDigest, ApiImageDigest: testApiImageDigest(),
+		}, AttemptCount: 1},
+		{ScoreJobResult: ScoreJobResult{
+			JobId: jobId, RoundId: roundId, StartedAt: &startedAt,
+			EvaluatorImageDigest: settings.EvaluatorImageDigest, ApiImageDigest: testApiImageDigest(),
+		}, AttemptCount: 2},
 	}
 	store := &fakeStore{claimJobs: jobs}
 	evaluator := &fakeEvaluator{
 		check: hostCheck,
 		outcomes: []EvaluationOutcome{
 			{Error: infrastructureError("host_transient", "host transient"), Infrastructure: true},
-			{Score: &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: map[string]Gate{"g1": {Passed: true, Details: map[string]any{}}}}, ArtifactManifest: []byte(`{"schema":1}`)},
+			{Score: &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: map[string]Gate{"g1": {Passed: true, Details: map[string]any{}}}, Significance: testScoreSignificance(false)}, ArtifactManifest: []byte(`{"schema":1}`)},
 		},
 	}
 	worker, err := newWorkerWithImageDigest(settings, store, evaluator, "box-a-worker", testWorkerImageDigest())
@@ -649,10 +868,11 @@ func TestRevealedRoundWorkloadAuthenticatesCommittedBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(providers)
+	finalizedAt := server.NowUtc()
 	round := &roundRecord{
 		RoundResult: RoundResult{
 			RoundId: roundId, ProvidersSha256: hex.EncodeToString(digest[:]),
-			RevealAt: server.NowUtc().Add(-time.Minute),
+			RevealAt: server.NowUtc().Add(-time.Minute), FinalizedAt: &finalizedAt,
 		},
 		ProvidersPath: path,
 	}
@@ -661,9 +881,9 @@ func TestRevealedRoundWorkloadAuthenticatesCommittedBytes(t *testing.T) {
 	if evalError != nil || status != 200 || gotDigest != round.ProvidersSha256 || !reflect.DeepEqual(got, providers) {
 		t.Fatalf("revealed workload = %q, %q, %d, %#v", got, gotDigest, status, evalError)
 	}
-	round.RevealAt = server.NowUtc().Add(time.Minute)
+	round.FinalizedAt = nil
 	if _, _, status, evalError := service.GetRoundWorkload(context.Background(), roundId); status != 409 || evalError == nil || evalError.Code != "round_not_revealed" {
-		t.Fatalf("active workload response = %d, %#v", status, evalError)
+		t.Fatalf("unfinalized workload response = %d, %#v", status, evalError)
 	}
 }
 

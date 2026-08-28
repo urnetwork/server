@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/docopt/docopt-go"
+	"github.com/urnetwork/server/competition"
 	"gopkg.in/yaml.v3"
 )
 
@@ -45,7 +46,16 @@ func sourceTestRepository(t *testing.T, repositoriesRoot string, name string) st
 	if err := os.WriteFile(filepath.Join(repositoryRoot, "source.txt"), []byte(name+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	sourceTestGit(t, repositoryRoot, "add", "source.txt")
+	if name == "server" {
+		protectedRoot := filepath.Join(repositoryRoot, "connect", "sim-latency")
+		if err := os.MkdirAll(protectedRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(protectedRoot, "main.go"), []byte("package main\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceTestGit(t, repositoryRoot, "add", "--all")
 	sourceTestGit(t, repositoryRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "source base")
 	return sourceTestGit(t, repositoryRoot, "rev-parse", "HEAD")
 }
@@ -58,8 +68,9 @@ func sourceTestManifest(repositoryCommits map[string]string) *sourceManifest {
 		EvaluationSource: evaluationSource{
 			Branch: "sim-latency",
 			Epochs: []sourceEpoch{{
-				Epoch: 0,
-				Kind:  "baseline",
+				Epoch:                         0,
+				Kind:                          "baseline",
+				SignificantImprovementPercent: 16.1,
 				Repositories: sourceRepositories{
 					Connect: sourceRepository{Commit: repositoryCommits["connect"]},
 					Sdk:     sourceRepository{Commit: repositoryCommits["sdk"]},
@@ -75,6 +86,26 @@ func sourceTestManifest(repositoryCommits map[string]string) *sourceManifest {
 			PersistPerEvaluation:          true,
 			FreezeMainCommits:             false,
 		},
+	}
+}
+
+func validSourceSignificance() *sourceSignificance {
+	return &sourceSignificance{
+		ScoreSha256:                               strings.Repeat("b", 64),
+		Method:                                    scoreSignificanceMethod,
+		Alpha:                                     scoreSignificanceAlpha,
+		ReplicateCount:                            9,
+		BaselineMeanRawScore:                      100,
+		CandidateMeanRawScore:                     70,
+		BaselineSampleVariance:                    4,
+		CandidateSampleVariance:                   4,
+		ObservedImprovementPercent:                30,
+		TakeoverMarginPercent:                     16.1,
+		MinimumSignificantImprovementPercent:      2,
+		RequiredImprovementPercent:                16.1,
+		OneSidedPValue:                            0.001,
+		NextEpochMinimumImprovementPercent:        2.5,
+		RecommendedNextEpochTakeoverMarginPercent: 16.1,
 	}
 }
 
@@ -182,6 +213,141 @@ func TestSourceManifestRejectsMissingRepositoryCommit(t *testing.T) {
 	}
 }
 
+func TestSourceManifestCarriesCommitsForwardWhenEpochHasNoWinner(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	manifest := sourceTestManifest(map[string]string{
+		"connect": commit,
+		"sdk":     commit,
+		"server":  commit,
+		"proxy":   commit,
+	})
+	previousEpoch := 0
+	manifest.EvaluationSource.Epochs = append(manifest.EvaluationSource.Epochs, sourceEpoch{
+		Epoch:                         1,
+		Kind:                          "no_winner_carry_forward",
+		SignificantImprovementPercent: 16.1,
+		PromotedFromEpoch:             &previousEpoch,
+		PromotedAt:                    "2026-08-29T00:00:00Z",
+		Repositories:                  manifest.EvaluationSource.Epochs[0].Repositories,
+	})
+	if err := validateSourceManifest(manifest); err != nil {
+		t.Fatalf("no-winner carry-forward rejected: %s", err)
+	}
+	manifest.EvaluationSource.Epochs[1].Repositories.Server.Commit = strings.Repeat("b", 40)
+	if err := validateSourceManifest(manifest); err == nil || !strings.Contains(err.Error(), "carry repository commits forward unchanged") {
+		t.Fatalf("changed no-winner commit was accepted: %v", err)
+	}
+	manifest.EvaluationSource.Epochs[1].Repositories = manifest.EvaluationSource.Epochs[0].Repositories
+	manifest.EvaluationSource.Epochs[1].WinnerJobId = "invented-winner"
+	if err := validateSourceManifest(manifest); err == nil || !strings.Contains(err.Error(), "cannot identify a winner") {
+		t.Fatalf("winner metadata on no-winner epoch was accepted: %v", err)
+	}
+}
+
+func TestSourceManifestRequiresWinnerSignificance(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	manifest := sourceTestManifest(map[string]string{
+		"connect": commit,
+		"sdk":     commit,
+		"server":  commit,
+		"proxy":   commit,
+	})
+	previousEpoch := 0
+	manifest.EvaluationSource.Epochs = append(manifest.EvaluationSource.Epochs, sourceEpoch{
+		Epoch:                         1,
+		Kind:                          "winner_promotion",
+		SignificantImprovementPercent: 16.1,
+		WinnerJobId:                   "winner-1",
+		WinnerSignificance:            validSourceSignificance(),
+		PromotedFromEpoch:             &previousEpoch,
+		PromotedAt:                    "2026-08-29T00:00:00Z",
+		Repositories:                  manifest.EvaluationSource.Epochs[0].Repositories,
+	})
+	if err := validateSourceManifest(manifest); err != nil {
+		t.Fatalf("winner significance rejected: %s", err)
+	}
+	manifest.EvaluationSource.Epochs[1].WinnerSignificance.OneSidedPValue = 0.051
+	if err := validateSourceManifest(manifest); err == nil ||
+		!strings.Contains(err.Error(), "not statistically significant") {
+		t.Fatalf("non-significant winner was accepted: %v", err)
+	}
+	manifest.EvaluationSource.Epochs[1].WinnerSignificance = nil
+	if err := validateSourceManifest(manifest); err == nil ||
+		!strings.Contains(err.Error(), "winning job and significance") {
+		t.Fatalf("winner without significance was accepted: %v", err)
+	}
+}
+
+func TestReadWinnerSignificanceRequiresEligibleR9Score(t *testing.T) {
+	directory := t.TempDir()
+	baselineVariance := 4.0
+	candidateVariance := 4.0
+	minimumPercent := 2.0
+	requiredPercent := 16.1
+	pValue := 0.001
+	tStatistic := 10.0
+	degreesOfFreedom := 16.0
+	nextEpochMinimumPercent := 2.5
+	recommendedPercent := 16.1
+	gates := map[string]competition.Gate{}
+	for _, name := range []string{
+		"G1_success",
+		"G2_volume",
+		"G3_path_integrity",
+		"G4_matchmaking",
+		"G5_stability",
+		"G6_resources",
+	} {
+		gates[name] = competition.Gate{Passed: true, Details: map[string]any{}}
+	}
+	rawScore := 70.0
+	normalizedScore := 142.857
+	result := &competition.ScoreResult{
+		ScoreSchema:      competition.ScoreSchema,
+		RawScore:         &rawScore,
+		NormalizedScore:  &normalizedScore,
+		Placeable:        true,
+		TakeoverEligible: true,
+		Gates:            gates,
+		Significance: &competition.ScoreSignificance{
+			Method:                                      scoreSignificanceMethod,
+			Alpha:                                       scoreSignificanceAlpha,
+			ReplicateCount:                              9,
+			BaselineMeanRawScore:                        100,
+			CandidateMeanRawScore:                       70,
+			BaselineSampleVariance:                      &baselineVariance,
+			CandidateSampleVariance:                     &candidateVariance,
+			ObservedImprovementPercent:                  30,
+			TakeoverMarginPercent:                       16.1,
+			MinimumSignificantImprovementPercent:        &minimumPercent,
+			RequiredImprovementPercent:                  &requiredPercent,
+			OneSidedPValue:                              &pValue,
+			WelchT:                                      &tStatistic,
+			WelchDegreesOfFreedom:                       &degreesOfFreedom,
+			StatisticallySignificant:                    true,
+			NextEpochMinimumImprovementPercent:          &nextEpochMinimumPercent,
+			RecommendedNextEpochTakeoverMarginPercent:   &recommendedPercent,
+			RecommendedNextEpochTakeoverMarginSupported: true,
+		},
+		Diagnostics: map[string]any{"baseline_takeover_eligible": true},
+	}
+	writeScoreJSON(t, filepath.Join(directory, "score.json"), result)
+	significance, err := readWinnerSignificance(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if significance.ReplicateCount != 9 || significance.OneSidedPValue != pValue ||
+		!validSha256(significance.ScoreSha256) {
+		t.Fatalf("winner significance = %+v", significance)
+	}
+
+	result.Significance.StatisticallySignificant = false
+	writeScoreJSON(t, filepath.Join(directory, "score.json"), result)
+	if _, err := readWinnerSignificance(directory); err == nil {
+		t.Fatal("non-significant winner score was accepted")
+	}
+}
+
 func TestEvaluatorSourceLockAcceptsOnlyOneServerCandidateCommit(t *testing.T) {
 	repositoriesRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
@@ -245,6 +411,7 @@ func TestStagePromotionRepositoryCommitsWinnerWithoutChangingCheckout(t *testing
 	}
 	repository := &promotionRepository{
 		Name:           "server",
+		Branch:         "sim-latency",
 		LocalRoot:      repositoryRoot,
 		PreviousCommit: previousCommit,
 		PatchPath:      patchPath,
@@ -262,6 +429,9 @@ func TestStagePromotionRepositoryCommitsWinnerWithoutChangingCheckout(t *testing
 	if parent := sourceTestGit(t, repository.StagedRoot, "rev-parse", "HEAD^"); parent != previousCommit {
 		t.Fatalf("promotion parent = %s, want %s", parent, previousCommit)
 	}
+	if branch := sourceTestGit(t, repository.StagedRoot, "symbolic-ref", "--short", "HEAD"); branch != "sim-latency" {
+		t.Fatalf("promotion branch = %q, want sim-latency", branch)
+	}
 	stagedBytes, err := os.ReadFile(filepath.Join(repository.StagedRoot, "source.txt"))
 	if err != nil || string(stagedBytes) != "winner\n" {
 		t.Fatalf("staged winner content = %q, %v", stagedBytes, err)
@@ -269,5 +439,45 @@ func TestStagePromotionRepositoryCommitsWinnerWithoutChangingCheckout(t *testing
 	localBytes, err := os.ReadFile(filepath.Join(repositoryRoot, "source.txt"))
 	if err != nil || string(localBytes) != "server\n" {
 		t.Fatalf("operator checkout changed during staging: %q, %v", localBytes, err)
+	}
+}
+
+func TestStagePromotionRepositoryRejectsProtectedSimulatorPatch(t *testing.T) {
+	testRoot := t.TempDir()
+	repositoriesRoot := filepath.Join(testRoot, "repositories")
+	if err := os.Mkdir(repositoriesRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	previousCommit := sourceTestRepository(t, repositoriesRoot, "server")
+	repositoryRoot := filepath.Join(repositoriesRoot, "server")
+	remoteRoot := filepath.Join(testRoot, "server.git")
+	sourceTestGit(t, testRoot, "init", "--quiet", "--bare", remoteRoot)
+	sourceTestGit(t, repositoryRoot, "remote", "add", "origin", remoteRoot)
+	sourceTestGit(t, repositoryRoot, "push", "--quiet", "--set-upstream", "origin", "sim-latency")
+	patchClone := filepath.Join(testRoot, "patch-clone")
+	sourceTestGit(t, testRoot, "clone", "--quiet", repositoryRoot, patchClone)
+	protectedPath := filepath.Join(patchClone, "connect", "sim-latency", "main.go")
+	if err := os.WriteFile(protectedPath, []byte("package main\n\n// tampered\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	patch := sourceTestGit(t, patchClone, "diff", "--binary") + "\n"
+	patchPath := filepath.Join(testRoot, "server.patch")
+	if err := os.WriteFile(patchPath, []byte(patch), 0600); err != nil {
+		t.Fatal(err)
+	}
+	repository := &promotionRepository{
+		Name: "server", Branch: "sim-latency", LocalRoot: repositoryRoot,
+		PreviousCommit: previousCommit, PatchPath: patchPath,
+	}
+	stagingRoot := filepath.Join(testRoot, "staging")
+	if err := os.Mkdir(stagingRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	err := stagePromotionRepository(repository, stagingRoot, "competition: malicious winner")
+	if err == nil || !strings.Contains(err.Error(), "protected sim-latency source tree") {
+		t.Fatalf("protected promotion error = %v", err)
+	}
+	if head := sourceTestGit(t, repositoryRoot, "rev-parse", "HEAD"); head != previousCommit {
+		t.Fatalf("operator checkout changed to %s", head)
 	}
 }

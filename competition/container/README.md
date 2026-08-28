@@ -15,6 +15,25 @@ labels and `/opt/urnetwork/image-identity.json`. Its cache key covers the base
 image id, canonical patch, patch policy, and fixed submission Dockerfile; an
 existing tag is reused only after every identity label authenticates.
 
+`connect/sim-latency/**` is a protected evaluator tree, not submission code.
+The API validator rejects it from a hard-coded denylist even if a malformed
+operator policy allowlists a file there, the frozen policy must repeat that
+deny rule explicitly, and the builder requires the directory's Git tree id to
+remain identical before and after the candidate commit. A direct edit, nested
+edit, rename, copy, new file, deletion, mode change, or symlink attempt is a
+terminal invalid submission. Runtime source is mounted read-only, and the
+trusted baseline and scorer continue to execute from the pristine base image.
+
+For every evaluation attempt, `prepare-evaluation-source.sh` copies fresh
+`server`, `connect`, `sdk`, and `proxy` repositories out of that authenticated
+base image into a bounded temporary directory. It checks out a local
+`sim-latency` branch at each epoch source-lock commit without reading or
+changing any host repository checkout. Baseline and candidate have distinct
+trees; the builder applies the canonical patch only to the candidate tree.
+The selected tree is mounted read-only at `/workspace` in each runner and is
+removed before evidence is retained. This keeps continuously updated control
+code on `main` separate from the measured source.
+
 This replaces custom per-job cgroup filesystem code. Docker creates the
 container cgroups; Compose puts runner, PostgreSQL, and Redis below one
 root-owned `cgroup_parent` and applies explicit CPU-set, memory/swap, PID, and
@@ -61,8 +80,10 @@ image ids, exit/OOM state, and accounting after every stage.
 
 1. The API authenticates a text patch, canonicalizes it, stores its SHA-256,
    and queues the immutable patch/round identity.
-2. The trusted worker writes only that patch and the frozen policy into a new
-   build context. `build-submission.sh` produces one content-addressed image.
+2. The trusted worker creates fresh baseline/candidate source directories from
+   the base image's authenticated repositories, then writes only the patch and
+   frozen policy into a new build context. `build-submission.sh` patches only
+   the temporary candidate checkout and produces one content-addressed image.
    Cache reuse is permitted only for the same base image id, patch SHA-256,
    policy SHA-256, and trusted Dockerfile SHA-256. Candidate builds disable
    BuildKit's variable default attestation and retain the authenticated build
@@ -101,8 +122,13 @@ a development snapshot.
 Build a submission from API-authenticated files:
 
 ```bash
+attempt_source="$(mktemp -d /var/lib/urnetwork/competition/source.XXXXXXXX)"
+./competition/container/prepare-evaluation-source.sh \
+  --base-image registry.example/urnetwork/sim-latency-evaluator-base@sha256:... \
+  --destination "$attempt_source/candidate"
 ./competition/container/build-submission.sh \
   --base-image registry.example/urnetwork/sim-latency-evaluator-base@sha256:... \
+  --source-root "$attempt_source/candidate" \
   --patch /var/lib/urnetwork/jobs/JOB/canonical.patch \
   --policy /var/lib/urnetwork/jobs/JOB/policy.json \
   --tag registry.example/urnetwork/sim-latency-submission:JOB

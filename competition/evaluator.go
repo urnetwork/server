@@ -196,6 +196,14 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 	patchPath := filepath.Join(attemptDir, "canonical.patch")
 	resultPath := filepath.Join(attemptDir, "worker-result.json")
 	stderrPath := filepath.Join(attemptDir, "worker.stderr.log")
+	stopProgressMetrics := startEvaluationProgressMetrics(
+		ctx,
+		filepath.Join(attemptDir, evaluationProgressFileName),
+		job.JobId.String(),
+		job.RoundId.String(),
+		settings.EvaluationPolicy.Replicates,
+	)
+	defer stopProgressMetrics()
 	if err := writeExclusiveFile(patchPath, job.Patch, 0400); err != nil {
 		return infrastructureFailure("artifact_create_failed", "canonical patch artifact could not be written")
 	}
@@ -264,7 +272,7 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 	manifest := artifactManifest{
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
 		SourceEpoch: job.Round.Epoch - 1,
-		Attempt:     job.AttemptCount, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		Attempt:     job.AttemptCount, EvaluatorImageDigest: job.EvaluatorImageDigest,
 		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
 		RequestSha256:          requestHash, PatchSha256: patchHash, StderrSha256: stderrHash,
@@ -303,7 +311,7 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
 		SourceEpoch: job.Round.Epoch - 1,
 		Attempt:     job.AttemptCount, CompetitionId: settings.CompetitionId,
-		BaseSha: settings.BaseSha, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		BaseSha: settings.BaseSha, EvaluatorImageDigest: job.EvaluatorImageDigest,
 		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		ScorerVersion: ScorerVersion, RoundSeedHex: seed, PatchPath: patchPath,
 		PatchSha256:   job.PatchSha256,

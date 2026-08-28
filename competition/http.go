@@ -126,9 +126,6 @@ func SubmitScoreHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	result, status, evalError := service.Submit(r.Context(), args, principal)
 	if evalError != nil {
-		if status == http.StatusTooManyRequests {
-			w.Header().Set("Retry-After", "30")
-		}
 		writeCompetitionJson(w, status, evalError)
 		return
 	}

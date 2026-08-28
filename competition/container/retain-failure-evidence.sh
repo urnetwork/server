@@ -46,6 +46,8 @@ sudo -n rm -rf -- \
     "$source_dir/input" \
     "$source_dir/scorer-input" \
     "$source_dir/score-runtime"
+sudo -n find "$source_dir" -mindepth 1 -maxdepth 1 -type d \
+    -name 'evaluation-sources.*' -exec rm -rf -- {} +
 sudo -n find "$source_dir" -depth -type d -name runtime -exec rm -rf -- {} +
 sudo -n find "$source_dir" -type f \
     \( -name '*.env' -o -name '*.env.new' \) -delete
@@ -91,7 +93,7 @@ jq -n \
     '{schema:1,kind:"sim-latency-evaluator-failure",job_id:$job_id,
       round_id:$round_id,attempt:$attempt,exit_code:$exit_code,
       evaluator_line:$evaluator_line,sanitized:true,
-      excluded:["input","scorer-input","score-runtime","runtime","*.env","*.env.new","non-regular entries"]}' \
+      excluded:["input","scorer-input","score-runtime","evaluation-sources.*","runtime","*.env","*.env.new","non-regular entries"]}' \
     > "$failure_record"
 
 find "$source_dir" -type d -exec chmod 0700 {} +

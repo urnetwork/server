@@ -64,6 +64,24 @@ func TestSubmissionDockerfileIsolatesCandidateExecution(t *testing.T) {
 	}
 }
 
+func TestSubmissionBuilderProtectsSimulatorTree(t *testing.T) {
+	scriptBytes, err := os.ReadFile("container/build-submission.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	for _, required := range []string{
+		`protected_simulator_tree="$(git -C "$source_root/server" rev-parse HEAD:connect/sim-latency)"`,
+		`git -C "$source_root/server" diff --quiet -- connect/sim-latency`,
+		`status --porcelain=v1 --untracked-files=all -- connect/sim-latency`,
+		`[ "$(git -C "$source_root/server" rev-parse HEAD:connect/sim-latency)" = "$protected_simulator_tree" ]`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("submission builder is missing protected-tree check %q", required)
+		}
+	}
+}
+
 // The development smoke validates containment and scorer plumbing, not the
 // production load frontier. Keep its small fleet away from artificial churn,
 // scheduler-scale timeouts, and client/lane reuse that manufactures contract
@@ -132,6 +150,109 @@ func TestEvaluatorAuthenticatesEveryCandidateBuildInput(t *testing.T) {
 		if !strings.Contains(script, requiredCheck) {
 			t.Errorf("evaluator is missing candidate identity check %q", requiredCheck)
 		}
+	}
+}
+
+func TestEvaluatorPublishesContainedInternalLiveProgress(t *testing.T) {
+	scriptBytes, err := os.ReadFile("container/evaluator.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	for _, required := range []string{
+		`progress_path="$artifact_dir/evaluation-progress.json"`,
+		`kind:"sim-latency-evaluation-progress"`,
+		`write_evaluation_progress preparing 0 0`,
+		`record_stage_progress "$role" "$index" "$run_dir/run.json"`,
+		`--network none --read-only --user 65532:65532`,
+		`--memory "$SCORER_MEMORY_BYTES" --memory-swap "$SCORER_MEMORY_BYTES"`,
+		`--entrypoint /opt/urnetwork/bin/sim-latency`,
+		`candidate_manifests`,
+		`baseline_manifests`,
+		`evaluation-progress.json evaluation.complete.json`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("live evaluation progress is missing %q", required)
+		}
+	}
+	for _, metric := range []string{
+		"ttfb_p50_ms",
+		"ttfb_p95_ms",
+		"throughput_p50_bytes_per_s",
+		"throughput_p95_bytes_per_s",
+	} {
+		if !strings.Contains(script, metric) {
+			t.Errorf("live evaluation progress omits %s", metric)
+		}
+	}
+}
+
+// Runner and API/worker source must have disjoint lifecycles. Each attempt
+// materializes both sides of the A/B pair from the immutable evaluator image,
+// checks out local sim-latency branches in that tmpfs, mounts the selected tree
+// read-only, and removes the source before durable evidence is copied.
+func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
+	prepareBytes, err := os.ReadFile("container/prepare-evaluation-source.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepare := string(prepareBytes)
+	for _, required := range []string{
+		`readonly REPOSITORIES=(server connect sdk proxy)`,
+		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
+		`checkout --quiet -B sim-latency "$expected_commit"`,
+		`source_lock_sha256`,
+		`candidate_patch_sha256:null`,
+	} {
+		if !strings.Contains(prepare, required) {
+			t.Errorf("temporary source preparer is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"WORKSPACE_ROOT", "SERVER_ROOT", "../server", "../connect"} {
+		if strings.Contains(prepare, forbidden) {
+			t.Errorf("temporary source preparer depends on a host checkout: %q", forbidden)
+		}
+	}
+
+	evaluatorBytes, err := os.ReadFile("container/evaluator.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluator := string(evaluatorBytes)
+	for _, required := range []string{
+		`active_source_root="$(mktemp -d "$work_dir/evaluation-sources.XXXXXXXX")"`,
+		`--destination "$baseline_source_root"`,
+		`--destination "$candidate_source_root"`,
+		`--source-root "$candidate_source_root"`,
+		`rev-parse HEAD:connect/sim-latency`,
+		`candidate changed the protected sim-latency source tree`,
+		`EVALUATION_SOURCE_DIR=$source`,
+		`.Destination == "/workspace" and .RW == false`,
+		`origin:"authenticated_evaluator_image",host_repositories_used:false`,
+		`remove_evaluation_sources`,
+		`sudo -n rm -rf -- "$active_source_root"`,
+	} {
+		if !strings.Contains(evaluator, required) {
+			t.Errorf("evaluator source isolation is missing %q", required)
+		}
+	}
+
+	composeBytes, err := os.ReadFile("container/compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(composeBytes)
+	for _, required := range []string{
+		`source: ${EVALUATION_SOURCE_DIR:?set the per-evaluation temporary source checkout}`,
+		`target: /workspace`,
+		`read_only: true`,
+	} {
+		if !strings.Contains(compose, required) {
+			t.Errorf("runner source mount is missing %q", required)
+		}
+	}
+	if strings.Count(compose, `source: ${EVALUATION_SOURCE_DIR:`) != 1 {
+		t.Fatal("temporary source must be mounted into the runner only")
 	}
 }
 
@@ -521,6 +642,7 @@ func TestEvaluatorRetainsOnlySanitizedFailureEvidence(t *testing.T) {
 		`"$source_dir/input"`,
 		`"$source_dir/scorer-input"`,
 		`"$source_dir/score-runtime"`,
+		`-name 'evaluation-sources.*'`,
 		`-type d -name runtime -exec rm -rf`,
 		`-name '*.env' -o -name '*.env.new'`,
 		`-name containers.json -print0`,

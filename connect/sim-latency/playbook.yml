@@ -12,37 +12,68 @@ evaluation_host:
 season:
   epoch_count: 6
   submission_window_seconds: 604800
-  reveal: at_close
-  grading: after_close_fifo
+  reveal: after_close_drain_and_honesty_review_finalization
+  grading: immediate_redis_fifo_with_post_close_drain
+  worker_lifecycle: one_shot_exit_after_epoch_drain_and_review_seal
+  next_epoch_control: external_agentic_review_and_promotion_loop
   preparation_window_seconds: 57600
-  queue_limit: 10
-  score_timeout_seconds: 49392
+  submission_fee_usd: 20
+  queue_limit: 0
+  score_timeout_seconds: 10800
   first_opens_at: null
   season_ends_at: null
   retain_until: null
-  baseline_source_policy: promote_each_epoch_winner
+  baseline_source_policy: promote_significant_winner_or_carry_forward_unchanged
+
+significance:
+  authority: config/main/sim-latency.yml
+  method: one-sided-welch-t
+  alpha: 0.05
+  initial_improvement_percent: 16.1
+  threshold_scope: per_source_epoch
+  evaluation_record: means_variances_p_value_and_next_epoch_recommendation
+  winner_requirement: placeable_margin_statistical_significance_and_approved_honesty_review
+  no_winner_policy: carry_commits_and_threshold_forward_when_none_significant_or_all_rejected
+
+honesty_review:
+  authority: postgres_append_only_competition_candidate_review
+  command: sim-latency epoch-review
+  environment: main
+  ordering: normalized_score_desc_raw_score_asc_submitted_at_job_id
+  candidate_materialization: fresh_mode_0700_temp_dir_with_mode_0400_patch_score_and_metadata
+  evidence: bounded_json_object_with_sha256_reviewer_reason_and_timestamp
+  reject_behavior: advance_to_next_ranked_significant_candidate
+  approve_behavior: atomically_finalize_exact_candidate_as_winner
+  exhaustion_behavior: atomically_finalize_without_winner
+  public_before_finalization: false
 
 evaluation_source:
   manifest: config/main/sim-latency.yml
-  branch: sim-latency
-  current_source_epoch: 0
+  authoritative_fields: branch_epoch_commits_and_significant_improvement_percent
   round_source_epoch_offset: -1
-  repository_commits:
-    connect: 4f3f017f5448c18620b9eb3aab8c1002e869536d
-    sdk: 3c2d56b47155cd026c2f572337d45bd0210f5bf5
-    server: 859be81191fafcc576b617ebec716fa49401643a
-    proxy: 17f929c926d49c27138569c85899bd2e98ec0ec1
-  source_config_sha256: 486641577844bb8373179f4389289249cda3059ff4bfb482b7daf44f8ebbf3ee
-  evaluator_image_id: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
-  simulator_sha256: a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b
   promotion_command: sim-latency promote
   activation_order: repository_branches_then_config_ledger
+  promotion_review_gate: finalized_exact_approved_job_patch_sha256_and_full_score_document
+  unevaluated_repository_patches: rejected
+  protected_evaluator_tree: connect/sim-latency/**
+  protected_evaluator_tree_policy: hard_reject_and_verify_git_tree_unchanged
+
+evaluator_release:
+  source_epoch: 0
+  evaluator_image_id: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
+  local_image_load:
+    status: verified
+    runtime: docker
+    immutable_reference: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
+    convenience_tag: urnetwork/sim-latency-evaluator-base:epoch0-859be811
+    verified_at: 2026-08-28T18:21:43Z
+  simulator_sha256: a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b
 
 release_record:
   control_plane_branch: main
   control_plane_commits_are_scoring_inputs: false
   exact_runtime_image_digest_persisted_per_evaluation: true
-  openapi_sha256: 161f534b77265ae91ccbbeb771a8d408e50546d453e9b1bc811792e56c6c0fe6
+  openapi_sha256: 17ee49b64f90ec47c20671259ab5f5e73aa2e132c1084ea38d3fe235084be0dc
   recorded_by: local_finalization
   recorded_at: 2026-08-28T15:39:21Z
 
@@ -83,14 +114,31 @@ monitoring:
   alert_rules: warp/grafana/alerting/competition.yml
   contact_policy: existing_main_policy
   on_call_record: pending_operator_record
+  runner_heartbeat_interval_seconds: 15
+  runner_heartbeat_warning_age_seconds: 30
+  operational_signals:
+    - submission_queue_size
+    - current_submission
+    - current_evaluation_elapsed_seconds
+    - significant_submission_found
+    - evaluation_duration_p75_estimate_seconds
+    - submission_backlog_estimated_seconds
+    - live_ttfb_p50_p95_by_replicate
+    - live_throughput_p50_p95_by_replicate
+  live_reveal:
+    visibility: internal_grafana_only
+    update_boundary: authenticated_replicate_completion
+    provisional_alpha: 0.05
+    final_score_remains_authoritative: true
+    public_before_epoch_finalization: false
 
 checklist:
   - id: evaluator_and_baseline
     status: complete
-    evidence: connect/sim-latency/final-baseline.html
+    evidence: connect/sim-latency/baseline/final-baseline.html
   - id: single_host_containment
     status: complete
-    evidence: connect/sim-latency/APEX-CALIBRATION.md
+    evidence: connect/sim-latency/baseline/v1/lineage/finalization-audit.json
   - id: main_postgres_redis_restore
     status: complete_operator_confirmed
     evidence: existing_main_environment
@@ -103,9 +151,9 @@ checklist:
   - id: competition_api_and_leaderboard
     status: complete
     evidence: sn/api/competition.yml
-  - id: six_epoch_batch_lifecycle
+  - id: six_epoch_immediate_fifo_lifecycle
     status: complete
-    evidence: server/competition/store.go
+    evidence: server/competition/store.go and server/competition/worker.go
   - id: immutable_artifact_implementation
     status: complete
     evidence: server/competition/artifact_archive.go
@@ -119,17 +167,27 @@ checklist:
   - id: runtime_control_plane_identity
     status: complete
     evidence: server/competition/deployment_identity.go
+  - id: epoch_zero_evaluator_image
+    status: complete_local_load
+    evidence: docker image inspect sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
   - id: live_minio_readiness_backup_capacity_and_deletion_owner
     status: deployment_verification_required
   - id: grafana_deploy_contact_routing_and_on_call
     status: deployment_verification_required
   - id: miner_onboarding_token_distribution_and_revocation
     status: operator_action_required
-  - id: fees_rewards_eligibility_legal_and_abuse
+  - id: rewards_eligibility_legal_and_abuse
     status: business_approval_required
+    evidence: submission_fee_usd is frozen at 20; remaining publication terms require approval
   - id: winner_source_policy
     status: complete
     evidence: config/main/sim-latency.yml and server/connect/sim-latency/source_promote.go
+  - id: winner_honesty_review_gate
+    status: complete
+    evidence: server/competition/store.go, server/db_migrations.go, and server/connect/sim-latency/epoch_review.go
+  - id: per_evaluation_significance_record
+    status: complete
+    evidence: server/connect/sim-latency/score_significance.go
   - id: apex_adapter_staging_registry_and_signed_handoff
     status: external_acceptance_required
     evidence: server/competition/APEX-HANDOFF.md

@@ -5,7 +5,6 @@
 set -Eeuo pipefail
 
 readonly EVALUATION_STAGE_OVERHEAD_SECONDS=600
-readonly EVALUATION_JOB_OVERHEAD_SECONDS=1200
 
 die() { printf '[competition-timeout-budget] ERROR: %s\n' "$*" >&2; exit 2; }
 require_nonnegative_integer() {
@@ -30,25 +29,12 @@ stage_timeout_seconds() {
     printf '%s\n' "$value"
 }
 
-minimum_score_timeout_seconds() {
-    [ "$#" -eq 6 ] || die "score requires a replicate count and five millisecond values"
-    local replicates="$1" stage_seconds
-    shift
-    require_positive_integer replicates "$replicates"
-    stage_seconds="$(stage_timeout_seconds "$@")"
-    printf '%s\n' "$((2 * replicates * stage_seconds + EVALUATION_JOB_OVERHEAD_SECONDS))"
-}
-
 case "${1:-}" in
     stage)
         shift
         stage_timeout_seconds "$@"
         ;;
-    score)
-        shift
-        minimum_score_timeout_seconds "$@"
-        ;;
     *)
-        die "usage: timeout-budget.sh {stage|score} ..."
+        die "usage: timeout-budget.sh stage ..."
         ;;
 esac

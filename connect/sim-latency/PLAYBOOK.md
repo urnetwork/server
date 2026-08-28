@@ -10,16 +10,16 @@ Deployment model: one authoritative 12-physical-core host; 10 evaluation cores,
 2 management cores; one content-addressed image per canonical submission patch.
 
 This playbook launches the authenticated UR competition scoring service. It
-includes the main-API leaderboard, six weekly batch epochs, MinIO compliance
+includes the main-API leaderboard, six weekly epochs, MinIO compliance
 retention, and main Grafana signals/alerts. It does not claim Macrocosmos Apex
 acceptance, business terms, live credentials, or a deployment record that has
 not actually been signed; those remaining actions are listed explicitly below.
 
 Read these first:
 
-- [Apex production calibration](APEX-CALIBRATION.md)
-- [Final baseline infographic](final-baseline.html)
-- [Finalization contract](FINALIZE.md)
+- [Preserved calibration evidence](baseline/README.md)
+- [Final baseline infographic](baseline/final-baseline.html)
+- [Official evaluator contract](OFFICIAL-RUN.md)
 - [Competition service README](../../competition/README.md)
 - [Evaluator protocol](../../competition/EVALUATOR-PROTOCOL.md)
 - [Competition OpenAPI](../../../sn/api/competition.yml)
@@ -34,18 +34,18 @@ Read these first:
 | Item | Frozen value / state |
 |---|---|
 | Public patch-authoring tag | `apex-season-1` at `eb697281cbe0a19a27d7771fe69fb24c2c3dab8c` |
-| Evaluator source | Epoch ledger `config/main/sim-latency.yml`; current source epoch 0: connect `4f3f017f…`, sdk `3c2d56b4…`, server `859be811…`, proxy `17f929c9…` |
+| Evaluator source | Epoch ledger `config/main/sim-latency.yml` is the sole authority for branch, epoch commits, and the significant-improvement percentage |
 | Control plane | API and worker follow `main`; their commits are not scoring inputs. Every job persists the exact API and worker runtime image digests. |
-| Evaluator image | Local epoch-0 image `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; ledger SHA-256 `486641577844bb8373179f4389289249cda3059ff4bfb482b7daf44f8ebbf3ee` |
+| Evaluator image | Local epoch-0 image `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; rebuild and record a new immutable digest whenever the measured source epoch changes |
 | Host qualification | `acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3` |
 | Simulator / scorer | Epoch-0 image binary `a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b` |
 | Workload | 1,800 providers; 200 clients; 80 arrivals/min; quality window 2; 4 exchange hosts; 4 shards |
 | Measurement | 180 seconds; impairment on; median of `R=9` |
-| Takeover rule | candidate raw score `<= same-round baseline * 0.839`, plus G1–G6 |
-| Epoch lifecycle | six epochs; exactly seven days of submission; batch grading only after close; deterministic winner and next-epoch creation |
-| Winner promotion | Round N evaluates source epoch N-1. After finalization, `sim-latency promote --epoch N` commits the winner, pushes measured branches, then activates source epoch N by pushing the config ledger last. |
-| Queue / timeout | ten distinct canonical patches per epoch; one active evaluation; 49,392-second bounded job timeout; three infrastructure attempts |
-| Patch surface | only `connect/resident_contract_manager.go`; maximum 262,144 bytes |
+| Takeover rule | Epoch 1 starts at `candidate <= same-round baseline * 0.839`; every epoch also requires G1–G6 and one-sided Welch `p <= 0.05`. The source ledger supplies later percentages. |
+| Epoch lifecycle | six epochs; exactly seven days of admission; immediate FIFO evaluation; accepted backlog drains past close; worker seals and exits; ranked significant candidates remain embargoed until the honesty-review harness approves the first honest candidate or rejects the list; only then do results reveal and the external loop promote/create the next epoch |
+| Winner promotion | Round N evaluates source epoch N-1. The first honesty-approved significant winner's score variance sets source epoch N's threshold. With no significant candidate or after all are rejected, `--no-winner` carries commits and threshold forward unchanged. Promotion is bound to the approved database job, patch digest, and entire score document; the config ledger is always pushed last. |
+| Queue / timeout | unbounded accepted submissions per epoch at a fixed $20 USD fee; Redis-list dispatch backed by authoritative PostgreSQL ordering/recovery; one active evaluation; three-hour total execution bound per submission across build, all attempts, retry backoff, scoring, and cleanup; timeout is terminal |
+| Patch surface | only `connect/resident_contract_manager.go`; maximum 262,144 bytes. `connect/sim-latency/**` is hard-forbidden independently of policy and its Git tree is authenticated unchanged by the builder. |
 | Evaluation leaves | `/home/by/urnetwork/config/local` and `/home/by/urnetwork/vault/local`, direct and read-only |
 | Evaluation leaf hashes | config `f2fd41f07258389a5b8cbfd12af69c7e71124755432e48e115933a66f835962d`; vault `f84b7bdd1976c5e404c196584025287ab346f4bcfd60196da9ca46191a39f3fa` |
 | Artifact retention | versioned MinIO object storage with compliance retention and post-upload SHA-256 authentication; score commit fails closed |
@@ -69,10 +69,11 @@ API or separate durable competition database is required. Per-evaluation
 PostgreSQL and Redis remain disposable services inside the evaluation Compose
 boundary.
 
-The final deployment still records the exact pushed commit and image digests,
+The final deployment still records runtime image digests per evaluation,
 proves `/competition/readyz`, the MinIO object-lock check, and the Grafana rules
-on the live main environment. Those are release verification steps, not new
-architectural components.
+on the live main environment. Main API/worker source commits are deliberately
+not scoring inputs. These are release verification steps, not new architectural
+components.
 
 ### Trust-boundary rule that must not be weakened
 
@@ -100,16 +101,16 @@ has an owner and a recorded value.
 
 | Area | Current state | Required before public launch |
 |---|---|---|
-| Season identity and dates | Code freezes six epochs, a 604,800-second submission window, close-time reveal, post-close grading, and automatic next-epoch creation. | Record the first `opens_at`, final `season_ends_at`, and `retain_until`. The cadence is decided; only calendar values remain. |
+| Season identity and dates | Code freezes six epochs, a 604,800-second admission window, a $20 USD submission fee, immediate grading, post-close backlog drain, post-honesty-review reveal, and a one-shot worker that exits after sealing the drained epoch. The external agentic loop reviews candidates, promotes an approved winner (or carries forward no winner), and explicitly creates the next epoch. | Record the first `opens_at`, final `season_ends_at`, and `retain_until`. The cadence is decided; only calendar values remain. |
 | Credentials | One season-wide AES-256 seed-encryption key is valid for all six epochs; every epoch independently draws a fresh 256-bit CSPRNG seed. Staging tokens/key exist root-only. | Rotate as one atomic season bundle or explicitly approve the staging bundle, deliver raw tokens out of band, and record revocation. There is no per-epoch seed-key rotation requirement. |
-| Control-plane data services | **Complete by operator confirmation.** Queue/round/result state uses the main PostgreSQL and the existing main Redis/restore boundary. | Run the normal migration verification for the final commit; no new durable data service is needed. |
-| Service supervision | **Complete by operator confirmation.** Main API plus one competition worker use the reviewed main-environment migration and boot ordering. | Verify the final deployed versions and singleton worker heartbeat. |
-| Public ingress | **Complete by operator confirmation.** DNS/TLS/reverse proxy/firewall/rate limits are provided by main. | Smoke the final `/competition/*` routes, including the 262,144-byte request ceiling and 429 behavior. |
-| Release distribution | Evaluator identity and OpenAPI digest are recorded. Main API/worker releases continue normally and are not scoring inputs; each evaluation stores their exact runtime image digests. | Publish or locally load the epoch-0 evaluator image by immutable digest. Verify runtime digest injection on the deployed API and worker. |
+| Control-plane data services | **Complete by operator confirmation.** PostgreSQL is authoritative for admission, exact FIFO order, leases, results, and finalization. A main-Redis list is the rebuildable FIFO dispatch index; a flush or interrupted push recovers from PostgreSQL. | Run the normal migration verification for the final commit; no new durable data service is needed. |
+| Service supervision | **Complete by operator confirmation.** Main API plus one competition worker per epoch use the reviewed main-environment migration and boot ordering. The worker exits zero after close and FIFO drain, leaving significant candidates embargoed for the separate honesty-review command. | Verify the final deployed versions, singleton worker heartbeat, clean one-shot exit handling, and review-harness handoff in the agentic controller. |
+| Public ingress | **Complete by operator confirmation.** DNS/TLS/reverse proxy/firewall/rate limits are provided by main. | Smoke the final `/competition/*` routes, including the 262,144-byte request ceiling and ordinary ingress rate limiting. There is no epoch job-count rejection. |
+| Release distribution | **Epoch-0 complete by local immutable load.** Docker resolves `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; the public info response exposes the current evaluator image, and each job response exposes its frozen evaluator plus exact API/worker runtime images. Main API/worker releases continue normally and are not scoring inputs. | Set the same evaluator digest in live `competition.yml`, then verify runtime API/worker digest injection on the deployed services. |
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` fails if object lock or versioning is absent. | Prove the live bucket check, capacity, backup replication, and the named post-`retain_until` deletion owner. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, and provisioned Grafana alert rules are implemented for the main Mimir/Grafana pipeline. | Deploy the final server and warp commits and map `severity=page|warn` through the existing main contact policy; record the human roster/incident contact in the operator record. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. | Distribute endpoint/token/onboarding instructions and exercise revocation once. No separate API is required. |
-| Leaderboard and winner | Implemented at public `GET /competition/leaderboard`; only finalized epochs appear, winner selection is deterministic, and the auditable source-epoch promotion/rebuild path is implemented. | Publish fees, rewards, eligibility, legal terms, and abuse/appeal handling. Exercise one dry-run promotion before opening epoch 1. |
+| Leaderboard and winner | Implemented at public `GET /competition/leaderboard`; only finalized epochs appear and rows expose approved/rejected/not-reviewed disposition. Ranked significant candidates require append-only operator honesty review, and promotion is database-bound to the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
 | Apex | Adapter mapping and handoff fields are documented in `competition/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
 
 The installed provisioner authenticates an existing bundle and intentionally
@@ -257,6 +258,10 @@ curl -fsS "$COMPETITION_API_BASE/info" | \
          .evaluation_policy.takeover_margin == 0.161'
 ```
 
+The literal base and 0.161 checks above apply to the first competition round.
+For every later round, derive both expected values from its selected source
+epoch in `config/main/sim-latency.yml`; do not copy epoch 0 values forward.
+
 On first boot, the worker must heartbeat before round generation. An
 authenticated `/readyz` may still return 503 because the old staging round is
 the last promoted rebaseline. That is expected; do not open submissions.
@@ -264,8 +269,11 @@ the last promoted rebaseline. That is expected; do not open submissions.
 Prepare the first strict JSON request with `closes_at = opens_at + 7 days` and
 `reveal_at = closes_at`. Create it far enough before opening to complete the
 same-round R=9 rebaseline; the configured 16-hour preparation window covers
-the 49,392-second job bound. Epochs 2 through 6 are created automatically only
-after the prior post-close FIFO drains and its winner is finalized.
+the three-hour submission execution bound. For epochs 2 through 6, the
+agentic control loop waits for the worker to exit after the prior FIFO drains
+past close, runs ordered honesty review until an honest significant candidate
+is approved or the list is exhausted, promotes that approved winner or records
+the no-winner carry-forward, and then submits the next strict round request.
 
 ```json
 {
@@ -374,39 +382,67 @@ URLs, miner Dockerfiles, or miner-built images:
 
 `POST /competition/score` returns HTTP 202 with a job id and status URL.
 `GET /competition/score/{jobId}` polls it. One canonical patch per round maps
-to one cache identity even when multiple principals submit it. During an
-active round, submitter responses intentionally hide raw scores, gate details,
-and diagnostics.
+to one cache identity even when multiple principals submit it. Before
+post-review epoch finalization, submitter responses expose only processing state: terminal jobs
+appear as outcome-neutral `completed`, with score and failure results omitted.
 
 Operate with these expectations:
 
-- up to ten distinct canonical patches are admitted during the seven-day
-  submission window; duplicate patches remain cache hits;
-- no admitted job is claimable until `closes_at`; post-close grading is one
-  FIFO evaluation at a time and HTTP 429 includes `Retry-After`;
-- one job may legitimately remain active for hours and is bounded by 49,392
-  seconds;
+- any number of unique canonical patches may be admitted during the seven-day
+  window after the Apex adapter collects the fixed $20 USD fee exactly once;
+  duplicate patches remain cache hits and transport retries are not recharged;
+- accepted jobs become claimable immediately. Redis-list dispatch and the
+  authoritative PostgreSQL order feed one FIFO evaluation at a time;
+- `closes_at` rejects only new admissions. Every queued/running job continues
+  to a terminal result, so the grading interval can extend arbitrarily past
+  the seven-day window as paid submissions require;
+- one job may legitimately remain active for about 2.5 hours and is terminated
+  as failed at the three-hour submission-wide execution deadline;
 - infrastructure failures retry under the same job/cache identity, up to
-  three attempts;
+  three attempts within that same three-hour deadline;
 - structural/build/submission errors are terminal and do not get noise redraws;
 - baseline and candidate each run nine repetitions with distinct fresh stores;
 - every candidate build and run is offline/default-deny;
 - accounting, resources, score, completion, and failure artifacts are retained
   and sealed; and
-- `placeable` and `takeover_eligible` are different. A winner needs
-  `takeover_eligible: true` and every G1–G6 gate true.
+- `placeable` and `takeover_eligible` are different. A winner needs every
+  G1–G6 gate, the epoch's raw-score margin, one-sided Welch `p <= 0.05`, a
+  supported next-epoch threshold, and therefore `takeover_eligible: true`;
+- statistical eligibility creates a ranked review candidate, not a winner. The
+  first candidate that receives an append-only `approved` honesty review is the
+  winner; `rejected` candidates are discarded and the next rank is presented;
+- every successful result preserves baseline and candidate means and sample
+  variances, the observed and required improvement percentages, p-value, and
+  recommended next-epoch margin.
 
-When the final accepted job becomes terminal, the worker atomically freezes the
-winner and finalized timestamp. `GET /competition/leaderboard` then publishes
-that epoch. If fewer than six epochs exist, the worker creates the next hidden
-round with its 16-hour rebaseline preparation window and exact seven-day
+When the final accepted job becomes terminal after admission closes, the worker
+seals the ranked significant-candidate set and exits successfully. It does not
+publish a winner. The operator-controlled agent harness then reviews the exact
+patch and score for each candidate in order. Approval atomically freezes the
+winner and finalized timestamp; rejecting the final candidate atomically
+freezes no winner. Only that post-review commit makes scores, failures, seed,
+workload, and `GET /competition/leaderboard` public. The external control loop
+then promotes the approved winner—or records a no-winner carry-forward—and creates the next
+hidden round with its 16-hour rebaseline preparation window and exact seven-day
 submission window. The operator must promote the next round's rebaseline before
 its `opens_at`; readiness remains false otherwise.
 
 Monitor at least:
 
 - unauthenticated `/competition/healthz` and authenticated `/competition/readyz`;
+- the runner-process heartbeat emitted every 15 seconds, warning when its age
+  exceeds 30 seconds;
 - authoritative host-heartbeat age and identity;
+- one-hot round phase including `review`; stale-worker paging covers only
+  `open|grading`, because the one-shot worker intentionally exits for review;
+- durable FIFO size, current job identity and elapsed time, recent p75
+  evaluation duration, estimated drain time, and whether the current epoch has
+  produced a statistically significant submission;
+- the internal live replicate plots for TTFB p50/p95 and throughput p50/p95.
+  They update after each authenticated replicate: blue is a provisional
+  significant improvement, red is a significant regression, gray is not
+  significant, and green is the same-round baseline. These diagnostics never
+  bypass the finalization-time public reveal or the sealed composite score;
 - queued/running job age, attempt count, lease owner, and lease expiry;
 - API/worker exits, evaluator typed errors, OOM/timeout events, and cleanup;
 - PostgreSQL and Redis health/latency/backups;
@@ -417,18 +453,26 @@ Monitor at least:
 Install `server/grafana/dashboards/competition.json` through the normal Grafana
 dashboard sync and `warp/grafana/alerting/competition.yml` through Grafana file
 provisioning. The provisioned thresholds are: archive readiness missing/below
-1 for one minute (page), worker heartbeat absent or older than 60 seconds for
-five minutes while open/grading (page), queued-without-running grading for five
+1 for one minute (page), runner-process heartbeat age over 30 seconds (dashboard
+warning), durable worker heartbeat absent or older than 60 seconds for five
+minutes while open/grading (page), queued-without-running grading for five
 minutes (page), any five-minute control-plane/archive/infrastructure error
 (page), MinIO over 75% used for 15 minutes (warn), and MinIO over 90% used for
 five minutes (page).
 
-## 8. Reveal, close, and retain
+The live plot source is the evaluator-owned `evaluation-progress.json`, which
+is atomically replaced after every completed replicate, retained with the
+attempt in MinIO, and watched only by the competition worker. The ordinary API
+does not expose this document or its metric series before finalization.
 
-At `closes_at`, atomically reject new jobs, reveal the committed workload, and
-make the accepted batch claimable. Verify `/competition/info` exposes the seed
-and provider URL, then download the workload and authenticate both response
-headers while the FIFO grades:
+## 8. Close, drain, reveal, and retain
+
+At `closes_at`, atomically reject new jobs and keep the immediate FIFO running
+until every accepted job is terminal. Do not expose the seed, workload, scores,
+failures, or leaderboard while that backlog drains or while honesty review is
+pending. After post-review epoch finalization,
+verify `/competition/info` exposes the seed and provider URL, then download the
+workload and authenticate both response headers:
 
 ```bash
 curl -fsS -D providers.headers \
@@ -442,36 +486,103 @@ The digest must equal the value committed at round generation and the
 providers file, API/worker release identities, job/event records, all attempts,
 scores, and public leaderboard export through `retain_until`.
 
-The epoch is not published merely because it closed or revealed. Publication
-waits until every accepted job is terminal and the deterministic winner update
-commits; only then may the automatic next epoch be created.
+The epoch is not published merely because it closed or reached `reveal_at`.
+Publication waits until every accepted job is terminal and the honesty-review
+decision commits. The worker exits after sealing/draining; only an approved
+candidate (or exhausted no-winner state) permits the external control loop to
+promote and create the next epoch.
 
-### Promote the finalized winner to the next source epoch
+### Review candidates, then promote the finalized winner
 
-Round N evaluates source epoch N-1. As soon as round N is finalized, retrieve
-the authenticated winning `canonical.patch` from MinIO and place it in a
-restricted winner directory. In a dedicated release workspace, check out the
-`sim-latency` branch of `connect`, `sdk`, `server`, and `proxy` at the commits
-for source epoch N-1, then run:
+Round N evaluates source epoch N-1. Once its backlog drains and the worker exits,
+enumerate the current highest-ranked significant candidate. `epoch-review`
+queries the main control plane, authenticates the immutable PostgreSQL patch
+copy, and materializes `candidate.json`, `score.json`, and `canonical.patch` in
+a fresh mode-0700 directory whose files are mode 0400:
 
 ```bash
-cd /release-workspace/server/connect/sim-latency
-./sim-latency source-check --epoch "REPLACE_WITH_N_MINUS_1"
-./sim-latency promote \
-  --epoch "REPLACE_WITH_N" \
-  --winner /restricted/winner-N \
-  --winner-job-id "REPLACE_WITH_FINALIZED_WINNER_JOB_ID"
+cd /home/by/urnetwork/server/connect/sim-latency
+review_json="$(./run-main.sh epoch-review --epoch "REPLACE_WITH_N" next)"
+winner_tmp="$(jq -er '.candidate_directory' <<<"$review_json")"
+candidate_job_id="$(jq -er '.state.candidate.job_id' <<<"$review_json")"
+
+# Run the trusted agent-harness honesty analysis without applying the patch.
+# It must write a bounded JSON object to honesty-report.json.
+HONESTY_HARNESS_COMMAND \
+  --candidate "$winner_tmp/candidate.json" \
+  --score "$winner_tmp/score.json" \
+  --patch "$winner_tmp/canonical.patch" \
+  --out honesty-report.json
 ```
 
-The winner directory accepts `canonical.patch` as the server patch, or explicit
-`connect.patch`, `sdk.patch`, `server.patch`, and `proxy.patch` files. Promotion
-requires clean exact local heads and matching remote branch heads, applies each
-patch in an isolated clone, creates at most one commit per changed repository,
-and repeats all four repository commits in the new ledger entry. Repository
-branches are pushed first; `config/main/sim-latency.yml` is committed and pushed
-last, so an interrupted cross-repository update never activates a partial
-source epoch. `--dry-run` performs every staging and validation step without a
-push or local fast-forward.
+For a dishonest candidate, append a rejection. The response already contains
+and materializes the next ranked candidate, if one exists; repeat until a
+candidate is approved or the state becomes `finalized` with no winner:
+
+```bash
+./run-main.sh epoch-review --epoch "REPLACE_WITH_N" reject \
+  --job-id "$candidate_job_id" \
+  --reviewer "REPLACE_WITH_STABLE_HARNESS_ID" \
+  --reason "REPLACE_WITH_CONCISE_TAMPERING_FINDING" \
+  --evidence honesty-report.json
+rm -rf -- "$winner_tmp"
+```
+
+For an honest candidate, append approval. This is atomic with finalization and
+is the only database path that can publish a winner:
+
+```bash
+./run-main.sh epoch-review --epoch "REPLACE_WITH_N" approve \
+  --job-id "$candidate_job_id" \
+  --reviewer "REPLACE_WITH_STABLE_HARNESS_ID" \
+  --reason "honesty checks passed" \
+  --evidence honesty-report.json
+```
+
+The review table and evidence are append-only. Database triggers reject rank
+skips, decisions before close/drain, a no-winner finalization with an unresolved
+significant candidate, and a winner without an approval for that exact job.
+Keep the approved directory just long enough to promote it, then remove it;
+MinIO and PostgreSQL remain durable.
+
+When a winner exists, promote from the exact approved directory:
+
+```bash
+
+./run-main.sh source-check --epoch "REPLACE_WITH_N_MINUS_1"
+./run-main.sh promote \
+  --epoch "REPLACE_WITH_N" \
+  --winner "$winner_tmp" \
+  --winner-job-id "$candidate_job_id"
+rm -rf -- "$winner_tmp"
+```
+
+If review finalized no winner, do not fabricate a patch or job id:
+
+```bash
+./run-main.sh promote --epoch "REPLACE_WITH_N" --no-winner
+```
+
+The winner directory must contain the evaluated `canonical.patch` and exact
+reviewed `score.json`. Promotion queries the finalized round, requires the exact
+approved job, rejects unevaluated repository patches, verifies the canonical
+patch SHA-256 and the entire score document against the approved database
+record, then rechecks G1–G6, placeability, margin, R=9 variance, one-sided
+p-value, and supported next-epoch recommendation. The recommendation becomes
+the new ledger percentage. A no-winner transition repeats both prior commits
+and prior percentage unchanged, and is rejected unless the round finalized
+without a winner.
+
+The command creates one additional temporary root, freshly clones `connect`,
+`sdk`, `server`, and `proxy`, checks out each `sim-latency` branch at the prior
+epoch commit, applies the winner, and creates at most one commit per changed
+repository. The long-lived local checkouts are verified preflight inputs and
+are never patched. Repository branches are pushed first;
+`config/main/sim-latency.yml` is cloned, committed, and pushed last, so an
+interrupted cross-repository update never activates a partial source epoch.
+`--dry-run` performs every staging and validation step without a push or local
+fast-forward. The `winner_tmp` directory is disposable because MinIO remains
+the durable submission and evaluation archive.
 
 For rounds 1 through 5, build the next immutable evaluator image during the
 16-hour preparation window and deploy its base SHA, image digest, and
@@ -533,17 +644,24 @@ no permission to fall back to a moving source checkout or tag-only image.
 Technical evidence already complete:
 
 - [x] one-host hardware and containment qualification;
-- [x] frozen p1800 scale, R=9 aggregation, and 16.1% takeover margin;
+- [x] frozen p1800 scale, R=9 aggregation, epoch-0 16.1% margin, and
+  per-evaluation variance/significance records that set later epoch margins;
 - [x] same-seed baseline and independent reference screen;
 - [x] adversarial CPU/memory-bomb cleanup;
 - [x] isolated direct read-only local leaves and no parent/all/main mounts;
 - [x] fixed per-submission Docker build and offline execution;
 - [x] authenticated main-API generate/submit/poll/info/reveal/leaderboard
   routes, FIFO/cache/failover, and structural OpenAPI conformance;
-- [x] six exact weekly submission epochs, post-close batch grading,
-  deterministic winner finalization, and automatic next-epoch creation;
-- [x] per-epoch measured-source ledger, mandatory run preflight, isolated
-  winner commit/push command, and epoch-bound evaluator image build;
+- [x] six exact weekly admission epochs, unbounded paid submission count,
+  immediate Redis-list FIFO dispatch with durable PostgreSQL recovery,
+  post-close drain, honesty-review-gated result publication, and one-shot worker
+  exit before the external review/promotion loop creates the next epoch;
+- [x] append-only ordered honesty review with reject/advance, exact candidate
+  approval, exhausted no-winner finalization, and promotion bound to the
+  approved patch and significance record;
+- [x] per-epoch measured-source ledger, mandatory run preflight, authenticated
+  winner-score threshold update or no-winner carry-forward, isolated
+  commit/push command, and epoch-bound evaluator image build;
 - [x] MinIO versioned compliance retention with post-upload authentication and
   fail-closed readiness;
 - [x] main Grafana metrics/dashboard plus provisioned worker, archive,
@@ -555,18 +673,20 @@ Technical evidence already complete:
 Still to add or approve before a public competition starts:
 
 - [ ] final season id, first `opens_at`, season end, and retention date (the
-  six-epoch weekly cadence and close-time reveal are already frozen);
+  six-epoch weekly cadence and post-review finalization reveal are already frozen);
 - [ ] atomic live credential/seed-key rotation or explicit approval to promote
   the staging-generated bundle;
-- [ ] publish or locally load the epoch-0 evaluator image by immutable digest;
-  main API/worker releases remain on `main` and persist their exact runtime
-  image digests per evaluation rather than freezing one season-wide build;
+- [x] epoch-0 evaluator image locally loaded as immutable Docker image id
+  `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`;
+  main API/worker releases remain on `main`, and every job API response persists
+  and exposes its frozen evaluator plus exact API/worker runtime image digests;
 - [ ] live MinIO `/readyz` proof, backup-replication record, capacity check, and
   the owner authorized to delete evidence after `retain_until`;
 - [ ] deploy the final server/warp monitoring commits and bind `severity` labels
   to the existing main Grafana contact policy/on-call record;
 - [ ] miner/submission onboarding, token distribution, and revocation flow;
-- [ ] fees, rewards, eligibility, legal terms, and abuse/appeal process;
+- [ ] publish rewards, eligibility, legal terms, and abuse/appeal process (the
+  submission fee is frozen at $20 USD);
 - [ ] Macrocosmos asynchronous-adapter/staging/private-registry acceptance and
   signed public Apex handoff artifacts.
 

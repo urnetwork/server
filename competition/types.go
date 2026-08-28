@@ -67,6 +67,7 @@ type SeasonPolicy struct {
 	EpochCount               int `json:"epoch_count" yaml:"epoch_count"`
 	SubmissionWindowSeconds  int `json:"submission_window_seconds" yaml:"submission_window_seconds"`
 	PreparationWindowSeconds int `json:"preparation_window_seconds" yaml:"preparation_window_seconds"`
+	SubmissionFeeUsd         int `json:"submission_fee_usd" yaml:"submission_fee_usd"`
 }
 
 type InfoResult struct {
@@ -126,8 +127,46 @@ type LeaderboardEntry struct {
 	PatchSha256    string      `json:"patch_sha256"`
 	SubmittedAt    time.Time   `json:"submitted_at"`
 	Winner         bool        `json:"winner"`
+	HonestyReview  string      `json:"honesty_review"`
 	Score          ScoreResult `json:"score"`
 	SubmitterCount int         `json:"submitter_count"`
+}
+
+// CandidateReviewState is the trusted operator view of a closed epoch. Score
+// results remain embargoed while Status is pending_review. A review decision
+// is append-only; rejecting the current candidate advances to the next ranked
+// statistically significant candidate, while approving it finalizes the epoch.
+type CandidateReviewState struct {
+	CompetitionId string                    `json:"competition_id"`
+	RoundId       server.Id                 `json:"round_id"`
+	Epoch         int                       `json:"epoch"`
+	Status        string                    `json:"status"`
+	RejectedCount int                       `json:"rejected_count"`
+	Candidate     *CandidateReviewCandidate `json:"candidate,omitempty"`
+	FinalizedAt   *time.Time                `json:"finalized_at,omitempty"`
+	WinnerJobId   *server.Id                `json:"winner_job_id,omitempty"`
+}
+
+// CandidateReviewCandidate contains the exact ranked score and authenticated
+// canonical patch needed by the operator-controlled honesty-review harness.
+// Patch is intentionally excluded from JSON and is materialized into a private
+// temporary directory by the CLI.
+type CandidateReviewCandidate struct {
+	Rank        int         `json:"rank"`
+	JobId       server.Id   `json:"job_id"`
+	PatchSha256 string      `json:"patch_sha256"`
+	SubmittedAt time.Time   `json:"submitted_at"`
+	Score       ScoreResult `json:"score"`
+	Patch       []byte      `json:"-"`
+}
+
+type CandidateReviewDecision struct {
+	JobId          server.Id
+	Decision       string
+	ReviewerId     string
+	Reason         string
+	Evidence       json.RawMessage
+	EvidenceSha256 string
 }
 
 type ScoreArgs struct {
@@ -145,28 +184,53 @@ type ScoreAcceptedResult struct {
 }
 
 type ScoreJobResult struct {
-	JobId             server.Id         `json:"job_id"`
-	RoundId           server.Id         `json:"round_id"`
-	PatchSha256       string            `json:"patch_sha256"`
-	State             string            `json:"state"`
-	SubmittedAt       time.Time         `json:"submitted_at"`
-	StartedAt         *time.Time        `json:"started_at,omitempty"`
-	CompletedAt       *time.Time        `json:"completed_at,omitempty"`
-	CacheKey          string            `json:"cache_key"`
-	ApiImageDigest    string            `json:"api_image_digest"`
-	WorkerImageDigest string            `json:"worker_image_digest,omitempty"`
-	Score             *ScoreResult      `json:"score,omitempty"`
-	EvalError         *CompetitionError `json:"eval_error,omitempty"`
+	JobId                server.Id         `json:"job_id"`
+	RoundId              server.Id         `json:"round_id"`
+	PatchSha256          string            `json:"patch_sha256"`
+	State                string            `json:"state"`
+	SubmittedAt          time.Time         `json:"submitted_at"`
+	StartedAt            *time.Time        `json:"started_at,omitempty"`
+	CompletedAt          *time.Time        `json:"completed_at,omitempty"`
+	CacheKey             string            `json:"cache_key"`
+	EvaluatorImageDigest string            `json:"evaluator_image_digest"`
+	ApiImageDigest       string            `json:"api_image_digest"`
+	WorkerImageDigest    string            `json:"worker_image_digest,omitempty"`
+	Score                *ScoreResult      `json:"score,omitempty"`
+	EvalError            *CompetitionError `json:"eval_error,omitempty"`
 }
 
 type ScoreResult struct {
-	ScoreSchema      int             `json:"score_schema"`
-	RawScore         *float64        `json:"raw_score,omitempty"`
-	NormalizedScore  *float64        `json:"normalized_score,omitempty"`
-	Placeable        bool            `json:"placeable"`
-	TakeoverEligible bool            `json:"takeover_eligible,omitempty"`
-	Gates            map[string]Gate `json:"gates"`
-	Diagnostics      map[string]any  `json:"diagnostics,omitempty"`
+	ScoreSchema      int                `json:"score_schema"`
+	RawScore         *float64           `json:"raw_score,omitempty"`
+	NormalizedScore  *float64           `json:"normalized_score,omitempty"`
+	Placeable        bool               `json:"placeable"`
+	TakeoverEligible bool               `json:"takeover_eligible,omitempty"`
+	Gates            map[string]Gate    `json:"gates"`
+	Significance     *ScoreSignificance `json:"significance"`
+	Diagnostics      map[string]any     `json:"diagnostics,omitempty"`
+}
+
+// ScoreSignificance is the immutable statistical record for one evaluation.
+// Percent fields use 100 for one hundred percent; variance is sample variance.
+type ScoreSignificance struct {
+	Method                                      string   `json:"method"`
+	Alpha                                       float64  `json:"alpha"`
+	ReplicateCount                              int      `json:"replicate_count"`
+	BaselineMeanRawScore                        float64  `json:"baseline_mean_raw_score"`
+	CandidateMeanRawScore                       float64  `json:"candidate_mean_raw_score"`
+	BaselineSampleVariance                      *float64 `json:"baseline_sample_variance"`
+	CandidateSampleVariance                     *float64 `json:"candidate_sample_variance"`
+	ObservedImprovementPercent                  float64  `json:"observed_improvement_percent"`
+	TakeoverMarginPercent                       float64  `json:"takeover_margin_percent"`
+	MinimumSignificantImprovementPercent        *float64 `json:"minimum_significant_improvement_percent"`
+	RequiredImprovementPercent                  *float64 `json:"required_improvement_percent"`
+	OneSidedPValue                              *float64 `json:"one_sided_p_value"`
+	WelchT                                      *float64 `json:"welch_t,omitempty"`
+	WelchDegreesOfFreedom                       *float64 `json:"welch_degrees_of_freedom,omitempty"`
+	StatisticallySignificant                    bool     `json:"statistically_significant"`
+	NextEpochMinimumImprovementPercent          *float64 `json:"next_epoch_minimum_improvement_percent"`
+	RecommendedNextEpochTakeoverMarginPercent   *float64 `json:"recommended_next_epoch_takeover_margin_percent"`
+	RecommendedNextEpochTakeoverMarginSupported bool     `json:"recommended_next_epoch_takeover_margin_supported"`
 }
 
 type Gate struct {

@@ -27,11 +27,15 @@ simulator at the present frontier point, dedicated PostgreSQL and Redis in the
 same resource boundary, and a paired multi-replicate baseline/candidate job.
 Those requirements do not fit the standard public sandbox contract.
 
-The season contract also batches work: an epoch accepts submissions for seven
-days, grading starts only after close, and one calibrated job may take up to
-49,392 seconds. The next of six epochs begins only after the prior FIFO drains
-and its winner is finalized. A synchronous solo-referee result cannot preserve
-that timing or cache identity without an accepted asynchronous adapter.
+The season contract accepts an unbounded number of $20 USD submissions for
+seven days and evaluates them immediately through one Redis-list FIFO backed by
+durable PostgreSQL ordering. One calibrated job has a three-hour hard execution
+limit. At close the backlog keeps running, and the external control loop begins
+the next of six epochs only after the prior FIFO drains, the one-shot worker
+exits, and ordered honesty review finalizes an approved winner or exhausts the
+candidate list. Only then do embargoed results publish. A synchronous
+solo-referee result cannot preserve that timing or cache identity without an
+accepted asynchronous adapter.
 
 The standard solo leaderboard also applies a one-percent takeover rule. This
 competition deliberately freezes its takeover margin only after same-seed,

@@ -115,17 +115,7 @@ func allChecks(checks map[string]bool) bool {
 }
 
 func secureEvaluatorChecksPass(checks map[string]bool) bool {
-	if len(checks) == 0 {
-		return false
-	}
-	for name, passed := range checks {
-		// Queue capacity has its own stable 429 response. Every containment,
-		// identity, reset, storage, and host check remains mandatory.
-		if name != "queue_admission" && !passed {
-			return false
-		}
-	}
-	return true
+	return allChecks(checks)
 }
 
 func roundGenerationChecksPass(checks map[string]bool) bool {
@@ -133,10 +123,10 @@ func roundGenerationChecksPass(checks map[string]bool) bool {
 		return false
 	}
 	for name, passed := range checks {
-		// A new round must exist before either host can attest its same-round
-		// baseline. Queue admission and that round-scoped check are therefore
-		// enforced for submissions, not for the atomic generation step.
-		if name != "queue_admission" && name != "host_rebaseline" && !passed {
+		// A new round must exist before the host can attest its same-round
+		// baseline. That round-scoped check is therefore enforced for
+		// submissions, not for the atomic generation step.
+		if name != "host_rebaseline" && !passed {
 			return false
 		}
 	}
@@ -254,15 +244,13 @@ func (s *Service) Submit(ctx context.Context, args ScoreArgs, principal *Princip
 	case errors.Is(err, ErrRoundClosed):
 		metricOutcome = "rejected"
 		return nil, 409, submissionError("round_not_open", "round is not open for submissions")
-	case errors.Is(err, ErrQueueFull):
-		metricOutcome = "queue_full"
-		return nil, 429, &CompetitionError{Kind: "infrastructure", Code: "queue_full", Message: "evaluation queue admission limit reached", Retriable: true}
 	case err != nil:
 		return nil, 503, infrastructureError("enqueue_failed", "submission could not be durably enqueued")
 	}
 	result := &ScoreAcceptedResult{
 		JobId: job.JobId, RoundId: job.RoundId, PatchSha256: job.PatchSha256,
-		State: job.State, CacheHit: hit, StatusUrl: "/competition/score/" + job.JobId.String(),
+		State:    scoreJobStateView(job.State, roundPublished(&job.Round, server.NowUtc()), principal),
+		CacheHit: hit, StatusUrl: "/competition/score/" + job.JobId.String(),
 	}
 	if hit {
 		metricOutcome = "cache_hit"
@@ -284,11 +272,7 @@ func (s *Service) GetScore(ctx context.Context, jobId server.Id, principal *Prin
 	if err != nil {
 		return nil, 503, infrastructureError("storage_unavailable", "score job storage is unavailable")
 	}
-	result := job.ScoreJobResult
-	if server.NowUtc().Before(job.Round.RevealAt) && principal.Role != "operator" {
-		result.Score = activeRoundScoreView(result.Score)
-		result.EvalError = activeRoundErrorView(result.EvalError)
-	}
+	result := scoreJobView(job, principal, server.NowUtc())
 	return &result, 200, nil
 }
 
@@ -304,8 +288,8 @@ func (s *Service) GetRoundWorkload(ctx context.Context, roundId server.Id) ([]by
 	if err != nil {
 		return nil, "", 503, infrastructureError("storage_unavailable", "competition round storage is unavailable")
 	}
-	if round.Canceled || server.NowUtc().Before(round.RevealAt) {
-		return nil, "", 409, submissionError("round_not_revealed", "round workload is unavailable until reveal_at")
+	if round.Canceled || !roundPublished(round, server.NowUtc()) {
+		return nil, "", 409, submissionError("round_not_revealed", "round workload is unavailable until post-review epoch finalization")
 	}
 	providers, err := readRoundWorkload(ctx, settings, round)
 	if err != nil {
@@ -316,7 +300,7 @@ func (s *Service) GetRoundWorkload(ctx context.Context, roundId server.Id) ([]by
 
 func (s *Service) roundView(round *roundRecord) (*RoundResult, *CompetitionError) {
 	view := round.RoundResult
-	if !server.NowUtc().Before(round.RevealAt) {
+	if roundPublished(round, server.NowUtc()) {
 		seed, err := revealRoundSecret(s.settings, round)
 		if err != nil {
 			return nil, infrastructureError("round_reveal_failed", "round commitment could not be revealed")
@@ -327,35 +311,25 @@ func (s *Service) roundView(round *roundRecord) (*RoundResult, *CompetitionError
 	return &view, nil
 }
 
-func activeRoundScoreView(score *ScoreResult) *ScoreResult {
-	if score == nil {
-		return nil
-	}
-	view := *score
-	view.RawScore = nil
-	view.Diagnostics = nil
-	view.Gates = make(map[string]Gate, len(score.Gates))
-	for name, gate := range score.Gates {
-		view.Gates[name] = Gate{Passed: gate.Passed, Details: map[string]any{}}
-	}
-	return &view
+func roundPublished(round *roundRecord, now time.Time) bool {
+	return round.FinalizedAt != nil && !now.Before(round.RevealAt)
 }
 
-func activeRoundErrorView(evalError *CompetitionError) *CompetitionError {
-	if evalError == nil {
-		return nil
+func scoreJobStateView(state string, published bool, principal *Principal) string {
+	if principal.Role != "operator" && !published && (state == "succeeded" || state == "failed") {
+		return "completed"
 	}
-	return &CompetitionError{
-		Kind: evalError.Kind, Code: evalError.Code,
-		Message: safeActiveErrorMessage(evalError), Retriable: evalError.Retriable,
-	}
+	return state
 }
 
-func safeActiveErrorMessage(evalError *CompetitionError) string {
-	if evalError.Kind == "infrastructure" {
-		return "evaluation infrastructure error"
+func scoreJobView(job *queuedJob, principal *Principal, now time.Time) ScoreJobResult {
+	result := job.ScoreJobResult
+	if principal.Role != "operator" && !roundPublished(&job.Round, now) {
+		result.State = scoreJobStateView(result.State, false, principal)
+		result.Score = nil
+		result.EvalError = nil
 	}
-	return "submission did not pass evaluation"
+	return result
 }
 
 func validateScore(score *ScoreResult) error {
@@ -371,12 +345,93 @@ func validateScore(score *ScoreResult) error {
 	if score.Gates == nil {
 		return errors.New("score gates are missing")
 	}
+	if err := validateScoreSignificance(score.Significance); err != nil {
+		return err
+	}
+	if score.TakeoverEligible && (!score.Placeable ||
+		!score.Significance.StatisticallySignificant ||
+		!score.Significance.RecommendedNextEpochTakeoverMarginSupported) {
+		return errors.New("takeover eligibility contradicts statistical significance")
+	}
 	for name, gate := range score.Gates {
 		if strings.TrimSpace(name) == "" || gate.Details == nil {
 			return fmt.Errorf("score gate %q is malformed", name)
 		}
 	}
 	return nil
+}
+
+func validateScoreSignificance(significance *ScoreSignificance) error {
+	if significance == nil || significance.Method != "one-sided-welch-t" ||
+		significance.Alpha != 0.05 || significance.ReplicateCount <= 0 ||
+		9 < significance.ReplicateCount || significance.ReplicateCount%2 == 0 ||
+		!finitePositiveNumber(significance.BaselineMeanRawScore) ||
+		!finitePositiveNumber(significance.CandidateMeanRawScore) ||
+		!finiteNumber(significance.ObservedImprovementPercent) ||
+		!finitePositiveNumber(significance.TakeoverMarginPercent) ||
+		50 < significance.TakeoverMarginPercent {
+		return errors.New("score significance metadata is malformed")
+	}
+	if significance.ReplicateCount == 1 {
+		if significance.BaselineSampleVariance != nil ||
+			significance.CandidateSampleVariance != nil ||
+			significance.MinimumSignificantImprovementPercent != nil ||
+			significance.RequiredImprovementPercent != nil ||
+			significance.OneSidedPValue != nil || significance.WelchT != nil ||
+			significance.WelchDegreesOfFreedom != nil ||
+			significance.StatisticallySignificant ||
+			significance.NextEpochMinimumImprovementPercent != nil ||
+			significance.RecommendedNextEpochTakeoverMarginPercent != nil ||
+			significance.RecommendedNextEpochTakeoverMarginSupported {
+			return errors.New("single-replicate score claims unavailable significance")
+		}
+		return nil
+	}
+	if !finiteNonnegativePointer(significance.BaselineSampleVariance) ||
+		!finiteNonnegativePointer(significance.CandidateSampleVariance) ||
+		!finiteNonnegativePointer(significance.MinimumSignificantImprovementPercent) ||
+		!finiteNonnegativePointer(significance.RequiredImprovementPercent) ||
+		!finiteNonnegativePointer(significance.NextEpochMinimumImprovementPercent) ||
+		!finitePositivePointer(significance.RecommendedNextEpochTakeoverMarginPercent) ||
+		significance.OneSidedPValue == nil ||
+		!finiteNumber(*significance.OneSidedPValue) ||
+		*significance.OneSidedPValue < 0 || 1 < *significance.OneSidedPValue {
+		return errors.New("score significance calculation is incomplete")
+	}
+	if significance.WelchT != nil && !finiteNumber(*significance.WelchT) {
+		return errors.New("score Welch statistic is not finite")
+	}
+	if significance.WelchDegreesOfFreedom != nil &&
+		!finitePositiveNumber(*significance.WelchDegreesOfFreedom) {
+		return errors.New("score Welch degrees of freedom are invalid")
+	}
+	statisticallySignificant := 0 < significance.ObservedImprovementPercent &&
+		*significance.OneSidedPValue <= significance.Alpha
+	if significance.StatisticallySignificant != statisticallySignificant {
+		return errors.New("score significance decision is inconsistent")
+	}
+	supported := 0 < *significance.RecommendedNextEpochTakeoverMarginPercent &&
+		*significance.RecommendedNextEpochTakeoverMarginPercent <= 50
+	if significance.RecommendedNextEpochTakeoverMarginSupported != supported {
+		return errors.New("next-epoch significance margin support is inconsistent")
+	}
+	return nil
+}
+
+func finiteNumber(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func finitePositiveNumber(value float64) bool {
+	return finiteNumber(value) && 0 < value
+}
+
+func finiteNonnegativePointer(value *float64) bool {
+	return value != nil && finiteNumber(*value) && 0 <= *value
+}
+
+func finitePositivePointer(value *float64) bool {
+	return value != nil && finitePositiveNumber(*value)
 }
 
 func infrastructureError(code, message string) *CompetitionError {

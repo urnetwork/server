@@ -22,6 +22,10 @@
       "generated Python __pycache__ directories"
     ]
   },
+  "report": {
+    "path": "final-baseline.html",
+    "sha256": "64f20843d6e0e37d3b5d03ac5f5fc1ec6eccaf791d30e062e4ee50b22dc60b33"
+  },
   "datasets": [
     {
       "id": "frontier",

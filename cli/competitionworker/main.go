@@ -14,7 +14,12 @@ import (
 )
 
 func main() {
-	usage := `Secure sim-latency competition evaluator worker.
+	usage := `Secure one-epoch sim-latency competition evaluator worker.
+
+The process exits successfully after admission closes and the FIFO drains. A
+statistically significant candidate remains embargoed until the operator's
+honesty-review harness approves it. An external controller performs review,
+promotes an approved winner (or records no winner), and starts the next epoch.
 
 Usage:
   competitionworker [--worker_id=<id>]
@@ -53,6 +58,7 @@ Options:
 	quit := server.NewEventWithContext(context.Background())
 	closeSignals := quit.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
 	defer closeSignals()
+	competition.StartRunnerHeartbeat(quit.Ctx)
 	competition.StartMetrics(quit.Ctx)
 	flushStats := server.StartStatsPusher(quit.Ctx)
 	defer flushStats()

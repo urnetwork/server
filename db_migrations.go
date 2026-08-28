@@ -6424,4 +6424,159 @@ var migrations = []any{
 		END
 		$competition_job_image_identity_guard$;
 	`),
+
+	// A statistically eligible score is only a candidate, never an automatic
+	// winner. Operator-controlled honesty review is append-only and ordered by
+	// the frozen score ranking. The database blocks winner publication while an
+	// earlier candidate remains unresolved or unless the selected winner has an
+	// explicit approved review record.
+	newSqlMigration(`
+		CREATE TABLE competition_candidate_review (
+			review_id bigserial PRIMARY KEY,
+			round_id uuid NOT NULL REFERENCES competition_round(round_id),
+			job_id uuid NOT NULL REFERENCES competition_job(job_id),
+			candidate_rank integer NOT NULL CHECK (candidate_rank > 0),
+			decision varchar(16) NOT NULL CHECK (decision IN ('approved', 'rejected')),
+			reviewer_id varchar(128) NOT NULL CHECK (
+				reviewer_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+			),
+			reason text NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 4096),
+			-- json (rather than jsonb) preserves the exact reviewed evidence bytes
+			-- whose SHA-256 is recorded alongside the append-only decision.
+			evidence_json json NOT NULL CHECK (json_typeof(evidence_json) = 'object'),
+			evidence_sha256 varchar(64) NOT NULL CHECK (evidence_sha256 ~ '^[0-9a-f]{64}$'),
+			reviewed_at timestamp NOT NULL,
+			UNIQUE (round_id, job_id)
+		);
+
+		CREATE UNIQUE INDEX competition_candidate_review_one_approval
+		ON competition_candidate_review (round_id)
+		WHERE decision = 'approved';
+
+		CREATE INDEX competition_candidate_review_order
+		ON competition_candidate_review (round_id, candidate_rank);
+
+		CREATE TRIGGER competition_candidate_review_append_only
+		BEFORE UPDATE OR DELETE ON competition_candidate_review
+		FOR EACH ROW EXECUTE FUNCTION competition_append_only_guard();
+
+		CREATE FUNCTION competition_candidate_review_insert_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_candidate_review_gate$
+		DECLARE
+			epoch_round competition_round%ROWTYPE;
+			expected_rank bigint;
+			unresolved_better bigint;
+		BEGIN
+			SELECT * INTO epoch_round
+			FROM competition_round
+			WHERE round_id = NEW.round_id;
+			IF NOT FOUND OR epoch_round.canceled OR epoch_round.finalized_at IS NOT NULL OR
+			   NEW.reviewed_at < epoch_round.closes_at OR EXISTS (
+				SELECT 1 FROM competition_job
+				WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
+			) OR EXISTS (
+				SELECT 1 FROM competition_candidate_review
+				WHERE round_id = NEW.round_id AND decision = 'approved'
+			) THEN
+				RAISE EXCEPTION 'competition epoch is not ready for candidate review';
+			END IF;
+
+			WITH eligible AS (
+				SELECT job_id,
+				       row_number() OVER (
+				           ORDER BY (score_json->>'normalized_score')::numeric DESC,
+				                    (score_json->>'raw_score')::numeric ASC,
+				                    submitted_at, job_id
+				       ) AS candidate_rank
+				FROM competition_job
+				WHERE round_id = NEW.round_id AND state = 'succeeded'
+				  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+				  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+				  AND jsonb_typeof(score_json->'gates') = 'object'
+				  AND score_json->'gates' <> '{}'::jsonb
+				  AND NOT EXISTS (
+				      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
+				      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+				  )
+			)
+			SELECT candidate.candidate_rank,
+			       count(better.job_id) FILTER (
+			           WHERE NOT EXISTS (
+			               SELECT 1 FROM competition_candidate_review AS prior_review
+			               WHERE prior_review.round_id = NEW.round_id
+			                 AND prior_review.job_id = better.job_id
+			                 AND prior_review.decision = 'rejected'
+			           )
+			       )
+			INTO expected_rank, unresolved_better
+			FROM eligible AS candidate
+			LEFT JOIN eligible AS better ON better.candidate_rank < candidate.candidate_rank
+			WHERE candidate.job_id = NEW.job_id
+			GROUP BY candidate.candidate_rank;
+
+			IF expected_rank IS NULL OR NEW.candidate_rank <> expected_rank THEN
+				RAISE EXCEPTION 'competition review job is not an eligible ranked candidate';
+			END IF;
+			IF unresolved_better <> 0 THEN
+				RAISE EXCEPTION 'competition review skipped a higher-ranked candidate';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_candidate_review_gate$;
+
+		CREATE TRIGGER competition_candidate_review_ordered
+		BEFORE INSERT ON competition_candidate_review
+		FOR EACH ROW EXECUTE FUNCTION competition_candidate_review_insert_guard();
+
+		CREATE FUNCTION competition_round_honesty_review_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_round_honesty_review_gate$
+		BEGIN
+			IF NEW.finalized_at IS NOT NULL AND OLD.finalized_at IS NULL THEN
+				IF EXISTS (
+					SELECT 1 FROM competition_job
+					WHERE round_id = NEW.round_id AND state IN ('queued', 'running')
+				) THEN
+					RAISE EXCEPTION 'competition epoch still has active evaluations';
+				END IF;
+				IF NEW.winner_job_id IS NOT NULL AND NOT EXISTS (
+					SELECT 1 FROM competition_candidate_review
+					WHERE round_id = NEW.round_id AND job_id = NEW.winner_job_id
+					  AND decision = 'approved'
+				) THEN
+					RAISE EXCEPTION 'competition winner has not passed honesty review';
+				END IF;
+				IF NEW.winner_job_id IS NULL AND EXISTS (
+					SELECT 1
+					FROM competition_job AS candidate
+					WHERE candidate.round_id = NEW.round_id AND candidate.state = 'succeeded'
+					  AND candidate.score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+					  AND candidate.score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+					  AND jsonb_typeof(candidate.score_json->'gates') = 'object'
+					  AND candidate.score_json->'gates' <> '{}'::jsonb
+					  AND NOT EXISTS (
+					      SELECT 1 FROM jsonb_each(candidate.score_json->'gates') AS gate
+					      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+					  )
+					  AND NOT EXISTS (
+					      SELECT 1 FROM competition_candidate_review AS review
+					      WHERE review.round_id = NEW.round_id
+					        AND review.job_id = candidate.job_id
+					        AND review.decision = 'rejected'
+					  )
+				) THEN
+					RAISE EXCEPTION 'competition epoch has an unresolved significant candidate';
+				END IF;
+			END IF;
+			RETURN NEW;
+		END
+		$competition_round_honesty_review_gate$;
+
+		CREATE TRIGGER competition_round_honesty_reviewed
+		BEFORE UPDATE OF finalized_at, winner_job_id ON competition_round
+		FOR EACH ROW EXECUTE FUNCTION competition_round_honesty_review_guard();
+	`),
 }

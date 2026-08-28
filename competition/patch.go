@@ -18,6 +18,8 @@ var (
 	indexLinePattern  = regexp.MustCompile(`^index [0-9a-f]{7,64}\.\.[0-9a-f]{7,64}(?: 100644)?$`)
 )
 
+const protectedSimulatorTreePattern = "connect/sim-latency/**"
+
 var hardForbiddenPatchPaths = []string{
 	".git/**",
 	".github/**",
@@ -34,7 +36,7 @@ var hardForbiddenPatchPaths = []string{
 	"site/**",
 	"db_migrations.go",
 	"db_migrations_*.go",
-	"connect/sim-latency/**",
+	protectedSimulatorTreePattern,
 	"stats/**",
 }
 

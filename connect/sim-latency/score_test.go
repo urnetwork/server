@@ -421,8 +421,51 @@ func TestScoreGenuineImprovement(t *testing.T) {
 	if result.RawScore != 80 || result.NormalizedScore != 125 {
 		t.Fatalf("unexpected improved score: %+v", result)
 	}
-	requireTakeoverEligibility(t, result, true)
+	// A single replicate can still produce a placeable diagnostic score, but it
+	// cannot estimate variance and therefore cannot win a production epoch.
+	requireTakeoverEligibility(t, result, false)
+	if result.Significance == nil || result.Significance.OneSidedPValue != nil ||
+		result.Significance.StatisticallySignificant {
+		t.Fatalf("single-replicate significance = %+v", result.Significance)
+	}
 	requireScoreGolden(t, "improvement", result)
+}
+
+func TestScoreReplicatedImprovementIsStatisticallyEligible(t *testing.T) {
+	values := []float64{70, 72, 71}
+	fixtures := make([]*scoreFixture, 0, len(values))
+	for i, value := range values {
+		options := defaultScoreFixtureOptions()
+		options.evaluationId = fmt.Sprintf("eval-significant-%d", i+1)
+		options.totalMs = value
+		fixtures = append(fixtures, newScoreFixture(t, options))
+	}
+	baseline := fixtures[0].baselineData
+	baseline.Replicates = []ScoreBaselineReplicate{
+		{RawScore: 99, SuccessRate: 1, RequestCount: 100, ReceivedBytes: 10_000, FindProvidersLoadP95Ms: 10, FindProvidersPoolP05: 100, FindProvidersSampleSpanFraction: minimumFindProvidersSampleSpanFraction},
+		{RawScore: 101, SuccessRate: 1, RequestCount: 100, ReceivedBytes: 10_000, FindProvidersLoadP95Ms: 10, FindProvidersPoolP05: 100, FindProvidersSampleSpanFraction: minimumFindProvidersSampleSpanFraction},
+		{RawScore: 100, SuccessRate: 1, RequestCount: 100, ReceivedBytes: 10_000, FindProvidersLoadP95Ms: 10, FindProvidersPoolP05: 100, FindProvidersSampleSpanFraction: minimumFindProvidersSampleSpanFraction},
+	}
+	writeScoreJSON(t, fixtures[0].baseline, baseline)
+	inputs := ScoreInputs{BaselineManifest: fixtures[0].baseline}
+	for _, fixture := range fixtures {
+		inputs.Runs = append(inputs.Runs, fixture.run)
+		inputs.Stderr = append(inputs.Stderr, fixture.stderr)
+		inputs.Accounting = append(inputs.Accounting, fixture.accounting)
+		inputs.Samples = append(inputs.Samples, fixture.samples)
+		inputs.ResourceReports = append(inputs.ResourceReports, fixture.resource)
+		inputs.Markers = append(inputs.Markers, fixture.marker)
+	}
+	result := Score(inputs)
+	if result.EvalError != nil || !result.Placeable || result.RawScore != 71 {
+		t.Fatalf("replicated improvement failed: %+v", result)
+	}
+	requireTakeoverEligibility(t, result, true)
+	if result.Significance == nil || !result.Significance.StatisticallySignificant ||
+		result.Significance.BaselineSampleVariance == nil ||
+		result.Significance.CandidateSampleVariance == nil {
+		t.Fatalf("replicated significance is incomplete: %+v", result.Significance)
+	}
 }
 
 func TestScoreRegression(t *testing.T) {

@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	ResourceName                   = "competition.yml"
-	evaluationStageOverheadSeconds = int64(600)
-	evaluationJobOverheadSeconds   = int64(1200)
+	ResourceName                       = "competition.yml"
+	evaluationStageOverheadSeconds     = int64(600)
+	submissionEvaluationTimeoutSeconds = 3 * 60 * 60
 )
 
 var (
@@ -188,11 +188,15 @@ func (s *Settings) Validate() error {
 	if err := validatePatterns(s.PatchPolicy.ForbiddenPaths, "forbidden_paths"); err != nil {
 		return err
 	}
+	if !slices.Contains(s.PatchPolicy.ForbiddenPaths, protectedSimulatorTreePattern) {
+		return fmt.Errorf("patch_policy.forbidden_paths must explicitly contain %q", protectedSimulatorTreePattern)
+	}
 	p := s.EvaluationPolicy
 	season := s.SeasonPolicy
 	if season.EpochCount != 6 || season.SubmissionWindowSeconds != 7*24*60*60 ||
-		season.PreparationWindowSeconds < 0 || 7*24*60*60 < season.PreparationWindowSeconds {
-		return errors.New("season_policy must freeze six seven-day submission epochs and a preparation window of at most seven days")
+		season.PreparationWindowSeconds < 0 || 7*24*60*60 < season.PreparationWindowSeconds ||
+		season.SubmissionFeeUsd != 20 {
+		return errors.New("season_policy must freeze six seven-day submission epochs, a $20 USD submission fee, and a preparation window of at most seven days")
 	}
 	if p.HardwareId == "" ||
 		!sha256Pattern.MatchString(p.HostQualificationSha256) ||
@@ -226,9 +230,8 @@ func (s *Settings) Validate() error {
 	if math.IsNaN(p.TakeoverMargin) || math.IsInf(p.TakeoverMargin, 0) || p.TakeoverMargin <= 0 || .5 < p.TakeoverMargin {
 		return errors.New("evaluation_policy.takeover_margin must be finite and in (0, 0.5]")
 	}
-	minimumScoreSeconds := minimumScoreTimeoutSeconds(p)
-	if p.QueueLimit <= 0 || 10000 < p.QueueLimit || int64(p.ScoreTimeoutSeconds) < minimumScoreSeconds || 7*24*60*60 < p.ScoreTimeoutSeconds {
-		return errors.New("queue_limit must be in 1..10000 and score_timeout_seconds must cover paired baseline/candidate replicates without exceeding seven days")
+	if p.QueueLimit != 0 || p.ScoreTimeoutSeconds != submissionEvaluationTimeoutSeconds {
+		return errors.New("queue_limit must be zero for unbounded epoch admission and score_timeout_seconds must equal the frozen three-hour submission limit")
 	}
 	if len(s.SeedKey) != 32 {
 		return errors.New("seed_key_base64 must decode to exactly 32 bytes")
@@ -289,12 +292,6 @@ func (s *Settings) Validate() error {
 func evaluationStageTimeoutSeconds(p EvaluationPolicy) int64 {
 	phaseMs := p.RampMs + p.SettleMs + p.ClientWarmupTimeoutMs + p.DurationMs + p.RequestTimeoutMs
 	return (phaseMs+999)/1000 + evaluationStageOverheadSeconds
-}
-
-// Covers every paired replicate plus candidate build, scoring, and final
-// artifact cleanup outside the individual simulator stages.
-func minimumScoreTimeoutSeconds(p EvaluationPolicy) int64 {
-	return 2*int64(p.Replicates)*evaluationStageTimeoutSeconds(p) + evaluationJobOverheadSeconds
 }
 
 func validateLocalMountDirectory(path, parent string) error {

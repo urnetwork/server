@@ -61,6 +61,33 @@ func TestRunRejectsPolicyDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestRunRejectsProtectedSimulatorPathEvenWhenPolicyAllowsIt(t *testing.T) {
+	root := t.TempDir()
+	filePath := "connect/sim-latency/main.go"
+	policy := []byte(`{"max_patch_bytes":4096,"allowed_paths":["connect/sim-latency/main.go"],"forbidden_paths":["unrelated/**"]}` + "\n")
+	patch := []byte("diff --git a/" + filePath + " b/" + filePath + "\n" +
+		"index 1111111..2222222 100644\n" +
+		"--- a/" + filePath + "\n" +
+		"+++ b/" + filePath + "\n" +
+		"@@ -1 +1 @@\n" +
+		"-package old\n" +
+		"+package main\n")
+	policyPath := writeTestFile(t, root, "policy.json", policy)
+	patchPath := writeTestFile(t, root, "canonical.patch", patch)
+	policyDigest := sha256.Sum256(policy)
+	patchDigest := sha256.Sum256(patch)
+	err := run([]string{
+		"--base-sha", strings.Repeat("a", 40),
+		"--policy", policyPath,
+		"--expected-policy-sha256", hex.EncodeToString(policyDigest[:]),
+		"--patch", patchPath,
+		"--expected-patch-sha256", hex.EncodeToString(patchDigest[:]),
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "validate canonical patch: path_not_allowed") {
+		t.Fatalf("error = %v, want protected simulator path rejection", err)
+	}
+}
+
 func writeTestFile(t *testing.T, root string, name string, bytes []byte) string {
 	t.Helper()
 	path := filepath.Join(root, name)

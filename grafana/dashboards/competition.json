@@ -45,8 +45,8 @@
       "targets": [{"refId": "A", "expr": "min(urnetwork_competition_artifact_archive_ready{env=\"$env\",host=~\"$host\"})", "instant": true}]
     },
     {
-      "id": 3, "type": "stat", "title": "worker heartbeat age",
-      "description": "Page when above 60 seconds for five minutes, or -1 while a competition is open/grading.",
+      "id": 3, "type": "stat", "title": "durable worker lease heartbeat age",
+      "description": "Database lease health. Page when above 60 seconds for five minutes, or -1 while a competition is open/grading. A drained epoch in honesty review intentionally has no worker.",
       "gridPos": {"h": 5, "w": 4, "x": 8, "y": 0},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 40}, {"color": "red", "value": 60}]}}, "overrides": []},
@@ -150,6 +150,137 @@
         {"refId": "A", "expr": "sum(increase(urnetwork_competition_artifact_objects_total{env=\"$env\",host=~\"$host\"}[$__rate_interval]))", "legendFormat": "retained objects"},
         {"refId": "B", "expr": "sum(urnetwork_competition_configured{env=\"$env\",host=~\"$host\"})", "legendFormat": "configured processes"}
       ]
+    },
+    {
+      "id": 15, "type": "stat", "title": "runner heartbeat age",
+      "description": "The sim-latency runner emits a process heartbeat every 15 seconds. Orange means no heartbeat has been heard for more than 30 seconds; red means more than 60 seconds. This is expected after the drained epoch enters honesty review.",
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 30}, {"color": "red", "value": 60}]}}, "overrides": []},
+      "options": {"colorMode": "background", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "time() - max(urnetwork_competition_runner_heartbeat_timestamp_seconds{env=\"$env\",host=~\"$host\"})", "instant": true}]
+    },
+    {
+      "id": 16, "type": "stat", "title": "submission queue",
+      "description": "Submissions waiting in the durable FIFO. The count is authoritative PostgreSQL state; Redis is a rebuildable FIFO dispatch index.",
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_submission_queue_size{env=\"$env\",host=~\"$host\"})", "instant": true}]
+    },
+    {
+      "id": 17, "type": "stat", "title": "current evaluation elapsed",
+      "description": "Wall time consumed by the current submission. Every submission has a hard three-hour evaluation budget.",
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "max": 10800, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 9000}, {"color": "red", "value": 10800}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_current_evaluation_elapsed_seconds{env=\"$env\",host=~\"$host\"})", "instant": true}]
+    },
+    {
+      "id": 18, "type": "stat", "title": "estimated FIFO drain time",
+      "description": "Estimated current remaining time plus queued submissions, using the recent completed-evaluation p75 and the three-hour limit before enough history exists.",
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_submission_backlog_estimated_seconds{env=\"$env\",host=~\"$host\"})", "instant": true}]
+    },
+    {
+      "id": 19, "type": "stat", "title": "significant submission found",
+      "description": "One after any completed submission in the current epoch passes the recorded statistical-significance test. Results remain internal until epoch finalization.",
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "options": {"colorMode": "background", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_significant_submission_found{env=\"$env\",host=~\"$host\"})", "instant": true}]
+    },
+    {
+      "id": 20, "type": "stat", "title": "evaluation duration estimate",
+      "description": "Recent completed-evaluation p75 used by the drain-time estimate; falls back to the three-hour evaluation limit when no history exists.",
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 36},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max(urnetwork_competition_evaluation_duration_estimate_seconds{env=\"$env\",host=~\"$host\"})", "instant": true}]
+    },
+    {
+      "id": 21, "type": "stat", "title": "current submission",
+      "description": "Internal identity of the one submission currently being evaluated. No series means the runner is idle.",
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 41},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1}, "overrides": []},
+      "options": {"colorMode": "background", "textMode": "name", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max by (job_id, round_id, patch_sha256, attempt) (urnetwork_competition_current_evaluation_info{env=\"$env\",host=~\"$host\"})", "legendFormat": "job {{job_id}} · attempt {{attempt}} · patch {{patch_sha256}}", "instant": true}]
+    },
+    {
+      "id": 22, "type": "bargauge", "title": "live TTFB p50 by replicate",
+      "description": "Internal live reveal after each completed replicate. Green is baseline, blue is a provisional statistically significant improvement, red is a significant regression, and gray is not significant at one-sided p≤0.05. The final sealed composite score remains authoritative.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 46},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {"unit": "ms", "min": 0, "color": {"mode": "fixed", "fixedColor": "#8f8f8f"}},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": ".*\\[baseline\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#199e70"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[improved\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#3987e5"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[regressed\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e02f44"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[not_testable\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e0a52f"}}]}
+        ]
+      },
+      "options": {"displayMode": "basic", "orientation": "vertical", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max by (job_id, role, replicate, significance) (urnetwork_competition_live_evaluation_metric_value{env=\"$env\",host=~\"$host\",metric=\"ttfb_p50_ms\"}) and on(job_id) max by (job_id) (urnetwork_competition_current_evaluation_info{env=\"$env\",host=~\"$host\"})", "legendFormat": "{{role}} r{{replicate}} [{{significance}}]", "instant": true}]
+    },
+    {
+      "id": 23, "type": "bargauge", "title": "live TTFB p95 by replicate",
+      "description": "Internal live reveal after each completed replicate. Green is baseline, blue is a provisional statistically significant improvement, red is a significant regression, and gray is not significant at one-sided p≤0.05. The final sealed composite score remains authoritative.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 46},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {"unit": "ms", "min": 0, "color": {"mode": "fixed", "fixedColor": "#8f8f8f"}},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": ".*\\[baseline\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#199e70"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[improved\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#3987e5"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[regressed\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e02f44"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[not_testable\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e0a52f"}}]}
+        ]
+      },
+      "options": {"displayMode": "basic", "orientation": "vertical", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max by (job_id, role, replicate, significance) (urnetwork_competition_live_evaluation_metric_value{env=\"$env\",host=~\"$host\",metric=\"ttfb_p95_ms\"}) and on(job_id) max by (job_id) (urnetwork_competition_current_evaluation_info{env=\"$env\",host=~\"$host\"})", "legendFormat": "{{role}} r{{replicate}} [{{significance}}]", "instant": true}]
+    },
+    {
+      "id": 24, "type": "bargauge", "title": "live throughput p50 by replicate",
+      "description": "Internal live reveal after each completed replicate. Green is baseline, blue is a provisional statistically significant improvement, red is a significant regression, and gray is not significant at one-sided p≤0.05. The final sealed composite score remains authoritative.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 54},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {"unit": "Bps", "min": 0, "color": {"mode": "fixed", "fixedColor": "#8f8f8f"}},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": ".*\\[baseline\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#199e70"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[improved\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#3987e5"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[regressed\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e02f44"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[not_testable\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e0a52f"}}]}
+        ]
+      },
+      "options": {"displayMode": "basic", "orientation": "vertical", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max by (job_id, role, replicate, significance) (urnetwork_competition_live_evaluation_metric_value{env=\"$env\",host=~\"$host\",metric=\"throughput_p50_bytes_per_s\"}) and on(job_id) max by (job_id) (urnetwork_competition_current_evaluation_info{env=\"$env\",host=~\"$host\"})", "legendFormat": "{{role}} r{{replicate}} [{{significance}}]", "instant": true}]
+    },
+    {
+      "id": 25, "type": "bargauge", "title": "live throughput p95 by replicate",
+      "description": "Internal live reveal after each completed replicate. Green is baseline, blue is a provisional statistically significant improvement, red is a significant regression, and gray is not significant at one-sided p≤0.05. The final sealed composite score remains authoritative.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 54},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {"unit": "Bps", "min": 0, "color": {"mode": "fixed", "fixedColor": "#8f8f8f"}},
+        "overrides": [
+          {"matcher": {"id": "byRegexp", "options": ".*\\[baseline\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#199e70"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[improved\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#3987e5"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[regressed\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e02f44"}}]},
+          {"matcher": {"id": "byRegexp", "options": ".*\\[not_testable\\].*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#e0a52f"}}]}
+        ]
+      },
+      "options": {"displayMode": "basic", "orientation": "vertical", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "targets": [{"refId": "A", "expr": "max by (job_id, role, replicate, significance) (urnetwork_competition_live_evaluation_metric_value{env=\"$env\",host=~\"$host\",metric=\"throughput_p95_bytes_per_s\"}) and on(job_id) max by (job_id) (urnetwork_competition_current_evaluation_info{env=\"$env\",host=~\"$host\"})", "legendFormat": "{{role}} r{{replicate}} [{{significance}}]", "instant": true}]
     }
   ]
 }

@@ -11,6 +11,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/docker-id-map.sh"
+readonly PREPARE_EVALUATION_SOURCE="$SCRIPT_DIR/prepare-evaluation-source.sh"
 readonly POSTGRES_IMAGE='postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941'
 readonly REDIS_IMAGE='redis:8-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78'
 
@@ -21,6 +22,7 @@ done
 [ -x "$RESOURCE_BOUNDARY" ] || { printf 'resource boundary is not executable\n' >&2; exit 1; }
 [ -x "$HASH_LOCAL_MOUNT" ] || { printf 'local-mount digest helper is not executable\n' >&2; exit 1; }
 [ -x "$DOCKER_ID_MAP" ] || { printf 'Docker id-map resolver is not executable\n' >&2; exit 1; }
+[ -x "$PREPARE_EVALUATION_SOURCE" ] || { printf 'evaluation source preparer is not executable\n' >&2; exit 1; }
 resource_boundary_json="$($RESOURCE_BOUNDARY)"
 SMOKE_CPUSET="$(jq -er '.evaluation_cpuset' <<<"$resource_boundary_json")"
 management_cpuset="$(jq -er '.management_cpuset' <<<"$resource_boundary_json")"
@@ -57,6 +59,7 @@ active_project=""
 evaluation_image=""
 evaluation_input_dir="$smoke_root/input"
 evaluation_output_dir="$smoke_root/output"
+evaluation_source_dir=""
 config_local_directory=""
 vault_local_directory=""
 config_local_sha256=""
@@ -75,6 +78,7 @@ compose() {
         "EVALUATION_IMAGE=${evaluation_image:?}" \
         "EVALUATOR_BASE_IMAGE=$base_image" \
         "EVALUATION_ENV_FILE=$runner_env" \
+        "EVALUATION_SOURCE_DIR=${evaluation_source_dir:?}" \
         "EVALUATION_CONFIG_LOCAL_DIR=${config_local_directory:?}" \
         "EVALUATION_VAULT_LOCAL_DIR=${vault_local_directory:?}" \
         "EVALUATION_INPUT_DIR=${evaluation_input_dir:?}" \
@@ -196,22 +200,23 @@ verify_local_sources_unchanged() {
     }
 }
 verify_local_sources_unchanged
-source_container="$(sudo -n docker create "$base_image_id")"
-sudo -n docker cp "$source_container:/workspace/server" "$smoke_root/server"
-sudo -n docker rm "$source_container" >/dev/null
-source_container=""
-sudo -n chown -R "$(id -u):$(id -g)" "$smoke_root/server"
+candidate_source_root="$smoke_root/evaluation-source"
+cache_source_root="$smoke_root/cache-evaluation-source"
+$PREPARE_EVALUATION_SOURCE --base-image "$base_image_id" --destination "$candidate_source_root" >/dev/null
+$PREPARE_EVALUATION_SOURCE --base-image "$base_image_id" --destination "$cache_source_root" >/dev/null
 
 printf '\n// competitionContainerSmoke verifies deterministic per-patch image derivation.\n' \
-    >> "$smoke_root/server/connect/resident_contract_manager.go"
-git -C "$smoke_root/server" diff --no-ext-diff --binary -- connect/resident_contract_manager.go \
+    >> "$candidate_source_root/server/connect/resident_contract_manager.go"
+git -C "$candidate_source_root/server" diff --no-ext-diff --binary -- connect/resident_contract_manager.go \
     > "$smoke_root/canonical.patch"
 [ -s "$smoke_root/canonical.patch" ]
+git -C "$candidate_source_root/server" checkout -- connect/resident_contract_manager.go
 install -m 0400 "$SCRIPT_DIR/policy.example.json" "$smoke_root/policy.json"
 
 candidate_json="$($SCRIPT_DIR/build-submission.sh \
     --allow-local-base \
     --base-image "$base_image" \
+    --source-root "$candidate_source_root" \
     --patch "$smoke_root/canonical.patch" \
     --policy "$smoke_root/policy.json")"
 candidate_image_id="$(jq -er '.image_id' <<<"$candidate_json")"
@@ -222,10 +227,16 @@ candidate_patch_sha256="$(jq -er '.patch_sha256' <<<"$candidate_json")"
 cached_candidate_json="$($SCRIPT_DIR/build-submission.sh \
     --allow-local-base \
     --base-image "$base_image" \
+    --source-root "$cache_source_root" \
     --patch "$smoke_root/canonical.patch" \
     --policy "$smoke_root/policy.json")"
 [ "$(jq -er '.image_id' <<<"$cached_candidate_json")" = "$candidate_image_id" ]
 [ "$(jq -er '.image_key' <<<"$cached_candidate_json")" = "$(jq -er '.image_key' <<<"$candidate_json")" ]
+evaluation_source_dir="$candidate_source_root"
+sudo -n find "$evaluation_source_dir" -type d -exec chmod 0555 {} +
+sudo -n find "$evaluation_source_dir" -type f -perm /111 -exec chmod 0555 {} +
+sudo -n find "$evaluation_source_dir" -type f ! -perm /111 -exec chmod 0444 {} +
+sudo -n chown -R "$container_host_uid:$container_host_gid" "$evaluation_source_dir"
 
 identity="$(sudo -n docker run --rm \
     --network none \
@@ -331,6 +342,7 @@ network_id="${active_project}_evaluation"
 sudo -n docker inspect "$runner_id" | jq -e --arg cpuset "$SMOKE_CPUSET" \
     --arg config_local "$config_local_directory" \
     --arg vault_local "$vault_local_directory" \
+    --arg source "$evaluation_source_dir" \
     '.[0].Config.User == "65532:65532" and
      .[0].HostConfig.ReadonlyRootfs == true and
      .[0].HostConfig.CpusetCpus == $cpuset and
@@ -344,7 +356,9 @@ sudo -n docker inspect "$runner_id" | jq -e --arg cpuset "$SMOKE_CPUSET" \
      (any(.[0].Mounts[]; .Type == "bind" and .Source == $config_local and
        .Destination == "/runtime/config/local" and .RW == false)) and
      (any(.[0].Mounts[]; .Type == "bind" and .Source == $vault_local and
-       .Destination == "/runtime/vault/local" and .RW == false))' >/dev/null
+       .Destination == "/runtime/vault/local" and .RW == false)) and
+     (any(.[0].Mounts[]; .Type == "bind" and .Source == $source and
+       .Destination == "/workspace" and .RW == false))' >/dev/null
 compose --profile run run --rm --no-deps --no-tty \
     --entrypoint /usr/bin/bash runner -Eeuo pipefail -c '
         test -r /runtime/config/local/db.yml

@@ -52,12 +52,34 @@ func (self sourceRepositories) commits() map[string]string {
 }
 
 type sourceEpoch struct {
-	Epoch             int                `yaml:"epoch"`
-	Kind              string             `yaml:"kind"`
-	WinnerJobId       string             `yaml:"winner_job_id,omitempty"`
-	PromotedFromEpoch *int               `yaml:"promoted_from_epoch,omitempty"`
-	PromotedAt        string             `yaml:"promoted_at,omitempty"`
-	Repositories      sourceRepositories `yaml:"repositories"`
+	Epoch                         int                 `yaml:"epoch"`
+	Kind                          string              `yaml:"kind"`
+	SignificantImprovementPercent float64             `yaml:"significant_improvement_percent"`
+	WinnerJobId                   string              `yaml:"winner_job_id,omitempty"`
+	WinnerSignificance            *sourceSignificance `yaml:"winner_significance,omitempty"`
+	PromotedFromEpoch             *int                `yaml:"promoted_from_epoch,omitempty"`
+	PromotedAt                    string              `yaml:"promoted_at,omitempty"`
+	Repositories                  sourceRepositories  `yaml:"repositories"`
+}
+
+// sourceSignificance preserves the winning evaluation statistics that define
+// the next epoch's incumbent and recommended threshold.
+type sourceSignificance struct {
+	ScoreSha256                               string  `yaml:"score_sha256"`
+	Method                                    string  `yaml:"method"`
+	Alpha                                     float64 `yaml:"alpha"`
+	ReplicateCount                            int     `yaml:"replicate_count"`
+	BaselineMeanRawScore                      float64 `yaml:"baseline_mean_raw_score"`
+	CandidateMeanRawScore                     float64 `yaml:"candidate_mean_raw_score"`
+	BaselineSampleVariance                    float64 `yaml:"baseline_sample_variance"`
+	CandidateSampleVariance                   float64 `yaml:"candidate_sample_variance"`
+	ObservedImprovementPercent                float64 `yaml:"observed_improvement_percent"`
+	TakeoverMarginPercent                     float64 `yaml:"takeover_margin_percent"`
+	MinimumSignificantImprovementPercent      float64 `yaml:"minimum_significant_improvement_percent"`
+	RequiredImprovementPercent                float64 `yaml:"required_improvement_percent"`
+	OneSidedPValue                            float64 `yaml:"one_sided_p_value"`
+	NextEpochMinimumImprovementPercent        float64 `yaml:"next_epoch_minimum_improvement_percent"`
+	RecommendedNextEpochTakeoverMarginPercent float64 `yaml:"recommended_next_epoch_takeover_margin_percent"`
 }
 
 type evaluationSource struct {
@@ -146,19 +168,44 @@ func validateSourceManifest(manifest *sourceManifest) error {
 		if epoch.Epoch != epochIndex {
 			return fmt.Errorf("source epochs must be contiguous: entry %d has epoch %d", epochIndex, epoch.Epoch)
 		}
+		if !finitePositive(epoch.SignificantImprovementPercent) ||
+			50 < epoch.SignificantImprovementPercent {
+			return fmt.Errorf("source epoch %d has an invalid significant improvement percentage", epochIndex)
+		}
 		if epochIndex == 0 && epoch.Kind != "baseline" {
 			return errors.New("source epoch 0 must be the baseline")
 		}
-		if 0 < epochIndex && epoch.Kind != "winner_promotion" {
-			return fmt.Errorf("source epoch %d must be a winner promotion", epochIndex)
-		}
 		if epochIndex == 0 {
-			if epoch.WinnerJobId != "" || epoch.PromotedFromEpoch != nil || epoch.PromotedAt != "" {
+			if epoch.WinnerJobId != "" || epoch.WinnerSignificance != nil ||
+				epoch.PromotedFromEpoch != nil || epoch.PromotedAt != "" {
 				return errors.New("source epoch 0 cannot contain winner promotion metadata")
 			}
 		} else {
-			if epoch.WinnerJobId == "" {
-				return fmt.Errorf("source epoch %d must identify its winning job", epochIndex)
+			switch epoch.Kind {
+			case "winner_promotion":
+				if epoch.WinnerJobId == "" || epoch.WinnerSignificance == nil {
+					return fmt.Errorf("source epoch %d must identify its winning job and significance", epochIndex)
+				}
+				if err := validateSourceSignificance(epoch.WinnerSignificance); err != nil {
+					return fmt.Errorf("source epoch %d winner significance: %w", epochIndex, err)
+				}
+				if epoch.SignificantImprovementPercent !=
+					epoch.WinnerSignificance.RecommendedNextEpochTakeoverMarginPercent {
+					return fmt.Errorf("source epoch %d threshold does not match its winner recommendation", epochIndex)
+				}
+			case "no_winner_carry_forward":
+				if epoch.WinnerJobId != "" || epoch.WinnerSignificance != nil {
+					return fmt.Errorf("source epoch %d cannot identify a winner or significance when carrying forward", epochIndex)
+				}
+				previous := manifest.EvaluationSource.Epochs[epochIndex-1]
+				if epoch.Repositories != previous.Repositories {
+					return fmt.Errorf("source epoch %d no-winner transition must carry repository commits forward unchanged", epochIndex)
+				}
+				if epoch.SignificantImprovementPercent != previous.SignificantImprovementPercent {
+					return fmt.Errorf("source epoch %d no-winner transition must carry the significance percentage forward unchanged", epochIndex)
+				}
+			default:
+				return fmt.Errorf("source epoch %d has unsupported transition kind %q", epochIndex, epoch.Kind)
 			}
 			if epoch.PromotedFromEpoch == nil || *epoch.PromotedFromEpoch != epochIndex-1 {
 				return fmt.Errorf("source epoch %d must promote epoch %d", epochIndex, epochIndex-1)
@@ -179,6 +226,37 @@ func validateSourceManifest(manifest *sourceManifest) error {
 		!manifest.ControlPlaneIdentity.PersistPerEvaluation ||
 		manifest.ControlPlaneIdentity.RuntimeImageDigestEnvironment != "WARP_IMAGE_DIGEST" {
 		return errors.New("control-plane identity policy is invalid")
+	}
+	return nil
+}
+
+func validateSourceSignificance(significance *sourceSignificance) error {
+	if significance == nil || !validSha256(significance.ScoreSha256) ||
+		significance.Method != scoreSignificanceMethod ||
+		significance.Alpha != scoreSignificanceAlpha ||
+		significance.ReplicateCount != 9 ||
+		!finitePositive(significance.BaselineMeanRawScore) ||
+		!finitePositive(significance.CandidateMeanRawScore) ||
+		!finiteNonnegative(significance.BaselineSampleVariance) ||
+		!finiteNonnegative(significance.CandidateSampleVariance) ||
+		!finite(significance.ObservedImprovementPercent) ||
+		significance.ObservedImprovementPercent <= 0 ||
+		!finitePositive(significance.TakeoverMarginPercent) ||
+		50 < significance.TakeoverMarginPercent ||
+		!finiteNonnegative(significance.MinimumSignificantImprovementPercent) ||
+		!finiteNonnegative(significance.RequiredImprovementPercent) ||
+		!finite(significance.OneSidedPValue) || significance.OneSidedPValue < 0 ||
+		significance.Alpha < significance.OneSidedPValue ||
+		!finiteNonnegative(significance.NextEpochMinimumImprovementPercent) ||
+		!finitePositive(significance.RecommendedNextEpochTakeoverMarginPercent) ||
+		50 < significance.RecommendedNextEpochTakeoverMarginPercent {
+		return errors.New("record is incomplete or not statistically significant")
+	}
+	if significance.RequiredImprovementPercent < significance.TakeoverMarginPercent ||
+		significance.RequiredImprovementPercent < significance.MinimumSignificantImprovementPercent ||
+		significance.RecommendedNextEpochTakeoverMarginPercent < significance.TakeoverMarginPercent ||
+		significance.RecommendedNextEpochTakeoverMarginPercent < significance.NextEpochMinimumImprovementPercent {
+		return errors.New("record contains an inconsistent significance margin")
 	}
 	return nil
 }
@@ -426,6 +504,31 @@ func runSourceCheck(opts docopt.Opts) {
 	epochNumber, sourceConfig, repositoriesRoot, err := checkConfiguredSource(opts)
 	if err != nil {
 		fatalf("source epoch preflight: %s", err)
+	}
+	if optBool(opts, "--json") {
+		manifest, err := loadSourceManifest(sourceConfig)
+		if err != nil {
+			fatalf("source epoch config: %s", err)
+		}
+		epoch, err := manifest.epoch(epochNumber)
+		if err != nil {
+			fatalf("source epoch config: %s", err)
+		}
+		result := struct {
+			Schema                        int     `json:"schema"`
+			Epoch                         int     `json:"epoch"`
+			SignificantImprovementPercent float64 `json:"significant_improvement_percent"`
+		}{
+			Schema:                        1,
+			Epoch:                         epochNumber,
+			SignificantImprovementPercent: epoch.SignificantImprovementPercent,
+		}
+		resultBytes, err := json.Marshal(result)
+		if err != nil {
+			fatalf("encode source epoch: %s", err)
+		}
+		fmt.Printf("%s\n", resultBytes)
+		return
 	}
 	fmt.Printf("source epoch %d verified: config=%s repositories=%s\n", epochNumber, sourceConfig, repositoriesRoot)
 }

@@ -16,7 +16,8 @@ func TestEvaluatorRequestBindsCanonicalPatchDigest(t *testing.T) {
 	job := &queuedJob{
 		ScoreJobResult: ScoreJobResult{
 			JobId: server.NewId(), RoundId: server.NewId(), PatchSha256: strings.Repeat("c", 64),
-			ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+			EvaluatorImageDigest: settings.EvaluatorImageDigest,
+			ApiImageDigest:       testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
 		},
 		AttemptCount: 2,
 		Round: roundRecord{
@@ -31,7 +32,8 @@ func TestEvaluatorRequestBindsCanonicalPatchDigest(t *testing.T) {
 	if request.SourceEpoch != 0 {
 		t.Fatalf("source epoch = %d, want baseline epoch 0", request.SourceEpoch)
 	}
-	if request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
+	if request.EvaluatorImageDigest != job.EvaluatorImageDigest ||
+		request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
 		t.Fatal("evaluator request did not bind the exact control-plane image identities")
 	}
 	if request.ConfigLocalDirectory != settings.ConfigLocalDirectory ||

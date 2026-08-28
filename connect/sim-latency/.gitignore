@@ -3,6 +3,8 @@ sim-latency
 build/
 eval-48g/
 eval-12c/
+# The launchers for these legacy host campaigns are archived under old/, but
+# existing local evidence trees remain ignored to prevent accidental commits.
 .sim-site/
 baseline-runs/
 baseline*.json

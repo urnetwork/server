@@ -6,16 +6,24 @@ registry activation are external approvals and are not represented as complete.
 ## Competition contract
 
 The competition is a six-epoch season. Each epoch accepts submissions for
-exactly seven days. No candidate evaluation starts while submissions are open.
-At close, the dedicated evaluator grades every admitted canonical patch through
-one FIFO worker, freezes the deterministic winner, publishes the finalized
-leaderboard, and prepares the next hidden-seed epoch. A 16-hour preparation
-window is reserved for the next same-round rebaseline.
+exactly seven days. Each admitted canonical patch enters the dedicated
+single-job FIFO immediately. At close, new admissions stop while the worker
+continues through every accepted job, seals the deterministic significant-
+candidate ranking, then exits without publishing a winner. The operator-controlled
+agent harness inspects candidates in deterministic rank order, appends either a
+rejection or approval with a JSON evidence digest, and finalizes only the first
+honest significant candidate. If every candidate is rejected, the epoch has no
+winner. The external control loop then promotes the approved winner and
+prepares the next hidden-seed epoch. A 16-hour preparation window is reserved
+for the next same-round rebaseline.
 
-The launch cap is ten distinct canonical patches per epoch. Identical canonical
-patch bytes share one `(round_id, patch_sha256)` result and do not consume
-another noise draw. One score job is bounded by 49,392 seconds; the adapter must
-therefore be asynchronous and tolerate the complete post-close grading window.
+The number of admitted submissions per epoch is unbounded. The Apex adapter
+collects the fixed $20 USD submission fee exactly once before forwarding each
+admission; transport retries of its durable admission record are not recharged.
+Identical canonical patch bytes share one `(round_id, patch_sha256)` result and
+do not consume another noise draw. One score job has a three-hour hard execution
+limit; the adapter must therefore be asynchronous and tolerate an unbounded
+post-close grading window.
 
 ## Adapter mapping
 
@@ -40,9 +48,16 @@ submission under changed bytes, or submit a second identity to bypass a pending
 job. HTTP 429 is backpressure; typed retriable 5xx results retain the same
 identity. Typed submission failures are terminal.
 
-Only a finalized leaderboard is public. A winner must be placeable,
+Results remain embargoed while admission is open and while any accepted job is
+queued or running. Polling reports terminal work as outcome-neutral `completed`
+until the post-review finalization transaction commits. Only a finalized
+leaderboard is public; its rows identify approved, rejected, and unreviewed
+honesty status without exposing the private review report.
+A winner must be placeable,
 `takeover_eligible`, and pass every G1-G6 gate. Ordering is normalized score
-descending, raw score ascending, submission time, then job id. Public rows use
+descending, raw score ascending, submission time, then job id. Statistical
+eligibility only enters the review queue; it does not establish that a patch is
+honest. Public rows use
 job and patch identities rather than bearer-token principal names; the adapter
 may associate those job ids with Apex identities in its own publication layer.
 
@@ -67,7 +82,7 @@ main Grafana/Mimir pipeline.
 Before Apex stage activation, Macrocosmos and UR must append a signed record
 containing:
 
-- the accepted external-evaluator adapter protocol and maximum asynchronous
+- the accepted external-evaluator adapter protocol and unbounded asynchronous
   grading interval;
 - stage and production adapter image repository digests and cosign identities;
 - the current main-API, worker, evaluator, OpenAPI, base-source, scorer, and

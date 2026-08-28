@@ -129,6 +129,17 @@ func TestMutatingCommandsRequireLocalEnvironment(t *testing.T) {
 	if err := validateEnvironment("init", "main"); err != nil {
 		t.Fatalf("init should not require a service environment: %v", err)
 	}
+
+	for _, command := range []string{"epoch-review", "promote"} {
+		if err := validateEnvironment(command, "main"); err != nil {
+			t.Fatalf("%s rejected main environment: %v", command, err)
+		}
+		for _, env := range []string{"local", "staging", ""} {
+			if err := validateEnvironment(command, env); err == nil {
+				t.Fatalf("%s accepted unsafe environment %q", command, env)
+			}
+		}
+	}
 }
 
 // the fake site's loading tree must terminate: following suburls from "/"

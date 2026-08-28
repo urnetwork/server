@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,17 +19,19 @@ var (
 	ErrNotFound          = errors.New("competition object not found")
 	ErrConflict          = errors.New("competition state conflict")
 	ErrRoundClosed       = errors.New("competition round is not open")
-	ErrQueueFull         = errors.New("competition queue is full")
 	ErrLeaseLost         = errors.New("competition worker lease lost")
 	ErrSeasonComplete    = errors.New("competition season is complete")
 	ErrPreviousEpochOpen = errors.New("previous competition epoch is not finalized")
+	ErrReviewNotReady    = errors.New("competition epoch is not ready for honesty review")
+	ErrReviewOutOfOrder  = errors.New("competition honesty review candidate is out of order")
 )
 
 type Store interface {
 	CreateRound(context.Context, *Settings, GenerateRoundArgs) (*roundRecord, error)
 	CurrentRound(context.Context, *Settings) (*roundRecord, error)
 	GetRound(context.Context, *Settings, server.Id) (*roundRecord, error)
-	FinalizeEligibleRound(context.Context, *Settings) (*roundRecord, bool, error)
+	PrepareCandidateReview(context.Context, *Settings, int) (*CandidateReviewState, error)
+	RecordCandidateReview(context.Context, *Settings, int, CandidateReviewDecision) (*CandidateReviewState, error)
 	Leaderboards(context.Context, *Settings) (*SeasonLeaderboardResult, error)
 	Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string, string) (*queuedJob, bool, error)
 	GetJob(context.Context, *Settings, server.Id, *Principal) (*queuedJob, error)
@@ -66,6 +69,22 @@ func policySnapshot(settings *Settings) ([]byte, error) {
 		EvaluationPolicy:     settings.EvaluationPolicy,
 		SeasonPolicy:         settings.SeasonPolicy,
 	})
+}
+
+// Reads the evaluator identity frozen with a round rather than the current
+// process configuration, so historical job responses retain exact provenance.
+func evaluatorImageDigestFromPolicy(stored json.RawMessage) (string, error) {
+	var policy roundPolicySnapshot
+	if len(stored) == 0 {
+		return "", errors.New("round policy is empty")
+	}
+	if err := json.Unmarshal(stored, &policy); err != nil {
+		return "", fmt.Errorf("decode round policy: %w", err)
+	}
+	if !imageDigestPattern.MatchString(policy.EvaluatorImageDigest) {
+		return "", errors.New("round evaluator image digest is invalid")
+	}
+	return policy.EvaluatorImageDigest, nil
 }
 
 func (PostgresStore) CreateRound(ctx context.Context, settings *Settings, args GenerateRoundArgs) (*roundRecord, error) {
@@ -230,76 +249,364 @@ func (PostgresStore) GetRound(ctx context.Context, settings *Settings, roundId s
 	return round, err
 }
 
-// FinalizeEligibleRound publishes at most one closed epoch. A round is not
-// final until every accepted job is terminal. Winner selection is deterministic:
-// only placeable/takeover-eligible jobs with every gate passing are considered,
-// then normalized score desc, raw score asc, submission time, and job id break
-// ties. A round with no qualifying job is still finalized with no winner.
-func (PostgresStore) FinalizeEligibleRound(ctx context.Context, settings *Settings) (round *roundRecord, finalized bool, err error) {
+const nextCandidateReviewSql = `
+	WITH eligible AS (
+		SELECT job_id, patch_sha256, patch_bytes, submitted_at, score_json,
+		       CAST(row_number() OVER (
+		           ORDER BY (score_json->>'normalized_score')::numeric DESC,
+		                    (score_json->>'raw_score')::numeric ASC,
+		                    submitted_at, job_id
+		       ) AS integer) AS candidate_rank
+		FROM competition_job
+		WHERE round_id = $1 AND state = 'succeeded'
+		  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
+		  AND score_json @> '{"significance":{"statistically_significant":true,"recommended_next_epoch_takeover_margin_supported":true}}'::jsonb
+		  AND jsonb_typeof(score_json->'gates') = 'object'
+		  AND score_json->'gates' <> '{}'::jsonb
+		  AND NOT EXISTS (
+		      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
+		      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
+		  )
+	)
+	SELECT eligible.candidate_rank, eligible.job_id, eligible.patch_sha256,
+	       eligible.patch_bytes, eligible.submitted_at, eligible.score_json
+	FROM eligible
+	LEFT JOIN competition_candidate_review AS review
+	  ON review.round_id = $1 AND review.job_id = eligible.job_id
+	WHERE review.job_id IS NULL
+	ORDER BY eligible.candidate_rank
+	LIMIT 1
+`
+
+func validateCandidateReviewDecision(decision CandidateReviewDecision) error {
+	decision.Reason = strings.TrimSpace(decision.Reason)
+	if decision.JobId == (server.Id{}) {
+		return errors.New("candidate review job id is required")
+	}
+	if decision.Decision != "approved" && decision.Decision != "rejected" {
+		return errors.New("candidate review decision must be approved or rejected")
+	}
+	if !workerIdPattern.MatchString(decision.ReviewerId) {
+		return errors.New("candidate review reviewer id is invalid")
+	}
+	if decision.Reason == "" || 4096 < len(decision.Reason) || strings.ContainsRune(decision.Reason, '\x00') {
+		return errors.New("candidate review reason must contain 1..4096 bytes")
+	}
+	if !sha256Pattern.MatchString(decision.EvidenceSha256) ||
+		len(decision.Evidence) == 0 || len(decision.Evidence) > 1024*1024 ||
+		!json.Valid(decision.Evidence) {
+		return errors.New("candidate review evidence must be valid JSON of at most 1 MiB with a SHA-256 digest")
+	}
+	var evidenceObject map[string]json.RawMessage
+	if err := json.Unmarshal(decision.Evidence, &evidenceObject); err != nil || evidenceObject == nil {
+		return errors.New("candidate review evidence must be a JSON object")
+	}
+	digest := sha256.Sum256(decision.Evidence)
+	if hex.EncodeToString(digest[:]) != decision.EvidenceSha256 {
+		return errors.New("candidate review evidence hash mismatch")
+	}
+	return nil
+}
+
+func candidateReviewState(round *roundRecord, status string, rejectedCount int) *CandidateReviewState {
+	return &CandidateReviewState{
+		CompetitionId: round.CompetitionId,
+		RoundId:       round.RoundId,
+		Epoch:         round.Epoch,
+		Status:        status,
+		RejectedCount: rejectedCount,
+		FinalizedAt:   round.FinalizedAt,
+		WinnerJobId:   round.WinnerJobId,
+	}
+}
+
+func scanNextCandidate(row pgx.Row) (*CandidateReviewCandidate, error) {
+	candidate := &CandidateReviewCandidate{}
+	var scoreBytes []byte
+	if err := row.Scan(
+		&candidate.Rank,
+		&candidate.JobId,
+		&candidate.PatchSha256,
+		&candidate.Patch,
+		&candidate.SubmittedAt,
+		&scoreBytes,
+	); err != nil {
+		return nil, err
+	}
+	if !sha256Pattern.MatchString(candidate.PatchSha256) || len(candidate.Patch) == 0 {
+		return nil, errors.New("candidate review patch identity is invalid")
+	}
+	digest := sha256.Sum256(candidate.Patch)
+	if hex.EncodeToString(digest[:]) != candidate.PatchSha256 {
+		return nil, errors.New("candidate review patch hash mismatch")
+	}
+	if err := json.Unmarshal(scoreBytes, &candidate.Score); err != nil {
+		return nil, fmt.Errorf("decode candidate review score: %w", err)
+	}
+	if err := validateScore(&candidate.Score); err != nil {
+		return nil, fmt.Errorf("validate candidate review score: %w", err)
+	}
+	return candidate, nil
+}
+
+func loadCandidateReviewRound(
+	ctx context.Context,
+	tx server.PgTx,
+	settings *Settings,
+	epoch int,
+) (*roundRecord, error) {
+	return scanRound(tx.QueryRow(ctx, `
+		SELECT round_id, competition_id, epoch_number, workload_commitment, seed_nonce,
+		       seed_ciphertext, providers_sha256, providers_path,
+		       policy_json, opens_at, closes_at, reveal_at,
+		       created_at, canceled, finalized_at, winner_job_id
+		FROM competition_round
+		WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false
+		FOR UPDATE
+	`, settings.CompetitionId, epoch))
+}
+
+func countRejectedCandidates(ctx context.Context, tx server.PgTx, roundId server.Id) int {
+	var count int
+	server.Raise(tx.QueryRow(ctx, `
+		SELECT count(*) FROM competition_candidate_review
+		WHERE round_id = $1 AND decision = 'rejected'
+	`, roundId).Scan(&count))
+	return count
+}
+
+func roundReadyForCandidateReview(ctx context.Context, tx server.PgTx, round *roundRecord, now time.Time) bool {
+	if now.Before(round.ClosesAt) {
+		return false
+	}
+	var active int
+	server.Raise(tx.QueryRow(ctx, `
+		SELECT count(*) FROM competition_job
+		WHERE round_id = $1 AND state IN ('queued', 'running')
+	`, round.RoundId).Scan(&active))
+	return active == 0
+}
+
+func nextCandidateReview(ctx context.Context, tx server.PgTx, roundId server.Id) (*CandidateReviewCandidate, error) {
+	candidate, err := scanNextCandidate(tx.QueryRow(ctx, nextCandidateReviewSql, roundId))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return candidate, err
+}
+
+func finalizeCandidateReviewRound(
+	ctx context.Context,
+	tx server.PgTx,
+	round *roundRecord,
+	winnerJobId *server.Id,
+	now time.Time,
+) {
+	server.RaisePgResult(tx.Exec(ctx, `
+		UPDATE competition_round
+		SET finalized_at = $2, winner_job_id = $3
+		WHERE round_id = $1
+	`, round.RoundId, now, winnerJobId))
+	round.FinalizedAt = &now
+	round.WinnerJobId = winnerJobId
+	setRoundStatus(round, now)
+}
+
+// PrepareCandidateReview seals the evaluation phase for one epoch without
+// publishing a statistically significant candidate as the winner. If no
+// eligible candidate remains, the epoch is safely finalized with no winner.
+// Otherwise the exact next-ranked candidate stays embargoed for operator
+// honesty review.
+func (PostgresStore) PrepareCandidateReview(
+	ctx context.Context,
+	settings *Settings,
+	epoch int,
+) (state *CandidateReviewState, err error) {
 	now := server.NowUtc()
+	finalized := false
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-finalize-v1', 0))`))
-			var scanErr error
-			round, scanErr = scanRound(tx.QueryRow(ctx, `
-				SELECT round_id, competition_id, epoch_number, workload_commitment, seed_nonce,
-				       seed_ciphertext, providers_sha256, providers_path,
-				       policy_json, opens_at, closes_at, reveal_at,
-				       created_at, canceled, finalized_at, winner_job_id
-				FROM competition_round
-				WHERE competition_id = $1 AND canceled = false
-				  AND closes_at <= $2 AND finalized_at IS NULL
-				ORDER BY epoch_number
-				LIMIT 1 FOR UPDATE
-			`, settings.CompetitionId, now))
+			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-finalize-v2', 0))`))
+			round, scanErr := loadCandidateReviewRound(ctx, tx, settings, epoch)
 			if errors.Is(scanErr, pgx.ErrNoRows) {
-				round = nil
+				stateErr = ErrNotFound
 				return
 			}
 			server.Raise(scanErr)
-			var active int
-			server.Raise(tx.QueryRow(ctx, `
-				SELECT count(*) FROM competition_job
-				WHERE round_id = $1 AND state IN ('queued', 'running')
-			`, round.RoundId).Scan(&active))
-			if active != 0 {
+			rejectedCount := countRejectedCandidates(ctx, tx, round.RoundId)
+			if round.FinalizedAt != nil {
+				state = candidateReviewState(round, "finalized", rejectedCount)
 				return
 			}
-			var winnerId *server.Id
-			winnerErr := tx.QueryRow(ctx, `
-				SELECT job_id
-				FROM competition_job
-				WHERE round_id = $1 AND state = 'succeeded'
-				  AND score_json @> '{"placeable":true,"takeover_eligible":true}'::jsonb
-				  AND jsonb_typeof(score_json->'gates') = 'object'
-				  AND score_json->'gates' <> '{}'::jsonb
-				  AND NOT EXISTS (
-				      SELECT 1 FROM jsonb_each(score_json->'gates') AS gate
-				      WHERE NOT COALESCE((gate.value->>'passed')::boolean, false)
-				  )
-				ORDER BY (score_json->>'normalized_score')::numeric DESC,
-				         (score_json->>'raw_score')::numeric ASC,
-				         submitted_at, job_id
-				LIMIT 1
-			`, round.RoundId).Scan(&winnerId)
-			if winnerErr != nil && !errors.Is(winnerErr, pgx.ErrNoRows) {
-				server.Raise(winnerErr)
+			if !roundReadyForCandidateReview(ctx, tx, round, now) {
+				state = candidateReviewState(round, "evaluating", rejectedCount)
+				return
 			}
-			server.RaisePgResult(tx.Exec(ctx, `
-				UPDATE competition_round
-				SET finalized_at = $2, winner_job_id = $3
-				WHERE round_id = $1
-			`, round.RoundId, now, winnerId))
-			round.FinalizedAt = &now
-			round.WinnerJobId = winnerId
-			setRoundStatus(round, now)
-			finalized = true
+			candidate, candidateErr := nextCandidateReview(ctx, tx, round.RoundId)
+			server.Raise(candidateErr)
+			if candidate == nil {
+				finalizeCandidateReviewRound(ctx, tx, round, nil, now)
+				state = candidateReviewState(round, "finalized", rejectedCount)
+				finalized = true
+				return
+			}
+			state = candidateReviewState(round, "pending_review", rejectedCount)
+			state.Candidate = candidate
 		})
 	})
+	if err == nil && stateErr != nil {
+		return nil, stateErr
+	}
 	if err == nil && finalized {
 		competitionRoundEvents.WithLabelValues("finalized").Inc()
 	}
-	return round, finalized, err
+	return state, err
+}
+
+// RecordCandidateReview appends an authenticated honesty decision for exactly
+// the current ranked candidate. Rejections advance in score order. Approval is
+// atomic with winner publication, and rejecting the last candidate finalizes
+// the epoch with no winner.
+func (PostgresStore) RecordCandidateReview(
+	ctx context.Context,
+	settings *Settings,
+	epoch int,
+	decision CandidateReviewDecision,
+) (state *CandidateReviewState, err error) {
+	decision.Reason = strings.TrimSpace(decision.Reason)
+	if err := validateCandidateReviewDecision(decision); err != nil {
+		return nil, err
+	}
+	now := server.NowUtc()
+	finalized := false
+	var stateErr error
+	err = captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-finalize-v2', 0))`))
+			round, scanErr := loadCandidateReviewRound(ctx, tx, settings, epoch)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				stateErr = ErrNotFound
+				return
+			}
+			server.Raise(scanErr)
+			if round.FinalizedAt != nil {
+				stateErr = ErrConflict
+				return
+			}
+			if !roundReadyForCandidateReview(ctx, tx, round, now) {
+				stateErr = ErrReviewNotReady
+				return
+			}
+			candidate, candidateErr := nextCandidateReview(ctx, tx, round.RoundId)
+			server.Raise(candidateErr)
+			if candidate == nil || candidate.JobId != decision.JobId {
+				stateErr = ErrReviewOutOfOrder
+				return
+			}
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO competition_candidate_review (
+					round_id, job_id, candidate_rank, decision, reviewer_id,
+					reason, evidence_json, evidence_sha256, reviewed_at
+				) VALUES ($1, $2, $3, $4, $5, $6, $7::json, $8, $9)
+			`,
+				round.RoundId,
+				candidate.JobId,
+				candidate.Rank,
+				decision.Decision,
+				decision.ReviewerId,
+				decision.Reason,
+				string(decision.Evidence),
+				decision.EvidenceSha256,
+				now,
+			))
+			rejectedCount := countRejectedCandidates(ctx, tx, round.RoundId)
+			if decision.Decision == "approved" {
+				winnerJobId := candidate.JobId
+				finalizeCandidateReviewRound(ctx, tx, round, &winnerJobId, now)
+				state = candidateReviewState(round, "finalized", rejectedCount)
+				finalized = true
+				return
+			}
+			next, nextErr := nextCandidateReview(ctx, tx, round.RoundId)
+			server.Raise(nextErr)
+			if next == nil {
+				finalizeCandidateReviewRound(ctx, tx, round, nil, now)
+				state = candidateReviewState(round, "finalized", rejectedCount)
+				finalized = true
+				return
+			}
+			state = candidateReviewState(round, "pending_review", rejectedCount)
+			state.Candidate = next
+		})
+	})
+	if err == nil && stateErr != nil {
+		return nil, stateErr
+	}
+	if err == nil && finalized {
+		competitionRoundEvents.WithLabelValues("finalized").Inc()
+	}
+	return state, err
+}
+
+// RequirePromotionDecision is the final source-promotion interlock. The
+// promotion CLI may only carry forward a finalized no-winner epoch or apply the
+// exact job that has an append-only approved honesty review.
+func (PostgresStore) RequirePromotionDecision(
+	ctx context.Context,
+	settings *Settings,
+	epoch int,
+	winnerJobId *server.Id,
+) (candidate *CandidateReviewCandidate, err error) {
+	var stateErr error
+	err = captureDatabaseError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			var finalizedAt *time.Time
+			var recordedWinner *server.Id
+			scanErr := conn.QueryRow(ctx, `
+				SELECT finalized_at, winner_job_id
+				FROM competition_round
+				WHERE competition_id = $1 AND epoch_number = $2 AND canceled = false
+			`, settings.CompetitionId, epoch).Scan(&finalizedAt, &recordedWinner)
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				stateErr = ErrNotFound
+				return
+			}
+			server.Raise(scanErr)
+			if finalizedAt == nil {
+				stateErr = ErrReviewNotReady
+				return
+			}
+			if winnerJobId == nil {
+				if recordedWinner != nil {
+					stateErr = ErrConflict
+				}
+				return
+			}
+			if recordedWinner == nil || *recordedWinner != *winnerJobId {
+				stateErr = ErrConflict
+				return
+			}
+			candidate, scanErr = scanNextCandidate(conn.QueryRow(ctx, `
+				SELECT review.candidate_rank, job.job_id, job.patch_sha256,
+				       job.patch_bytes, job.submitted_at, job.score_json
+				FROM competition_candidate_review AS review
+				JOIN competition_job AS job ON job.job_id = review.job_id
+				JOIN competition_round AS round ON round.round_id = review.round_id
+				WHERE round.competition_id = $1 AND round.epoch_number = $2
+				  AND review.job_id = $3 AND review.decision = 'approved'
+			`, settings.CompetitionId, epoch, *winnerJobId))
+			if errors.Is(scanErr, pgx.ErrNoRows) {
+				stateErr = ErrConflict
+				return
+			}
+			server.Raise(scanErr)
+		})
+	})
+	if err == nil && stateErr != nil {
+		return nil, stateErr
+	}
+	return candidate, err
 }
 
 func (PostgresStore) Leaderboards(ctx context.Context, settings *Settings) (result *SeasonLeaderboardResult, err error) {
@@ -327,11 +634,14 @@ func (PostgresStore) Leaderboards(ctx context.Context, settings *Settings) (resu
 				board := &result.Epochs[boardIndex]
 				jobRows, jobsErr := conn.Query(ctx, `
 					SELECT job.job_id, job.patch_sha256, job.submitted_at,
-					       job.score_json, count(principal.principal_id)
+					       job.score_json, count(principal.principal_id),
+					       COALESCE(review.decision, 'not_reviewed')
 					FROM competition_job AS job
 					JOIN competition_job_principal AS principal ON principal.job_id = job.job_id
+					LEFT JOIN competition_candidate_review AS review
+					  ON review.round_id = job.round_id AND review.job_id = job.job_id
 					WHERE job.round_id = $1 AND job.state = 'succeeded'
-					GROUP BY job.job_id
+					GROUP BY job.job_id, review.decision
 					ORDER BY (job.score_json->>'normalized_score')::numeric DESC,
 					         (job.score_json->>'raw_score')::numeric ASC,
 					         job.submitted_at, job.job_id
@@ -342,7 +652,7 @@ func (PostgresStore) Leaderboards(ctx context.Context, settings *Settings) (resu
 						var scoreBytes []byte
 						server.Raise(jobRows.Scan(
 							&entry.JobId, &entry.PatchSha256, &entry.SubmittedAt,
-							&scoreBytes, &entry.SubmitterCount,
+							&scoreBytes, &entry.SubmitterCount, &entry.HonestyReview,
 						))
 						server.Raise(json.Unmarshal(scoreBytes, &entry.Score))
 						server.Raise(validateScore(&entry.Score))
@@ -408,6 +718,9 @@ func (PostgresStore) Enqueue(
 	if _, identityErr := validateRuntimeImageDigest(apiImageDigest); identityErr != nil {
 		return nil, false, identityErr
 	}
+	if settings == nil || settings.artifactArchive == nil {
+		return nil, false, errors.New("competition submission archive is unavailable")
+	}
 	now := server.NowUtc()
 	var stateErr error
 	err = captureDatabaseError(func() {
@@ -442,15 +755,14 @@ func (PostgresStore) Enqueue(
 			if !errors.Is(scanErr, pgx.ErrNoRows) {
 				server.Raise(scanErr)
 			}
-			var active int
-			server.Raise(tx.QueryRow(ctx, `
-				SELECT count(*) FROM competition_job WHERE state IN ('queued', 'running')
-			`).Scan(&active))
-			if settings.EvaluationPolicy.QueueLimit <= active {
-				stateErr = ErrQueueFull
-				return
-			}
 			jobId := server.NewId()
+			submissionArtifact, archiveErr := settings.artifactArchive.ArchiveSubmission(
+				ctx,
+				settings,
+				roundId,
+				patch,
+			)
+			server.Raise(archiveErr)
 			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO competition_job (
 					job_id, round_id, patch_bytes, patch_sha256, cache_key, state,
@@ -460,7 +772,7 @@ func (PostgresStore) Enqueue(
 			addPrincipal(ctx, tx, jobId, principalId, now)
 			appendEvent(ctx, tx, jobId, now, "submitted", principalId, map[string]any{
 				"round_id": roundId.String(), "patch_sha256": patch.Sha256, "cache_key": key,
-				"api_image_digest": apiImageDigest,
+				"api_image_digest": apiImageDigest, "submission_artifact": submissionArtifact,
 			})
 			job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id = $1`, jobId), true)
 			server.Raise(scanErr)
@@ -468,6 +780,9 @@ func (PostgresStore) Enqueue(
 	})
 	if err == nil && stateErr != nil {
 		err = stateErr
+	}
+	if err == nil && job != nil && job.State == "queued" {
+		err = enqueueCompetitionJob(ctx, settings, job.JobId)
 	}
 	return job, cacheHit, err
 }
@@ -507,6 +822,10 @@ func scanJob(row pgx.Row, includePatch bool) (*queuedJob, error) {
 	job.Round.RoundId = job.RoundId
 	job.Round.ScoreSchema = ScoreSchema
 	job.Round.PolicyJson = policyJson
+	job.EvaluatorImageDigest, err = evaluatorImageDigestFromPolicy(policyJson)
+	if err != nil {
+		return nil, err
+	}
 	setRoundStatus(&job.Round, server.NowUtc())
 	if len(scoreJson) != 0 {
 		job.Score = &ScoreResult{}
@@ -557,7 +876,7 @@ func (PostgresStore) Readiness(ctx context.Context, settings *Settings) (checks 
 		"retention_window":             !settings.RetainUntil.Before(settings.SeasonEndsAt),
 		"database":                     false,
 		"fifo_slot":                    false,
-		"queue_admission":              false,
+		"queue_admission":              true,
 		"authoritative_evaluator_host": false,
 		"artifact_storage":             false,
 		"host_rebaseline":              false,
@@ -570,9 +889,6 @@ func (PostgresStore) Readiness(ctx context.Context, settings *Settings) (checks 
 			var slots int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM competition_worker_slot WHERE slot_id = 1`).Scan(&slots))
 			checks["fifo_slot"] = slots == 1
-			var active int
-			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM competition_job WHERE state IN ('queued', 'running')`).Scan(&active))
-			checks["queue_admission"] = active < settings.EvaluationPolicy.QueueLimit
 			var hosts, artifactHosts, rebaselineHosts int
 			server.Raise(conn.QueryRow(ctx, `
 				WITH current_round AS (
@@ -604,6 +920,9 @@ func (PostgresStore) Readiness(ctx context.Context, settings *Settings) (checks 
 			checks["host_rebaseline"] = 1 <= rebaselineHosts
 		})
 	})
+	if err == nil {
+		checks["queue_admission"] = checkCompetitionFifo(ctx, settings) == nil
+	}
 	return checks, err
 }
 
@@ -640,6 +959,12 @@ func (PostgresStore) Claim(ctx context.Context, settings *Settings, workerId str
 	}
 	now := server.NowUtc()
 	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
+	// Consume one Redis wake-up in FIFO order. PostgreSQL still selects the
+	// authoritative oldest eligible row, which recovers correctly after a
+	// Redis flush, a lost post-commit push, or a stale list entry.
+	if _, err := dequeueCompetitionJob(ctx, settings); err != nil {
+		return nil, err
+	}
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			var slotWorker *string
@@ -662,7 +987,7 @@ func (PostgresStore) Claim(ctx context.Context, settings *Settings, workerId str
 				        (j.state = 'running' AND j.lease_expires_at <= $1)
 				      )
 				  AND r.canceled = false
-				  AND r.closes_at <= $1
+				  AND r.opens_at <= $1
 				  AND r.finalized_at IS NULL
 				ORDER BY j.submitted_at, j.job_id
 				LIMIT 1 FOR UPDATE OF j SKIP LOCKED
@@ -696,6 +1021,9 @@ func (PostgresStore) Claim(ctx context.Context, settings *Settings, workerId str
 			job.LeaseOwner = workerId
 			job.LeaseExpiresAt = &leaseUntil
 			job.WorkerImageDigest = workerImageDigest
+			if job.StartedAt == nil {
+				job.StartedAt = &now
+			}
 		})
 	})
 	return job, err
@@ -740,6 +1068,20 @@ type EvaluationOutcome struct {
 	Infrastructure   bool
 }
 
+// Schedules an infrastructure retry only when it can begin before the one
+// submission-wide execution deadline. Queue wait before the first claim is not
+// charged, while every attempt and retry backoff after it is charged.
+func infrastructureRetrySchedule(
+	settings *Settings,
+	startedAt time.Time,
+	completedAt time.Time,
+	attempts int,
+) (time.Time, bool) {
+	retryAt := completedAt.Add(time.Duration(attempts*attempts) * 15 * time.Second)
+	deadline := startedAt.Add(time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second)
+	return retryAt, attempts < settings.MaxInfrastructureAttempts && retryAt.Before(deadline)
+}
+
 func (PostgresStore) Complete(ctx context.Context, settings *Settings, workerId string, jobId server.Id, outcome EvaluationOutcome) (retry bool, err error) {
 	now := server.NowUtc()
 	leaseLost := false
@@ -748,17 +1090,26 @@ func (PostgresStore) Complete(ctx context.Context, settings *Settings, workerId 
 			var state, owner string
 			var attempts int
 			var apiImageDigest, workerImageDigest string
+			var startedAt time.Time
 			server.Raise(tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
-				       api_image_digest, COALESCE(worker_image_digest, '')
+				       api_image_digest, COALESCE(worker_image_digest, ''), started_at
 				FROM competition_job WHERE job_id = $1 FOR UPDATE
-			`, jobId).Scan(&state, &owner, &attempts, &apiImageDigest, &workerImageDigest))
+			`, jobId).Scan(&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt))
 			if state != "running" || owner != workerId {
 				leaseLost = true
 				return
 			}
 			if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
 				panic(errors.New("competition job runtime image identity is invalid"))
+			}
+			retryAt, retryBudgetAvailable := infrastructureRetrySchedule(settings, startedAt, now, attempts)
+			if outcome.Infrastructure && attempts < settings.MaxInfrastructureAttempts && !retryBudgetAvailable {
+				outcome.Score = nil
+				outcome.Error = infrastructureError(
+					"evaluation_time_budget_exhausted",
+					"submission exhausted its total evaluation time budget",
+				)
 			}
 			scoreJson, errorJson, manifestJson := nullableJson(outcome.Score), nullableJson(outcome.Error), []byte(outcome.ArtifactManifest)
 			manifestHash := any(nil)
@@ -769,14 +1120,13 @@ func (PostgresStore) Complete(ctx context.Context, settings *Settings, workerId 
 				h := sha256.Sum256(manifestJson)
 				manifestHash = hex.EncodeToString(h[:])
 			}
-			if outcome.Infrastructure && attempts < settings.MaxInfrastructureAttempts {
+			if outcome.Infrastructure && retryBudgetAvailable {
 				retry = true
-				backoff := time.Duration(attempts*attempts) * 15 * time.Second
 				server.RaisePgResult(tx.Exec(ctx, `
 					UPDATE competition_job SET state = 'queued', available_at = $2,
 						lease_owner = NULL, lease_expires_at = NULL
 					WHERE job_id = $1
-				`, jobId, now.Add(backoff)))
+				`, jobId, retryAt))
 				errorCode := "unknown_infrastructure_error"
 				if outcome.Error != nil {
 					errorCode = outcome.Error.Code
@@ -813,6 +1163,9 @@ func (PostgresStore) Complete(ctx context.Context, settings *Settings, workerId 
 	})
 	if err == nil && leaseLost {
 		err = ErrLeaseLost
+	}
+	if err == nil && retry {
+		err = enqueueCompetitionJob(ctx, settings, jobId)
 	}
 	return retry, err
 }

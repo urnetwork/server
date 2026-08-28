@@ -4,7 +4,7 @@
 # local-env variables set (mirrors server/cli/*/run-local.sh). Requires
 # server/local/run-local.sh to be running (postgres + redis).
 #
-# Usage: ./run-local.sh <init|run|fleet> [args...]
+# Usage: ./run-local.sh <command> [args...]
 #   ./run-local.sh init --count 2000 --clients 200 --out providers.yml
 #   ./run-local.sh run --epoch 0 --providers providers.yml > results.csv
 

@@ -91,20 +91,20 @@
   <header>
     <div class="eyebrow">URnetwork · sim-latency · authenticated final baseline</div>
     <h1>What “significantly better” means on the final evaluator.</h1>
-    <p class="lead">The competition uses a lower-is-better, failure-charged latency score. Twelve same-seed calibration pairs select a median-of-nine evaluation and a 16.1% takeover margin. Each live round still generates its own hidden-seed baseline; the fixed calibration below controls the policy, while the staging draw shows the path working end to end.</p>
+    <p class="lead">The competition uses a lower-is-better, failure-charged latency score. Twelve same-seed calibration pairs select a median-of-nine evaluation and the initial 16.1% takeover margin. Each live round generates its own hidden-seed baseline and records run-level variance and a one-sided significance test; a significant winner's measured variance sets the next epoch's margin.</p>
     <div class="chips">
       <span class="chip ready">LOCAL TECHNICAL GATE · 10/10</span>
       <span class="chip">1,800 providers · 200 clients</span>
       <span class="chip">3-minute measured window</span>
       <span class="chip">R=9 · median</span>
-      <span class="chip">16.1% significant-better margin</span>
+      <span class="chip">epoch 0 margin · 16.1%</span>
       <span class="chip">score schema 1</span>
     </div>
   </header>
 
   <section id="policy-baseline">
     <div class="section-head">
-      <div><div class="section-index">01 · POLICY BASELINE</div><h2>The calibrated scoring line</h2><p>The 12-pair baseline population averages 43.102 seconds. A submission must land at or below 36.162 seconds under the selected aggregation to cross the significant-better line. The green band is the full qualifying fringe; lower is better.</p></div>
+      <div><div class="section-index">01 · POLICY BASELINE</div><h2>The initial calibrated scoring line</h2><p>The 12-pair baseline population averages 43.102 seconds. At the initial 16.1% margin, a submission must land at or below 36.162 seconds under the selected aggregation. The green band is the raw-margin fringe; lower is better.</p></div>
       <div class="section-kpi">≤36.162 s<small>significantly better</small></div>
     </div>
     <svg viewBox="0 0 1000 260" role="img" aria-label="Calibration baseline gauge with significant-better threshold and shaded improvement fringe">
@@ -124,8 +124,9 @@
       <div class="metric"><strong>43.102 s</strong><span>12-pair calibration baseline mean</span></div>
       <div class="metric"><strong>36.162 s</strong><span>mean × 0.839 significant-better line</span></div>
       <div class="metric"><strong>R=9</strong><span>median of nine baseline and candidate replicates</span></div>
-      <div class="metric"><strong>16.1%</strong><span>takeover margin / minimum detectable delta</span></div>
+      <div class="metric"><strong>16.1%</strong><span>epoch-0 calibrated takeover margin</span></div>
     </div>
+    <div class="notice">Crossing the plotted line is necessary, not sufficient: a winner must also pass G1–G6 and the run-level one-sided Welch test at p ≤ 0.05. Every score stores both sample variances and its next-epoch margin recommendation.</div>
   </section>
 
   <section id="same-seed-stability">
@@ -177,7 +178,7 @@
       <div class="metric"><strong>40.476 s</strong><span>exact no-op candidate median · 1.201% slower</span></div>
       <div class="metric"><strong>98.814</strong><span>normalized score · G1–G6 all passed</span></div>
     </div>
-    <div class="notice">The 39.996-second value is a production staging observation, not a permanent absolute target. Every live round derives a fresh hidden-seed same-round baseline and applies the same 16.1% margin.</div>
+    <div class="notice">The 39.996-second value is a production staging observation, not a permanent absolute target. Every live round derives a fresh hidden-seed same-round baseline and applies the percentage recorded for its source epoch. Epoch 1 starts at 16.1%; a significant winner's measured variance determines the next percentage, while a no-winner epoch carries it forward unchanged.</div>
   </section>
 
   <section id="environment">
@@ -207,7 +208,7 @@
 
   <section id="references">
     <div class="section-head">
-      <div><div class="section-index">05 · INDEPENDENT REFERENCES</div><h2>Better, no-op, and worse across hidden seeds</h2><p>Each seed uses one precommitted designated baseline. Candidate raw scores are divided by that baseline; lower is better. The authorized launch screen passed 4/5 correct orderings. The green fringe below 0.839 is where a candidate is significantly better than its designated same-round baseline.</p></div>
+      <div><div class="section-index">05 · INDEPENDENT REFERENCES</div><h2>Better, no-op, and worse across hidden seeds</h2><p>Each seed uses one precommitted designated baseline. Candidate raw scores are divided by that baseline; lower is better. The authorized launch screen passed 4/5 correct orderings. The green fringe below 0.839 is the initial calibrated raw-margin region; live winners also need G1–G6 and p ≤ 0.05.</p></div>
       <div class="section-kpi">4/5 ordered<small>authorized launch screen</small></div>
     </div>
     <svg viewBox="0 0 1000 350" role="img" aria-label="Independent reference ratios with baseline, significant-better threshold, and improvement fringe">
@@ -234,7 +235,7 @@
 
   <section id="product-projection">
     <div class="section-head">
-      <div><div class="section-index">06 · SIX-ROUND PRODUCT PROJECTION</div><h2>Compounding threshold wins change the experience</h2><p>The sealed production baseline run manifests measure a median p95 TTFB of 666.915 ms and median p50 large-transfer throughput of 1.725 Mbps. This illustrative projection makes each winning result the next round's baseline, lowers TTFB by exactly 16.1%, and raises throughput by exactly 16.1% in each of six successive rounds.</p></div>
+      <div><div class="section-index">06 · SIX-ROUND PRODUCT PROJECTION</div><h2>Compounding threshold wins change the experience</h2><p>The sealed production baseline run manifests measure a median p95 TTFB of 666.915 ms and median p50 large-transfer throughput of 1.725 Mbps. This conservative illustrative path holds every epoch at the initial 16.1% floor, makes each winner the next baseline, lowers TTFB by exactly 16.1%, and raises throughput by exactly 16.1% in each of six successive rounds.</p></div>
       <div class="section-kpi">232.617 ms · 4.224 Mbps<small>projected after round 6</small></div>
     </div>
     <svg viewBox="0 0 1000 460" role="img" aria-label="Six-round projected p95 TTFB and p50 throughput when each round reaches the 16.1 percent significant-improvement threshold">
@@ -274,7 +275,7 @@
       <div class="metric"><strong>×0.839 / round</strong><span>TTFB target at the exact lower-is-better margin</span></div>
       <div class="metric"><strong>×1.161 / round</strong><span>throughput modeling assumption at the same relative margin</span></div>
     </div>
-    <div class="notice">Projection, not a performance promise: the measured starting values are authenticated, but future improvements are hypothetical. The competition takeover decision is based on failure-charged p95 total latency with G1–G6, not independent TTFB or throughput thresholds; the throughput curve assumes the same 16.1% relative gain for illustration.</div>
+    <div class="notice">Projection, not a performance promise: the measured starting values are authenticated, but future improvements are hypothetical. The competition takeover decision is based on failure-charged p95 total latency, G1–G6, and p ≤ 0.05—not independent TTFB or throughput thresholds. The scorer never recommends a later margin below the incumbent 16.1%, so the plotted fixed-margin path is the minimum-margin scenario; an epoch may require more.</div>
   </section>
 
   <section id="readiness">
@@ -286,7 +287,7 @@
       <text class="visual-title" x="40" y="42">AUTHENTICATED LOCAL TECHNICAL LAUNCH CHAIN</text>
       <g>
         <rect class="box-green" x="38" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="65" cy="101" r="13"/><path class="check-mark" d="M58 101l5 5 10-12"/><text class="box-title" x="88" y="105">SOURCE + SCALE</text><text class="small" x="58" y="137">identity · frontier · p1800</text>
-        <rect class="box-green" x="226" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="253" cy="101" r="13"/><path class="check-mark" d="M246 101l5 5 10-12"/><text class="box-title" x="276" y="105">BASELINE</text><text class="small" x="246" y="137">12 pairs · R=9 · 16.1%</text>
+        <rect class="box-green" x="226" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="253" cy="101" r="13"/><path class="check-mark" d="M246 101l5 5 10-12"/><text class="box-title" x="276" y="105">BASELINE</text><text class="small" x="246" y="137">12 pairs · R=9 · epoch 0 16.1%</text>
         <rect class="box-green" x="414" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="441" cy="101" r="13"/><path class="check-mark" d="M434 101l5 5 10-12"/><text class="box-title" x="464" y="105">REFERENCES</text><text class="small" x="434" y="137">hidden seeds · 4/5 order</text>
         <rect class="box-green" x="602" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="629" cy="101" r="13"/><path class="check-mark" d="M622 101l5 5 10-12"/><text class="box-title" x="652" y="105">SECURITY</text><text class="small" x="622" y="137">15/15 · bomb cleanup</text>
         <rect class="box-green" x="790" y="74" width="170" height="86" rx="14"/><circle class="check-circle" cx="817" cy="101" r="13"/><path class="check-mark" d="M810 101l5 5 10-12"/><text class="box-title" x="840" y="105">STAGING</text><text class="small" x="810" y="137">generate → reveal · 7/7</text>
@@ -303,7 +304,7 @@
   </section>
 
   <footer>
-    Generated from the authenticated finalization chain sealed 2026-08-28. Evaluator source <code>46515d82fe98ff666c61b2b5bb1d34a89cf4dad8</code>; evaluator image <code>sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c</code>; completion audit <code>f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423</code>. Lower raw scores are better.
+    Generated from the authenticated calibration chain sealed 2026-08-28. Calibration evaluator source <code>46515d82fe98ff666c61b2b5bb1d34a89cf4dad8</code>; calibration image <code>sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c</code>; completion audit <code>f28e630e5e7a8a79bedc97dbdc9dafd4302cb067daa875de20ce2278f7999423</code>. Lower raw scores are better.
   </footer>
 </main>
 </body>

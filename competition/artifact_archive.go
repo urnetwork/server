@@ -26,6 +26,7 @@ import (
 type artifactArchive interface {
 	Check(context.Context) error
 	ArchiveRound(context.Context, *Settings, *roundRecord, workloadArtifact) error
+	ArchiveSubmission(context.Context, *Settings, server.Id, *CanonicalPatch) (*retainedArtifact, error)
 	ArchiveAttempt(context.Context, *Settings, *queuedJob, string, artifactManifest) (json.RawMessage, error)
 	ReadRoundWorkload(context.Context, *Settings, *roundRecord) ([]byte, error)
 }
@@ -111,6 +112,69 @@ func (self *blobArtifactArchive) ArchiveRound(
 	return err
 }
 
+// ArchiveSubmission durably retains canonical patch bytes before the queue row
+// becomes claimable. Attempts retain the patch again inside their complete
+// evidence bundle; this admission copy proves that even a not-yet-evaluated
+// submission survives outside the control-plane database.
+func (self *blobArtifactArchive) ArchiveSubmission(
+	ctx context.Context,
+	settings *Settings,
+	roundId server.Id,
+	patch *CanonicalPatch,
+) (result *retainedArtifact, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			competitionArtifactFailures.Inc()
+		}
+	}()
+	if settings == nil || patch == nil || roundId == (server.Id{}) ||
+		len(patch.Bytes) == 0 || settings.PatchPolicy.MaxPatchBytes < len(patch.Bytes) ||
+		!sha256Pattern.MatchString(patch.Sha256) {
+		return nil, errors.New("submission archive identity is invalid")
+	}
+	digest := sha256.Sum256(patch.Bytes)
+	if hex.EncodeToString(digest[:]) != patch.Sha256 {
+		return nil, errors.New("submission archive patch hash mismatch")
+	}
+	temporary, err := os.CreateTemp("", "urnetwork-competition-submission-*.patch")
+	if err != nil {
+		return nil, err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return nil, err
+	}
+	if _, err := temporary.Write(patch.Bytes); err != nil {
+		temporary.Close()
+		return nil, err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return nil, err
+	}
+	if err := temporary.Close(); err != nil {
+		return nil, err
+	}
+	result, err = self.retainFile(
+		ctx,
+		settings,
+		"canonical.patch",
+		self.submissionPatchKey(settings, roundId, patch.Sha256),
+		temporaryPath,
+		patch.Sha256,
+		int64(len(patch.Bytes)),
+		"text/x-diff",
+	)
+	if err != nil {
+		return nil, err
+	}
+	competitionArtifactObjects.Inc()
+	competitionArtifactBytes.Add(float64(len(patch.Bytes)))
+	return result, nil
+}
+
 func (self *blobArtifactArchive) ArchiveAttempt(
 	ctx context.Context,
 	settings *Settings,
@@ -125,8 +189,10 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 	}()
 	if settings == nil || job == nil || manifest.JobId != job.JobId.String() ||
 		manifest.RoundId != job.RoundId.String() || manifest.Attempt != job.AttemptCount ||
+		manifest.EvaluatorImageDigest != job.EvaluatorImageDigest ||
 		manifest.ApiImageDigest != job.ApiImageDigest ||
 		manifest.WorkerImageDigest != job.WorkerImageDigest ||
+		!imageDigestPattern.MatchString(manifest.EvaluatorImageDigest) ||
 		!imageDigestPattern.MatchString(manifest.ApiImageDigest) ||
 		!imageDigestPattern.MatchString(manifest.WorkerImageDigest) {
 		return nil, errors.New("attempt archive identity is invalid")
@@ -306,6 +372,21 @@ func (self *blobArtifactArchive) roundWorkloadKey(settings *Settings, round *rou
 		"workloads",
 		"sha256",
 		digest+".providers.yml",
+	))
+}
+
+func (self *blobArtifactArchive) submissionPatchKey(settings *Settings, roundId server.Id, digest string) string {
+	return filepath.ToSlash(filepath.Join(
+		self.store.Prefix(),
+		"competition",
+		"v1",
+		settings.CompetitionId,
+		"rounds",
+		roundId.String(),
+		"submissions",
+		"sha256",
+		digest,
+		"canonical.patch",
 	))
 }
 

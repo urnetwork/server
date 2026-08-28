@@ -1,10 +1,14 @@
 package main
 
-// Winner promotion advances measured source one epoch. Repository branches are
-// pushed before the config ledger, so an interrupted multi-repository update
-// remains inactive and every evaluation continues to fail closed.
+// Winner promotion advances measured source one epoch. It creates one temporary
+// root, clones all measured repositories there, checks out their sim-latency
+// branch at the prior epoch, applies and commits the winner, pushes repository
+// branches, and activates the config ledger last. The operator checkouts are
+// preflight inputs only and are never patched.
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +19,7 @@ import (
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"github.com/urnetwork/server/competition"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +30,7 @@ var promotionJobIdPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 // promotionRepository records one branch transition staged in an isolated clone.
 type promotionRepository struct {
 	Name           string
+	Branch         string
 	LocalRoot      string
 	StagedRoot     string
 	PreviousCommit string
@@ -34,14 +40,124 @@ type promotionRepository struct {
 
 // promotionResult is the operator-readable dry-run and completion record.
 type promotionResult struct {
-	Schema            int               `json:"schema"`
-	Epoch             int               `json:"epoch"`
-	WinnerJobId       string            `json:"winner_job_id"`
-	PromotedFromEpoch int               `json:"promoted_from_epoch"`
-	RepositoryCommits map[string]string `json:"repository_commits"`
-	ConfigCommit      string            `json:"config_commit"`
-	DryRun            bool              `json:"dry_run"`
-	LedgerActivated   bool              `json:"ledger_activated"`
+	Schema                        int                 `json:"schema"`
+	Epoch                         int                 `json:"epoch"`
+	Kind                          string              `json:"kind"`
+	SignificantImprovementPercent float64             `json:"significant_improvement_percent"`
+	WinnerJobId                   string              `json:"winner_job_id,omitempty"`
+	WinnerSignificance            *sourceSignificance `json:"winner_significance,omitempty"`
+	PromotedFromEpoch             int                 `json:"promoted_from_epoch"`
+	RepositoryCommits             map[string]string   `json:"repository_commits"`
+	ConfigCommit                  string              `json:"config_commit"`
+	DryRun                        bool                `json:"dry_run"`
+	LedgerActivated               bool                `json:"ledger_activated"`
+}
+
+// readWinnerScore authenticates the exact control-plane score record that was
+// materialized for honesty review. The immutable evaluation archive remains
+// the source of every underlying scorer artifact and replicate diagnostic.
+func readWinnerScore(winnerRoot string) (*competition.ScoreResult, []byte, error) {
+	path := filepath.Join(winnerRoot, "score.json")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, errors.New("winner score must be a regular file")
+	}
+	content, err := readBoundedFile(path, "winner score")
+	if err != nil {
+		return nil, nil, err
+	}
+	result := &competition.ScoreResult{}
+	if err := decodeStrictJSONBytes(content, result, "winner score"); err != nil {
+		return nil, nil, err
+	}
+	if result.ScoreSchema != competition.ScoreSchema || result.RawScore == nil ||
+		result.NormalizedScore == nil || !finitePositive(*result.RawScore) ||
+		!finitePositive(*result.NormalizedScore) || *result.NormalizedScore < 1 ||
+		200 < *result.NormalizedScore || !result.Placeable ||
+		!result.TakeoverEligible || !allCompetitionScoreGatesPass(result.Gates) ||
+		result.Significance == nil ||
+		!result.Significance.StatisticallySignificant ||
+		!result.Significance.RecommendedNextEpochTakeoverMarginSupported ||
+		result.Significance.ReplicateCount != 9 {
+		return nil, nil, errors.New("winner score is not a statistically eligible R=9 result")
+	}
+	takeoverEligible, ok := result.Diagnostics["baseline_takeover_eligible"].(bool)
+	if !ok || !takeoverEligible {
+		return nil, nil, errors.New("winner score is missing its takeover eligibility diagnostic")
+	}
+	return result, content, nil
+}
+
+func allCompetitionScoreGatesPass(gates map[string]competition.Gate) bool {
+	if len(gates) == 0 {
+		return false
+	}
+	for _, gate := range gates {
+		if !gate.Passed || gate.Details == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func winnerSourceSignificance(
+	result *competition.ScoreResult,
+	content []byte,
+) (*sourceSignificance, error) {
+	significance := result.Significance
+	if significance.BaselineSampleVariance == nil ||
+		significance.CandidateSampleVariance == nil ||
+		significance.MinimumSignificantImprovementPercent == nil ||
+		significance.RequiredImprovementPercent == nil ||
+		significance.OneSidedPValue == nil ||
+		significance.NextEpochMinimumImprovementPercent == nil ||
+		significance.RecommendedNextEpochTakeoverMarginPercent == nil {
+		return nil, errors.New("winner score significance record is incomplete")
+	}
+	digest := sha256.Sum256(content)
+	source := &sourceSignificance{
+		ScoreSha256:                               fmt.Sprintf("%x", digest),
+		Method:                                    significance.Method,
+		Alpha:                                     significance.Alpha,
+		ReplicateCount:                            significance.ReplicateCount,
+		BaselineMeanRawScore:                      significance.BaselineMeanRawScore,
+		CandidateMeanRawScore:                     significance.CandidateMeanRawScore,
+		BaselineSampleVariance:                    *significance.BaselineSampleVariance,
+		CandidateSampleVariance:                   *significance.CandidateSampleVariance,
+		ObservedImprovementPercent:                significance.ObservedImprovementPercent,
+		TakeoverMarginPercent:                     significance.TakeoverMarginPercent,
+		MinimumSignificantImprovementPercent:      *significance.MinimumSignificantImprovementPercent,
+		RequiredImprovementPercent:                *significance.RequiredImprovementPercent,
+		OneSidedPValue:                            *significance.OneSidedPValue,
+		NextEpochMinimumImprovementPercent:        *significance.NextEpochMinimumImprovementPercent,
+		RecommendedNextEpochTakeoverMarginPercent: *significance.RecommendedNextEpochTakeoverMarginPercent,
+	}
+	if err := validateSourceSignificance(source); err != nil {
+		return nil, err
+	}
+	return source, nil
+}
+
+// readWinnerSignificance retains the narrow helper used by source-ledger
+// validation while requiring the review-time control-plane score schema.
+func readWinnerSignificance(winnerRoot string) (*sourceSignificance, error) {
+	result, content, err := readWinnerScore(winnerRoot)
+	if err != nil {
+		return nil, err
+	}
+	return winnerSourceSignificance(result, content)
+}
+
+func exactApprovedScoreMatches(
+	approved competition.ScoreResult,
+	winner *competition.ScoreResult,
+) bool {
+	if winner == nil {
+		return false
+	}
+	approvedJSON, approvedErr := json.Marshal(approved)
+	winnerJSON, winnerErr := json.Marshal(winner)
+	return approvedErr == nil && winnerErr == nil && bytes.Equal(approvedJSON, winnerJSON)
 }
 
 // remoteBranchCommit reads one exact branch head without changing local refs.
@@ -100,12 +216,32 @@ func stagePromotionRepository(repository *promotionRepository, stagingRoot strin
 	if _, err := gitOutput(stagingRoot, "clone", "--quiet", "--no-checkout", originUrl, repository.StagedRoot); err != nil {
 		return err
 	}
-	if _, err := gitOutput(repository.StagedRoot, "checkout", "--quiet", "--detach", repository.PreviousCommit); err != nil {
+	if repository.Branch != "sim-latency" {
+		return errors.New("promotion repository branch must be sim-latency")
+	}
+	if _, err := gitOutput(
+		repository.StagedRoot,
+		"checkout", "--quiet", "-B", repository.Branch, repository.PreviousCommit,
+	); err != nil {
 		return err
+	}
+	branch, err := gitOutput(repository.StagedRoot, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil || branch != repository.Branch {
+		return fmt.Errorf("repository %s did not check out branch %s", repository.Name, repository.Branch)
 	}
 	if repository.PatchPath == "" {
 		repository.NextCommit = repository.PreviousCommit
 		return nil
+	}
+	protectedSimulatorTree := ""
+	if repository.Name == "server" {
+		protectedSimulatorTree, err = gitOutput(
+			repository.StagedRoot,
+			"rev-parse", "HEAD:connect/sim-latency",
+		)
+		if err != nil || !sourceGitShaPattern.MatchString(protectedSimulatorTree) {
+			return errors.New("server promotion is missing the protected sim-latency source tree")
+		}
 	}
 	if _, err := gitOutput(repository.StagedRoot, "apply", "--check", "--whitespace=error-all", repository.PatchPath); err != nil {
 		return fmt.Errorf("repository %s winner patch check: %w", repository.Name, err)
@@ -119,6 +255,13 @@ func stagePromotionRepository(repository *promotionRepository, stagingRoot strin
 	}
 	if changedPaths == "" {
 		return fmt.Errorf("repository %s winner patch makes no change", repository.Name)
+	}
+	if repository.Name == "server" {
+		for _, changedPath := range strings.Split(changedPaths, "\n") {
+			if changedPath == "connect/sim-latency" || strings.HasPrefix(changedPath, "connect/sim-latency/") {
+				return fmt.Errorf("repository server winner patch modifies the protected sim-latency source tree")
+			}
+		}
 	}
 	status, err := gitOutput(repository.StagedRoot, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
@@ -155,6 +298,15 @@ func stagePromotionRepository(repository *promotionRepository, stagingRoot strin
 	if status != "" {
 		return fmt.Errorf("repository %s staged promotion is not clean", repository.Name)
 	}
+	if repository.Name == "server" {
+		candidateSimulatorTree, treeErr := gitOutput(
+			repository.StagedRoot,
+			"rev-parse", "HEAD:connect/sim-latency",
+		)
+		if treeErr != nil || candidateSimulatorTree != protectedSimulatorTree {
+			return errors.New("server promotion changed the protected sim-latency source tree")
+		}
+	}
 	return nil
 }
 
@@ -174,7 +326,9 @@ func stagePromotionConfig(
 	sourceConfig string,
 	stagingRoot string,
 	epochNumber int,
+	transitionKind string,
 	winnerJobId string,
+	winnerSignificance *sourceSignificance,
 	promotedAt string,
 	repositoryCommits map[string]string,
 ) (string, string, error) {
@@ -216,13 +370,19 @@ func stagePromotionConfig(
 		return "", "", fmt.Errorf("config origin/main %s does not match local head %s", remoteHead, configHead)
 	}
 	previousEpoch := epochNumber - 1
+	significantImprovementPercent := manifest.EvaluationSource.Epochs[previousEpoch].SignificantImprovementPercent
+	if winnerSignificance != nil {
+		significantImprovementPercent = winnerSignificance.RecommendedNextEpochTakeoverMarginPercent
+	}
 	manifest.EvaluationSource.Epochs = append(manifest.EvaluationSource.Epochs, sourceEpoch{
-		Epoch:             epochNumber,
-		Kind:              "winner_promotion",
-		WinnerJobId:       winnerJobId,
-		PromotedFromEpoch: &previousEpoch,
-		PromotedAt:        promotedAt,
-		Repositories:      sourceRepositoriesFromCommits(repositoryCommits),
+		Epoch:                         epochNumber,
+		Kind:                          transitionKind,
+		SignificantImprovementPercent: significantImprovementPercent,
+		WinnerJobId:                   winnerJobId,
+		WinnerSignificance:            winnerSignificance,
+		PromotedFromEpoch:             &previousEpoch,
+		PromotedAt:                    promotedAt,
+		Repositories:                  sourceRepositoriesFromCommits(repositoryCommits),
 	})
 	if err := validateSourceManifest(manifest); err != nil {
 		return "", "", err
@@ -282,17 +442,51 @@ func runPromote(opts docopt.Opts) {
 	if err != nil || epochNumber == 0 {
 		fatalf("promotion epoch must be an integer in 1..%d", maximumCompetitionEpoch)
 	}
+	noWinner := optBool(opts, "--no-winner")
 	winnerJobId := optString(opts, "--winner-job-id", "")
-	if !promotionJobIdPattern.MatchString(winnerJobId) {
-		fatalf("--winner-job-id must match [A-Za-z0-9._-]{1,128}")
+	winnerRoot := ""
+	var winnerScore *competition.ScoreResult
+	var winnerSignificance *sourceSignificance
+	transitionKind := "winner_promotion"
+	if noWinner {
+		transitionKind = "no_winner_carry_forward"
+		if winnerJobId != "" || optString(opts, "--winner", "") != "" {
+			fatalf("--no-winner cannot be combined with --winner or --winner-job-id")
+		}
+	} else {
+		if !promotionJobIdPattern.MatchString(winnerJobId) {
+			fatalf("--winner-job-id must match [A-Za-z0-9._-]{1,128}")
+		}
+		winnerRoot, err = filepath.Abs(optString(opts, "--winner", ""))
+		if err != nil {
+			fatalf("winner path: %s", err)
+		}
+		winnerInfo, statErr := os.Stat(winnerRoot)
+		if statErr != nil || !winnerInfo.IsDir() {
+			fatalf("--winner must be an existing directory")
+		}
+		var winnerScoreBytes []byte
+		winnerScore, winnerScoreBytes, err = readWinnerScore(winnerRoot)
+		if err == nil {
+			winnerSignificance, err = winnerSourceSignificance(winnerScore, winnerScoreBytes)
+		}
+		if err != nil {
+			fatalf("winner score: %s", err)
+		}
 	}
-	winnerRoot, err := filepath.Abs(optString(opts, "--winner", ""))
+	approvedCandidate, err := requireReviewedPromotion(epochNumber, winnerJobId, noWinner)
 	if err != nil {
-		fatalf("winner path: %s", err)
+		fatalf("promotion honesty-review gate: %s", err)
 	}
-	winnerInfo, err := os.Stat(winnerRoot)
-	if err != nil || !winnerInfo.IsDir() {
-		fatalf("--winner must be an existing directory")
+	if !noWinner {
+		if err := authenticateApprovedWinnerBundle(
+			winnerRoot,
+			approvedCandidate,
+			winnerScore,
+			winnerSignificance,
+		); err != nil {
+			fatalf("promotion approved bundle: %s", err)
+		}
 	}
 	messageSuffix := strings.TrimSpace(optString(opts, "--message", ""))
 	if 120 < len(messageSuffix) || strings.ContainsAny(messageSuffix, "\r\n") {
@@ -327,21 +521,30 @@ func runPromote(opts docopt.Opts) {
 	defer os.RemoveAll(stagingRoot)
 
 	commitMessage := fmt.Sprintf("competition: promote epoch %d winner %s", epochNumber, winnerJobId)
+	if noWinner {
+		commitMessage = fmt.Sprintf("competition: carry source epoch %d after no winner", epochNumber)
+	}
 	if messageSuffix != "" {
 		commitMessage += "\n\n" + messageSuffix
 	}
 	repositories := []*promotionRepository{}
 	patchCount := 0
 	for _, repositoryName := range []string{"connect", "sdk", "server", "proxy"} {
-		patchPath, found, patchErr := promotionPatchPath(winnerRoot, repositoryName)
-		if patchErr != nil {
-			fatalf("winner bundle: %s", patchErr)
-		}
-		if found {
-			patchCount += 1
+		patchPath := ""
+		if !noWinner {
+			var found bool
+			var patchErr error
+			patchPath, found, patchErr = promotionPatchPath(winnerRoot, repositoryName)
+			if patchErr != nil {
+				fatalf("winner bundle: %s", patchErr)
+			}
+			if found {
+				patchCount += 1
+			}
 		}
 		repository := &promotionRepository{
 			Name:           repositoryName,
+			Branch:         manifest.EvaluationSource.Branch,
 			LocalRoot:      filepath.Join(repositoriesRoot, repositoryName),
 			PreviousCommit: previousEpoch.Repositories.commits()[repositoryName],
 			PatchPath:      patchPath,
@@ -353,12 +556,14 @@ func runPromote(opts docopt.Opts) {
 		if remoteCommit != repository.PreviousCommit {
 			fatalf("repository %s origin/%s %s does not match epoch %d commit %s", repositoryName, manifest.EvaluationSource.Branch, remoteCommit, previousEpochNumber, repository.PreviousCommit)
 		}
-		if stageErr := stagePromotionRepository(repository, stagingRoot, commitMessage); stageErr != nil {
+		if noWinner {
+			repository.NextCommit = repository.PreviousCommit
+		} else if stageErr := stagePromotionRepository(repository, stagingRoot, commitMessage); stageErr != nil {
 			fatalf("stage repository %s: %s", repositoryName, stageErr)
 		}
 		repositories = append(repositories, repository)
 	}
-	if patchCount == 0 {
+	if !noWinner && patchCount == 0 {
 		fatalf("winner bundle must contain at least one repository patch")
 	}
 	repositoryCommits := map[string]string{}
@@ -371,7 +576,9 @@ func runPromote(opts docopt.Opts) {
 		sourceConfig,
 		stagingRoot,
 		epochNumber,
+		transitionKind,
 		winnerJobId,
+		winnerSignificance,
 		promotedAt,
 		repositoryCommits,
 	)
@@ -379,14 +586,22 @@ func runPromote(opts docopt.Opts) {
 		fatalf("stage source config: %s", err)
 	}
 	result := promotionResult{
-		Schema:            1,
-		Epoch:             epochNumber,
-		WinnerJobId:       winnerJobId,
-		PromotedFromEpoch: previousEpochNumber,
-		RepositoryCommits: repositoryCommits,
-		ConfigCommit:      configCommit,
-		DryRun:            optBool(opts, "--dry-run"),
-		LedgerActivated:   false,
+		Schema: 1,
+		Epoch:  epochNumber,
+		Kind:   transitionKind,
+		SignificantImprovementPercent: func() float64 {
+			if winnerSignificance != nil {
+				return winnerSignificance.RecommendedNextEpochTakeoverMarginPercent
+			}
+			return previousEpoch.SignificantImprovementPercent
+		}(),
+		WinnerJobId:        winnerJobId,
+		WinnerSignificance: winnerSignificance,
+		PromotedFromEpoch:  previousEpochNumber,
+		RepositoryCommits:  repositoryCommits,
+		ConfigCommit:       configCommit,
+		DryRun:             optBool(opts, "--dry-run"),
+		LedgerActivated:    false,
 	}
 	if !result.DryRun {
 		for _, repository := range repositories {
