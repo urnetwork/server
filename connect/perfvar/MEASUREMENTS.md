@@ -1708,6 +1708,269 @@ median 38.4%, wire bytes 10.8%, and queue drops 90%. Both branches were removed.
 Only negotiated H3 hybrid-stream writes retain the delayed nested-recovery
 policy; TCP Transfer ACK remains enabled on every carrier.
 
+## 2026-08-23 message-pool server A/B and reclaim tuning
+
+This campaign checked whether Connect's mobile-oriented message-pool trim and
+allocation changes regressed `server/connect` or `server/proxy`, then isolated
+the pool implementation from the other memory changes in the same Connect
+commit. The host was an Apple M4 Pro with 14 logical CPUs, macOS/arm64,
+Go 1.26.7, and `GOMAXPROCS=10`. Server was `6f2f31d09a4d`; the historical
+Connect control was `3d52a610e2e1`, and the initial memory candidate was
+`5f2d5fccdb1f`. The measured lazy-capacity diff was rebased unchanged and
+published as `c1d9ab4`; the intervening upstream commits changed only generated
+IP security/blocker tables.
+
+### Packet-path and proxy benchmarks
+
+Every benchmark in `server/connect`, `server/connect/perfvar`, and
+`server/proxy` ran eight times for 500 ms with `-benchmem`. The final lazy-slot
+candidate is compared directly with the parent revision below.
+
+| Package | Parent geomean | Final geomean | Change | Allocation result |
+|---|---:|---:|---:|---|
+| `server/connect` | 9.107 us/op | 9.013 us/op | **1.03% faster** | allocs/op unchanged; B/op +0.08% |
+| `server/connect/perfvar` link microbenchmarks | 582.9 ns/op | 574.1 ns/op | **1.51% faster** | allocs/op unchanged; B/op -0.03% |
+| `server/proxy` WireGuard upload | 5.910 us/op | 5.870 us/op | **0.68% faster** | every individual B/op and allocs/op result unchanged |
+
+The incremental lazy-index comparison against `5f2d5fc` was also neutral:
+`server/connect` improved 0.32%, perfvar improved 1.10%, proxy changed +0.11%,
+and allocation counts were identical. Sparse and saturated subcases moved in
+both directions, consistent with sequential host variance rather than a new
+pool-path cost.
+
+### Full routes and PERFVAR isolation
+
+The opt-in five-run stream-route comparison passed on the final tree. Parent
+versus final medians were 19.22/44.02 MB/s for exchange H1, 119.86/115.34 MB/s
+for exchange H3, 52.41/52.03 MB/s for legacy P2P, and 151.49/152.55 MB/s for
+fast P2P. H1 varied widely even within one five-run process; the stable P2P
+routes changed -0.72% and +0.70%. Fast P2P's median advantage remained
+2.93x, versus 2.89x on the parent.
+
+The canonical clean-LAN PERFVAR TCP matrix ran all four forced routes, both
+directions, five fresh repetitions, and 32 MiB per repetition. Parent,
+`5f2d5fc`, and the final lazy-slot tree each delivered all 40 payloads exactly
+with zero failed repetitions. Final versus parent P2P medians were:
+
+| Route/direction | Parent | Final | Change |
+|---|---:|---:|---:|
+| P2P fast download | 0.114333 Gbit/s | 0.114335 Gbit/s | +0.00% |
+| P2P fast upload | 0.110650 Gbit/s | 0.110305 Gbit/s | -0.31% |
+| P2P legacy download | 0.123141 Gbit/s | 0.123273 Gbit/s | +0.11% |
+| P2P legacy upload | 0.115647 Gbit/s | 0.115754 Gbit/s | +0.09% |
+
+Clean same-host exchange calibration is not a reliable revision comparator on
+this host. H1 recorded payload-correct receive-queue refusals in every run.
+H3 validity varied by process and direction. A 20-pair alternating-process H3
+upload diagnostic initially favored the whole `5f2d5fc` parent, but the pool
+hot path was byte-for-byte unchanged. A second binary retained only the pool
+changes while reverting the TLS-root and reliability-projection changes:
+
+| Pool-only H3 upload metric | Parent | Pool-only candidate |
+|---|---:|---:|
+| Independently valid runs | 7/12 | 7/12 |
+| Median goodput | 0.027481 Gbit/s | 0.028025 Gbit/s |
+| Median allocated bytes | 475,337,488 | 473,973,680 |
+| Median allocations | 5,395,641 | 5,381,643 |
+| Median GC count | 9 | 9 |
+
+Five pairs were valid on both sides. Their candidate/parent median ratio was
+1.018; the pool-only candidate won four of five. This isolation rejects
+message reclaim, telemetry, and free-list behavior as the source of the noisy
+whole-commit H3 result.
+
+### Server-sized capacity and reclaim behavior
+
+The actual server startup calls exposed a separate issue. A configured limit
+was represented by an eagerly allocated dense `[][]byte`, even while the pool
+retained no buffers. The one-argument API gives each of the three size classes
+the supplied cap, so connect's 16-GiB call represents 48 GiB of aggregate
+payload capacity and proxy's 8-GiB call represents 24 GiB.
+
+| Component sizing | Dense resize | Dense heap growth | Lazy resize | Lazy heap growth |
+|---|---:|---:|---:|---:|
+| connect, 16 GiB/class | 17.120 ms | 352,309,344 B | 0.000583 ms | 0 B |
+| proxy, 8 GiB/class | 9.150 ms | 176,143,240 B | 0.000709 ms | 0 B |
+
+The retained fix separates configured capacity from allocated free-list slots.
+Slots now grow only when returned buffers establish a real high-water mark.
+`ClearMessagePools` and `TrimMessagePoolsToWarm` release excess slot backing
+as well as buffer references without changing the logical capacity. The
+ordinary steady take/return still takes the original first branch; lazy growth
+is only the empty/high-water fallback.
+
+A controlled 64 MiB retained in each class (192 MiB total) checked reclaim and
+refill. The dense implementation trimmed 190.5 MiB to the 1.5-MiB warm set in
+109--116 us; the final lazy implementation took 2.6 us because replacing the
+index makes per-dropped-slot clearing unnecessary. Refill changed from
+17.7--18.3 ms to 15.0 ms in the isolated runs. The lazy run allocated about
+5.3 MiB more cumulatively while growing its index, a one-time 2.3% addition to
+the roughly 232 MiB buffer refill rather than a steady packet-path allocation.
+
+No server component currently invokes automatic idle trim, and this campaign
+does not add one. `server/connect` and `server/proxy` therefore retain their
+real burst working sets and existing logical limits. Mobile keeps its existing
+small warm targets; server-specific tuning is the lazy capacity/index policy,
+not a more aggressive server trim timer.
+
+### 20-MiB mobile follow-up: server isolation
+
+The later 20-MiB mobile topology/reclaim work (final Connect commit `3a495e7`)
+was isolated again from exact parent `f4d3656` on the same Apple M4 Pro / Go
+1.26.7 host with `GOMAXPROCS=10`. Every benchmark in `server/connect`,
+`server/connect/perfvar`, and `server/proxy` ran serially for 300 ms, five
+times, with `-benchmem`. The mobile packet-pressure reader is not constructed
+or called by either server component.
+
+| Package | Parent geomean | Candidate geomean | Change | Allocation result |
+|---|---:|---:|---:|---|
+| `server/connect` | 8.918 us/op | 8.847 us/op | -0.79% | 112.8 B/op geomean and allocs/op unchanged |
+| `server/connect/perfvar` link primitives | 571.4 ns/op | 572.8 ns/op | +0.25% | 1.452 KiB/op and 5.477 allocs/op unchanged |
+| `server/proxy` | 5.914 us/op | 5.915 us/op | +0.01% | every individual B/op and allocs/op result unchanged |
+
+The timing deltas are host noise and the allocation equality is the useful
+guard. No server reclaim/re-warm override was added: server callers keep the
+historical 1-MiB wrappers, desktop/server GC pacing remains 100, and only a
+<=20-MiB mobile SDK instance samples the new packet-root pressure signal.
+
+The canonical full PERFVAR attempt ran for 376.662 seconds with its documented
+environment, but Redis at `10.211.55.5:6379` returned `host is down`, so its
+DB-backed fixtures are infrastructure-blocked rather than passing evidence. A
+single severe-profile count comparison also observed 68 versus 69 once; that
+focused path then passed three non-race repetitions (121.646 seconds) and its
+race run (57.859 seconds). The DB-dependent full suite remains an external
+rerun, not a silently green result.
+
+### 24-MiB mobile rebalance: exact server isolation
+
+The 2026-08-24 mobile SDK candidate raises only the mobile steady target to 24
+MiB, fixes Auto quality/speed at 4/1, uses a 512-KiB mobile warm set, and changes
+Android/iOS GC pacing from 10 to 25. Linux/server keeps `GOGC=100`, the existing
+20-MiB default `DeviceLocal` target, the 1-MiB server pool wrapper, and no mobile
+packet-pressure or idle-reclaim path.
+
+An initial comparison against the retained prior-day log moved the time
+geomeans +1.75% for `server/connect`, +2.59% for its PERFVAR link primitives,
+and -2.37% for `server/proxy`. A second current-source cohort repeated the first
+within -0.02%, -1.02%, and +0.71%, respectively. Because that cross-day result
+could not distinguish code from host state, it was not accepted as the change
+impact.
+
+The retained result is an exact same-session A/B. Temporary worktrees held
+server at `1806bbc9` and every non-SDK dependency fixed; the baseline SDK was
+`49f756f`, while the candidate worktree contained only the 24-MiB patch. Every
+benchmark in `server/connect`, `server/connect/perfvar`, and `server/proxy` ran
+for 300 ms with `-benchmem`, `GOMAXPROCS=10`, and six repetitions per side. The
+process order was baseline/candidate/candidate/baseline for each of three
+cycles, balancing warm-up and thermal drift.
+
+| Package | Baseline geomean | Candidate geomean | Time change | Allocation result |
+|---|---:|---:|---:|---|
+| `server/connect` | 8.954 us/op | 8.949 us/op | -0.05% | B/op +0.01%; allocs/op unchanged |
+| `server/connect/perfvar` | 585.8 ns/op | 584.8 ns/op | -0.17% | B/op and allocs/op unchanged |
+| `server/proxy` | 5.844 us/op | 5.847 us/op | +0.05% | every B/op and allocs/op result unchanged |
+
+No individual timing comparison was statistically significant. The exact A/B
+therefore rejects a server performance regression and identifies the earlier
+1.5--1.7% same-source offset as cross-session host drift. No server-specific
+reclaim tuning is warranted. The broad `go test ./connect ./proxy -short`
+attempt remained environment-blocked by absent `WARP_ENV` and vault `pg.yml`,
+matching the documented fixture limitation; benchmark processes and focused
+mobile/server policy tests passed.
+
+### 2026-08-25 H1 ready-drain and retained-budget isolation
+
+The final H1/mobile-memory tree was checked again because a previous-day broad
+comparison appeared roughly 20% slower in `server/connect/perfvar` and
+`server/proxy`. That movement was uniform across unrelated benchmarks and had
+unchanged allocation counts, but was retained as a possible regression until a
+same-session isolation could distinguish it from host-frequency drift.
+
+First, one current binary swept the server H1 TLS ready limit at 8, 16, and 32
+messages. Each point ran seven times for 500 ms with `GOMAXPROCS=10` and
+`-benchmem`:
+
+| Shape | 8-message median | 16-message median | 32-message median | 8 -> 32 result |
+| --- | ---: | ---: | ---: | ---: |
+| Full payload | 1,057 ns / 1,305.04 MB/s | 996.4 ns / 1,385.02 MB/s | 936.5 ns / 1,473.51 MB/s | 11.4% less time; 12.9% more throughput |
+| ACK sized | 766.4 ns / 167.03 MB/s | 544.3 ns / 235.18 MB/s | 413.8 ns / 309.30 MB/s | 46.0% less time; 85.2% more throughput |
+
+Full-payload TCP writes/frame fell 0.125 -> 0.09375; ACK-sized writes/frame fell
+0.125 -> 0.03125. All points retained two allocations/op; full payload retained
+17 B/op, while ACK-sized work changed 11 -> 10 B/op. The writer is ready-only,
+stops ordinary bytes at 12 KiB, and uses the existing 16-KiB wrapper, so the
+larger count adds neither a batching timer nor socket storage.
+
+The complete current benchmark-only tiers then passed with 190
+`server/connect`, 10 `server/connect/perfvar`, and 20 `server/proxy` samples.
+To isolate the apparent broad slowdown, detached baseline Connect/SDK
+worktrees and the current tree ran in baseline/current/current/baseline order;
+server code, host, Go process settings, and benchmark duration were held fixed.
+Each arm contributed ten samples per benchmark. PERFVAR's two link primitives
+changed -0.46% in time geomean. Proxy's four WireGuard upload shapes changed
++0.64% overall, with individual medians from -2.18% to +2.41%. Every B/op and
+allocs/op result was identical. The baseline itself reproduced the newer,
+slower absolute host rate, proving that the previous-day 20% shift was host
+state rather than the Connect/SDK changes.
+
+The exact changed path is materially faster and the shared server paths are
+neutral within normal host variance. Server/default receive queues do not
+enable mobile retained-root scanning, and neither server component installs
+the mobile packet-pressure/reclaim policy. No server-specific reclaim tuning
+is warranted. The broad short tier still waits on unavailable Redis/vault/DB
+fixtures; focused H1 tests and every benchmark-only tier pass.
+
+### 2026-08-25 H1 lane/ACK directionality follow-up
+
+The iterative-depth device arm reached its full earned 128-Packet / 256-KiB
+window without improving fast.com, so the next controlled PERFVAR comparison
+held byte budgets fixed and varied only negotiated logical data lanes. On the
+four-flow impaired profile, lane zero delivered 20.247 Mbit/s with a
+41.474-Mbit/s calibrated underlay; eight lanes delivered 29.058 Mbit/s with a
+43.704-Mbit/s underlay. That is a +43.5% raw improvement at similar route
+capacity. Order-balanced repeats remained calibration-variable, so the result
+is evidence that independent flow sequencing removes head-of-line recovery,
+not a claim that eight lanes always multiply throughput by that amount.
+
+An adjacent clean 50-ms H1 A/B checked the lossless compact Transfer-ACK
+overflow fallback. Folding a full handoff directly into the existing monotonic
+cumulative/selective window changed 134.551 to 134.529 Mbit/s (-0.016%). It
+adds no queue, timer, wait, or per-ACK allocation. A separate server H1
+10-ms-backpressure experiment reduced the order-balanced median from 28.90 to
+24.00 Mbit/s (-17.0%) and was fully reverted. Server/client H1 drains therefore
+remain ready-only; neither side waits to fill a batch.
+
+The physical client-only lane arm then improved Wikipedia median load from
+1,157.8 to 348.8 ms and reduced timeout resends from 1,053 to 152 while keeping
+Go runtime below 20.61 MiB. Public fast.com remained far below same-session
+Direct because the deployed provider still sent every download flow on lane
+zero. The next decisive test is symmetric: one pinned explicit-H1 provider and
+client with eight shared-budget lanes, the retained 16-frame / 24-KiB provider
+logical group, and direct established TCP-ACK application. Default Auto remains
+unchanged until that controlled provider A/B covers transport transitions.
+
+The final shared-code gate first repeated every benchmark in all three server
+packages three times at 300 ms. A later audit found a 15.5-hour-old,
+campaign-owned benchmark-listing probe consuming more than one CPU core during
+that cohort, so it is retained only as conservative pass evidence. After
+stopping the probe, five 500-ms affected repetitions measured production H1 TLS
+medians of 891.7 ns full payload and 370.3 ns ACK sized, both at two
+allocations/op; PERFVAR receive-credit admission was 673.6 ns, and proxy
+batch-64 was 5,406 ns. Those clean-host results improve the preceding
+final-source cohort. The ACK overflow path is dormant until its compact
+handoff channel is full, so ordinary server traffic pays no added queue or
+timer cost.
+
+### Known test-fixture failures
+
+`TestConnectMultiClientPerformance` failed identically on the parent and
+candidate: each UDP flood exhausted successive 100-MiB debit contracts and
+reported zero echoes before the fixture's delivery assertion. The TCP,
+directional TCP, contract, and no-contract performance tests passed. This is a
+pre-existing contract-budget fixture failure and was not used as pool evidence.
+Likewise, payload-correct PERFVAR repetitions with receive-queue refusals remain
+recorded as invalid calibration rather than silently entering medians.
+
 ## Coverage and remaining runs
 
 This historical baseline exercised all four routes with full-TUN TCP, both clean
@@ -1743,6 +2006,15 @@ throughput aggregates.
 
 | Log | Use |
 |---|---|
+| `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-server-bench.txt` | Eight-repeat parent, initial memory commit, and lazy-capacity Connect/PERFVAR/proxy microbenchmarks |
+| `/tmp/urnetwork-server-m20-ab.lDDp1P/{baseline,current}.txt` | Five-repeat exact-parent/current 20-MiB follow-up across server Connect, PERFVAR link, and proxy benchmarks |
+| `/tmp/urnetwork-m24-exact-ab.zQn7v9/{base,current}.txt` | Six-repeat order-balanced exact SDK baseline/24-MiB candidate comparison across every server Connect, PERFVAR link, and proxy benchmark |
+| `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-perfvar.txt` | Canonical five-run clean-LAN TCP matrices used for payload correctness and stable-route comparison |
+| `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/paired-{parent,current}-{1..20}.txt` | Alternating-process H3 diagnostic for whole-commit variance |
+| `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/isolate-{parent,pool}-{1..12}.txt` | Parent versus pool-only H3 isolation |
+| `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-stream-route.txt` | Five-run forced H1/H3/legacy-P2P/fast-P2P comparisons |
+| `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/server-pool-{16g,8g}.txt` and `server-pool-lazy-{16g,8g}.txt` | Dense versus lazy server-capacity resize, trim, and refill measurements |
+| `/tmp/urnetwork-server-pool-perf-20260822.yaQOM8/{baseline,current,lazy}-connect-e2e.txt` | DB-backed TCP/UDP, directional, contract, and no-contract performance suites; UDP fixture failure retained |
 | `/tmp/lowbar-openloop-v20-paired-baseline-{1..5}.log` | Order-rotated pre-split half of the authoritative repaired-source loaded-latency A/B |
 | `/tmp/lowbar-openloop-v20-paired-final-{1..5}.log` | Exact race-repaired source half of the authoritative loaded-latency A/B |
 | `/tmp/perfvar-short-race-v17-final-rerun.json` | Complete passing 398.440-second PERFVAR short race tier after terminal raw-Pack repair |

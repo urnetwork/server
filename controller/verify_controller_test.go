@@ -8,9 +8,7 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
-	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -137,64 +135,36 @@ func TestVerifySyntheticSeedId(t *testing.T) {
 	}
 }
 
-// TestVerifySourceIpPrecedence pins the source-ip precedence the whole /verify
-// subsystem's soundness rests on. Forwarded headers are honored only for an
-// explicitly trusted immediate peer; nginx also force-overwrites them at the
-// edge, giving attribution two independent boundaries.
-func TestVerifySourceIpPrecedence(t *testing.T) {
-	trusted := []netip.Prefix{netip.MustParsePrefix("10.9.9.9/32")}
-	newReq := func() *http.Request {
-		req := httptest.NewRequest("POST", "/verify", nil)
-		req.RemoteAddr = "10.9.9.9:5555"
-		return req
-	}
-	addr := func(req *http.Request) (string, error) {
-		return session.ResolveClientAddress(req, trusted)
-	}
-	mustAddr := func(req *http.Request) string {
-		address, err := addr(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return address
-	}
-
-	// 1. X-UR-Forwarded-For wins over everything
-	req := newReq()
-	req.Header.Set("X-UR-Forwarded-For", "203.0.113.1:1111")
+// Pins the source address used by verify trails and per-address limits.
+func TestVerifyUsesUrForwardedAddress(t *testing.T) {
+	req := httptest.NewRequest("POST", "/verify", nil)
+	req.RemoteAddr = "65.49.70.82:5555"
+	req.Header.Set("X-UR-Forwarded-For", "173.25.160.143:1111")
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := mustAddr(req); got != "203.0.113.1:1111" {
-		t.Fatalf("X-UR-Forwarded-For must win, got %q", got)
-	}
 
-	// 2. without X-UR-Forwarded-For: X-Forwarded-For + X-Forwarded-Source-Port
-	req = newReq()
+	clientAddress, err := session.ResolveClientAddress(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientAddress != "173.25.160.143:1111" {
+		t.Fatalf("verify resolved %q, want the UR ingress address", clientAddress)
+	}
+}
+
+// Prevents the removed alternate headers from changing verify attribution.
+func TestVerifyIgnoresLegacyForwardedAddress(t *testing.T) {
+	req := httptest.NewRequest("POST", "/verify", nil)
+	req.RemoteAddr = "65.49.70.82:5555"
 	req.Header.Set("X-Forwarded-For", "198.51.100.2")
 	req.Header.Set("X-Forwarded-Source-Port", "2222")
-	if got := mustAddr(req); got != "198.51.100.2:2222" {
-		t.Fatalf("X-Forwarded-For+port expected, got %q", got)
-	}
 
-	// 3. A trusted proxy sending a partial identity is rejected, never silently
-	// re-attributed to the proxy itself.
-	req = newReq()
-	req.Header.Set("X-Forwarded-For", "198.51.100.2")
-	if _, err := addr(req); err == nil {
-		t.Fatal("partial forwarded source must be rejected")
+	clientAddress, err := session.ResolveClientAddress(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// 4. no forwarding headers → RemoteAddr
-	if got := mustAddr(newReq()); got != "10.9.9.9:5555" {
-		t.Fatalf("RemoteAddr fallback expected, got %q", got)
-	}
-
-	// 5. an untrusted direct caller cannot spoof either forwarding form.
-	req = newReq()
-	req.RemoteAddr = "198.18.0.4:4444"
-	req.Header.Set("X-UR-Forwarded-For", "203.0.113.99:1")
-	if got, err := session.ResolveClientAddress(req, trusted); err != nil || got != "198.18.0.4:4444" {
-		t.Fatalf("untrusted forwarding spoof resolved as %q, %v", got, err)
+	if clientAddress != "65.49.70.82:5555" {
+		t.Fatalf("legacy headers changed verify attribution to %q", clientAddress)
 	}
 }
 

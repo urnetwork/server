@@ -39,6 +39,7 @@ const (
 	AuthTypeBringYour  AuthType = "bringyour"
 	AuthTypeGuest      AuthType = "guest"
 	AuthTypeSolana     AuthType = "solana"
+	AuthTypeBittensor  AuthType = "bittensor"
 	AuthTypeSeedphrase AuthType = "seedphrase"
 )
 
@@ -112,7 +113,7 @@ func AuthLogin(
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
 	if !allow {
-		return nil, maxUserAuthAttemptsError()
+		return nil, maxUserAuthAttemptsError(userAuth)
 	}
 
 	if login.UserAuth != nil {
@@ -709,7 +710,7 @@ func AuthLoginWithPassword(
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
 	if !allow {
-		return nil, maxUserAuthAttemptsError()
+		return nil, maxUserAuthAttemptsError(userAuth)
 	}
 
 	var userId *server.Id
@@ -757,6 +758,24 @@ func AuthLoginWithPassword(
 	// server.Logger().Printf("Comparing password hashes\n")
 	loginPasswordHash := computePasswordHashV1([]byte(loginWithPassword.Password), passwordSalt)
 	if bytes.Equal(passwordHash, loginPasswordHash) {
+		// A configured acceptance identity must never get stranded behind a code
+		// prompt. This also repairs an unverified fixture left by a run against an
+		// older server, but only after its password has been proven.
+		if !userVerified && testAuthPolicyForUserAuth(userAuth).BypassVerification {
+			server.Db(session.Ctx, func(conn server.PgConn) {
+				server.RaisePgResult(conn.Exec(
+					session.Ctx,
+					`
+						UPDATE network_user_auth_password
+						SET verified = true
+						WHERE user_id = $1 AND user_auth = $2
+					`,
+					userId,
+					userAuth,
+				))
+			})
+			userVerified = true
+		}
 
 		if userVerified {
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
@@ -841,7 +860,7 @@ func AuthVerify(
 
 	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
 	if !allow {
-		return nil, maxUserAuthAttemptsError()
+		return nil, maxUserAuthAttemptsError(userAuth)
 	}
 
 	normalVerifyCode := strings.ToLower(strings.TrimSpace(verify.VerifyCode))
@@ -975,7 +994,7 @@ func AuthVerifyCreateCode(
 	// cannot bomb a target's email/SMS or repeatedly invalidate their pending code.
 	// Each send intentionally consumes attempt budget (not marked success).
 	if _, allow := UserAuthAttempt(userAuth, session); !allow {
-		return nil, maxUserAuthAttemptsError()
+		return nil, maxUserAuthAttemptsError(userAuth)
 	}
 
 	created := false
@@ -1075,7 +1094,7 @@ func AuthPasswordResetCreateCode(
 	// cannot bomb a target's email/SMS or repeatedly invalidate their pending code.
 	// Each send intentionally consumes attempt budget (not marked success).
 	if _, allow := UserAuthAttempt(userAuth, session); !allow {
-		return nil, maxUserAuthAttemptsError()
+		return nil, maxUserAuthAttemptsError(userAuth)
 	}
 
 	created := false
@@ -1157,7 +1176,10 @@ func AuthPasswordSet(
 ) (*AuthPasswordSetResult, error) {
 	userAuthAttemptId, allow := UserAuthAttempt(nil, session)
 	if !allow {
-		return nil, maxUserAuthAttemptsError()
+		// nil user auth: the reset code must not reveal which account it
+		// belongs to, so this attempt is recorded against the client address
+		// alone and the refusal is address-scoped.
+		return nil, maxUserAuthAttemptsError(nil)
 	}
 
 	// 4 hours

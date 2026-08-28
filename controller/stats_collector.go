@@ -7,6 +7,7 @@ package controller
 //
 //	urnetwork_stats_total_networks                   total networks (db)
 //	urnetwork_stats_block_users                      unique top-level identities with contract usage this block (db)
+//	urnetwork_stats_online_providers                 connected valid public providers (db)
 //	urnetwork_stats_countries                        countries with connected valid providers (db)
 //	urnetwork_stats_staked_alpha                     cumulative α staked in the ST contract (chain)
 //	urnetwork_stats_block_demand_deposits_alpha      demand deposits this block (st_event mirror)
@@ -20,7 +21,6 @@ package controller
 // additionally reads:
 //
 //	urnetwork_stats_users_24h                        unique top-level identities with contract usage in the last 24h (db)
-//	urnetwork_stats_online_providers                 connected valid public providers (db)
 //	urnetwork_stats_online_providers_by_country      the same, per country {country_code, country} (db)
 //	urnetwork_stats_provider_regions                 distinct regions with a connected valid public provider (db)
 //	urnetwork_stats_provider_cities                  distinct cities with a connected valid public provider (db)

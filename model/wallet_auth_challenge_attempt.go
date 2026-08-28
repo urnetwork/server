@@ -74,6 +74,14 @@ func WalletAuthChallengeAttempt(
 			return failedCount < WalletAuthChallengeAttemptFailedCountThreshold
 		}
 
+		// This threshold keys on client_address_port as well as the address
+		// hash, which has two consequences an operator should know about, and
+		// neither is repaired here.
+		//
+		// The port is client-influenced if an ingress passes
+		// X-UR-Forwarded-For through instead of overwriting it, so a caller could
+		// vary the header and get a fresh bucket per attempt. Warp must overwrite
+		// the header and backend service ports must remain private.
 		var attempts []WalletAuthChallengeAttemptResult
 		result, err := tx.Query(
 			session.Ctx,

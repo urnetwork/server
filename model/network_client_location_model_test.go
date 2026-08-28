@@ -1013,6 +1013,26 @@ func TestFindProviders2ProviderLocation(t *testing.T) {
 	})
 }
 
+func TestFindProvidersProviderCarriesFreshSessionSelectionMetadata(t *testing.T) {
+	clientId := server.NewId()
+	score := &ClientScore{
+		ClientId:              clientId,
+		Tiers:                 map[string]int{RankModeQuality: 0},
+		MaxBytesPerSecond:     5_000_000,
+		HasSpeedTest:          true,
+		NetworkOnly:           true,
+		ReputationFailedNames: "bloomberg",
+	}
+	provider := findProvidersProviderFromClientScore(score, RankModeQuality, nil)
+	connect.AssertEqual(t, provider.ClientId, clientId)
+	connect.AssertEqual(t, provider.Tier, 0)
+	connect.AssertEqual(t, provider.EstimatedBytesPerSecond, ByteCount(5_000_000))
+	connect.AssertEqual(t, provider.HasEstimatedBytesPerSecond, true)
+	connect.AssertEqual(t, provider.NetworkOnly, true)
+	connect.AssertEqual(t, provider.ReputationFailedNames, "bloomberg")
+	connect.AssertEqual(t, provider.Location, nil)
+}
+
 // FindProviders2 gates providers on reliability minimums (0.99 independent
 // reliability weight on the hour lookback). The reliability sink is
 // asynchronous: the announce hot path buffers per-block counters in redis and
@@ -2366,6 +2386,18 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 		networkOnlyClientId := connectProvider(networkOnlyNetworkId, "0.0.0.2:0", map[ProvideMode][]byte{
 			ProvideModeNetwork: []byte("network-secret"),
 		})
+		// The low-rate external observer found this provider healthy overall but
+		// rejected by Bloomberg. Selection must publish both independent facts:
+		// same-network eligibility and the domain-specific reputation result.
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId:              networkOnlyClientId,
+			MeasuredAt:            server.NowUtc(),
+			OKCount:               131,
+			Total:                 131,
+			ReputationOK:          2,
+			ReputationTotal:       3,
+			ReputationFailedNames: "bloomberg",
+		})
 
 		UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
@@ -2373,7 +2405,7 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
 
-		findFrom := func(networkId server.Id, name string) map[server.Id]bool {
+		findFrom := func(networkId server.Id, name string) map[server.Id]*FindProvidersProvider {
 			clientSession := session.Testing_CreateClientSession(
 				ctx,
 				jwt.NewByJwt(networkId, server.NewId(), name, false, false),
@@ -2389,23 +2421,26 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 				clientSession,
 			)
 			connect.AssertEqual(t, err, nil)
-			found := map[server.Id]bool{}
+			found := map[server.Id]*FindProvidersProvider{}
 			for _, provider := range res.Providers {
-				found[provider.ClientId] = true
+				found[provider.ClientId] = provider
 			}
 			return found
 		}
 
 		// the network-only provider's own network sees both
 		sameNetwork := findFrom(networkOnlyNetworkId, "same-network")
-		connect.AssertEqual(t, sameNetwork[publicClientId], true)
-		connect.AssertEqual(t, sameNetwork[networkOnlyClientId], true)
+		connect.AssertEqual(t, sameNetwork[publicClientId] != nil, true)
+		networkProvider := sameNetwork[networkOnlyClientId]
+		connect.AssertEqual(t, networkProvider != nil, true)
+		connect.AssertEqual(t, networkProvider.NetworkOnly, true)
+		connect.AssertEqual(t, networkProvider.ReputationFailedNames, "bloomberg")
 
 		// a stranger sees only the Public one. handing them the network-only
 		// provider would produce a `CreateContract` NoPermission rejection.
 		otherNetwork := findFrom(server.NewId(), "other-network")
-		connect.AssertEqual(t, otherNetwork[publicClientId], true)
-		connect.AssertEqual(t, otherNetwork[networkOnlyClientId], false)
+		connect.AssertEqual(t, otherNetwork[publicClientId] != nil, true)
+		connect.AssertEqual(t, otherNetwork[networkOnlyClientId] != nil, false)
 	})
 }
 

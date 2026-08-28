@@ -1,0 +1,194 @@
+{
+  "uid": "urnetwork-minio",
+  "title": "urnetwork / minio",
+  "description": "MinIO storage health, usable capacity, per-bucket growth, API traffic and errors. Metrics v3 are scraped locally by fluent-bit and remote-written to Mimir.",
+  "tags": ["urnetwork", "minio", "infrastructure"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(minio_cluster_health_nodes_online_count{job=\"minio\"}, env)",
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "host",
+        "label": "host",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(minio_cluster_health_nodes_online_count{env=\"$env\",job=\"minio\"}, host)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      },
+      {
+        "name": "bucket",
+        "label": "bucket",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+        "query": "label_values(minio_cluster_usage_buckets_total_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"}, bucket)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "nodes online",
+      "description": "MinIO nodes visible to the cluster. This single-node deployment should report 1.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "max(minio_cluster_health_nodes_online_count{env=\"$env\",host=~\"$host\",job=\"minio\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 2,
+      "title": "drives offline",
+      "description": "Any nonzero value needs immediate storage inspection.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "max(minio_cluster_health_drives_offline_count{env=\"$env\",host=~\"$host\",job=\"minio\"}) or on() vector(0)", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 3,
+      "title": "usable capacity used",
+      "description": "Usable capacity consumed. Plan reclamation or expansion before 80%.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 70}, {"color": "red", "value": 85}]}}, "overrides": []},
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "100 * (1 - max(minio_cluster_health_capacity_usable_free_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"}) / max(minio_cluster_health_capacity_usable_total_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"}))", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 4,
+      "title": "objects",
+      "description": "Current object count across the MinIO deployment.",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"refId": "A", "expr": "max(minio_cluster_usage_objects_count{env=\"$env\",host=~\"$host\",job=\"minio\"})", "instant": true, "range": false, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 5,
+      "title": "usable capacity",
+      "description": "Free and used usable capacity reported by MinIO.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "max by (host) (minio_cluster_health_capacity_usable_total_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"} - minio_cluster_health_capacity_usable_free_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"})", "legendFormat": "{{host}} used", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "max by (host) (minio_cluster_health_capacity_usable_free_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"})", "legendFormat": "{{host}} free", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 6,
+      "title": "bucket usage and quota",
+      "description": "Bytes stored per selected bucket and its configured hard quota.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "max by (host, bucket) (minio_cluster_usage_buckets_total_bytes{env=\"$env\",host=~\"$host\",bucket=~\"$bucket\",job=\"minio\"})", "legendFormat": "{{bucket}} used", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "max by (host, bucket) (minio_cluster_usage_buckets_quota_total_bytes{env=\"$env\",host=~\"$host\",bucket=~\"$bucket\",job=\"minio\"})", "legendFormat": "{{bucket}} quota", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 7,
+      "title": "API requests / s",
+      "description": "MinIO API operations by request name.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "normal", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "sum by (name) (rate(minio_api_requests_total{env=\"$env\",host=~\"$host\",job=\"minio\"}[$__rate_interval]))", "legendFormat": "{{name}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 8,
+      "title": "API errors / s",
+      "description": "Server-side 5xx is actionable. 4xx is shown separately because client/auth mistakes can dominate it.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(minio_api_requests_5xx_errors_total{env=\"$env\",host=~\"$host\",job=\"minio\"}[$__rate_interval])) or on() vector(0)", "legendFormat": "5xx", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum(rate(minio_api_requests_4xx_errors_total{env=\"$env\",host=~\"$host\",job=\"minio\"}[$__rate_interval])) or on() vector(0)", "legendFormat": "4xx", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 9,
+      "title": "API traffic",
+      "description": "Bytes received from and sent to MinIO clients per second.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "Bps", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(minio_api_requests_traffic_received_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"}[$__rate_interval]))", "legendFormat": "received", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "sum(rate(minio_api_requests_traffic_sent_bytes{env=\"$env\",host=~\"$host\",job=\"minio\"}[$__rate_interval]))", "legendFormat": "sent", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    },
+    {
+      "id": 10,
+      "title": "API p95 time to first byte",
+      "description": "95th-percentile response time from MinIO's request TTFB distribution.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, name) (rate(minio_api_requests_ttfb_seconds_distribution{env=\"$env\",host=~\"$host\",job=\"minio\"}[$__rate_interval])))", "legendFormat": "{{name}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 11,
+      "title": "host data disk used",
+      "description": "Host filesystem utilization for the MinIO data mount.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "100 * (1 - node_filesystem_avail_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=\"/mnt/data\"} / node_filesystem_size_bytes{env=\"$env\",host=~\"$host\",job=\"node\",mountpoint=\"/mnt/data\"})", "legendFormat": "{{host}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 12,
+      "title": "host CPU and memory used",
+      "description": "Host pressure beside MinIO service metrics.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "expr": "100 * (1 - avg by (host) (rate(node_cpu_seconds_total{env=\"$env\",host=~\"$host\",job=\"node\",mode=\"idle\"}[$__rate_interval])))", "legendFormat": "{{host}} cpu", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
+        {"refId": "B", "expr": "100 * (1 - node_memory_MemAvailable_bytes{env=\"$env\",host=~\"$host\",job=\"node\"} / node_memory_MemTotal_bytes{env=\"$env\",host=~\"$host\",job=\"node\"})", "legendFormat": "{{host}} memory", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
+      ]
+    }
+  ]
+}

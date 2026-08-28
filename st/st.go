@@ -1,14 +1,14 @@
 // Package st resolves the UR subnet's subtensor connection from the standard
 // vault resource st.yml. The subtensor host is threaded exactly the way pg/redis
 // are (server/db.go, server/redis.go): config/<env>/settings.yml sets
-// BRINGYOUR_SUBTENSOR_HOSTNAME, st.yml's `authority` interpolates it
-// ("{{ env:BRINGYOUR_SUBTENSOR_HOSTNAME }}:9944"), and this package turns that
-// authority into the RPC endpoints the chain client dials.
+// BRINGYOUR_SUBTENSOR_HOSTNAME, and st.yml's `authority` / `lightnode-authority`
+// interpolate it on ports 9944 / 9946. This package turns both authorities into
+// the RPC endpoints chain clients dial.
 //
-// One subtensor node/gateway (host "snow") serves BOTH the substrate WS and the
-// EVM JSON-RPC (docs/LAUNCH.md §0), so both endpoints derive from the single
-// authority. The server's ST coordination uses the EVM JSON-RPC (RpcUrls); the
-// substrate WS (WsUrl) is exposed for completeness.
+// The archive and light nodes on "snow" each serve Substrate WS and EVM
+// JSON-RPC. The primary authority remains the archive endpoint; the lightnode
+// authority is resolved independently so callers can opt into recent-state
+// traffic without weakening archive-backed consumers.
 //
 // server/controller/st_controller.go reads the rest of st.yml (contract address,
 // netuid, hot wallets, deposit sizing) and sources its RPC endpoints from here,
@@ -39,6 +39,9 @@ const (
 // authority omits one (the nginx gateway on snow — xops/main/ansible).
 const DefaultGatewayPort = "9944"
 
+// DefaultLightnodeGatewayPort is the side-by-side lightnode gateway on snow.
+const DefaultLightnodeGatewayPort = "9946"
+
 // Connection is the subtensor endpoints derived from st.yml.
 //
 //   - Authority is the RPC gateway host:port (BRINGYOUR_SUBTENSOR_HOSTNAME + port).
@@ -46,10 +49,15 @@ const DefaultGatewayPort = "9944"
 //     the ST contract — the explicit st.yml `rpc_urls` if set, else derived from
 //     the authority.
 //   - WsUrl is the substrate/EVM websocket url derived from the authority.
+//   - Lightnode* are the equivalent optional endpoints for the warp-synced
+//     lightnode. They stay empty when st.yml does not configure one.
 type Connection struct {
-	Authority string
-	RpcUrls   []string
-	WsUrl     string
+	Authority          string
+	RpcUrls            []string
+	WsUrl              string
+	LightnodeAuthority string
+	LightnodeRpcUrls   []string
+	LightnodeWsUrl     string
 }
 
 // resolveConnection reads st.yml once. It is deliberately tolerant: a missing
@@ -127,32 +135,75 @@ func connectionFromResourceProfile(res stResource, profile string) (conn *Connec
 		scheme, wsScheme = "https", "wss"
 	}
 
-	conn = &Connection{}
+	primary, err := endpointFromResource(res, profile, "", DefaultGatewayPort, scheme, wsScheme, true)
+	if err != nil {
+		return nil, err
+	}
+	lightnode, err := endpointFromResource(res, profile, "lightnode", DefaultLightnodeGatewayPort, scheme, wsScheme, false)
+	if err != nil {
+		return nil, err
+	}
+	return &Connection{
+		Authority:          primary.Authority,
+		RpcUrls:            primary.RpcUrls,
+		WsUrl:              primary.WsUrl,
+		LightnodeAuthority: lightnode.Authority,
+		LightnodeRpcUrls:   lightnode.RpcUrls,
+		LightnodeWsUrl:     lightnode.WsUrl,
+	}, nil
+}
 
-	// An explicit `rpc_urls` list overrides the authority-derived default and
-	// does not require the threaded host to be set.
-	if urls := trimAll(res.StringList(profileKey(profile, "rpc_urls"))); len(urls) > 0 {
-		conn.RpcUrls = urls
-		conn.Authority = authorityBestEffortProfile(res, profile)
-		if ws := trimAll(res.StringList(profileKey(profile, "ws_url"))); len(ws) > 0 {
-			conn.WsUrl = ws[0]
-		} else if conn.Authority != "" {
-			conn.WsUrl = fmt.Sprintf("%s://%s", wsScheme, conn.Authority)
+type rpcEndpoint struct {
+	Authority string
+	RpcUrls   []string
+	WsUrl     string
+}
+
+// endpointFromResource resolves either the primary endpoint (prefix "") or an
+// optional named endpoint such as "lightnode". Explicit *_rpc_urls win over an
+// authority-derived URL, matching the primary connection contract.
+func endpointFromResource(res stResource, profile, prefix, defaultPort, scheme, wsScheme string, required bool) (rpcEndpoint, error) {
+	key := func(base string) string {
+		if prefix == "" {
+			return profileKey(profile, base)
 		}
-		return conn, nil
+		return profileKey(profile, prefix+"-"+base)
 	}
 
-	// Standard path: derive the endpoints from the threaded authority.
-	// RequireString interpolates {{ env:BRINGYOUR_SUBTENSOR_HOSTNAME }}
-	// (UnmarshalYaml does not — server/env.go), and panics if the var is unset.
-	authority := withDefaultPort(strings.TrimSpace(res.RequireString(profileKey(profile, "authority"))))
-	if authority == "" {
-		return nil, fmt.Errorf("st.yml authority is empty")
+	authority := authorityBestEffortKey(res, key("authority"), defaultPort)
+	urls := trimAll(res.StringList(key("rpc_urls")))
+	wsUrls := trimAll(res.StringList(key("ws_url")))
+	if len(urls) > 0 {
+		endpoint := rpcEndpoint{Authority: authority, RpcUrls: urls}
+		if len(wsUrls) > 0 {
+			endpoint.WsUrl = wsUrls[0]
+		} else if authority != "" {
+			endpoint.WsUrl = fmt.Sprintf("%s://%s", wsScheme, authority)
+		}
+		return endpoint, nil
 	}
-	conn.Authority = authority
-	conn.RpcUrls = []string{fmt.Sprintf("%s://%s", scheme, authority)}
-	conn.WsUrl = fmt.Sprintf("%s://%s", wsScheme, authority)
-	return conn, nil
+	if authority == "" {
+		if required {
+			return rpcEndpoint{}, fmt.Errorf("st.yml %sauthority is empty", endpointErrorPrefix(prefix))
+		}
+		return rpcEndpoint{}, nil
+	}
+	endpoint := rpcEndpoint{
+		Authority: authority,
+		RpcUrls:   []string{fmt.Sprintf("%s://%s", scheme, authority)},
+		WsUrl:     fmt.Sprintf("%s://%s", wsScheme, authority),
+	}
+	if len(wsUrls) > 0 {
+		endpoint.WsUrl = wsUrls[0]
+	}
+	return endpoint, nil
+}
+
+func endpointErrorPrefix(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	return prefix + " "
 }
 
 // GetConnection returns the resolved subtensor connection, or an error when
@@ -171,6 +222,16 @@ func RpcUrls() []string {
 	return conn.RpcUrls
 }
 
+// LightnodeRpcUrls returns the lightnode's EVM JSON-RPC url(s), or nil when
+// the connection or optional lightnode endpoint is not configured.
+func LightnodeRpcUrls() []string {
+	conn, err := resolveConnection()
+	if err != nil {
+		return nil
+	}
+	return conn.LightnodeRpcUrls
+}
+
 // Authority returns the subtensor gateway host:port, or "" when not configured.
 func Authority() string {
 	conn, err := resolveConnection()
@@ -180,6 +241,16 @@ func Authority() string {
 	return conn.Authority
 }
 
+// LightnodeAuthority returns the lightnode gateway host:port, or "" when it is
+// not configured.
+func LightnodeAuthority() string {
+	conn, err := resolveConnection()
+	if err != nil {
+		return ""
+	}
+	return conn.LightnodeAuthority
+}
+
 // authorityBestEffort reads `authority` without letting a missing threaded host
 // abort an otherwise-valid explicit rpc_urls config.
 func authorityBestEffort(res stResource) (authority string) {
@@ -187,16 +258,24 @@ func authorityBestEffort(res stResource) (authority string) {
 }
 
 func authorityBestEffortProfile(res stResource, profile string) (authority string) {
+	return authorityBestEffortKey(res, profileKey(profile, "authority"), DefaultGatewayPort)
+}
+
+func authorityBestEffortKey(res stResource, key, defaultPort string) (authority string) {
 	defer func() { _ = recover() }()
-	return withDefaultPort(strings.TrimSpace(res.RequireString(profileKey(profile, "authority"))))
+	return withDefaultPortFor(strings.TrimSpace(res.RequireString(key)), defaultPort)
 }
 
 // withDefaultPort appends DefaultGatewayPort when the authority has a bare host.
 func withDefaultPort(authority string) string {
+	return withDefaultPortFor(authority, DefaultGatewayPort)
+}
+
+func withDefaultPortFor(authority, defaultPort string) string {
 	if authority == "" || strings.Contains(authority, ":") {
 		return authority
 	}
-	return authority + ":" + DefaultGatewayPort
+	return authority + ":" + defaultPort
 }
 
 func trimAll(values []string) []string {

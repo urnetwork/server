@@ -9,6 +9,20 @@
         "from": "now-1h",
         "to": "now"
     },
+    "links": [
+        {
+            "asDropdown": false,
+            "icon": "external link",
+            "includeVars": false,
+            "keepTime": true,
+            "tags": [],
+            "targetBlank": false,
+            "title": "Logs Drilldown",
+            "tooltip": "Browse every Loki log stream and search without writing LogQL",
+            "type": "link",
+            "url": "/a/grafana-lokiexplore-app/explore?var-ds=warp-loki"
+        }
+    ],
     "templating": {
         "list": [
             {

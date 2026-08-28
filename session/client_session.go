@@ -1,26 +1,14 @@
+// Client sessions carry request identity and authentication state through the server.
 package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
-	"os"
-
-	// "strconv"
-	// "crypto/sha256"
-	// "net"
 	"net/netip"
-	// "regexp"
-	// "strconv"
 	"strings"
-	"sync"
-	// "sync"
-
-	// "bytes"
-	"fmt"
-
-	// "encoding/base64"
-	"errors"
 
 	"github.com/urnetwork/glog"
 
@@ -32,6 +20,10 @@ import (
 // https://www.rfc-editor.org/rfc/rfc6750
 const authBearerPrefix = "Bearer "
 
+// The Warp ingress overwrites this with the address accepted from the client.
+const urForwardedForHeader = "X-UR-Forwarded-For"
+
+// Request-scoped client identity and authentication state.
 type ClientSession struct {
 	Ctx    context.Context
 	Cancel context.CancelFunc
@@ -39,21 +31,22 @@ type ClientSession struct {
 	ClientAddress string
 	// pre-computed peppered address hash + port (see server.ClientIpHash),
 	// set instead of ClientAddress when the session is reconstructed from
-	// storage that persists only the hash (deferred tasks). The raw address
-	// is deliberately absent on such sessions: consumers that need the ip
-	// itself (geo lookup, egress parsing) get a parse error, exactly as they
-	// would for any unparseable address, while consumers of
-	// ClientAddressHashPort keep working against the stored hash.
+	// storage that persists only the hash (deferred tasks). The raw address is
+	// deliberately absent on such sessions: consumers that need the ip itself
+	// (geo lookup, egress parsing) get a parse error, exactly as they would for
+	// any unparseable address, while consumers of ClientAddressHashPort keep
+	// working against the stored hash.
 	clientAddressHash     *[32]byte
 	clientAddressHashPort int
 	Header                map[string][]string
 	ByJwt                 *jwt.ByJwt
 }
 
+// Resolves the ingress-owned client address before exposing request state.
 func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	cancelCtx, cancel := context.WithCancel(req.Context())
 
-	clientAddress, err := ResolveClientAddress(req, trustedProxyPrefixes())
+	clientAddress, err := ResolveClientAddress(req)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -67,49 +60,23 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 	}, nil
 }
 
-const trustedProxyCidrsEnvironment = "BRINGYOUR_TRUSTED_PROXY_CIDRS"
-
-var trustedProxyPrefixes = sync.OnceValue(func() []netip.Prefix {
-	raw := strings.TrimSpace(os.Getenv(trustedProxyCidrsEnvironment))
-	if raw == "" {
-		// The local warp/nginx sidecar is the safe portable default. A remote
-		// proxy must be explicitly enumerated by the deployment.
-		raw = "127.0.0.0/8,::1/128"
-	}
-	prefixes, err := ParseTrustedProxyPrefixes(raw)
-	if err != nil {
-		panic(err)
-	}
-	return prefixes
-})
-
-func ParseTrustedProxyPrefixes(raw string) ([]netip.Prefix, error) {
-	parts := strings.Split(raw, ",")
-	prefixes := make([]netip.Prefix, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		prefix, err := netip.ParsePrefix(part)
-		if err != nil {
-			return nil, fmt.Errorf("%s contains invalid CIDR %q: %w", trustedProxyCidrsEnvironment, part, err)
-		}
-		prefixes = append(prefixes, prefix.Masked())
-	}
-	if len(prefixes) == 0 {
-		return nil, fmt.Errorf("%s must contain at least one CIDR", trustedProxyCidrsEnvironment)
-	}
-	return prefixes, nil
-}
-
+// Normalizes an ip:port pair, including ipv4-mapped ipv6.
 func parseRequestAddress(raw string) (netip.AddrPort, error) {
-	if addrPort, err := netip.ParseAddrPort(raw); err == nil {
-		return addrPort, nil
-	}
 	host, port, err := net.SplitHostPort(raw)
 	if err != nil {
-		return netip.AddrPort{}, err
+		// Older ingress configurations emitted IPv6 without brackets. Split at
+		// the last colon only when everything before it is itself valid IPv6;
+		// otherwise preserve SplitHostPort's rejection.
+		lastColon := strings.LastIndexByte(raw, ':')
+		if lastColon <= 0 {
+			return netip.AddrPort{}, err
+		}
+		unbracketedAddr, unbracketedErr := netip.ParseAddr(raw[:lastColon])
+		if unbracketedErr != nil || !unbracketedAddr.Is6() {
+			return netip.AddrPort{}, err
+		}
+		host = raw[:lastColon]
+		port = raw[lastColon+1:]
 	}
 	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
 	if err != nil {
@@ -122,55 +89,55 @@ func parseRequestAddress(raw string) (netip.AddrPort, error) {
 	return netip.AddrPortFrom(addr.Unmap(), uint16(portNumber)), nil
 }
 
-func proxyIsTrusted(remote netip.Addr, trusted []netip.Prefix) bool {
-	remote = remote.Unmap()
-	for _, prefix := range trusted {
-		if prefix.Contains(remote) {
-			return true
-		}
-	}
-	return false
+// Fleet-standard source attribution entry point.
+func ResolveClientAddressFromRequest(req *http.Request) (string, error) {
+	return ResolveClientAddress(req)
 }
 
-// ResolveClientAddress honors forwarding headers only when the immediate TCP
-// peer is in an explicit trusted CIDR. This makes source attribution an
-// application invariant instead of relying solely on an ingress rewrite.
-func ResolveClientAddress(req *http.Request, trusted []netip.Prefix) (string, error) {
+// Uses the one header owned by every UR-controlled ingress.
+//
+// The ingress must overwrite X-UR-Forwarded-For with one ip:port pair from the
+// socket it accepted and backend service ports must remain unreachable from
+// clients. Standard X-Forwarded-For and X-Forwarded-Source-Port are deliberately
+// ignored. Without the UR header, direct and internal requests use RemoteAddr.
+func ResolveClientAddress(req *http.Request) (string, error) {
 	remote, err := parseRequestAddress(req.RemoteAddr)
 	if err != nil {
 		return "", fmt.Errorf("invalid remote address %q: %w", req.RemoteAddr, err)
 	}
-	if !proxyIsTrusted(remote.Addr(), trusted) {
+
+	forwardedValues := req.Header.Values(urForwardedForHeader)
+	if len(forwardedValues) == 0 {
+		return remote.String(), nil
+	}
+	if len(forwardedValues) != 1 {
+		glog.Errorf(
+			"[session]%s must be one ingress-overwritten ip:port value; using peer %s\n",
+			urForwardedForHeader,
+			remote.Addr(),
+		)
 		return remote.String(), nil
 	}
 
-	forwarded := strings.TrimSpace(req.Header.Get("X-UR-Forwarded-For"))
-	if forwarded != "" {
-		if strings.Contains(forwarded, ",") {
-			return "", fmt.Errorf("invalid X-UR-Forwarded-For chain")
-		}
-		address, err := parseRequestAddress(forwarded)
-		if err != nil {
-			return "", fmt.Errorf("invalid X-UR-Forwarded-For: %w", err)
-		}
-		return address.String(), nil
-	}
-
-	forwardedIp := strings.TrimSpace(req.Header.Get("X-Forwarded-For"))
-	forwardedPort := strings.TrimSpace(req.Header.Get("X-Forwarded-Source-Port"))
-	if forwardedIp == "" && forwardedPort == "" {
+	forwardedValue := strings.TrimSpace(forwardedValues[0])
+	if forwardedValue == "" {
 		return remote.String(), nil
 	}
-	if forwardedIp == "" || forwardedPort == "" || strings.Contains(forwardedIp, ",") {
-		return "", fmt.Errorf("forwarded source requires one IP and one port")
-	}
-	address, err := parseRequestAddress(net.JoinHostPort(strings.Trim(forwardedIp, "[]"), forwardedPort))
+	forwarded, err := parseRequestAddress(forwardedValue)
 	if err != nil {
-		return "", fmt.Errorf("invalid forwarded source: %w", err)
+		// Do not log the value: a future ingress regression could make it
+		// caller-controlled. The peer and fixed header name are actionable.
+		glog.Errorf(
+			"[session]%s from ingress peer %s was not one ip:port value; using the peer address\n",
+			urForwardedForHeader,
+			remote.Addr(),
+		)
+		return remote.String(), nil
 	}
-	return address.String(), nil
+	return forwarded.String(), nil
 }
 
+// Creates a session for trusted in-process work.
 func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt.ByJwt) *ClientSession {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
@@ -183,7 +150,7 @@ func NewLocalClientSession(ctx context.Context, clientAddress string, byJwt *jwt
 	}
 }
 
-// NewLocalClientSessionWithAddressHash reconstructs a session from storage
+// Reconstructs a session from storage
 // that persists only the peppered address hash + port (deferred tasks), never
 // the raw ip:port. ClientAddress stays empty on the returned session — see
 // the field comment on ClientSession.
@@ -200,7 +167,7 @@ func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash
 	}
 }
 
-// either sets `ByJwt` or returns and error
+// Sets authentication claims or returns an authentication error.
 func (self *ClientSession) Auth(req *http.Request) error {
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
@@ -227,7 +194,9 @@ func (self *ClientSession) Auth(req *http.Request) error {
 					false,
 					false, // pro mode - for api keys we don't need to thread this for now
 				)
-				glog.V(2).Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)
+				if glog.V(2) {
+					glog.Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)
+				}
 				return nil
 
 			} else {
@@ -242,20 +211,23 @@ func (self *ClientSession) Auth(req *http.Request) error {
 				if err := jwt.ValidateByJwtState(self.Ctx, byJwt, false); err != nil {
 					return err
 				}
-				glog.V(2).Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+				if glog.V(2) {
+					glog.Infof("[session]authed as %s (%s %s)\n", byJwt.UserId, byJwt.NetworkName, byJwt.NetworkId)
+				}
 				self.ByJwt = byJwt
 				return nil
 			}
-
 		}
 	}
 	return errors.New("Invalid auth.")
 }
 
+// Splits the normalized client address.
 func (self *ClientSession) ClientIpPort() (string, int, error) {
 	return server.SplitClientAddress(self.ClientAddress)
 }
 
+// Splits and parses the normalized client address.
 func (self *ClientSession) ParseClientIpPort() (ip netip.Addr, port int, err error) {
 	var ipStr string
 	ipStr, port, err = server.SplitClientAddress(self.ClientAddress)
@@ -266,6 +238,7 @@ func (self *ClientSession) ParseClientIpPort() (ip netip.Addr, port int, err err
 	return
 }
 
+// Returns the privacy-preserving address key and source port.
 func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, clientPort int, err error) {
 	// a session reconstructed from hash-only storage carries the hash
 	// directly; there is no raw address to derive it from
@@ -281,6 +254,7 @@ func (self *ClientSession) ClientAddressHashPort() (clientAddressHash [32]byte, 
 	return
 }
 
+// Returns a session view with updated authentication claims.
 func (self *ClientSession) WithByJwt(byJwt *jwt.ByJwt) *ClientSession {
 	return &ClientSession{
 		Ctx:                   self.Ctx,
@@ -293,6 +267,7 @@ func (self *ClientSession) WithByJwt(byJwt *jwt.ByJwt) *ClientSession {
 	}
 }
 
+// Creates deterministic local state for server tests.
 func Testing_CreateClientSession(ctx context.Context, byJwt *jwt.ByJwt) *ClientSession {
 	cancelCtx, cancel := context.WithCancel(ctx)
 

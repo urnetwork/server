@@ -15,13 +15,21 @@ import (
 )
 
 type testDashboard struct {
-	Uid        string   `json:"uid"`
-	Title      string   `json:"title"`
-	Tags       []string `json:"tags"`
+	Uid        string              `json:"uid"`
+	Title      string              `json:"title"`
+	Tags       []string            `json:"tags"`
+	Links      []testDashboardLink `json:"links"`
 	Templating struct {
 		List []any `json:"list"`
 	} `json:"templating"`
 	Panels []testPanel `json:"panels"`
+}
+
+type testDashboardLink struct {
+	Title       string `json:"title"`
+	Url         string `json:"url"`
+	KeepTime    bool   `json:"keepTime"`
+	IncludeVars bool   `json:"includeVars"`
 }
 
 type testPanel struct {
@@ -136,6 +144,119 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 
 		if slices.Contains(dashboard.Tags, PublicTag) && len(dashboard.Templating.List) != 0 {
 			t.Errorf("public dashboard %s uses template variables, which Grafana public dashboards do not support", entry.Name())
+		}
+	}
+}
+
+func TestServiceLogsLinksToLogsDrilldown(t *testing.T) {
+	dashboard := readTestDashboard(t, "service-logs.json")
+	for _, link := range dashboard.Links {
+		if link.Title != "Logs Drilldown" {
+			continue
+		}
+		if link.Url != "/a/grafana-lokiexplore-app/explore?var-ds=warp-loki" {
+			t.Fatalf("Logs Drilldown URL = %q", link.Url)
+		}
+		if !link.KeepTime {
+			t.Fatal("Logs Drilldown link must preserve the dashboard time range")
+		}
+		if link.IncludeVars {
+			t.Fatal("service dashboard variables are not Logs Drilldown variables")
+		}
+		return
+	}
+	t.Fatal("service logs dashboard is missing its Logs Drilldown link")
+}
+
+func TestInfrastructureDashboardsCoverServiceAndHostSignals(t *testing.T) {
+	tests := []struct {
+		name           string
+		diskMountpoint string
+		serviceMetrics []string
+	}{
+		{
+			name:           "minio.json",
+			diskMountpoint: "/mnt/data",
+			serviceMetrics: []string{
+				"minio_cluster_health_nodes_online_count",
+				"minio_cluster_health_drives_offline_count",
+				"minio_cluster_health_capacity_usable_free_bytes",
+				"minio_cluster_usage_buckets_total_bytes",
+				"minio_api_requests_5xx_errors_total",
+			},
+		},
+		{
+			name:           "subtensor.json",
+			diskMountpoint: "/",
+			serviceMetrics: []string{
+				"substrate_block_height",
+				"substrate_sub_libp2p_peers_count",
+				"substrate_sub_libp2p_is_major_syncing",
+				"substrate_ready_transactions_number",
+				"substrate_rpc_sessions_opened",
+			},
+		},
+		{
+			name:           "postgres.json",
+			diskMountpoint: "/",
+			serviceMetrics: []string{
+				"pg_up",
+				"pg_stat_activity_count",
+				"pg_stat_activity_max_tx_duration",
+				"pg_settings_max_connections",
+				"pg_stat_database_xact_commit",
+				"pg_stat_database_deadlocks",
+				"pg_locks_count",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dashboard := readTestDashboard(t, test.name)
+			queries := strings.Join(dashboardExpressions(dashboard), "\n")
+			for _, metric := range test.serviceMetrics {
+				if !strings.Contains(queries, metric) {
+					t.Errorf("dashboard is missing service metric %s", metric)
+				}
+			}
+			if !strings.Contains(queries, "node_cpu_seconds_total") ||
+				!strings.Contains(queries, "node_memory_MemAvailable_bytes") {
+				t.Error("dashboard must include host CPU and memory context")
+			}
+			if !strings.Contains(queries, "node_filesystem_avail_bytes") ||
+				!strings.Contains(queries, `mountpoint="`+test.diskMountpoint+`"`) {
+				t.Errorf("dashboard must include host disk context for %s", test.diskMountpoint)
+			}
+			if !strings.Contains(queries, `{env="$env"`) ||
+				!strings.Contains(queries, `host=~"$host"`) {
+				t.Error("dashboard queries must be scoped by env and host")
+			}
+		})
+	}
+}
+
+func TestSubtensorDashboardSeparatesArchiveAndLightnodeMetrics(t *testing.T) {
+	dashboard := readTestDashboard(t, "subtensor.json")
+	queries := dashboardExpressions(dashboard)
+	for _, query := range queries {
+		if strings.Contains(query, "substrate_") && !strings.Contains(query, `job=~"$node"`) {
+			t.Errorf("Subtensor query does not honor the archive/lightnode selector: %s", query)
+		}
+	}
+	raw, err := dashboardsFs.ReadFile("dashboards/subtensor.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(raw)
+	for _, required := range []string{
+		`"name": "node"`,
+		`subtensor(|-lightnode)`,
+		`max by (job)`,
+		`{{job}}`,
+	} {
+		if !strings.Contains(content, required) {
+			t.Errorf("Subtensor dashboard does not separate both node jobs: missing %s", required)
 		}
 	}
 }

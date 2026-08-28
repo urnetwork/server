@@ -209,19 +209,19 @@ func clientAddress(req *mcpsdk.CallToolRequest) string {
 		header = http.Header{}
 	}
 
-	clientAddress := header.Get("X-UR-Forwarded-For")
-	if clientAddress == "" {
-		clientIpStr := header.Get("X-Forwarded-For")
-		clientPortStr := header.Get("X-Forwarded-Source-Port")
-		if clientIpStr != "" && clientPortStr != "" {
-			clientAddress = fmt.Sprintf("%s:%s", clientIpStr, clientPortStr)
-		}
+	// The fleet-standard resolver accepts only X-UR-Forwarded-For. The truthful
+	// peer is X-UR-Remote-Addr, which middleware sets from the connection and
+	// which stands in for RemoteAddr because tool handlers see only headers.
+	httpReq := &http.Request{
+		RemoteAddr: header.Get("X-UR-Remote-Addr"),
+		Header:     header,
 	}
-	if clientAddress == "" {
-		clientAddress = header.Get("X-UR-Remote-Addr")
+	if resolved, err := session.ResolveClientAddressFromRequest(httpReq); err == nil {
+		return resolved
 	}
-	if clientAddress == "" {
-		clientAddress = "127.0.0.1:0"
+	// no (or unparseable) captured peer — some SDK paths carry no headers
+	if remoteAddr := header.Get("X-UR-Remote-Addr"); remoteAddr != "" {
+		return remoteAddr
 	}
-	return clientAddress
+	return "127.0.0.1:0"
 }

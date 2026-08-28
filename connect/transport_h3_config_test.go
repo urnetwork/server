@@ -26,14 +26,32 @@ func TestConnectH3InitialDatagramPathByteCountUsesQuicLimit(t *testing.T) {
 }
 
 func TestConnectH3TransferCarrierEnablesBoundedAckReserve(t *testing.T) {
-	properties := connectH3TransferCarrierProperties(true)
+	settings := clientconnect.DefaultH3DatagramSettings()
+	maxDatagramByteCount := clientconnect.H3InitialDatagramByteCount
+	properties := connectH3TransferCarrierProperties(
+		true,
+		settings,
+		maxDatagramByteCount,
+	)
 	if !properties.Unreliable || !properties.UnreliableFlowIsolation ||
 		!properties.UnreliableFlowReserve {
 		t.Fatalf("H3 DATAGRAM carrier properties = %+v", properties)
 	}
-	properties = connectH3TransferCarrierProperties(false)
+	wantLimit := clientconnect.H3DatagramTransferFrameByteLimit(
+		settings,
+		maxDatagramByteCount,
+	)
+	if properties.UnreliableMaxMessageByteCount != wantLimit || wantLimit <= 0 {
+		t.Fatalf(
+			"H3 hybrid unreliable cutoff=%d want=%d",
+			properties.UnreliableMaxMessageByteCount,
+			wantLimit,
+		)
+	}
+	properties = connectH3TransferCarrierProperties(false, settings, 0)
 	if properties.Unreliable || properties.UnreliableFlowIsolation ||
-		properties.UnreliableFlowReserve {
+		properties.UnreliableFlowReserve ||
+		properties.UnreliableMaxMessageByteCount != 0 {
 		t.Fatalf("legacy H3 carrier properties = %+v", properties)
 	}
 }

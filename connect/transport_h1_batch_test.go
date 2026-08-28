@@ -93,8 +93,32 @@ func newConnectH1BatchTestMessage(index byte) []byte {
 	return message
 }
 
-// Four ready messages share one deadline and flush while the fifth retains its
-// place in the source queue for the next writer iteration.
+func TestConnectH1ReadyDrainBalancesAcksAndPayloadBytes(t *testing.T) {
+	readyCount := func(messageByteCount int) (count int, byteCount int) {
+		count = 1
+		byteCount = messageByteCount
+		for connectH1WriteBatchCanDrain(count, byteCount) {
+			count += 1
+			byteCount += messageByteCount
+		}
+		return
+	}
+
+	if count, bytes := readyCount(128); count != 32 || bytes != 4*1024 {
+		t.Fatalf("ACK-sized ready drain=(%d, %dB), want (32, 4096B)", count, bytes)
+	}
+	if count, bytes := readyCount(clientconnect.DefaultMtu); count != 12 ||
+		bytes >= 16*1024 {
+		t.Fatalf("tunnel-MTU ready drain=(%d, %dB), want 12 below 16KiB", count, bytes)
+	}
+	if count, bytes := readyCount(4 * 1024); count != 3 ||
+		bytes != connectH1WriteBatchDrainByteCount {
+		t.Fatalf("maximum H1 ready drain=(%d, %dB), want (3, 12288B)", count, bytes)
+	}
+}
+
+// One maximum ready batch shares one deadline and flush while the next message
+// retains its place in the source queue for the next writer iteration.
 func TestConnectH1UserReadyBatchBoundsDrainAndPreservesFifo(t *testing.T) {
 	receive := make(chan []byte, connectH1WriteBatchMaxMessageCount)
 	messages := make([][]byte, connectH1WriteBatchMaxMessageCount+1)
@@ -176,7 +200,7 @@ func TestConnectH1UserReadyBatchBoundsDrainAndPreservesFifo(t *testing.T) {
 		}
 		clientconnect.MessagePoolReturn(pendingMessage)
 	default:
-		t.Fatal("bounded batch consumed its fifth ready message")
+		t.Fatal("bounded batch consumed the next ready message")
 	}
 }
 

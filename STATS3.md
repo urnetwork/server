@@ -56,7 +56,7 @@ live tables; unchanged):
 | `all_packets_data`, `all_packets_summary(_rate)` | contract event packets | FAKE (bytes/1500) | **REMOVED** — no real packet count is recorded anywhere |
 | `extender_transfer_data` (+summaries) | contract events with extender_id | never populated | **REMOVED** — no extender producer exists anywhere |
 | `extenders_data`, `extenders_superspeed_data` (+summaries) | extender online/offline | never populated | **REMOVED** — `audit_extender_event` has no writer at all (table + reaper kept) |
-| `networks_data`, `networks_summary` | network created/deleted | HALF-REAL — created emitted (network_model.go), deleted never emitted, so the active count only grew | REAL — `NetworkDeleted` now emitted in `model.RemoveNetwork` (the only `DELETE FROM network` path) |
+| `networks_data`, `networks_summary` | live `network` count anchored backward with network created/deleted deltas | HALF-REAL — created emitted (network_model.go), deleted never emitted, so the active count only grew | REAL current count — summary/today come directly from `COUNT(network)`; daily history walks retained deltas backward. Deletes are exact from the 2026-08-10 `NetworkDeleted` deploy forward; older unrecorded deletion times cannot be reconstructed and age out of the 90-day view |
 | `devices_data`, `devices_summary` | device added/removed | never populated | REAL (FIXED 2026-08, user decision) — **connected-per-day: distinct devices with ≥1 connection that day**. SweepDeviceAuditEvents (all connected clients) + touched-union aggregation in computeStatsDevice. **Public-claim guidance: this measures REACH — every connected client id, including pure consumers and hosted-proxy child clients — do NOT quote it as a provider count** (that is `providers_data`). |
 
 Removal mechanics: the fields were deleted from the `Stats` struct and their
@@ -165,6 +165,19 @@ forward. This is stated because no other per-day evidence exists
   emission, a day with zero events (including today) must still export the
   carried state. The sample generator's constant event stream had masked this
   — a real latent bug for the networks series too.
+- Network history is anchored to the authoritative current `network` table and
+  reconstructed backward from created/deleted events inside the requested
+  window. The former forward replay silently lost every still-live network
+  when its only creation event crossed the 180-day audit retention boundary
+  (359,365 live networks were missing on main on 2026-08-26). Backward replay
+  is compatible with bounded retention and keeps `networks_summary` exact.
+  Deletion events did not exist before 2026-08-10, so historical points before
+  that date remain best-effort until they leave the lookback; the current
+  count is exact immediately.
+- Provider/country/region/city summaries are current selectable-supply counts
+  from `network_client_location_reliability` plus Public provide keys, not the
+  historical series' three-day maximum. This is the same population used by
+  the public provider map and the Prometheus public-stats collector.
 - Honesty comment at `ComputeStats`: series are real from deploy forward plus
   labeled reconstruction; unrecorded history is not fabricated.
 

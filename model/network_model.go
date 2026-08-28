@@ -96,6 +96,10 @@ type NetworkCreateResult struct {
 	VerificationRequired *NetworkCreateResultVerification `json:"verification_required,omitempty"`
 	Error                *NetworkCreateResultError        `json:"error,omitempty"`
 	IsPro                bool                             `json:"is_pro,omitempty"`
+	// SuppressAccountMessages is server-internal. Dedicated acceptance auth
+	// identities can authenticate immediately without causing verification or
+	// welcome-message sends from production infrastructure.
+	SuppressAccountMessages bool `json:"-"`
 }
 
 type NetworkCreateResultNetwork struct {
@@ -213,11 +217,36 @@ func NetworkCreate(
 		}
 	}
 
-	// email/SSO/wallet paths use the existing auth rate limit
-	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
-	if !allow {
-		return nil, maxUserAuthAttemptsError()
-	}
+	// INPUT VALIDATION RUNS FIRST, BEFORE ANY LIMITER IS CHARGED.
+	//
+	// UserAuthAttempt used to be consumed here, above every check below. That
+	// meant an unticked terms box, a network name that was too short, or a
+	// network name someone else already has each burned one of five slots in a
+	// five-minute window -- and for a signup with no user auth (SSO, wallet)
+	// those slots are shared by everyone at the client address, so ordinary
+	// form mistakes refused strangers. Four mistakes and the user's own
+	// corrected submission was refused too. A form mistake must not spend a
+	// shared budget.
+	//
+	// Nothing between here and the limiter WRITES. ValidateNetworkName and the
+	// user-auth normalisation are pure; checkNetworkNameAvailability is two
+	// reads. Everything that creates or mutates state -- networkCreateUserAuth,
+	// ParseAuthJwt, networkCreateAuthJwt, UseWalletAuthChallenge,
+	// networkCreateWalletAuth, the search index Add, auditNetworkCreate, JWT
+	// minting -- stays below the limiter.
+	//
+	// Be precise about what the reorder does hand out unmetered, because the
+	// obvious sentence ("it is the same lookup /auth/network-check already
+	// serves") is not quite true and this comment is load-bearing for anyone
+	// moving code across the limiter later. checkNetworkNameAvailability is a
+	// SUPERSET of NetworkCheck: both run the fuzzy networkNameSearch, and it
+	// adds an exact `SELECT network_id FROM network WHERE network_name = $1`
+	// inside a transaction. So the reorder does widen the free oracle slightly
+	// -- exact-name existence for names the fuzzy search misses -- and costs
+	// one extra unmetered read transaction per unauthenticated request. That is
+	// acceptable because POST /auth/network-check (api/api.go) is already
+	// unauthenticated, unlimited and DB-backed, so no new capability appears;
+	// it is not acceptable as licence to move anything else up here.
 
 	if !networkCreate.Terms {
 		result := &NetworkCreateResult{
@@ -250,20 +279,31 @@ func NetworkCreate(
 		return result, nil
 	}
 
+	// an unparseable email or phone number is a form mistake like any other,
+	// so it is refused here rather than after the limiter below
+	if networkCreate.UserAuth != nil && userAuth == nil {
+		result := &NetworkCreateResult{
+			Error: &NetworkCreateResultError{
+				Message: "Invalid email or phone number.",
+			},
+		}
+		return result, nil
+	}
+
 	containsProfanity := goaway.IsProfane(validatedNetworkName)
+
+	// email/SSO/wallet paths use the existing auth rate limit. The input is
+	// valid by this point, so a slot is only ever spent on a submission that
+	// would otherwise create an account.
+	userAuthAttemptId, allow := UserAuthAttempt(userAuth, session)
+	if !allow {
+		return nil, maxUserAuthAttemptsError(userAuth)
+	}
 
 	if networkCreate.UserAuth != nil {
 		// user is creating a network via email/phone + pass
 		// validate the user does not exist
-
-		if userAuth == nil {
-			result := &NetworkCreateResult{
-				Error: &NetworkCreateResultError{
-					Message: "Invalid email or phone number.",
-				},
-			}
-			return result, nil
-		}
+		testAuthPolicy := testAuthPolicyForUserAuth(userAuth)
 
 		resultNetworkCreate := networkCreateUserAuth(
 			session.Ctx,
@@ -271,12 +311,36 @@ func NetworkCreate(
 			userAuth,
 			validatedNetworkName,
 			containsProfanity,
+			testAuthPolicy.BypassVerification,
 		)
 
 		if resultNetworkCreate.Created {
 			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
 			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
+
+			if testAuthPolicy.BypassVerification {
+				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+
+				byJwt := jwt.NewByJwt(
+					resultNetworkCreate.NetworkId,
+					resultNetworkCreate.UserId,
+					validatedNetworkName,
+					false,
+					resultNetworkCreate.IsPro,
+				)
+				byJwtSigned := byJwt.Sign()
+				return &NetworkCreateResult{
+					Network: &NetworkCreateResultNetwork{
+						ByJwt:       &byJwtSigned,
+						NetworkName: validatedNetworkName,
+						NetworkId:   resultNetworkCreate.NetworkId,
+						IsPro:       resultNetworkCreate.IsPro,
+					},
+					UserAuth:                userAuth,
+					SuppressAccountMessages: testAuthPolicy.SuppressAccountMessages,
+				}, nil
+			}
 
 			result := &NetworkCreateResult{
 				VerificationRequired: &NetworkCreateResultVerification{
@@ -409,12 +473,17 @@ func NetworkCreate(
 			}, nil
 		}
 
-		networkCreateResult := networkCreateWalletAuth(
+		networkCreateResult, err := networkCreateWalletAuth(
 			session.Ctx,
 			&networkCreate,
 			validatedNetworkName,
 			containsProfanity,
 		)
+		if err != nil {
+			return &NetworkCreateResult{
+				Error: &NetworkCreateResultError{Message: err.Error()},
+			}, nil
+		}
 
 		if networkCreateResult.Created {
 
@@ -512,7 +581,10 @@ func networkCreateWalletAuth(
 	networkCreate *NetworkCreateArgs,
 	validatedNetworkName string,
 	containsProfanity bool,
-) networkCreateResult {
+) (networkCreateResult, error) {
+	if err := validateWalletAuth(networkCreate.WalletAuth); err != nil {
+		return networkCreateResult{}, err
+	}
 
 	created := false
 	var createdNetworkId server.Id
@@ -551,7 +623,7 @@ func networkCreateWalletAuth(
 				VALUES ($1, $2, $3, $4, $5)
 			`,
 			createdUserId,
-			AuthTypeSolana,
+			walletAuthType(networkCreate.WalletAuth.Blockchain),
 			networkCreate.WalletAuth.PublicKey,
 			networkCreate.WalletAuth.Blockchain,
 			networkCreate.UserName,
@@ -561,7 +633,8 @@ func networkCreateWalletAuth(
 		}
 
 		// insert into network_user_auth_wallet
-		addWalletAuth(
+		server.Raise(addWalletAuthInTx(
+			tx,
 			&AddWalletAuthArgs{
 				WalletAuth: &WalletAuthArgs{
 					PublicKey:  networkCreate.WalletAuth.PublicKey,
@@ -572,7 +645,7 @@ func networkCreateWalletAuth(
 				UserId: createdUserId,
 			},
 			ctx,
-		)
+		))
 
 		_, err = tx.Exec(
 			ctx,
@@ -608,7 +681,7 @@ func networkCreateWalletAuth(
 		NetworkName: networkCreate.NetworkName,
 		UserId:      createdUserId,
 		IsPro:       isPro,
-	}
+	}, nil
 
 }
 
@@ -738,6 +811,7 @@ func networkCreateUserAuth(
 	userAuth *string,
 	validatedNetworkName string,
 	containsProfanity bool,
+	verified bool,
 ) networkCreateResult {
 
 	created := false
@@ -818,6 +892,7 @@ func networkCreateUserAuth(
 				UserAuth:     userAuth,
 				PasswordHash: passwordHash,
 				PasswordSalt: passwordSalt,
+				Verified:     verified,
 			},
 			ctx,
 		)
@@ -1212,6 +1287,16 @@ func Testing_CreateNetworkByWallet(
 	signature string,
 	message string,
 ) {
+	walletArgs := &AddWalletAuthArgs{
+		WalletAuth: &WalletAuthArgs{
+			PublicKey:  publicKey,
+			Signature:  signature,
+			Message:    message,
+			Blockchain: AuthTypeSolana,
+		},
+		UserId: adminUserId,
+	}
+	server.Raise(validateWalletAuth(walletArgs.WalletAuth))
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1238,18 +1323,7 @@ func Testing_CreateNetworkByWallet(
 			AuthTypeSolana,
 		))
 
-		addWalletAuth(
-			&AddWalletAuthArgs{
-				WalletAuth: &WalletAuthArgs{
-					PublicKey:  publicKey,
-					Signature:  signature,
-					Message:    message,
-					Blockchain: AuthTypeSolana,
-				},
-				UserId: adminUserId,
-			},
-			ctx,
-		)
+		server.Raise(addWalletAuthInTx(tx, walletArgs, ctx))
 	})
 
 }

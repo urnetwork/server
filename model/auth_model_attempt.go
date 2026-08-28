@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -15,8 +14,51 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-func maxUserAuthAttemptsError() error {
-	return errors.New("503 User auth attempts exceeded limits.")
+// maxUserAuthAttemptsError reports the auth-attempt limit to the client.
+//
+// 429, not the 503 this used to return. A rate limit is client-attributable:
+// the request was refused because of who sent it and how often, not because the
+// service is broken. A 5xx tells every well-behaved client and SDK to retry,
+// and every retry records another attempt (see authAttemptScript), so the
+// status itself made the condition worse and did so self-reinforcingly.
+//
+// The wording depends on which budget was spent, because the two are not the
+// same event. With no user auth -- SSO signup, wallet signup, AuthPasswordSet
+// -- userAuthAttemptRedisKeys builds a key with no identity component, so the
+// budget is shared by everyone at the client address and the refused user may
+// have done nothing at all. With a user auth the budget is that account's.
+// Support cannot tell a wrongly-refused stranger from abuse if both are handed
+// the same sentence, which is why the old single message ("User auth attempts
+// exceeded limits.") is gone.
+//
+// Retry-After is the address lookback rather than the global one. Both windows
+// feed this refusal, but the address window is the binding constraint in
+// practice (5 attempts / 5 minutes against 300 / 30 minutes), and advising the
+// longer wait would hold back a legitimate caller six times longer than needed.
+// A caller that retries on the hint and is still over budget simply gets
+// another 429 carrying a fresh hint.
+func maxUserAuthAttemptsError(userAuth *string) error {
+	retryAfterSeconds := int(AttemptLookback / time.Second)
+	if userAuth == nil {
+		return &rateLimitError{
+			message: fmt.Sprintf(
+				"429 Too many recent sign-in or account-creation attempts from your "+
+					"network address. This limit is scoped to the address you are "+
+					"connecting from and is shared with everyone else on it, so someone "+
+					"else on your network may have used it. Please try again in %d minutes.",
+				int(AttemptLookback/time.Minute),
+			),
+			retryAfterSeconds: retryAfterSeconds,
+		}
+	}
+	return &rateLimitError{
+		message: fmt.Sprintf(
+			"429 Too many recent sign-in attempts for this account from your network "+
+				"address. Please try again in %d minutes.",
+			int(AttemptLookback/time.Minute),
+		),
+		retryAfterSeconds: retryAfterSeconds,
+	}
 }
 
 const AttemptLookback = 5 * time.Minute

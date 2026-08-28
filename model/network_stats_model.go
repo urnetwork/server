@@ -116,11 +116,22 @@ type ProviderCountryCount struct {
 // consumer that keeps per-country state must treat absence as zero. The
 // result is ordered by country code.
 func CountProvidersByCountry(ctx context.Context) []ProviderCountryCount {
-	counts := []ProviderCountryCount{}
+	var counts []ProviderCountryCount
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
+		counts = countProvidersByCountry(ctx, conn)
+	})
+	return counts
+}
+
+// countProvidersByCountry is the connection-scoped form used when a caller
+// already holds a replica connection (notably ComputeStats). Keeping the live
+// public summaries on that same connection avoids opening a nested pool
+// checkout during the hourly historical export.
+func countProvidersByCountry(ctx context.Context, conn server.PgConn) []ProviderCountryCount {
+	counts := []ProviderCountryCount{}
+	result, err := conn.Query(
+		ctx,
+		`
                 SELECT
                     location.country_code,
                     MIN(location.location_name),
@@ -142,22 +153,21 @@ func CountProvidersByCountry(ctx context.Context) []ProviderCountryCount {
                 GROUP BY location.country_code
                 ORDER BY location.country_code
             `,
-			ProvideModePublic,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var count ProviderCountryCount
-				server.Raise(result.Scan(
-					&count.CountryCode,
-					&count.Country,
-					&count.Count,
-					&count.RegionCount,
-					&count.CityCount,
-				))
-				count.CountryCode = strings.ToUpper(strings.TrimSpace(count.CountryCode))
-				counts = append(counts, count)
-			}
-		})
+		ProvideModePublic,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var count ProviderCountryCount
+			server.Raise(result.Scan(
+				&count.CountryCode,
+				&count.Country,
+				&count.Count,
+				&count.RegionCount,
+				&count.CityCount,
+			))
+			count.CountryCode = strings.ToUpper(strings.TrimSpace(count.CountryCode))
+			counts = append(counts, count)
+		}
 	})
 	return counts
 }

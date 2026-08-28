@@ -151,3 +151,61 @@ func TestSetProviderEgressHealthUpsertReplaces(t *testing.T) {
 		}
 	})
 }
+
+// A health measurement that has aged out must stop gating the provider in.
+//
+// This is the failure that put blackholes in the public list. Health drives the
+// gate, but nothing re-measured a provider on its own schedule: the due queue
+// keyed re-probes off provider_egress_location's age, so a provider with a
+// fresh location was never re-probed and its passing tally sat unchanged for
+// days. Measured on beta: 98.6% of gated providers were advertised on evidence
+// older than six hours, and 12 of 12 sampled from the stalest cohort answered
+// ok=0/131 when actually probed -- total blackholes, still advertised, because
+// a measurement taken days ago said they were fine.
+//
+// The bound in GetAllProviderEgressHealthCounts is what closes that. A provider
+// past ProviderEgressHealthMaxAge is absent from the map and so fails
+// passesHealth closed, exactly as a never-measured one does -- both mean "no
+// current evidence this provider carries traffic".
+//
+// The fresh provider is not decoration. It is identical to the stale one in
+// every scored figure, differing ONLY in measured_at, so it is what makes this
+// a test of the age bound rather than of the gate being reachable at all: a
+// passesHealth broken to return false for everything would still satisfy the
+// stale assertion on its own.
+func TestStaleEgressHealthStopsGatingTheProvider(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		fresh := server.NewId()
+		stale := server.NewId()
+
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId:   fresh,
+			MeasuredAt: now.Add(-time.Hour),
+			OKCount:    100, Total: 100,
+		})
+		// deliberately a minute PAST the boundary rather than exactly on it:
+		// server.NowUtc() advances between this write and the query, so an
+		// exact-boundary fixture would land on whichever side the elapsed
+		// microseconds put it
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId:   stale,
+			MeasuredAt: now.Add(-ProviderEgressHealthMaxAge - time.Minute),
+			OKCount:    100, Total: 100,
+		})
+
+		f := newProviderCountFilter(ctx)
+
+		if !f.passesHealth(fresh) {
+			t.Errorf("a provider measured 100/100 an hour ago must pass the gate")
+		}
+		if f.passesHealth(stale) {
+			t.Errorf("a provider whose only measurement is older than ProviderEgressHealthMaxAge (%s) still passes "+
+				"the gate. Stale evidence is not evidence: nothing re-measures a provider on the gate's schedule, so a "+
+				"provider that went dark keeps its passing tally and stays advertised until some other sweep reaches it",
+				ProviderEgressHealthMaxAge)
+		}
+	})
+}

@@ -72,7 +72,21 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
+		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),
+		router.NewRoute("POST", "/network/provider-blackhole-checks", handlers.SubmitProviderBlackholeChecks),
 		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
+		// operator-to-server, same operator secret as the egress routes above:
+		// the prober fetching the network client jwt that the bootstrap task
+		// minted for it. This is what makes the credential arrive without a
+		// human -- until it existed the task stored a jwt nothing ever read, and
+		// an operator still had to hand-carry one into the prober's environment.
+		// Returns the jwt and the client id it names, and nothing else -- but do
+		// NOT read that narrowness as containment. The jwt itself carries
+		// network_id, user_id and network_name as readable claims, and holding
+		// it is enough to regenerate this account's seedphrase. The operator
+		// secret checked in the handler is the actual gate. See
+		// ProberCredentialResult, which spells this out.
+		router.NewRoute("GET", "/network/prober-credential", handlers.ProberCredential),
 		// operator-to-server, same operator secret: the certificate pins this
 		// server observed DIRECTLY for the geolocation source hosts. The
 		// prober fetches them here instead of carrying a compile-time

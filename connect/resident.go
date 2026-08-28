@@ -1315,11 +1315,12 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 
 				messageByteCount := len(message)
-				sendResult := trySendPooledReceive(
+				sendResult := sendPooledReceive(
 					handleCtx.Done(),
 					nil,
 					receive,
 					message,
+					connect.CarrierReliabilityReliable,
 				)
 				switch sendResult {
 				case pooledMessageSendDelivered:
@@ -1334,6 +1335,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 						receiveQueueBoundaryExchangeAcceptTransport,
 						messageByteCount,
 					)
+					return
 				}
 			}
 		})
@@ -1410,11 +1412,12 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 
 				messageByteCount := len(message)
-				sendResult := trySendPooledReceive(
+				sendResult := sendPooledReceive(
 					handleCtx.Done(),
 					nil,
 					forward,
 					message,
+					connect.CarrierReliabilityReliable,
 				)
 				switch sendResult {
 				case pooledMessageSendDelivered:
@@ -1429,6 +1432,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 						receiveQueueBoundaryExchangeAcceptForward,
 						messageByteCount,
 					)
+					return
 				}
 			}
 		})
@@ -1451,11 +1455,7 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	switch header.Op {
 	case ExchangeOpTransport:
 		send, receive, closeTransport, err := resident.AddTransportWithProperties(
-			connect.TransferCarrierProperties{
-				Unreliable:              header.UnreliableTransfer,
-				UnreliableFlowIsolation: header.UnreliableFlowIsolation,
-				UnreliableFlowReserve:   header.UnreliableFlowReserve,
-			},
+			header.transferCarrierProperties(),
 		)
 		if err == nil {
 			runTransport(send, receive, closeTransport)
@@ -2063,13 +2063,23 @@ func exchangeOpMetricLabel(op ExchangeOp) string {
 }
 
 type ExchangeHeader struct {
-	Version                 int
-	ClientId                server.Id
-	ResidentId              server.Id
-	Op                      ExchangeOp
-	UnreliableTransfer      bool
-	UnreliableFlowIsolation bool
-	UnreliableFlowReserve   bool
+	Version                               int
+	ClientId                              server.Id
+	ResidentId                            server.Id
+	Op                                    ExchangeOp
+	UnreliableTransfer                    bool
+	UnreliableTransferMaxMessageByteCount int
+	UnreliableFlowIsolation               bool
+	UnreliableFlowReserve                 bool
+}
+
+func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierProperties {
+	return connect.TransferCarrierProperties{
+		Unreliable:                    self.UnreliableTransfer,
+		UnreliableMaxMessageByteCount: self.UnreliableTransferMaxMessageByteCount,
+		UnreliableFlowIsolation:       self.UnreliableFlowIsolation,
+		UnreliableFlowReserve:         self.UnreliableFlowReserve,
+	}
 }
 
 type ExchangeConnection struct {
@@ -2237,11 +2247,12 @@ func (self *ExchangeConnection) Run() {
 				}
 
 				messageByteCount := len(message)
-				sendResult := trySendPooledReceive(
+				sendResult := sendPooledReceive(
 					self.ctx.Done(),
 					nil,
 					self.receive,
 					message,
+					connect.CarrierReliabilityReliable,
 				)
 				switch sendResult {
 				case pooledMessageSendDelivered:
@@ -2256,6 +2267,7 @@ func (self *ExchangeConnection) Run() {
 						receiveQueueBoundaryExchangeOutboundSocket,
 						messageByteCount,
 					)
+					return
 				}
 			}
 		})
@@ -2446,6 +2458,8 @@ type ResidentTransport struct {
 
 	send    chan []byte
 	receive chan []byte
+
+	beforeReliableReceiveWaitForTest func()
 }
 
 // pooledMessageSendResult describes the final ownership of one queue offer.
@@ -2459,6 +2473,13 @@ const (
 	// pooledMessageSendDone returns ownership because a lifecycle ended.
 	pooledMessageSendDone
 )
+
+// A timeout has already returned the skipped message to the pool, so the
+// framed connection may continue only after an actual enqueue. Done and drop
+// both retire this generation; reconnect starts from a recoverable boundary.
+func pooledMessageSendKeepsGeneration(result pooledMessageSendResult) bool {
+	return result == pooledMessageSendDelivered
+}
 
 // pooledMessageSendAdmission joins queue producers with owner teardown without
 // holding a lock while a producer waits for destination capacity.
@@ -2567,15 +2588,17 @@ func sendPooledMessage(
 	}
 }
 
-// trySendPooledReceive transfers one complete carrier message without waiting
-// for queue capacity. It is the receive-side counterpart to sendPooledMessage:
-// sender-owned bridges may propagate backpressure, while a receiver must drop
-// immediately and let Transfer recovery discover the achievable rate.
-func trySendPooledReceive(
+// sendPooledReceive transfers one complete carrier message while preserving
+// the physical lane's delivery contract. Reliable framed lanes propagate
+// bounded queue backpressure to their socket reader; a true datagram lane
+// refuses immediately so its reader can continue draining the packet socket.
+func sendPooledReceive(
 	ctxDone <-chan struct{},
 	peerDone <-chan struct{},
 	destination chan<- []byte,
 	message []byte,
+	reliability connect.CarrierReliability,
+	beforeReliableWaitForTest ...func(),
 ) pooledMessageSendResult {
 	select {
 	case <-ctxDone:
@@ -2597,9 +2620,26 @@ func trySendPooledReceive(
 	case destination <- message:
 		return pooledMessageSendDelivered
 	default:
-		connect.MessagePoolReturn(message)
-		return pooledMessageSendDropped
 	}
+
+	if reliability == connect.CarrierReliabilityReliable {
+		if 0 < len(beforeReliableWaitForTest) && beforeReliableWaitForTest[0] != nil {
+			beforeReliableWaitForTest[0]()
+		}
+		select {
+		case <-ctxDone:
+			connect.MessagePoolReturn(message)
+			return pooledMessageSendDone
+		case <-peerDone:
+			connect.MessagePoolReturn(message)
+			return pooledMessageSendDone
+		case destination <- message:
+			return pooledMessageSendDelivered
+		}
+	}
+
+	connect.MessagePoolReturn(message)
+	return pooledMessageSendDropped
 }
 
 // returnReadyPooledMessages returns every pooled message currently queued on
@@ -2660,10 +2700,11 @@ func NewResidentTransportWithProperties(
 	properties connect.TransferCarrierProperties,
 ) *ResidentTransport {
 	header := ExchangeHeader{
-		Op:                      ExchangeOpTransport,
-		UnreliableTransfer:      properties.Unreliable,
-		UnreliableFlowIsolation: properties.UnreliableFlowIsolation,
-		UnreliableFlowReserve:   properties.UnreliableFlowReserve,
+		Op:                                    ExchangeOpTransport,
+		UnreliableTransfer:                    properties.Unreliable,
+		UnreliableTransferMaxMessageByteCount: properties.UnreliableMaxMessageByteCount,
+		UnreliableFlowIsolation:               properties.UnreliableFlowIsolation,
+		UnreliableFlowReserve:                 properties.UnreliableFlowReserve,
 	}
 	return newResidentTransport(ctx, exchange, header, clientId, instanceId)
 }
@@ -2746,15 +2787,16 @@ func (self *ResidentTransport) Run() {
 							writeTimer,
 							self.exchange.settings.WriteTimeout,
 						)
-						if sendResult == pooledMessageSendDone {
+						if !pooledMessageSendKeepsGeneration(sendResult) {
 							return
 						}
 					}
 				}
 			})
 
-			// Read-side bridge: never park this connection on the resident's
-			// route queue. Transfer recovery owns a refused complete message.
+			// The internal exchange is a reliable framed TCP hop. Propagate its
+			// fixed queue backpressure instead of creating an invisible sequence
+			// gap between the edge carrier and the resident Transfer receiver.
 			for {
 				select {
 				case <-handleCtx.Done():
@@ -2765,11 +2807,12 @@ func (self *ResidentTransport) Run() {
 						return
 					}
 					messageByteCount := len(message)
-					sendResult := trySendPooledReceive(
+					sendResult := sendPooledReceive(
 						handleCtx.Done(),
 						connection.Done(),
 						self.receive,
 						message,
+						connect.CarrierReliabilityReliable,
 					)
 					if sendResult == pooledMessageSendDone {
 						return
@@ -2779,6 +2822,7 @@ func (self *ResidentTransport) Run() {
 							receiveQueueBoundaryExchangeToResident,
 							messageByteCount,
 						)
+						return
 					}
 				}
 			}
@@ -2882,22 +2926,25 @@ func (self *ResidentTransport) Done() <-chan struct{} {
 	return self.ctx.Done()
 }
 
-// trySendMessage admits one socket-received message to the resident transport
-// queue without waiting. It returns ownership on refusal or teardown.
-func (self *ResidentTransport) trySendMessage(
+// sendReceivedMessage admits one complete edge-carrier message using the
+// delivery contract of the physical lane that produced it.
+func (self *ResidentTransport) sendReceivedMessage(
 	ctxDone <-chan struct{},
 	message []byte,
+	reliability connect.CarrierReliability,
 ) pooledMessageSendResult {
 	if !self.sendAdmission.start() {
 		connect.MessagePoolReturn(message)
 		return pooledMessageSendDone
 	}
 	defer self.sendAdmission.done()
-	return trySendPooledReceive(
+	return sendPooledReceive(
 		ctxDone,
 		self.Done(),
 		self.send,
 		message,
+		reliability,
+		self.beforeReliableReceiveWaitForTest,
 	)
 }
 
@@ -2989,13 +3036,11 @@ func (self *ResidentForward) Run() {
 					writeTimer,
 					self.exchange.settings.WriteTimeout,
 				)
-				if sendResult == pooledMessageSendDone {
-					return
-				}
-				if sendResult == pooledMessageSendDropped {
-					if glog.V(1) {
-						glog.Infof("[rf]drop %s->\n", self.clientId)
+				if !pooledMessageSendKeepsGeneration(sendResult) {
+					if sendResult == pooledMessageSendDropped && glog.V(1) {
+						glog.Infof("[rf]retire saturated exchange %s->\n", self.clientId)
 					}
+					return
 				}
 			}
 		}
@@ -3700,8 +3745,12 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	default:
 		connect.MessagePoolReturn(shared)
 		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward, len(transferFrameBytes))
+		// This callback carries reliable Transfer frames. It cannot block the
+		// shared client receive loop, so retire this generation on saturation;
+		// reconnect/recovery can replay from a known sequence boundary.
+		self.cancel()
 		if glog.V(1) {
-			glog.Infof("[rf]drop ingress full %s->%s\n", sourceId, destinationId)
+			glog.Infof("[rf]retire ingress full %s->%s\n", sourceId, destinationId)
 		}
 	}
 }
@@ -3955,7 +4004,13 @@ func (self *Resident) AddTransportWithProperties(
 		[]connect.Route{send},
 		properties,
 	)
-	routeManager.UpdateTransport(transport.receiveTransport, []connect.Route{receive})
+	routeManager.UpdateTransportWithProperties(
+		transport.receiveTransport,
+		[]connect.Route{receive},
+		connect.TransferCarrierProperties{
+			ReceiveReliability: connect.CarrierReliabilityReliable,
+		},
+	)
 
 	func() {
 		self.stateLock.Lock()
