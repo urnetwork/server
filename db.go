@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -352,42 +353,33 @@ func (self *PgRetry) Error() string {
 // https://www.postgresql.org/docs/current/mvcc-serialization-failure-handling.html
 // https://www.postgresql.org/docs/current/errcodes-appendix.html
 func isTransientError(err error) bool {
-	switch v := err.(type) {
-	case *pgconn.PgError:
-		if pgerrcode.IsIntegrityConstraintViolation(v.Code) {
-			return true
-		}
-		if pgerrcode.IsTransactionRollback(v.Code) {
-			return true
-		}
-		// fmt.Printf("[db]intransient error = %d\n", v.Code)
-		return false
-	case *PgRetry:
-		return true
-	default:
-		return false
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgerrcode.IsIntegrityConstraintViolation(pgErr.Code) ||
+			pgerrcode.IsTransactionRollback(pgErr.Code)
 	}
+	var retryErr *PgRetry
+	if errors.As(err, &retryErr) {
+		return true
+	}
+	return false
 }
 
 func isConnectionError(err error) bool {
-	switch v := err.(type) {
-	case *pgconn.PgError:
-		if pgerrcode.IsConnectionException(v.Code) {
-			// try a new connection
-			return true
-		}
-		return false
-	default:
-		switch err.Error() {
-		// pgconn.connLockError
-		// https://github.com/jackc/pgconn/blob/master/errors.go
-		case "conn closed":
-			// try a new connection
-			return true
-		default:
-			return false
-		}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgerrcode.IsConnectionException(pgErr.Code)
 	}
+	// pgx protocol errors wrap the underlying socket failure. In particular,
+	// pgproto3.writeError wraps net.OpError, so inspect the complete chain before
+	// deciding whether the current pooled connection can be reused.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	// pgconn.connLockError does not expose its concrete type.
+	// https://github.com/jackc/pgx/blob/master/pgconn/errors.go
+	return err.Error() == "conn closed"
 }
 
 // maintenance connection
