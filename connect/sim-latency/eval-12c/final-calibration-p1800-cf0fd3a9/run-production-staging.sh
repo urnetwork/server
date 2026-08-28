@@ -940,6 +940,7 @@ common_args=(
     --arg protocol "$PROTOCOL_SHA"
     --arg reference_v5 "$REFERENCE_V5_STAGING_AMENDMENT_SHA"
     --arg release_amendment "$RELEASE_AMENDMENT_SHA"
+    --arg remediation_amendment "$REMEDIATION_AMENDMENT_SHA"
     --arg control "$CONTROL_COMMIT"
 )
 
@@ -957,6 +958,7 @@ jq -n "${common_args[@]}" \
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
       production_staging_reference_v5_amendment_sha256:$reference_v5,
       production_release_self_check_contract_amendment_sha256:$release_amendment,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment,
       control_plane_commit:$control,
       round_id:$round,job_id:$job,evidence_sha256:{round:$round_sha,submit_a:$submit_a,
         submit_b:$submit_b,active_submitter:$active,terminal_operator:$terminal,revealed_info:$revealed,
@@ -979,6 +981,7 @@ jq -n "${common_args[@]}" \
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
       production_staging_reference_v5_amendment_sha256:$reference_v5,
       production_release_self_check_contract_amendment_sha256:$release_amendment,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment,
       control_plane_commit:$control,
       round_id:$round,job_id:$job,patch_sha256:$patch,
       evidence_sha256:{rebaseline:$rebaseline,promotion:$promotion,worker_result:$worker,
@@ -1000,6 +1003,7 @@ jq -n "${common_args[@]}" \
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
       production_staging_reference_v5_amendment_sha256:$reference_v5,
       production_release_self_check_contract_amendment_sha256:$release_amendment,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment,
       control_plane_commit:$control,
       round_id:$round,job_id:$job,evidence_sha256:{ready:$ready,events:$events,
         failed_attempt:$failed_attempt,resource_bomb:$resource_bomb},
@@ -1020,6 +1024,7 @@ jq -n "${common_args[@]}" \
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
       production_staging_reference_v5_amendment_sha256:$reference_v5,
       production_release_self_check_contract_amendment_sha256:$release_amendment,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment,
       control_plane_commit:$control,
       round_id:$round,job_id:$job,retain_until:$retain,
       evidence_sha256:{accounting:$accounting,resources:$resources,quota:$quota,failed_attempt:$failure},
@@ -1039,6 +1044,7 @@ jq -n "${common_args[@]}" \
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
       production_staging_reference_v5_amendment_sha256:$reference_v5,
       production_release_self_check_contract_amendment_sha256:$release_amendment,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment,
       control_plane_commit:$control,
       round_id:$round,job_id:$job,evidence_sha256:{local_mounts:$mounts,
         control_boundary:$boundary,secret_scan:$scan,deployment:$deployment},

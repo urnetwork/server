@@ -827,6 +827,14 @@ def load_production_check(
         raise AuditError(
             f"production check {check_id!r} content is incomplete or unbound"
         )
+    if evidence.get(
+        "production_staging_attempt_06_remediation_amendment_sha256"
+    ) != readiness.get(
+        "production_staging_attempt_06_remediation_amendment_sha256"
+    ):
+        raise AuditError(
+            f"production check {check_id!r} is not bound to the attempt-06 remediation"
+        )
     if check_id not in {
         "release_artifacts",
         "service_backed_fifo_cache_failover",
@@ -846,17 +854,6 @@ def load_production_check(
     ):
         raise AuditError(
             f"production check {check_id!r} is not bound to the release self-check amendment"
-        )
-    if check_id in {
-        "release_artifacts",
-        "service_backed_fifo_cache_failover",
-    } and evidence.get(
-        "production_staging_attempt_06_remediation_amendment_sha256"
-    ) != readiness.get(
-        "production_staging_attempt_06_remediation_amendment_sha256"
-    ):
-        raise AuditError(
-            f"production check {check_id!r} is not bound to the attempt-06 remediation"
         )
     return {
         "evidence_path": relative,

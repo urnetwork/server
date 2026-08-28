@@ -652,6 +652,11 @@ def verify_check(check_id: str, name: str, expected: set[str]) -> dict[str, Any]
         and all(assertion is True for assertion in assertions.values()),
         f"check assertions failed: {check_id}",
     )
+    require(
+        value.get("production_staging_attempt_06_remediation_amendment_sha256")
+        == REMEDIATION_AMENDMENT_SHA256,
+        f"attempt-06 remediation is unbound: {check_id}",
+    )
     if check_id not in {
         "release_artifacts",
         "service_backed_fifo_cache_failover",
@@ -665,12 +670,6 @@ def verify_check(check_id: str, name: str, expected: set[str]) -> dict[str, Any]
             value.get("production_release_self_check_contract_amendment_sha256")
             == RELEASE_SELF_CHECK_AMENDMENT_SHA256,
             f"release self-check amendment is unbound: {check_id}",
-        )
-    else:
-        require(
-            value.get("production_staging_attempt_06_remediation_amendment_sha256")
-            == REMEDIATION_AMENDMENT_SHA256,
-            f"attempt-06 remediation is unbound: {check_id}",
         )
     require(isinstance(evidence, dict) and evidence, f"check has no content evidence: {check_id}")
     serialized = path.read_text(encoding="utf-8").lower()
