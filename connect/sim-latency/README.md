@@ -54,6 +54,8 @@ See:
 
 - [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for the evaluator and artifact contract;
 - [`PLAYBOOK.md`](PLAYBOOK.md) for live deployment and epoch operation;
+- [`launch/APEX-OPEN-QUESTIONS.md`](launch/APEX-OPEN-QUESTIONS.md) for the shareable partner
+  decision and acceptance checklist;
 - [`playbook.yml`](playbook.yml) for machine-readable launch status;
 - [`baseline/README.md`](baseline/README.md) for preserved calibration evidence;
 - [`baseline/final-baseline.html`](baseline/final-baseline.html) for the visual

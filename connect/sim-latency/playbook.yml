@@ -106,14 +106,14 @@ retention:
   candidate_credentials_exposed: false
   warn_used_percent: 75
   page_used_percent: 90
-  deletion_owner: pending_operator_record
+  deletion_owner: support@ur.xyz
 
 monitoring:
   destination: main_grafana_mimir
   dashboard: server/grafana/dashboards/competition.json
   alert_rules: warp/grafana/alerting/competition.yml
   contact_policy: existing_main_policy
-  on_call_record: pending_operator_record
+  on_call_record: support@ur.xyz
   runner_heartbeat_interval_seconds: 15
   runner_heartbeat_warning_age_seconds: 30
   operational_signals:
@@ -172,8 +172,10 @@ checklist:
     evidence: docker image inspect sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
   - id: live_minio_readiness_backup_capacity_and_deletion_owner
     status: deployment_verification_required
+    deletion_owner: support@ur.xyz
   - id: grafana_deploy_contact_routing_and_on_call
     status: deployment_verification_required
+    on_call_and_incident_contact: support@ur.xyz
   - id: miner_onboarding_token_distribution_and_revocation
     status: operator_action_required
   - id: rewards_eligibility_legal_and_abuse

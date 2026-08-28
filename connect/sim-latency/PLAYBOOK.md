@@ -25,6 +25,7 @@ Read these first:
 - [Competition OpenAPI](../../../sn/api/competition.yml)
 - [Apex integration gap](../../competition/APEX-INTEGRATION-GAP.md)
 - [Apex handoff draft](../../competition/APEX-HANDOFF.md)
+- [Apex open-question checklist](launch/APEX-OPEN-QUESTIONS.md)
 - [Machine-readable launch status](playbook.yml)
 
 ## 1. Go-live position
@@ -107,8 +108,8 @@ has an owner and a recorded value.
 | Service supervision | **Complete by operator confirmation.** Main API plus one competition worker per epoch use the reviewed main-environment migration and boot ordering. The worker exits zero after close and FIFO drain, leaving significant candidates embargoed for the separate honesty-review command. | Verify the final deployed versions, singleton worker heartbeat, clean one-shot exit handling, and review-harness handoff in the agentic controller. |
 | Public ingress | **Complete by operator confirmation.** DNS/TLS/reverse proxy/firewall/rate limits are provided by main. | Smoke the final `/competition/*` routes, including the 262,144-byte request ceiling and ordinary ingress rate limiting. There is no epoch job-count rejection. |
 | Release distribution | **Epoch-0 complete by local immutable load.** Docker resolves `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; the public info response exposes the current evaluator image, and each job response exposes its frozen evaluator plus exact API/worker runtime images. Main API/worker releases continue normally and are not scoring inputs. | Set the same evaluator digest in live `competition.yml`, then verify runtime API/worker digest injection on the deployed services. |
-| Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` fails if object lock or versioning is absent. | Prove the live bucket check, capacity, backup replication, and the named post-`retain_until` deletion owner. Grafana warns at 75% used and pages at 90%. |
-| Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, and provisioned Grafana alert rules are implemented for the main Mimir/Grafana pipeline. | Deploy the final server and warp commits and map `severity=page|warn` through the existing main contact policy; record the human roster/incident contact in the operator record. |
+| Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` fails if object lock or versioning is absent. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Prove the live bucket check, capacity, and backup replication. Grafana warns at 75% used and pages at 90%. |
+| Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, and provisioned Grafana alert rules are implemented for the main Mimir/Grafana pipeline. `support@ur.xyz` owns on-call and incident response. | Deploy the final server and warp commits and map `severity=page|warn` through the existing main contact policy to `support@ur.xyz`. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. | Distribute endpoint/token/onboarding instructions and exercise revocation once. No separate API is required. |
 | Leaderboard and winner | Implemented at public `GET /competition/leaderboard`; only finalized epochs appear and rows expose approved/rejected/not-reviewed disposition. Ranked significant candidates require append-only operator honesty review, and promotion is database-bound to the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
 | Apex | Adapter mapping and handoff fields are documented in `competition/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
@@ -680,10 +681,12 @@ Still to add or approve before a public competition starts:
   `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`;
   main API/worker releases remain on `main`, and every job API response persists
   and exposes its frozen evaluator plus exact API/worker runtime image digests;
-- [ ] live MinIO `/readyz` proof, backup-replication record, capacity check, and
-  the owner authorized to delete evidence after `retain_until`;
+- [ ] live MinIO `/readyz` proof, backup-replication record, and capacity check;
+  `support@ur.xyz` is recorded as the owner authorized to delete evidence after
+  `retain_until`;
 - [ ] deploy the final server/warp monitoring commits and bind `severity` labels
-  to the existing main Grafana contact policy/on-call record;
+  to the existing main Grafana contact policy routed to the recorded on-call
+  and incident contact, `support@ur.xyz`;
 - [ ] miner/submission onboarding, token distribution, and revocation flow;
 - [ ] publish rewards, eligibility, legal terms, and abuse/appeal process (the
   submission fee is frozen at $20 USD);
