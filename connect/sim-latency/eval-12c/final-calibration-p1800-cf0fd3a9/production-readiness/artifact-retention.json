@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-readiness-check",
+  "check_id": "artifact_retention",
+  "passed": true,
+  "generated_at": "2026-08-28T11:15:15Z",
+  "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+  "production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
+  "production_staging_reference_v5_amendment_sha256": "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695",
+  "production_release_self_check_contract_amendment_sha256": "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d",
+  "production_staging_attempt_06_remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
+  "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+  "round_id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+  "job_id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+  "retain_until": "2027-02-01T00:00:00Z",
+  "evidence_sha256": {
+    "accounting": "64093a842a36864e95e65c3c1fc48f97e4c633cb6737b1a6b276a9007285da3f",
+    "resources": "3c084c566f80e2d66feff527e7953e0ef0f87f301fb22e6bbc894fb59067e15e",
+    "quota": "cc104a3ad0b50ad5d9f4dc10ed4ec33653752fbf7bba05984de235c86617f57d",
+    "failed_attempt": "abbaee29ddac29ca3d480204970c0dc0ed722367953bca3c15d74fbddfc85258"
+  },
+  "assertions": {
+    "accounting_immutable": true,
+    "resources_immutable": true,
+    "artifact_quota_verified": true,
+    "retain_until_verified": true,
+    "failure_evidence_retained": true
+  }
+}

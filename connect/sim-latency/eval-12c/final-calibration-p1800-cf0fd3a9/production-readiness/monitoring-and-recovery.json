@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-readiness-check",
+  "check_id": "monitoring_and_recovery",
+  "passed": true,
+  "generated_at": "2026-08-28T11:15:15Z",
+  "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+  "production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
+  "production_staging_reference_v5_amendment_sha256": "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695",
+  "production_release_self_check_contract_amendment_sha256": "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d",
+  "production_staging_attempt_06_remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
+  "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+  "round_id": "01a046c8-1b3b-e89d-e68f-51d19c759e4d",
+  "job_id": "01a04755-63f0-041c-60bb-47b92ccbcf8c",
+  "evidence_sha256": {
+    "ready": "00311c7c033e91f4a6150346fdad7d61909f97f435cf3ca063e84a882d459688",
+    "events": "8f39c41eb9e63109052fea223f3432718ccdcb6fcefcb688a43d6d871dcee97e",
+    "failed_attempt": "abbaee29ddac29ca3d480204970c0dc0ed722367953bca3c15d74fbddfc85258",
+    "resource_bomb": "f1330f3c47856135823221fa153b6253d432d46be368baac9ea3a008bc781bfe"
+  },
+  "assertions": {
+    "single_job_fifo_verified": true,
+    "lease_recovery_verified": true,
+    "host_heartbeat_verified": true,
+    "resource_reports_verified": true,
+    "cleanup_after_failure_verified": true
+  }
+}
