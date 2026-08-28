@@ -45,6 +45,10 @@ const InternalApiPort = 8083
 const InternalWgPort = 8084
 
 func DefaultProxySettings() *ProxySettings {
+	// HttpProxy interprets ProxyConnectTimeout as retry pacing, not as a total
+	// timeout. Follow its prompt production default so a transient hosted-device
+	// dial failure can recover inside an ordinary client request deadline.
+	httpProxySettings := proxy.DefaultHttpProxySettings()
 	return &ProxySettings{
 		SocksPort:                InternalSocksPort,
 		HttpPort:                 InternalHttpPort,
@@ -54,7 +58,7 @@ func DefaultProxySettings() *ProxySettings {
 		ProxyWriteTimeout:        15 * time.Second,
 		ProxyIdleTimeout:         5 * time.Minute,
 		ProxyTlsHandshakeTimeout: 30 * time.Second,
-		ProxyConnectTimeout:      30 * time.Minute,
+		ProxyConnectTimeout:      httpProxySettings.ProxyConnectTimeout,
 		NotificationTimeout:      5 * time.Second,
 		WarmupTimeout:            30 * time.Minute,
 		MaxRequestBytes:          32 * model.Kib,

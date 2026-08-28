@@ -2358,6 +2358,20 @@ assuming subnet `::1`. Verify both families with source-aware `route get`,
 packet captures, and application handshakes after applying it; an internal 200
 alone cannot close the incident.
 
+**Late-RA boot signature (fireside, 2026-08-28):**
+`network-online.target` can start the transparent LB after its required static
+IPv4 address exists but before Router Advertisement assigns the optional public
+IPv6 address. The startup log then names the public interface only as `ipv4=...`
+while the Docker bridge already has `ipv6=...`; later `ip -6 addr` shows the
+public address, but `ip -6 rule` has no Warp rules and `ip -6 route show table
+<rttable>` says the FIB table does not exist. A forced-IPv4 authenticated proxy
+request passes while the normal dual-stack hostname stalls. This is not a
+container, provider-window, or router-whitelist failure. Current Warp retries
+live interface discovery while the optional routing-table IPv6 family is
+missing, then installs its source/fwmark rules and the real RA default gateway.
+For a pre-fix binary, restarting only the transparent LB controller after the
+address appears restores the table without restarting proxy containers.
+
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
 
 `providers-unresponsive` is not sufficient evidence that providers failed.
@@ -2427,6 +2441,16 @@ Connect returns no route metadata for nil or typed-nil endpoints and continues
 processing the DNS response. Count this stack independently from window stalls;
 after deploying the fix, require zero new occurrences throughout the sustained
 acceptance window.
+
+**HTTP transient-dial amplification:** one sustained HTTP CONNECT request may
+time out while the same temporary device subsequently passes all SOCKS and
+WireGuard requests. On its exact block, the distinguishing counter edge is one
+new `ConnectDialErrors` followed by `ConnectClientsGone`, with no DoH panic,
+identity restore, or pending-H1 increase. `ProxyConnectTimeout` is the interval
+between retries, not a total timeout. A legacy 30-minute value turns one
+recoverable TUN dial error into a client-visible terminal timeout; current
+proxy/server defaults pace retries at one second and continue until the client
+leaves. A clean immediate rerun does not make the legacy interval safe.
 
 ---
 
