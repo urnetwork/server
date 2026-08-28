@@ -101,6 +101,8 @@ func TestLaunchPlaybookFreezesWeeklySixEpochContract(t *testing.T) {
 		"six_epoch_batch_lifecycle",
 		"immutable_artifact_implementation",
 		"grafana_implementation",
+		"runtime_control_plane_identity",
+		"winner_source_policy",
 	} {
 		if !strings.HasPrefix(statuses[completeId], "complete") {
 			t.Errorf("checklist item %q = %q, want complete", completeId, statuses[completeId])

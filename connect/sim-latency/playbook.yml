@@ -20,15 +20,28 @@ season:
   first_opens_at: null
   season_ends_at: null
   retain_until: null
-  baseline_source_policy: approval_required
+  baseline_source_policy: promote_each_epoch_winner
+
+evaluation_source:
+  manifest: config/main/sim-latency.yml
+  branch: sim-latency
+  current_source_epoch: 0
+  round_source_epoch_offset: -1
+  repository_commits:
+    connect: 4f3f017f5448c18620b9eb3aab8c1002e869536d
+    sdk: 3c2d56b47155cd026c2f572337d45bd0210f5bf5
+    server: 859be81191fafcc576b617ebec716fa49401643a
+    proxy: 17f929c926d49c27138569c85899bd2e98ec0ec1
+  source_config_sha256: 486641577844bb8373179f4389289249cda3059ff4bfb482b7daf44f8ebbf3ee
+  evaluator_image_id: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
+  simulator_sha256: a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b
+  promotion_command: sim-latency promote
+  activation_order: repository_branches_then_config_ledger
 
 release_record:
-  server_commit: 928a40106aa2a45ed6ba113d1025a5913f262b8b
-  server_metadata_commit: recorded_by_the_following_commit
-  sn_commit: 68f21fe916bf0d78943874e9561d303da035c10b
-  warp_commit: 160a56ddd2e3d3107e8905824ff69fab210deee1
-  main_api_image_digest: null
-  competition_worker_image_or_archive_digest: null
+  control_plane_branch: main
+  control_plane_commits_are_scoring_inputs: false
+  exact_runtime_image_digest_persisted_per_evaluation: true
   openapi_sha256: 161f534b77265ae91ccbbeb771a8d408e50546d453e9b1bc811792e56c6c0fe6
   recorded_by: local_finalization
   recorded_at: 2026-08-28T15:39:21Z
@@ -103,8 +116,9 @@ checklist:
     status: approval_required
   - id: credential_bundle
     status: approval_or_rotation_required
-  - id: final_release_record
-    status: deployment_action_required
+  - id: runtime_control_plane_identity
+    status: complete
+    evidence: server/competition/deployment_identity.go
   - id: live_minio_readiness_backup_capacity_and_deletion_owner
     status: deployment_verification_required
   - id: grafana_deploy_contact_routing_and_on_call
@@ -114,7 +128,8 @@ checklist:
   - id: fees_rewards_eligibility_legal_and_abuse
     status: business_approval_required
   - id: winner_source_policy
-    status: approval_required
+    status: complete
+    evidence: config/main/sim-latency.yml and server/connect/sim-latency/source_promote.go
   - id: apex_adapter_staging_registry_and_signed_handoff
     status: external_acceptance_required
     evidence: server/competition/APEX-HANDOFF.md

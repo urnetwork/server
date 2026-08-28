@@ -34,15 +34,16 @@ Read these first:
 | Item | Frozen value / state |
 |---|---|
 | Public patch-authoring tag | `apex-season-1` at `eb697281cbe0a19a27d7771fe69fb24c2c3dab8c` |
-| Evaluator source | `46515d82fe98ff666c61b2b5bb1d34a89cf4dad8` |
-| Control-plane source | Server code `928a40106aa2a45ed6ba113d1025a5913f262b8b`; API contract `68f21fe916bf0d78943874e9561d303da035c10b`; alert provisioning `160a56ddd2e3d3107e8905824ff69fab210deee1`; the following server commit contains metadata only |
-| Evaluator image | `sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c` |
+| Evaluator source | Epoch ledger `config/main/sim-latency.yml`; current source epoch 0: connect `4f3f017f…`, sdk `3c2d56b4…`, server `859be811…`, proxy `17f929c9…` |
+| Control plane | API and worker follow `main`; their commits are not scoring inputs. Every job persists the exact API and worker runtime image digests. |
+| Evaluator image | Local epoch-0 image `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; ledger SHA-256 `486641577844bb8373179f4389289249cda3059ff4bfb482b7daf44f8ebbf3ee` |
 | Host qualification | `acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3` |
-| Simulator / scorer | `bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997` |
+| Simulator / scorer | Epoch-0 image binary `a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b` |
 | Workload | 1,800 providers; 200 clients; 80 arrivals/min; quality window 2; 4 exchange hosts; 4 shards |
 | Measurement | 180 seconds; impairment on; median of `R=9` |
 | Takeover rule | candidate raw score `<= same-round baseline * 0.839`, plus G1–G6 |
 | Epoch lifecycle | six epochs; exactly seven days of submission; batch grading only after close; deterministic winner and next-epoch creation |
+| Winner promotion | Round N evaluates source epoch N-1. After finalization, `sim-latency promote --epoch N` commits the winner, pushes measured branches, then activates source epoch N by pushing the config ledger last. |
 | Queue / timeout | ten distinct canonical patches per epoch; one active evaluation; 49,392-second bounded job timeout; three infrastructure attempts |
 | Patch surface | only `connect/resident_contract_manager.go`; maximum 262,144 bytes |
 | Evaluation leaves | `/home/by/urnetwork/config/local` and `/home/by/urnetwork/vault/local`, direct and read-only |
@@ -104,11 +105,11 @@ has an owner and a recorded value.
 | Control-plane data services | **Complete by operator confirmation.** Queue/round/result state uses the main PostgreSQL and the existing main Redis/restore boundary. | Run the normal migration verification for the final commit; no new durable data service is needed. |
 | Service supervision | **Complete by operator confirmation.** Main API plus one competition worker use the reviewed main-environment migration and boot ordering. | Verify the final deployed versions and singleton worker heartbeat. |
 | Public ingress | **Complete by operator confirmation.** DNS/TLS/reverse proxy/firewall/rate limits are provided by main. | Smoke the final `/competition/*` routes, including the 262,144-byte request ceiling and 429 behavior. |
-| Release distribution | Evaluator and historical control-plane evidence are sealed. The final server/API/alert source commits and OpenAPI digest are recorded in `playbook.yml`. | Build and record the main API/worker image or sealed-archive digests. A registry is optional on one host; a verified sealed-archive load record is sufficient. |
+| Release distribution | Evaluator identity and OpenAPI digest are recorded. Main API/worker releases continue normally and are not scoring inputs; each evaluation stores their exact runtime image digests. | Publish or locally load the epoch-0 evaluator image by immutable digest. Verify runtime digest injection on the deployed API and worker. |
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` fails if object lock or versioning is absent. | Prove the live bucket check, capacity, backup replication, and the named post-`retain_until` deletion owner. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, and provisioned Grafana alert rules are implemented for the main Mimir/Grafana pipeline. | Deploy the final server and warp commits and map `severity=page|warn` through the existing main contact policy; record the human roster/incident contact in the operator record. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. | Distribute endpoint/token/onboarding instructions and exercise revocation once. No separate API is required. |
-| Leaderboard and winner | Implemented at public `GET /competition/leaderboard`; only finalized epochs appear and winner selection is deterministic. | Publish fees, rewards, eligibility, legal terms, and abuse/appeal handling. Also approve a fixed-base six-epoch season or define a separately signed winner-source promotion/rebuild process; code does not silently mutate the trusted base. |
+| Leaderboard and winner | Implemented at public `GET /competition/leaderboard`; only finalized epochs appear, winner selection is deterministic, and the auditable source-epoch promotion/rebuild path is implemented. | Publish fees, rewards, eligibility, legal terms, and abuse/appeal handling. Exercise one dry-run promotion before opening epoch 1. |
 | Apex | Adapter mapping and handoff fields are documented in `competition/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
 
 The installed provisioner authenticates an existing bundle and intentionally
@@ -166,21 +167,22 @@ binaries predate the six-epoch lifecycle, MinIO archive, leaderboard, and
 competition signals; do not deploy those two historical binaries as the live
 control plane.
 
-After the final commits are pushed:
+After the control-plane changes are pushed:
 
 1. build and deploy the main API through the normal main-environment release;
-2. build `cli/competitionworker` from the exact same server commit;
+2. build and deploy `cli/competitionworker` from `main`;
 3. build the host simulator with `cd connect/sim-latency && make`;
 4. run `(cd connect/sim-latency && ./tests.sh)` and the Go control-plane gates;
-5. record commit, binary SHA-256, image/archive digest, host, UTC time, and
-   operator in `playbook.yml` or its signed deployment copy; and
+5. verify the deploy system injects `WARP_IMAGE_DIGEST=sha256:...` into both
+   processes and that new jobs persist those two exact runtime identities; and
 6. retain the OpenAPI bytes and SHA-256 beside that release record.
 
-The evaluator image remains pinned to the qualified digest in section 1 unless
-its trusted source changes, in which case the containment and calibration gates
-must be repeated. Main API code may move for this control-plane finalization;
-the score baseline data is not recomputed merely because API routing or
-retention code changed.
+The evaluator image is immutable within a source epoch. Main API and worker code
+may continue moving for correctness and operational improvements: their source
+commits are deliberately not frozen scoring inputs. The pull/run boundary uses
+the inspected image id, and each evaluation request, database row, event, and
+artifact manifest records the exact API and worker runtime image digests. The
+score baseline is not recomputed merely because control-plane code changes.
 
 Use one root-owned environment file for API, migration, rebaseline, and worker.
 It uses the normal main config/vault roots for the trusted processes. Candidate
@@ -249,7 +251,7 @@ curl -fsS "$COMPETITION_API_BASE/healthz" | \
   jq -e '.status == "alive"'
 curl -fsS "$COMPETITION_API_BASE/info" | \
   jq -e '.enabled == true and
-         .base_sha == "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8" and
+         .base_sha == "859be81191fafcc576b617ebec716fa49401643a" and
          .evaluation_policy.provider_count == 1800 and
          .evaluation_policy.replicates == 9 and
          .evaluation_policy.takeover_margin == 0.161'
@@ -444,6 +446,53 @@ The epoch is not published merely because it closed or revealed. Publication
 waits until every accepted job is terminal and the deterministic winner update
 commits; only then may the automatic next epoch be created.
 
+### Promote the finalized winner to the next source epoch
+
+Round N evaluates source epoch N-1. As soon as round N is finalized, retrieve
+the authenticated winning `canonical.patch` from MinIO and place it in a
+restricted winner directory. In a dedicated release workspace, check out the
+`sim-latency` branch of `connect`, `sdk`, `server`, and `proxy` at the commits
+for source epoch N-1, then run:
+
+```bash
+cd /release-workspace/server/connect/sim-latency
+./sim-latency source-check --epoch "REPLACE_WITH_N_MINUS_1"
+./sim-latency promote \
+  --epoch "REPLACE_WITH_N" \
+  --winner /restricted/winner-N \
+  --winner-job-id "REPLACE_WITH_FINALIZED_WINNER_JOB_ID"
+```
+
+The winner directory accepts `canonical.patch` as the server patch, or explicit
+`connect.patch`, `sdk.patch`, `server.patch`, and `proxy.patch` files. Promotion
+requires clean exact local heads and matching remote branch heads, applies each
+patch in an isolated clone, creates at most one commit per changed repository,
+and repeats all four repository commits in the new ledger entry. Repository
+branches are pushed first; `config/main/sim-latency.yml` is committed and pushed
+last, so an interrupted cross-repository update never activates a partial
+source epoch. `--dry-run` performs every staging and validation step without a
+push or local fast-forward.
+
+For rounds 1 through 5, build the next immutable evaluator image during the
+16-hour preparation window and deploy its base SHA, image digest, and
+simulator/scorer digests through the trusted main competition configuration:
+
+```bash
+cd /release-workspace/server
+./competition/container/build-base.sh \
+  --epoch "REPLACE_WITH_N" \
+  --source-config /home/by/urnetwork/config/main/sim-latency.yml \
+  --tag urnetwork/sim-latency-evaluator-base:epoch-N
+```
+
+The build embeds only the sanitized epoch ledger at
+`/opt/urnetwork/sim-latency.yml`; it does not mount or copy `config/main`,
+`config/all`, `vault/main`, or `vault/all`. Docker runs `source-check` inside
+the image before publishing it. Update the main evaluator policy, complete the
+new round's same-round rebaseline, and require `/readyz` before `opens_at`.
+Round 6 is promoted the same way to leave the final winning product at source
+epoch 6, but it has no following competition round to rebaseline.
+
 After the season:
 
 1. close ingress and drain the queue;
@@ -493,6 +542,8 @@ Technical evidence already complete:
   routes, FIFO/cache/failover, and structural OpenAPI conformance;
 - [x] six exact weekly submission epochs, post-close batch grading,
   deterministic winner finalization, and automatic next-epoch creation;
+- [x] per-epoch measured-source ledger, mandatory run preflight, isolated
+  winner commit/push command, and epoch-bound evaluator image build;
 - [x] MinIO versioned compliance retention with post-upload authentication and
   fail-closed readiness;
 - [x] main Grafana metrics/dashboard plus provisioned worker, archive,
@@ -507,17 +558,15 @@ Still to add or approve before a public competition starts:
   six-epoch weekly cadence and close-time reveal are already frozen);
 - [ ] atomic live credential/seed-key rotation or explicit approval to promote
   the staging-generated bundle;
-- [ ] build and record the final main-API/worker image/archive digests, then add
-  either a verified local load record or approved digest-pinned registry
-  publication (the source commits and OpenAPI digest are already recorded);
+- [ ] publish or locally load the epoch-0 evaluator image by immutable digest;
+  main API/worker releases remain on `main` and persist their exact runtime
+  image digests per evaluation rather than freezing one season-wide build;
 - [ ] live MinIO `/readyz` proof, backup-replication record, capacity check, and
   the owner authorized to delete evidence after `retain_until`;
 - [ ] deploy the final server/warp monitoring commits and bind `severity` labels
   to the existing main Grafana contact policy/on-call record;
 - [ ] miner/submission onboarding, token distribution, and revocation flow;
 - [ ] fees, rewards, eligibility, legal terms, and abuse/appeal process;
-- [ ] explicit approval that all six epochs use the frozen season base, or a
-  separately reviewed signed winner-source promotion/rebuild process; and
 - [ ] Macrocosmos asynchronous-adapter/staging/private-registry acceptance and
   signed public Apex handoff artifacts.
 
