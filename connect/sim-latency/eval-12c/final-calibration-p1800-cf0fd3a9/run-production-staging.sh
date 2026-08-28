@@ -21,6 +21,7 @@ readonly INDEPENDENT_PROGRESS="$REFERENCE_V5/hidden-launch-runtime/independent-r
 readonly INDEPENDENT_ATTESTATION_REPAIR="$REFERENCE_V5/hidden-attestation-path-repair.json"
 readonly INDEPENDENT_ATTESTATION_REPAIR_SCRIPT="$REFERENCE_V5/repair-hidden-attestation-path.py"
 readonly REFERENCE_V5_STAGING_AMENDMENT="$ROOT/production-staging-reference-v5-amendment.json"
+readonly RELEASE_AMENDMENT="$ROOT/production-release-self-check-contract-amendment.json"
 readonly SERVICE_CHECK="$ROOT/production-readiness/service-backed-fifo-cache-failover.json"
 readonly RELEASE_CHECK="$ROOT/production-readiness/release-artifacts.json"
 readonly OUTPUT_ROOT="$ROOT/production-readiness"
@@ -43,14 +44,18 @@ readonly DBINIT="$RELEASE/binaries/competitiondbinit"
 readonly SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
 readonly PROTOCOL_SHA=6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af
 readonly REFERENCE_V5_STAGING_AMENDMENT_SHA=618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695
+readonly RELEASE_AMENDMENT_SHA=99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d
 readonly INDEPENDENT_ATTESTATION_REPAIR_SHA=499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d
 readonly INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA=a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0
-readonly CONTROL_COMMIT=5070445ddb1764ad80f999102a9d71946e5a9e29
-readonly CONTROL_RELEASE_SHA=b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940
+readonly CONTROL_COMMIT=2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36
+readonly CONTROL_RELEASE_SHA=90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7
+readonly RELEASE_MANIFEST_SHA=17d2817a69f3bc506c98ba00f31b8cc15fc9e2b7e0a4e18b5ca0df9fc89bfc00
+readonly RELEASE_CHECK_SHA=3fa3ca749a4718f31ed9ac17351c2b2695891f89117e794b7d3220e477d3b5cd
+readonly SERVICE_CHECK_SHA=e3c168731edab3f0de0a823aaed23aa64e72b1ed7ea32e0dc5663806af7c4a08
 readonly EVALUATOR_IMAGE=sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038
 readonly HOST_QUALIFICATION_SHA=9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f
 readonly NOOP_SHA=8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775
-readonly PROVISIONER_SHA=e1327a534da3513b1acc503d08a62f5b157c2704c6994ba0f91057060e023893
+readonly PROVISIONER_SHA=3f68f7dca0f74523aaa0a36be7eb395f8378d34de6d1f7ee6c2b6f4c7dd3a416
 readonly BOOT_ID=34760d1b-a0b6-46a0-b8c1-264abd1affba
 readonly MANAGEMENT_CPUS=20,22
 readonly SERVICE_IP=10.213.0.1
@@ -65,6 +70,8 @@ worker_id=""
 success=false
 runtime_armed=false
 runtime_stopped=false
+preflight_only=false
+http_status=""
 
 log() { printf '[production-staging] %s %s\n' "$(date -u '+%FT%TZ')" "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -208,10 +215,33 @@ runtime_env() {
         WARP_DOMAIN=bringyour.com \
         WARP_HOST=127.0.0.1 \
         WARP_BLOCK=competition \
-        WARP_VERSION=0.0.0-competition-5070445d \
+        WARP_VERSION=0.0.0-competition-2ee4883f \
         BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com \
         BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com \
         "$@"
+}
+
+runtime_exec() {
+    exec env \
+        WARP_CONFIG_HOME="$API_CONFIG" \
+        WARP_VAULT_HOME="$API_VAULT" \
+        WARP_ENV=local \
+        WARP_SERVICE=api \
+        WARP_DOMAIN=bringyour.com \
+        WARP_HOST=127.0.0.1 \
+        WARP_BLOCK=competition \
+        WARP_VERSION=0.0.0-competition-2ee4883f \
+        BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com \
+        BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com \
+        "$@"
+}
+
+http_status_expected() {
+    local status="$1" expected="$2"
+    case ",$expected," in
+        *",$status,"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 http_json() {
@@ -231,7 +261,9 @@ http_json() {
         status="$(curl --silent --show-error --request "$method" \
             --output "$output" --write-out '%{http_code}' "$url")"
     fi
-    [ "$status" = "$expected" ] || die "$method $url returned HTTP $status, expected $expected"
+    http_status_expected "$status" "$expected" ||
+        die "$method $url returned HTTP $status, expected one of $expected"
+    http_status="$status"
 }
 
 wait_stack() {
@@ -256,7 +288,9 @@ wait_api() {
         kill -0 "$api_pid" 2>/dev/null || die "competition API exited during startup"
         if curl --silent --fail "$API_BASE/healthz" >"$STAGING/health.json.new" 2>/dev/null; then
             mv "$STAGING/health.json.new" "$STAGING/health.json"
-            jq -e '.status == "ok"' "$STAGING/health.json" >/dev/null || die "health response is malformed"
+            jq -e '.status == "alive" and .version == "0.0.0-competition-2ee4883f" and
+                (.time | type == "string" and endswith("Z"))' \
+                "$STAGING/health.json" >/dev/null || die "health response is malformed"
             return 0
         fi
         sleep 1
@@ -267,21 +301,22 @@ wait_api() {
 start_worker() {
     worker_id="$1"
     local log_path="$2"
-    runtime_env taskset -c "$MANAGEMENT_CPUS" "$WORKER" --worker_id="$worker_id" >"$log_path" 2>&1 &
+    runtime_exec taskset -c "$MANAGEMENT_CPUS" "$WORKER" --worker_id="$worker_id" >"$log_path" 2>&1 &
     worker_pid=$!
 }
 
-wait_generation_ready() {
-    local operator_token="$1" unused
+generate_round() {
+    local operator_token="$1" request="$2" output="$3" unused
     for unused in $(seq 1 120); do
         kill -0 "$worker_pid" 2>/dev/null || die "pre-round worker exited"
-        http_json GET "$API_BASE/readyz" "$operator_token" "" "$STAGING/ready-pre-round.json.new" 200
-        mv "$STAGING/ready-pre-round.json.new" "$STAGING/ready-pre-round.json"
-        if jq -e '.checks.database and .checks.fifo_slot and
-            .checks.authoritative_evaluator_host and .checks.artifact_storage' \
-            "$STAGING/ready-pre-round.json" >/dev/null; then
+        http_json POST "$API_BASE/generate-round" "$operator_token" "$request" "$output.new" 201,503
+        if [ "$http_status" = 201 ]; then
+            mv "$output.new" "$output"
             return 0
         fi
+        jq -e '.kind == "infrastructure" and .code == "not_ready" and .retriable == true' \
+            "$output.new" >/dev/null || die "round-generation readiness error is malformed"
+        mv "$output.new" "$STAGING/round-not-ready.json"
         sleep 1
     done
     die "worker heartbeat did not make round-generation infrastructure ready"
@@ -291,10 +326,17 @@ wait_fully_ready() {
     local operator_token="$1" unused
     for unused in $(seq 1 120); do
         kill -0 "$worker_pid" 2>/dev/null || die "post-promotion worker exited"
-        http_json GET "$API_BASE/readyz" "$operator_token" "" "$STAGING/ready-post-promotion.json.new" 200
+        http_json GET "$API_BASE/readyz" "$operator_token" "" "$STAGING/ready-post-promotion.json.new" 200,503
         mv "$STAGING/ready-post-promotion.json.new" "$STAGING/ready-post-promotion.json"
-        if jq -e '.ready == true and ([.checks[]] | all)' "$STAGING/ready-post-promotion.json" >/dev/null; then
+        if [ "$http_status" = 200 ] &&
+           jq -e '.ready == true and ([.checks[]] | all)' "$STAGING/ready-post-promotion.json" >/dev/null; then
             return 0
+        fi
+        if [ "$http_status" = 503 ]; then
+            jq -e '.kind == "infrastructure" and .code == "not_ready" and .retriable == true' \
+                "$STAGING/ready-post-promotion.json" >/dev/null || die "readiness error is malformed"
+        else
+            die "successful readiness response is malformed"
         fi
         sleep 1
     done
@@ -346,18 +388,21 @@ wait_no_job_resources() {
 
 write_check() {
     local path="$1"
-    jq -e '.schema == 1 and .kind == "sim-latency-production-readiness-check" and
-        .passed == true and ([.assertions[]] | all)' "$path" >/dev/null || die "readiness check is malformed: $path"
+    jq -e --arg release_amendment "$RELEASE_AMENDMENT_SHA" \
+        '.schema == 1 and .kind == "sim-latency-production-readiness-check" and
+        .passed == true and
+        .production_release_self_check_contract_amendment_sha256 == $release_amendment and
+        ([.assertions[]] | all)' "$path" >/dev/null || die "readiness check is malformed: $path"
     chmod 0400 "$path"
 }
 
 static_self_test() {
-    local environment expected request
+    local child_pid environment expected probe_pid probe_root request unused
     if rg -n '[[:space:]][+][[:space:]]{4}' "$0" >/dev/null; then
         die "patch-marker shell arguments remain in the staging driver"
     fi
-    environment="$(runtime_env sh -c 'printf "%s|%s|%s|%s" "$WARP_CONFIG_HOME" "$WARP_VAULT_HOME" "$WARP_BLOCK" "$BRINGYOUR_POSTGRES_HOSTNAME"')"
-    expected="$API_CONFIG|$API_VAULT|competition|local-pg.bringyour.com"
+    environment="$(runtime_env sh -c 'printf "%s|%s|%s|%s|%s" "$WARP_CONFIG_HOME" "$WARP_VAULT_HOME" "$WARP_BLOCK" "$BRINGYOUR_POSTGRES_HOSTNAME" "$WARP_VERSION"')"
+    expected="$API_CONFIG|$API_VAULT|competition|local-pg.bringyour.com|0.0.0-competition-2ee4883f"
     [ "$environment" = "$expected" ] || die "control-plane runtime environment"
     request="$(jq -cn --arg opens 2026-01-01T00:00:00Z \
         --arg closes 2026-01-01T01:00:00Z \
@@ -365,22 +410,45 @@ static_self_test() {
         '{opens_at:$opens,closes_at:$closes,reveal_at:$reveal}')"
     jq -e '.opens_at < .closes_at and .closes_at < .reveal_at' \
         <<<"$request" >/dev/null || die "round request construction"
-    log "static self-test passed: continuations, environment, and JSON construction"
+    http_status_expected 503 200,503 || die "HTTP status-set matching failed"
+    ! http_status_expected 503 200 || die "HTTP status-set matching accepted a false member"
+    probe_root="$(mktemp -d /tmp/urnetwork-staging-process.XXXXXXXX)"
+    runtime_exec sh -c 'printf "%s\n" "$$" >"$1"; exec sleep 30' sh "$probe_root/pid" &
+    probe_pid=$!
+    for unused in $(seq 1 20); do
+        [ -s "$probe_root/pid" ] && break
+        sleep 0.05
+    done
+    child_pid="$(cat "$probe_root/pid" 2>/dev/null || true)"
+    if [ "$child_pid" != "$probe_pid" ]; then
+        kill -KILL "$probe_pid" 2>/dev/null || true
+        wait "$probe_pid" 2>/dev/null || true
+        rm -rf -- "$probe_root"
+        die "background runtime PID does not own the launched process"
+    fi
+    kill -TERM "$probe_pid"
+    wait "$probe_pid" 2>/dev/null || true
+    rm -rf -- "$probe_root"
+    log "static self-test passed: continuations, environment, process ownership, and JSON construction"
 }
 
-for command in awk chmod cp curl date docker env find flock getent git id install ip jq kill mktemp mv openssl python3 readlink realpath rg rm runuser seq sh sha256sum sleep sort stat systemctl taskset xargs; do
+for command in awk cat chmod cp curl date docker env find flock getent git id install ip jq kill mktemp mv openssl python3 readlink realpath rg rm runuser seq sh sha256sum sleep sort stat systemctl taskset xargs; do
     require_command "$command"
 done
 case "${1:-}" in
     --self-test)
-        [ "$#" -eq 1 ] || die "usage: $0 [--self-test]"
+        [ "$#" -eq 1 ] || die "usage: $0 [--self-test|--preflight]"
         static_self_test
         exit 0
         ;;
-    "")
-        [ "$#" -eq 0 ] || die "usage: $0 [--self-test]"
+    --preflight)
+        [ "$#" -eq 1 ] || die "usage: $0 [--self-test|--preflight]"
+        preflight_only=true
         ;;
-    *) die "usage: $0 [--self-test]" ;;
+    "")
+        [ "$#" -eq 0 ] || die "usage: $0 [--self-test|--preflight]"
+        ;;
+    *) die "usage: $0 [--self-test|--preflight]" ;;
 esac
 [ "$(id -u)" -eq 0 ] || die "production staging must run as root"
 [ "$(< /proc/sys/kernel/random/boot_id)" = "$BOOT_ID" ] || die "host rebooted"
@@ -388,6 +456,8 @@ esac
 [ "$(sha256_file "$ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
 [ "$(sha256_file "$REFERENCE_V5_STAGING_AMENDMENT")" = "$REFERENCE_V5_STAGING_AMENDMENT_SHA" ] ||
     die "reference-v5 staging amendment changed"
+[ "$(sha256_file "$RELEASE_AMENDMENT")" = "$RELEASE_AMENDMENT_SHA" ] ||
+    die "production release self-check amendment changed"
 [ "$(sha256_file "$INDEPENDENT_ATTESTATION_REPAIR")" = "$INDEPENDENT_ATTESTATION_REPAIR_SHA" ] ||
     die "independent attestation repair changed"
 [ "$(sha256_file "$INDEPENDENT_ATTESTATION_REPAIR_SCRIPT")" = "$INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA" ] ||
@@ -395,8 +465,10 @@ esac
 [ "$(sha256_file "$PROVISIONER")" = "$PROVISIONER_SHA" ] || die "provisioner changed"
 [ "$(sha256_file "$ROOT/control-plane-release/source-release.json")" = "$CONTROL_RELEASE_SHA" ] || die "control source release changed"
 [ "$(git -C "$CONTROL" rev-parse HEAD)" = "$CONTROL_COMMIT" ] || die "control-plane commit changed"
+[ "$(git -C "$CONTROL" rev-parse '@{upstream}')" = "$CONTROL_COMMIT" ] || die "control-plane push identity changed"
 [ -z "$(git -C "$CONTROL" status --porcelain --untracked-files=no)" ] || die "control-plane worktree is dirty"
 [ -f "$RELEASE_MANIFEST" ] && [ ! -L "$RELEASE_MANIFEST" ] || die "final control-plane release is missing"
+[ "$(sha256_file "$RELEASE_MANIFEST")" = "$RELEASE_MANIFEST_SHA" ] || die "release manifest changed"
 [ -f "$SELECTION" ] && [ -f "$INDEPENDENT_ATTESTATION" ] || die "terminal measurement evidence is missing"
 jq -e --arg source "$SOURCE_LOCK_SHA" '.accepted == true and .source_lock_sha256 == $source and
     .same_seed_pairs == 12 and .independent_seed_target == 12 and .reference_required_passes == 11' \
@@ -421,6 +493,24 @@ jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
      .retained_invariants.all_original_security_gates_unchanged == true and
      .retained_invariants.all_original_staging_round_gates_unchanged == true' \
     "$REFERENCE_V5_STAGING_AMENDMENT" >/dev/null || die "reference-v5 staging amendment is invalid"
+jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
+    --arg staging_amendment "$REFERENCE_V5_STAGING_AMENDMENT_SHA" \
+    --arg control "$CONTROL_COMMIT" --arg source_release "$CONTROL_RELEASE_SHA" \
+    --arg release_manifest "$RELEASE_MANIFEST_SHA" --arg release_check "$RELEASE_CHECK_SHA" \
+    --arg service_check "$SERVICE_CHECK_SHA" \
+    '.schema == 1 and .kind == "sim-latency-production-release-self-check-contract-amendment" and
+     .passed == true and .binding.source_lock_sha256 == $source and
+     .binding.production_staging_protocol_sha256 == $protocol and
+     .binding.production_staging_reference_v5_amendment_sha256 == $staging_amendment and
+     .replacement_release.control_plane_commit == $control and
+     .replacement_release.origin_control_plane_commit == $control and
+     .replacement_release.source_release_sha256 == $source_release and
+     .replacement_release.release_manifest_sha256 == $release_manifest and
+     .replacement_release.release_check_sha256 == $release_check and
+     .replacement_release.service_gate_sha256 == $service_check and
+     .root_cause.strict_unknown_field_rejection_retained == true and
+     ([.retained_invariants[]] | all)' \
+    "$RELEASE_AMENDMENT" >/dev/null || die "production release self-check amendment is invalid"
 jq -e '.accepted == true and .target_independent_seeds == 5 and
     .reference_required_passes == 4 and .reference_ordering_passes >= 4 and
     .selected_competition_replicate_count_unchanged == true and
@@ -442,7 +532,16 @@ jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" --arg contr
      .control_plane_commit == $control and .control_plane_source_release_sha256 == $control_release and
      .evaluator_image_digest == $image and .image_contexts_contain_config_or_vault == false' \
     "$RELEASE_MANIFEST" >/dev/null || die "release manifest identity is invalid"
-[ -f "$SERVICE_CHECK" ] && [ -f "$RELEASE_CHECK" ] || die "release and service-backed checks must pass first"
+[ "$(sha256_file "$SERVICE_CHECK")" = "$SERVICE_CHECK_SHA" ] || die "service-backed check changed"
+[ "$(sha256_file "$RELEASE_CHECK")" = "$RELEASE_CHECK_SHA" ] || die "release check changed"
+for prerequisite_check in "$SERVICE_CHECK" "$RELEASE_CHECK"; do
+    jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" --arg control "$CONTROL_COMMIT" \
+        '.schema == 1 and .kind == "sim-latency-production-readiness-check" and
+         .passed == true and .source_lock_sha256 == $source and
+         .production_staging_protocol_sha256 == $protocol and
+         .control_plane_commit == $control and ([.assertions[]] | all)' \
+        "$prerequisite_check" >/dev/null || die "prerequisite readiness check is invalid: $prerequisite_check"
+done
 [ ! -e "$STAGING" ] || die "staging output already exists: $STAGING"
 for output in authenticated-api.json full-staging-round.json monitoring-and-recovery.json artifact-retention.json no-secrets-audit.json; do
     [ ! -e "$OUTPUT_ROOT/$output" ] || die "production check already exists: $output"
@@ -476,12 +575,18 @@ jq -e --arg image "$EVALUATOR_IMAGE" --arg qualification "$HOST_QUALIFICATION_SH
      .evaluation_cpu_list == "0,2,4,6,8,10,12,14,16,18" and
      .management_cpu_list == "20,22" and .artifact_root == "/var/lib/urnetwork/competition"' \
     "$HOST_CONFIG" >/dev/null || die "authoritative host configuration changed"
+if [ "$preflight_only" = true ]; then
+    log "production staging preflight passed"
+    exit 0
+fi
 
 install -d -o 0 -g 0 -m 0700 "$OUTPUT_ROOT" "$STAGING"
 log "installing separate control-plane resources and root-owned trusted commands"
 runuser -u by -- "$PROVISIONER" --install >"$STAGING/provision.log" 2>&1
 [ "$(stat -c '%U:%G:%a' "$CREDENTIALS")" = root:root:400 ] || die "raw credentials are not root-only"
 [ "$(jq -er '.control_plane_commit' "$DEPLOYMENT_MANIFEST")" = "$CONTROL_COMMIT" ] || die "deployment manifest control identity"
+[ "$(jq -er '.production_release_self_check_contract_amendment_sha256' "$DEPLOYMENT_MANIFEST")" = "$RELEASE_AMENDMENT_SHA" ] ||
+    die "deployment manifest release amendment identity"
 
 operator_token="$(jq -er '.tokens["competition-operator"]' "$CREDENTIALS")"
 submit_a_token="$(jq -er '.tokens["apex-submit-a"]' "$CREDENTIALS")"
@@ -512,12 +617,11 @@ jq -e '.schema == 1 and .database_version == .migration_count and .migration_cou
     die "database initialization did not reach the repository migration count"
 
 log "starting the released competition API"
-runtime_env taskset -c "$MANAGEMENT_CPUS" "$API" -p "$API_PORT" >"$STAGING/api.log" 2>&1 &
+runtime_exec taskset -c "$MANAGEMENT_CPUS" "$API" -p "$API_PORT" >"$STAGING/api.log" 2>&1 &
 api_pid=$!
 wait_api
 
 start_worker staging-bootstrap "$STAGING/worker-bootstrap.log"
-wait_generation_ready "$operator_token"
 
 replicates="$(jq -er '.replicate_count' "$SELECTION")"
 [[ "$replicates" =~ ^(1|3|5|7|9)$ ]] || die "selected replicate count is invalid"
@@ -530,7 +634,7 @@ closes_at="$(date -u -d "@$closes_epoch" '+%FT%TZ')"
 reveal_at="$(date -u -d "@$reveal_epoch" '+%FT%TZ')"
 jq -n --arg opens "$opens_at" --arg closes "$closes_at" --arg reveal "$reveal_at" \
     '{opens_at:$opens,closes_at:$closes,reveal_at:$reveal}' >"$STAGING/generate-request.json"
-http_json POST "$API_BASE/generate-round" "$operator_token" "$STAGING/generate-request.json" "$STAGING/round.json" 201
+generate_round "$operator_token" "$STAGING/generate-request.json" "$STAGING/round.json"
 round_id="$(jq -er '.round_id' "$STAGING/round.json")"
 providers_sha="$(jq -er '.providers_sha256' "$STAGING/round.json")"
 commitment="$(jq -er '.workload_commitment' "$STAGING/round.json")"
@@ -703,6 +807,7 @@ common_args=(
     --arg source "$SOURCE_LOCK_SHA"
     --arg protocol "$PROTOCOL_SHA"
     --arg reference_v5 "$REFERENCE_V5_STAGING_AMENDMENT_SHA"
+    --arg release_amendment "$RELEASE_AMENDMENT_SHA"
     --arg control "$CONTROL_COMMIT"
 )
 
@@ -718,7 +823,9 @@ jq -n "${common_args[@]}" \
     '{schema:1,kind:"sim-latency-production-readiness-check",
       check_id:"authenticated_api_generate_submit_poll",passed:true,generated_at:$generated_at,
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
-      production_staging_reference_v5_amendment_sha256:$reference_v5,control_plane_commit:$control,
+      production_staging_reference_v5_amendment_sha256:$reference_v5,
+      production_release_self_check_contract_amendment_sha256:$release_amendment,
+      control_plane_commit:$control,
       round_id:$round,job_id:$job,evidence_sha256:{round:$round_sha,submit_a:$submit_a,
         submit_b:$submit_b,active_submitter:$active,terminal_operator:$terminal,revealed_info:$revealed,
         providers:$providers},
@@ -738,7 +845,9 @@ jq -n "${common_args[@]}" \
     '{schema:1,kind:"sim-latency-production-readiness-check",
       check_id:"full_staging_round",passed:true,generated_at:$generated_at,
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
-      production_staging_reference_v5_amendment_sha256:$reference_v5,control_plane_commit:$control,
+      production_staging_reference_v5_amendment_sha256:$reference_v5,
+      production_release_self_check_contract_amendment_sha256:$release_amendment,
+      control_plane_commit:$control,
       round_id:$round,job_id:$job,patch_sha256:$patch,
       evidence_sha256:{rebaseline:$rebaseline,promotion:$promotion,worker_result:$worker,
         completion:$completion,evidence_manifest:$manifest},
@@ -757,7 +866,9 @@ jq -n "${common_args[@]}" \
     '{schema:1,kind:"sim-latency-production-readiness-check",
       check_id:"monitoring_and_recovery",passed:true,generated_at:$generated_at,
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
-      production_staging_reference_v5_amendment_sha256:$reference_v5,control_plane_commit:$control,
+      production_staging_reference_v5_amendment_sha256:$reference_v5,
+      production_release_self_check_contract_amendment_sha256:$release_amendment,
+      control_plane_commit:$control,
       round_id:$round,job_id:$job,evidence_sha256:{ready:$ready,events:$events,
         failed_attempt:$failed_attempt,resource_bomb:$resource_bomb},
       assertions:{single_job_fifo_verified:true,lease_recovery_verified:true,
@@ -775,7 +886,9 @@ jq -n "${common_args[@]}" \
     '{schema:1,kind:"sim-latency-production-readiness-check",
       check_id:"artifact_retention",passed:true,generated_at:$generated_at,
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
-      production_staging_reference_v5_amendment_sha256:$reference_v5,control_plane_commit:$control,
+      production_staging_reference_v5_amendment_sha256:$reference_v5,
+      production_release_self_check_contract_amendment_sha256:$release_amendment,
+      control_plane_commit:$control,
       round_id:$round,job_id:$job,retain_until:$retain,
       evidence_sha256:{accounting:$accounting,resources:$resources,quota:$quota,failed_attempt:$failure},
       assertions:{accounting_immutable:true,resources_immutable:true,artifact_quota_verified:true,
@@ -792,7 +905,9 @@ jq -n "${common_args[@]}" \
     '{schema:1,kind:"sim-latency-production-readiness-check",
       check_id:"no_secrets_audit",passed:true,generated_at:$generated_at,
       source_lock_sha256:$source,production_staging_protocol_sha256:$protocol,
-      production_staging_reference_v5_amendment_sha256:$reference_v5,control_plane_commit:$control,
+      production_staging_reference_v5_amendment_sha256:$reference_v5,
+      production_release_self_check_contract_amendment_sha256:$release_amendment,
+      control_plane_commit:$control,
       round_id:$round,job_id:$job,evidence_sha256:{local_mounts:$mounts,
         control_boundary:$boundary,secret_scan:$scan,deployment:$deployment},
       assertions:{direct_config_local_read_only:true,direct_vault_local_read_only:true,

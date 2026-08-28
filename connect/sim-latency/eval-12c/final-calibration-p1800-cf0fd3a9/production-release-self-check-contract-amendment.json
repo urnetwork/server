@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-release-self-check-contract-amendment",
+  "recorded_at": "2026-08-28T00:48:07Z",
+  "passed": true,
+  "authorization": {
+    "scope": "correct the production sim-latency control plane when staging identifies a real correctness defect",
+    "candidate_evaluation_code_changes_allowed": false,
+    "measurement_policy_changes_allowed": false
+  },
+  "binding": {
+    "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+    "production_staging_protocol_sha256": "6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af",
+    "production_staging_reference_v5_amendment_sha256": "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695",
+    "season_base_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+    "evaluator_image_digest": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038"
+  },
+  "failure_evidence": {
+    "staging_attempt": 4,
+    "worker_bootstrap_log_sha256": "295c224d3f5fa4804a79ae0ae4d2a09281c874cba99f5e7fefe3bacc26f15a65",
+    "observed_error": "competition evaluator self-check: decode self-check: json: unknown field \"irq_affinity_sha256\"",
+    "round_created": false,
+    "submission_created": false,
+    "evaluation_started": false,
+    "cleanup_verified": true
+  },
+  "root_cause": {
+    "producer": "competition/host-self-check.sh",
+    "consumer": "competition.HostSelfCheck",
+    "decoder": "encoding/json with DisallowUnknownFields",
+    "emitted_but_undeclared_fields": [
+      "irq_affinity_sha256",
+      "irq_policy_sha256"
+    ],
+    "strict_unknown_field_rejection_retained": true
+  },
+  "superseded_release": {
+    "control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+    "source_release_sha256": "b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940",
+    "release_manifest_sha256": "e1405b3ca7c900e800c718917758a79d56c2392dc23c8ab1bd3bc17d8d5620db",
+    "release_check_sha256": "dd49f6b83b9761e52ca270e7d46706e38811ffa3b35997773b8fb5e36a12b7ca",
+    "service_gate_sha256": "79b076c615357fe5eb2e105e00b4fd2703094860cf96153f0d65c5bc6f03d71c",
+    "retained": true
+  },
+  "replacement_release": {
+    "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+    "origin_control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+    "source_release_sha256": "90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7",
+    "release_manifest_sha256": "17d2817a69f3bc506c98ba00f31b8cc15fc9e2b7e0a4e18b5ca0df9fc89bfc00",
+    "release_check_sha256": "3fa3ca749a4718f31ed9ac17351c2b2695891f89117e794b7d3220e477d3b5cd",
+    "service_gate_sha256": "e3c168731edab3f0de0a823aaed23aa64e72b1ed7ea32e0dc5663806af7c4a08",
+    "release_builder_sha256": "e92b881fbc9d6b2aa43d522654c4364b195e7f4a5ca6b4885593941a2dacee91",
+    "service_gate_runner_sha256": "04adbf0d24c397775ae527bcd92e34717c65a8530d6101ccb3bc6aab241f2bd5",
+    "api_binary_sha256": "ae0bf6cd7fa6142b1e9ac40b06ac3c475cbe90f2fe82f45cb0ce6e4bbac7a611",
+    "worker_binary_sha256": "ae0591753be1436cb258c7d1c6776b6ea1b44c512e2dade906771628d20834e3",
+    "rebaseline_binary_sha256": "95bbbe458ea8ea3fddb7a1416070f82b3860ca6488a7d49e19b95ffe8f1dcdfa",
+    "dbinit_binary_sha256": "a842fe9d36ce53f213e3b8754bd164007f40d5ab9e476f391bbb450b95664267",
+    "api_image_id": "sha256:923889fd2fb1ed398199bac89782df16e9acb4b5541d76c2394edcd513ca86e5",
+    "worker_image_id": "sha256:9942f9bf28cc0f7b690e717621e254bfaf19f7693fd9d8b4842475086454f437"
+  },
+  "change_set": {
+    "parent_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+    "commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+    "paths": [
+      "competition/competition_test.go",
+      "competition/container_isolation_test.go",
+      "competition/evaluator_test.go",
+      "competition/types.go"
+    ],
+    "source_sha256": {
+      "competition/competition_test.go": "4accfac59a736263728b33171a797e22bf63dcbc2a9b967d53ccc2d72be512ec",
+      "competition/container_isolation_test.go": "8f4e1f4a553065d16b87d7fefc69a81b39b7b0586b6ab9fd9caa7d4c4fd961f7",
+      "competition/evaluator_test.go": "eb239b97278882b0881c26a3d8303db8a62d82febcbf2f517ffd68d9d4449f19",
+      "competition/types.go": "36e89f49a667e45e72eed7807f2652a7069e4be247762348054329eeab7db2a9"
+    }
+  },
+  "validation": {
+    "targeted_regressions_passed": true,
+    "full_configured_competition_suite_passed": true,
+    "go_vet_passed": true,
+    "api_and_worker_build_passed": true,
+    "release_assertions_passed": 15,
+    "service_assertions_passed": 11,
+    "strict_unknown_field_regression_tested": true,
+    "missing_or_malformed_irq_hashes_rejected": true,
+    "service_cleanup_verified": true
+  },
+  "retained_invariants": {
+    "candidate_base_unchanged": true,
+    "evaluator_image_unchanged": true,
+    "simulator_unchanged": true,
+    "scorer_unchanged": true,
+    "scale_unchanged": true,
+    "baseline_unchanged": true,
+    "takeover_threshold_unchanged": true,
+    "hidden_seed_evidence_unchanged": true,
+    "reference_decision_unchanged": true,
+    "openapi_unchanged": true,
+    "config_and_vault_mount_policy_unchanged": true,
+    "default_deny_network_unchanged": true
+  }
+}

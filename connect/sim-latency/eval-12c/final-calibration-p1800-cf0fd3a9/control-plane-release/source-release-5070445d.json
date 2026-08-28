@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-control-plane-source-release",
+  "recorded_at": "2026-08-27T07:08:39Z",
+  "season_base_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "control_plane_branch": "finalization-control-plane",
+  "control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+  "origin_control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+  "candidate_base_unchanged": true,
+  "evaluator_image_unchanged": true,
+  "tracked_worktree_clean": true,
+  "separate_release_identity_required": true,
+  "source_sha256": {
+    "competition/rebaseline.go": "d9d0de97a8b33f9a171acab4c4268d122d59e4e6bf4b733793481e7ead808e79",
+    "competition/rebaseline_test.go": "313e0714958ba662044fdbfdf43ae3cd1bcfaa3b6bc9991c53a440f73b3bb08c",
+    "competition/promote-round-rebaseline.sh": "19f404f543dc8f5ee91326d31722234f200cdc137147f21cf44558297627d694",
+    "competition/promote-host-containment.sh": "5f6b28d6bbc889915c4b06f4117b1dbd42f33224652c8174867c3d24e5d94593",
+    "competition/service.go": "bd1676b0e96be7accad162d74b1f407246c4251e3f19043dfe7c57b66da7aff3",
+    "competition/types.go": "c6f6def937bcb60c1d516917daf26a6764377298c1df072cfdfa7390911a2aef",
+    "cli/competitionrebaseline/main.go": "67f5a8776df1208aa1ced51d80f52a9d23b7d06766d36a4175dc7c5899437178",
+    "cli/competitionrebaseline/main_test.go": "23806acd97175acffb5021e67c53f077bd1bc703d95d42719974ac58a91bf45e",
+    "cli/competitionrebaseline/Makefile": "4ab9155d730a36f982a18312474b79fcccbeb5fb758f81299bb3f66b3ba9532a",
+    "competition/EVALUATOR-PROTOCOL.md": "3fa4e7f54856e0676554b298c58c07d24a2f9fad6a5b73c81c8da086487ee383"
+  },
+  "checks": [
+    {
+      "id": "isolated_unit_suite",
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go test -timeout=5m ./competition ./cli/competitionrebaseline -skip '^TestPostgresStoreQueueCacheFailoverAndImmutability$' -count=1",
+      "exit_code": 0
+    },
+    {
+      "id": "focused_race_suite",
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go test -race -timeout=5m ./competition ./cli/competitionrebaseline -run 'Test(ValidateScoreRequiresFrozenGateSet|RunRebaseline|WriteExclusiveJson|ReadPatch|PromoteRoundRebaseline)' -count=1",
+      "exit_code": 0
+    },
+    {
+      "id": "go_vet",
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go vet ./competition ./cli/competitionrebaseline",
+      "exit_code": 0
+    },
+    {
+      "id": "dual_openapi_conformance",
+      "command": "env WARP_ENV=local GOMAXPROCS=2 taskset -c 20,22 go test -timeout=5m ./api -run '^Test(SpecConformance|SpecRoutesImplemented|CompetitionSpecConformance|CompetitionSpecRoutesImplemented|CompetitionSpecSecurity)$' -count=1",
+      "exit_code": 0
+    },
+    {
+      "id": "shell_syntax",
+      "command": "bash -n competition/promote-round-rebaseline.sh competition/promote-host-containment.sh",
+      "exit_code": 0
+    }
+  ],
+  "deferred_until_measurement_idle": [
+    "service-backed PostgreSQL/Redis integration",
+    "root-owned live promotion fixture",
+    "production API/worker image build",
+    "full generate-submit-poll-cache-reveal staging round"
+  ]
+}

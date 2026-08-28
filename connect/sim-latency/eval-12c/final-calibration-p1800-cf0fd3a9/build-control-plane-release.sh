@@ -11,24 +11,24 @@ export LANG=C LC_ALL=C
 readonly ROOT=/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
 readonly CONTROL_WORKTREE=/home/by/urnetwork/server-finalization-control-plane
 readonly CONTROL_REPOSITORY=/home/by/urnetwork/server
-readonly CONTROL=/home/by/urnetwork/server-finalization-release-source-5070445d
+readonly CONTROL=/home/by/urnetwork/server-finalization-release-source-2ee4883f
 readonly RELEASE_ROOT="$ROOT/control-plane-release"
 readonly FINAL="$RELEASE_ROOT/final"
 readonly READINESS_ROOT="$ROOT/production-readiness"
 readonly RELEASE_CHECK="$READINESS_ROOT/release-artifacts.json"
-readonly CONTROL_COMMIT=5070445ddb1764ad80f999102a9d71946e5a9e29
-readonly SOURCE_RELEASE_SHA=b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940
+readonly CONTROL_COMMIT=2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36
+readonly SOURCE_RELEASE_SHA=90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7
 readonly SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
 readonly PROTOCOL_SHA=6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af
 readonly EVALUATOR_IMAGE=sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038
 readonly OPENAPI_SHA=3fadfe3ecc23fcc262776d4e6321001e013a53c501574d32d615eb0f0353c289
 readonly BOOT_ID=34760d1b-a0b6-46a0-b8c1-264abd1affba
 readonly BUILD_CPU_LIST=0,2,4,6,8,10,12,14,16,18,20,22
-readonly BUILDER_NAME=urnetwork-final-release-cf0fd3a9
+readonly BUILDER_NAME=urnetwork-final-release-cf0fd3a9-2ee4883f
 readonly BUILDKIT_IMAGE='moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8'
 readonly SBOM_GENERATOR_IMAGE='docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
-readonly API_TAG=urnetwork/sim-latency-competition-api:5070445d
-readonly WORKER_TAG=urnetwork/sim-latency-competition-worker:5070445d
+readonly API_TAG=urnetwork/sim-latency-competition-api:2ee4883f
+readonly WORKER_TAG=urnetwork/sim-latency-competition-worker:2ee4883f
 readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 readonly VERIFY_RELEASE_OCI="$ROOT/verify-release-oci.py"
 readonly VERIFY_RELEASE_OCI_SHA=b4a0316f591f1963110e5a328adee56a9a6d091a6c1deef8b0e6015d5f9cff2b
@@ -92,6 +92,12 @@ self_test() {
         die "runtime archive solves must explicitly disable duplicate SBOMs"
     [ "$(rg -c '^build_image (api|worker) ' <<<"$build_section")" -eq 2 ] ||
         die "release builder must invoke the verified image path for API and worker"
+    rg -q 'sudo -n install -d -o root -g root -m 0700 "\$READINESS_ROOT"' "$SCRIPT_PATH" ||
+        die "release readiness root must remain privileged"
+    rg -q 'sudo -n install -o root -g root -m 0400 "\$release_check_pending" "\$RELEASE_CHECK"' "$SCRIPT_PATH" ||
+        die "release readiness record must cross the privileged boundary by exact install"
+    ! rg -q '\}\}.*>"\$RELEASE_CHECK"' "$SCRIPT_PATH" ||
+        die "release builder writes directly through the privileged readiness boundary"
     [[ "$BUILDKIT_IMAGE" =~ ^moby/buildkit:v0\.32\.2@sha256:[0-9a-f]{64}$ ]] ||
         die "BuildKit image is not digest-pinned"
     [[ "$SBOM_GENERATOR_IMAGE" =~ ^docker/buildkit-syft-scanner:stable-1@sha256:[0-9a-f]{64}$ ]] ||
@@ -134,7 +140,8 @@ prepare_control_source
 [ "$(sha256_file /home/by/urnetwork/sn/api/competition.yml)" = "$OPENAPI_SHA" ] || die "competition OpenAPI changed"
 sudo -n docker info >/dev/null || die "Docker is unavailable"
 [ ! -e "$FINAL" ] || die "final release already exists: $FINAL"
-[ ! -e "$RELEASE_CHECK" ] || die "release readiness check already exists: $RELEASE_CHECK"
+sudo -n install -d -o root -g root -m 0700 "$READINESS_ROOT"
+sudo -n test ! -e "$RELEASE_CHECK" || die "release readiness check already exists: $RELEASE_CHECK"
 
 for service in urnetwork-final-calibration-recovery-8c7cfc98.service urnetwork-final-independent-r1-da4ee86a.service; do
     state="$(systemctl is-active "$service" 2>/dev/null || true)"
@@ -441,8 +448,8 @@ chmod 0400 "$work/release-build.json" "$work/images/"*.json "$work/images/"*.log
 find "$work/images/api" "$work/images/worker" -type f -exec chmod 0400 {} +
 find "$work" -type d -exec chmod 0500 {} +
 mv "$work" "$FINAL"
-install -d -m 0700 "$READINESS_ROOT"
 release_manifest_sha="$(sha256_file "$FINAL/release-build.json")"
+release_check_pending="$(mktemp "$RELEASE_ROOT/.release-artifacts.XXXXXXXX")"
 jq -n \
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg source_lock_sha256 "$SOURCE_LOCK_SHA" \
@@ -503,9 +510,14 @@ jq -n \
         digest_pinned_buildkit_verified:true,digest_pinned_sbom_generator_verified:true,
         api_slsa_v1_provenance_verified:true,worker_slsa_v1_provenance_verified:true,
         api_spdx_sbom_verified:true,worker_spdx_sbom_verified:true,
-        no_config_or_vault_in_images:true}}' >"$RELEASE_CHECK"
+        no_config_or_vault_in_images:true}}' >"$release_check_pending"
 jq -e '.schema == 1 and .passed == true and (.assertions | length) == 15 and
-    ([.assertions[]] | all)' "$RELEASE_CHECK" >/dev/null || die "release readiness record is invalid"
-chmod 0400 "$RELEASE_CHECK"
+    ([.assertions[]] | all)' "$release_check_pending" >/dev/null || die "release readiness record is invalid"
+chmod 0400 "$release_check_pending"
+release_check_sha="$(sha256_file "$release_check_pending")"
+sudo -n install -o root -g root -m 0400 "$release_check_pending" "$RELEASE_CHECK"
+[ "$(sudo -n sha256sum "$RELEASE_CHECK" | awk '{print $1}')" = "$release_check_sha" ] ||
+    die "installed release readiness record changed"
+rm -f -- "$release_check_pending"
 log "final control-plane release: $FINAL"
-printf '%s %s\n' "$release_manifest_sha" "$(sha256_file "$RELEASE_CHECK")"
+printf '%s %s\n' "$release_manifest_sha" "$release_check_sha"
