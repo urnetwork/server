@@ -105,6 +105,7 @@ REMEDIATION_AMENDMENT = (
 HOST_SELF_CHECK = ROOT / "host-self-check-attempt-06.json"
 CALIBRATION_MD = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
 FINAL_REPORT = SERVER / "finalize-report.html"
+FINAL_PREVIEW = SERVER / "final-preview.html"
 FINAL_REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 
 SOURCE_LOCK_SHA256 = (
@@ -2180,6 +2181,9 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
             text = FINAL_REPORT.read_text(encoding="utf-8")
             parser = FinalReportParser()
             parser.feed(text)
+            preview_text = FINAL_PREVIEW.read_text(encoding="utf-8")
+            preview_parser = FinalReportParser()
+            preview_parser.feed(preview_text)
             evidence = load_json(FINAL_REPORT_EVIDENCE)
             commitment = load_json(INDEPENDENT_COMMITMENT)
             (
@@ -2190,6 +2194,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 _authenticated_manifest_bytes,
             ) = independent_seed_result_evidence(commitment)
             report_sha = sha256(FINAL_REPORT)
+            preview_sha = sha256(FINAL_PREVIEW)
             visual_count = sum(parser.section_visuals)
             if not (
                 len(parser.section_visuals) == 4
@@ -2199,8 +2204,22 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and parser.baseline_ids == parser.threshold_line_ids
                 and parser.baseline_ids == parser.threshold_label_ids
                 and FINAL_REPORT.stat().st_mode & 0o777 == 0o444
+                and len(preview_parser.section_visuals) == 4
+                and all(count >= 1 for count in preview_parser.section_visuals)
+                and preview_parser.section_depth == 0
+                and preview_parser.baseline_ids
+                and preview_parser.baseline_ids
+                == preview_parser.threshold_line_ids
+                and preview_parser.baseline_ids
+                == preview_parser.threshold_label_ids
+                and preview_parser.baseline_ids == parser.baseline_ids
+                and FINAL_PREVIEW.stat().st_mode & 0o777 == 0o444
                 and "preview-only" not in text.lower()
                 and "pending" not in text.lower()
+                and "shareable final preview" in preview_text.lower()
+                and "launch-ready preview" in preview_text.lower()
+                and "preview-only" not in preview_text.lower()
+                and "pending" not in preview_text.lower()
                 and "original familywise placeability rule produced no eligible"
                 in text.lower()
                 and "94.614%" in text
@@ -2208,6 +2227,8 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and "placeability is a separate diagnostic" in text.lower()
                 and "apex-season-1" in text
                 and SERVER_COMMIT in text
+                and SERVER_COMMIT in preview_text
+                and EVALUATOR_IMAGE.removeprefix("sha256:")[:12] in preview_text
                 and evidence.get("schema") == 1
                 and evidence.get("kind") == "sim-latency-finalize-report-evidence"
                 and evidence.get("source_lock_sha256") == SOURCE_LOCK_SHA256
@@ -2222,6 +2243,7 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and evidence.get("season_base_equivalence_sha256")
                 == SEASON_BASE_EQUIVALENCE_SHA256
                 and evidence.get("report_sha256") == report_sha
+                and evidence.get("preview_sha256") == preview_sha
                 and evidence.get("same_seed_selection_sha256")
                 == sha256(SELECTION)
                 and evidence.get("strict_same_seed_analysis_sha256")
@@ -2262,6 +2284,13 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 and set(evidence.get("baseline_ids", []))
                 == parser.baseline_ids
                 and evidence.get("all_baselines_have_threshold_lines") is True
+                and evidence.get("preview_sections") == 4
+                and evidence.get("preview_section_svg_counts")
+                == preview_parser.section_visuals
+                and set(evidence.get("preview_baseline_ids", []))
+                == preview_parser.baseline_ids
+                and evidence.get("preview_all_baselines_have_threshold_lines")
+                is True
                 and FINAL_REPORT_EVIDENCE.stat().st_mode & 0o777 == 0o400
             ):
                 raise AuditError(
@@ -2271,12 +2300,15 @@ def audit_production_and_reports(checks: list[dict[str, Any]]) -> None:
                 checks,
                 "final_html_report",
                 "pass",
-                "The authenticated final report has four sections, a visual in each, and a mapped threshold line and label for every baseline.",
+                "The authenticated final report and shareable preview each have four sections, a visual in each, and a mapped threshold line and label for every baseline.",
                 {
                     "sha256": report_sha,
+                    "preview_sha256": preview_sha,
                     "evidence_sha256": sha256(FINAL_REPORT_EVIDENCE),
                     "sections": len(parser.section_visuals),
                     "section_svg_counts": parser.section_visuals,
+                    "preview_sections": len(preview_parser.section_visuals),
+                    "preview_section_svg_counts": preview_parser.section_visuals,
                     "baseline_ids": sorted(parser.baseline_ids),
                     "independent_seed_results_sha256": seed_results_sha256,
                     "reference_placeability_counts": (

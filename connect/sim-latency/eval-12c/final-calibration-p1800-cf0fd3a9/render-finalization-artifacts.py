@@ -79,6 +79,7 @@ REMEDIATION_AMENDMENT = (
 )
 
 REPORT = SERVER / "finalize-report.html"
+PREVIEW = SERVER / "final-preview.html"
 REPORT_EVIDENCE = ROOT / "finalize-report-evidence.json"
 CALIBRATION_DOCUMENT = SERVER / "connect/sim-latency/APEX-CALIBRATION.md"
 
@@ -93,6 +94,9 @@ SEASON_BASE_EQUIVALENCE_SHA256 = (
 )
 CALIBRATION_TEMPLATE_SHA256 = (
     "ff4883f7b9d0776ebe0e91d33e91a25d1f8a5bbb616776a135e1e1c06e8cc7cc"
+)
+PREVIEW_TEMPLATE_SHA256 = (
+    "2011ec4cc129819d24c1f4726a0f5fbfa268f22d633b86c24cba58bf7246a027"
 )
 BASE_SHA = "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8"
 HISTORICAL_BASE_SHA = "5ca3d5242f4a7d40efe4415635608023b05a0956"
@@ -1569,6 +1573,29 @@ def render_html(data: dict[str, Any]) -> str:
     return report
 
 
+def render_preview_html(data: dict[str, Any]) -> str:
+    preview = render_html(data)
+    replacements = (
+        (
+            "<title>Sim-latency competition finalization</title>",
+            "<title>Final sim-latency evaluation environment preview</title>",
+        ),
+        (
+            "URnetwork · sim-latency · final evidence",
+            "URnetwork · sim-latency · shareable final preview",
+        ),
+        (
+            "<h1>The competition evaluator is technically launch-ready.</h1>",
+            "<h1>Final evaluation environment: launch-ready preview.</h1>",
+        ),
+    )
+    for old, new in replacements:
+        require(preview.count(old) == 1, f"preview template marker changed: {old}")
+        preview = preview.replace(old, new, 1)
+    validate_report_shape(preview)
+    return preview
+
+
 def validate_report_shape(report: str) -> ReportShapeParser:
     parser = ReportShapeParser()
     parser.feed(report)
@@ -1923,6 +1950,12 @@ def atomic_pending(path: Path, content: str, mode: int) -> Path:
 def render_outputs(data: dict[str, Any]) -> None:
     require(not REPORT.exists(), f"final report already exists: {REPORT}")
     require(
+        PREVIEW.is_file()
+        and not PREVIEW.is_symlink()
+        and sha256(PREVIEW) == PREVIEW_TEMPLATE_SHA256,
+        "preview template changed",
+    )
+    require(
         not REPORT_EVIDENCE.exists(),
         f"final report evidence already exists: {REPORT_EVIDENCE}",
     )
@@ -1932,6 +1965,8 @@ def render_outputs(data: dict[str, Any]) -> None:
     )
     report = render_html(data)
     parser = validate_report_shape(report)
+    preview = render_preview_html(data)
+    preview_parser = validate_report_shape(preview)
     calibration = render_calibration_document(data)
     lowered = calibration.lower()
     require(
@@ -1992,15 +2027,22 @@ def render_outputs(data: dict[str, Any]) -> None:
         "production_readiness_sha256": sha256(READINESS),
         "calibration_document_sha256": sha256_text(calibration),
         "report_sha256": sha256_text(report),
+        "preview_sha256": sha256_text(preview),
         "sections": 4,
         "section_svg_counts": parser.section_visuals,
         "baseline_ids": sorted(parser.baseline_ids),
         "all_baselines_have_threshold_lines": True,
+        "preview_sections": 4,
+        "preview_section_svg_counts": preview_parser.section_visuals,
+        "preview_baseline_ids": sorted(preview_parser.baseline_ids),
+        "preview_all_baselines_have_threshold_lines": True,
     }
     pending_paths: list[Path] = []
     try:
         report_pending = atomic_pending(REPORT, report, 0o444)
         pending_paths.append(report_pending)
+        preview_pending = atomic_pending(PREVIEW, preview, 0o444)
+        pending_paths.append(preview_pending)
         calibration_pending = atomic_pending(
             CALIBRATION_DOCUMENT, calibration, 0o444
         )
@@ -2013,6 +2055,7 @@ def render_outputs(data: dict[str, Any]) -> None:
         pending_paths.append(evidence_pending)
 
         calibration_pending.replace(CALIBRATION_DOCUMENT)
+        preview_pending.replace(PREVIEW)
         report_pending.replace(REPORT)
         evidence_pending.replace(REPORT_EVIDENCE)
     except Exception:
@@ -2020,6 +2063,7 @@ def render_outputs(data: dict[str, Any]) -> None:
             pending.unlink(missing_ok=True)
         raise
     exact_mode(CALIBRATION_DOCUMENT, 0o444)
+    exact_mode(PREVIEW, 0o444)
     exact_mode(REPORT, 0o444)
     exact_mode(REPORT_EVIDENCE, 0o400)
     print(sha256(REPORT))
@@ -2175,6 +2219,14 @@ def self_test() -> None:
             and "placeability is a separate diagnostic" in lowered_report
             and "better 4/5" in rendered,
             "self-test launch policy disclosure",
+        )
+        preview = render_preview_html(fixture)
+        preview_parser = validate_report_shape(preview)
+        require(
+            preview_parser.baseline_ids == parser.baseline_ids
+            and "shareable final preview" in preview
+            and "launch-ready preview" in preview,
+            "self-test preview rendering",
         )
         calibration = render_calibration_document(fixture)
         calibration_path = Path(directory) / "calibration.md"
