@@ -40,6 +40,8 @@ type evaluatorRequest struct {
 	CompetitionId        string           `json:"competition_id"`
 	BaseSha              string           `json:"base_sha"`
 	EvaluatorImageDigest string           `json:"evaluator_image_digest"`
+	ApiImageDigest       string           `json:"api_image_digest"`
+	WorkerImageDigest    string           `json:"worker_image_digest"`
 	ScorerVersion        string           `json:"scorer_version"`
 	RoundSeedHex         string           `json:"round_seed_hex"`
 	ProvidersPath        string           `json:"providers_path"`
@@ -110,6 +112,8 @@ type artifactManifest struct {
 	RoundId                string               `json:"round_id"`
 	Attempt                int                  `json:"attempt"`
 	EvaluatorImageDigest   string               `json:"evaluator_image_digest"`
+	ApiImageDigest         string               `json:"api_image_digest"`
+	WorkerImageDigest      string               `json:"worker_image_digest"`
 	EvaluatorCommandSha256 string               `json:"evaluator_command_sha256"`
 	RequestSha256          string               `json:"request_sha256"`
 	PatchSha256            string               `json:"patch_sha256"`
@@ -255,6 +259,7 @@ func (CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, job *q
 	manifest := artifactManifest{
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
 		Attempt: job.AttemptCount, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
 		RequestSha256:          requestHash, PatchSha256: patchHash, StderrSha256: stderrHash,
 		ResultSha256: hex.EncodeToString(resultHash[:]), Security: result.Security,
@@ -292,6 +297,7 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(),
 		Attempt: job.AttemptCount, CompetitionId: settings.CompetitionId,
 		BaseSha: settings.BaseSha, EvaluatorImageDigest: settings.EvaluatorImageDigest,
+		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		ScorerVersion: ScorerVersion, RoundSeedHex: seed, PatchPath: patchPath,
 		PatchSha256:   job.PatchSha256,
 		ProvidersPath: job.Round.ProvidersPath, ProvidersSha256: job.Round.ProvidersSha256,

@@ -112,6 +112,42 @@ func validSettings() *Settings {
 	}
 }
 
+func testApiImageDigest() string {
+	return "sha256:" + strings.Repeat("6", 64)
+}
+
+func testWorkerImageDigest() string {
+	return "sha256:" + strings.Repeat("7", 64)
+}
+
+func TestRuntimeImageDigestRequiresExactSha256Identity(t *testing.T) {
+	want := testApiImageDigest()
+	t.Setenv(runtimeImageDigestEnvironment, "  "+want+"\n")
+	got, err := runtimeImageDigest()
+	if err != nil || got != want {
+		t.Fatalf("runtime image digest = %q, %v", got, err)
+	}
+	t.Setenv(runtimeImageDigestEnvironment, "main-api:latest")
+	if _, err := runtimeImageDigest(); err == nil {
+		t.Fatal("mutable image tag accepted as runtime identity")
+	}
+}
+
+func TestEvaluatorRequestBindsControlPlaneImageDigests(t *testing.T) {
+	settings := validSettings()
+	job := &queuedJob{
+		ScoreJobResult: ScoreJobResult{
+			JobId: server.NewId(), RoundId: server.NewId(), PatchSha256: strings.Repeat("8", 64),
+			ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
+		},
+		AttemptCount: 1,
+	}
+	request := evaluatorRequestForJob(settings, job, strings.Repeat("9", 64), "/tmp/attempt", "/tmp/attempt/canonical.patch")
+	if request.ApiImageDigest != job.ApiImageDigest || request.WorkerImageDigest != job.WorkerImageDigest {
+		t.Fatalf("request image identity = %q, %q", request.ApiImageDigest, request.WorkerImageDigest)
+	}
+}
+
 func TestTimeoutBudgetMatchesEvaluator(t *testing.T) {
 	p := validSettings().EvaluationPolicy
 	args := []string{
@@ -414,7 +450,7 @@ func (f *fakeStore) FinalizeEligibleRound(context.Context, *Settings) (*roundRec
 func (f *fakeStore) Leaderboards(context.Context, *Settings) (*SeasonLeaderboardResult, error) {
 	return &SeasonLeaderboardResult{CompetitionId: "test", Epochs: []LeaderboardResult{}}, nil
 }
-func (f *fakeStore) Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string) (*queuedJob, bool, error) {
+func (f *fakeStore) Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string, string) (*queuedJob, bool, error) {
 	return nil, false, errors.New("unused")
 }
 func (f *fakeStore) GetJob(context.Context, *Settings, server.Id, *Principal) (*queuedJob, error) {
@@ -424,10 +460,11 @@ func (f *fakeStore) Readiness(context.Context, *Settings) (map[string]bool, erro
 	return f.readiness, f.readyErr
 }
 func (f *fakeStore) RegisterHost(context.Context, *Settings, HostSelfCheck) error { return nil }
-func (f *fakeStore) Claim(context.Context, *Settings, string) (*queuedJob, error) {
+func (f *fakeStore) Claim(_ context.Context, _ *Settings, _ string, workerImageDigest string) (*queuedJob, error) {
 	if f.claims < len(f.claimJobs) {
 		job := f.claimJobs[f.claims]
 		f.claims++
+		job.WorkerImageDigest = workerImageDigest
 		return job, nil
 	}
 	return nil, nil
@@ -497,7 +534,7 @@ func TestWorkerAdvanceSeasonCreatesNextSevenDayEpoch(t *testing.T) {
 	store := &fakeStore{
 		round: current, finalizeRound: current, finalized: true, createRound: next,
 	}
-	worker, err := NewWorker(settings, store, &fakeEvaluator{}, "box-a-worker")
+	worker, err := newWorkerWithImageDigest(settings, store, &fakeEvaluator{}, "box-a-worker", testWorkerImageDigest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +564,7 @@ func TestWorkerAdvanceSeasonStopsAfterSixEpochs(t *testing.T) {
 		RoundId: server.NewId(), Epoch: 6, Status: "finalized", FinalizedAt: &finalizedAt,
 	}}
 	store := &fakeStore{round: current, finalizeRound: current, finalized: true}
-	worker, err := NewWorker(settings, store, &fakeEvaluator{}, "box-a-worker")
+	worker, err := newWorkerWithImageDigest(settings, store, &fakeEvaluator{}, "box-a-worker", testWorkerImageDigest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,8 +597,8 @@ func TestWorkerRetriesInfrastructureUnderSameJob(t *testing.T) {
 	hostCheck := passingHostCheck(settings)
 	roundId := *hostCheck.RebaselineRoundId
 	jobs := []*queuedJob{
-		{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: roundId}, AttemptCount: 1},
-		{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: roundId}, AttemptCount: 2},
+		{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: roundId, ApiImageDigest: testApiImageDigest()}, AttemptCount: 1},
+		{ScoreJobResult: ScoreJobResult{JobId: jobId, RoundId: roundId, ApiImageDigest: testApiImageDigest()}, AttemptCount: 2},
 	}
 	store := &fakeStore{claimJobs: jobs}
 	evaluator := &fakeEvaluator{
@@ -571,7 +608,7 @@ func TestWorkerRetriesInfrastructureUnderSameJob(t *testing.T) {
 			{Score: &ScoreResult{ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: map[string]Gate{"g1": {Passed: true, Details: map[string]any{}}}}, ArtifactManifest: []byte(`{"schema":1}`)},
 		},
 	}
-	worker, err := NewWorker(settings, store, evaluator, "box-a-worker")
+	worker, err := newWorkerWithImageDigest(settings, store, evaluator, "box-a-worker", testWorkerImageDigest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +652,7 @@ func TestRevealedRoundWorkloadAuthenticatesCommittedBytes(t *testing.T) {
 		},
 		ProvidersPath: path,
 	}
-	service := NewService(settings, &fakeStore{round: round})
+	service := newServiceWithImageDigest(settings, &fakeStore{round: round}, testApiImageDigest(), nil)
 	got, gotDigest, status, evalError := service.GetRoundWorkload(context.Background(), roundId)
 	if evalError != nil || status != 200 || gotDigest != round.ProvidersSha256 || !reflect.DeepEqual(got, providers) {
 		t.Fatalf("revealed workload = %q, %q, %d, %#v", got, gotDigest, status, evalError)

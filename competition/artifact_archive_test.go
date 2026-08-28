@@ -40,6 +40,7 @@ func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *tes
 	job := &queuedJob{
 		ScoreJobResult: ScoreJobResult{
 			JobId: jobId, RoundId: roundId, PatchSha256: strings.Repeat("a", 64),
+			ApiImageDigest: testApiImageDigest(), WorkerImageDigest: testWorkerImageDigest(),
 		},
 		AttemptCount: 1,
 	}
@@ -53,6 +54,7 @@ func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *tes
 
 	manifestBytes, err := archive.ArchiveAttempt(context.Background(), settings, job, attemptDirectory, artifactManifest{
 		Schema: 1, JobId: jobId.String(), RoundId: roundId.String(), Attempt: 1,
+		ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest,
 		PatchSha256: patch.Sha256, ResultSha256: result.Sha256,
 		StderrSha256: stderr.Sha256, Artifacts: []evaluationArtifact{declared},
 	})
@@ -67,6 +69,9 @@ func TestBlobArtifactArchiveRetainsAuthenticatedAttemptWithoutSeedRequest(t *tes
 		!manifest.Retention.AuthenticatedAfterUpload || manifest.Retention.ComplianceObjectLock ||
 		manifest.Retention.ObjectCount != 4 {
 		t.Fatalf("retention manifest = %+v", manifest.Retention)
+	}
+	if manifest.ApiImageDigest != job.ApiImageDigest || manifest.WorkerImageDigest != job.WorkerImageDigest {
+		t.Fatal("retention manifest lost control-plane image provenance")
 	}
 	objects, err := store.List(context.Background(), "evidence/competition/v1/")
 	if err != nil {

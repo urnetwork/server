@@ -13,13 +13,23 @@ import (
 )
 
 type Service struct {
-	settings    *Settings
-	settingsErr error
-	store       Store
+	settings            *Settings
+	settingsErr         error
+	store               Store
+	apiImageDigest      string
+	apiImageIdentityErr error
 }
 
 func NewService(settings *Settings, store Store) *Service {
-	service := &Service{settings: settings, store: store}
+	apiImageDigest, apiImageIdentityErr := runtimeImageDigest()
+	return newServiceWithImageDigest(settings, store, apiImageDigest, apiImageIdentityErr)
+}
+
+func newServiceWithImageDigest(settings *Settings, store Store, apiImageDigest string, identityErr error) *Service {
+	service := &Service{
+		settings: settings, store: store, apiImageDigest: apiImageDigest,
+		apiImageIdentityErr: identityErr,
+	}
 	if settings == nil {
 		service.settingsErr = errors.New("competition settings unavailable")
 	} else if err := settings.Validate(); err != nil {
@@ -81,11 +91,12 @@ func (s *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionError
 
 func (s *Service) readinessChecks(ctx context.Context, settings *Settings) (map[string]bool, error) {
 	checks, err := s.store.Readiness(ctx, settings)
-	if err != nil {
-		return checks, err
-	}
 	if checks == nil {
 		checks = map[string]bool{}
+	}
+	checks["api_image_identity"] = s.apiImageIdentityErr == nil && imageDigestPattern.MatchString(s.apiImageDigest)
+	if err != nil {
+		return checks, err
 	}
 	checks["artifact_archive"] = settings.artifactArchive != nil && settings.artifactArchive.Check(ctx) == nil
 	return checks, nil
@@ -235,7 +246,7 @@ func (s *Service) Submit(ctx context.Context, args ScoreArgs, principal *Princip
 	if readyErr := s.requireSecureEvaluator(ctx, settings); readyErr != nil {
 		return nil, 503, readyErr
 	}
-	job, hit, err := s.store.Enqueue(ctx, settings, args.RoundId, patch, principal.Id)
+	job, hit, err := s.store.Enqueue(ctx, settings, args.RoundId, patch, principal.Id, s.apiImageDigest)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		metricOutcome = "rejected"

@@ -14,14 +14,29 @@ import (
 var workerIdPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type Worker struct {
-	settings  *Settings
-	store     Store
-	evaluator Evaluator
-	workerId  string
-	pollEvery time.Duration
+	settings          *Settings
+	store             Store
+	evaluator         Evaluator
+	workerId          string
+	workerImageDigest string
+	pollEvery         time.Duration
 }
 
 func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId string) (*Worker, error) {
+	workerImageDigest, err := runtimeImageDigest()
+	if err != nil {
+		return nil, err
+	}
+	return newWorkerWithImageDigest(settings, store, evaluator, workerId, workerImageDigest)
+}
+
+func newWorkerWithImageDigest(
+	settings *Settings,
+	store Store,
+	evaluator Evaluator,
+	workerId string,
+	workerImageDigest string,
+) (*Worker, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
@@ -31,9 +46,12 @@ func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId st
 	if !workerIdPattern.MatchString(workerId) {
 		return nil, errors.New("worker id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 	}
+	if _, err := validateRuntimeImageDigest(workerImageDigest); err != nil {
+		return nil, err
+	}
 	return &Worker{
 		settings: settings, store: store, evaluator: evaluator, workerId: workerId,
-		pollEvery: time.Second,
+		workerImageDigest: workerImageDigest, pollEvery: time.Second,
 	}, nil
 }
 
@@ -60,7 +78,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		if err := w.advanceSeason(ctx); err != nil {
 			return fmt.Errorf("advance competition season: %w", err)
 		}
-		job, err := w.store.Claim(ctx, w.settings, w.workerId)
+		job, err := w.store.Claim(ctx, w.settings, w.workerId, w.workerImageDigest)
 		if err != nil {
 			return fmt.Errorf("claim competition job: %w", err)
 		}

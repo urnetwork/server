@@ -30,11 +30,11 @@ type Store interface {
 	GetRound(context.Context, *Settings, server.Id) (*roundRecord, error)
 	FinalizeEligibleRound(context.Context, *Settings) (*roundRecord, bool, error)
 	Leaderboards(context.Context, *Settings) (*SeasonLeaderboardResult, error)
-	Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string) (*queuedJob, bool, error)
+	Enqueue(context.Context, *Settings, server.Id, *CanonicalPatch, string, string) (*queuedJob, bool, error)
 	GetJob(context.Context, *Settings, server.Id, *Principal) (*queuedJob, error)
 	Readiness(context.Context, *Settings) (map[string]bool, error)
 	RegisterHost(context.Context, *Settings, HostSelfCheck) error
-	Claim(context.Context, *Settings, string) (*queuedJob, error)
+	Claim(context.Context, *Settings, string, string) (*queuedJob, error)
 	Heartbeat(context.Context, *Settings, string, server.Id) error
 	Complete(context.Context, *Settings, string, server.Id, EvaluationOutcome) (bool, error)
 	HandBack(context.Context, string, server.Id, string) error
@@ -397,7 +397,17 @@ func cacheKey(roundId server.Id, patch []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (PostgresStore) Enqueue(ctx context.Context, settings *Settings, roundId server.Id, patch *CanonicalPatch, principalId string) (job *queuedJob, cacheHit bool, err error) {
+func (PostgresStore) Enqueue(
+	ctx context.Context,
+	settings *Settings,
+	roundId server.Id,
+	patch *CanonicalPatch,
+	principalId string,
+	apiImageDigest string,
+) (job *queuedJob, cacheHit bool, err error) {
+	if _, identityErr := validateRuntimeImageDigest(apiImageDigest); identityErr != nil {
+		return nil, false, identityErr
+	}
 	now := server.NowUtc()
 	var stateErr error
 	err = captureDatabaseError(func() {
@@ -424,7 +434,9 @@ func (PostgresStore) Enqueue(ctx context.Context, settings *Settings, roundId se
 			if scanErr == nil {
 				cacheHit = true
 				addPrincipal(ctx, tx, job.JobId, principalId, now)
-				appendEvent(ctx, tx, job.JobId, now, "cache_hit", principalId, map[string]any{"cache_key": key})
+				appendEvent(ctx, tx, job.JobId, now, "cache_hit", principalId, map[string]any{
+					"cache_key": key, "api_image_digest": apiImageDigest,
+				})
 				return
 			}
 			if !errors.Is(scanErr, pgx.ErrNoRows) {
@@ -442,12 +454,13 @@ func (PostgresStore) Enqueue(ctx context.Context, settings *Settings, roundId se
 			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO competition_job (
 					job_id, round_id, patch_bytes, patch_sha256, cache_key, state,
-					submitted_at, available_at, artifact_retain_until
-				) VALUES ($1, $2, $3, $4, $5, 'queued', $6, $6, $7)
-			`, jobId, roundId, patch.Bytes, patch.Sha256, key, now, settings.RetainUntil))
+					submitted_at, available_at, artifact_retain_until, api_image_digest
+				) VALUES ($1, $2, $3, $4, $5, 'queued', $6, $6, $7, $8)
+			`, jobId, roundId, patch.Bytes, patch.Sha256, key, now, settings.RetainUntil, apiImageDigest))
 			addPrincipal(ctx, tx, jobId, principalId, now)
 			appendEvent(ctx, tx, jobId, now, "submitted", principalId, map[string]any{
 				"round_id": roundId.String(), "patch_sha256": patch.Sha256, "cache_key": key,
+				"api_image_digest": apiImageDigest,
 			})
 			job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id = $1`, jobId), true)
 			server.Raise(scanErr)
@@ -463,7 +476,7 @@ const jobSelect = `
 	SELECT j.job_id, j.round_id, j.patch_sha256, j.state, j.submitted_at,
 	       j.started_at, j.completed_at, j.cache_key, j.score_json,
 	       j.eval_error_json, j.patch_bytes, j.attempt_count, COALESCE(j.lease_owner, ''),
-	       j.lease_expires_at,
+	       j.lease_expires_at, j.api_image_digest, COALESCE(j.worker_image_digest, ''),
 	       r.competition_id, r.workload_commitment, r.seed_nonce,
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
 	       r.policy_json, r.opens_at, r.closes_at,
@@ -479,7 +492,8 @@ func scanJob(row pgx.Row, includePatch bool) (*queuedJob, error) {
 		&job.JobId, &job.RoundId, &job.PatchSha256, &job.State,
 		&job.SubmittedAt, &job.StartedAt, &job.CompletedAt, &job.CacheKey,
 		&scoreJson, &errorJson, &job.Patch, &job.AttemptCount, &job.LeaseOwner,
-		&job.LeaseExpiresAt, &job.Round.CompetitionId,
+		&job.LeaseExpiresAt, &job.ApiImageDigest, &job.WorkerImageDigest,
+		&job.Round.CompetitionId,
 		&job.Round.WorkloadCommitment, &job.Round.SeedNonce,
 		&job.Round.SeedCiphertext, &job.Round.ProvidersSha256,
 		&job.Round.ProvidersPath, &policyJson, &job.Round.OpensAt,
@@ -620,7 +634,10 @@ func (PostgresStore) RegisterHost(ctx context.Context, settings *Settings, selfC
 	})
 }
 
-func (PostgresStore) Claim(ctx context.Context, settings *Settings, workerId string) (job *queuedJob, err error) {
+func (PostgresStore) Claim(ctx context.Context, settings *Settings, workerId string, workerImageDigest string) (job *queuedJob, err error) {
+	if _, identityErr := validateRuntimeImageDigest(workerImageDigest); identityErr != nil {
+		return nil, identityErr
+	}
 	now := server.NowUtc()
 	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
 	err = captureDatabaseError(func() {
@@ -663,20 +680,22 @@ func (PostgresStore) Claim(ctx context.Context, settings *Settings, workerId str
 			server.Raise(scanErr)
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'running', started_at = COALESCE(started_at, $2),
-					lease_owner = $3, lease_expires_at = $4, attempt_count = attempt_count + 1
+					lease_owner = $3, lease_expires_at = $4, attempt_count = attempt_count + 1,
+					worker_image_digest = $5
 				WHERE job_id = $1
-			`, job.JobId, now, workerId, leaseUntil))
+			`, job.JobId, now, workerId, leaseUntil, workerImageDigest))
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = $1, job_id = $2,
 					lease_expires_at = $3, heartbeat_at = $4 WHERE slot_id = 1
 			`, workerId, job.JobId, leaseUntil, now))
 			appendEvent(ctx, tx, job.JobId, now, "claimed", workerId, map[string]any{
-				"attempt": job.AttemptCount + 1,
+				"attempt": job.AttemptCount + 1, "worker_image_digest": workerImageDigest,
 			})
 			job.State = "running"
 			job.AttemptCount++
 			job.LeaseOwner = workerId
 			job.LeaseExpiresAt = &leaseUntil
+			job.WorkerImageDigest = workerImageDigest
 		})
 	})
 	return job, err
@@ -728,13 +747,18 @@ func (PostgresStore) Complete(ctx context.Context, settings *Settings, workerId 
 		server.Tx(ctx, func(tx server.PgTx) {
 			var state, owner string
 			var attempts int
+			var apiImageDigest, workerImageDigest string
 			server.Raise(tx.QueryRow(ctx, `
-				SELECT state, COALESCE(lease_owner, ''), attempt_count
+				SELECT state, COALESCE(lease_owner, ''), attempt_count,
+				       api_image_digest, COALESCE(worker_image_digest, '')
 				FROM competition_job WHERE job_id = $1 FOR UPDATE
-			`, jobId).Scan(&state, &owner, &attempts))
+			`, jobId).Scan(&state, &owner, &attempts, &apiImageDigest, &workerImageDigest))
 			if state != "running" || owner != workerId {
 				leaseLost = true
 				return
+			}
+			if !imageDigestPattern.MatchString(apiImageDigest) || !imageDigestPattern.MatchString(workerImageDigest) {
+				panic(errors.New("competition job runtime image identity is invalid"))
 			}
 			scoreJson, errorJson, manifestJson := nullableJson(outcome.Score), nullableJson(outcome.Error), []byte(outcome.ArtifactManifest)
 			manifestHash := any(nil)
@@ -760,6 +784,7 @@ func (PostgresStore) Complete(ctx context.Context, settings *Settings, workerId 
 				appendEvent(ctx, tx, jobId, now, "infrastructure_retry", workerId, map[string]any{
 					"attempt": attempts, "error_code": errorCode,
 					"artifact_manifest_sha256": manifestHash,
+					"api_image_digest":         apiImageDigest, "worker_image_digest": workerImageDigest,
 				})
 			} else {
 				terminal := "failed"
@@ -774,7 +799,10 @@ func (PostgresStore) Complete(ctx context.Context, settings *Settings, workerId 
 						artifact_manifest_sha256 = $7
 					WHERE job_id = $1
 				`, jobId, terminal, now, scoreJson, errorJson, nullableBytes(manifestJson), manifestHash))
-				appendEvent(ctx, tx, jobId, now, terminal, workerId, map[string]any{"attempt": attempts})
+				appendEvent(ctx, tx, jobId, now, terminal, workerId, map[string]any{
+					"attempt": attempts, "api_image_digest": apiImageDigest,
+					"worker_image_digest": workerImageDigest,
+				})
 			}
 			server.RaisePgResult(tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = NULL, job_id = NULL,

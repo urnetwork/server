@@ -145,16 +145,18 @@ type ScoreAcceptedResult struct {
 }
 
 type ScoreJobResult struct {
-	JobId       server.Id         `json:"job_id"`
-	RoundId     server.Id         `json:"round_id"`
-	PatchSha256 string            `json:"patch_sha256"`
-	State       string            `json:"state"`
-	SubmittedAt time.Time         `json:"submitted_at"`
-	StartedAt   *time.Time        `json:"started_at,omitempty"`
-	CompletedAt *time.Time        `json:"completed_at,omitempty"`
-	CacheKey    string            `json:"cache_key"`
-	Score       *ScoreResult      `json:"score,omitempty"`
-	EvalError   *CompetitionError `json:"eval_error,omitempty"`
+	JobId             server.Id         `json:"job_id"`
+	RoundId           server.Id         `json:"round_id"`
+	PatchSha256       string            `json:"patch_sha256"`
+	State             string            `json:"state"`
+	SubmittedAt       time.Time         `json:"submitted_at"`
+	StartedAt         *time.Time        `json:"started_at,omitempty"`
+	CompletedAt       *time.Time        `json:"completed_at,omitempty"`
+	CacheKey          string            `json:"cache_key"`
+	ApiImageDigest    string            `json:"api_image_digest"`
+	WorkerImageDigest string            `json:"worker_image_digest,omitempty"`
+	Score             *ScoreResult      `json:"score,omitempty"`
+	EvalError         *CompetitionError `json:"eval_error,omitempty"`
 }
 
 type ScoreResult struct {

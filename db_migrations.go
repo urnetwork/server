@@ -6371,4 +6371,57 @@ var migrations = []any{
 		END
 		$competition_epoch_lifecycle_guard$;
 	`),
+
+	// Bind every accepted job to the exact API image that admitted it and every
+	// attempt to the exact worker image that executed it. API identity is
+	// immutable; worker identity may advance only while a nonterminal job is
+	// retried, with every attempt also preserved in the append-only event log.
+	newSqlMigration(`
+		ALTER TABLE competition_job
+			ADD COLUMN api_image_digest varchar(71),
+			ADD COLUMN worker_image_digest varchar(71) NULL;
+
+		DO $competition_image_identity_backfill_guard$
+		BEGIN
+			IF EXISTS (SELECT 1 FROM competition_job WHERE api_image_digest IS NULL) THEN
+				RAISE EXCEPTION 'pre-release competition jobs must be removed before runtime image identity is enabled';
+			END IF;
+		END
+		$competition_image_identity_backfill_guard$;
+
+		ALTER TABLE competition_job
+			ALTER COLUMN api_image_digest SET NOT NULL,
+			ADD CONSTRAINT competition_job_api_image_digest_format CHECK (
+				api_image_digest ~ '^sha256:[0-9a-f]{64}$'
+			),
+			ADD CONSTRAINT competition_job_worker_image_digest_format CHECK (
+				worker_image_digest IS NULL OR worker_image_digest ~ '^sha256:[0-9a-f]{64}$'
+			);
+
+		CREATE OR REPLACE FUNCTION competition_job_immutable_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $competition_job_image_identity_guard$
+		BEGIN
+			IF (OLD.state IN ('succeeded', 'failed', 'canceled') AND OLD IS DISTINCT FROM NEW) OR
+			   OLD.job_id IS DISTINCT FROM NEW.job_id OR
+			   OLD.round_id IS DISTINCT FROM NEW.round_id OR
+			   OLD.patch_bytes IS DISTINCT FROM NEW.patch_bytes OR
+			   OLD.patch_sha256 IS DISTINCT FROM NEW.patch_sha256 OR
+			   OLD.cache_key IS DISTINCT FROM NEW.cache_key OR
+			   OLD.submitted_at IS DISTINCT FROM NEW.submitted_at OR
+			   OLD.api_image_digest IS DISTINCT FROM NEW.api_image_digest OR
+			   OLD.artifact_retain_until IS DISTINCT FROM NEW.artifact_retain_until OR
+			   NEW.attempt_count < OLD.attempt_count OR
+			   (OLD.score_json IS NOT NULL AND OLD.score_json IS DISTINCT FROM NEW.score_json) OR
+			   (OLD.eval_error_json IS NOT NULL AND OLD.eval_error_json IS DISTINCT FROM NEW.eval_error_json) OR
+			   (OLD.artifact_manifest_json IS NOT NULL AND OLD.artifact_manifest_json IS DISTINCT FROM NEW.artifact_manifest_json) OR
+			   (OLD.artifact_manifest_sha256 IS NOT NULL AND OLD.artifact_manifest_sha256 IS DISTINCT FROM NEW.artifact_manifest_sha256)
+			THEN
+				RAISE EXCEPTION 'competition job immutable fields changed';
+			END IF;
+			RETURN NEW;
+		END
+		$competition_job_image_identity_guard$;
+	`),
 }

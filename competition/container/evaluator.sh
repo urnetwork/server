@@ -206,7 +206,7 @@ request_path="$(realpath -e "$request_path")"
 artifact_dir="$(dirname "$request_path")"
 [ "$result_path" = "$artifact_dir/worker-result.json" ] || die "result path is outside the attempt directory"
 
-readonly request_keys='["artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_id","round_seed_hex","schema","scorer_version","vault_local_directory"]'
+readonly request_keys='["api_image_digest","artifact_directory","attempt","base_sha","competition_id","config_local_directory","evaluation_policy","evaluator_image_digest","job_id","patch_path","patch_policy","patch_sha256","providers_path","providers_sha256","round_id","round_seed_hex","schema","scorer_version","vault_local_directory","worker_image_digest"]'
 readonly patch_policy_keys='["allowed_paths","forbidden_paths","max_patch_bytes"]'
 readonly evaluation_policy_keys='["announce_timeout_ms","api_port","arrivals_per_minute","client_pool_size","client_warmup_timeout_ms","config_local_sha256","duration_ms","exchange_hosts","fleet_shards","hardware_id","host_qualification_sha256","impairment_enabled","pipeline_interval_ms","prewarm_ms","provider_count","quality_window_size","queue_limit","ramp_ms","replicates","request_timeout_ms","score_timeout_seconds","scorer_sha256","settle_ms","simulator_sha256","site_listen","takeover_margin","test_timeout_ms","vault_local_sha256"]'
 jq -e \
@@ -225,6 +225,8 @@ attempt="$(jq -er '.attempt' "$request_path")"
 competition_id="$(jq -er '.competition_id' "$request_path")"
 base_sha="$(jq -er '.base_sha' "$request_path")"
 base_image="$(jq -er '.evaluator_image_digest' "$request_path")"
+api_control_image="$(jq -er '.api_image_digest' "$request_path")"
+worker_control_image="$(jq -er '.worker_image_digest' "$request_path")"
 scorer_version="$(jq -er '.scorer_version' "$request_path")"
 providers_path="$(jq -er '.providers_path' "$request_path")"
 providers_sha256="$(jq -er '.providers_sha256' "$request_path")"
@@ -243,6 +245,8 @@ replicates="$(jq -er '.evaluation_policy.replicates' "$request_path")"
 [[ "$competition_id" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "competition id is invalid"
 [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || die "base SHA is invalid"
 [[ "$base_image" =~ ^sha256:[0-9a-f]{64}$ ]] || die "base image id is invalid"
+[[ "$api_control_image" =~ ^sha256:[0-9a-f]{64}$ ]] || die "API control image id is invalid"
+[[ "$worker_control_image" =~ ^sha256:[0-9a-f]{64}$ ]] || die "worker control image id is invalid"
 [ "$scorer_version" = sim-latency-score/1 ] || die "scorer version is invalid"
 [[ "$providers_sha256" =~ ^[0-9a-f]{64}$ ]] || die "providers SHA-256 is invalid"
 [[ "$patch_sha256" =~ ^[0-9a-f]{64}$ ]] || die "patch SHA-256 is invalid"

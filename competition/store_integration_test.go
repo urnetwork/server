@@ -15,6 +15,9 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		ctx := context.Background()
 		settings := validSettings()
 		store := PostgresStore{}
+		apiImageDigest := testApiImageDigest()
+		workerAImageDigest := testWorkerImageDigest()
+		workerBImageDigest := "sha256:" + strings.Repeat("9", 64)
 		now := server.NowUtc()
 		round, err := store.CreateRound(ctx, settings, GenerateRoundArgs{
 			OpensAt: now.Add(-time.Minute), ClosesAt: now.Add(500 * time.Millisecond), RevealAt: now.Add(500 * time.Millisecond),
@@ -35,11 +38,11 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		if patchErr != nil {
 			t.Fatal(patchErr)
 		}
-		job1, hit, err := store.Enqueue(ctx, settings, round.RoundId, patch1, "miner-a")
+		job1, hit, err := store.Enqueue(ctx, settings, round.RoundId, patch1, "miner-a", apiImageDigest)
 		if err != nil || hit {
 			t.Fatalf("first enqueue = hit %v, err %v", hit, err)
 		}
-		cached, hit, err := store.Enqueue(ctx, settings, round.RoundId, patch1, "miner-b")
+		cached, hit, err := store.Enqueue(ctx, settings, round.RoundId, patch1, "miner-b", apiImageDigest)
 		if err != nil || !hit || cached.JobId != job1.JobId {
 			t.Fatalf("cached enqueue = %#v, hit %v, err %v", cached, hit, err)
 		}
@@ -54,7 +57,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		if patchErr != nil {
 			t.Fatal(patchErr)
 		}
-		job2, _, err := store.Enqueue(ctx, settings, round.RoundId, patch2, "miner-a")
+		job2, _, err := store.Enqueue(ctx, settings, round.RoundId, patch2, "miner-a", apiImageDigest)
 		if err != nil {
 			t.Fatalf("second enqueue: %s", err)
 		}
@@ -62,22 +65,22 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		if patchErr != nil {
 			t.Fatal(patchErr)
 		}
-		job3, _, err := store.Enqueue(ctx, settings, round.RoundId, patch3, "miner-a")
+		job3, _, err := store.Enqueue(ctx, settings, round.RoundId, patch3, "miner-a", apiImageDigest)
 		if err != nil {
 			t.Fatalf("third enqueue: %s", err)
 		}
-		if early, err := store.Claim(ctx, settings, "worker-a"); err != nil || early != nil {
+		if early, err := store.Claim(ctx, settings, "worker-a", workerAImageDigest); err != nil || early != nil {
 			t.Fatalf("batch job was claimable before closes_at: %#v, %v", early, err)
 		}
 		time.Sleep(600 * time.Millisecond)
-		claimed1, err := store.Claim(ctx, settings, "worker-a")
+		claimed1, err := store.Claim(ctx, settings, "worker-a", workerAImageDigest)
 		if err != nil || claimed1 == nil || claimed1.JobId != job1.JobId || claimed1.AttemptCount != 1 {
 			t.Fatalf("first claim = %#v, %v", claimed1, err)
 		}
-		if blocked, err := store.Claim(ctx, settings, "worker-b"); err != nil || blocked != nil {
+		if blocked, err := store.Claim(ctx, settings, "worker-b", workerBImageDigest); err != nil || blocked != nil {
 			t.Fatalf("singleton slot allowed concurrent claim: %#v, %v", blocked, err)
 		}
-		if blocked, err := store.Claim(ctx, settings, "worker-a"); err != nil || blocked != nil {
+		if blocked, err := store.Claim(ctx, settings, "worker-a", workerAImageDigest); err != nil || blocked != nil {
 			t.Fatalf("duplicate worker id bypassed singleton slot: %#v, %v", blocked, err)
 		}
 		if err := store.Heartbeat(ctx, settings, "worker-a", claimed1.JobId); err != nil {
@@ -91,7 +94,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		if err != nil {
 			t.Fatalf("complete first: %s", err)
 		}
-		claimed2, err := store.Claim(ctx, settings, "worker-a")
+		claimed2, err := store.Claim(ctx, settings, "worker-a", workerAImageDigest)
 		if err != nil || claimed2 == nil || claimed2.JobId != job2.JobId {
 			t.Fatalf("second claim = %#v, %v", claimed2, err)
 		}
@@ -105,7 +108,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 				UPDATE competition_worker_slot SET lease_expires_at = $1 WHERE slot_id = 1
 			`, now.Add(-time.Minute)))
 		})
-		failedOver, err := store.Claim(ctx, settings, "worker-b")
+		failedOver, err := store.Claim(ctx, settings, "worker-b", workerBImageDigest)
 		if err != nil || failedOver == nil || failedOver.JobId != job2.JobId || failedOver.AttemptCount != 2 {
 			t.Fatalf("failover claim = %#v, %v", failedOver, err)
 		}
@@ -117,7 +120,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 			t.Fatalf("complete failed submission: %s", err)
 		}
 
-		claimed3, err := store.Claim(ctx, settings, "worker-a")
+		claimed3, err := store.Claim(ctx, settings, "worker-a", workerAImageDigest)
 		if err != nil || claimed3 == nil || claimed3.JobId != job3.JobId {
 			t.Fatalf("third claim = %#v, %v", claimed3, err)
 		}
@@ -139,7 +142,7 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `UPDATE competition_job SET available_at = $1 WHERE job_id = $2`, now.Add(-time.Minute), job3.JobId))
 		}, server.OptReadWrite())
-		retried3, err := store.Claim(ctx, settings, "worker-b")
+		retried3, err := store.Claim(ctx, settings, "worker-b", workerBImageDigest)
 		if err != nil || retried3 == nil || retried3.JobId != job3.JobId || retried3.AttemptCount != 2 {
 			t.Fatalf("third retry claim = %#v, %v", retried3, err)
 		}
@@ -190,6 +193,12 @@ func TestPostgresStoreQueueCacheFailoverAndImmutability(t *testing.T) {
 		}, server.OptReadWrite())
 		if immutableErr == nil || !strings.Contains(immutableErr.Error(), "immutable") {
 			t.Fatalf("patch immutability update error = %v", immutableErr)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			_, immutableErr = conn.Exec(ctx, `UPDATE competition_job SET api_image_digest = $2 WHERE job_id = $1`, job1.JobId, workerBImageDigest)
+		}, server.OptReadWrite())
+		if immutableErr == nil || !strings.Contains(immutableErr.Error(), "immutable") {
+			t.Fatalf("API image identity immutability update error = %v", immutableErr)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			_, immutableErr = conn.Exec(ctx, `UPDATE competition_job SET eval_error_json = '{"tampered":true}'::jsonb WHERE job_id = $1`, job2.JobId)

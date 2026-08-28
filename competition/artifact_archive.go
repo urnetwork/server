@@ -124,7 +124,11 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 		}
 	}()
 	if settings == nil || job == nil || manifest.JobId != job.JobId.String() ||
-		manifest.RoundId != job.RoundId.String() || manifest.Attempt != job.AttemptCount {
+		manifest.RoundId != job.RoundId.String() || manifest.Attempt != job.AttemptCount ||
+		manifest.ApiImageDigest != job.ApiImageDigest ||
+		manifest.WorkerImageDigest != job.WorkerImageDigest ||
+		!imageDigestPattern.MatchString(manifest.ApiImageDigest) ||
+		!imageDigestPattern.MatchString(manifest.WorkerImageDigest) {
 		return nil, errors.New("attempt archive identity is invalid")
 	}
 	artifacts := append([]evaluationArtifact(nil), manifest.Artifacts...)

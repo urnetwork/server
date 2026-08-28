@@ -37,6 +37,7 @@ func TestCompetitionMigrationsFollowOriginMigrations(t *testing.T) {
 		"competition_append_only_guard",
 		"competition_workload_backfill_guard",
 		"competition_epoch_lifecycle_guard",
+		"competition_image_identity_backfill_guard",
 	}
 	firstCompetitionIndex := len(migrations) - len(markers)
 	if firstCompetitionIndex <= canceledCircleRetryRestoreMigrationIndex(t) {
