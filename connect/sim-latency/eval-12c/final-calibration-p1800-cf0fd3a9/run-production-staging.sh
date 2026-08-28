@@ -8,13 +8,14 @@ set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C TZ=UTC
 
-readonly ROOT=/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
+readonly ROOT=/home/by/urnetwork/server-finalization-evidence/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
 readonly SERVER=/home/by/urnetwork/server
+readonly HISTORICAL_ROOT="$SERVER/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9"
 readonly CONTROL=/home/by/urnetwork/server-finalization-control-plane
 readonly RELEASE="$ROOT/control-plane-release/final"
 readonly RELEASE_MANIFEST="$RELEASE/release-build.json"
-readonly SELECTION="$ROOT/post-frontier/final-calibration-selection.json"
-readonly REFERENCE_V5="$ROOT/reference-requalification-v5"
+readonly SELECTION="$HISTORICAL_ROOT/post-frontier/final-calibration-selection.json"
+readonly REFERENCE_V5="$HISTORICAL_ROOT/reference-requalification-v5"
 readonly INDEPENDENT_ATTESTATION="$REFERENCE_V5/hidden-launch-runtime/independent-campaign-attestation.json"
 readonly INDEPENDENT_DECISION="$REFERENCE_V5/hidden-launch-decision.json"
 readonly INDEPENDENT_PROGRESS="$REFERENCE_V5/hidden-launch-runtime/independent-references/progress.json"
@@ -22,6 +23,7 @@ readonly INDEPENDENT_ATTESTATION_REPAIR="$REFERENCE_V5/hidden-attestation-path-r
 readonly INDEPENDENT_ATTESTATION_REPAIR_SCRIPT="$REFERENCE_V5/repair-hidden-attestation-path.py"
 readonly REFERENCE_V5_STAGING_AMENDMENT="$ROOT/production-staging-reference-v5-amendment.json"
 readonly RELEASE_AMENDMENT="$ROOT/production-release-self-check-contract-amendment.json"
+readonly REMEDIATION_AMENDMENT="$ROOT/production-staging-attempt-06-remediation-amendment.json"
 readonly SERVICE_CHECK="$ROOT/production-readiness/service-backed-fifo-cache-failover.json"
 readonly RELEASE_CHECK="$ROOT/production-readiness/release-artifacts.json"
 readonly OUTPUT_ROOT="$ROOT/production-readiness"
@@ -32,30 +34,36 @@ readonly API_VAULT=/etc/urnetwork/competition-api/vault
 readonly CREDENTIALS=/etc/urnetwork/competition-api/credentials.json
 readonly DEPLOYMENT_MANIFEST=/etc/urnetwork/competition-api/deployment-manifest.json
 readonly HOST_CONFIG=/etc/urnetwork/competition-host.json
-readonly COMMAND_ROOT=/usr/local/libexec/urnetwork/competition-cf0fd3a9
+readonly COMMAND_ROOT=/usr/local/libexec/urnetwork/competition-2abcf145
 readonly SELF_CHECK="$COMMAND_ROOT/competition-host-self-check"
 readonly REBASELINE_PROMOTER="$COMMAND_ROOT/promote-round-rebaseline.sh"
-readonly RESOURCE_BOMB="$ROOT/host-qualification/resource-bomb-cleanup-production.json"
+readonly RESOURCE_BOMB="$HISTORICAL_ROOT/host-qualification/resource-bomb-cleanup-production.json"
 readonly NOOP_PATCH="$SERVER/competition/references/noop.patch"
 readonly API="$RELEASE/binaries/api"
 readonly WORKER="$RELEASE/binaries/competitionworker"
 readonly REBASELINE="$RELEASE/binaries/competitionrebaseline"
 readonly DBINIT="$RELEASE/binaries/competitiondbinit"
-readonly SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
+readonly SOURCE_LOCK_SHA=94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022
+readonly HISTORICAL_SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
 readonly PROTOCOL_SHA=6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af
 readonly REFERENCE_V5_STAGING_AMENDMENT_SHA=618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695
 readonly RELEASE_AMENDMENT_SHA=99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d
+readonly REMEDIATION_AMENDMENT_SHA=7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d
 readonly INDEPENDENT_ATTESTATION_REPAIR_SHA=499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb5b9877207541412d
 readonly INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA=a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0
 readonly CONTROL_COMMIT=2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36
-readonly CONTROL_RELEASE_SHA=90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7
+readonly CONTROL_RELEASE_SHA=0fdf035ee23fb030936d1340ddfaeb80cbcb23fde4c0000bff9f93e70e736818
+readonly HISTORICAL_CONTROL_RELEASE_SHA=90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7
+readonly HISTORICAL_RELEASE_MANIFEST_SHA=17d2817a69f3bc506c98ba00f31b8cc15fc9e2b7e0a4e18b5ca0df9fc89bfc00
+readonly HISTORICAL_RELEASE_CHECK_SHA=3fa3ca749a4718f31ed9ac17351c2b2695891f89117e794b7d3220e477d3b5cd
+readonly HISTORICAL_SERVICE_CHECK_SHA=e3c168731edab3f0de0a823aaed23aa64e72b1ed7ea32e0dc5663806af7c4a08
 readonly RELEASE_MANIFEST_SHA=17d2817a69f3bc506c98ba00f31b8cc15fc9e2b7e0a4e18b5ca0df9fc89bfc00
 readonly RELEASE_CHECK_SHA=3fa3ca749a4718f31ed9ac17351c2b2695891f89117e794b7d3220e477d3b5cd
 readonly SERVICE_CHECK_SHA=e3c168731edab3f0de0a823aaed23aa64e72b1ed7ea32e0dc5663806af7c4a08
-readonly EVALUATOR_IMAGE=sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038
-readonly HOST_QUALIFICATION_SHA=9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f
+readonly EVALUATOR_IMAGE=sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c
+readonly HOST_QUALIFICATION_SHA=acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3
 readonly NOOP_SHA=8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775
-readonly PROVISIONER_SHA=3f68f7dca0f74523aaa0a36be7eb395f8378d34de6d1f7ee6c2b6f4c7dd3a416
+readonly PROVISIONER_SHA=5a887a605d8ff7f9407800e4ac586d0e5ed82c2cebf84d570e91c7d7f6819d26
 readonly BOOT_ID=34760d1b-a0b6-46a0-b8c1-264abd1affba
 readonly MANAGEMENT_CPUS=20,22
 readonly SERVICE_IP=10.213.0.1
@@ -486,9 +494,11 @@ wait_no_job_resources() {
 write_check() {
     local path="$1"
     jq -e --arg release_amendment "$RELEASE_AMENDMENT_SHA" \
+        --arg remediation_amendment "$REMEDIATION_AMENDMENT_SHA" \
         '.schema == 1 and .kind == "sim-latency-production-readiness-check" and
         .passed == true and
         .production_release_self_check_contract_amendment_sha256 == $release_amendment and
+        .production_staging_attempt_06_remediation_amendment_sha256 == $remediation_amendment and
         ([.assertions[]] | all)' "$path" >/dev/null || die "readiness check is malformed: $path"
     chmod 0400 "$path"
 }
@@ -558,11 +568,13 @@ esac
 [ "$(id -u)" -eq 0 ] || die "production staging must run as root"
 [ "$(< /proc/sys/kernel/random/boot_id)" = "$BOOT_ID" ] || die "host rebooted"
 [ "$(sha256_file "$ROOT/source-lock.json")" = "$SOURCE_LOCK_SHA" ] || die "source lock changed"
-[ "$(sha256_file "$ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
+[ "$(sha256_file "$HISTORICAL_ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
 [ "$(sha256_file "$REFERENCE_V5_STAGING_AMENDMENT")" = "$REFERENCE_V5_STAGING_AMENDMENT_SHA" ] ||
     die "reference-v5 staging amendment changed"
 [ "$(sha256_file "$RELEASE_AMENDMENT")" = "$RELEASE_AMENDMENT_SHA" ] ||
     die "production release self-check amendment changed"
+[ "$(sha256_file "$REMEDIATION_AMENDMENT")" = "$REMEDIATION_AMENDMENT_SHA" ] ||
+    die "attempt-06 remediation amendment changed"
 [ "$(sha256_file "$INDEPENDENT_ATTESTATION_REPAIR")" = "$INDEPENDENT_ATTESTATION_REPAIR_SHA" ] ||
     die "independent attestation repair changed"
 [ "$(sha256_file "$INDEPENDENT_ATTESTATION_REPAIR_SCRIPT")" = "$INDEPENDENT_ATTESTATION_REPAIR_SCRIPT_SHA" ] ||
@@ -575,10 +587,10 @@ esac
 [ -f "$RELEASE_MANIFEST" ] && [ ! -L "$RELEASE_MANIFEST" ] || die "final control-plane release is missing"
 [ "$(sha256_file "$RELEASE_MANIFEST")" = "$RELEASE_MANIFEST_SHA" ] || die "release manifest changed"
 [ -f "$SELECTION" ] && [ -f "$INDEPENDENT_ATTESTATION" ] || die "terminal measurement evidence is missing"
-jq -e --arg source "$SOURCE_LOCK_SHA" '.accepted == true and .source_lock_sha256 == $source and
+jq -e --arg source "$HISTORICAL_SOURCE_LOCK_SHA" '.accepted == true and .source_lock_sha256 == $source and
     .same_seed_pairs == 12 and .independent_seed_target == 12 and .reference_required_passes == 11' \
     "$SELECTION" >/dev/null || die "original same-seed selection is invalid"
-jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
+jq -e --arg source "$HISTORICAL_SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
     --arg attestation "$(sha256_file "$INDEPENDENT_ATTESTATION")" \
     --arg decision "$(sha256_file "$INDEPENDENT_DECISION")" \
     --arg repair "$INDEPENDENT_ATTESTATION_REPAIR_SHA" \
@@ -598,11 +610,11 @@ jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
      .retained_invariants.all_original_security_gates_unchanged == true and
      .retained_invariants.all_original_staging_round_gates_unchanged == true' \
     "$REFERENCE_V5_STAGING_AMENDMENT" >/dev/null || die "reference-v5 staging amendment is invalid"
-jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
+jq -e --arg source "$HISTORICAL_SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
     --arg staging_amendment "$REFERENCE_V5_STAGING_AMENDMENT_SHA" \
-    --arg control "$CONTROL_COMMIT" --arg source_release "$CONTROL_RELEASE_SHA" \
-    --arg release_manifest "$RELEASE_MANIFEST_SHA" --arg release_check "$RELEASE_CHECK_SHA" \
-    --arg service_check "$SERVICE_CHECK_SHA" \
+    --arg control "$CONTROL_COMMIT" --arg source_release "$HISTORICAL_CONTROL_RELEASE_SHA" \
+    --arg release_manifest "$HISTORICAL_RELEASE_MANIFEST_SHA" --arg release_check "$HISTORICAL_RELEASE_CHECK_SHA" \
+    --arg service_check "$HISTORICAL_SERVICE_CHECK_SHA" \
     '.schema == 1 and .kind == "sim-latency-production-release-self-check-contract-amendment" and
      .passed == true and .binding.source_lock_sha256 == $source and
      .binding.production_staging_protocol_sha256 == $protocol and
@@ -615,7 +627,21 @@ jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" \
      .replacement_release.service_gate_sha256 == $service_check and
      .root_cause.strict_unknown_field_rejection_retained == true and
      ([.retained_invariants[]] | all)' \
-    "$RELEASE_AMENDMENT" >/dev/null || die "production release self-check amendment is invalid"
+    "$RELEASE_AMENDMENT" >/dev/null || die "historical production release self-check amendment is invalid"
+jq -e --arg source "$SOURCE_LOCK_SHA" --arg historical_source "$HISTORICAL_SOURCE_LOCK_SHA" \
+    --arg staging "$REFERENCE_V5_STAGING_AMENDMENT_SHA" --arg release "$RELEASE_AMENDMENT_SHA" \
+    --arg image "$EVALUATOR_IMAGE" \
+    '.schema == 1 and .kind == "sim-latency-production-staging-attempt-06-remediation-amendment" and
+     .authorized == true and .historical_calibration.source_lock_sha256 == $historical_source and
+     .historical_calibration.production_staging_reference_v5_amendment_sha256 == $staging and
+     .historical_calibration.production_release_self_check_contract_amendment_sha256 == $release and
+     .replacement.source_lock_sha256 == $source and .replacement.evaluator_image_digest == $image and
+     .root_cause.season_base_commit == "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8" and
+     .compatibility.control_plane_commit_changed == false and
+     .compatibility.security_policy_weakened == false and
+     .required_measurement_bridge.replicates_per_side == 9 and
+     .required_measurement_bridge.all_eighteen_replicates_must_be_clean == true' \
+    "$REMEDIATION_AMENDMENT" >/dev/null || die "attempt-06 remediation amendment is invalid"
 jq -e '.accepted == true and .target_independent_seeds == 5 and
     .reference_required_passes == 4 and .reference_ordering_passes >= 4 and
     .selected_competition_replicate_count_unchanged == true and
@@ -633,17 +659,23 @@ jq -e '.complete == true and .completed_independent_seeds == 5 and
     "$INDEPENDENT_PROGRESS" >/dev/null || die "independent progress is invalid"
 jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" --arg control "$CONTROL_COMMIT" \
     --arg control_release "$CONTROL_RELEASE_SHA" --arg image "$EVALUATOR_IMAGE" \
+    --arg remediation "$REMEDIATION_AMENDMENT_SHA" \
     '.source_lock_sha256 == $source and .production_staging_protocol_sha256 == $protocol and
      .control_plane_commit == $control and .control_plane_source_release_sha256 == $control_release and
-     .evaluator_image_digest == $image and .image_contexts_contain_config_or_vault == false' \
+     .evaluator_image_digest == $image and
+     .production_staging_attempt_06_remediation_amendment_sha256 == $remediation and
+     .candidate_base_unchanged == false and .candidate_base_change_authorized == true and
+     .image_contexts_contain_config_or_vault == false' \
     "$RELEASE_MANIFEST" >/dev/null || die "release manifest identity is invalid"
 [ "$(sha256_file "$SERVICE_CHECK")" = "$SERVICE_CHECK_SHA" ] || die "service-backed check changed"
 [ "$(sha256_file "$RELEASE_CHECK")" = "$RELEASE_CHECK_SHA" ] || die "release check changed"
 for prerequisite_check in "$SERVICE_CHECK" "$RELEASE_CHECK"; do
     jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PROTOCOL_SHA" --arg control "$CONTROL_COMMIT" \
+        --arg remediation "$REMEDIATION_AMENDMENT_SHA" \
         '.schema == 1 and .kind == "sim-latency-production-readiness-check" and
          .passed == true and .source_lock_sha256 == $source and
          .production_staging_protocol_sha256 == $protocol and
+         .production_staging_attempt_06_remediation_amendment_sha256 == $remediation and
          .control_plane_commit == $control and ([.assertions[]] | all)' \
         "$prerequisite_check" >/dev/null || die "prerequisite readiness check is invalid: $prerequisite_check"
 done
@@ -999,7 +1031,7 @@ write_check "$OUTPUT_ROOT/artifact-retention.json"
 jq -n "${common_args[@]}" \
     --arg round "$round_id" --arg job "$job_id" \
     --arg mounts "$(sha256_file "$attempt_final/evidence/local-mounts.json")" \
-    --arg boundary "$(sha256_file "$ROOT/control-plane-secret-boundary.json")" \
+    --arg boundary "$(sha256_file "$HISTORICAL_ROOT/control-plane-secret-boundary.json")" \
     --arg scan "$(sha256_file "$STAGING/secret-scan.json")" \
     --arg deployment "$(sha256_file "$DEPLOYMENT_MANIFEST")" \
     '{schema:1,kind:"sim-latency-production-readiness-check",

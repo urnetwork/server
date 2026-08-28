@@ -81,6 +81,7 @@ compose() {
         "EVALUATION_OUTPUT_DIR=${evaluation_output_dir:?}" \
         "EVALUATION_POSTGRES_INIT=$SCRIPT_DIR/postgres-init.sh" \
         "RUNNER_MEMORY_LIMIT=2g" \
+        "RUNNER_CPU_SHARES=1024" \
         "RUNNER_PIDS_LIMIT=4096" \
         "RUNNER_TMP_LIMIT=256m" \
         "RUNNER_WORK_LIMIT=512m" \
@@ -88,11 +89,13 @@ compose() {
         "MIGRATOR_PIDS_LIMIT=4096" \
         "MIGRATOR_TMP_LIMIT=1g" \
         "POSTGRES_MEMORY_LIMIT=2g" \
+        "POSTGRES_CPU_SHARES=4096" \
         "POSTGRES_PIDS_LIMIT=1024" \
         "POSTGRES_DATA_LIMIT=2g" \
         "POSTGRES_MAX_CONNECTIONS=128" \
         "POSTGRES_SHARED_BUFFERS=256MB" \
         "REDIS_MEMORY_LIMIT=1g" \
+        "REDIS_CPU_SHARES=2048" \
         "REDIS_PIDS_LIMIT=512" \
         "REDIS_DATA_LIMIT=512m" \
         "REDIS_MAX_CLIENTS=4096" \
@@ -333,6 +336,7 @@ sudo -n docker inspect "$runner_id" | jq -e --arg cpuset "$SMOKE_CPUSET" \
     '.[0].Config.User == "65532:65532" and
      .[0].HostConfig.ReadonlyRootfs == true and
      .[0].HostConfig.CpusetCpus == $cpuset and
+     .[0].HostConfig.CpuShares == 1024 and
      .[0].HostConfig.Memory == 2147483648 and
      .[0].HostConfig.MemorySwap == 2147483648 and
      .[0].HostConfig.PidsLimit == 4096 and
@@ -433,6 +437,7 @@ jq -e --arg cpuset "$SMOKE_CPUSET" \
     '.[0].Config.User == "65532:65532" and
      .[0].HostConfig.ReadonlyRootfs == true and
      .[0].HostConfig.CpusetCpus == $cpuset and
+     .[0].HostConfig.CpuShares == 1024 and
      .[0].HostConfig.Memory == 2147483648 and
      .[0].HostConfig.MemorySwap == 2147483648 and
      .[0].HostConfig.PidsLimit == 4096 and

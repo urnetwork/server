@@ -28,6 +28,7 @@ readonly EVIDENCE_WORK_BYTES=34359738368
 # plus the host reserve fits the physical box.
 readonly RUNNER_MEMORY_LIMIT=72g
 readonly RUNNER_MEMORY_BYTES=77309411328
+readonly RUNNER_CPU_SHARES=1024
 readonly RUNNER_PIDS_LIMIT=65536
 readonly RUNNER_TMP_LIMIT=2g
 readonly RUNNER_WORK_LIMIT=8g
@@ -36,12 +37,14 @@ readonly MIGRATOR_PIDS_LIMIT=4096
 readonly MIGRATOR_TMP_LIMIT=1g
 readonly POSTGRES_MEMORY_LIMIT=16g
 readonly POSTGRES_MEMORY_BYTES=17179869184
+readonly POSTGRES_CPU_SHARES=4096
 readonly POSTGRES_PIDS_LIMIT=4096
 readonly POSTGRES_DATA_LIMIT=12g
 readonly POSTGRES_MAX_CONNECTIONS=512
 readonly POSTGRES_SHARED_BUFFERS=2GB
 readonly REDIS_MEMORY_LIMIT=8g
 readonly REDIS_MEMORY_BYTES=8589934592
+readonly REDIS_CPU_SHARES=2048
 readonly REDIS_PIDS_LIMIT=4096
 readonly REDIS_DATA_LIMIT=6g
 readonly REDIS_MAX_CLIENTS=32768
@@ -278,8 +281,11 @@ resource_boundary_json="$($RESOURCE_BOUNDARY)" || die "host resource boundary is
 jq -e \
     --arg runner_memory_limit "$RUNNER_MEMORY_LIMIT" \
     --argjson runner_memory_bytes "$RUNNER_MEMORY_BYTES" \
+    --argjson runner_cpu_shares "$RUNNER_CPU_SHARES" \
     --argjson postgres_memory_bytes "$POSTGRES_MEMORY_BYTES" \
+    --argjson postgres_cpu_shares "$POSTGRES_CPU_SHARES" \
     --argjson redis_memory_bytes "$REDIS_MEMORY_BYTES" \
+    --argjson redis_cpu_shares "$REDIS_CPU_SHARES" \
     --argjson active_memory_bytes "$ACTIVE_EVALUATION_MEMORY_BYTES" \
     --argjson reserve_bytes "$MINIMUM_MANAGEMENT_MEMORY_RESERVE_BYTES" \
     '.schema == 1 and .kind == "sim-latency-resource-boundary" and
@@ -289,8 +295,12 @@ jq -e \
      .disjoint_cpu_sets == true and .memory_capacity_passed == true and
      .runner_memory_limit == $runner_memory_limit and
      .runner_memory_limit_bytes == $runner_memory_bytes and
+     .runner_cpu_shares == $runner_cpu_shares and
      .postgres_memory_limit_bytes == $postgres_memory_bytes and
+     .postgres_cpu_shares == $postgres_cpu_shares and
      .redis_memory_limit_bytes == $redis_memory_bytes and
+     .redis_cpu_shares == $redis_cpu_shares and
+     .service_cpu_priority_passed == true and
      .active_memory_limit_bytes == $active_memory_bytes and
      .minimum_management_memory_reserve_bytes == $reserve_bytes and
      .capacity_reserve_bytes >= $reserve_bytes' \
@@ -522,6 +532,7 @@ write_compose_env() {
         "EVALUATION_OUTPUT_DIR=$output" \
         "EVALUATION_POSTGRES_INIT=$POSTGRES_INIT" \
         "RUNNER_MEMORY_LIMIT=$RUNNER_MEMORY_LIMIT" \
+        "RUNNER_CPU_SHARES=$RUNNER_CPU_SHARES" \
         "RUNNER_PIDS_LIMIT=$RUNNER_PIDS_LIMIT" \
         "RUNNER_TMP_LIMIT=$RUNNER_TMP_LIMIT" \
         "RUNNER_WORK_LIMIT=$RUNNER_WORK_LIMIT" \
@@ -529,11 +540,13 @@ write_compose_env() {
         "MIGRATOR_PIDS_LIMIT=$MIGRATOR_PIDS_LIMIT" \
         "MIGRATOR_TMP_LIMIT=$MIGRATOR_TMP_LIMIT" \
         "POSTGRES_MEMORY_LIMIT=$POSTGRES_MEMORY_LIMIT" \
+        "POSTGRES_CPU_SHARES=$POSTGRES_CPU_SHARES" \
         "POSTGRES_PIDS_LIMIT=$POSTGRES_PIDS_LIMIT" \
         "POSTGRES_DATA_LIMIT=$POSTGRES_DATA_LIMIT" \
         "POSTGRES_MAX_CONNECTIONS=$POSTGRES_MAX_CONNECTIONS" \
         "POSTGRES_SHARED_BUFFERS=$POSTGRES_SHARED_BUFFERS" \
         "REDIS_MEMORY_LIMIT=$REDIS_MEMORY_LIMIT" \
+        "REDIS_CPU_SHARES=$REDIS_CPU_SHARES" \
         "REDIS_PIDS_LIMIT=$REDIS_PIDS_LIMIT" \
         "REDIS_DATA_LIMIT=$REDIS_DATA_LIMIT" \
         "REDIS_MAX_CLIENTS=$REDIS_MAX_CLIENTS" \
@@ -827,16 +840,20 @@ run_stage() {
         --arg config_local "$config_local_directory" \
         --arg vault_local "$vault_local_directory" \
         --argjson runner_memory "$RUNNER_MEMORY_BYTES" \
+        --argjson runner_cpu_shares "$RUNNER_CPU_SHARES" \
         --argjson runner_pids "$RUNNER_PIDS_LIMIT" \
         --argjson postgres_memory "$POSTGRES_MEMORY_BYTES" \
+        --argjson postgres_cpu_shares "$POSTGRES_CPU_SHARES" \
         --argjson postgres_pids "$POSTGRES_PIDS_LIMIT" \
         --argjson redis_memory "$REDIS_MEMORY_BYTES" \
+        --argjson redis_cpu_shares "$REDIS_CPU_SHARES" \
         --argjson redis_pids "$REDIS_PIDS_LIMIT" \
         'length == 3 and
          (map(select(.Name | endswith("-runner-1"))) | length == 1) and
          (map(select(.Name | endswith("-runner-1")))[0] |
           .Config.Image == $image and .Config.User == "65532:65532" and
           .HostConfig.ReadonlyRootfs == true and .HostConfig.Memory == $runner_memory and
+          .HostConfig.CpuShares == $runner_cpu_shares and
           .HostConfig.MemorySwap == $runner_memory and .HostConfig.PidsLimit == $runner_pids and
           .HostConfig.CgroupParent == $parent and .State.ExitCode == 0 and .State.OOMKilled == false and
           (.HostConfig.CapDrop | index("ALL") != null) and
@@ -849,10 +866,12 @@ run_stage() {
          (map(select(.Name | endswith("-postgres-1"))) | length == 1) and
          (map(select(.Name | endswith("-postgres-1")))[0] |
           .Config.User == "999:999" and .HostConfig.Memory == $postgres_memory and
+          .HostConfig.CpuShares == $postgres_cpu_shares and
           .HostConfig.MemorySwap == $postgres_memory and .HostConfig.PidsLimit == $postgres_pids) and
          (map(select(.Name | endswith("-redis-1"))) | length == 1) and
          (map(select(.Name | endswith("-redis-1")))[0] |
           .Config.User == "999:999" and .HostConfig.Memory == $redis_memory and
+          .HostConfig.CpuShares == $redis_cpu_shares and
           .HostConfig.MemorySwap == $redis_memory and .HostConfig.PidsLimit == $redis_pids) and
          ([.[] | .HostConfig.CgroupParent == $parent and .HostConfig.ReadonlyRootfs == true and
            .HostConfig.CpusetCpus == $cpuset and
@@ -864,6 +883,7 @@ run_stage() {
           config:{image:.Config.Image,user:.Config.User,labels:.Config.Labels},
           host_config:{readonly_rootfs:.HostConfig.ReadonlyRootfs,
             memory:.HostConfig.Memory,memory_swap:.HostConfig.MemorySwap,
+            cpu_shares:.HostConfig.CpuShares,
             pids_limit:.HostConfig.PidsLimit,cgroup_parent:.HostConfig.CgroupParent,
             cpuset_cpus:.HostConfig.CpusetCpus,cap_drop:.HostConfig.CapDrop,
             security_opt:.HostConfig.SecurityOpt,network_mode:.HostConfig.NetworkMode},

@@ -628,6 +628,60 @@ func TestEvaluatorReservesManagementResources(t *testing.T) {
 
 }
 
+// Trusted data services must remain schedulable when submitted code saturates
+// every evaluation CPU. Relative shares preserve idle runner throughput while
+// giving PostgreSQL and Redis deterministic priority under contention.
+func TestEvaluatorPrioritizesDataServicesUnderRunnerContention(t *testing.T) {
+	composeBytes, err := os.ReadFile("container/compose.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(composeBytes)
+	for _, required := range []string{
+		`cpu_shares: ${RUNNER_CPU_SHARES:?set the frozen runner CPU shares}`,
+		`cpu_shares: ${POSTGRES_CPU_SHARES:?set the frozen PostgreSQL CPU shares}`,
+		`cpu_shares: ${REDIS_CPU_SHARES:?set the frozen Redis CPU shares}`,
+	} {
+		if !strings.Contains(compose, required) {
+			t.Errorf("Compose CPU contention policy is missing %q", required)
+		}
+	}
+
+	evaluatorBytes, err := os.ReadFile("container/evaluator.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluator := string(evaluatorBytes)
+	for _, required := range []string{
+		"readonly RUNNER_CPU_SHARES=1024",
+		"readonly POSTGRES_CPU_SHARES=4096",
+		"readonly REDIS_CPU_SHARES=2048",
+		`.HostConfig.CpuShares == $runner_cpu_shares`,
+		`.HostConfig.CpuShares == $postgres_cpu_shares`,
+		`.HostConfig.CpuShares == $redis_cpu_shares`,
+		`cpu_shares:.HostConfig.CpuShares`,
+	} {
+		if !strings.Contains(evaluator, required) {
+			t.Errorf("evaluator CPU contention policy is missing %q", required)
+		}
+	}
+
+	boundaryBytes, err := os.ReadFile("container/resource-boundary.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := string(boundaryBytes)
+	for _, required := range []string{
+		"$postgres_cpu_shares > $redis_cpu_shares",
+		"$redis_cpu_shares > $runner_cpu_shares",
+		"service_cpu_priority_passed:",
+	} {
+		if !strings.Contains(boundary, required) {
+			t.Errorf("resource evidence is missing CPU priority proof %q", required)
+		}
+	}
+}
+
 // The worker must be restricted to the management set without making the host
 // topology appear to contain only two CPUs. Host-online CPUs and inherited
 // worker affinity are distinct qualification facts.

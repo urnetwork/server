@@ -22,6 +22,7 @@ services:
     image: postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
     pull_policy: never
     user: "999:999"
+    cpu_shares: ${POSTGRES_CPU_SHARES:?set the frozen PostgreSQL CPU shares}
     mem_limit: ${POSTGRES_MEMORY_LIMIT:?set the frozen PostgreSQL memory limit}
     memswap_limit: ${POSTGRES_MEMORY_LIMIT:?set the frozen PostgreSQL memory limit}
     pids_limit: ${POSTGRES_PIDS_LIMIT:?set the frozen PostgreSQL PID limit}
@@ -115,6 +116,7 @@ services:
     image: redis:8-bookworm@sha256:c22af04bb576503bf16b3e34a1fd2fd82de0f765afd866d2e380145e0af30d78
     pull_policy: never
     user: "999:999"
+    cpu_shares: ${REDIS_CPU_SHARES:?set the frozen Redis CPU shares}
     mem_limit: ${REDIS_MEMORY_LIMIT:?set the frozen Redis memory limit}
     memswap_limit: ${REDIS_MEMORY_LIMIT:?set the frozen Redis memory limit}
     pids_limit: ${REDIS_PIDS_LIMIT:?set the frozen Redis PID limit}
@@ -155,6 +157,7 @@ services:
     image: ${EVALUATION_IMAGE:?set a digest-pinned base or per-submission image}
     pull_policy: never
     user: "65532:65532"
+    cpu_shares: ${RUNNER_CPU_SHARES:?set the frozen runner CPU shares}
     mem_limit: ${RUNNER_MEMORY_LIMIT:?set the frozen runner memory limit}
     memswap_limit: ${RUNNER_MEMORY_LIMIT:?set the frozen runner memory limit}
     pids_limit: ${RUNNER_PIDS_LIMIT:?set the frozen runner PID limit}

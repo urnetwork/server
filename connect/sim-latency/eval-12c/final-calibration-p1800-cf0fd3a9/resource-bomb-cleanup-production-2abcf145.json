@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-resource-bomb-cleanup",
+  "image": "urnetwork/resource-bomb-gate:local",
+  "evaluation_cpuset": "0,2,4,6,8,10,12,14,16,18",
+  "management_cpuset": "20,22",
+  "management_affinity": "20,22",
+  "cpu_bomb_observed_cpuset": "0,2,4,6,8,10,12,14,16,18",
+  "cpu_bomb_saturated_evaluation_set": true,
+  "memory_limit_bytes": 77309411328,
+  "production_memory_limit": true,
+  "memory_exit_code": 137,
+  "memory_oom_killed": true,
+  "cleanup_elapsed_ms": 602,
+  "cleanup_limit_ms": 10000,
+  "cleanup_complete": true,
+  "residual_containers": 0,
+  "residual_networks": 0
+}

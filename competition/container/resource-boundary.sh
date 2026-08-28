@@ -9,10 +9,13 @@ readonly EVALUATION_PHYSICAL_CORE_COUNT=10
 readonly MANAGEMENT_PHYSICAL_CORE_COUNT=2
 readonly RUNNER_MEMORY_LIMIT=72g
 readonly RUNNER_MEMORY_BYTES=77309411328
+readonly RUNNER_CPU_SHARES=1024
 readonly POSTGRES_MEMORY_LIMIT=16g
 readonly POSTGRES_MEMORY_BYTES=17179869184
+readonly POSTGRES_CPU_SHARES=4096
 readonly REDIS_MEMORY_LIMIT=8g
 readonly REDIS_MEMORY_BYTES=8589934592
+readonly REDIS_CPU_SHARES=2048
 readonly BUILD_MEMORY_LIMIT=12g
 readonly BUILD_MEMORY_BYTES=12884901888
 readonly MINIMUM_MANAGEMENT_MEMORY_RESERVE_BYTES=25769803776
@@ -79,8 +82,11 @@ jq -n \
     --arg evaluation_cpuset "$evaluation_cpuset" \
     --arg management_cpuset "$management_cpuset" \
     --arg runner_memory_limit "$RUNNER_MEMORY_LIMIT" \
+    --argjson runner_cpu_shares "$RUNNER_CPU_SHARES" \
     --arg postgres_memory_limit "$POSTGRES_MEMORY_LIMIT" \
+    --argjson postgres_cpu_shares "$POSTGRES_CPU_SHARES" \
     --arg redis_memory_limit "$REDIS_MEMORY_LIMIT" \
+    --argjson redis_cpu_shares "$REDIS_CPU_SHARES" \
     --arg build_memory_limit "$BUILD_MEMORY_LIMIT" \
     --argjson discovered_physical_core_count "${#core_keys[@]}" \
     --argjson selected_physical_core_count "$required_core_count" \
@@ -105,13 +111,19 @@ jq -n \
       host_memory_bytes:$host_memory_bytes,
       runner_memory_limit:$runner_memory_limit,
       runner_memory_limit_bytes:$runner_memory_limit_bytes,
+      runner_cpu_shares:$runner_cpu_shares,
       postgres_memory_limit:$postgres_memory_limit,
       postgres_memory_limit_bytes:$postgres_memory_limit_bytes,
+      postgres_cpu_shares:$postgres_cpu_shares,
       redis_memory_limit:$redis_memory_limit,
       redis_memory_limit_bytes:$redis_memory_limit_bytes,
+      redis_cpu_shares:$redis_cpu_shares,
       build_memory_limit:$build_memory_limit,
       build_memory_limit_bytes:$build_memory_limit_bytes,
       active_memory_limit_bytes:$active_memory_limit_bytes,
       minimum_management_memory_reserve_bytes:$minimum_management_memory_reserve_bytes,
       capacity_reserve_bytes:$capacity_reserve_bytes,
-      disjoint_cpu_sets:true,memory_capacity_passed:true}'
+      disjoint_cpu_sets:true,memory_capacity_passed:true,
+      service_cpu_priority_passed:
+        ($postgres_cpu_shares > $redis_cpu_shares and
+         $redis_cpu_shares > $runner_cpu_shares)}'

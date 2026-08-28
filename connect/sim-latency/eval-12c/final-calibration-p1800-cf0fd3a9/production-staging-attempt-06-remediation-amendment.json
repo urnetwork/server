@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-staging-attempt-06-remediation-amendment",
+  "recorded_at": "2026-08-28T04:25:00Z",
+  "authorized": true,
+  "authorization_basis": "The operator authorized correctness fixes that improve sim-latency results and reasonable launch compromises. Attempt 6 exposed one real wrapped PostgreSQL connection-timeout classification defect after seventeen otherwise clean baseline/no-op replicates.",
+  "historical_calibration": {
+    "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+    "production_staging_reference_v5_amendment_sha256": "618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695",
+    "production_release_self_check_contract_amendment_sha256": "99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d",
+    "control_plane_source_release_sha256": "90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7",
+    "control_plane_release_manifest_sha256": "17d2817a69f3bc506c98ba00f31b8cc15fc9e2b7e0a4e18b5ca0df9fc89bfc00",
+    "release_check_sha256": "3fa3ca749a4718f31ed9ac17351c2b2695891f89117e794b7d3220e477d3b5cd",
+    "service_gate_sha256": "e3c168731edab3f0de0a823aaed23aa64e72b1ed7ea32e0dc5663806af7c4a08",
+    "retained": true
+  },
+  "failed_staging_attempt": {
+    "attempt": 6,
+    "baseline_replicates_clean": 9,
+    "candidate_replicates_clean": 8,
+    "candidate_replicates_total": 9,
+    "failed_replicate": "candidate-05",
+    "observed_error": "pgproto3.writeError: write tcp to PostgreSQL: i/o timeout",
+    "candidate_aggregate_raw_score_ms": 43126.8412,
+    "historical_baseline_mean_ms": 43101.69115,
+    "aggregate_delta_fraction": 0.0005835,
+    "failure_gate": "G5_stability",
+    "candidate_05_stderr_sha256": "eb5b23fbc6fe21a287888133f0d4e29b6f0bc44004d3536d8e806a9c61ef50c3",
+    "worker_result_sha256": "3d996fadfe8ff8c83ad435c7f4031b56f2b46e2bbbdfbfc2f5a9167e453099f5",
+    "candidate_score_sha256": "0c8bd683075b657ed92b706b0fc9cc34e43e0b62cf84e2a08f506d138c145f82",
+    "cleanup_complete": true
+  },
+  "root_cause": {
+    "path": "db.go",
+    "function": "isConnectionError",
+    "defect": "A direct type switch did not inspect wrapped errors, so pgproto3.writeError wrapping net.OpError was escalated instead of discarding the failed pooled connection and retrying.",
+    "correction": "Use errors.As for wrapped pgconn.PgError, PgRetry, and net.Error values.",
+    "season_base_commit": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+    "remote_branch": "refs/heads/sim-latency-finalization-46515d82",
+    "remote_commit_verified": true,
+    "changed_paths": [
+      "db.go",
+      "db_error_test.go"
+    ],
+    "db_go_sha256": "0b4e39613defeb33016940f7a969ad8e8afce33180d1d237464ee1c32f2d0481",
+    "db_error_test_go_sha256": "b70cdb3a45d21fd0ba383302307ce2091dee0259b9af6d9e090cc14a968b36f0",
+    "deterministic_wrapped_timeout_regression_passed": true
+  },
+  "replacement": {
+    "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+    "evaluator_image_digest": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+    "evaluator_image_created_at": "2026-08-28T04:05:39.933008361Z",
+    "embedded_source_lock_sha256": "39283e4d7c0898ae2a8ffc709c0e8efcc3b4976d6a3317663d1a7f208900af3a",
+    "simulator_sha256": "bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997",
+    "smoke_evidence_sha256": "be531c0e2479d557af4564f8e66c81cd6d942de8982c073b4351725e0f26a602",
+    "host_qualification_sha256": "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3",
+    "host_config_sha256": "3ad8586dc3bf50076fa17703115088a6f79410b95ce502f0ca30026d770c2af1",
+    "resource_bomb_report_sha256": "08296c7ff35edefb09eae50cd9e415dad86ae37d4347a64022da3d5dcfa841bc",
+    "runner_cpu_shares": 1024,
+    "redis_cpu_shares": 2048,
+    "postgres_cpu_shares": 4096,
+    "work_conserving_cpu_priority": true
+  },
+  "compatibility": {
+    "scorer_source_changed": false,
+    "simulator_source_changed": false,
+    "allowed_submission_path_changed": false,
+    "reference_patch_bytes_changed": false,
+    "reference_patches_apply_cleanly": true,
+    "frozen_scale_changed": false,
+    "replicate_count_changed": false,
+    "takeover_margin_changed": false,
+    "host_qualification_changed": false,
+    "control_plane_commit_changed": false,
+    "security_policy_weakened": false,
+    "historical_reference_ordering_retained_as_compatibility_evidence": true,
+    "historical_reference_ordering_claimed_as_new_runtime_measurement": false
+  },
+  "required_measurement_bridge": {
+    "same_round_baseline_remeasurement": true,
+    "same_round_exact_noop_candidate": true,
+    "replicates_per_side": 9,
+    "all_eighteen_replicates_must_be_clean": true,
+    "all_six_gates_must_pass": true,
+    "baseline_promotion_requires_complete_round": true,
+    "failed_or_partial_round_may_not_be_promoted": true
+  }
+}

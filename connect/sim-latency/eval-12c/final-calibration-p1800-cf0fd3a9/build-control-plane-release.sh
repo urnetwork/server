@@ -8,7 +8,8 @@ set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C
 
-readonly ROOT=/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
+readonly ROOT=/home/by/urnetwork/server-finalization-evidence/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
+readonly HISTORICAL_ROOT=/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
 readonly CONTROL_WORKTREE=/home/by/urnetwork/server-finalization-control-plane
 readonly CONTROL_REPOSITORY=/home/by/urnetwork/server
 readonly CONTROL=/home/by/urnetwork/server-finalization-release-source-2ee4883f
@@ -17,18 +18,20 @@ readonly FINAL="$RELEASE_ROOT/final"
 readonly READINESS_ROOT="$ROOT/production-readiness"
 readonly RELEASE_CHECK="$READINESS_ROOT/release-artifacts.json"
 readonly CONTROL_COMMIT=2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36
-readonly SOURCE_RELEASE_SHA=90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7
-readonly SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
+readonly SOURCE_RELEASE_SHA=0fdf035ee23fb030936d1340ddfaeb80cbcb23fde4c0000bff9f93e70e736818
+readonly SOURCE_LOCK_SHA=94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022
 readonly PROTOCOL_SHA=6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af
-readonly EVALUATOR_IMAGE=sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038
+readonly REMEDIATION_AMENDMENT="$ROOT/production-staging-attempt-06-remediation-amendment.json"
+readonly REMEDIATION_AMENDMENT_SHA=7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d
+readonly EVALUATOR_IMAGE=sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c
 readonly OPENAPI_SHA=3fadfe3ecc23fcc262776d4e6321001e013a53c501574d32d615eb0f0353c289
 readonly BOOT_ID=34760d1b-a0b6-46a0-b8c1-264abd1affba
 readonly BUILD_CPU_LIST=0,2,4,6,8,10,12,14,16,18,20,22
-readonly BUILDER_NAME=urnetwork-final-release-cf0fd3a9-2ee4883f
+readonly BUILDER_NAME=urnetwork-final-release-2abcf145-2ee4883f
 readonly BUILDKIT_IMAGE='moby/buildkit:v0.32.2@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8'
 readonly SBOM_GENERATOR_IMAGE='docker/buildkit-syft-scanner:stable-1@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9'
-readonly API_TAG=urnetwork/sim-latency-competition-api:2ee4883f
-readonly WORKER_TAG=urnetwork/sim-latency-competition-worker:2ee4883f
+readonly API_TAG=urnetwork/sim-latency-competition-api:2ee4883f-2abcf145
+readonly WORKER_TAG=urnetwork/sim-latency-competition-worker:2ee4883f-2abcf145
 readonly SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 readonly VERIFY_RELEASE_OCI="$ROOT/verify-release-oci.py"
 readonly VERIFY_RELEASE_OCI_SHA=b4a0316f591f1963110e5a328adee56a9a6d091a6c1deef8b0e6015d5f9cff2b
@@ -130,7 +133,9 @@ esac
 
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT_ID" ] || die "boot identity changed"
 [ "$(sha256_file "$ROOT/source-lock.json")" = "$SOURCE_LOCK_SHA" ] || die "source lock changed"
-[ "$(sha256_file "$ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
+[ "$(sha256_file "$HISTORICAL_ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
+[ "$(sha256_file "$REMEDIATION_AMENDMENT")" = "$REMEDIATION_AMENDMENT_SHA" ] ||
+    die "attempt-06 remediation amendment changed"
 [ "$(sha256_file "$RELEASE_ROOT/source-release.json")" = "$SOURCE_RELEASE_SHA" ] || die "control-plane source release changed"
 [ "$(sha256_file "$VERIFY_RELEASE_OCI")" = "$VERIFY_RELEASE_OCI_SHA" ] || die "release OCI verifier changed"
 [ "$(git -C "$CONTROL_WORKTREE" rev-parse HEAD)" = "$CONTROL_COMMIT" ] || die "control-plane commit changed"
@@ -327,6 +332,7 @@ jq -n \
     --arg control_commit "$CONTROL_COMMIT" \
     --arg source_vcs_revision "$(git -C "$CONTROL" rev-parse HEAD)" \
     --arg source_release_sha256 "$SOURCE_RELEASE_SHA" \
+    --arg remediation_amendment_sha256 "$REMEDIATION_AMENDMENT_SHA" \
     --arg evaluator_image_digest "$EVALUATOR_IMAGE" \
     --arg go_version "$(go version)" \
     --arg api_binary_sha256 "$api_binary_sha" \
@@ -373,6 +379,7 @@ jq -n \
         network_remotes:0,vcs_revision:$source_vcs_revision,
         linked_worktree_avoided_for_vcs_stamping:true},
       control_plane_source_release_sha256:$source_release_sha256,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment_sha256,
       evaluator_image_digest:$evaluator_image_digest,
       go_version:$go_version,
       binaries:{
@@ -419,7 +426,8 @@ jq -n \
         provenance_verified:true,sbom_verified:true,
         runtime_manifest_digest_equivalent:true},
       image_contexts_contain_config_or_vault:false,
-      candidate_base_unchanged:true
+      candidate_base_unchanged:false,
+      candidate_base_change_authorized:true
     }' >"$work/release-build.json"
 
 jq -e \
@@ -433,6 +441,8 @@ jq -e \
       .builder.driver=="docker-container" and
       .attestations.provenance_verified==true and .attestations.sbom_verified==true and
       .attestations.runtime_manifest_digest_equivalent==true and
+      .production_staging_attempt_06_remediation_amendment_sha256=="7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d" and
+      .candidate_base_unchanged==false and .candidate_base_change_authorized==true and
       .images.api.image_id==(.images.api | .image_id) and
       .images.api.platform_manifest_digest != .images.api.attested_index_digest and
       .images.worker.platform_manifest_digest != .images.worker.attested_index_digest and
@@ -481,9 +491,11 @@ jq -n \
     --arg buildkit_image_id "$(jq -er '.builder.image_id' "$FINAL/release-build.json")" \
     --arg buildkit_inspect_sha256 "$(jq -er '.builder.inspect_sha256' "$FINAL/release-build.json")" \
     --arg openapi_sha256 "$OPENAPI_SHA" \
+    --arg remediation_amendment_sha256 "$REMEDIATION_AMENDMENT_SHA" \
     '{schema:1,kind:"sim-latency-production-readiness-check",check_id:"release_artifacts",
       passed:true,generated_at:$generated_at,source_lock_sha256:$source_lock_sha256,
       production_staging_protocol_sha256:$protocol_sha256,control_plane_commit:$control_commit,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment_sha256,
       evidence_sha256:{release_manifest:$release_manifest_sha256,
         binaries:{api:$api_binary_sha256,worker:$worker_binary_sha256,
           rebaseline:$rebaseline_binary_sha256,dbinit:$dbinit_binary_sha256},
@@ -510,8 +522,9 @@ jq -n \
         digest_pinned_buildkit_verified:true,digest_pinned_sbom_generator_verified:true,
         api_slsa_v1_provenance_verified:true,worker_slsa_v1_provenance_verified:true,
         api_spdx_sbom_verified:true,worker_spdx_sbom_verified:true,
-        no_config_or_vault_in_images:true}}' >"$release_check_pending"
-jq -e '.schema == 1 and .passed == true and (.assertions | length) == 15 and
+        no_config_or_vault_in_images:true,attempt_06_remediation_bound:true,
+        candidate_base_change_authorized:true}}' >"$release_check_pending"
+jq -e '.schema == 1 and .passed == true and (.assertions | length) == 17 and
     ([.assertions[]] | all)' "$release_check_pending" >/dev/null || die "release readiness record is invalid"
 chmod 0400 "$release_check_pending"
 release_check_sha="$(sha256_file "$release_check_pending")"

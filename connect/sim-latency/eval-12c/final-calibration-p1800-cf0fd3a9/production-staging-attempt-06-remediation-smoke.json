@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-production-staging-attempt-06-remediation-smoke",
+  "generated_at": "2026-08-28T04:12:33Z",
+  "passed": true,
+  "source": {
+    "server_commit": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+    "remote_branch": "refs/heads/sim-latency-finalization-46515d82",
+    "remote_commit_verified": true,
+    "embedded_source_lock_sha256": "39283e4d7c0898ae2a8ffc709c0e8efcc3b4976d6a3317663d1a7f208900af3a"
+  },
+  "evaluator": {
+    "image_tag": "urnetwork/sim-latency-evaluator-base:46515d82fe98ff666c61b2b5",
+    "image_id": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+    "image_created_at": "2026-08-28T04:05:39.933008361Z",
+    "development_snapshot": false,
+    "simulator_sha256": "bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997",
+    "candidate_image_id": "sha256:5e722e0d56632e020549d1024febc28c13dd34bb4f6ae2505e9bbf95876f8968",
+    "candidate_commit": "d5c364cd92393432f2e0446038a0d68c879b1f2b"
+  },
+  "cpu_contention_policy": {
+    "evaluation_cpuset": "0,2,4,6,8,10,12,14,16,18",
+    "runner_cpu_shares": 1024,
+    "redis_cpu_shares": 2048,
+    "postgres_cpu_shares": 4096,
+    "work_conserving": true,
+    "management_cpuset_unchanged": "20,22",
+    "compose_sha256": "33c5286cf69057e3e5270cb33d0aa0ef43bea437810dc6a538090f85ab1a80b5",
+    "evaluator_sha256": "b790c5216a1b18a2367f59312031dc534e6f4b3fa16596096759b2202dc78753",
+    "resource_boundary_sha256": "0c2b7244be23c073fc8f57a043d6c4cc66a84efd15a33289392c0ecd6d83473c",
+    "smoke_test_sha256": "2b1b96e97288438e311cac4fa53c3cc1f777c47eb9726c2ef566dd264fa2b6a3"
+  },
+  "checks": {
+    "wrapped_connection_error_regression_inside_image": true,
+    "canonical_patch_revalidation": true,
+    "offline_candidate_vet_and_compile": true,
+    "authenticated_image_cache_reuse": true,
+    "nonroot_read_only_runner": true,
+    "exact_read_only_local_leaf_mounts": true,
+    "live_cpu_shares_verified": true,
+    "internal_run_network": true,
+    "fresh_postgres_and_redis": true,
+    "trusted_migrations": true,
+    "official_runner_preflight": true,
+    "complete_simulator_lifecycle": true,
+    "trusted_accounting_and_resource_report": true,
+    "networkless_pristine_scorer": true,
+    "cleanup_complete": true,
+    "host_network_controls_restored": true
+  }
+}

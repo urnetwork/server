@@ -9,12 +9,16 @@ umask 077
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 readonly SERVER=/home/by/urnetwork/server
+readonly EVIDENCE=/home/by/urnetwork/server-finalization-evidence
 readonly CONTROL=/home/by/urnetwork/server-finalization-control-plane
-readonly ROOT="$SERVER/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9"
+readonly ROOT="$EVIDENCE/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9"
+readonly HISTORICAL_ROOT="$SERVER/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9"
 readonly SOURCE_LOCK="$ROOT/source-lock.json"
-readonly SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
-readonly SELECTION="$ROOT/post-frontier/final-calibration-selection.json"
-readonly REFERENCE_V5="$ROOT/reference-requalification-v5"
+readonly SOURCE_LOCK_SHA=94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022
+readonly HISTORICAL_SOURCE_LOCK="$ROOT/source-lock-cf0fd3a9.json"
+readonly HISTORICAL_SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
+readonly SELECTION="$HISTORICAL_ROOT/post-frontier/final-calibration-selection.json"
+readonly REFERENCE_V5="$HISTORICAL_ROOT/reference-requalification-v5"
 readonly INDEPENDENT_ROOT="$REFERENCE_V5/hidden-launch-runtime"
 readonly INDEPENDENT_ATTESTATION="$INDEPENDENT_ROOT/independent-campaign-attestation.json"
 readonly INDEPENDENT_PROGRESS="$INDEPENDENT_ROOT/independent-references/progress.json"
@@ -23,18 +27,20 @@ readonly INDEPENDENT_REVEAL="$INDEPENDENT_ROOT/independent-references/seed-revea
 readonly COMPATIBILITY_DECISION="$INDEPENDENT_ROOT/calibration-decision.json"
 readonly TERMINAL_DECISION="$REFERENCE_V5/hidden-launch-decision.json"
 readonly MEASUREMENT_AMENDMENT="$REFERENCE_V5/hidden-launch-measurement-amendment.json"
-readonly R1_CORRECTION="$ROOT/independent-reference-r1-correction.json"
+readonly R1_CORRECTION="$HISTORICAL_ROOT/independent-reference-r1-correction.json"
 readonly INDEPENDENT_PROTOCOL="$REFERENCE_V5/hidden-launch-protocol.json"
 readonly STAGING_AMENDMENT="$ROOT/production-staging-reference-v5-amendment.json"
 readonly RELEASE_AMENDMENT="$ROOT/production-release-self-check-contract-amendment.json"
+readonly REMEDIATION_AMENDMENT="$ROOT/production-staging-attempt-06-remediation-amendment.json"
 readonly ATTESTATION_REPAIR="$REFERENCE_V5/hidden-attestation-path-repair.json"
 readonly ATTESTATION_REPAIR_SCRIPT="$REFERENCE_V5/repair-hidden-attestation-path.py"
-readonly PRODUCTION_STAGING_PROTOCOL="$ROOT/production-staging-protocol.json"
+readonly PRODUCTION_STAGING_PROTOCOL="$HISTORICAL_ROOT/production-staging-protocol.json"
 readonly MEASUREMENT_AMENDMENT_SHA=9d453d7b1d763a7c0975bae8275985ef3b7fc3367535f67ccd79ac1afe9e0f61
 readonly R1_CORRECTION_SHA=b500ac07ac7272e8ff839d3bdf6f5ebcdc327d254b1a6d0a5d6078b64831dafa
 readonly INDEPENDENT_PROTOCOL_SHA=4969535eb343049d7b790c5fff8e82b7eb7a60b6e92d2e2aa94e6466e7789fad
 readonly STAGING_AMENDMENT_SHA=618393539636b69cfcdbd6fec14afef3e58fe20d43bda06fbcbf15693802b695
 readonly RELEASE_AMENDMENT_SHA=99d6010edcbc659d936e97cbc7cde48129d0af9146c6404a1bc03604d750ef5d
+readonly REMEDIATION_AMENDMENT_SHA=7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d
 readonly PRODUCTION_STAGING_PROTOCOL_SHA=6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af
 readonly COMPATIBILITY_DECISION_SHA=ba49014d7ceef1ff044a2d799f7911868b2eb159a6c587425a9c9f3d4fac2649
 readonly TERMINAL_DECISION_SHA=3e4cc70d783b01a87328736caf82f49016138c97ff384b26dc38864f8cede835
@@ -42,14 +48,19 @@ readonly ATTESTATION_REPAIR_SHA=499efd5e6d99f4d56a55f05d3949f6107ae8fcdeb2c7dfeb
 readonly ATTESTATION_REPAIR_SCRIPT_SHA=a5bfedfd7228b8e7c01a41334aa01b0d6a413ffadc4cca380073ac9ecdb668a0
 readonly CONTROL_COMMIT=2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36
 readonly CONTROL_SOURCE_RELEASE="$ROOT/control-plane-release/source-release.json"
-readonly CONTROL_SOURCE_RELEASE_SHA=90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7
-readonly SUPERSEDED_CONTROL_COMMIT=5070445ddb1764ad80f999102a9d71946e5a9e29
-readonly SUPERSEDED_CONTROL_SOURCE_RELEASE_SHA=b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940
-readonly SUPERSEDED_PROVISIONER_SHA=13256d52487fd38f3c4f8d16f8b441dcbcca04e8a8de1ba3b7c31e7186d2060c
-readonly ANCHOR="$ROOT/frontier-anchor-request.json"
-readonly BASE_SHA=5ca3d5242f4a7d40efe4415635608023b05a0956
-readonly BASE_IMAGE=sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038
-readonly SIMULATOR_SHA=247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d
+readonly CONTROL_SOURCE_RELEASE_SHA=0fdf035ee23fb030936d1340ddfaeb80cbcb23fde4c0000bff9f93e70e736818
+readonly SUPERSEDED_CONTROL_COMMIT=2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36
+readonly SUPERSEDED_CONTROL_SOURCE_RELEASE_SHA=90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7
+readonly SUPERSEDED_PROVISIONER_SHA=3f68f7dca0f74523aaa0a36be7eb395f8378d34de6d1f7ee6c2b6f4c7dd3a416
+readonly SUPERSEDED_DEPLOYMENT_MANIFEST_SHA=70cf137b8af195bc520abef8336d4cf62ede5c3116cc974dc8bd5d7d36f908d0
+readonly ANCHOR="$HISTORICAL_ROOT/frontier-anchor-request.json"
+readonly BASE_SHA=46515d82fe98ff666c61b2b5bb1d34a89cf4dad8
+readonly BASE_IMAGE=sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c
+readonly SIMULATOR_SHA=bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997
+readonly CONTAINER_SOURCE="$EVIDENCE/competition/container"
+readonly CONTAINER_COMPOSE_SHA=33c5286cf69057e3e5270cb33d0aa0ef43bea437810dc6a538090f85ab1a80b5
+readonly CONTAINER_EVALUATOR_SHA=b790c5216a1b18a2367f59312031dc534e6f4b3fa16596096759b2202dc78753
+readonly CONTAINER_RESOURCE_BOUNDARY_SHA=0c2b7244be23c073fc8f57a043d6c4cc66a84efd15a33289392c0ecd6d83473c
 readonly CONFIG_REPOSITORY=/home/by/urnetwork/config
 readonly CONFIG_REPOSITORY_SHA=f61e90f9a9fe4efdbd4c200d875f6a809fde2679
 readonly IPINFO_BLOB_SHA1=d43ab4c54fb5ffd9cd765a3c06e5397e3636bce4
@@ -69,11 +80,12 @@ readonly API_CONFIG_ROOT="$API_ROOT/config"
 readonly API_VAULT_ROOT="$API_ROOT/vault"
 readonly API_CREDENTIALS="$API_ROOT/credentials.json"
 readonly API_MANIFEST="$API_ROOT/deployment-manifest.json"
-readonly API_SUPERSEDED_ROOT="$API_PARENT/competition-api-superseded-5070445d"
+readonly API_SUPERSEDED_ROOT="$API_PARENT/competition-api-superseded-cf0fd3a9"
 readonly API_SERVICE_USER=by
 readonly API_SERVICE_GROUP=by
-readonly LIBEXEC_ROOT=/usr/local/libexec/urnetwork/competition-cf0fd3a9
-readonly LIBEXEC_SUPERSEDED_ROOT=/usr/local/libexec/urnetwork/competition-cf0fd3a9-superseded-5070445d
+readonly LIBEXEC_ROOT=/usr/local/libexec/urnetwork/competition-2abcf145
+readonly LIBEXEC_PREVIOUS_ROOT=/usr/local/libexec/urnetwork/competition-cf0fd3a9
+readonly LIBEXEC_SUPERSEDED_ROOT=/usr/local/libexec/urnetwork/competition-cf0fd3a9-superseded-46515d82
 readonly INSTALLED_SIMULATOR="$LIBEXEC_ROOT/sim-latency"
 readonly INSTALLED_EVALUATOR="$LIBEXEC_ROOT/container/evaluator.sh"
 readonly INSTALLED_SELF_CHECK="$LIBEXEC_ROOT/competition-host-self-check"
@@ -90,7 +102,7 @@ api_parent_changed=false
 install_committed=false
 
 log() {
-    printf '[competition-api-provision-cf0fd3a9] %s %s\n' "$(date -u '+%FT%TZ')" "$*"
+    printf '[competition-api-provision-2abcf145] %s %s\n' "$(date -u '+%FT%TZ')" "$*"
 }
 
 die() {
@@ -126,7 +138,7 @@ cleanup() {
             sudo -n chmod 0700 "$API_PARENT" >/dev/null 2>&1 || true
         fi
         if [ "$created_libexec_root" = true ]; then
-            [ "$LIBEXEC_ROOT" = /usr/local/libexec/urnetwork/competition-cf0fd3a9 ] || exit 125
+            [ "$LIBEXEC_ROOT" = /usr/local/libexec/urnetwork/competition-2abcf145 ] || exit 125
             sudo -n rm -rf -- "$LIBEXEC_ROOT" >/dev/null 2>&1 || true
         fi
     fi
@@ -140,14 +152,16 @@ verify_file() {
     [ "$(sha256_file "$path")" = "$expected" ] || die "frozen file changed: $path"
 }
 
-verify_release_amendment() {
+verify_remediation_amendment() {
+    verify_file "$HISTORICAL_SOURCE_LOCK" "$HISTORICAL_SOURCE_LOCK_SHA"
     verify_file "$RELEASE_AMENDMENT" "$RELEASE_AMENDMENT_SHA"
+    verify_file "$REMEDIATION_AMENDMENT" "$REMEDIATION_AMENDMENT_SHA"
     jq -e \
-        --arg source "$SOURCE_LOCK_SHA" \
+        --arg source "$HISTORICAL_SOURCE_LOCK_SHA" \
         --arg protocol "$PRODUCTION_STAGING_PROTOCOL_SHA" \
         --arg staging_amendment "$STAGING_AMENDMENT_SHA" \
         --arg commit "$CONTROL_COMMIT" \
-        --arg source_release "$CONTROL_SOURCE_RELEASE_SHA" \
+        --arg source_release "$SUPERSEDED_CONTROL_SOURCE_RELEASE_SHA" \
         '.schema == 1 and
          .kind == "sim-latency-production-release-self-check-contract-amendment" and
          .passed == true and
@@ -159,7 +173,31 @@ verify_release_amendment() {
          .replacement_release.source_release_sha256 == $source_release and
          .root_cause.strict_unknown_field_rejection_retained == true and
          ([.retained_invariants[]] | all)' \
-        "$RELEASE_AMENDMENT" >/dev/null || die "production release self-check amendment is invalid"
+        "$RELEASE_AMENDMENT" >/dev/null || die "historical production release amendment is invalid"
+    jq -e \
+        --arg source "$SOURCE_LOCK_SHA" \
+        --arg historical_source "$HISTORICAL_SOURCE_LOCK_SHA" \
+        --arg historical_staging "$STAGING_AMENDMENT_SHA" \
+        --arg historical_release "$RELEASE_AMENDMENT_SHA" \
+        --arg commit "$BASE_SHA" \
+        --arg image "$BASE_IMAGE" \
+        '.schema == 1 and
+         .kind == "sim-latency-production-staging-attempt-06-remediation-amendment" and
+         .authorized == true and
+         .historical_calibration.source_lock_sha256 == $historical_source and
+         .historical_calibration.production_staging_reference_v5_amendment_sha256 == $historical_staging and
+         .historical_calibration.production_release_self_check_contract_amendment_sha256 == $historical_release and
+         .root_cause.season_base_commit == $commit and
+         .replacement.source_lock_sha256 == $source and
+         .replacement.evaluator_image_digest == $image and
+         .compatibility.scorer_source_changed == false and
+         .compatibility.simulator_source_changed == false and
+         .compatibility.reference_patch_bytes_changed == false and
+         .compatibility.security_policy_weakened == false and
+         .required_measurement_bridge.same_round_baseline_remeasurement == true and
+         .required_measurement_bridge.replicates_per_side == 9 and
+         .required_measurement_bridge.all_eighteen_replicates_must_be_clean == true' \
+        "$REMEDIATION_AMENDMENT" >/dev/null || die "attempt-06 remediation amendment is invalid"
 }
 
 verify_resource_layer() {
@@ -193,9 +231,13 @@ verify_inputs() {
     [ "$(git -C "$CONTROL" rev-parse '@{upstream}')" = "$CONTROL_COMMIT" ] || die "control-plane push identity changed"
     [ -z "$(git -C "$CONTROL" status --porcelain --untracked-files=no)" ] || die "control-plane tracked worktree changed"
     verify_file "$CONTROL_SOURCE_RELEASE" "$CONTROL_SOURCE_RELEASE_SHA"
-    verify_release_amendment
+    verify_remediation_amendment
     [ "$(< /proc/sys/kernel/random/boot_id)" = "$(jq -er '.host.boot_id' "$SOURCE_LOCK")" ] || die "host rebooted"
     [ "$(sudo -n docker image inspect --format '{{.Id}}' "$BASE_IMAGE")" = "$BASE_IMAGE" ] || die "frozen evaluator image unavailable"
+    [ "$(sha256_file "$CONTAINER_SOURCE/compose.yml")" = "$CONTAINER_COMPOSE_SHA" ] || die "trusted Compose policy changed"
+    [ "$(sha256_file "$CONTAINER_SOURCE/evaluator.sh")" = "$CONTAINER_EVALUATOR_SHA" ] || die "trusted evaluator changed"
+    [ "$(sha256_file "$CONTAINER_SOURCE/resource-boundary.sh")" = "$CONTAINER_RESOURCE_BOUNDARY_SHA" ] ||
+        die "trusted resource boundary changed"
     [ "$(git -C "$CONFIG_REPOSITORY" rev-parse HEAD)" = "$CONFIG_REPOSITORY_SHA" ] || die "config source changed"
     [ -z "$(git -C "$CONFIG_REPOSITORY" status --porcelain --untracked-files=no)" ] || die "config tracked worktree changed"
     [ "$(git -C "$CONFIG_REPOSITORY" cat-file -t "$IPINFO_BLOB_SHA1")" = blob ] || die "frozen IPInfo data blob unavailable"
@@ -220,7 +262,7 @@ verify_inputs() {
     [ "$config_hash" = "$(jq -er '.host.config_local_sha256' "$SOURCE_LOCK")" ] || die "evaluation config/local hash changed"
     [ "$vault_hash" = "$(jq -er '.host.vault_local_sha256' "$SOURCE_LOCK")" ] || die "evaluation vault/local hash changed"
     if [ -f "$SELECTION" ]; then
-        jq -e --arg source "$SOURCE_LOCK_SHA" \
+        jq -e --arg source "$HISTORICAL_SOURCE_LOCK_SHA" \
             '.schema == 1 and .kind == "sim-latency-post-frontier-final-calibration-selection" and
              .accepted == true and .source_lock_sha256 == $source and .same_seed_pairs == 12 and
              .independent_seed_target == 12 and .reference_required_passes == 11 and
@@ -251,7 +293,7 @@ verify_terminal_evidence() {
     verify_file "$ATTESTATION_REPAIR" "$ATTESTATION_REPAIR_SHA"
     verify_file "$ATTESTATION_REPAIR_SCRIPT" "$ATTESTATION_REPAIR_SCRIPT_SHA"
     verify_file "$PRODUCTION_STAGING_PROTOCOL" "$PRODUCTION_STAGING_PROTOCOL_SHA"
-    jq -e --arg source "$SOURCE_LOCK_SHA" \
+    jq -e --arg source "$HISTORICAL_SOURCE_LOCK_SHA" \
         '.schema == 1 and .kind == "sim-latency-post-frontier-final-calibration-selection" and
          .accepted == true and .source_lock_sha256 == $source and .same_seed_pairs == 12 and
          .independent_seed_target == 12 and .reference_required_passes == 11 and
@@ -264,7 +306,7 @@ verify_terminal_evidence() {
     progress_sha="$(sha256_file "$INDEPENDENT_PROGRESS")"
     commitment_sha="$(sha256_file "$INDEPENDENT_COMMITMENT")"
     reveal_sha="$(sha256_file "$INDEPENDENT_REVEAL")"
-    jq -e --arg source "$SOURCE_LOCK_SHA" --arg selection "$selection_sha" \
+    jq -e --arg source "$HISTORICAL_SOURCE_LOCK_SHA" --arg selection "$selection_sha" \
         --arg amendment "$MEASUREMENT_AMENDMENT_SHA" \
         --argjson replicates "$(jq -er '.replicate_count' "$SELECTION")" \
         --argjson margin "$(jq -er '.takeover_margin' "$SELECTION")" \
@@ -306,7 +348,7 @@ verify_terminal_evidence() {
         .failed_ordering_seed_indices == [3]' \
         "$INDEPENDENT_PROGRESS" >/dev/null || die "terminal independent reference progress is invalid"
     attestation_sha="$(sha256_file "$INDEPENDENT_ATTESTATION")"
-    jq -e --arg source "$SOURCE_LOCK_SHA" --arg protocol "$PRODUCTION_STAGING_PROTOCOL_SHA" \
+    jq -e --arg source "$HISTORICAL_SOURCE_LOCK_SHA" --arg protocol "$PRODUCTION_STAGING_PROTOCOL_SHA" \
         --arg attestation "$attestation_sha" --arg terminal "$TERMINAL_DECISION_SHA" \
         --arg hidden_protocol "$INDEPENDENT_PROTOCOL_SHA" --arg repair "$ATTESTATION_REPAIR_SHA" \
         --arg repair_script "$ATTESTATION_REPAIR_SCRIPT_SHA" \
@@ -348,6 +390,7 @@ verify_deployment() {
         --arg reference "$(sha256_file "$INDEPENDENT_ATTESTATION")" --arg provisioner "$expected_provisioner" \
         --arg staging_amendment "$STAGING_AMENDMENT_SHA" \
         --arg release_amendment "$expected_release_amendment" \
+        --arg remediation_amendment "$REMEDIATION_AMENDMENT_SHA" \
         --arg control_commit "$expected_control_commit" --arg source_release "$expected_source_release" \
         --arg config_hash "$(jq -er '.host.config_local_sha256' "$SOURCE_LOCK")" \
         --arg vault_hash "$(jq -er '.host.vault_local_sha256' "$SOURCE_LOCK")" \
@@ -359,6 +402,7 @@ verify_deployment() {
          .independent_attestation_sha256 == $reference and .provisioner_sha256 == $provisioner and
          .production_staging_reference_v5_amendment_sha256 == $staging_amendment and
          (.production_release_self_check_contract_amendment_sha256 // "") == $release_amendment and
+         .production_staging_attempt_06_remediation_amendment_sha256 == $remediation_amendment and
          .control_plane_commit == $control_commit and
          .control_plane_source_release_sha256 == $source_release and
          .api_runtime_user == "by" and .api_runtime_group == "by" and
@@ -457,32 +501,69 @@ verify_existing() {
 }
 
 verify_superseded_existing() {
-    verify_deployment \
-        "$SUPERSEDED_CONTROL_COMMIT" \
-        "$SUPERSEDED_CONTROL_SOURCE_RELEASE_SHA" \
-        "$SUPERSEDED_PROVISIONER_SHA" \
-        ""
+    sudo -n test -f "$API_MANIFEST" && sudo -n test ! -L "$API_MANIFEST" || return 1
+    [ "$(sudo_sha256_file "$API_MANIFEST")" = "$SUPERSEDED_DEPLOYMENT_MANIFEST_SHA" ] || return 1
+    sudo -n jq -e \
+        --arg source "$HISTORICAL_SOURCE_LOCK_SHA" \
+        --arg provisioner "$SUPERSEDED_PROVISIONER_SHA" \
+        --arg staging "$STAGING_AMENDMENT_SHA" \
+        --arg release "$RELEASE_AMENDMENT_SHA" \
+        --arg control "$SUPERSEDED_CONTROL_COMMIT" \
+        --arg source_release "$SUPERSEDED_CONTROL_SOURCE_RELEASE_SHA" \
+        '.schema == 1 and .kind == "sim-latency-competition-api-deployment" and
+         .source_lock_sha256 == $source and .provisioner_sha256 == $provisioner and
+         .production_staging_reference_v5_amendment_sha256 == $staging and
+         .production_release_self_check_contract_amendment_sha256 == $release and
+         .control_plane_commit == $control and
+         .control_plane_source_release_sha256 == $source_release and
+         .simulator_sha256 == "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d" and
+         .evaluator_sha256 == "958985237282deac0d3204918cf1d2ce40b7851ad54794b6dc1f6fcb185e9b9f" and
+         .evaluation_mounts_unchanged == true and .api_secrets_outside_evaluation_mounts == true and
+         .raw_credentials_present_in_manifest == false' "$API_MANIFEST" >/dev/null || return 1
+    sudo -n test -d "$LIBEXEC_PREVIOUS_ROOT" && sudo -n test ! -L "$LIBEXEC_PREVIOUS_ROOT" || return 1
+    [ "$(sudo_sha256_file "$LIBEXEC_PREVIOUS_ROOT/sim-latency")" = \
+        "$(sudo -n jq -er '.simulator_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo_sha256_file "$LIBEXEC_PREVIOUS_ROOT/container/evaluator.sh")" = \
+        "$(sudo -n jq -er '.evaluator_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo_sha256_file "$LIBEXEC_PREVIOUS_ROOT/competition-host-self-check")" = \
+        "$(sudo -n jq -er '.self_check_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo_sha256_file "$LIBEXEC_PREVIOUS_ROOT/promote-host-containment.sh")" = \
+        "$(sudo -n jq -er '.containment_promoter_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo_sha256_file "$LIBEXEC_PREVIOUS_ROOT/promote-round-rebaseline.sh")" = \
+        "$(sudo -n jq -er '.rebaseline_promoter_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo_sha256_file "$API_CONFIG_ROOT/local/competition.yml")" = \
+        "$(sudo -n jq -er '.competition_config_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo_sha256_file "$API_VAULT_ROOT/local/competition.yml")" = \
+        "$(sudo -n jq -er '.competition_vault_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo_sha256_file "$API_CREDENTIALS")" = \
+        "$(sudo -n jq -er '.raw_credentials_sha256' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo -n "$HASH_LOCAL" "$EVALUATION_CONFIG")" = \
+        "$(sudo -n jq -er '.source_local_layer_sha256.config' "$API_MANIFEST")" ] || return 1
+    [ "$(sudo -n "$HASH_LOCAL" "$EVALUATION_VAULT")" = \
+        "$(sudo -n jq -er '.source_local_layer_sha256.vault' "$API_MANIFEST")" ] || return 1
+    [ ! -e "$EVALUATION_CONFIG/competition.yml" ] && [ ! -e "$EVALUATION_VAULT/competition.yml" ] || return 1
+    return 0
 }
 
 archive_superseded_deployment() {
     sudo -n test ! -e "$API_SUPERSEDED_ROOT" || die "superseded API archive already exists"
     sudo -n test ! -e "$LIBEXEC_SUPERSEDED_ROOT" || die "superseded command archive already exists"
     [ "$API_ROOT" = /etc/urnetwork/competition-api ] || die "unsafe API upgrade source"
-    [ "$API_SUPERSEDED_ROOT" = /etc/urnetwork/competition-api-superseded-5070445d ] ||
+    [ "$API_SUPERSEDED_ROOT" = /etc/urnetwork/competition-api-superseded-cf0fd3a9 ] ||
         die "unsafe API upgrade archive"
-    [ "$LIBEXEC_ROOT" = /usr/local/libexec/urnetwork/competition-cf0fd3a9 ] ||
+    [ "$LIBEXEC_PREVIOUS_ROOT" = /usr/local/libexec/urnetwork/competition-cf0fd3a9 ] ||
         die "unsafe command upgrade source"
-    [ "$LIBEXEC_SUPERSEDED_ROOT" = /usr/local/libexec/urnetwork/competition-cf0fd3a9-superseded-5070445d ] ||
+    [ "$LIBEXEC_SUPERSEDED_ROOT" = /usr/local/libexec/urnetwork/competition-cf0fd3a9-superseded-46515d82 ] ||
         die "unsafe command upgrade archive"
     sudo -n mv -- "$API_ROOT" "$API_SUPERSEDED_ROOT"
     sudo -n chown root:root "$API_SUPERSEDED_ROOT"
     sudo -n chmod 0500 "$API_SUPERSEDED_ROOT"
-    sudo -n mv -- "$LIBEXEC_ROOT" "$LIBEXEC_SUPERSEDED_ROOT"
+    sudo -n mv -- "$LIBEXEC_PREVIOUS_ROOT" "$LIBEXEC_SUPERSEDED_ROOT"
     sudo -n chown root:root "$LIBEXEC_SUPERSEDED_ROOT"
     sudo -n chmod 0555 "$LIBEXEC_SUPERSEDED_ROOT"
     sudo -n chown root:root "$API_PARENT"
     sudo -n chmod 0700 "$API_PARENT"
-    log "authenticated 5070445d deployment retained under commit-qualified archive paths"
+    log "authenticated cf0fd3a9 deployment retained under image-qualified archive paths"
 }
 
 extract_simulator() {
@@ -624,11 +705,13 @@ write_resources() {
         --arg containment_promoter "$containment_promoter_sha" --arg rebaseline_promoter "$rebaseline_promoter_sha" \
         --arg control_commit "$CONTROL_COMMIT" --arg control_source_release "$CONTROL_SOURCE_RELEASE_SHA" \
         --arg staging_amendment "$STAGING_AMENDMENT_SHA" --arg release_amendment "$RELEASE_AMENDMENT_SHA" \
+        --arg remediation_amendment "$REMEDIATION_AMENDMENT_SHA" \
         '{schema:1,kind:"sim-latency-competition-api-deployment",created_at:$created,
           source_lock_sha256:$source,final_calibration_selection_sha256:$selection,
           independent_attestation_sha256:$reference,provisioner_sha256:$provisioner,
           production_staging_reference_v5_amendment_sha256:$staging_amendment,
           production_release_self_check_contract_amendment_sha256:$release_amendment,
+          production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment,
           api_runtime_user:"by",api_runtime_group:"by",
           api_parent:"/etc/urnetwork",api_parent_mode:"root:by:0710",
           api_config_root:"/etc/urnetwork/competition-api/config",
@@ -707,7 +790,7 @@ prepare_stage() {
         [ "$(stat -c %s "$stage/api/config/local/arindb/arin.mmdb")" = "$ARIN_SIZE" ] || die "staged ARIN data size"
         chmod 0444 "$stage/api/config/local/mmdb/ip-ipinfo.mmdb" "$stage/api/config/local/arindb/arin.mmdb"
     fi
-    cp -a "$SERVER/competition/container" "$stage/libexec/container"
+    cp -a "$CONTAINER_SOURCE" "$stage/libexec/container"
     cp "$SERVER/competition/host-self-check.sh" "$stage/libexec/competition-host-self-check"
     cp "$SERVER/competition/authoritative-host-irqs.sh" "$stage/libexec/authoritative-host-irqs.sh"
     cp "$CONTROL/competition/promote-host-containment.sh" "$stage/libexec/promote-host-containment.sh"
@@ -795,10 +878,12 @@ self_test() {
     [ ! -e "$EVALUATION_CONFIG/competition.yml" ] && [ ! -e "$EVALUATION_VAULT/competition.yml" ] ||
         die "self-test crossed evaluation mount boundary"
     jq -e --arg release_amendment "$RELEASE_AMENDMENT_SHA" \
+        --arg remediation_amendment "$REMEDIATION_AMENDMENT_SHA" \
         '.api_resource_scope == ["local","allowlisted-host-runtime-assets","generated-competition"] and
         .nonlocal_configuration_or_vault_imported == false and
         .host_runtime_assets_exposed_to_evaluation == false and
         .production_release_self_check_contract_amendment_sha256 == $release_amendment and
+        .production_staging_attempt_06_remediation_amendment_sha256 == $remediation_amendment and
         (.containment_promoter_sha256 | test("^[0-9a-f]{64}$")) and
         (.rebaseline_promoter_sha256 | test("^[0-9a-f]{64}$")) and
         ([.host_runtime_assets[].path] == ["arindb/arin.mmdb","mmdb/ip-ipinfo.mmdb"])' \

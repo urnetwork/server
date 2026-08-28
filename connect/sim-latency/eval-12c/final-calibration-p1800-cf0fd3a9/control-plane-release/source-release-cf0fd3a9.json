@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-control-plane-source-release",
+  "recorded_at": "2026-08-28T00:38:20Z",
+  "season_base_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "control_plane_branch": "finalization-control-plane",
+  "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+  "origin_control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
+  "supersedes_control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
+  "candidate_base_unchanged": true,
+  "evaluator_image_unchanged": true,
+  "scorer_unchanged": true,
+  "scale_unchanged": true,
+  "baseline_unchanged": true,
+  "tracked_worktree_clean": true,
+  "separate_release_identity_required": true,
+  "defect": {
+    "class": "strict producer-consumer schema mismatch",
+    "observed_error": "decode self-check: json: unknown field \"irq_affinity_sha256\"",
+    "failed_staging_attempt": 4,
+    "worker_bootstrap_log_sha256": "295c224d3f5fa4804a79ae0ae4d2a09281c874cba99f5e7fefe3bacc26f15a65",
+    "producer_fields": [
+      "irq_affinity_sha256",
+      "irq_policy_sha256"
+    ],
+    "strict_unknown_field_rejection_retained": true
+  },
+  "superseded_release": {
+    "source_release_sha256": "b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940",
+    "release_manifest_sha256": "e1405b3ca7c900e800c718917758a79d56c2392dc23c8ab1bd3bc17d8d5620db",
+    "release_check_sha256": "dd49f6b83b9761e52ca270e7d46706e38811ffa3b35997773b8fb5e36a12b7ca",
+    "service_gate_sha256": "79b076c615357fe5eb2e105e00b4fd2703094860cf96153f0d65c5bc6f03d71c"
+  },
+  "changed_paths_from_superseded_release": [
+    "competition/competition_test.go",
+    "competition/container_isolation_test.go",
+    "competition/evaluator_test.go",
+    "competition/types.go"
+  ],
+  "source_sha256": {
+    "competition/types.go": "36e89f49a667e45e72eed7807f2652a7069e4be247762348054329eeab7db2a9",
+    "competition/evaluator.go": "a075d184d9f89199fd59fdebdbbd53c05dfc750f90df105349043064813d9502",
+    "competition/host-self-check.sh": "d3c904313ebdd24edfaa6615e2b54e7c95367162661b4e873505a99fa016c8f7",
+    "competition/config.go": "2d8905ea6ecfa93d1a1c7b74bd3939b2e12770d5476b8370964d47551021cd05",
+    "competition/competition_test.go": "4accfac59a736263728b33171a797e22bf63dcbc2a9b967d53ccc2d72be512ec",
+    "competition/evaluator_test.go": "eb239b97278882b0881c26a3d8303db8a62d82febcbf2f517ffd68d9d4449f19",
+    "competition/container_isolation_test.go": "8f4e1f4a553065d16b87d7fefc69a81b39b7b0586b6ab9fd9caa7d4c4fd961f7",
+    "cli/api/Dockerfile": "b45d75413889be2d2cb50f14c321960a46dbf7d85e0b8ee4b3ceb4b493cf56e0",
+    "cli/competitionworker/Dockerfile": "05d775ee1bcea5fd82985a840f5258327bf5d5a81c7b98615cc49a77984b7d4c",
+    "sn/api/competition.yml": "3fadfe3ecc23fcc262776d4e6321001e013a53c501574d32d615eb0f0353c289"
+  },
+  "checks": [
+    {
+      "id": "targeted_irq_contract_regression",
+      "command": "env GOTOOLCHAIN=local GOPROXY=off taskset -c 20,22 go test ./competition -run 'Test(CommandEvaluatorAcceptsExactIrqSelfCheckEvidence|CommandEvaluatorStillRejectsUnknownSelfCheckFields|HostEligibilityRejectsMissingOrMalformedIrqEvidence|HostEligibilityAllowsPreRoundHeartbeatButRejectsMalformedRebaseline|AuthoritativeHostControlsAreFailClosed)$' -count=1",
+      "exit_code": 0
+    },
+    {
+      "id": "configured_competition_suite",
+      "command": "env WARP_ENV=local WARP_SERVICE=test WARP_DOMAIN=bringyour.com WARP_BLOCK=test WARP_VERSION=0.0.0 BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com GOTOOLCHAIN=local GOPROXY=off taskset -c 20,22 go test ./competition -count=1",
+      "exit_code": 0
+    },
+    {
+      "id": "go_vet",
+      "command": "env GOTOOLCHAIN=local GOPROXY=off taskset -c 20,22 go vet ./competition ./api ./cli/competitionworker",
+      "exit_code": 0
+    },
+    {
+      "id": "production_binary_compile",
+      "command": "env GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 go build -trimpath ./cli/api ./cli/competitionworker",
+      "exit_code": 0
+    },
+    {
+      "id": "remote_commit_verified",
+      "command": "git ls-remote --heads origin finalization-control-plane",
+      "exit_code": 0
+    }
+  ],
+  "deferred_until_release_gate": [
+    "attested production API and worker image rebuild",
+    "formal service-backed release gate rerun",
+    "full generate-submit-poll-cache-reveal staging round"
+  ]
+}

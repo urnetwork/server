@@ -8,14 +8,17 @@ set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C
 
-readonly ROOT=/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
+readonly ROOT=/home/by/urnetwork/server-finalization-evidence/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
+readonly HISTORICAL_ROOT=/home/by/urnetwork/server/connect/sim-latency/eval-12c/final-calibration-p1800-cf0fd3a9
 readonly SERVER=/home/by/urnetwork/server
 readonly CONTROL=/home/by/urnetwork/server-finalization-control-plane
 readonly OUTPUT_ROOT="$ROOT/production-readiness"
 readonly OUTPUT="$OUTPUT_ROOT/service-backed-fifo-cache-failover.json"
 readonly FINAL_LOG_ROOT="$OUTPUT_ROOT/service-backed-logs"
-readonly SOURCE_LOCK_SHA=0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838
+readonly SOURCE_LOCK_SHA=94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022
 readonly PROTOCOL_SHA=6fc4a809779bf6e694ef3afa71522fa50d0512c56177b42da4249738a37dc7af
+readonly REMEDIATION_AMENDMENT="$ROOT/production-staging-attempt-06-remediation-amendment.json"
+readonly REMEDIATION_AMENDMENT_SHA=7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d
 readonly CONTROL_COMMIT=2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36
 readonly BOOT_ID=34760d1b-a0b6-46a0-b8c1-264abd1affba
 readonly SERVICE_IP=10.213.0.1
@@ -236,7 +239,9 @@ esac
 
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$BOOT_ID" ] || die "boot identity changed"
 [ "$(sha256_file "$ROOT/source-lock.json")" = "$SOURCE_LOCK_SHA" ] || die "source lock changed"
-[ "$(sha256_file "$ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
+[ "$(sha256_file "$HISTORICAL_ROOT/production-staging-protocol.json")" = "$PROTOCOL_SHA" ] || die "staging protocol changed"
+[ "$(sha256_file "$REMEDIATION_AMENDMENT")" = "$REMEDIATION_AMENDMENT_SHA" ] ||
+    die "attempt-06 remediation amendment changed"
 [ "$(git -C "$CONTROL" rev-parse HEAD)" = "$CONTROL_COMMIT" ] || die "control-plane commit changed"
 [ -z "$(git -C "$CONTROL" status --porcelain --untracked-files=no)" ] || die "control-plane tracked worktree is dirty"
 sudo -n test ! -e "$OUTPUT" || die "passed service evidence already exists"
@@ -346,6 +351,7 @@ jq -n \
     --arg source_lock_sha256 "$SOURCE_LOCK_SHA" \
     --arg protocol_sha256 "$PROTOCOL_SHA" \
     --arg control_commit "$CONTROL_COMMIT" \
+    --arg remediation_amendment_sha256 "$REMEDIATION_AMENDMENT_SHA" \
     --arg service_ip "$SERVICE_IP" \
     --arg migration_test_sha256 "$(sha256_file "$CONTROL/db_migrations_test.go")" \
     --arg store_test_sha256 "$(sha256_file "$CONTROL/competition/store_integration_test.go")" \
@@ -361,6 +367,7 @@ jq -n \
       generated_at:$generated_at,
       source_lock_sha256:$source_lock_sha256,
       production_staging_protocol_sha256:$protocol_sha256,
+      production_staging_attempt_06_remediation_amendment_sha256:$remediation_amendment_sha256,
       control_plane_commit:$control_commit,
       dedicated_service_ip:$service_ip,
       test_source_sha256:{migration_order:$migration_test_sha256,store_integration:$store_test_sha256},
@@ -376,11 +383,12 @@ jq -n \
         infrastructure_retry_verified:true,
         terminal_fields_immutable:true,
         event_log_append_only:true,
-        test_exit_zero:true
+        test_exit_zero:true,
+        attempt_06_remediation_bound:true
       }
     }' >"$output_pending"
 
-jq -e '.schema==1 and .passed==true and (.assertions|length)==11 and all(.assertions[]; .==true)' "$output_pending" >/dev/null
+jq -e '.schema==1 and .passed==true and (.assertions|length)==12 and all(.assertions[]; .==true)' "$output_pending" >/dev/null
 chmod 0400 "$output_pending"
 output_sha="$(sha256_file "$output_pending")"
 sudo -n chown root:root \

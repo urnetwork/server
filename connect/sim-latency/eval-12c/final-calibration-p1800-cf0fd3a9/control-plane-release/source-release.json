@@ -1,84 +1,101 @@
 {
   "schema": 1,
   "kind": "sim-latency-control-plane-source-release",
-  "recorded_at": "2026-08-28T00:38:20Z",
-  "season_base_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+  "recorded_at": "2026-08-28T04:25:00Z",
+  "season_base_commit": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+  "season_base_remote_branch": "refs/heads/sim-latency-finalization-46515d82",
+  "season_base_remote_verified": true,
   "control_plane_branch": "finalization-control-plane",
   "control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
   "origin_control_plane_commit": "2ee4883f2b77cccfcbc69b3bcf1cb4ee613dad36",
-  "supersedes_control_plane_commit": "5070445ddb1764ad80f999102a9d71946e5a9e29",
-  "candidate_base_unchanged": true,
-  "evaluator_image_unchanged": true,
-  "scorer_unchanged": true,
+  "candidate_base_unchanged": false,
+  "candidate_base_change_authorized": true,
+  "evaluator_image_unchanged": false,
+  "scorer_source_unchanged": true,
+  "simulator_source_unchanged": true,
   "scale_unchanged": true,
-  "baseline_unchanged": true,
-  "tracked_worktree_clean": true,
+  "takeover_margin_unchanged": true,
+  "historical_calibration_retained": true,
+  "same_round_baseline_remeasurement_required": true,
+  "tracked_source_worktree_clean": true,
   "separate_release_identity_required": true,
+  "remediation_amendment_sha256": "7971eeeac22c73781c0de1ce34c5296f79b2f223afbfe67d4a7b3fd2642de65d",
   "defect": {
-    "class": "strict producer-consumer schema mismatch",
-    "observed_error": "decode self-check: json: unknown field \"irq_affinity_sha256\"",
-    "failed_staging_attempt": 4,
-    "worker_bootstrap_log_sha256": "295c224d3f5fa4804a79ae0ae4d2a09281c874cba99f5e7fefe3bacc26f15a65",
-    "producer_fields": [
-      "irq_affinity_sha256",
-      "irq_policy_sha256"
-    ],
-    "strict_unknown_field_rejection_retained": true
+    "class": "wrapped connection failure misclassified as application stability failure",
+    "failed_staging_attempt": 6,
+    "failed_replicate": "candidate-05",
+    "observed_error": "pgproto3.writeError: write tcp to PostgreSQL: i/o timeout",
+    "root_cause_path": "db.go",
+    "root_cause_function": "isConnectionError",
+    "correction": "Classify wrapped net.Error and pgconn errors through errors.As so the failed pooled connection is discarded and retried.",
+    "strict_non_connection_error_rejection_retained": true
   },
   "superseded_release": {
-    "source_release_sha256": "b942c70bae7e69bf08c811084075a094d4cbb18d74083e53a8935de110f4c940",
-    "release_manifest_sha256": "e1405b3ca7c900e800c718917758a79d56c2392dc23c8ab1bd3bc17d8d5620db",
-    "release_check_sha256": "dd49f6b83b9761e52ca270e7d46706e38811ffa3b35997773b8fb5e36a12b7ca",
-    "service_gate_sha256": "79b076c615357fe5eb2e105e00b4fd2703094860cf96153f0d65c5bc6f03d71c"
+    "season_base_commit": "5ca3d5242f4a7d40efe4415635608023b05a0956",
+    "source_lock_sha256": "0cf71458833f3b1ae96a663357c583eba3a9c25a19d6c795c8549e4154141838",
+    "source_release_sha256": "90458a61e19259bba1bf1626b63567e92a06082d3944a070a8ea071b5f8bd5e7",
+    "release_manifest_sha256": "17d2817a69f3bc506c98ba00f31b8cc15fc9e2b7e0a4e18b5ca0df9fc89bfc00",
+    "release_check_sha256": "3fa3ca749a4718f31ed9ac17351c2b2695891f89117e794b7d3220e477d3b5cd",
+    "service_gate_sha256": "e3c168731edab3f0de0a823aaed23aa64e72b1ed7ea32e0dc5663806af7c4a08",
+    "retained": true
   },
-  "changed_paths_from_superseded_release": [
-    "competition/competition_test.go",
-    "competition/container_isolation_test.go",
-    "competition/evaluator_test.go",
-    "competition/types.go"
+  "replacement_evaluator": {
+    "source_lock_sha256": "94c25024a92b5fcb5fa8bf324ff8022fde1074fd62bc210fc0ad5efbba0e4022",
+    "image_digest": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
+    "embedded_source_lock_sha256": "39283e4d7c0898ae2a8ffc709c0e8efcc3b4976d6a3317663d1a7f208900af3a",
+    "simulator_sha256": "bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997",
+    "smoke_evidence_sha256": "be531c0e2479d557af4564f8e66c81cd6d942de8982c073b4351725e0f26a602",
+    "host_qualification_sha256": "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3",
+    "host_config_sha256": "3ad8586dc3bf50076fa17703115088a6f79410b95ce502f0ca30026d770c2af1",
+    "resource_bomb_report_sha256": "08296c7ff35edefb09eae50cd9e415dad86ae37d4347a64022da3d5dcfa841bc"
+  },
+  "changed_paths_from_season_base": [
+    "db.go",
+    "db_error_test.go"
   ],
   "source_sha256": {
-    "competition/types.go": "36e89f49a667e45e72eed7807f2652a7069e4be247762348054329eeab7db2a9",
-    "competition/evaluator.go": "a075d184d9f89199fd59fdebdbbd53c05dfc750f90df105349043064813d9502",
-    "competition/host-self-check.sh": "d3c904313ebdd24edfaa6615e2b54e7c95367162661b4e873505a99fa016c8f7",
-    "competition/config.go": "2d8905ea6ecfa93d1a1c7b74bd3939b2e12770d5476b8370964d47551021cd05",
-    "competition/competition_test.go": "4accfac59a736263728b33171a797e22bf63dcbc2a9b967d53ccc2d72be512ec",
-    "competition/evaluator_test.go": "eb239b97278882b0881c26a3d8303db8a62d82febcbf2f517ffd68d9d4449f19",
-    "competition/container_isolation_test.go": "8f4e1f4a553065d16b87d7fefc69a81b39b7b0586b6ab9fd9caa7d4c4fd961f7",
-    "cli/api/Dockerfile": "b45d75413889be2d2cb50f14c321960a46dbf7d85e0b8ee4b3ceb4b493cf56e0",
-    "cli/competitionworker/Dockerfile": "05d775ee1bcea5fd82985a840f5258327bf5d5a81c7b98615cc49a77984b7d4c",
-    "sn/api/competition.yml": "3fadfe3ecc23fcc262776d4e6321001e013a53c501574d32d615eb0f0353c289"
+    "db.go": "0b4e39613defeb33016940f7a969ad8e8afce33180d1d237464ee1c32f2d0481",
+    "db_error_test.go": "b70cdb3a45d21fd0ba383302307ce2091dee0259b9af6d9e090cc14a968b36f0",
+    "competition/container/compose.yml": "33c5286cf69057e3e5270cb33d0aa0ef43bea437810dc6a538090f85ab1a80b5",
+    "competition/container/evaluator.sh": "b790c5216a1b18a2367f59312031dc534e6f4b3fa16596096759b2202dc78753",
+    "competition/container/resource-boundary.sh": "0c2b7244be23c073fc8f57a043d6c4cc66a84efd15a33289392c0ecd6d83473c",
+    "competition/container/smoke-test.sh": "2b1b96e97288438e311cac4fa53c3cc1f777c47eb9726c2ef566dd264fa2b6a3"
+  },
+  "reference_patch_sha256": {
+    "noop": "8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775",
+    "worse": "8748650518d2cc4b177009080613a1e30ea7239e91bc26a40df415b51133bd93",
+    "better": "fa1dcc5f0a4af45886035e5cecda8b331e794891d359c78b8386eb9864dd0089"
   },
   "checks": [
     {
-      "id": "targeted_irq_contract_regression",
-      "command": "env GOTOOLCHAIN=local GOPROXY=off taskset -c 20,22 go test ./competition -run 'Test(CommandEvaluatorAcceptsExactIrqSelfCheckEvidence|CommandEvaluatorStillRejectsUnknownSelfCheckFields|HostEligibilityRejectsMissingOrMalformedIrqEvidence|HostEligibilityAllowsPreRoundHeartbeatButRejectsMalformedRebaseline|AuthoritativeHostControlsAreFailClosed)$' -count=1",
+      "id": "deterministic_wrapped_connection_regression",
+      "command": "go test -count=1 . -run '^TestDb(ClassifiesWrappedTransientError|ClassifiesWrappedConnectionWriteTimeout|RejectsWrappedNonConnectionError|RejectsWrappedOrdinaryError)$'",
       "exit_code": 0
     },
     {
-      "id": "configured_competition_suite",
-      "command": "env WARP_ENV=local WARP_SERVICE=test WARP_DOMAIN=bringyour.com WARP_BLOCK=test WARP_VERSION=0.0.0 BRINGYOUR_POSTGRES_HOSTNAME=local-pg.bringyour.com BRINGYOUR_REDIS_HOSTNAME=local-redis.bringyour.com GOTOOLCHAIN=local GOPROXY=off taskset -c 20,22 go test ./competition -count=1",
+      "id": "exact_image_regression",
+      "command": "networkless read-only evaluator image test of the four deterministic database error classifiers",
       "exit_code": 0
     },
     {
-      "id": "go_vet",
-      "command": "env GOTOOLCHAIN=local GOPROXY=off taskset -c 20,22 go vet ./competition ./api ./cli/competitionworker",
+      "id": "evaluator_docker_smoke",
+      "command": "competition/container/smoke-test.sh against sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
       "exit_code": 0
     },
     {
-      "id": "production_binary_compile",
-      "command": "env GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 go build -trimpath ./cli/api ./cli/competitionworker",
+      "id": "reference_patch_static_qualification",
+      "command": "git apply --check for noop, worse, and better reference patches",
       "exit_code": 0
     },
     {
       "id": "remote_commit_verified",
-      "command": "git ls-remote --heads origin finalization-control-plane",
+      "command": "git ls-remote origin refs/heads/sim-latency-finalization-46515d82",
       "exit_code": 0
     }
   ],
   "deferred_until_release_gate": [
-    "attested production API and worker image rebuild",
+    "attested production API and worker release rebind",
     "formal service-backed release gate rerun",
-    "full generate-submit-poll-cache-reveal staging round"
+    "full same-round baseline and exact-noop staging calibration"
   ]
 }

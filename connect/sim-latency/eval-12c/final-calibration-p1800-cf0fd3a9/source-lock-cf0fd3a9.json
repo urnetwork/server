@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "kind": "sim-latency-local-validation-source-lock",
-  "frozen_at": "2026-08-28T04:12:33Z",
+  "frozen_at": "2026-08-27T00:58:51Z",
   "authority": "local-commits",
   "origin_policy": "ignore origin movement after this lock",
   "tracked_worktrees_clean": true,
   "repositories": {
-    "server": "46515d82fe98ff666c61b2b5bb1d34a89cf4dad8",
+    "server": "5ca3d5242f4a7d40efe4415635608023b05a0956",
     "connect": "4f3f017f5448c18620b9eb3aab8c1002e869536d",
     "proxy": "17f929c926d49c27138569c85899bd2e98ec0ec1",
     "sdk": "3c2d56b47155cd026c2f572337d45bd0210f5bf5",
@@ -17,11 +17,11 @@
     "warp": "678b25a8bbd2e564cc9d8fa954322b99af6bba0e"
   },
   "evaluator": {
-    "image_tag": "urnetwork/sim-latency-evaluator-base:46515d82fe98ff666c61b2b5",
-    "image_id": "sha256:2abcf145c0f914899debbd2fd52e57a16cf20072165c8d13f04a0ba487198a4c",
-    "image_created_at": "2026-08-28T04:05:39.933008361Z",
-    "embedded_source_lock_sha256": "39283e4d7c0898ae2a8ffc709c0e8efcc3b4976d6a3317663d1a7f208900af3a",
-    "simulator_sha256": "bc843ce2b9cdcc41459362c7a682b08e7a12a8ac896443fe1e8aad94d4b17997",
+    "image_tag": "urnetwork/sim-latency-evaluator-base:5ca3d5242f4a7d40efe44156",
+    "image_id": "sha256:cf0fd3a9e73385729ee8dcd8da7ea53eb59d5f372b9ff36789ec923056222038",
+    "image_created_at": "2026-08-27T00:22:57.674028811Z",
+    "embedded_source_lock_sha256": "3e916937920677e6d1a40acfbf8511a07297a1c66e1246070535bf5f84949de8",
+    "simulator_sha256": "247a4d2998699eb439ade7987588cf886be707bde458a07ed1fb6a4fd84c102d",
     "builder_sha256": "624f52c6752c6d6119b50b8219769ba695c86cbc58fb8113d800e3781f12fdb7",
     "patch_policy_sha256": "2dba553cd94d6d901e0fc590fd147d3e39273b41c24317e987b1bbf479382460"
   },
@@ -30,14 +30,14 @@
     "hardware_id": "sille-macpro6-1-single-host",
     "evaluation_cpu_list": "0,2,4,6,8,10,12,14,16,18",
     "management_cpu_list": "20,22",
-    "qualification_sha256": "acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3",
+    "qualification_sha256": "9cb7a977f171babafb5ff35c045799cbd54ec734ecfdebe7ebd106e482683d2f",
     "irq_policy_sha256": "8b235b88a0b117cc6271a9158cbd2415ae7f12fc885945dfbd855d9536f754f2",
     "config_local_sha256": "f2fd41f07258389a5b8cbfd12af69c7e71124755432e48e115933a66f835962d",
     "vault_local_sha256": "f84b7bdd1976c5e404c196584025287ab346f4bcfd60196da9ca46191a39f3fa",
-    "host_config_sha256": "3ad8586dc3bf50076fa17703115088a6f79410b95ce502f0ca30026d770c2af1",
+    "host_config_sha256": "51d8a08a4488a917c011a0edb83a0b72237ba09ae9ce1a2407f54c53fc12e696",
     "reboot_proof_sha256": "2522dcc04deeccd44d8f44fb8f2e996fe6d3e4e5d59c9dd9bbd8f80699f25ee7",
-    "resource_bomb_report_sha256": "08296c7ff35edefb09eae50cd9e415dad86ae37d4347a64022da3d5dcfa841bc",
-    "corrected_image_smoke_proof_sha256": "be531c0e2479d557af4564f8e66c81cd6d942de8982c073b4351725e0f26a602"
+    "resource_bomb_report_sha256": "f1330f3c47856135823221fa153b6253d432d46be368baac9ea3a008bc781bfe",
+    "corrected_image_smoke_proof_sha256": "f5c06909bb2b27b29440797009507b8e8f3665a62132f87fa7c2a56b68f255ba"
   },
   "pre_measurement_gates": {
     "server_sim_latency_package_tests": true,
@@ -56,8 +56,6 @@
     "malicious_build_isolation": true,
     "post_reboot_host_controls": true,
     "production_resource_bomb_cleanup": true,
-    "wrapped_connection_retry_classifier": true,
-    "service_cpu_priority_under_contention": true,
     "residual_competition_containers": 0
   },
   "development_snapshot": false
