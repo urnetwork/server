@@ -52,6 +52,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urfoundation/sn/stabi"
 
@@ -368,6 +369,9 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	}
 	if len(cfg.RpcUrls) == 0 || cfg.Netuid == 0 || cfg.NoId == 0 || cfg.DeployBlock == 0 || cfg.DeploymentId == "" {
 		return nil, fmt.Errorf("st.yml %s enabled profile is missing rpc, netuid, no_id, deploy_block, or deployment_id", profile)
+	}
+	if cfg.Netuid > uint64(^uint16(0)) {
+		return nil, fmt.Errorf("st.yml %s netuid %d exceeds uint16", profile, cfg.Netuid)
 	}
 	for label, raw := range map[string]string{"coordinator": s.ContractAddress, "settlement vault": s.SettlementVault, "reserve sink": s.ReserveSink} {
 		if !common.IsHexAddress(raw) || common.HexToAddress(raw) == (common.Address{}) {
@@ -1987,33 +1991,57 @@ func stDepositSizeRao(usageBytes int64, rateNumerator, rateDenominator, capRao u
 	if usageBytes <= 0 || rateNumerator == 0 || rateDenominator == 0 || capRao == 0 {
 		return big.NewInt(0)
 	}
-	amount := new(big.Int).Mul(big.NewInt(usageBytes), new(big.Int).SetUint64(rateNumerator))
-	divisor := new(big.Int).Mul(new(big.Int).SetUint64(rateDenominator), big.NewInt(1<<30))
-	amount.Quo(amount, divisor)
-	capBig := new(big.Int).SetUint64(capRao)
-	if 0 < amount.Cmp(capBig) {
-		amount.Set(capBig)
+	policy := protocol.DepositPolicy{EpochCapRaoPerOperator: capRao, Tiers: []protocol.DepositTier{{RateNumeratorRaoPerGiB: rateNumerator, RateDenominator: rateDenominator}}}
+	amount, _, err := protocol.RequiredDepositRao(uint64(usageBytes), big.NewInt(0), policy)
+	if err != nil {
+		return big.NewInt(0)
 	}
 	return amount
 }
 
 func stDepositRateForConviction(tiers []StDepositTier, conviction *big.Int) (uint64, uint64, error) {
-	if conviction == nil || conviction.Sign() < 0 || len(tiers) == 0 {
-		return 0, 0, fmt.Errorf("invalid conviction tier input")
+	selected, err := protocol.DepositTierAt(stDepositPolicy(tiers, ^uint64(0)), conviction)
+	if err != nil {
+		return 0, 0, err
 	}
-	selected := tiers[0]
-	if selected.MinConvictionRao != 0 || selected.RateNumerator == 0 || selected.RateDenominator == 0 {
-		return 0, 0, fmt.Errorf("invalid tier zero")
-	}
+	return selected.RateNumeratorRaoPerGiB, selected.RateDenominator, nil
+}
+
+func stDepositPolicy(tiers []StDepositTier, capRao uint64) protocol.DepositPolicy {
+	policy := protocol.DepositPolicy{EpochCapRaoPerOperator: capRao, Tiers: make([]protocol.DepositTier, len(tiers))}
 	for i, tier := range tiers {
-		if tier.RateNumerator == 0 || tier.RateDenominator == 0 || (i > 0 && tier.MinConvictionRao <= tiers[i-1].MinConvictionRao) {
-			return 0, 0, fmt.Errorf("invalid conviction tier schedule")
-		}
-		if conviction.Cmp(new(big.Int).SetUint64(tier.MinConvictionRao)) >= 0 {
-			selected = tier
-		}
+		policy.Tiers[i] = protocol.DepositTier{MinConvictionRao: tier.MinConvictionRao, RateNumeratorRaoPerGiB: tier.RateNumerator, RateDenominator: tier.RateDenominator}
 	}
-	return selected.RateNumerator, selected.RateDenominator, nil
+	return policy
+}
+
+// stDepositArtifactUsage verifies the complete operator/artifact identity and
+// finalized boundaries before the next deposit consumes its usage total. The
+// artifact itself has already passed canonical reconstruction in startifact.Read.
+func stDepositArtifactUsage(
+	artifact *startifact.Artifact,
+	record *model.StPayoutArtifact,
+	cfg *StConfig,
+	epoch uint64,
+	startBlock uint64,
+	startHash [32]byte,
+	endBlock uint64,
+	endHash [32]byte,
+) (uint64, error) {
+	if artifact == nil || record == nil || cfg == nil || cfg.ArtifactKey == nil {
+		return 0, errors.New("deposit artifact identity is incomplete")
+	}
+	expectedSigner := crypto.PubkeyToAddress(cfg.ArtifactKey.PublicKey)
+	if artifact.DeploymentID != cfg.DeploymentId || artifact.ChainID != cfg.ChainId || artifact.Netuid != uint16(cfg.Netuid) || artifact.Coordinator != cfg.ContractAddress || artifact.SettlementVault != cfg.SettlementVault || artifact.Epoch != epoch || artifact.NoID != cfg.NoId || artifact.Signer != expectedSigner || !strings.EqualFold(artifact.GenesisHash, fmt.Sprintf("0x%x", cfg.GenesisHash)) || !strings.EqualFold(artifact.PolicyHash, fmt.Sprintf("0x%x", cfg.PolicyHash)) {
+		return 0, fmt.Errorf("epoch %d payout artifact deployment identity mismatch", epoch)
+	}
+	if !strings.EqualFold(artifact.ContentHash, record.ContentHash) || artifact.PayoutRoot != record.PayoutRoot {
+		return 0, fmt.Errorf("epoch %d payout artifact record mismatch", epoch)
+	}
+	if artifact.Start.Number != startBlock || artifact.End.Number != endBlock || !strings.EqualFold(artifact.Start.Hash, common.BytesToHash(startHash[:]).Hex()) || !strings.EqualFold(artifact.End.Hash, common.BytesToHash(endHash[:]).Hex()) {
+		return 0, fmt.Errorf("epoch %d payout artifact finalized boundary mismatch", epoch)
+	}
+	return artifact.TotalUsageBytes, nil
 }
 
 // stBuildPayoutTree rebuilds the canonical payout Merkle tree from stored
@@ -2258,10 +2286,6 @@ func stComputeReleasePayout(
 		}
 		providers = append(providers, provider)
 	}
-	if len(providers) == 0 {
-		model.SetStPayoutLeaves(ctx, epoch, cfg.NoId, nil)
-		return [32]byte{}, 0, nil
-	}
 	startHash, err := client.BlockHash(ctx, startBlock)
 	if err != nil {
 		return [32]byte{}, 0, err
@@ -2282,7 +2306,7 @@ func stComputeReleasePayout(
 		Start:                startifact.Boundary{Number: startBlock, Hash: common.BytesToHash(startHash[:]).Hex()},
 		End:                  startifact.Boundary{Number: closeBlock, Hash: common.BytesToHash(endHash[:]).Hex()},
 		OperatorSnapshotHash: stSnapshotHash(operatorSnapshot), FleetSnapshotHash: stSnapshotHash(fleetSnapshot),
-		ProviderSnapshotHash: stSnapshotHash(providers), Providers: providers,
+		Providers:       providers,
 		ReliabilityAMin: uint64(cfg.ReliabilityAMin), CreatedAt: endTime,
 	})
 	if err != nil {
@@ -2605,23 +2629,42 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 		if epoch == 0 {
 			amount = big.NewInt(0)
 		} else {
-			prevStart, prevEnd, _, _, err := stEpochWindow(ctx, client, state, epoch-1, cfg.BlockSeconds)
+			_, _, prevStartBlock, prevEndBlock, err := stEpochWindow(ctx, client, state, epoch-1, cfg.BlockSeconds)
 			if err != nil {
 				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
 			}
-			var usageBytes int64
-			for _, usage := range model.GetStEpochNetworkUsage(ctx, prevStart, prevEnd) {
-				usageBytes += usage.PayoutByteCount
+			artifactRecord := model.GetStPayoutArtifact(ctx, epoch-1, cfg.NoId)
+			if artifactRecord == nil {
+				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("epoch %d signed payout artifact is not published yet", epoch-1), Retry: true}, nil
+			}
+			store, ok := server.LoadBlobStore()
+			if !ok {
+				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: "st payout artifact store is unavailable", Retry: true}, nil
+			}
+			artifact, _, artifactErr := startifact.Read(ctx, store, artifactRecord.ContentHash)
+			if artifactErr != nil {
+				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("epoch %d signed payout artifact: %v", epoch-1, artifactErr), Retry: true}, nil
+			}
+			prevStartHash, hashErr := client.BlockHash(ctx, prevStartBlock)
+			if hashErr != nil {
+				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}, nil
+			}
+			prevEndHash, hashErr := client.BlockHash(ctx, prevEndBlock)
+			if hashErr != nil {
+				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}, nil
+			}
+			usageBytes, identityErr := stDepositArtifactUsage(artifact, artifactRecord, cfg, epoch-1, prevStartBlock, prevStartHash, prevEndBlock, prevEndHash)
+			if identityErr != nil {
+				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: identityErr.Error(), Retry: true}, nil
 			}
 			conviction, convictionErr := client.ConvictionBeforeEpoch(ctx, epoch, cfg.NoId)
 			if convictionErr != nil {
 				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: convictionErr.Error(), Retry: true}, nil
 			}
-			numerator, denominator, rateErr := stDepositRateForConviction(cfg.DepositTiers, conviction)
-			if rateErr != nil {
-				return nil, rateErr
+			amount, _, err = protocol.RequiredDepositRao(usageBytes, conviction, stDepositPolicy(cfg.DepositTiers, cfg.DepositEpochCapRao))
+			if err != nil {
+				return nil, err
 			}
-			amount = stDepositSizeRao(usageBytes, numerator, denominator, cfg.DepositEpochCapRao)
 		}
 	}
 	if amount.Sign() <= 0 {

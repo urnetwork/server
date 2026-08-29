@@ -15,12 +15,9 @@ package controller
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -172,18 +169,9 @@ func SnPoolClaim(
 		if !available {
 			return nil, fmt.Errorf("payout artifact store unavailable")
 		}
-		reader, readErr := store.Get(ctx, artifactRecord.ContentKey)
+		artifact, _, readErr := startifact.Read(ctx, store, artifactRecord.ContentHash)
 		if readErr != nil {
-			return nil, readErr
-		}
-		bytes, readErr := io.ReadAll(io.LimitReader(reader, 32<<20))
-		reader.Close()
-		if readErr != nil {
-			return nil, readErr
-		}
-		var artifact startifact.Artifact
-		if json.Unmarshal(bytes, &artifact) != nil || startifact.Verify(&artifact) != nil || !strings.EqualFold(artifact.ContentHash, artifactRecord.ContentHash) {
-			return nil, fmt.Errorf("payout artifact integrity failure")
+			return nil, fmt.Errorf("payout artifact integrity failure: %w", readErr)
 		}
 		clientId := stId16(*clientSession.ByJwt.ClientId)
 		for _, provider := range artifact.Providers {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urnetwork/connect"
 
 	"github.com/urfoundation/sn/merkle"
@@ -22,6 +23,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	stconn "github.com/urnetwork/server/st"
+	"github.com/urnetwork/server/startifact"
 )
 
 func releaseStVaultFile() stVaultFile {
@@ -393,6 +395,51 @@ func TestStDepositRateForConvictionUsesPreEpochTierExactly(t *testing.T) {
 	}
 	if _, _, err := stDepositRateForConviction([]StDepositTier{{MinConvictionRao: 1, RateNumerator: 1, RateDenominator: 1}}, big.NewInt(0)); err == nil {
 		t.Fatal("tier schedule without zero baseline accepted")
+	}
+}
+
+func TestStDepositArtifactUsagePinsSignerIdentityAndFinalizedBoundaries(t *testing.T) {
+	cfg, err := stConfigForProfile(stconn.ProfileTestnet, releaseStVaultFile(), []string{"https://evm.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startHash, endHash := [32]byte{1}, [32]byte{2}
+	artifact, err := startifact.Build(startifact.BuildInput{
+		DeploymentID: cfg.DeploymentId, GenesisHash: "0x" + strings.Repeat("11", 32),
+		PolicyHash: "0x" + strings.Repeat("22", 32), ChainID: cfg.ChainId, Netuid: uint16(cfg.Netuid),
+		Coordinator: cfg.ContractAddress, SettlementVault: cfg.SettlementVault,
+		Epoch: 4, NoID: cfg.NoId,
+		Start:                startifact.Boundary{Number: 100, Hash: common.BytesToHash(startHash[:]).Hex()},
+		End:                  startifact.Boundary{Number: 200, Hash: common.BytesToHash(endHash[:]).Hex()},
+		OperatorSnapshotHash: "sha256:" + strings.Repeat("10", 32),
+		FleetSnapshotHash:    "sha256:" + strings.Repeat("20", 32),
+		Providers:            []startifact.ProviderInput{{ClientID: [16]byte{1}, Coldkey: [32]byte{1}, UsageBytes: 1234, Assignments: 8, Confirmations: 8, Eligible: true}},
+		ReliabilityAMin:      8, CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := startifact.Sign(artifact, cfg.ArtifactKey); err != nil {
+		t.Fatal(err)
+	}
+	record := &model.StPayoutArtifact{Epoch: 4, NoId: cfg.NoId, ContentHash: artifact.ContentHash, PayoutRoot: artifact.PayoutRoot}
+	usage, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash)
+	if err != nil || usage != 1234 {
+		t.Fatalf("artifact usage = %d, %v", usage, err)
+	}
+	if _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, [32]byte{9}, 200, endHash); err == nil {
+		t.Fatal("orphaned start boundary was accepted")
+	}
+	otherKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := startifact.Sign(artifact, otherKey); err != nil {
+		t.Fatal(err)
+	}
+	record.ContentHash = artifact.ContentHash
+	if _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash); err == nil {
+		t.Fatal("unexpected artifact signer was accepted")
 	}
 }
 

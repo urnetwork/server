@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -60,25 +63,13 @@ func SnArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := r.URL.Query().Get("hash")
-	key, err := startifact.ContentKey(store, hash)
-	if err != nil {
+	if _, err := startifact.ContentKey(store, hash); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	reader, err := store.Get(r.Context(), key)
+	artifact, b, err := startifact.Read(r.Context(), store, hash)
 	if err != nil {
-		http.Error(w, "Artifact not found.", http.StatusNotFound)
-		return
-	}
-	defer reader.Close()
-	b, err := io.ReadAll(io.LimitReader(reader, 32<<20))
-	if err != nil {
-		http.Error(w, "Artifact read failed.", http.StatusBadGateway)
-		return
-	}
-	var artifact startifact.Artifact
-	if err := json.Unmarshal(b, &artifact); err != nil || startifact.Verify(&artifact) != nil || !strings.EqualFold(artifact.ContentHash, hash) {
-		http.Error(w, "Artifact integrity failure.", http.StatusBadGateway)
+		http.Error(w, "Artifact unavailable or failed integrity.", http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -96,20 +87,75 @@ func SnArtifactHistory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
 		return
 	}
-	deployment := cleanArtifactSegment(r.URL.Query().Get("deployment_id"))
-	netuid := cleanArtifactSegment(r.URL.Query().Get("netuid"))
-	if deployment == "" || netuid == "" {
-		http.Error(w, "deployment_id and netuid are required.", http.StatusBadRequest)
+	prefix, err := payoutArtifactHistoryPrefix(
+		store.Prefix(),
+		r.URL.Query().Get("deployment_id"),
+		r.URL.Query().Get("netuid"),
+		r.URL.Query().Get("epoch"),
+		r.URL.Query().Get("no_id"),
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	prefix := filepath.ToSlash(filepath.Join(store.Prefix(), "st", "v1", "history", deployment, netuid)) + "/"
 	objects, err := store.List(r.Context(), prefix)
 	if err != nil {
 		http.Error(w, "Artifact history unavailable.", http.StatusBadGateway)
 		return
 	}
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	type historyObject struct {
+		Key         string `json:"key"`
+		Size        int64  `json:"size"`
+		ContentHash string `json:"content_hash"`
+	}
+	publicObjects := make([]historyObject, len(objects))
+	for i, object := range objects {
+		if object.Size < 0 || !strings.HasPrefix(object.Key, prefix) {
+			http.Error(w, "Artifact history integrity failure.", http.StatusBadGateway)
+			return
+		}
+		hash := strings.TrimSuffix(filepath.Base(object.Key), filepath.Ext(object.Key))
+		decoded, decodeErr := hex.DecodeString(hash)
+		if decodeErr != nil || len(decoded) != 32 || filepath.Ext(object.Key) != ".json" {
+			http.Error(w, "Artifact history integrity failure.", http.StatusBadGateway)
+			return
+		}
+		publicObjects[i] = historyObject{Key: object.Key, Size: object.Size, ContentHash: "sha256:" + strings.ToLower(hash)}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"schema": "urnetwork-payout-artifact-history-v1", "objects": objects})
+	_ = json.NewEncoder(w).Encode(map[string]any{"schema": "urnetwork-payout-artifact-history-v1", "objects": publicObjects})
+}
+
+func payoutArtifactHistoryPrefix(blobPrefix, deploymentRaw, netuidRaw, epochRaw, noIDRaw string) (string, error) {
+	deployment := cleanArtifactSegment(deploymentRaw)
+	if deployment == "" {
+		return "", fmt.Errorf("deployment_id is required and must be one safe segment")
+	}
+	netuid, err := strconv.ParseUint(strings.TrimSpace(netuidRaw), 10, 16)
+	if err != nil || netuid == 0 {
+		return "", fmt.Errorf("netuid must be a nonzero uint16")
+	}
+	parts := []string{blobPrefix, "st", "v1", "history", deployment, strconv.FormatUint(netuid, 10)}
+	if strings.TrimSpace(epochRaw) == "" {
+		if strings.TrimSpace(noIDRaw) != "" {
+			return "", fmt.Errorf("no_id requires epoch")
+		}
+		return filepath.ToSlash(filepath.Join(parts...)) + "/", nil
+	}
+	epoch, err := strconv.ParseUint(strings.TrimSpace(epochRaw), 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("epoch must be a uint64")
+	}
+	parts = append(parts, strconv.FormatUint(epoch, 10))
+	if strings.TrimSpace(noIDRaw) != "" {
+		noID, noIDErr := strconv.ParseUint(strings.TrimSpace(noIDRaw), 10, 64)
+		if noIDErr != nil || noID == 0 {
+			return "", fmt.Errorf("no_id must be a nonzero uint64")
+		}
+		parts = append(parts, strconv.FormatUint(noID, 10))
+	}
+	return filepath.ToSlash(filepath.Join(parts...)) + "/", nil
 }
 
 // SnEvidence accepts and serves the generic signed release history envelope.

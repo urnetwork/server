@@ -6,242 +6,35 @@ package startifact
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
-
-	"github.com/urfoundation/sn/merkle"
-	"github.com/urfoundation/sn/protocol"
+	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urnetwork/server"
 )
 
-const Schema = "urnetwork-payout-artifact-v1"
+const Schema = payoutartifact.Schema
 
-type Boundary struct {
-	Number uint64 `json:"number"`
-	Hash   string `json:"hash"`
-}
+// The server owns persistence, while the canonical schema and verifier live
+// in sn so validators and offline analysis do not depend on this module.
+type Boundary = payoutartifact.Boundary
+type ProviderInput = payoutartifact.ProviderInput
+type Leaf = payoutartifact.Leaf
+type Artifact = payoutartifact.Artifact
+type BuildInput = payoutartifact.BuildInput
 
-type ProviderInput struct {
-	ClientID          [16]byte `json:"client_id"`
-	NetworkID         [16]byte `json:"network_id"`
-	Coldkey           [32]byte `json:"coldkey"`
-	UsageBytes        uint64   `json:"usage_bytes"`
-	Assignments       uint64   `json:"assignments"`
-	Confirmations     uint64   `json:"confirmations"`
-	ReliabilityPPM    uint32   `json:"reliability_ppm"`
-	Eligible          bool     `json:"eligible"`
-	HeadExcluded      bool     `json:"head_excluded"`
-	ExclusionReason   string   `json:"exclusion_reason,omitempty"`
-	BindingGeneration uint64   `json:"binding_generation,omitempty"`
-}
+var Build = payoutartifact.Build
+var Sign = payoutartifact.Sign
+var Verify = payoutartifact.Verify
+var Bytes = payoutartifact.Bytes
+var Decode = payoutartifact.Decode
 
-type Leaf struct {
-	Index    uint64     `json:"index"`
-	ClientID [16]byte   `json:"allocation_client_id"`
-	Coldkey  [32]byte   `json:"coldkey"`
-	ShareBPS uint64     `json:"share_bps"`
-	Proof    [][32]byte `json:"proof"`
-}
-
-type Artifact struct {
-	Schema               string          `json:"schema"`
-	DeploymentID         string          `json:"deployment_id"`
-	ChainID              uint64          `json:"chain_id"`
-	GenesisHash          string          `json:"genesis_hash"`
-	Netuid               uint16          `json:"netuid"`
-	Coordinator          common.Address  `json:"coordinator"`
-	SettlementVault      common.Address  `json:"settlement_vault"`
-	Epoch                uint64          `json:"epoch"`
-	NoID                 uint64          `json:"no_id"`
-	PolicyHash           string          `json:"policy_hash"`
-	Start                Boundary        `json:"start"`
-	End                  Boundary        `json:"end"`
-	OperatorSnapshotHash string          `json:"operator_snapshot_hash"`
-	FleetSnapshotHash    string          `json:"fleet_snapshot_hash"`
-	ProviderSnapshotHash string          `json:"provider_snapshot_hash"`
-	Providers            []ProviderInput `json:"providers"`
-	Leaves               []Leaf          `json:"leaves"`
-	PayoutRoot           [32]byte        `json:"payout_root"`
-	TotalUsageBytes      uint64          `json:"total_usage_bytes"`
-	EligibleUsageBytes   uint64          `json:"eligible_usage_bytes"`
-	ExcludedUsageBytes   uint64          `json:"excluded_usage_bytes"`
-	SharesTotalBPS       uint64          `json:"shares_total_bps"`
-	CreatedAt            string          `json:"created_at"`
-	Signer               common.Address  `json:"signer"`
-	ContentHash          string          `json:"content_hash"`
-	Signature            string          `json:"signature"`
-}
-
-type BuildInput struct {
-	DeploymentID, GenesisHash, PolicyHash                         string
-	ChainID                                                       uint64
-	Netuid                                                        uint16
-	Coordinator, SettlementVault                                  common.Address
-	Epoch, NoID                                                   uint64
-	Start, End                                                    Boundary
-	OperatorSnapshotHash, FleetSnapshotHash, ProviderSnapshotHash string
-	Providers                                                     []ProviderInput
-	ReliabilityAMin                                               uint64
-	CreatedAt                                                     time.Time
-}
-
-// Build computes Wilson reliability, exact largest-remainder shares, the
-// Merkle root, and every proof. Provider order is canonicalized by client id.
-func Build(in BuildInput) (*Artifact, error) {
-	if in.DeploymentID == "" || in.ChainID == 0 || in.Netuid == 0 || in.Coordinator == (common.Address{}) || in.SettlementVault == (common.Address{}) || in.PolicyHash == "" || in.Start.Hash == "" || in.End.Hash == "" || in.End.Number < in.Start.Number || in.ReliabilityAMin == 0 {
-		return nil, errors.New("incomplete payout artifact identity/boundary")
-	}
-	providers := append([]ProviderInput(nil), in.Providers...)
-	sort.SliceStable(providers, func(i, j int) bool {
-		return bytes.Compare(providers[i].ClientID[:], providers[j].ClientID[:]) < 0
-	})
-	allocations := make([]protocol.ProviderAllocation, 0, len(providers))
-	var totalUsage, eligibleUsage uint64
-	for i := range providers {
-		p := &providers[i]
-		totalUsage += p.UsageBytes
-		p.ReliabilityPPM = protocol.ReliabilityPPM(p.Confirmations, p.Assignments, in.ReliabilityAMin)
-		if p.Eligible && !p.HeadExcluded && p.Coldkey != ([32]byte{}) {
-			eligibleUsage += p.UsageBytes
-		}
-		allocations = append(allocations, protocol.ProviderAllocation{ClientID: p.ClientID, Coldkey: p.Coldkey, UsageBytes: p.UsageBytes, ReliabilityPPM: p.ReliabilityPPM, Eligible: p.Eligible, HeadExcluded: p.HeadExcluded})
-	}
-	shares, err := protocol.AllocateShares(allocations)
-	if err != nil {
-		if !errors.Is(err, protocol.ErrNoEligibleProviders) {
-			return nil, err
-		}
-		shares = nil
-	}
-	merkleLeaves := make([]merkle.Leaf, len(shares))
-	for i, share := range shares {
-		merkleLeaves[i] = merkle.PayoutLeaf(share.Coldkey, newBigInt(share.ShareBPS))
-	}
-	var tree *merkle.Tree
-	if len(merkleLeaves) != 0 {
-		tree, err = merkle.NewTree(merkleLeaves)
-		if err != nil {
-			return nil, err
-		}
-	}
-	leaves := make([]Leaf, len(shares))
-	for i, share := range shares {
-		proof, proofErr := tree.Proof(merkleLeaves[i])
-		if proofErr != nil {
-			return nil, proofErr
-		}
-		leaves[i] = Leaf{Index: uint64(i), ClientID: share.ClientID, Coldkey: share.Coldkey, ShareBPS: share.ShareBPS, Proof: proof}
-	}
-	created := in.CreatedAt.UTC()
-	if created.IsZero() {
-		return nil, errors.New("created_at is required")
-	}
-	root, sharesTotal := [32]byte{}, uint64(0)
-	if tree != nil {
-		root, sharesTotal = tree.Root(), 10_000
-	}
-	return &Artifact{Schema: Schema, DeploymentID: in.DeploymentID, ChainID: in.ChainID, GenesisHash: strings.ToLower(in.GenesisHash), Netuid: in.Netuid, Coordinator: in.Coordinator, SettlementVault: in.SettlementVault, Epoch: in.Epoch, NoID: in.NoID, PolicyHash: strings.ToLower(in.PolicyHash), Start: in.Start, End: in.End, OperatorSnapshotHash: in.OperatorSnapshotHash, FleetSnapshotHash: in.FleetSnapshotHash, ProviderSnapshotHash: in.ProviderSnapshotHash, Providers: providers, Leaves: leaves, PayoutRoot: root, TotalUsageBytes: totalUsage, EligibleUsageBytes: eligibleUsage, ExcludedUsageBytes: totalUsage - eligibleUsage, SharesTotalBPS: sharesTotal, CreatedAt: created.Format(time.RFC3339Nano)}, nil
-}
-
-func newBigInt(v uint64) *big.Int { return new(big.Int).SetUint64(v) }
-
-func unsignedBytes(a *Artifact) ([]byte, error) {
-	copy := *a
-	copy.ContentHash = ""
-	copy.Signature = ""
-	copy.Signer = common.Address{}
-	return json.Marshal(copy)
-}
-
-func Sign(a *Artifact, key *ecdsa.PrivateKey) error {
-	if key == nil {
-		return errors.New("artifact signer is nil")
-	}
-	b, err := unsignedBytes(a)
-	if err != nil {
-		return err
-	}
-	h := sha256.Sum256(b)
-	sig, err := crypto.Sign(h[:], key)
-	if err != nil {
-		return err
-	}
-	a.Signer = crypto.PubkeyToAddress(key.PublicKey)
-	a.ContentHash = "sha256:" + hex.EncodeToString(h[:])
-	a.Signature = "0x" + hex.EncodeToString(sig)
-	return nil
-}
-
-func Verify(a *Artifact) error {
-	if a.Schema != Schema || !strings.HasPrefix(a.ContentHash, "sha256:") {
-		return errors.New("invalid artifact schema/hash")
-	}
-	b, err := unsignedBytes(a)
-	if err != nil {
-		return err
-	}
-	h := sha256.Sum256(b)
-	if a.ContentHash != "sha256:"+hex.EncodeToString(h[:]) {
-		return errors.New("artifact content hash mismatch")
-	}
-	sig, err := hex.DecodeString(strings.TrimPrefix(a.Signature, "0x"))
-	if err != nil || len(sig) != crypto.SignatureLength {
-		return errors.New("invalid artifact signature")
-	}
-	pub, err := crypto.SigToPub(h[:], sig)
-	if err != nil || crypto.PubkeyToAddress(*pub) != a.Signer {
-		return errors.New("artifact signer mismatch")
-	}
-	merkleLeaves := make([]merkle.Leaf, len(a.Leaves))
-	var sum uint64
-	for i, leaf := range a.Leaves {
-		if leaf.Index != uint64(i) || leaf.ShareBPS == 0 {
-			return errors.New("invalid leaf order/share")
-		}
-		sum += leaf.ShareBPS
-		merkleLeaves[i] = merkle.PayoutLeaf(leaf.Coldkey, newBigInt(leaf.ShareBPS))
-	}
-	if len(a.Leaves) == 0 {
-		if sum != 0 || a.SharesTotalBPS != 0 || a.PayoutRoot != ([32]byte{}) {
-			return errors.New("empty artifact has nonzero shares/root")
-		}
-		return nil
-	}
-	if sum != 10_000 || a.SharesTotalBPS != 10_000 {
-		return fmt.Errorf("artifact shares sum to %d", sum)
-	}
-	tree, err := merkle.NewTree(merkleLeaves)
-	if err != nil || tree.Root() != a.PayoutRoot {
-		return errors.New("artifact payout root mismatch")
-	}
-	for i, leaf := range a.Leaves {
-		if !merkle.Verify(a.PayoutRoot, merkleLeaves[i], leaf.Proof) {
-			return fmt.Errorf("artifact proof %d is invalid", i)
-		}
-	}
-	return nil
-}
-
-func Bytes(a *Artifact) ([]byte, error) {
-	if err := Verify(a); err != nil {
-		return nil, err
-	}
-	return json.Marshal(a)
-}
+const maximumArtifactBytes = 32 * 1024 * 1024
 
 type Published struct {
 	ContentHash string `json:"content_hash"`
@@ -271,6 +64,39 @@ func Publish(ctx context.Context, store server.BlobStore, a *Artifact) (*Publish
 		return nil, err
 	}
 	return &Published{ContentHash: a.ContentHash, ContentKey: contentKey, HistoryKey: historyKey, Bucket: store.Bucket()}, nil
+}
+
+// Read resolves one content identity from server/blob and accepts only the
+// exact canonical signed bytes. It is used by operator automation so deposit
+// sizing consumes the same immutable statement validators audit.
+func Read(ctx context.Context, store server.BlobStore, contentHash string) (*Artifact, []byte, error) {
+	if store == nil {
+		return nil, nil, errors.New("server/blob store is unavailable")
+	}
+	key, err := ContentKey(store, contentHash)
+	if err != nil {
+		return nil, nil, err
+	}
+	reader, err := store.Get(ctx, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer reader.Close()
+	value, err := io.ReadAll(io.LimitReader(reader, maximumArtifactBytes+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(value) > maximumArtifactBytes {
+		return nil, nil, errors.New("payout artifact exceeds 32 MiB")
+	}
+	artifact, err := Decode(value)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !strings.EqualFold(artifact.ContentHash, contentHash) {
+		return nil, nil, errors.New("payout artifact content identity mismatch")
+	}
+	return artifact, value, nil
 }
 
 func putImmutable(ctx context.Context, store server.BlobStore, key string, b []byte) error {
