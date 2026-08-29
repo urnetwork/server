@@ -1,6 +1,6 @@
 # Sim-latency competition live-deployment playbook
 
-Status date: 2026-08-28
+Status date: 2026-08-29
 
 Evaluator/baseline qualification: **complete — 10/10 required gates pass**
 
@@ -20,12 +20,15 @@ Read these first:
 - [Preserved calibration evidence](baseline/README.md)
 - [Final baseline infographic](baseline/final-baseline.html)
 - [Official evaluator contract](OFFICIAL-RUN.md)
-- [Competition service README](../../competition/README.md)
-- [Evaluator protocol](../../competition/EVALUATOR-PROTOCOL.md)
+- [Competition controller](../../controller/competition_controller.go)
+- [Evaluator protocol](evaluator/EVALUATOR-PROTOCOL.md)
 - [Competition OpenAPI](../../../sn/api/competition.yml)
-- [Apex integration gap](../../competition/APEX-INTEGRATION-GAP.md)
-- [Apex handoff draft](../../competition/APEX-HANDOFF.md)
+- [Apex integration gap](launch/APEX-INTEGRATION-GAP.md)
+- [Apex handoff draft](launch/APEX-HANDOFF.md)
 - [Apex open-question checklist](launch/APEX-OPEN-QUESTIONS.md)
+- [Submitter onboarding](launch/ONBOARDING.md)
+- [Incident response](launch/INCIDENT-RESPONSE.md)
+- [Agent season harness](RUN-MAIN.md)
 - [Machine-readable launch status](playbook.yml)
 
 ## 1. Go-live position
@@ -108,11 +111,11 @@ has an owner and a recorded value.
 | Service supervision | **Complete by operator confirmation.** Main API plus one competition worker per epoch use the reviewed main-environment migration and boot ordering. The worker exits zero after close and FIFO drain, leaving significant candidates embargoed for the separate honesty-review command. | Verify the final deployed versions, singleton worker heartbeat, clean one-shot exit handling, and review-harness handoff in the agentic controller. |
 | Public ingress | **Complete by operator confirmation.** DNS/TLS/reverse proxy/firewall/rate limits are provided by main. | Smoke the final `/competition/*` routes, including the 262,144-byte request ceiling and ordinary ingress rate limiting. There is no epoch job-count rejection. |
 | Release distribution | **Epoch-0 complete by local immutable load.** Docker resolves `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; the public info response exposes the current evaluator image, and each job response exposes its frozen evaluator plus exact API/worker runtime images. Main API/worker releases continue normally and are not scoring inputs. | Set the same evaluator digest in live `competition.yml`, then verify runtime API/worker digest injection on the deployed services. |
-| Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` fails if object lock or versioning is absent. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Prove the live bucket check, capacity, and backup replication. Grafana warns at 75% used and pages at 90%. |
-| Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, and provisioned Grafana alert rules are implemented for the main Mimir/Grafana pipeline. `support@ur.xyz` owns on-call and incident response. | Deploy the final server and warp commits and map `severity=page|warn` through the existing main contact policy to `support@ur.xyz`. |
-| Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. | Distribute endpoint/token/onboarding instructions and exercise revocation once. No separate API is required. |
+| Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` now fails unless object lock, versioning, and an enabled server-validated replication destination all pass. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Run and retain the live protection/capacity preflight. Grafana warns at 75% used and pages at 90%. |
+| Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, 15-second runner heartbeat, 30-second stale warning, service-labeled alert rules, and the `support@ur.xyz` contact-policy reconciler are implemented for main Mimir/Grafana. | Deploy the final server and warp commits and retain the live Grafana routing proof. |
+| Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. The Go-only onboarding and atomic token rotation/revocation flows are documented in `launch/ONBOARDING.md`. | Deliver the token through the private channel and exercise live revocation once. No separate API is required. |
 | Leaderboard and winner | Implemented at public `GET /competition/leaderboard`; only finalized epochs appear and rows expose approved/rejected/not-reviewed disposition. Ranked significant candidates require append-only operator honesty review, and promotion is database-bound to the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
-| Apex | Adapter mapping and handoff fields are documented in `competition/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
+| Apex | Adapter mapping and handoff fields are documented in `launch/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
 
 The installed provisioner authenticates an existing bundle and intentionally
 does not rotate it in place. Do not hand-edit one file: the vault,
@@ -310,7 +313,7 @@ Stop the ordinary worker before rebaseline and confirm there is no running job.
 Use the exact no-op patch:
 
 ```text
-/home/by/urnetwork/server/competition/references/noop.patch
+/home/by/urnetwork/server/connect/sim-latency/evaluator/references/noop.patch
 SHA-256 8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775
 ```
 
@@ -321,7 +324,7 @@ to a new root-owned output directory:
 ```bash
 taskset -c 20,22 competitionrebaseline \
   --round_id "$COMPETITION_ROUND_ID" \
-  --patch /home/by/urnetwork/server/competition/references/noop.patch \
+  --patch /home/by/urnetwork/server/connect/sim-latency/evaluator/references/noop.patch \
   --patch_sha256 8bd57a48ac82a6e846b607a9301c48145da5c66717c9e3a341138d034d1e0775 \
   --output "/var/lib/urnetwork/competition/rebaseline/$COMPETITION_ROUND_ID/result.json"
 ```
@@ -516,9 +519,10 @@ HONESTY_HARNESS_COMMAND \
   --out honesty-report.json
 ```
 
-For a dishonest candidate, append a rejection. The response already contains
-and materializes the next ranked candidate, if one exists; repeat until a
-candidate is approved or the state becomes `finalized` with no winner:
+For a dishonest candidate, append a rejection. The response advances to the
+next ranked candidate without creating another temporary directory. Invoke
+`epoch-review next` to materialize that candidate, then repeat until a candidate
+is approved or the state becomes `finalized` with no winner:
 
 ```bash
 ./run-main.sh epoch-review --epoch "REPLACE_WITH_N" reject \
@@ -591,7 +595,7 @@ simulator/scorer digests through the trusted main competition configuration:
 
 ```bash
 cd /release-workspace/server
-./competition/container/build-base.sh \
+./connect/sim-latency/evaluator/container/build-base.sh \
   --epoch "REPLACE_WITH_N" \
   --source-config /home/by/urnetwork/config/main/sim-latency.yml \
   --tag urnetwork/sim-latency-evaluator-base:epoch-N
@@ -663,10 +667,11 @@ Technical evidence already complete:
 - [x] per-epoch measured-source ledger, mandatory run preflight, authenticated
   winner-score threshold update or no-winner carry-forward, isolated
   commit/push command, and epoch-bound evaluator image build;
-- [x] MinIO versioned compliance retention with post-upload authentication and
-  fail-closed readiness;
-- [x] main Grafana metrics/dashboard plus provisioned worker, archive,
-  evaluation, queue-stall, and MinIO capacity alerts;
+- [x] MinIO versioned compliance retention, enabled-replication validation,
+  capacity accounting, post-upload authentication, and fail-closed readiness;
+- [x] main Grafana metrics/dashboard plus provisioned runner/worker, archive,
+  evaluation, queue-stall, and MinIO capacity alerts, all routed by the
+  `service=sim-latency` label;
 - [x] operator-confirmed main PostgreSQL/Redis/restore boundary, service/migration
   ordering, and public ingress controls; and
 - [x] evaluator release provenance/SBOMs, OpenAPI, baseline, and final reports.
@@ -687,7 +692,8 @@ Still to add or approve before a public competition starts:
 - [ ] deploy the final server/warp monitoring commits and bind `severity` labels
   to the existing main Grafana contact policy routed to the recorded on-call
   and incident contact, `support@ur.xyz`;
-- [ ] miner/submission onboarding, token distribution, and revocation flow;
+- [ ] deliver the implemented submitter onboarding/token bundle and retain one
+  live rotation/revocation proof;
 - [ ] publish rewards, eligibility, legal terms, and abuse/appeal process (the
   submission fee is frozen at $20 USD);
 - [ ] Macrocosmos asynchronous-adapter/staging/private-registry acceptance and

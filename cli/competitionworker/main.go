@@ -10,7 +10,7 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/competition"
+	"github.com/urnetwork/server/controller"
 )
 
 func main() {
@@ -42,14 +42,14 @@ Options:
 			panic(err)
 		}
 	}
-	settings, err := competition.LoadSettings()
+	settings, err := controller.LoadSettings()
 	if err != nil {
 		panic(err)
 	}
-	worker, err := competition.NewWorker(
+	worker, err := controller.NewWorker(
 		settings,
-		competition.PostgresStore{},
-		competition.CommandEvaluator{},
+		controller.PostgresStore{},
+		controller.CommandEvaluator{},
 		workerId,
 	)
 	if err != nil {
@@ -58,8 +58,8 @@ Options:
 	quit := server.NewEventWithContext(context.Background())
 	closeSignals := quit.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
 	defer closeSignals()
-	competition.StartRunnerHeartbeat(quit.Ctx)
-	competition.StartMetrics(quit.Ctx)
+	controller.StartRunnerHeartbeat(quit.Ctx)
+	controller.StartMetrics(quit.Ctx)
 	flushStats := server.StartStatsPusher(quit.Ctx)
 	defer flushStats()
 	if err := worker.Run(quit.Ctx); err != nil && !errors.Is(err, context.Canceled) {

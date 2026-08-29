@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/docopt/docopt-go"
-	"github.com/urnetwork/server/competition"
+	"github.com/urnetwork/server/controller"
 	"gopkg.in/yaml.v3"
 )
 
@@ -56,7 +56,7 @@ type promotionResult struct {
 // readWinnerScore authenticates the exact control-plane score record that was
 // materialized for honesty review. The immutable evaluation archive remains
 // the source of every underlying scorer artifact and replicate diagnostic.
-func readWinnerScore(winnerRoot string) (*competition.ScoreResult, []byte, error) {
+func readWinnerScore(winnerRoot string) (*controller.ScoreResult, []byte, error) {
 	path := filepath.Join(winnerRoot, "score.json")
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
@@ -66,11 +66,11 @@ func readWinnerScore(winnerRoot string) (*competition.ScoreResult, []byte, error
 	if err != nil {
 		return nil, nil, err
 	}
-	result := &competition.ScoreResult{}
+	result := &controller.ScoreResult{}
 	if err := decodeStrictJSONBytes(content, result, "winner score"); err != nil {
 		return nil, nil, err
 	}
-	if result.ScoreSchema != competition.ScoreSchema || result.RawScore == nil ||
+	if result.ScoreSchema != controller.ScoreSchema || result.RawScore == nil ||
 		result.NormalizedScore == nil || !finitePositive(*result.RawScore) ||
 		!finitePositive(*result.NormalizedScore) || *result.NormalizedScore < 1 ||
 		200 < *result.NormalizedScore || !result.Placeable ||
@@ -88,7 +88,7 @@ func readWinnerScore(winnerRoot string) (*competition.ScoreResult, []byte, error
 	return result, content, nil
 }
 
-func allCompetitionScoreGatesPass(gates map[string]competition.Gate) bool {
+func allCompetitionScoreGatesPass(gates map[string]controller.Gate) bool {
 	if len(gates) == 0 {
 		return false
 	}
@@ -101,7 +101,7 @@ func allCompetitionScoreGatesPass(gates map[string]competition.Gate) bool {
 }
 
 func winnerSourceSignificance(
-	result *competition.ScoreResult,
+	result *controller.ScoreResult,
 	content []byte,
 ) (*sourceSignificance, error) {
 	significance := result.Significance
@@ -149,8 +149,8 @@ func readWinnerSignificance(winnerRoot string) (*sourceSignificance, error) {
 }
 
 func exactApprovedScoreMatches(
-	approved competition.ScoreResult,
-	winner *competition.ScoreResult,
+	approved controller.ScoreResult,
+	winner *controller.ScoreResult,
 ) bool {
 	if winner == nil {
 		return false
@@ -445,7 +445,7 @@ func runPromote(opts docopt.Opts) {
 	noWinner := optBool(opts, "--no-winner")
 	winnerJobId := optString(opts, "--winner-job-id", "")
 	winnerRoot := ""
-	var winnerScore *competition.ScoreResult
+	var winnerScore *controller.ScoreResult
 	var winnerSignificance *sourceSignificance
 	transitionKind := "winner_promotion"
 	if noWinner {
@@ -507,7 +507,7 @@ func runPromote(opts docopt.Opts) {
 		fatalf("epoch %d is not the next unconfigured epoch; ledger currently contains epochs 0..%d", epochNumber, len(manifest.EvaluationSource.Epochs)-1)
 	}
 	previousEpochNumber := epochNumber - 1
-	if err := verifySourceEpoch(manifest, previousEpochNumber, repositoriesRoot, ""); err != nil {
+	if err := verifyRemoteSourceEpochHead(manifest, previousEpochNumber, repositoriesRoot); err != nil {
 		fatalf("previous source epoch preflight: %s", err)
 	}
 	previousEpoch, err := manifest.epoch(previousEpochNumber)
@@ -616,14 +616,9 @@ func runPromote(opts docopt.Opts) {
 			fatalf("push config activation (repository branches may be staged ahead; no evaluation can select them yet): %s", err)
 		}
 		result.LedgerActivated = true
-		for _, repository := range repositories {
-			if repository.NextCommit == repository.PreviousCommit {
-				continue
-			}
-			if err := fastForwardLocalBranch(repository.LocalRoot, manifest.EvaluationSource.Branch, repository.NextCommit); err != nil {
-				fatalf("epoch activated, but local repository %s did not fast-forward: %s", repository.Name, err)
-			}
-		}
+		// Product worktrees are runner inputs only for discovering their origins.
+		// Winner patches are staged and pushed from private temporary clones, so
+		// never change a developer or agent checkout after publication.
 		configRoot, _ := gitOutput(filepath.Dir(sourceConfig), "rev-parse", "--show-toplevel")
 		if err := fastForwardLocalBranch(configRoot, "main", configCommit); err != nil {
 			fatalf("epoch activated, but local config repository did not fast-forward: %s", err)

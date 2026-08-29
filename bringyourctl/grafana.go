@@ -32,6 +32,10 @@ func grafanaLoadDefaults(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
+	if err := grafana.ReconcileCompetitionAlertRouting(context.Background(), grafanaUrl, "admin", adminPassword); err != nil {
+		panic(err)
+	}
+	fmt.Printf("Competition warn/page alerts route to %s\n", grafana.CompetitionIncidentContact)
 	for _, title := range titles {
 		fmt.Printf("- %s\n", title)
 	}

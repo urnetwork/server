@@ -35,7 +35,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/urnetwork/server/competition"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -630,14 +629,14 @@ func TestSpecRoutesImplemented(t *testing.T) {
 
 func competitionRegistry() []specEndpoint {
 	return []specEndpoint{
-		{"GET", "/competition/healthz", nil, rt(competition.HealthResult{})},
-		{"GET", "/competition/readyz", nil, rt(competition.ReadinessResult{})},
-		{"GET", "/competition/info", nil, rt(competition.InfoResult{})},
-		{"GET", "/competition/leaderboard", nil, rt(competition.SeasonLeaderboardResult{})},
-		{"POST", "/competition/generate-round", rt(competition.GenerateRoundArgs{}), rt(competition.RoundResult{})},
+		{"GET", "/competition/healthz", nil, rt(controller.HealthResult{})},
+		{"GET", "/competition/readyz", nil, rt(controller.ReadinessResult{})},
+		{"GET", "/competition/info", nil, rt(controller.InfoResult{})},
+		{"GET", "/competition/leaderboard", nil, rt(controller.SeasonLeaderboardResult{})},
+		{"POST", "/competition/generate-round", rt(controller.GenerateRoundArgs{}), rt(controller.RoundResult{})},
 		{"GET", "/competition/round/{roundId}/providers.yml", nil, nil},
-		{"POST", "/competition/score", rt(competition.ScoreArgs{}), rt(competition.ScoreAcceptedResult{})},
-		{"GET", "/competition/score/{jobId}", nil, rt(competition.ScoreJobResult{})},
+		{"POST", "/competition/score", rt(controller.ScoreArgs{}), rt(controller.ScoreAcceptedResult{})},
+		{"GET", "/competition/score/{jobId}", nil, rt(controller.ScoreJobResult{})},
 	}
 }
 

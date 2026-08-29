@@ -108,6 +108,14 @@ type evaluatorSourceLock struct {
 	Repositories        map[string]string `json:"repositories"`
 }
 
+type sourceRecord struct {
+	Schema                        int               `json:"schema"`
+	Epoch                         int               `json:"epoch"`
+	Branch                        string            `json:"branch"`
+	SignificantImprovementPercent float64           `json:"significant_improvement_percent"`
+	Repositories                  map[string]string `json:"repositories"`
+}
+
 // readSourceFile bounds operator configuration before parsing it.
 func readSourceFile(path string) ([]byte, error) {
 	file, err := os.Open(path)
@@ -531,4 +539,44 @@ func runSourceCheck(opts docopt.Opts) {
 		return
 	}
 	fmt.Printf("source epoch %d verified: config=%s repositories=%s\n", epochNumber, sourceConfig, repositoriesRoot)
+}
+
+// runSourceRecord reads the ledger and verifies that every configured commit
+// is reachable from the remote sim-latency branch. Local product worktrees are
+// discovery-only and may be dirty, detached, or on unrelated branches.
+func runSourceRecord(opts docopt.Opts) {
+	epochNumber, err := configuredEpoch(opts)
+	if err != nil {
+		fatalf("source record epoch: %s", err)
+	}
+	sourceConfig, repositoriesRoot, sourceLock, err := configuredSourcePaths(opts)
+	if err != nil {
+		fatalf("source record paths: %s", err)
+	}
+	if sourceLock != "" {
+		fatalf("source record is host-only and cannot use an evaluator source lock")
+	}
+	manifest, err := loadSourceManifest(sourceConfig)
+	if err != nil {
+		fatalf("source record config: %s", err)
+	}
+	if err := verifyRemoteSourceEpoch(manifest, epochNumber, repositoriesRoot); err != nil {
+		fatalf("source record remote verification: %s", err)
+	}
+	epoch, err := manifest.epoch(epochNumber)
+	if err != nil {
+		fatalf("source record config: %s", err)
+	}
+	result := sourceRecord{
+		Schema:                        1,
+		Epoch:                         epochNumber,
+		Branch:                        manifest.EvaluationSource.Branch,
+		SignificantImprovementPercent: epoch.SignificantImprovementPercent,
+		Repositories:                  epoch.Repositories.commits(),
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		fatalf("encode source record: %s", err)
+	}
+	fmt.Printf("%s\n", encoded)
 }

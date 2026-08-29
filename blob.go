@@ -23,6 +23,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
+	"github.com/minio/minio-go/v7/pkg/replication"
 
 	"github.com/urnetwork/glog"
 )
@@ -62,6 +64,31 @@ type BlobRetention struct {
 	VersionId   string
 	Mode        string
 	RetainUntil time.Time
+}
+
+// BlobUsage is a bounded namespace capacity proof. CapacityBytes is an
+// operator allocation for the configured prefix, not an estimate of the whole
+// MinIO cluster; cluster free-space alerts remain sourced from MinIO metrics.
+type BlobUsage struct {
+	Authority     string  `json:"authority"`
+	Bucket        string  `json:"bucket"`
+	Prefix        string  `json:"prefix"`
+	ObjectCount   int     `json:"object_count"`
+	UsedBytes     int64   `json:"used_bytes"`
+	CapacityBytes int64   `json:"capacity_bytes"`
+	FreeBytes     int64   `json:"free_bytes"`
+	UsedPercent   float64 `json:"used_percent"`
+}
+
+// BlobProtection is the non-secret production proof for one immutable
+// evidence bucket. ReplicationTargets contains only configured destination
+// bucket identities; credentials and endpoint secrets are never included.
+type BlobProtection struct {
+	Authority          string   `json:"authority"`
+	Bucket             string   `json:"bucket"`
+	ObjectLock         string   `json:"object_lock"`
+	Versioning         bool     `json:"versioning"`
+	ReplicationTargets []string `json:"replication_targets"`
 }
 
 // BlobLifecycleRule expires (deletes) objects whose key starts with KeyPrefix
@@ -122,6 +149,62 @@ type RetainedBlobStore interface {
 	// CheckRetention verifies that immutable retained writes are available. It
 	// performs no mutation and is suitable for readiness checks.
 	CheckRetention(ctx context.Context) error
+}
+
+// ProtectedBlobStore is the production evidence capability required at
+// launch: immutable WORM storage plus at least one enabled, server-validated
+// replication destination.
+type ProtectedBlobStore interface {
+	RetainedBlobStore
+	CheckProtection(ctx context.Context) (*BlobProtection, error)
+}
+
+// MeasureBlobUsage authenticates the current object sizes under one store
+// prefix against an operator-approved allocation. It is intentionally a
+// launch/preflight operation rather than a hot readiness probe because a full
+// recursive MinIO listing can be expensive.
+func MeasureBlobUsage(ctx context.Context, store BlobStore, capacityBytes int64) (*BlobUsage, error) {
+	if store == nil {
+		return nil, errors.New("blob store is required")
+	}
+	return MeasureBlobUsageAtPrefix(ctx, store, store.Prefix(), capacityBytes)
+}
+
+// MeasureBlobUsageAtPrefix scopes the allocation proof to one subsystem
+// namespace while retaining the store's bucket and authority identity.
+func MeasureBlobUsageAtPrefix(ctx context.Context, store BlobStore, keyPrefix string, capacityBytes int64) (*BlobUsage, error) {
+	if store == nil || capacityBytes <= 0 {
+		return nil, errors.New("blob capacity allocation must be positive")
+	}
+	keyPrefix = strings.TrimSpace(keyPrefix)
+	if keyPrefix == "" || !strings.HasPrefix(keyPrefix, store.Prefix()) {
+		return nil, errors.New("blob usage prefix is outside the configured namespace")
+	}
+	objects, err := store.List(ctx, keyPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var usedBytes int64
+	for _, object := range objects {
+		if object.Size < 0 || math.MaxInt64-usedBytes < object.Size {
+			return nil, errors.New("blob usage size is invalid")
+		}
+		usedBytes += object.Size
+	}
+	freeBytes := capacityBytes - usedBytes
+	if freeBytes < 0 {
+		freeBytes = 0
+	}
+	return &BlobUsage{
+		Authority:     store.Authority(),
+		Bucket:        store.Bucket(),
+		Prefix:        keyPrefix,
+		ObjectCount:   len(objects),
+		UsedBytes:     usedBytes,
+		CapacityBytes: capacityBytes,
+		FreeBytes:     freeBytes,
+		UsedPercent:   100 * float64(usedBytes) / float64(capacityBytes),
+	}, nil
 }
 
 // BlobStoreConfig is the backing MinIO configuration (or local-backend
@@ -426,7 +509,7 @@ func (self *minioBlobStore) SetLifecycle(ctx context.Context, rules []BlobLifecy
 	return self.client.SetBucketLifecycle(ctx, self.bucket, config)
 }
 
-func (self *minioBlobStore) CheckRetention(ctx context.Context) error {
+func (self *minioBlobStore) checkRetentionConfiguration(ctx context.Context) error {
 	exists, err := self.client.BucketExists(ctx, self.bucket)
 	if err != nil {
 		return err
@@ -449,6 +532,60 @@ func (self *minioBlobStore) CheckRetention(ctx context.Context) error {
 		return errors.New("minio blob bucket does not have versioning enabled")
 	}
 	return nil
+}
+
+// enabledReplicationTargets validates and normalizes the enabled backup
+// destinations without depending on a live MinIO server.
+func enabledReplicationTargets(config replication.Config) ([]string, error) {
+	targetSet := map[string]bool{}
+	for _, rule := range config.Rules {
+		if rule.Status != replication.Enabled {
+			continue
+		}
+		target := strings.TrimSpace(rule.Destination.Bucket)
+		if target == "" {
+			return nil, errors.New("minio replication has an enabled rule without a destination bucket")
+		}
+		targetSet[target] = true
+	}
+	if len(targetSet) == 0 {
+		return nil, errors.New("minio blob bucket does not have an enabled replication destination")
+	}
+	targets := make([]string, 0, len(targetSet))
+	for target := range targetSet {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+	return targets, nil
+}
+
+func (self *minioBlobStore) CheckProtection(ctx context.Context) (*BlobProtection, error) {
+	if err := self.checkRetentionConfiguration(ctx); err != nil {
+		return nil, err
+	}
+	config, err := self.client.GetBucketReplication(ctx, self.bucket)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := enabledReplicationTargets(config)
+	if err != nil {
+		return nil, err
+	}
+	if err := self.client.CheckBucketReplication(ctx, self.bucket); err != nil {
+		return nil, fmt.Errorf("minio replication validation: %w", err)
+	}
+	return &BlobProtection{
+		Authority:          self.authority,
+		Bucket:             self.bucket,
+		ObjectLock:         "COMPLIANCE",
+		Versioning:         true,
+		ReplicationTargets: targets,
+	}, nil
+}
+
+func (self *minioBlobStore) CheckRetention(ctx context.Context) error {
+	_, err := self.CheckProtection(ctx)
+	return err
 }
 
 // mergeOwnedLifecycleRules replaces existing rules by exact ID match with the

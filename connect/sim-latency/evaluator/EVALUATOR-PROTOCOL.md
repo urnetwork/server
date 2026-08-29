@@ -16,7 +16,8 @@ providers path/SHA-256, patch path/SHA-256, artifact directory, and both frozen
 policies. The evaluator must never copy the active seed into logs or public
 diagnostics.
 
-The pinned evaluator uses the fixed files in `competition/container`. The
+The pinned evaluator uses the fixed files in
+`connect/sim-latency/evaluator/container`. The
 season publishes one digest-pinned evaluator base, and the evaluator derives
 one candidate image for each `(base image digest, canonical patch SHA-256,
 patch-policy SHA-256, trusted Dockerfile SHA-256)` identity. It never accepts a
@@ -184,7 +185,8 @@ qualification digest deliberately excludes the unique host id so a rebuilt
 authoritative host can retain the frozen image identity while its database row
 still has a stable host id.
 
-`competition/container/smoke-test.sh` is the development integration gate. It
+`connect/sim-latency/evaluator/container/smoke-test.sh` is the development
+integration gate. It
 must pass against live Docker state, including authenticated image cache reuse,
 the common cgroup parent, the 10-core evaluation CPU set, management-only
 orchestration affinity, hard resource
@@ -201,7 +203,8 @@ produced the same config digest and exactly 910/910 successful measured
 requests each. A later rebuilt-boundary smoke passed the 10+2 split, exact
 10-CPU preflight, fresh stores/migrations, real lifecycle, scorer, and cleanup.
 
-`competition/container/test-resource-bomb-cleanup.sh` is the hostile-resource
+`connect/sim-latency/evaluator/container/test-resource-bomb-cleanup.sh` is the
+hostile-resource
 gate. It runs simultaneous CPU and memory bombs on the evaluation set, observes
 the CPU bomb on every evaluation core and none outside it, requires the memory
 bomb to exit 137 with `OOMKilled=true` at a no-swap limit, then performs
@@ -226,7 +229,8 @@ that reboot boundary, then constructs a
 hash-consistent adversarial chain containing a parent `/runtime/config` mount
 and proves that no marker is written.
 
-The stronger `competition/container/evaluator.sh` gate consumes the exact
+The stronger `connect/sim-latency/evaluator/container/evaluator.sh` gate
+consumes the exact
 worker request, derives the candidate, runs separate baseline/candidate and
 scorer projects, emits the strict result above, and produces a hash manifest
 for every retained evidence file. Its local end-to-end pass is required before
@@ -242,7 +246,8 @@ evaluation CPUs, 2 management cores, 72 GiB runner/no-swap limit, >=24 GiB
 reserve, and zero residual objects. This closes the local protocol replay but
 does not replace official baseline/noise/reference calibration on the
 authoritative host.
-`competition/container/test-build-isolation.sh` is the corresponding malicious
+`connect/sim-latency/evaluator/container/test-build-isolation.sh` is the
+corresponding malicious
 initialization gate: it attempts to corrupt six trusted base files during the
 compile-only test process and requires every final-image digest to remain
 unchanged.

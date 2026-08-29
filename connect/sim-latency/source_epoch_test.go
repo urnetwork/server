@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/docopt/docopt-go"
-	"github.com/urnetwork/server/competition"
+	"github.com/urnetwork/server/controller"
 	"gopkg.in/yaml.v3"
 )
 
@@ -289,7 +289,7 @@ func TestReadWinnerSignificanceRequiresEligibleR9Score(t *testing.T) {
 	degreesOfFreedom := 16.0
 	nextEpochMinimumPercent := 2.5
 	recommendedPercent := 16.1
-	gates := map[string]competition.Gate{}
+	gates := map[string]controller.Gate{}
 	for _, name := range []string{
 		"G1_success",
 		"G2_volume",
@@ -298,18 +298,18 @@ func TestReadWinnerSignificanceRequiresEligibleR9Score(t *testing.T) {
 		"G5_stability",
 		"G6_resources",
 	} {
-		gates[name] = competition.Gate{Passed: true, Details: map[string]any{}}
+		gates[name] = controller.Gate{Passed: true, Details: map[string]any{}}
 	}
 	rawScore := 70.0
 	normalizedScore := 142.857
-	result := &competition.ScoreResult{
-		ScoreSchema:      competition.ScoreSchema,
+	result := &controller.ScoreResult{
+		ScoreSchema:      controller.ScoreSchema,
 		RawScore:         &rawScore,
 		NormalizedScore:  &normalizedScore,
 		Placeable:        true,
 		TakeoverEligible: true,
 		Gates:            gates,
-		Significance: &competition.ScoreSignificance{
+		Significance: &controller.ScoreSignificance{
 			Method:                                      scoreSignificanceMethod,
 			Alpha:                                       scoreSignificanceAlpha,
 			ReplicateCount:                              9,

@@ -1,5 +1,5 @@
 schema: 1
-status_date: 2026-08-28
+status_date: 2026-08-29
 launch_state: local_validation_complete_release_and_external_actions_pending
 
 evaluation_host:
@@ -14,7 +14,7 @@ season:
   submission_window_seconds: 604800
   reveal: after_close_drain_and_honesty_review_finalization
   grading: immediate_redis_fifo_with_post_close_drain
-  worker_lifecycle: one_shot_exit_after_epoch_drain_and_review_seal
+  worker_lifecycle: one_shot_exit_after_epoch_drain_before_honesty_review
   next_epoch_control: external_agentic_review_and_promotion_loop
   preparation_window_seconds: 57600
   submission_fee_usd: 20
@@ -78,9 +78,13 @@ release_record:
   recorded_at: 2026-08-28T15:39:21Z
 
 validation:
-  completed_at: 2026-08-28T15:39:21Z
+  completed_at: 2026-08-29T04:37:06Z
   sim_latency_go_race_suite: pass
+  sim_latency_go_race_suite_consecutive_passes: 3
   competition_api_go_race_suite: pass
+  competition_controller_lifecycle_go_race_suite: pass
+  apex_adapter_conformance_race_repetitions: 20
+  launch_endpoint_and_credential_transport_tests: pass
   go_vet: pass
   migration_order_and_application: pass
   postgres_redis_lifecycle_integration: pass
@@ -102,6 +106,7 @@ retention:
   service: minio
   required_mode: COMPLIANCE
   versioning_required: true
+  enabled_replication_destination_required: true
   post_upload_authentication: sha256_and_size
   candidate_credentials_exposed: false
   warn_used_percent: 75
@@ -153,10 +158,10 @@ checklist:
     evidence: sn/api/competition.yml
   - id: six_epoch_immediate_fifo_lifecycle
     status: complete
-    evidence: server/competition/store.go and server/competition/worker.go
+    evidence: server/controller/competition_controller.go and server/connect/sim-latency/RUN-MAIN.sh
   - id: immutable_artifact_implementation
     status: complete
-    evidence: server/competition/artifact_archive.go
+    evidence: server/controller/competition_controller.go and server/blob.go
   - id: grafana_implementation
     status: complete
     evidence: server/grafana/dashboards/competition.json
@@ -166,18 +171,24 @@ checklist:
     status: approval_or_rotation_required
   - id: runtime_control_plane_identity
     status: complete
-    evidence: server/competition/deployment_identity.go
+    evidence: server/controller/competition_controller.go
   - id: epoch_zero_evaluator_image
     status: complete_local_load
     evidence: docker image inspect sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
   - id: live_minio_readiness_backup_capacity_and_deletion_owner
     status: deployment_verification_required
     deletion_owner: support@ur.xyz
+    local_implementation: complete_object_lock_versioning_replication_and_capacity_preflight
   - id: grafana_deploy_contact_routing_and_on_call
     status: deployment_verification_required
     on_call_and_incident_contact: support@ur.xyz
+    local_implementation: complete_service_labeled_alerts_and_support_contact_policy
   - id: miner_onboarding_token_distribution_and_revocation
-    status: operator_action_required
+    status: implementation_complete_distribution_pending
+    evidence: server/connect/sim-latency/launch/ONBOARDING.md and server/connect/sim-latency/credentials.go
+  - id: incident_response
+    status: implementation_complete_live_roster_confirmation_pending
+    evidence: server/connect/sim-latency/launch/INCIDENT-RESPONSE.md
   - id: rewards_eligibility_legal_and_abuse
     status: business_approval_required
     evidence: submission_fee_usd is frozen at 20; remaining publication terms require approval
@@ -186,10 +197,10 @@ checklist:
     evidence: config/main/sim-latency.yml and server/connect/sim-latency/source_promote.go
   - id: winner_honesty_review_gate
     status: complete
-    evidence: server/competition/store.go, server/db_migrations.go, and server/connect/sim-latency/epoch_review.go
+    evidence: server/controller/competition_controller.go, server/db_migrations.go, and server/connect/sim-latency/epoch_review.go
   - id: per_evaluation_significance_record
     status: complete
     evidence: server/connect/sim-latency/score_significance.go
   - id: apex_adapter_staging_registry_and_signed_handoff
     status: external_acceptance_required
-    evidence: server/competition/APEX-HANDOFF.md
+    evidence: server/controller/competition_controller.go and server/connect/sim-latency/launch/APEX-HANDOFF.md

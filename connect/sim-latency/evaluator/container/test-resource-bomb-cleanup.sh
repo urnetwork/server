@@ -7,7 +7,7 @@ set -Eeuo pipefail
 umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-readonly SERVER_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+readonly SERVER_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly FIXTURE_ROOT="$SCRIPT_DIR/testdata/resource-bomb"
 readonly JOB_ID=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
@@ -77,7 +77,7 @@ trap cleanup EXIT INT TERM
 
 cleanup_job_objects
 CGO_ENABLED=0 go build -trimpath -o "$build_context/resource-bomb" \
-    "$SERVER_ROOT/competition/container/testdata/resource-bomb"
+    "$SERVER_ROOT/connect/sim-latency/evaluator/container/testdata/resource-bomb"
 install -m 0444 "$FIXTURE_ROOT/Dockerfile" "$build_context/Dockerfile"
 taskset -c "$management_cpuset" sudo -n docker build \
     --network none --provenance=false --file "$build_context/Dockerfile" \

@@ -78,8 +78,49 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	if !strings.Contains(tests, "go test") || !strings.Contains(tests, "-race") {
 		t.Fatal("tests.sh must run the Go package under the race detector")
 	}
+	if !strings.Contains(tests, "^TestRunMainCompleteSixEpochLifecycle$") {
+		t.Fatal("tests.sh must always run the deterministic six-epoch lifecycle tier")
+	}
 	if strings.Contains(strings.ToLower(tests), "python") {
 		t.Fatal("tests.sh must remain Go-only")
+	}
+
+	seasonHarnessBytes, err := os.ReadFile("RUN-MAIN.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seasonHarness := string(seasonHarnessBytes)
+	for _, required := range []string{
+		"set -euo pipefail",
+		"/competition/generate-round",
+		"competitionworker",
+		"epoch-review",
+		"pending_review",
+		"promote --epoch=",
+		"--no-winner",
+		"return 20",
+	} {
+		if !strings.Contains(seasonHarness, required) {
+			t.Errorf("RUN-MAIN.sh is missing fail-closed lifecycle contract %q", required)
+		}
+	}
+	if strings.Contains(strings.ToLower(seasonHarness), "python") {
+		t.Fatal("RUN-MAIN.sh must remain Go/shell-only")
+	}
+	seasonRunbook, err := os.ReadFile("RUN-MAIN.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"Mandatory candidate review",
+		"fabricated measurements",
+		"status 20",
+		"mode-0700 temporary directory",
+		"After epoch 6",
+	} {
+		if !strings.Contains(string(seasonRunbook), required) {
+			t.Errorf("RUN-MAIN.md is missing agent handoff contract %q", required)
+		}
 	}
 }
 
@@ -166,6 +207,8 @@ func TestOnlyCurrentEntrypointsRemainAtPackageRoot(t *testing.T) {
 		"README.md",
 		"OFFICIAL-RUN.md",
 		"PLAYBOOK.md",
+		"RUN-MAIN.md",
+		"RUN-MAIN.sh",
 		"playbook.yml",
 		"official-run.sh",
 		"baseline/README.md",
@@ -174,6 +217,19 @@ func TestOnlyCurrentEntrypointsRemainAtPackageRoot(t *testing.T) {
 	} {
 		if info, err := os.Stat(name); err != nil || !info.Mode().IsRegular() {
 			t.Errorf("current package file is missing: %s", name)
+		}
+	}
+	for _, name := range []string{
+		"launch/ONBOARDING.md",
+		"launch/INCIDENT-RESPONSE.md",
+	} {
+		content, err := os.ReadFile(name)
+		if err != nil {
+			t.Errorf("launch document is missing: %s: %v", name, err)
+			continue
+		}
+		if !strings.Contains(string(content), "support@ur.xyz") {
+			t.Errorf("launch document %s does not identify the operations owner", name)
 		}
 	}
 

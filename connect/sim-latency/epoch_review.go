@@ -13,16 +13,16 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/competition"
+	"github.com/urnetwork/server/controller"
 )
 
 const maximumHonestyEvidenceBytes = 1024 * 1024
 
 type epochReviewResult struct {
-	Schema             int                               `json:"schema"`
-	Action             string                            `json:"action"`
-	State              *competition.CandidateReviewState `json:"state"`
-	CandidateDirectory string                            `json:"candidate_directory,omitempty"`
+	Schema             int                              `json:"schema"`
+	Action             string                           `json:"action"`
+	State              *controller.CandidateReviewState `json:"state"`
+	CandidateDirectory string                           `json:"candidate_directory,omitempty"`
 }
 
 func readHonestyEvidence(path string) ([]byte, string, error) {
@@ -63,7 +63,7 @@ func writePrivateReviewFile(path string, content []byte) error {
 }
 
 func materializeReviewCandidate(
-	state *competition.CandidateReviewState,
+	state *controller.CandidateReviewState,
 	requestedDirectory string,
 ) (string, error) {
 	if state == nil || state.Status != "pending_review" || state.Candidate == nil {
@@ -112,15 +112,21 @@ func materializeReviewCandidate(
 	return directory, nil
 }
 
-func loadCompetitionControl() (*competition.Settings, competition.PostgresStore, error) {
-	settings, err := competition.LoadSettings()
+func loadCompetitionControl() (*controller.Settings, controller.PostgresStore, error) {
+	settings, err := controller.LoadSettings()
 	if err != nil {
-		return nil, competition.PostgresStore{}, err
+		return nil, controller.PostgresStore{}, err
 	}
 	if !settings.Enabled {
-		return nil, competition.PostgresStore{}, errors.New("competition is disabled")
+		return nil, controller.PostgresStore{}, errors.New("competition is disabled")
 	}
-	return settings, competition.PostgresStore{}, nil
+	return settings, controller.PostgresStore{}, nil
+}
+
+// Keeps rejection as a state-only transition so a later explicit enumeration
+// owns the next private directory and its cleanup.
+func reviewActionMaterializesCandidate(action string, state *controller.CandidateReviewState) bool {
+	return action == "next" && state != nil && state.Status == "pending_review" && state.Candidate != nil
 }
 
 func runEpochReview(opts docopt.Opts) {
@@ -135,8 +141,29 @@ func runEpochReview(opts docopt.Opts) {
 	ctx, cancel := signalContext()
 	defer cancel()
 	action := "next"
-	var state *competition.CandidateReviewState
-	if optBool(opts, "reject") || optBool(opts, "approve") {
+	var state *controller.CandidateReviewState
+	materializedState := (*controller.CandidateReviewState)(nil)
+	if optBool(opts, "export-winner") {
+		action = "export-winner"
+		jobId, parseErr := server.ParseId(optString(opts, "--job-id", ""))
+		if parseErr != nil {
+			fatalf("winner job id: %s", parseErr)
+		}
+		state, err = store.PrepareCandidateReview(ctx, settings, epoch)
+		if err == nil && (state.Status != "finalized" || state.WinnerJobId == nil || *state.WinnerJobId != jobId) {
+			err = errors.New("epoch does not have this finalized approved winner")
+		}
+		var candidate *controller.CandidateReviewCandidate
+		if err == nil {
+			candidate, err = store.RequirePromotionDecision(ctx, settings, epoch, &jobId)
+		}
+		if err == nil {
+			copy := *state
+			copy.Status = "pending_review"
+			copy.Candidate = candidate
+			materializedState = &copy
+		}
+	} else if optBool(opts, "reject") || optBool(opts, "approve") {
 		decision := "approved"
 		if optBool(opts, "reject") {
 			action = "reject"
@@ -152,7 +179,7 @@ func runEpochReview(opts docopt.Opts) {
 		if evidenceErr != nil {
 			fatalf("honesty evidence: %s", evidenceErr)
 		}
-		state, err = store.RecordCandidateReview(ctx, settings, epoch, competition.CandidateReviewDecision{
+		state, err = store.RecordCandidateReview(ctx, settings, epoch, controller.CandidateReviewDecision{
 			JobId:          jobId,
 			Decision:       decision,
 			ReviewerId:     optString(opts, "--reviewer", ""),
@@ -167,9 +194,12 @@ func runEpochReview(opts docopt.Opts) {
 		fatalf("epoch honesty review: %s", err)
 	}
 	result := epochReviewResult{Schema: 1, Action: action, State: state}
-	if state.Status == "pending_review" {
+	if materializedState == nil && reviewActionMaterializesCandidate(action, state) {
+		materializedState = state
+	}
+	if materializedState != nil {
 		result.CandidateDirectory, err = materializeReviewCandidate(
-			state,
+			materializedState,
 			optString(opts, "--out-dir", ""),
 		)
 		if err != nil {
@@ -187,7 +217,7 @@ func requireReviewedPromotion(
 	epoch int,
 	winnerJobId string,
 	noWinner bool,
-) (*competition.CandidateReviewCandidate, error) {
+) (*controller.CandidateReviewCandidate, error) {
 	settings, store, err := loadCompetitionControl()
 	if err != nil {
 		return nil, err
@@ -204,7 +234,7 @@ func requireReviewedPromotion(
 }
 
 func approvedSignificanceMatches(
-	approved *competition.ScoreSignificance,
+	approved *controller.ScoreSignificance,
 	promotion *sourceSignificance,
 ) bool {
 	if approved == nil || promotion == nil || approved.BaselineSampleVariance == nil ||
@@ -233,8 +263,8 @@ func approvedSignificanceMatches(
 
 func authenticateApprovedWinnerBundle(
 	winnerRoot string,
-	approved *competition.CandidateReviewCandidate,
-	winnerScore *competition.ScoreResult,
+	approved *controller.CandidateReviewCandidate,
+	winnerScore *controller.ScoreResult,
 	promotionSignificance *sourceSignificance,
 ) error {
 	if approved == nil || approved.JobId == (server.Id{}) {

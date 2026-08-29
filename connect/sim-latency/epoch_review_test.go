@@ -10,25 +10,25 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/competition"
+	"github.com/urnetwork/server/controller"
 )
 
 func TestMaterializeReviewCandidateUsesPrivateFreshDirectory(t *testing.T) {
 	patch := []byte("diff --git a/connect/example.go b/connect/example.go\n")
 	digest := sha256.Sum256(patch)
 	raw, normalized := 80.0, 125.0
-	state := &competition.CandidateReviewState{
+	state := &controller.CandidateReviewState{
 		CompetitionId: "sim-latency-season-1",
 		RoundId:       server.NewId(),
 		Epoch:         2,
 		Status:        "pending_review",
-		Candidate: &competition.CandidateReviewCandidate{
+		Candidate: &controller.CandidateReviewCandidate{
 			Rank:        3,
 			JobId:       server.NewId(),
 			PatchSha256: hex.EncodeToString(digest[:]),
 			SubmittedAt: time.Date(2026, 8, 28, 20, 0, 0, 0, time.UTC),
 			Patch:       patch,
-			Score: competition.ScoreResult{
+			Score: controller.ScoreResult{
 				ScoreSchema: 1, RawScore: &raw, NormalizedScore: &normalized,
 			},
 		},
@@ -71,6 +71,25 @@ func TestMaterializeReviewCandidateUsesPrivateFreshDirectory(t *testing.T) {
 	}
 }
 
+func TestReviewCandidateMaterializationRequiresExplicitNextAction(t *testing.T) {
+	state := &controller.CandidateReviewState{
+		Status:    "pending_review",
+		Candidate: &controller.CandidateReviewCandidate{JobId: server.NewId()},
+	}
+	if !reviewActionMaterializesCandidate("next", state) {
+		t.Fatal("next action did not materialize its pending candidate")
+	}
+	for _, action := range []string{"reject", "approve", "export-winner"} {
+		if reviewActionMaterializesCandidate(action, state) {
+			t.Fatalf("%s action implicitly materialized another candidate directory", action)
+		}
+	}
+	state.Status = "finalized"
+	if reviewActionMaterializesCandidate("next", state) {
+		t.Fatal("finalized state materialized a candidate directory")
+	}
+}
+
 func TestReadHonestyEvidenceAuthenticatesRegularJson(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "honesty.json")
 	evidence := []byte(`{"schema":1,"honest":true}`)
@@ -110,19 +129,19 @@ func TestAuthenticateApprovedWinnerBundleBindsPatchAndScore(t *testing.T) {
 	nextMarginPercent := 16.1
 	rawScore := 80.0
 	normalizedScore := 125.0
-	approved := &competition.CandidateReviewCandidate{
+	approved := &controller.CandidateReviewCandidate{
 		JobId:       server.NewId(),
 		PatchSha256: hex.EncodeToString(patchDigest[:]),
-		Score: competition.ScoreResult{
-			ScoreSchema:      competition.ScoreSchema,
+		Score: controller.ScoreResult{
+			ScoreSchema:      controller.ScoreSchema,
 			RawScore:         &rawScore,
 			NormalizedScore:  &normalizedScore,
 			Placeable:        true,
 			TakeoverEligible: true,
-			Gates: map[string]competition.Gate{
+			Gates: map[string]controller.Gate{
 				"G1_success": {Passed: true, Details: map[string]any{}},
 			},
-			Significance: &competition.ScoreSignificance{
+			Significance: &controller.ScoreSignificance{
 				Method:                                      "one-sided-welch-t",
 				Alpha:                                       0.05,
 				ReplicateCount:                              9,

@@ -37,8 +37,8 @@ Build the reviewed season base once, then derive a candidate with dependency
 networking disabled and the pre-populated module cache:
 
 ```bash
-./competition/container/build-base.sh --epoch 0 --tag registry/base:season-1
-./competition/container/build-submission.sh \
+./connect/sim-latency/evaluator/container/build-base.sh --epoch 0 --tag registry/base:season-1
+./connect/sim-latency/evaluator/container/build-submission.sh \
   --base-image registry/base@sha256:<digest> \
   --patch /job/canonical.patch --policy /job/policy.json
 ```
@@ -122,7 +122,8 @@ container/helper processes. Docker owns the child cgroups; the worker verifies
 the live hierarchy and aggregates every child counter. Sampling only the
 runner PID or trusting rendered Compose YAML is invalid.
 
-Before host qualification, run `competition/container/test-resource-bomb-cleanup.sh`.
+Before host qualification, run
+`connect/sim-latency/evaluator/container/test-resource-bomb-cleanup.sh`.
 It must observe a CPU bomb saturating every evaluation core, an OOM-killed
 no-swap memory bomb, management-affined cleanup within 10 seconds, and zero
 residual labeled containers or networks.

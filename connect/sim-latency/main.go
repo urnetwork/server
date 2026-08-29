@@ -24,9 +24,17 @@ package main
 //   score     validate and score a complete candidate artifact bundle
 //   source-check
 //             verify one frozen source epoch against the measured repositories
+//   source-record
+//             verify and print one epoch from the remote competition branches
 //   epoch-review
 //             enumerate, reject, or approve ranked significant candidates
 //   promote   publish a significant winner or no-winner source transition
+//   launch-preflight
+//             prove frozen source, image, API, MinIO, Grafana, and heartbeat
+//   handoff-manifest
+//             authenticate the launch evidence awaiting Apex signatures
+//   credentials
+//             generate, rotate, and revoke competition credentials
 //   reset     clear cross-run reliability state so runs are independent
 
 import (
@@ -62,10 +70,18 @@ Usage:
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
+  sim-latency source-record --epoch=<n> [--source-config=<path>] [--repos-root=<dir>]
   sim-latency epoch-review --epoch=<n> next [--out-dir=<dir>]
+  sim-latency epoch-review --epoch=<n> export-winner --job-id=<id> [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> reject --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path> [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
   sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
+  sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
+  sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
+  sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
+  sim-latency credentials rotate-token --vault=<path> --delivery=<path> --role=<role> --name=<name>
+  sim-latency credentials rotate-seed --vault=<path> --confirm-no-unrevealed-rounds
+  sim-latency credentials revoke --vault=<path> --name=<name>
   sim-latency reset
   sim-latency -h | --help
   sim-latency --version
@@ -85,6 +101,24 @@ Options:
   --no-winner            Carry the prior repository commits forward after an epoch with no significant winner.
   --message=<text>       Promotion commit message suffix.
   --dry-run              Validate and stage a promotion without pushing or updating local branches.
+  --evaluator-image=<digest>  Immutable sha256 evaluator image identity.
+  --operator-token-file=<path>  Private file containing the competition operator bearer token.
+  --grafana-url=<url>     Main Grafana origin used by launch preflight.
+  --grafana-token-file=<path>  Private file containing a Grafana service-account token.
+  --metrics-url=<url>     Main Prometheus-compatible Mimir query origin.
+  --metrics-token-file=<path>  Private file containing a Mimir query token.
+  --openapi=<path>        Competition OpenAPI source file.
+  --artifact-capacity-bytes=<n>  Approved MinIO allocation [default: 1099511627776].
+  --baseline-manifest=<path>  Versioned baseline evidence manifest.
+  --preflight=<path>      Passing launch-preflight JSON evidence.
+  --staging-evidence=<paths>  Comma-separated Apex staging evidence files.
+  --vault=<path>          Private competition vault YAML to create or update atomically.
+  --delivery=<path>       New private JSON file receiving raw generated bearer tokens.
+  --submitter-name=<name> Stable name for the initial submitter credential.
+  --operator-name=<name>  Stable name for the initial operator credential.
+  --name=<name>           Stable name of the token to create or revoke.
+  --role=<role>           Token role: submitter or operator.
+  --confirm-no-unrevealed-rounds  Confirm seed rotation cannot invalidate an unrevealed round.
   --out=<path>           Output path for the selected file-producing command.
   --count=<n>            Number of providers [default: 100000].
   --clients=<n>          Client identity pool size [default: 4000].
@@ -173,12 +207,22 @@ Options:
 		runScore(opts)
 	case optBool(opts, "source-check"):
 		runSourceCheck(opts)
+	case optBool(opts, "source-record"):
+		runSourceRecord(opts)
 	case optBool(opts, "epoch-review"):
 		requireMainEnvironment("epoch-review")
 		runEpochReview(opts)
 	case optBool(opts, "promote"):
 		requireMainEnvironment("promote")
 		runPromote(opts)
+	case optBool(opts, "launch-preflight"):
+		requireMainEnvironment("launch-preflight")
+		runLaunchPreflight(opts)
+	case optBool(opts, "handoff-manifest"):
+		runHandoffManifest(opts)
+	case optBool(opts, "credentials"):
+		requireMainEnvironment("credentials")
+		runCredentials(opts)
 	case optBool(opts, "reset"):
 		requireLocalEnvironment("reset")
 		runReset()
@@ -367,7 +411,7 @@ func validateEnvironment(command string, env string) error {
 				env,
 			)
 		}
-	case "epoch-review", "promote":
+	case "epoch-review", "promote", "launch-preflight", "credentials":
 		if env != "main" {
 			return fmt.Errorf(
 				"sim-latency %s is main-only: refusing WARP_ENV=%q",

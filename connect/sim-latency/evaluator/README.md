@@ -45,7 +45,8 @@ evaluator image and round policy before opening epoch 1.
    skipped rank, an unresolved no-winner finalization, or publication of a
    winner without that exact job's approved review.
 2. Build the API and `cli/competitionworker` from one clean release. Build the
-   trusted evaluator base with `competition/container/build-base.sh`; its
+   trusted evaluator base with
+   `connect/sim-latency/evaluator/container/build-base.sh`; its
    source-lock records the clean server/connect/proxy/sdk/glog/goidenticons/
    userwireguard/sn commits and it freezes the toolchain/module cache. The API
    Dockerfile pins the Docker Official Ubuntu index rather than a floating base
@@ -171,19 +172,19 @@ containment boundary before this round-scoped attestation can exist.
 ## Verification
 
 ```bash
-go test -race ./competition ./api
+go test -race ./controller ./model ./api
 go test . -run TestApplyDbMigrations -count=1
-go vet ./competition ./api ./cli/competitionworker
+go vet ./controller ./model ./api ./cli/competitionworker
 (cd connect/sim-latency && ./tests.sh)
-./competition/container/test-build-isolation.sh \
+./connect/sim-latency/evaluator/container/test-build-isolation.sh \
   --allow-local-base \
   --base-image urnetwork/sim-latency-evaluator-base:dev \
-  --policy competition/container/policy.example.json
-./competition/container/smoke-test.sh \
+  --policy connect/sim-latency/evaluator/container/policy.example.json
+./connect/sim-latency/evaluator/container/smoke-test.sh \
   urnetwork/sim-latency-evaluator-base:dev
-./competition/container/test-resource-bomb-cleanup.sh \
+./connect/sim-latency/evaluator/container/test-resource-bomb-cleanup.sh \
   --production-memory-limit
-./competition/test-promote-host-containment.sh
+./connect/sim-latency/evaluator/test-promote-host-containment.sh
 ```
 
 Production readiness is evidence, not a config flag: missing/old host

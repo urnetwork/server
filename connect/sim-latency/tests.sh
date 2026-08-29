@@ -15,6 +15,17 @@ export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"
 
 mkdir -p profile
 match="/$(basename "$script_dir")/\\S*\\.go|^\\S*_test.go"
+
+# The six-epoch lifecycle is wall-clock shaped but uses an explicit test clock.
+# Run it first without race scheduling so every package invocation proves the
+# complete admission, drain, review, promotion, and final-exit contract.
+go test -timeout 5m -v -run '^TestRunMainCompleteSixEpochLifecycle$' \
+    | grep --color=always -e "^" -e "$match"
+test_status=${pipestatus[1]}
+if [[ $test_status != 0 ]]; then
+    exit $test_status
+fi
+
 GORACE="log_path=profile/race.out halt_on_error=1" \
     go test -timeout 900m -v -race \
     -cpuprofile profile/cpu -memprofile profile/memory "$@" \

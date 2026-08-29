@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
+	"github.com/minio/minio-go/v7/pkg/replication"
 )
 
 // Prove the configured non-local service account can perform every operation
@@ -232,6 +233,64 @@ func TestLocalBlobStoreCapacity(t *testing.T) {
 	}
 	if err := store.Put(ctx, "stats/b", second, "application/octet-stream"); err != nil {
 		t.Fatalf("put after freeing capacity: %v", err)
+	}
+}
+
+func TestMeasureBlobUsageAuthenticatesAllocatedPrefix(t *testing.T) {
+	store := NewLocalBlobStoreWithMaxBytes(t.TempDir(), "competition", 20)
+	sourceDirectory := t.TempDir()
+	firstPath := filepath.Join(sourceDirectory, "first")
+	secondPath := filepath.Join(sourceDirectory, "second")
+	if err := os.WriteFile(firstPath, []byte("1234"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("56"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := store.Put(ctx, "competition/one", firstPath, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, "competition/two", secondPath, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, "other/not-counted", secondPath, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+
+	usage, err := MeasureBlobUsage(ctx, store, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.ObjectCount != 2 || usage.UsedBytes != 6 || usage.FreeBytes != 4 || usage.UsedPercent != 60 {
+		t.Fatalf("blob usage = %+v", usage)
+	}
+	if _, err := MeasureBlobUsage(ctx, store, 0); err == nil {
+		t.Fatal("zero capacity allocation passed")
+	}
+}
+
+func TestEnabledReplicationTargetsRequireARealEnabledDestination(t *testing.T) {
+	config := replication.Config{Rules: []replication.Rule{
+		{Status: replication.Disabled, Destination: replication.Destination{Bucket: "arn:disabled"}},
+		{Status: replication.Enabled, Destination: replication.Destination{Bucket: "arn:replica-b"}},
+		{Status: replication.Enabled, Destination: replication.Destination{Bucket: "arn:replica-a"}},
+		{Status: replication.Enabled, Destination: replication.Destination{Bucket: "arn:replica-b"}},
+	}}
+	targets, err := enabledReplicationTargets(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[0] != "arn:replica-a" || targets[1] != "arn:replica-b" {
+		t.Fatalf("replication targets = %v", targets)
+	}
+	if _, err := enabledReplicationTargets(replication.Config{}); err == nil {
+		t.Fatal("replication config without an enabled target passed")
+	}
+	if _, err := enabledReplicationTargets(replication.Config{Rules: []replication.Rule{
+		{Status: replication.Enabled},
+	}}); err == nil {
+		t.Fatal("enabled replication rule without a destination passed")
 	}
 }
 

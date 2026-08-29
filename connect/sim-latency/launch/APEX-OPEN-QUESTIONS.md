@@ -84,4 +84,4 @@ competition API are already complete; this list does not reopen them.
   `support@ur.xyz`.
 
 Technical details and exact route mappings are in
-`competition/APEX-HANDOFF.md` and `sn/api/competition.yml`.
+`connect/sim-latency/launch/APEX-HANDOFF.md` and `sn/api/competition.yml`.

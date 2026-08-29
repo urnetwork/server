@@ -15,10 +15,10 @@ import (
 	"os"
 	"regexp"
 
-	"github.com/urnetwork/server/competition"
+	"github.com/urnetwork/server/controller"
 )
 
-const maxPolicyBytes = 1 << 20
+const maxPolicyBytes = 1024 * 1024
 
 var (
 	gitShaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -75,7 +75,7 @@ func run(args []string, stdout io.Writer) error {
 	if actual := hex.EncodeToString(policyDigest[:]); actual != opts.expectedPolicySha256 {
 		return fmt.Errorf("patch policy SHA-256 mismatch: got %s", actual)
 	}
-	var policy competition.PatchPolicy
+	var policy controller.PatchPolicy
 	decoder := json.NewDecoder(bytes.NewReader(policyBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&policy); err != nil {
@@ -92,7 +92,7 @@ func run(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read canonical patch: %w", err)
 	}
-	patch, validationErr := competition.ValidateAndCanonicalizePatch(string(patchBytes), policy)
+	patch, validationErr := controller.ValidateAndCanonicalizePatch(string(patchBytes), policy)
 	if validationErr != nil {
 		return fmt.Errorf("validate canonical patch: %s", validationErr.Code)
 	}

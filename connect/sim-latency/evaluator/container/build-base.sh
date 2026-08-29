@@ -10,7 +10,7 @@ set -Eeuo pipefail
 umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-readonly SERVER_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+readonly SERVER_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd -P)"
 readonly WORKSPACE_ROOT="$(cd "$SERVER_ROOT/.." && pwd -P)"
 
 include_worktree=false
@@ -69,7 +69,7 @@ git -C "$config_root" diff --quiet HEAD -- "$source_config_relative" &&
     exit 1
 }
 
-for command in git jq sha256sum mktemp realpath stat sudo; do
+for command in git go jq sha256sum mktemp realpath stat sudo; do
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
 sudo -n docker info >/dev/null
@@ -89,7 +89,47 @@ install -m 0555 "$SERVER_ROOT/connect/sim-latency/official-run.sh" "$build_conte
 install -m 0444 "$source_config" "$build_context/sim-latency.yml"
 
 readonly REPOSITORIES=(server connect proxy sdk glog goidenticons userwireguard sn)
+readonly MEASURED_REPOSITORIES=(server connect proxy sdk)
 declare -A revisions
+
+source_record=""
+if [ "$include_worktree" = false ]; then
+    source_tool="${SIM_LATENCY_SOURCE_TOOL:-}"
+    if [ -n "$source_tool" ]; then
+        [ -x "$source_tool" ] && [ ! -L "$source_tool" ] || {
+            printf 'SIM_LATENCY_SOURCE_TOOL must be a regular executable: %s\n' "$source_tool" >&2
+            exit 1
+        }
+        source_record="$("$source_tool" source-record \
+            --epoch "$source_epoch" \
+            --source-config "$source_config" \
+            --repos-root "$WORKSPACE_ROOT")"
+    else
+        source_record="$(cd "$SERVER_ROOT/connect/sim-latency" && go run . source-record \
+            --epoch "$source_epoch" \
+            --source-config "$source_config" \
+            --repos-root "$WORKSPACE_ROOT")"
+    fi
+    jq -e \
+        --argjson epoch "$source_epoch" \
+        '.schema == 1 and .epoch == $epoch and .branch == "sim-latency" and
+         (.significant_improvement_percent | type == "number" and . > 0 and . <= 50) and
+         (["server","connect","proxy","sdk"] |
+          all(. as $repository | $record.repositories[$repository] | test("^[0-9a-f]{40}$")))' \
+        --argjson record "$source_record" \
+        <<<"$source_record" >/dev/null || {
+        printf 'authenticated source record is malformed\n' >&2
+        exit 1
+    }
+fi
+
+is_measured_repository() {
+    local candidate="$1" repository
+    for repository in "${MEASURED_REPOSITORIES[@]}"; do
+        [ "$candidate" = "$repository" ] && return 0
+    done
+    return 1
+}
 
 overlay_worktree() {
     local source_root="$1" clone_root="$2" relative
@@ -119,9 +159,15 @@ for repository in "${REPOSITORIES[@]}"; do
     source_root="$WORKSPACE_ROOT/$repository"
     clone_root="$build_context/source/$repository"
     [ -d "$source_root/.git" ] || { printf 'repository missing: %s\n' "$source_root" >&2; exit 1; }
-    source_revision="$(git -C "$source_root" rev-parse HEAD)"
+    if [ "$include_worktree" = false ] && is_measured_repository "$repository"; then
+        source_revision="$(jq -er --arg repository "$repository" '.repositories[$repository]' <<<"$source_record")"
+        source_origin="$(git -C "$source_root" remote get-url origin)"
+    else
+        source_revision="$(git -C "$source_root" rev-parse HEAD)"
+        source_origin="file://$source_root"
+    fi
     git init --quiet "$clone_root"
-    git -C "$clone_root" remote add origin "file://$source_root"
+    git -C "$clone_root" remote add origin "$source_origin"
     git -C "$clone_root" fetch --quiet --depth=1 origin "$source_revision"
     git -C "$clone_root" checkout --quiet --detach FETCH_HEAD
     if [ "$include_worktree" = true ]; then

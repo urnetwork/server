@@ -108,7 +108,7 @@ container would let a malicious patch read or alter trusted evidence.
 Build the season base only from reviewed commits:
 
 ```bash
-./competition/container/build-base.sh \
+./connect/sim-latency/evaluator/container/build-base.sh \
   --epoch 0 \
   --tag registry.example/urnetwork/sim-latency-evaluator-base:season-1
 sudo docker push registry.example/urnetwork/sim-latency-evaluator-base:season-1
@@ -123,10 +123,10 @@ Build a submission from API-authenticated files:
 
 ```bash
 attempt_source="$(mktemp -d /var/lib/urnetwork/competition/source.XXXXXXXX)"
-./competition/container/prepare-evaluation-source.sh \
+./connect/sim-latency/evaluator/container/prepare-evaluation-source.sh \
   --base-image registry.example/urnetwork/sim-latency-evaluator-base@sha256:... \
   --destination "$attempt_source/candidate"
-./competition/container/build-submission.sh \
+./connect/sim-latency/evaluator/container/build-submission.sh \
   --base-image registry.example/urnetwork/sim-latency-evaluator-base@sha256:... \
   --source-root "$attempt_source/candidate" \
   --patch /var/lib/urnetwork/jobs/JOB/canonical.patch \
@@ -159,12 +159,12 @@ and only then start the runner:
 ```bash
 sudo docker compose \
   --env-file /var/lib/urnetwork/jobs/JOB/candidate/compose.env \
-  -f competition/container/compose.yml \
+  -f connect/sim-latency/evaluator/container/compose.yml \
   --profile run up --detach --wait postgres redis
 
 sudo docker compose \
   --env-file /var/lib/urnetwork/jobs/JOB/candidate/compose.env \
-  -f competition/container/compose.yml \
+  -f connect/sim-latency/evaluator/container/compose.yml \
   --profile run run --rm --no-deps --no-tty migrate \
   > /var/lib/urnetwork/jobs/JOB/candidate/migration.json
 
@@ -174,7 +174,7 @@ jq -e '.schema == 1 and .database_version > 0 and
 
 sudo docker compose \
   --env-file /var/lib/urnetwork/jobs/JOB/candidate/compose.env \
-  -f competition/container/compose.yml \
+  -f connect/sim-latency/evaluator/container/compose.yml \
   --profile run up --no-deps --abort-on-container-exit --exit-code-from runner runner
 ```
 
@@ -189,7 +189,7 @@ fully resolved project:
 ```bash
 sudo docker compose \
   --env-file /var/lib/urnetwork/jobs/JOB/candidate/compose.env \
-  -f competition/container/compose.yml \
+  -f connect/sim-latency/evaluator/container/compose.yml \
   --profile run down --volumes --remove-orphans
 ```
 
@@ -208,7 +208,8 @@ may not.
 
 ## Live development smoke
 
-Run `./competition/container/smoke-test.sh` after building a development base.
+Run `./connect/sim-latency/evaluator/container/smoke-test.sh` after building a
+development base.
 The test derives a harmless allowed patch twice, requires authenticated cache
 reuse of the same image id, starts fresh tmpfs PostgreSQL/Redis and the
 candidate below a common cgroup parent on the 10 evaluation cores while the
@@ -227,7 +228,7 @@ Run the same lifecycle against the exact host leaves that production will bind:
 ```bash
 SMOKE_CONFIG_LOCAL_DIR=/srv/warp/config/local \
 SMOKE_VAULT_LOCAL_DIR=/srv/warp/vault/local \
-  ./competition/container/smoke-test.sh \
+  ./connect/sim-latency/evaluator/container/smoke-test.sh \
   urnetwork/sim-latency-evaluator-base:dev
 ```
 
@@ -255,10 +256,10 @@ Before accepting a submission builder, also run the adversarial build-isolation
 gate:
 
 ```bash
-./competition/container/test-build-isolation.sh \
+./connect/sim-latency/evaluator/container/test-build-isolation.sh \
   --allow-local-base \
   --base-image urnetwork/sim-latency-evaluator-base:dev \
-  --policy competition/container/policy.example.json
+  --policy connect/sim-latency/evaluator/container/policy.example.json
 ```
 
 It injects candidate package initialization that attempts to overwrite the
@@ -272,8 +273,8 @@ image afterward.
 Run the hostile-resource cleanup gate as a separate mandatory qualification:
 
 ```bash
-./competition/container/test-resource-bomb-cleanup.sh
-./competition/container/test-resource-bomb-cleanup.sh --production-memory-limit
+./connect/sim-latency/evaluator/container/test-resource-bomb-cleanup.sh
+./connect/sim-latency/evaluator/container/test-resource-bomb-cleanup.sh --production-memory-limit
 ```
 
 It starts simultaneous CPU and memory bombs on the evaluation CPU set. The CPU

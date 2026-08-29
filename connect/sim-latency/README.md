@@ -54,14 +54,19 @@ See:
 
 - [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for the evaluator and artifact contract;
 - [`PLAYBOOK.md`](PLAYBOOK.md) for live deployment and epoch operation;
+- [`RUN-MAIN.md`](RUN-MAIN.md) for the six-epoch agent harness and mandatory
+  winner honesty review;
+- [`launch/ONBOARDING.md`](launch/ONBOARDING.md) for submitter integration;
+- [`launch/INCIDENT-RESPONSE.md`](launch/INCIDENT-RESPONSE.md) for operational response;
 - [`launch/APEX-OPEN-QUESTIONS.md`](launch/APEX-OPEN-QUESTIONS.md) for the shareable partner
   decision and acceptance checklist;
 - [`playbook.yml`](playbook.yml) for machine-readable launch status;
 - [`baseline/README.md`](baseline/README.md) for preserved calibration evidence;
 - [`baseline/final-baseline.html`](baseline/final-baseline.html) for the visual
   baseline report;
-- [`../../competition/README.md`](../../competition/README.md) for the API and
-  worker implementation; and
+- [`../../controller/competition_controller.go`](../../controller/competition_controller.go)
+  and [`../../model/competition_model.go`](../../model/competition_model.go)
+  for the API/worker implementation; and
 - [`../../../sn/api/competition.yml`](../../../sn/api/competition.yml) for the
   public competition API.
 
