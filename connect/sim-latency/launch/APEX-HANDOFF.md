@@ -1,7 +1,8 @@
 # Apex external-evaluator handoff
 
-Status: integration-ready draft, 2026-08-28. Macrocosmos staging acceptance and
-registry activation are external approvals and are not represented as complete.
+Status: integration contract approved, 2026-08-29. Macrocosmos has approved the
+non-standard external-evaluator design; concrete integration ownership, staging
+evidence, release identities, and registry activation remain to be recorded.
 
 ## Competition contract
 
@@ -61,6 +62,12 @@ honest. Public rows use
 job and patch identities rather than bearer-token principal names; the adapter
 may associate those job ids with Apex identities in its own publication layer.
 
+UR provides a durable Go reference adapter and conformance suite for this
+mapping. Apex and UR have not yet recorded ownership of the runnable production
+integration or its private-registry representation. The standard
+`apex.competition.v1` two-sandbox player/referee contract does not contain an
+external-evaluator field; Macrocosmos has approved this deliberate exception.
+
 ## Trust and release boundary
 
 Candidate patches are structurally validated and built offline into one
@@ -77,23 +84,28 @@ to versioned MinIO objects with compliance retention before PostgreSQL accepts a
 terminal score. Operational signals are exported by the API and worker to the
 main Grafana/Mimir pipeline.
 
-## External acceptance record
+## Remaining operational handoff record
 
-Before Apex stage activation, Macrocosmos and UR must append a signed record
-containing:
+Before Apex stage activation, Macrocosmos and UR must record:
 
 - the accepted external-evaluator adapter protocol and unbounded asynchronous
   grading interval;
-- stage and production adapter image repository digests and cosign identities;
-- the current main-API, worker, evaluator, OpenAPI, base-source, scorer, and
-  patch-policy digests;
-- the Apex competition repository/spec release and completed public
-  `HANDOFF.md` expected by the Apex registry process;
+- the chosen integration owner and stage/production release identity: adapter
+  image digests and cosign identities, or an equivalent digest-pinned direct
+  Apex platform release;
+- the evaluator, OpenAPI, base-source, scorer, and patch-policy digests, plus
+  evidence that the continuously maintained main API and worker persist their
+  exact runtime image digests with each evaluation rather than freezing their
+  source commits season-wide;
+- the Apex competition repository/spec release, completed onboarding manifest,
+  and any explicit waiver or replacement for the standard player/referee
+  artifacts;
 - stage credentials, registry activation identifiers, and at least one
   end-to-end stage submission whose job, patch, and leaderboard identities
   reconcile; and
 - fee, reward, eligibility, legal/abuse, incident, and notification owners.
 
-Until that signed record exists, the dedicated evaluator and REST contract are
-launchable directly through the main API, but the Apex-facing launch remains
-`external_acceptance_required`.
+The design decision is no longer an open gate. Until the operational record
+exists, the dedicated evaluator and REST contract are launchable directly
+through the main API, while the Apex-facing launch remains
+`integration_handoff_pending`.

@@ -1,11 +1,11 @@
-# Apex integration decision record
+# Apex external-evaluator integration record
 
-Status date: 2026-08-28
+Status date: 2026-08-29
 
 The UR competition control plane and evaluator protocol are implemented for a
-dedicated external scoring service. They cannot truthfully be described as a
-drop-in deployment of the current public Apex runner contract without a
-Macrocosmos integration decision.
+dedicated external scoring service. Macrocosmos has approved this non-standard
+external-evaluator path. It is deliberately not a drop-in deployment of the
+current public Apex runner contract.
 
 The concrete asynchronous adapter mapping and external acceptance fields are
 prepared in [`APEX-HANDOFF.md`](APEX-HANDOFF.md).
@@ -48,22 +48,25 @@ competition owner to publish a separate competition repository, released
 maintainer then copies the reviewed spec into the private registry and activates
 stage before production. There is no public registry pull request to create.
 
-## Decision required before staging
+## Approved integration path
 
-Macrocosmos must approve one of these paths:
+Macrocosmos has approved an external-evaluator adapter that maps Apex
+submissions to the authenticated `/competition/score` and
+`/competition/score/{jobId}` API, preserves canonical patch bytes and hidden
+round identity, and honors the calibrated significance/takeover decision
+returned by the service.
 
-1. an external-evaluator adapter that maps Apex submissions to the authenticated
-   `/competition/score` and `/competition/score/{jobId}` API, preserves the
-   canonical patch bytes and hidden-round identity, and honors the calibrated
-   takeover decision returned by this service; or
-2. a negotiated dedicated-host referee profile large enough to run the complete
-   evaluator boundary, with a reviewed custom protocol and resource ceilings.
+The alternative dedicated-host referee profile is not required unless Apex and
+UR later replace the approved adapter design.
 
-The chosen path must also define submission-fee handling, round and reveal
-timing, maximum patch payload, polling deadline, result/artifact disclosure,
-cosign identity, stage credentials, and who owns retries and cache identity.
+The remaining work is operational: assign the runnable integration owner;
+record its stage/production release identity and private-registry entry; issue
+stage credentials; prove retry/cache idempotency and one complete staging
+submission; and record economics, participant policy, incident contacts, and
+any standard-artifact waivers. The current checklist is
+[`APEX-OPEN-QUESTIONS.md`](APEX-OPEN-QUESTIONS.md).
 
-Until that decision is recorded, the REST/OpenAPI package is ready for local
-and UR staging integration, but an `apex.competition.v1` spec, signed player and
-referee image digests, Apex stage run, registry activation, and accepted
-`HANDOFF.md` remain blocked external deliverables.
+The REST/OpenAPI package is ready for integration. The Apex stage run, release
+identity, registry activation, completed onboarding record, and any artifacts
+or waivers required for the approved external-evaluator path remain external
+deliverables.

@@ -166,9 +166,9 @@ checklist:
     status: complete
     evidence: server/grafana/dashboards/competition.json
   - id: final_calendar
-    status: approval_required
+    status: apex_activation_time_required
   - id: credential_bundle
-    status: approval_or_rotation_required
+    status: apex_custodian_and_stage_distribution_pending
   - id: runtime_control_plane_identity
     status: complete
     evidence: server/controller/competition_controller.go
@@ -190,7 +190,7 @@ checklist:
     status: implementation_complete_live_roster_confirmation_pending
     evidence: server/connect/sim-latency/launch/INCIDENT-RESPONSE.md
   - id: rewards_eligibility_legal_and_abuse
-    status: business_approval_required
+    status: apex_terms_record_required
     evidence: submission_fee_usd is frozen at 20; remaining publication terms require approval
   - id: winner_source_policy
     status: complete
@@ -202,5 +202,5 @@ checklist:
     status: complete
     evidence: server/connect/sim-latency/score_significance.go
   - id: apex_adapter_staging_registry_and_signed_handoff
-    status: external_acceptance_required
+    status: design_approved_integration_handoff_pending
     evidence: server/controller/competition_controller.go and server/connect/sim-latency/launch/APEX-HANDOFF.md

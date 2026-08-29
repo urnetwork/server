@@ -1,87 +1,153 @@
-# Sim-latency: open questions for the Apex team
+# Sim-latency: remaining Apex launch inputs and actions
 
-Status: partner decision checklist, 2026-08-28.
+Status: ready to share with the Apex/Macrocosmos team, 2026-08-29.
 
-This checklist contains the decisions and acceptance records still needed for
-an Apex-facing launch. The evaluator, baseline, scoring contract, and
-competition API are already complete; this list does not reopen them.
+Macrocosmos design approval is complete. UR is in direct communication with
+Macrocosmos, and Macrocosmos has approved the sim-latency competition design,
+including every deliberate difference from the ordinary Apex sandbox profile.
+This document does not ask the Apex team to approve those decisions again. It
+contains only the concrete values, owners, release records, and staging actions
+still needed to activate the competition through Apex.
 
-## 1. Season and publication
+## Approved contract — no response required
 
-- [ ] What Apex competition/season identifier should UR record?
-- [ ] What UTC time should epoch 1 open?
-- [ ] Does Apex accept the variable season calendar? Each epoch admits
-  submissions for exactly seven days, but the next epoch opens only after the
-  prior FIFO drains, honesty review finishes, a winner or no-winner is
-  finalized, and the next rebaseline completes.
-- [ ] What date must immutable submission and score evidence be retained
-  through (`retain_until`)?
-- [ ] How should Apex describe jobs during the embargo? Jobs may finish before
-  the epoch, but scores and rankings remain private until every admitted job is
-  terminal and honesty review finalizes the epoch.
+- Six epochs with exactly seven days of admissions per epoch and a 16-hour
+  preparation/rebaseline interval before the next epoch.
+- An asynchronous external evaluator on UR's qualified host rather than the
+  standard Apex player/referee sandbox resource profile.
+- Ten evaluation CPUs, approximately 13 GiB at the frozen scale, PostgreSQL and
+  Redis in the evaluation boundary, and a three-hour hard limit per score job.
+- Immediate durable FIFO evaluation, unbounded paid submissions, and continued
+  grading after the submission window closes until every admitted job is
+  terminal.
+- A fixed $20 USD fee for every submitted Apex identity, collected exactly once
+  before the UR submission API is called.
+- Scores, ranks, and evaluation errors remain embargoed through epoch close,
+  complete backlog drain, and manual honesty review. Only the atomically
+  finalized leaderboard is public.
+- UR's epoch-specific improvement margin and one-sided Welch significance test
+  replace the ordinary one-percent Apex solo takeover rule. Epoch 1 starts at a
+  16.1% margin; every evaluation records its variance and significance result.
+- A statistically significant submission is only a review candidate. The first
+  honest significant candidate wins; if none remains, there is no winner and
+  the source commits and threshold carry forward.
+- Winning patches advance the `sim-latency` branches of `connect`, `sdk`,
+  `server`, and `proxy`. The main API and worker remain continuously maintained
+  control-plane services.
 
-## 2. Fees, rewards, and participant policy
+## 1. Identifiers, calendar, and economics
 
-- [ ] Confirm that Apex collects the fixed **$20 USD** fee exactly once for
-  each durable admission before calling the UR submission API.
-- [ ] Approve the fee/refund policy for invalid patches, build failures,
-  three-hour timeouts, infrastructure retries, and duplicate canonical
-  patches that reuse a cached evaluation.
-- [ ] Define the reward amount, asset/currency, payout schedule, and payer.
-- [ ] Define participant eligibility, geographic/KYC restrictions, and any
-  per-participant submission rules. Evaluation admission itself remains
-  unbounded.
-- [ ] Approve the rules for dishonest submissions, disqualification,
-  notification, appeal, and abuse handling. Statistical significance alone
-  does not make a submission the winner.
-- [ ] Decide whether public leaderboard rows are displayed by patch/job id only
-  or enriched by Apex with a public miner identity.
+- [ ] Provide the Apex competition id and immutable release/spec version that
+  map to UR competition id `sim-latency`.
+- [ ] Provide the epoch-1 activation time in UTC. UR will derive subsequent
+  epoch start/end times after each drain, review, promotion or carry-forward,
+  and rebaseline.
+- [ ] Provide the final incentive weight.
+- [ ] Provide the reward amount, asset/currency, payout cadence, and payer.
+- [ ] Provide the final fee receipt and refund policy for invalid patches,
+  build failures, three-hour timeouts, infrastructure failures, and
+  canonical-patch cache hits. Transport retries never collect a second fee.
+- [ ] Provide participant eligibility, geographic/KYC restrictions,
+  wallet/account rules, and any participant-level submission restrictions. The
+  UR evaluator itself has no submission cap.
+- [ ] Provide the disqualification notification, appeal, and abuse process for
+  dishonest submissions.
+- [ ] Decide whether Apex publishes finalized rows by job/patch id only or joins
+  those ids to a public miner identity in its own publication layer.
 
-## 3. Adapter and staging acceptance
+## 2. Integration ownership and release identity
 
-- [ ] Accept the asynchronous adapter contract: one FIFO evaluator, immediate
-  enqueue, up to three hours per evaluation, and an unbounded post-close drain.
-- [ ] Name the Apex owner for adapter credentials, token rotation, and emergency
-  revocation. UR's operational contact is `support@ur.xyz`.
-- [ ] Confirm Apex polling/backoff behavior for the returned immutable
-  `status_url`, including HTTP 429 and typed retriable 5xx responses without
-  creating a second admission.
-- [ ] Record the stage and production adapter image repository digests and
-  signing/cosign identities.
-- [ ] Complete one end-to-end staging submission and reconcile its Apex
-  identity, `job_id`, `round_id`, `patch_sha256`, terminal state, and finalized
-  leaderboard row.
-- [ ] Activate the Apex private-registry entry and record its identifier.
-- [ ] Publish the Apex competition repository/spec release and public
-  `HANDOFF.md` required by the registry process.
+- [ ] Name the Apex product owner and integration engineer.
+- [ ] Record whether Apex will integrate the external evaluator directly into
+  its platform or operate a standalone adapter. UR provides a durable Go
+  reference adapter and conformance suite; it is not itself a deployed Apex
+  service.
+- [ ] Record the exact stage and production release identity for that
+  integration: an image digest and cosign identity for a standalone adapter, or
+  the equivalent digest-pinned Apex platform release for direct integration.
+- [ ] Confirm the transport mapping supplies one stable Apex submission id and
+  the exact canonical text patch, up to 262,144 bytes, for `connect`, `sdk`,
+  `server`, and `proxy`. Player-built images are not submitted to the UR API.
+- [ ] Confirm durable idempotency across HTTP 429, typed retriable 5xx,
+  connection loss, and process restart without a second fee or admission.
+- [ ] Record how this approved external-evaluator integration is represented in
+  the private Apex registry, including its registry entry identifier.
+- [ ] State whether Apex requires any additional screening beyond UR's
+  structural patch validation, isolated evaluator, statistical gates, and
+  manual honesty review.
 
-## 4. Ownership and signed handoff
+## 3. Credentials, staging, and operational handoff
 
-- [ ] Name the Apex product owner, notification owner, incident contact, and
-  legal/abuse owner.
-- [ ] Agree on participant messaging for a long grading backlog, no-winner
-  epochs, rejected dishonest candidates, delayed next-epoch openings, and
-  service incidents.
-- [ ] Identify the authorized Macrocosmos and UR signers and the durable
-  location for the acceptance record.
-- [ ] Sign the final handoff covering the adapter protocol, release identities,
-  staging proof, registry activation, economics, participant policy, and named
-  owners.
-
-## Contract already frozen
-
-- Six epochs; each admission window is exactly seven days.
-- Immediate Redis-list FIFO evaluation with durable PostgreSQL recovery.
-- Unbounded paid submissions and a three-hour hard limit per evaluation.
-- Results stay embargoed through close, backlog drain, and honesty review.
-- A winner must meet the epoch's margin and one-sided Welch significance test,
-  pass all scoring gates, and pass manual honesty review.
-- If no honest significant candidate remains, the epoch has no winner and the
-  existing source commits and threshold carry forward.
-- The main API is `api.bringyour.com`; no separate submission service is
-  required.
-- UR's MinIO evidence-deletion owner and Grafana/on-call incident contact is
+- [ ] Name the Apex credential custodian, notification owner, incident contact,
+  and legal/abuse owner. UR's operational and evidence-deletion contact is
   `support@ur.xyz`.
+- [ ] Choose a private credential-delivery channel and complete one stage-token
+  issue, rotation, and revocation exercise. Apex receives only a submitter
+  credential—not a hidden seed, MinIO credential, operator token, Docker
+  socket, or candidate filesystem.
+- [ ] Complete one end-to-end stage submission and reconcile the Apex
+  submission id, `job_id`, `round_id`, `patch_sha256`, immutable `status_url`,
+  terminal state, and finalized leaderboard row.
+- [ ] Record the stage and production activation identifiers.
+- [ ] Confirm the participant-facing status text for queued work, a long
+  post-close drain, no-winner epochs, dishonest-candidate rejection, delayed
+  epoch openings, and incidents. No provisional score is public during the
+  embargo.
+- [ ] State any Apex-required minimum evidence-retention date. If Apex has no
+  additional requirement, UR will set `retain_until` under its retention
+  policy.
 
-Technical details and exact route mappings are in
-`connect/sim-latency/launch/APEX-HANDOFF.md` and `sn/api/competition.yml`.
+## 4. Onboarding package and final record
+
+- [ ] Specify which ordinary onboarding artifacts are required, replaced, or
+  waived for the approved external-evaluator path: `spec.yaml`, player image,
+  referee image, optional screen image, baseline submission, adversarial
+  submission set, and per-task evaluation records.
+- [ ] Confirm whether UR should use the public Competition onboarding issue or
+  a private intake route for this approved non-standard integration, and name
+  the Macrocosmos reviewer.
+- [ ] Provide a private channel for the threat model and security questionnaire.
+  Apex's builder says defenses belong in the handoff rather than miner-visible
+  documentation, so sensitive review material must not be pasted into a public
+  issue.
+- [ ] Name the Macrocosmos registry/activation owner and provide the durable
+  private-registry review record after UR submits the package.
+- [ ] Identify the authorized Macrocosmos signer and the durable location for
+  the final acceptance record. UR will identify its signer.
+- [ ] Countersign the final handoff containing the approved integration path,
+  release identities, staging proof, registry activation, economics,
+  participant policy, named owners, and any standard-artifact waivers.
+
+After Apex returns the items above, UR will supply the competition repository
+URL, released tag, required spec or waiver manifest, digest-pinned artifacts,
+cosign identities, completed handoff, stage credential, and evidence bundle.
+
+## Already complete on the UR side
+
+- Baseline, evaluator image, scorer, source ledger, significance calculation,
+  structural patch validation, Docker isolation, and resource-bomb cleanup.
+- Authenticated generate/submit/poll/reveal/leaderboard API and OpenAPI package
+  at `https://api.bringyour.com`.
+- Durable PostgreSQL ordering plus Redis-list wake-up, cache recovery, the
+  three-hour timeout, post-close drain, and one-shot worker exit.
+- Manual honesty-review and next-candidate gate, no-winner carry-forward, and
+  temporary-clone winner promotion.
+- Immutable MinIO evidence implementation and Grafana dashboard, alerts,
+  heartbeat, queue/backlog, evaluation progress, and significance signals.
+- Go reference adapter/conformance tests, launch preflight, handoff manifest,
+  credential rotation/revocation tooling, and operator runbooks.
+
+## Apex contract reference
+
+The ordinary Apex contract is included only to document why the approved
+external-evaluator integration needs a custom registry representation. It was
+reviewed at public builder commit
+`73311da2d56d58c364deb2071291021aceafeaa5`:
+
+- [Competition-builder overview and shipping flow](https://github.com/macrocosm-os/apex-competitions-builder/blob/73311da2d56d58c364deb2071291021aceafeaa5/README.md)
+- [`apex.competition.v1` schema](https://github.com/macrocosm-os/apex-competitions-builder/blob/73311da2d56d58c364deb2071291021aceafeaa5/src/apex_sdk/schema/apex.competition.v1.json)
+- [Official onboarding manifest](https://github.com/macrocosm-os/apex-competitions-builder/blob/73311da2d56d58c364deb2071291021aceafeaa5/skills/apex-competition-builder/HANDOFF.md)
+- [Competition onboarding/activation issue](https://github.com/macrocosm-os/apex-competitions-builder/blob/73311da2d56d58c364deb2071291021aceafeaa5/.github/ISSUE_TEMPLATE/competition-onboarding.yml)
+
+UR technical details and exact route mappings are in `APEX-HANDOFF.md` and
+`sn/api/competition.yml`.
