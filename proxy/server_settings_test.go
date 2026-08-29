@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/connect"
+	proxylib "github.com/urnetwork/proxy"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -15,6 +16,16 @@ func TestDefaultProxySettingsIngressPorts(t *testing.T) {
 	connect.AssertEqual(t, settings.HttpPort, InternalHttpPort)
 	connect.AssertEqual(t, settings.HttpsPort, InternalHttpsPort)
 	connect.AssertEqual(t, settings.WgPort, InternalWgPort)
+}
+
+func TestDefaultProxySettingsUsesHttpDialRetryPacing(t *testing.T) {
+	settings := DefaultProxySettings()
+
+	connect.AssertEqual(
+		t,
+		settings.ProxyConnectTimeout,
+		proxylib.DefaultHttpProxySettings().ProxyConnectTimeout,
+	)
 }
 
 // TestDefaultProxyDeviceManagerSettingsLoadsDeviceMemoryBudget proves the main
