@@ -4806,6 +4806,46 @@ and is excluded from that denominator. Every failed reachable host's Vault
 address exactly matched its live interface; do not repair this incident by
 changing `services.yml`.
 
+The later socket inventory found the remaining controller race. Warpctl did
+perform the bounded socket-authoritative scan while Docker reported two
+same-version containers, but nginx could close the old listener immediately
+after that scan and Docker could remove the old container before the next
+30-second scan. The following poll saw only one container and skipped
+reconciliation, leaving the dead first DNAT rule indefinitely. On edge-0/eno2,
+edge-0/eno4, and edge-1/eno2 this left dead targets 7232, 7659, and 7232 ahead
+of the live 7231, 7658, and 7231 targets respectively. Preserve the bounded
+overlap scans, and also run one final socket-authoritative prune on the
+duplicate-to-single transition. The deterministic regression closes the old
+listener and removes the old Docker container one second after a clean overlap
+scan; it requires the dead IPv4 and IPv6 rules to be removed while the live
+rules remain.
+
+**Upstream IPv6 ACL identity drift (edge-3, 2026-08-30):** a timeout has a
+different discriminator from the dead-first reset. Both edge-3 links were up
+at 10 Gb/s, the live interface addresses exactly matched active v21 Vault
+(`...:5880:...:e380` and `...:5860:...:e381`), both exact-source outbound
+requests returned those same addresses, both gateways answered, live nginx
+sockets existed, and the exact host DNAT rules had zero inbound packets.
+External ICMPv6 reached both addresses while new TCP/22, TCP/80, and TCP/443
+timed out. Healthy edge-4 on the same EdgeRouter answered TCP/80 and TCP/443
+while intentionally filtering TCP/22. That protocol split localizes the drop
+to the upstream ingress ACL rather than Vault, NDP, routing, nginx, or host
+netfilter.
+
+The EdgeRouter Infinity configuration supplied the exact cause. Its active
+`WANv6_IN` policy has default action `drop` and permits ICMPv6 in rule 50, but
+edge-3's TCP/UDP allow rules still name the former NIC identities ending
+`e382` and `e383`. The deployed host and active Vault version now end `e380`
+and `e381`; edge-4's equivalent ACL destinations match its live addresses and
+pass. Repair only the destination address in rules 30, 31, 41, and 42 from
+`e382` to `e380`, and rules 33 and 34 from `e383` to `e381`; do not broaden the
+default-drop policy or change ports/actions. Persist the router transaction,
+then require three consecutive pinned HTTP/1.1 IPv6 200 responses on each
+edge-3 interface and confirm the host DNAT counters advance. Keep the active
+Vault version as the authority, update any stale inventory copy, and compare
+router permit destinations with the live interface during every address or
+NIC migration. Edge-5 remains operator-declared offline and excluded.
+
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
 
 **False post-deploy verification against a stale proxy artifact:** do not use
