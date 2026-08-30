@@ -180,6 +180,36 @@ func TestVacuumHealthSignalExplainsPaymentPlannerHorizon(t *testing.T) {
 	}
 }
 
+func TestVacuumHealthSignalUsesAlertedTableAndConfiguredThresholdInVerification(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{
+			"transfer_escrow_sweep", "30851910", "08-29 23:38",
+			"25000000", "scanning heap", "153", "4890878", "1635356", "0", "0", "0", "0",
+			"3227912", "250581", "623068571", "623068284", "182", "active", "client backend", "",
+			"CREATE TEMPORARY TABLE temp_account_payment ON COMMIT DROP AS SELECT u.contract_id, u.balance_id FROM transfer_contract u",
+		}}, nil
+	}}
+
+	alerts, err := NewVacuumHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "dead-tuples").Markdown()
+	for _, want := range []string{
+		"table transfer_escrow_sweep has 30851910 dead tuples",
+		"alert_threshold=25000000",
+		"vacuum phase=scanning heap age_s=153 heap_scanned=1635356/4890878",
+		"transfer_escrow_sweep returns below 25M on consecutive five-minute samples",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("cascade-table vacuum diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "transfer_contract returns below 10M") {
+		t.Fatalf("cascade-table verification retained the transfer_contract threshold:\n%s", markdown)
+	}
+}
+
 func TestVacuumHealthSignalRejectsFreshReadAsHorizonOwner(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
 		return []Row{{

@@ -400,6 +400,13 @@ func vacuumDeadTupleAlertThreshold(configuredThreshold int64) int64 {
 	return vacuumDeadTupleAlertFloor
 }
 
+func vacuumDeadTupleThresholdLabel(threshold int64) string {
+	if threshold%1_000_000 == 0 {
+		return fmt.Sprintf("%dM", threshold/1_000_000)
+	}
+	return fmt.Sprintf("%d", threshold)
+}
+
 func isPaymentPlannerVacuumHorizon(query string) bool {
 	lowerQuery := strings.ToLower(query)
 	if strings.Contains(lowerQuery, "temp_account_payment") {
@@ -438,6 +445,11 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			// policy, not an overdue vacuum.
 			continue
 		}
+		recoveryTarget := fmt.Sprintf(
+			"%s returns below %s",
+			r.str(0),
+			vacuumDeadTupleThresholdLabel(alertThreshold),
+		)
 		vacuum := "no vacuum currently reported"
 		if r.str(4) != "" {
 			vacuum = fmt.Sprintf(
@@ -455,34 +467,34 @@ func (self pgVacuumProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		mechanism := "Dead-row production is outrunning cleanup, or an old backend_xid/backend_xmin horizon is preventing cleanup. A vacuum that has scanned the full heap but remains in index vacuum while dead tuples keep rising points to continuing writer churn, not a stalled heap scan."
 		context := "An old backend_xid or backend_xmin can pin cleanup, including active writers and pg_dump/COPY snapshots. Fresh snapshots inherit the oldest in-progress xid, so equal horizons are ranked by oldest transaction/query start; confirm the candidate's owner before acting. If no old horizon exists, correlate high-row UPDATE writers such as payment retention before tuning or interrupting autovacuum."
 		action := "Remove or bound the identified write fan-out first. Only address a horizon holder after confirming its owner and safety; do not cancel a progressing autovacuum merely because its index phase is long."
-		verify := "The high-row writer is bounded, the active vacuum completes, and n_dead_tup falls below 10M on consecutive five-minute samples."
+		verify := "The high-row writer is bounded, the active vacuum completes, and " + recoveryTarget + " on consecutive five-minute samples."
 		if strings.Contains(strings.ToLower(r.str(20)), "client_reliability_running") {
 			mechanism += " The selected horizon is UpdateReliabilities performing a full running-window re-anchor; the pre-fix threshold was shorter than the task cadence, so this multi-billion-row transaction recurred every cycle and restricted each vacuum to rows removable before that old horizon. It can reduce, rather than completely prevent, reclamation."
 			context += " The task-overdue signal is the authoritative task diagnosis; this vacuum signal describes its MVCC consequence."
 			action = "Allow a progressing bounded re-anchor to finish, and roll out the four-hour reliability re-anchor cadence while retaining the 30-minute incremental cadence. Do not cancel the transaction, raise its deadline, or retune autovacuum to hide the shared root cause."
-			verify = "Most reliability cycles take the incremental path below their historical p95; transfer_contract stays below 10M on consecutive five-minute samples, and after the bounded re-anchor completes the waiting maintenance proceeds and later vacuums can see the full removable cohort."
+			verify = "Most reliability cycles take the incremental path below their historical p95; " + recoveryTarget + " on consecutive five-minute samples, and after the bounded re-anchor completes the waiting maintenance proceeds and later vacuums can see the full removable cohort."
 		} else if lowerQuery := strings.ToLower(r.str(20)); strings.Contains(lowerQuery, "update transfer_contract") &&
 			strings.Contains(lowerQuery, "reap_time") {
 			mechanism += " The selected horizon is the legacy CompletePayment retention fan-out: one indexed payment lookup is updating millions of transfer_contract reap_time values inside one transaction, generating the dead rows and holding their old snapshot while autovacuum works."
 			context += " The retention-fanout signal is the authoritative statement diagnosis; this vacuum signal describes the same writer's MVCC and cleanup consequence."
 			action = "Roll out the contract_retention_pending queue and bounded, committed contract_retention_cursor batches. Do not cancel the progressing vacuum, kill an in-flight payment without proving retry safety, or tune autovacuum around the unbounded writer."
-			verify = "The legacy retention query disappears, cursor batches commit with bounded row counts, the active vacuum completes, and transfer_contract stays below 10M on consecutive five-minute samples."
+			verify = "The legacy retention query disappears, cursor batches commit with bounded row counts, the active vacuum completes, and " + recoveryTarget + " on consecutive five-minute samples."
 		} else if lowerQuery := strings.ToLower(r.str(20)); strings.Contains(lowerQuery, "update transfer_contract") &&
 			strings.Contains(lowerQuery, "set outcome") && strings.Contains(lowerQuery, "close_time") {
 			mechanism += " The selected horizon is one bounded per-contract CloseExpiredContracts transaction. During backlog recovery, many short committed closes legitimately create a new dead-row cohort; a seconds-old closer is workload evidence, not an old MVCC pin or the legacy multi-million-row retention fan-out."
 			context += " The open-contract signal is authoritative for whether the closer is draining. Compare its five- and 30-minute age buckets and the active close-task duration before attributing this dead-row wave to a stuck writer."
 			action = "Let the bounded close cohort and progressing autovacuum run, and roll out the 25,000-contract task checkpoint. Do not cancel the closer, raise its concurrency, or revive a draining backlog merely to reduce the current dead-tuple estimate."
-			verify = "Older open-contract buckets fall, each close cohort checkpoints before its deadline, autovacuum completes, and transfer_contract returns below 10M on consecutive five-minute samples after the backlog drains."
+			verify = "Older open-contract buckets fall, each close cohort checkpoints before its deadline, autovacuum completes, and " + recoveryTarget + " on consecutive five-minute samples after the backlog drains."
 		} else if isPaymentPlannerVacuumHorizon(r.str(20)) {
 			mechanism += " The selected horizon is the Payout payment planner building its bounded temp_account_payment working set. This statement reads transfer_contract and can retain an MVCC snapshot while the plan runs, but it is not the unbounded transfer_contract retention writer that produced the dead-row wave."
 			context += " The task-canary signal is authoritative for the Payout row. In the affected deployment, the outer plan transaction can later sit idle while a deliberately separate reliability-maintenance transaction runs; PostgreSQL's global five-minute idle-in-transaction timeout then closes that outer connection."
 			action = "Let the bounded payout attempt reach its task outcome, and roll out the payment-plan SET LOCAL idle_in_transaction_session_timeout override together with bounded plan slices. Do not cancel this seconds-old reader, disable the database-wide timeout, or blame it for the retention write fan-out."
-			verify = "A Payout slice commits and clears its task error, an unrelated PostgreSQL session retains the global five-minute idle-in-transaction timeout, autovacuum completes, and transfer_contract returns below 10M on consecutive five-minute samples."
+			verify = "A Payout slice commits and clears its task error, an unrelated PostgreSQL session retains the global five-minute idle-in-transaction timeout, autovacuum completes, and " + recoveryTarget + " on consecutive five-minute samples."
 		} else if lowerQuery := strings.TrimSpace(strings.ToLower(r.str(20))); atoiRow(r, 16) < 60 && strings.HasPrefix(lowerQuery, "select ") {
 			mechanism += " The selected candidate is a fresh read-only snapshot, not a persistent horizon holder. Its large backend_xmin age is inherited from cluster transaction state; a seconds-old SELECT does not become the owner merely because it was sampled after the real old transaction released."
 			context += " Treat this row as negative attribution evidence. Continuing dead-row growth with per-index progress points to writer churn and cleanup debt; use the retention, close-backlog, and active-query signals to name those writers."
 			action = "Do not cancel or tune around the fresh SELECT. Let the progressing vacuum continue and address only a separately proven high-row writer or genuinely old transaction."
-			verify = "The sampled read disappears normally, index progress continues, known high-row writers are bounded, and transfer_contract returns below 10M on consecutive five-minute samples."
+			verify = "The sampled read disappears normally, index progress continues, known high-row writers are bounded, and " + recoveryTarget + " on consecutive five-minute samples."
 		}
 		findings = append(findings, finding{
 			probeId: "pg/dead-tuples", tier: tierWarn,
