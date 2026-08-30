@@ -598,6 +598,19 @@ be removed. Verify consecutive samples and downstream maintenance after the
 anchor releases instead of interpreting either partial recovery or one active
 horizon as an all-or-nothing vacuum state.
 
+The 16:23Z anchor supplied the same control later in the observation window.
+At 16:33:59Z its `UpdateReliabilities` INSERT was the oldest useful MVCC
+horizon: the transaction was 614s old and the horizon was 700,598 xids old.
+While it remained live, the `transfer_contract` dead-row estimate rose from
+13.247M to 16.537M, but the already-complete heap scan continued through its
+index work. Autovacuum finished at 16:43:06Z, before the anchor itself
+completed cleanly at 16:45:44Z. By 16:56Z the estimate was 7.995M and a
+successor vacuum had normally begun scanning the 23.99M-block heap. That
+sequence again proves a progressing vacuum can reclaim an older cohort despite
+the anchor, while the avoidable all-lookback transaction still prolongs the
+horizon and writer feedback. Preserve the maintenance deferral and
+per-lookback checkpoints; do not cancel either progressing operation.
+
 The anchor did not commit at its 08:29:40Z deadline. Its retry opened a new old
 snapshot within seconds, so a momentary blocker-PID change was not vacuum
 recovery. Verification must follow the replacement claim and require durable
@@ -944,6 +957,18 @@ deadline, durable retry, and immediate fast drain again validate the 25k task
 checkpoint. Do not raise the deadline or connection pool based on either the
 successful retry or transient count.
 
+The 16:19Z close cycle repeated the production-sized checkpoint failure while
+the open-set probe preserved user impact. Consecutive samples rose from
+309,353 to 363,016, 418,771, 472,729, and 531,094 open contracts. At 363,016,
+301,316 were older than five minutes and none were older than 30 minutes, so
+this was a growing fresh cohort rather than ancient residue. After the exact
+deadline and same-id retry described in §2.6a, catch-up closes reduced the set
+to 244,296 by 16:56Z; 174,897 were older than five minutes and zero were older
+than 30. The rise-and-drain pair is deterministic evidence that the close
+checkpoint, not an abandoned session set, controlled the backlog. Retain the
+25,000-row task checkpoint and require the aged buckets to keep falling after
+rollout.
+
 ### 2.6a Close-task checkpoint duration — the live backlog precursor
 Probe: `close-duration`
 
@@ -986,6 +1011,17 @@ different active successor id to remain visible. They also preserve the exact
 successor also crosses 120s, its active alert retains the precursor failure's
 duration, task id, error, timestamp, and executor identity rather than letting
 new activity erase the deadline incident.
+
+Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
+control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged
+`eval error(1800.88s) (reschedule) ... = Timeout`; the monitor immediately
+rendered `phase=failed`, the exact task id, error, timestamp, and executor.
+The same id was reclaimed on edge-4/g2 container `3c0a752d4433` and its
+authoritative row ran from 16:52:36.353384Z to 16:53:00.255024Z—23.902s—while
+retaining `reschedule_error=Timeout`. That 75x same-task duration split proves
+the deployed 100k checkpoint is load-sensitive and proves why a fast retry
+must not erase its failed precursor. It validates the monitor lifecycle rule
+and the 25k source checkpoint; it is not a reason to raise 1,800 seconds.
 
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
@@ -1265,6 +1301,18 @@ enough to attribute retention.
   §2.6 growth and §2.11 pool-path timeouts; do not kill a payment transaction
   without first proving retry/idempotency safety.
 
+The 16:19–16:53 recurrence preserved the same durable writer signature while
+close, reliability, and vacuum work overlapped. Query id
+`-3312164664690273449` advanced from 39 to 40 calls and from 2,156,465 to
+2,162,072 rows/call; lifetime mean/max execution reached 324,803/544,554ms,
+with 3.234B shared-buffer hits, 30.93M reads, 115.45M dirtied blocks, and only
+164,194 written blocks. One to three copies were transiently active and one
+exceeded 410s. Ten durable `AdvancePayment` rows still carried the exact
+120-second connection-cleanup deadline signature. This is continued evidence
+of an unbounded row writer and delayed cancellation cleanup, not a reason to
+expand connection pools; keep the bounded retention implementation and use
+the retained task errors only as attribution between active executions.
+
 ### 2.11 PgBouncer client-write stall — pool path vs postgres load
 Probe: `pgbouncer-stalls`
 
@@ -1395,6 +1443,20 @@ allocator reproduction; the streaming/bounded writer remains a source fix and
 must still be verified after rollout by bounded heap and producer lead while
 the task runs. Encoding may continue to use CPU and allocate bytes; those
 rates alone are not a regression if live heap no longer grows by tens of GiB.
+
+The next scheduled score export reproduced the allocator on a second executor
+without a cold-start ambiguity. Task
+`01a05377-7f00-72a0-c8a0-6de9c75d6147` began on edge-1/g1 container
+`53ef545dc646` at 16:19:26Z. Its heap repeatedly sawtoothed from roughly
+9.39GiB to 27.72GiB while five-minute allocation stayed near 798–850MiB/s and
+CPU near 4.00 cores. GC pause accumulation was only
+0.000024–0.000034 seconds/second, so the worker was doing sustained encoding
+and allocation rather than stopping in GC. At 16:56Z its claim and
+10–12-second heartbeats were still fresh beyond 2,200s, alongside a long
+client reaper. This independent recurrence strengthens the streaming
+512-command/8MiB, lazy-encode, cleared-slot fix. Keep the incident open until
+the authoritative finish row and post-completion heap collapse are observed;
+do not infer liveness from a retained final heartbeat.
 
 ---
 
@@ -1566,6 +1628,15 @@ Probe: `redis-connections`
   `PING`/`GET`/`EXEC`-dominated cohorts; all four received the generic hot-node
   investigation instead. A stray `EXPIRE` or high ratio is not ownership
   proof.
+- At 16:44Z port 6382 independently repeated the owned-marker shape: 700
+  connected clients versus a 218 fleet median (3.2x), later 904 versus 298.
+  Marker slot 9508 resolved to that port, and the bounded battery was dominated
+  by persistent `EXPIRE` cohorts—293 clients from `192.168.51.181`, 84 from
+  `.40`, 58 from `.95`, and 38 from `.180`—with smaller `SADD`/`PING`
+  cohorts. That is the fixed-slot pool fingerprint, not Redis latency or a
+  reconnect storm. The marker-free writer/high-water rollup remains the
+  source fix; existing pools contract only as old service processes restart
+  normally.
 - `CLIENT LIST` sorted by omem: any client > 32mb = a stalled consumer.
 - Accept-queue: `ss -lnt` Recv-Q pegged at backlog on a redis port = event
   loop too busy to accept() = wedge in progress (dials time out while the
@@ -1687,6 +1758,15 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
   it does not make the all-lookback transaction safe. Retain the four-hour
   anchor cadence, per-lookback checkpoints, and maintenance-aware optional
   deferral, then verify their marker-by-marker behavior after rollout.
+- The following task `01a05360-3544-70b6-58ec-f4327c74c449` ran on
+  edge-3/g2 container `4cf91fd25a2e` from 16:23:30.019754Z to
+  16:45:44.722565Z (1,334.703s) with uninterrupted heartbeats and no task
+  error. During it, the anchor INSERT held the oldest useful MVCC horizon and
+  the transfer-contract vacuum completed just before the task. This is another
+  successful deployed all-lookback result, not evidence that its rollback
+  unit is safe. The race-enabled rolling-equivalence, durable-checkpoint, and
+  cadence tests cover the source behavior; production verification still
+  requires a rolled cycle and a quiet four-hour anchor boundary after rollout.
 
 ---
 
@@ -2010,6 +2090,14 @@ limit:
   earlier samples), while another executor's score export cycled through
   10–30GiB. Keep the bounded Redis latency fix, but do not attribute the score
   allocator's heap to this reaper.
+  A subsequent reaper `01a05379-a1b0-d902-e4bd-4aef15756092` began on
+  edge-1/g1 at 16:25:04Z and remained live beyond 1,870s with fresh
+  heartbeats. Its seven-day p50/p95 were 51s/3,718s, so the generic
+  median-tail cap correctly alerted at 1,200s instead of normalizing the
+  recurrence to twice the inflated p95. It shared the score-heavy process,
+  but the independent low-heap control above still separates reaper latency
+  from score allocation. Follow this row to its authoritative terminal state;
+  the bounded 1,000-client, compare-delete cleanup remains the root fix.
 
 ### 5.8 Query-plan CPU wall (the 2026-07-17 planner-stats landmine)
 Signature: db host load ≫ cores (490 on 96 observed), hundreds of client
@@ -2432,6 +2520,27 @@ certificate for the legacy incident, not evidence that its full-fleet writer
 is safe. Two further scheduled passes stayed in band at 52.59GiB/45.38GiB and
 45.04GiB/55.28GiB over/under, respectively, while every emitter remained
 quiet; the convergence was durable across executor changes.
+
+The next recurrence completed the same long-run/reversal/convergence chain at
+16:50Z. Task `01a05375-52b2-59c3-8a72-36646de9060d` ran on edge-1/g1 from
+16:21:36.597190Z to 16:39:30.633361Z (1,074.036s), rewriting 898,952 balances
+and reporting 1.11TiB over-reserved plus 1.81TiB under-reserved across 2,331
+networks. Eleven settlements then exposed negative mirrors: seven API and four
+Connect lines from 16:35:31.032Z through 16:43:16.640Z; taskworker emitted
+none. The first three occurred while the stale apply was live, and the last
+three Connect results on one balance reached -62.98MiB, -191MiB, and
+-319MiB. Corrective task `01a0538a-5d49-7938-0805-24eed3a0e8de` moved to
+edge-3/g1 and completed in 17.020s, reversing the dominant quantities to
+1.81TiB over and 1.11TiB under across 2,317 networks. The next scheduled pass
+`01a0538f-3b89-ea12-7f55-39e0ae148398` moved to edge-0/g2 and completed in
+20.841s, contracting drift to 46.12GiB over/36.47GiB under across 834
+networks. API, Connect, and taskworker then each remained at zero negative
+lines through 16:58:40Z, more than eight minutes after that pass and beyond the
+log-ingestion allowance. This is the exact stale absolute-write inversion
+followed by normal convergence; retain the page-local additive/no-op-skipping
+writer and atomic release clamp. Alert grouping now preserves
+`frame=site=settle` while redacting balance and contract ids, so separate
+mutation sites cannot collapse into one opaque target.
 
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
