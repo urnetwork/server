@@ -393,6 +393,13 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alert.verify = "The migration artifact exists, every scheduled reconciliation finishes below 120s, aggregate drift converges, and taskworker, API, and Connect emit no new negative counters for a full interval."
 			alert.playbook = "SIGNALS.md §5.11 and §8.9"
 		}
+		if task == "Payout" {
+			alert.mechanism = "The bounded Payout planner can spend minutes actively building its temp_account_payment and subsidy windows, then leave its outer transaction intentionally idle while a separate reliability-maintenance transaction runs. In the deployed path, PostgreSQL's global five-minute idle-in-transaction guard closes that outer connection and the task reports pgconn conn closed only after the nested work returns."
+			alert.context += " Correlate this live claim with the explicit oldest PostgreSQL transaction and the Payout failed-row alert. An active planner can temporarily hold the oldest vacuum horizon; elapsed time alone does not justify canceling it or disabling the global guard."
+			alert.action = "Let the bounded attempt reach its task outcome and roll out SET LOCAL idle_in_transaction_session_timeout=0 on the payment-plan transaction only. Retain the task MaxTime and bounded plan slices; do not disable the database-wide timeout, cancel the active planner, or repeatedly kick its row."
+			alert.verify = "A bounded Payout slice commits and clears the row's error, the affected vacuum completes, and a fresh unrelated PostgreSQL session still reports the global five-minute idle-in-transaction timeout."
+			alert.playbook = "SIGNALS.md §5.6 and §5.7"
+		}
 		if task == "DbMaintenance" && len(dbMaintenanceEvidence) > 0 {
 			alert.evidence = fmt.Sprintf(
 				"relation=%s index=%s phase=%s query_age_s=%s wait=%s:%s blocking_pids=%s blocker_pid=%s blocker_query=%s blocks_done=%s blocks_total=%s",

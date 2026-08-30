@@ -150,6 +150,50 @@ func TestTaskCanariesSignalDiagnosesLiveNetEscrowOverrun(t *testing.T) {
 	}
 }
 
+func TestTaskCanariesSignalDiagnosesLivePayoutOverrun(t *testing.T) {
+	taskID := "01a0088a-327f-ed06-0c69-9b994a1e70fe"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return []Row{{"Payout", "4538", "1800", "f", "21600", "0", taskID}}, nil
+			case strings.Contains(query, "WITH failures AS"):
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		localFn: func(name string, args ...string) (string, error) {
+			joined := strings.Join(args, " ")
+			if name != "warpctl" || !strings.Contains(joined, "--query="+taskID) {
+				t.Fatalf("unexpected task heartbeat command: %s %s", name, joined)
+			}
+			return "[by-us-fmt-5-edge-4][taskworker][g1][cid:52c4c3be3b3f][I][2026-08-30T22:30:00Z][task.go:1938][" + taskID + "]eval active(4500.00s) github.com/urnetwork/server/taskworker/work.Payout({})", nil
+		},
+	}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-overdue").Markdown()
+	for _, want := range []string{
+		"Payout",
+		"temp_account_payment and subsidy windows",
+		"global five-minute idle-in-transaction guard",
+		"explicit oldest PostgreSQL transaction",
+		"SET LOCAL idle_in_transaction_session_timeout=0",
+		"do not disable the database-wide timeout",
+		"SIGNALS.md §5.6 and §5.7",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("live Payout diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
 func TestTaskCanariesSignalDoesNotMistakeDueQueueDelayForExecutionTime(t *testing.T) {
 	taskID := "01a052d2-9c33-c78e-1e37-66e411e45c1e"
 	source := &syntheticSource{

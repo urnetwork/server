@@ -170,7 +170,7 @@ func TestVacuumHealthSignalExplainsPaymentPlannerHorizon(t *testing.T) {
 			"not the unbounded transfer_contract retention writer",
 			"task-canary signal is authoritative",
 			"SET LOCAL idle_in_transaction_session_timeout override",
-			"Do not cancel this seconds-old reader",
+			"Do not cancel this bounded reader solely from its sampled age",
 			"unrelated PostgreSQL session retains the global five-minute",
 		} {
 			if markdown := alert.Markdown(); !strings.Contains(markdown, detail) {
