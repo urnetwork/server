@@ -358,6 +358,17 @@ shape on stderr, then proves the service panic finding stays healthy. An
 exhausted query still restarts the tailer and is surfaced by tailer health; it
 is neither hidden nor attributed to the observed service.
 
+That Grafana startup outage exposed one more feedback loop. `tailOnce` waited
+for the `warpctl` child but discarded its nonzero exit status, so `run`
+mistook every exhausted 429/502 query for a clean stream rotation and reset
+its retry delay to one second. Eight services each reached 35 restarts in one
+minute, adding query load while the observation backend was least able to
+serve it. `tailOnce` now returns `cmd.Wait` errors after a successful stdout
+scan; only a true exit-zero rotation resets the delay, while failures use the
+existing exponential backoff capped at one minute. The synthetic child exits
+2 and proves that failure reaches the backoff branch. Tailer restart findings
+remain visible, but the monitor no longer amplifies their cause.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)

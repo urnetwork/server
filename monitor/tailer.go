@@ -354,8 +354,14 @@ func (self *logTailer) tailOnce(ctx context.Context) error {
 			self.scanErrorCount += 1
 		}()
 	}
-	cmd.Wait()
-	return scanErr
+	waitErr := cmd.Wait()
+	if scanErr != nil {
+		return scanErr
+	}
+	// A nonzero child exit is not a clean stream rotation. Preserve it so
+	// run() keeps increasing its restart backoff instead of resetting every
+	// failed Loki query to a one-second retry loop.
+	return waitErr
 }
 
 // openStream starts the warpctl log stream (or the injected test stream).

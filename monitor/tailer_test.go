@@ -213,6 +213,21 @@ func TestTailerCleanStreamEnd(t *testing.T) {
 	}
 }
 
+// An exhausted observation-transport request makes warpctl exit nonzero.
+// tailOnce must preserve that exit status so run() uses its escalating
+// failure backoff; discarding cmd.Wait's error caused every service tailer to
+// retry once a second through a Grafana startup outage.
+func TestTailerFailedStreamReturnsChildError(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	tailer.stream = fakeStream(`exit 2`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := tailer.tailOnce(ctx); err == nil {
+		t.Fatal("tailOnce returned nil for a nonzero child exit")
+	}
+}
+
 func findingByClass(t *testing.T, findings []finding, class string) finding {
 	t.Helper()
 	for _, f := range findings {
