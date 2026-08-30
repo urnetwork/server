@@ -2878,6 +2878,15 @@ later scheduled pass as post-fix verification. The exact 1,800-second
 a larger `MaxTime`; the task-canary alert routes this family to §5.11 and §8.9
 and explicitly preserves the deadline.
 
+The third attempt on edge-4/g1 reached the same boundary. Its last retained
+heartbeat was 1,777s at 22:22:17Z; by the 22:23:13Z task-canary sample the
+row's `reschedule_error_count` had advanced from two to three with the same
+`context canceled` error and already carried a fresh successor claim. The
+standing taskworker stream recorded 8/min and then 4/min negative counters
+across that boundary. A narrow task-id Loki lookup timed out while awaiting
+headers, so the successor executor was not inferred from missing log results;
+the PostgreSQL row is authoritative for the third failure and fresh retry.
+
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
 additive reconciler can observe that committed settlement and correct the
