@@ -32,25 +32,50 @@ func accountPaymentContractRetentionMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "account_payment_contract_retention_queue")
 }
 
-// Competition migrations were developed against an older main. They must
-// remain a contiguous suffix so every migration integrated from origin runs
-// first and retains its published version number.
-func TestCompetitionMigrationsFollowOriginMigrations(t *testing.T) {
-	markers := []string{
-		"CREATE TABLE competition_round",
-		"competition_append_only_guard",
-		"competition_workload_backfill_guard",
-		"competition_epoch_lifecycle_guard",
-		"competition_image_identity_backfill_guard",
-		"competition_candidate_review_gate",
+func migrationIndex(t testing.TB, marker string) int {
+	t.Helper()
+	for i, migration := range migrations {
+		var sql string
+		switch typed := migration.(type) {
+		case *SqlMigration:
+			sql = typed.sql
+		case *OnlineSqlMigration:
+			sql = typed.sql
+		}
+		if strings.Contains(sql, marker) {
+			return i
+		}
 	}
-	firstCompetitionIndex := len(migrations) - len(markers)
-	if firstCompetitionIndex <= accountPaymentContractRetentionMigrationIndex(t) {
-		t.Fatalf("competition migration suffix starts at %d before latest origin migration", firstCompetitionIndex)
+	t.Fatalf("migration containing %q not found", marker)
+	return -1
+}
+
+// Migration versions are an append-only production protocol. Versions
+// 588-590 were applied before the escrow/retention fixes were merged; moving
+// those new migrations ahead of the published competition sequence made a DB
+// recorded at 590 skip the new schema and try to create competition tables a
+// second time. Freeze every already-published index and require new work to
+// follow it. Future migrations may append after this map without changing it.
+func TestPublishedMigrationVersionsRemainStable(t *testing.T) {
+	published := []struct {
+		marker string
+		index  int
+	}{
+		{"CREATE TABLE competition_round", 587},
+		{"competition_append_only_guard", 588},
+		{"competition_workload_backfill_guard", 589},
+		{"competition_epoch_lifecycle_guard", 590},
+		{"competition_image_identity_backfill_guard", 591},
+		{"competition_candidate_review_gate", 592},
+		{"transfer_escrow_balance_contract", 593},
+		{"account_payment_contract_retention_queue", 594},
+		{"account_payment_contract_retention_pending", 595},
+		{"transfer_escrow_sweep_payment_contract", 596},
 	}
-	for i, marker := range markers {
-		if index := sqlMigrationIndex(t, marker); index != firstCompetitionIndex+i {
-			t.Fatalf("competition migration %q index = %d, want suffix index %d", marker, index, firstCompetitionIndex+i)
+	for _, migration := range published {
+		if index := migrationIndex(t, migration.marker); index != migration.index {
+			t.Errorf("migration %q index = %d (version %d), want index %d (version %d)",
+				migration.marker, index, index+1, migration.index, migration.index+1)
 		}
 	}
 }
