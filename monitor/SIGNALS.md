@@ -332,6 +332,20 @@ partial startup callback, then proves the log drain still runs exactly on its
 own cadence. This preserves both continuous ingestion and meaningful
 per-minute storm thresholds.
 
+The live watcher found a third observability boundary at 22:48Z on
+2026-08-30. A bounded `warpctl logs` query reached Grafana/Loki, but the HTTP/2
+connection was retired with `GOAWAY` while `query_range` was in flight. The Go
+HTTP client returned that transient transport error and `warpctl` panicked,
+turning a safe idempotent read into a failed monitor helper and occasionally a
+full command-timeout visibility gap. Warp commit `5b65a16` retries
+`query_range` transport failures and retryable 429/502/503/504 responses up to
+three times with context-aware bounded backoff. The synthetic transport returns
+the production GOAWAY on its first request and a valid Loki response on its
+second, proving the observation survives without duplicating a mutation (the
+request is GET-only). Exhausted retries still fail visibly; they must not be
+relabelled as a healthy log window. Standing WebSocket tails retain their
+separate reconnect lifecycle.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)
