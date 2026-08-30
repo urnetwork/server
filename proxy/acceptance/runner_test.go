@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +24,7 @@ func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
 	)
 	var mu sync.Mutex
 	paths := []string{}
+	progress := []string{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		mu.Lock()
 		paths = append(paths, request.URL.Path)
@@ -99,6 +101,9 @@ func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
 		CredentialsPath: "injected-for-test",
 		Repeat:          1,
 		ProbeTimeout:    time.Second,
+		Progress: func(message string) {
+			progress = append(progress, message)
+		},
 	}, runDependencies{
 		credentials: &credentials{user: "person@example.invalid", password: "password-secret"},
 		httpClient:  server.Client(),
@@ -122,11 +127,118 @@ func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
 			t.Fatalf("result leaked a secret: %q", result.Detail)
 		}
 	}
+	progressText := strings.Join(progress, "\n")
+	for _, secret := range []string{proxyToken, clientID, networkJWT} {
+		if strings.Contains(progressText, secret) {
+			t.Fatalf("progress leaked a secret: %q", progressText)
+		}
+	}
+	for _, milestone := range []string{
+		"repetition 1/1 started",
+		"temporary client assigned to proxy host proxy.example",
+		"temporary client public ports http=8081 socks=8080 wireguard=8084",
+		"http campaign started",
+		"socks campaign failed",
+		"wireguard campaign passed",
+		"temporary client cleanup completed",
+		"repetition 1/1 finished",
+	} {
+		if !strings.Contains(progressText, milestone) {
+			t.Fatalf("progress missing %q: %q", milestone, progressText)
+		}
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	wantPaths := []string{"/auth/login-with-password", "/network/auth-client", "/network/remove-client"}
 	if strings.Join(paths, ",") != strings.Join(wantPaths, ",") {
 		t.Fatalf("request paths = %v, want %v", paths, wantPaths)
+	}
+}
+
+func TestRunOverlapsAllProtocolsOnTheSameProxyDevice(t *testing.T) {
+	removed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/auth/login-with-password":
+			_, _ = w.Write([]byte(`{"network":{"by_jwt":"jwt"}}`))
+		case "/network/auth-client":
+			_, _ = w.Write([]byte(`{"client_id":"client","proxy_config_result":{"auth_token":"token"}}`))
+		case "/network/remove-client":
+			close(removed)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	started := make(chan string, len(protocolNames))
+	release := make(chan struct{})
+	var countLock sync.Mutex
+	counts := map[string]int{}
+	resultChannel := make(chan []Result, 1)
+	go func() {
+		resultChannel <- runWithDependencies(context.Background(), Options{
+			APIURL: server.URL, TargetURL: server.URL + "/target", CredentialsPath: "injected", Repeat: 1,
+			OverlapProtocols: true,
+		}, runDependencies{
+			credentials: &credentials{user: "user", password: "password"},
+			httpClient:  server.Client(),
+			probes: func(*proxyConfigResult) map[string]protocolProbe {
+				probes := map[string]protocolProbe{}
+				for _, protocol := range protocolNames {
+					protocol := protocol
+					probes[protocol] = func(context.Context) error {
+						countLock.Lock()
+						counts[protocol]++
+						call := counts[protocol]
+						countLock.Unlock()
+						if call == 1 {
+							return nil // isolated baseline
+						}
+						started <- protocol
+						<-release
+						return nil
+					}
+				}
+				return probes
+			},
+		})
+	}()
+
+	startedSet := map[string]bool{}
+	for len(startedSet) < len(protocolNames) {
+		select {
+		case protocol := <-started:
+			startedSet[protocol] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only overlapping protocols %v started before timeout", startedSet)
+		}
+	}
+	select {
+	case <-removed:
+		t.Fatal("temporary client was removed while overlapping campaigns were active")
+	default:
+	}
+	close(release)
+
+	var results []Result
+	select {
+	case results = <-resultChannel:
+	case <-time.After(2 * time.Second):
+		t.Fatal("overlapping proxy campaigns did not finish")
+	}
+	for _, protocol := range protocolNames {
+		assertResult(t, results, protocol, "PASS")
+		if counts[protocol] != 2 {
+			t.Fatalf("%s probe ran %d times, want isolated plus overlapping", protocol, counts[protocol])
+		}
+	}
+	select {
+	case <-removed:
+	default:
+		t.Fatal("temporary client was not removed after overlapping campaigns")
 	}
 }
 
@@ -313,6 +425,7 @@ func TestProbeHTTPSRunsConfiguredSustainedCampaign(t *testing.T) {
 		30*time.Second,
 		10*time.Second,
 		func(context.Context, time.Duration) error { return nil },
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -346,6 +459,7 @@ func TestProbeHTTPSFailsImmediatelyOnRateLimitDuringSustainedCampaign(t *testing
 		50*time.Second,
 		10*time.Second,
 		func(context.Context, time.Duration) error { return nil },
+		nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 429") || !strings.Contains(err.Error(), "sustained request 2/5") {
 		t.Fatalf("rate-limit error = %v", err)
@@ -355,6 +469,48 @@ func TestProbeHTTPSFailsImmediatelyOnRateLimitDuringSustainedCampaign(t *testing
 	}
 	if requestCount != 3 {
 		t.Fatalf("target requests = %d, want 3; a 429 must not be retried", requestCount)
+	}
+}
+
+// A timeout after WroteRequest means the proxy tunnel, TLS handshake, and
+// request write all completed; preserve that distinction in the artifact.
+func TestHTTPSRequestTraceIdentifiesResponseHeaderStall(t *testing.T) {
+	started := time.Date(2026, time.August, 29, 4, 3, 0, 0, time.UTC)
+	requestTrace := &httpsRequestTrace{started: started, phase: "starting_request"}
+	clientTrace := requestTrace.clientTrace()
+	clientTrace.GotConn(httptrace.GotConnInfo{Reused: false})
+	clientTrace.WroteRequest(httptrace.WroteRequestInfo{})
+
+	err := requestTrace.wrap(context.DeadlineExceeded, started.Add(30*time.Second))
+	detail := err.Error()
+	for _, evidence := range []string{
+		"request started 2026-08-29T04:03:00Z",
+		"elapsed 30s",
+		"phase waiting_for_response_headers",
+		"connection new",
+		"context deadline exceeded",
+	} {
+		if !strings.Contains(detail, evidence) {
+			t.Errorf("trace detail %q does not contain %q", detail, evidence)
+		}
+	}
+}
+
+// An error before GotConn must not be mislabeled as an established data-plane
+// tunnel; this is the adjacent failure class needed to interpret a timeout.
+func TestHTTPSRequestTraceIdentifiesTunnelConnectFailure(t *testing.T) {
+	started := time.Date(2026, time.August, 29, 4, 3, 0, 0, time.UTC)
+	requestTrace := &httpsRequestTrace{started: started, phase: "starting_request"}
+	clientTrace := requestTrace.clientTrace()
+	clientTrace.ConnectStart("tcp", "example.test:443")
+	clientTrace.ConnectDone("tcp", "example.test:443", errors.New("dial failed"))
+
+	detail := requestTrace.wrap(errors.New("dial failed"), started.Add(time.Second)).Error()
+	if !strings.Contains(detail, "phase connecting_tunnel_failed") {
+		t.Errorf("trace detail %q does not identify the connect failure", detail)
+	}
+	if !strings.Contains(detail, "connection not_established") {
+		t.Errorf("trace detail %q incorrectly claims an established connection", detail)
 	}
 }
 

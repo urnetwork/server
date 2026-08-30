@@ -101,7 +101,71 @@ func startLocalTarget(t testing.TB) (baseUrl string, closeTarget func()) {
 	target.Listener.Close()
 	target.Listener = listener
 	target.StartTLS()
-	return target.URL, target.Close
+	return target.URL, func() {
+		closeLocalTarget(target)
+	}
+}
+
+// Timed-out proxy attempts may leave provider-side TCP flows alive until their
+// idle reaper fires. Force-close test-owned connections before waiting for the
+// server, or a partial request body can hide a completed workload in teardown.
+func closeLocalTarget(target *httptest.Server) {
+	target.CloseClientConnections()
+	target.Close()
+}
+
+// A partial origin upload must not pin the contract-test target's teardown.
+func TestLocalTargetCloseReleasesPartialUpload(t *testing.T) {
+	handlerStarted := make(chan struct{})
+	handlerDone := make(chan struct{})
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		firstByte := make([]byte, 1)
+		if _, err := io.ReadFull(r.Body, firstByte); err != nil {
+			t.Errorf("read first upload byte: %v", err)
+			return
+		}
+		close(handlerStarted)
+		_, _ = io.Copy(io.Discard, r.Body)
+	}))
+
+	conn, err := tls.Dial("tcp", target.Listener.Addr().String(), testTargetTlsConfig)
+	if err != nil {
+		target.Close()
+		t.Fatalf("dial target: %v", err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(
+		conn,
+		"POST /upload HTTP/1.1\r\nHost: target.test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",
+	); err != nil {
+		target.CloseClientConnections()
+		target.Close()
+		t.Fatalf("write partial upload: %v", err)
+	}
+	select {
+	case <-handlerStarted:
+	case <-time.After(5 * time.Second):
+		target.CloseClientConnections()
+		target.Close()
+		t.Fatal("partial upload did not reach target handler")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		closeLocalTarget(target)
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("target close remained blocked on a partial upload")
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("partial upload handler remained blocked after target close")
+	}
 }
 
 // ---- proxy transports ----------------------------------------------------

@@ -537,17 +537,21 @@ type ProxyDevice struct {
 	// per-device lock and — crucially — is never serialized under the wg proxy's
 	// single global state lock.
 	lastActivityNanos atomic.Int64
-	// stateLock guards only the receive-mode fields below (swapped rarely, via
-	// SetReceive), not the activity/liveness state above.
+	// stateLock guards only the receive-attachment fields below (swapped rarely),
+	// not the activity/liveness state above.
 	stateLock      sync.Mutex
 	receiveMonitor *connect.Monitor
 	receiveNotify  chan struct{}
 	receive        chan []byte
+	receiveAddr    netip.Addr
 
 	// Nil in production. Ownership tests replace the final asynchronous sends
 	// while retaining the same borrowed-to-owned copy boundary.
 	sendOwnedPacketForTest  func([]byte) bool
 	sendOwnedPacketsForTest func([][]byte) int
+	// Stops a forced-full receive delivery immediately before its blocking
+	// handoff, allowing a deterministic backpressure regression test.
+	receiveBackpressureForTest func()
 }
 
 func NewProxyDeviceWithDefaults(
@@ -747,37 +751,13 @@ func (self *ProxyDevice) PushDeviceRpc(ws sdk.DeviceRpcWs) error {
 func (self *ProxyDevice) Run() {
 	defer self.cancel()
 
-	// A callback batch is borrowed for this call. The ordinary proxy mode
-	// injects it into gVisor with one GRO-aware write. The legacy external
-	// receive mode gets nonblocking shared copies; a full consumer is loss,
-	// never head-of-line blocking on the SDK receive pump.
 	receivePacketsCallback := func(
 		source connect.TransferPath,
 		provideMode protocol.ProvideMode,
 		ipPath *connect.IpPath,
 		packets [][]byte,
 	) {
-		if !self.UpdateActivity() {
-			return
-		}
-		receive, _ := self.receiveWithNotify()
-		if receive == nil {
-			_, _ = self.tun.WriteBatch(packets)
-			self.UpdateActivity()
-			return
-		}
-		for _, packet := range packets {
-			sharedPacket := connect.MessagePoolShareReadOnly(packet)
-			select {
-			case <-self.ctx.Done():
-				connect.MessagePoolReturn(sharedPacket)
-				return
-			case receive <- sharedPacket:
-				self.UpdateActivity()
-			default:
-				connect.MessagePoolReturn(sharedPacket)
-			}
-		}
+		self.deliverReturnPackets(packets)
 	}
 	sub := self.deviceLocal.AddReceivePacketsCallback(receivePacketsCallback)
 	defer sub()
@@ -796,6 +776,94 @@ func (self *ProxyDevice) Run() {
 			return
 		}
 		self.deviceLocal.SendPacketsNoCopy(packets[:n])
+	}
+}
+
+// A callback batch is borrowed for this call. Return packets addressed to the
+// WireGuard peer are copied into its receive channel; all other packets stay on
+// the private gVisor Tun used by HTTP and SOCKS. The old global mode switch
+// could only serve one of those paths at a time: any overlapping Tun dial
+// silently stole every WireGuard return packet, while late Tun packets were
+// handed to WireGuard. Destination demultiplexing keeps all paths live.
+func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
+	if !self.UpdateActivity() {
+		return
+	}
+	receive, receiveAddr, receiveNotify := self.receiveWithNotify()
+	if receive == nil {
+		_, _ = self.tun.WriteBatch(packets)
+		self.UpdateActivity()
+		return
+	}
+
+	// Flush every Tun run before a WireGuard handoff can wait for capacity.
+	// This keeps a busy process-wide WireGuard queue from delaying HTTP/SOCKS
+	// returns on the same device, without allocating a partition slice.
+	tunStart := -1
+	flushTun := func(end int) {
+		if tunStart < 0 {
+			return
+		}
+		_, _ = self.tun.WriteBatch(packets[tunStart:end])
+		tunStart = -1
+	}
+	for i, packet := range packets {
+		if proxyPacketMatchesReceiveAddress(packet, receiveAddr) {
+			flushTun(i)
+			continue
+		}
+		if tunStart < 0 {
+			tunStart = i
+		}
+	}
+	flushTun(len(packets))
+
+	for _, packet := range packets {
+		if !proxyPacketMatchesReceiveAddress(packet, receiveAddr) {
+			continue
+		}
+		if !self.deliverWireGuardReturn(receive, receiveNotify, packet) {
+			return
+		}
+	}
+	self.UpdateActivity()
+}
+
+// deliverWireGuardReturn preserves the device-side Tun loss model: provider
+// NAT has already consumed upstream TCP bytes and cannot reconstruct a segment
+// dropped here. This callback belongs to one DeviceLocal, so waiting on the
+// fixed process queue propagates bounded backpressure only into that device;
+// cancellation or an attachment change still releases it immediately.
+func (self *ProxyDevice) deliverWireGuardReturn(receive chan []byte, receiveNotify chan struct{}, packet []byte) bool {
+	sharedPacket := connect.MessagePoolShareReadOnly(packet)
+	select {
+	case <-self.ctx.Done():
+		connect.MessagePoolReturn(sharedPacket)
+		return false
+	case <-receiveNotify:
+		connect.MessagePoolReturn(sharedPacket)
+		return false
+	case receive <- sharedPacket:
+		self.UpdateActivity()
+		return true
+	default:
+	}
+	backpressureStart := time.Now()
+	proxyWireGuardReturnBackpressureCounter.Inc()
+	defer proxyWireGuardReturnBackpressureDuration.Observe(time.Since(backpressureStart).Seconds())
+	if self.receiveBackpressureForTest != nil {
+		self.receiveBackpressureForTest()
+	}
+	select {
+	case <-self.ctx.Done():
+		connect.MessagePoolReturn(sharedPacket)
+		return false
+	case <-receiveNotify:
+		connect.MessagePoolReturn(sharedPacket)
+		return false
+	case receive <- sharedPacket:
+		self.UpdateActivity()
+		return true
 	}
 }
 
@@ -843,35 +911,73 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 }
 
 func (self *ProxyDevice) SetReceive(receive chan []byte) {
+	self.SetReceiveForAddress(netip.Addr{}, receive)
+}
+
+// SetReceiveForAddress routes return packets for one WireGuard client address
+// to receive without disabling the Tun return path. An invalid address retains
+// SetReceive's legacy all-packets behavior for non-address-aware callers.
+func (self *ProxyDevice) SetReceiveForAddress(receiveAddr netip.Addr, receive chan []byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	if self.receive == receive {
-		// already in this mode; avoid monitor churn / waking the receive callback
+	if receive == nil {
+		receiveAddr = netip.Addr{}
+	}
+	if self.receive == receive && self.receiveAddr == receiveAddr {
+		// already attached; avoid monitor churn / waking the receive callback
 		return
 	}
 	self.receiveMonitor.NotifyAll()
 	self.receive = receive
+	self.receiveAddr = receiveAddr
 	self.receiveNotify = self.receiveMonitor.NotifyChannel()
 }
 
-func (self *ProxyDevice) receiveWithNotify() (chan []byte, chan struct{}) {
+func (self *ProxyDevice) receiveWithNotify() (chan []byte, netip.Addr, chan struct{}) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return self.receive, self.receiveNotify
+	return self.receive, self.receiveAddr, self.receiveNotify
+}
+
+// proxyPacketMatchesReceiveAddress is allocation-free because it runs once per
+// returned packet. IPv4 and IPv6 destination offsets are fixed in their base
+// headers; extension headers do not change the IPv6 destination position.
+func proxyPacketMatchesReceiveAddress(packet []byte, receiveAddr netip.Addr) bool {
+	if !receiveAddr.IsValid() {
+		// Backward-compatible SetReceive means the external consumer owns all
+		// packets. Production WireGuard always supplies its assigned address.
+		return true
+	}
+	if len(packet) == 0 {
+		return false
+	}
+	var destination []byte
+	switch packet[0] >> 4 {
+	case 4:
+		if len(packet) < 20 {
+			return false
+		}
+		destination = packet[16:20]
+	case 6:
+		if len(packet) < 40 {
+			return false
+		}
+		destination = packet[24:40]
+	default:
+		return false
+	}
+	addr, ok := netip.AddrFromSlice(destination)
+	return ok && addr == receiveAddr
 }
 
 func (self *ProxyDevice) Tun() *connect.Tun {
 	return self.tun
 }
 
-// DialContext dials a connection through the device's tun. A tun-based dial
-// means the device is being used as an http/socks proxy, so it first resets any
-// wg "receive" mode (set via SetReceive). A device serves one proxy mode at a
-// time — in practice a device is only ever wg, http, or socks — but resetting
-// the mode on a new call lets the same device be reused if the mode changes,
-// instead of stranding outbound packets on a stale wg receive channel.
+// DialContext dials through the device's private Tun. WireGuard return packets
+// are independently selected by destination address in Run, so starting a Tun
+// connection must not detach or interrupt an active WireGuard peer.
 func (self *ProxyDevice) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
-	self.SetReceive(nil)
 	return self.tun.DialContext(ctx, network, addr)
 }
 

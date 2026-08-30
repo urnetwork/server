@@ -395,7 +395,7 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 		return authHeaderProxyId(authHeader)
 	}
 
-	connectDial := func(r *http.Request, network string, addr string) (net.Conn, error) {
+	connectDial := func(ctx context.Context, r *http.Request, network string, addr string) (net.Conn, error) {
 		proxyId, err := authProxyId(r)
 		if err != nil {
 			return nil, err
@@ -423,7 +423,7 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 			return nil, err
 		}
 
-		return pd.DialContext(r.Context(), network, addr)
+		return pd.DialContext(ctx, network, addr)
 	}
 
 	httpSettings := proxy.DefaultHttpProxySettings()
@@ -436,7 +436,7 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	httpProxy := proxy.NewHttpProxy(httpSettings)
 	// httpProxy.Logger = self
 	httpProxy.GetTlsConfigForClient = self.transportTls.GetTlsConfigForClient
-	httpProxy.ConnectDialWithRequest = connectDial
+	httpProxy.ConnectDialContextWithRequest = connectDial
 	return httpProxy
 }
 

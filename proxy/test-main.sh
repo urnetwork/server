@@ -6,6 +6,7 @@
 #   ./proxy/test-main.sh
 #   ./proxy/test-main.sh --repeat=5
 #   ./proxy/test-main.sh --soak-duration=10m --soak-interval=5s
+#   ./proxy/test-main.sh --overlap-protocols=false
 #   ./proxy/test-main.sh --skip-build
 #
 # Environment:
@@ -16,6 +17,7 @@
 #   UR_ACCEPT_PROXY_BIN=<path>          cached local runner binary
 #   UR_ACCEPT_PROXY_SOAK_DURATION=<dur> default: 5m per protocol
 #   UR_ACCEPT_PROXY_SOAK_INTERVAL=<dur> default: 5s between sustained requests
+#   UR_ACCEPT_PROXY_OVERLAP_PROTOCOLS=<bool> default: true
 #   UR_ACCEPT_PROXY_TIMEOUT=<dur>       default: 2h for the complete runner
 set -Eeuo pipefail
 umask 077
@@ -32,6 +34,7 @@ target_url="${UR_ACCEPT_PROXY_TARGET_URL:-https://api.bringyour.com/hello}"
 binary="${UR_ACCEPT_PROXY_BIN:-$server_root/temp/acceptance/proxy-main}"
 soak_duration="${UR_ACCEPT_PROXY_SOAK_DURATION:-5m}"
 soak_interval="${UR_ACCEPT_PROXY_SOAK_INTERVAL:-5s}"
+overlap_protocols="${UR_ACCEPT_PROXY_OVERLAP_PROTOCOLS:-true}"
 runner_timeout="${UR_ACCEPT_PROXY_TIMEOUT:-2h}"
 
 usage() {
@@ -43,6 +46,7 @@ for arg in "$@"; do
     --repeat=*) repeat_count="${arg#*=}" ;;
     --soak-duration=*) soak_duration="${arg#*=}" ;;
     --soak-interval=*) soak_interval="${arg#*=}" ;;
+    --overlap-protocols=*) overlap_protocols="${arg#*=}" ;;
     --skip-build) skip_build=1 ;;
     --headless|--keep-fixture) ;; # accepted for root-runner parity
     -h|--help) usage; exit 0 ;;
@@ -52,6 +56,10 @@ done
 case "$repeat_count" in
   ''|*[!0-9]*) echo "--repeat must be a positive integer" >&2; exit 2 ;;
   0) echo "--repeat must be at least 1" >&2; exit 2 ;;
+esac
+case "$overlap_protocols" in
+  true|false) ;;
+  *) echo "--overlap-protocols must be true or false" >&2; exit 2 ;;
 esac
 
 for command_name in go timeout tee; do
@@ -112,7 +120,11 @@ fi
 echo "[proxy acceptance] running $repeat_count complete repetition(s) against main"
 echo "[proxy acceptance] sustained campaign: $soak_duration per protocol at $soak_interval intervals"
 set +e
-timeout --signal=TERM --kill-after=60s "$runner_timeout" \
+# Keep the runner in this foreground process group. The root suite applies its
+# own deadline around this script; without --foreground, terminating the outer
+# shell can orphan this timeout and its child while both tee processes keep the
+# root pipeline open.
+timeout --foreground --signal=TERM --kill-after=60s "$runner_timeout" \
   "$binary" \
     --credentials="$credentials" \
     --result-file="$result_file" \
@@ -121,6 +133,7 @@ timeout --signal=TERM --kill-after=60s "$runner_timeout" \
     --repeat="$repeat_count" \
     --soak-duration="$soak_duration" \
     --soak-interval="$soak_interval" \
+    --overlap-protocols="$overlap_protocols" \
   2>&1 | tee "$artifacts/run.log"
 status=${PIPESTATUS[0]}
 set -e

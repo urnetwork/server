@@ -78,6 +78,25 @@ var proxyPlatformTransportPendingH1BytesGauge = prometheus.NewGauge(
 	},
 )
 
+var proxyWireGuardReturnBackpressureCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wireguard_return_backpressure_total",
+		Help:      "WireGuard return packets that waited for the bounded process receive queue",
+	},
+)
+
+var proxyWireGuardReturnBackpressureDuration = prometheus.NewHistogram(
+	prometheus.HistogramOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wireguard_return_backpressure_seconds",
+		Help:      "Time WireGuard return packets waited for bounded process receive-queue capacity",
+		Buckets:   prometheus.ExponentialBuckets(0.000_001, 4, 12),
+	},
+)
+
 // proxyDeviceMemoryUsage is one instance-wide sample without per-customer
 // labels. It preserves operational visibility without exporting proxy ids.
 type proxyDeviceMemoryUsage struct {
@@ -101,6 +120,8 @@ func init() {
 	prometheus.MustRegister(proxyPlatformTransportUsedGauge)
 	prometheus.MustRegister(proxyPlatformTransportPendingH1Gauge)
 	prometheus.MustRegister(proxyPlatformTransportPendingH1BytesGauge)
+	prometheus.MustRegister(proxyWireGuardReturnBackpressureCounter)
+	prometheus.MustRegister(proxyWireGuardReturnBackpressureDuration)
 }
 
 // aggregateProxyDeviceMemoryUsage reduces independently sampled DeviceLocals
