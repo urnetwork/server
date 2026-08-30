@@ -2812,6 +2812,24 @@ One further old-generation pass on edge-3/g1 completed at
 19:37:08.885440Z and remained in band at 36.24GiB over plus 46.47GiB under
 across 842 networks, while every negative-counter stream remained quiet.
 
+The next old-generation pass recreated a full stale-write sequence on the hot
+edge-1/g2 container `06abfbe03c32`. Task
+`01a0542c-fa1a-6ed7-5e90-19b29c5f76a8` ran from about 19:42:13Z to
+20:04:07.468260Z (an authoritative rounded 1,314s), rewriting 901,144
+balances and correcting 438.07GiB over-reserved plus 5.54TiB under-reserved
+across 2,238 networks. The redacted raw taskworker pull peaked at 3,181
+negative settlements in minute 20:05; the standing monitor windows retained
+289, 207, 133, and 81/min during the decay rather than losing the burst at a
+snapshot boundary. Its same-executor successor
+`01a05445-aef3-991e-3ccd-e3557c314bf6` was not a fast recovery: it ran 402s
+and ended at 20:15:53.180148Z with 6.17TiB over plus 386.85GiB under across
+2,405 networks. The monitor correctly rendered the 5.54TiB-under to
+6.17TiB-over pair as `matched_reversal=true`, and its next full stream window
+paged on another 1,280 taskworker negatives/min. This is a causal inverse, not
+convergence: keep the sequence open until a later scheduled aggregate returns
+to the tens-of-GiB band and taskworker, API, and Connect remain at zero for a
+full following interval.
+
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
 additive reconciler can observe that committed settlement and correct the
