@@ -607,6 +607,50 @@ func TestTaskCanariesSignalExplainsPayoutIdleTransactionClosure(t *testing.T) {
 	}
 }
 
+func TestTaskCanariesSignalExplainsMissingMigrationArtifact(t *testing.T) {
+	var failureQuery string
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			failureQuery = query
+			return []Row{{
+				"RemoveCompletedContracts", "1", "0", "1", "7", "43",
+				"Unhandled: ERROR: column account_payment.contract_retention_cursor does not exist",
+				"1800", "1", "schema-object-missing=1",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(failureQuery, "THEN 'schema-object-missing'") {
+		t.Fatalf("undefined PostgreSQL objects are not classified in SQL: %s", failureQuery)
+	}
+	if strings.Index(failureQuery, "sqlstate 42703") > strings.Index(failureQuery, "context canceled") {
+		t.Fatalf("specific missing-schema classification must precede generic cancellation: %s", failureQuery)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"cause_breakdown=schema-object-missing=1",
+		"schema-dependent code activated before its append-only migration",
+		"successful migration_audit head",
+		"Do not create the object by hand",
+		"SIGNALS.md §8.9",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("missing-schema diagnosis missing %q: %s", want, markdown)
+		}
+	}
+}
+
 func TestTaskCanariesSignalExplainsUnfundedPayoutWallet(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {

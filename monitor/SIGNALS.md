@@ -209,6 +209,14 @@ WHERE function_name LIKE '%UpdateClient%'
   fresh. On 2026-08-30 the one disabled `RefreshVerifyProxyEgress` row therefore
   read parked=1 and fresh_claim=1. Report that overlap explicitly and never add
   the two counts or describe `fresh_claim` as a guaranteed active retry.
+- GOTCHA — an undefined PostgreSQL object is an activation-order signal, not a
+  generic task retry. Classify SQLSTATE 42703/42P01/42883/42704 as
+  `schema-object-missing`, retain the exact object name, and compare the
+  running binary requirement, successful `migration_audit` head, and §8.9
+  artifact table. A behind head means the migration phase did not precede
+  dependent services; a current head with a missing object is
+  `migration-schema-drift`. Never create the object by hand or delete the task
+  row to hide either condition.
 - GOTCHA — long-running vs stuck: a live run shows claim_time refreshing
   every ~10s (the keepalive bumps claim_time+release_time). Frozen claim +
   future release_time = pre-lease-fix binary or killed worker. Current workers

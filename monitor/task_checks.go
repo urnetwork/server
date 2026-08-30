@@ -36,6 +36,11 @@ const taskFailureSummarySQL = `
 		           THEN 'processor-invalid-destination'
 		         WHEN coalesce(reschedule_error,'') LIKE '%400 Bad Request%'
 		           THEN 'processor-bad-request'
+		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42703%'
+		           OR lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42p01%'
+		           OR lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42883%'
+		           OR lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42704%'
+		           THEN 'schema-object-missing'
 		         WHEN trim(coalesce(reschedule_error,'')) = 'Timeout'
 		           THEN 'deadline-timeout'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%context canceled%'
@@ -351,11 +356,17 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		causeClassCount, causeSummary := atoiRow(r, 8), r.str(9)
 		mixedCauses := 1 < causeClassCount
 		lowerError := strings.ToLower(lastError)
+		schemaObjectMissing := strings.Contains(causeSummary, "schema-object-missing=") ||
+			strings.Contains(lowerError, "sqlstate 42703") ||
+			strings.Contains(lowerError, "sqlstate 42p01") ||
+			strings.Contains(lowerError, "sqlstate 42883") ||
+			strings.Contains(lowerError, "sqlstate 42704")
 		disabledVerifyRetry := task == "RefreshVerifyProxyEgress" &&
 			!env.cfg.verificationEnabled &&
 			(strings.Contains(lowerError, "context canceled") ||
 				strings.Contains(lowerError, "interrupted: done"))
 		alertMechanism, alertAction, alertVerify := "", "", ""
+		alertPlaybook := "SIGNALS.md 5.7"
 		alertContext := "Each task function is grouped before reporting; another noisy function cannot consume a global row limit and hide this failure. Parked and fresh-claim counts are independent predicates and can overlap briefly during reschedule handoff; do not add them together."
 		if strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
 			alertContext += fmt.Sprintf(" This literal Timeout is the task evaluator's configured deadline of %ss. Compare the matching eval-error duration; an exact match means the task needs a smaller checkpointed batch or a justified task-specific MaxTime, not a database restart.", maxTimeSeconds)
@@ -372,6 +383,12 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				alertAction = "Investigate and remediate each listed cause class independently; do not apply the representative error's action to the entire mixed family or delete task rows to hide it."
 				alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."
 			}
+		} else if schemaObjectMissing {
+			alertMechanism = "The running task references a PostgreSQL schema object that does not exist in its connected database. During a rollout this normally means schema-dependent code activated before its append-only migration and artifact check; if the successful migration head already claims that version, the database instead has migration-schema drift."
+			alertContext += " SQLSTATE 42703, 42P01, 42883, and 42704 identify undefined columns, tables, functions, and objects respectively; the exact object in the representative error must be mapped to the versioned artifact table in §8.9."
+			alertAction = "Compare the running binary's required MigrationCount, the successful migration_audit head, and the versioned artifact in §8.9. If the database is behind, reject the rollout as incomplete and run the migration phase from the exact service commit before dependent services; if the head is current, repair migration-schema-drift. Do not create the object by hand or delete the task row."
+			alertVerify = "The migration head reaches the binary-required version, every versioned artifact probe passes, and this same task family succeeds and clears its reschedule error without manual row deletion."
+			alertPlaybook = "SIGNALS.md §8.9"
 		} else if disabledVerifyRetry {
 			alertMechanism = "The verification subsystem is disabled, but a RefreshVerifyProxyEgress RunOnce row from an older generation is still executing and rescheduling. Its exact task-deadline cancellation is wasted disabled work, not evidence that the 15-minute deadline is too small."
 			alertContext += fmt.Sprintf(" The monitor loaded verification_enabled=false from the same environment. A matching eval error at the configured %ss boundary confirms the stale ungated chain; `Interrupted: Done` is the same disabled-work family.", maxTimeSeconds)
@@ -419,7 +436,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			context:  alertContext,
 			action:   alertAction,
 			verify:   alertVerify,
-			playbook: "SIGNALS.md 5.7",
+			playbook: alertPlaybook,
 		})
 	}
 	if len(failRows) == 0 {
