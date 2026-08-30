@@ -20,6 +20,21 @@ import (
 // scheduler task and let the existing in-process parallelism do the work.
 const DefaultCloseExpiredContractsBlockSize = 1
 
+const (
+	// Checkpoint task success before the 30-minute task deadline. A 100,003-row
+	// production cohort hit that deadline exactly while transfer_contract was
+	// paying down retention/autovacuum write debt; its per-contract commits
+	// survived, but the task retried with a Timeout and had to rescan. A 25k
+	// cohort keeps the same worker parallelism while committing scheduler
+	// progress four times as often.
+	closeExpiredContractsMaxCount = 25_000
+	closeExpiredContractsParallel = 92
+)
+
+func closeExpiredContractsFull(closeCount int64) bool {
+	return int64(closeExpiredContractsMaxCount/(4*DefaultCloseExpiredContractsBlockSize)) <= closeCount
+}
+
 type CloseExpiredContractsArgs struct {
 	BlockSize  int `json:"block_size"`
 	BlockIndex int `json:"block_index"`
@@ -68,18 +83,16 @@ func CloseExpiredContracts(
 ) (*CloseExpiredContractsResult, error) {
 	if closeExpiredContracts.BlockSize == DefaultCloseExpiredContractsBlockSize {
 		minTime := server.NowUtc().Add(-5 * time.Minute)
-		n := 100000
 		c, err := model.ForceCloseOpenContractIds(
 			clientSession.Ctx,
 			minTime,
-			n,
-			92,
+			closeExpiredContractsMaxCount,
+			closeExpiredContractsParallel,
 			closeExpiredContracts.BlockSize,
 			closeExpiredContracts.BlockIndex,
 		)
-		full := int64(n/(4*DefaultCloseExpiredContractsBlockSize)) <= c
 		return &CloseExpiredContractsResult{
-			Full: full,
+			Full: closeExpiredContractsFull(c),
 		}, err
 	}
 	// else ignore lingering tasks with older block size
@@ -299,11 +312,11 @@ func SweepOrphanContractDataPost(
 
 // Reconcile net escrow
 //
-// The redis net escrow counter is an approximate mirror with no ttl and no
-// other reconciliation, so leaked reservations (dropped settle posts, crashes,
-// quarantined closes) accumulate over the life of a balance and eventually
-// surface as spurious "Insufficient balance" errors. This periodically resets
-// each active balance's counter to the postgres source of truth.
+// The redis net escrow counter is an approximate, expiring mirror. Dropped
+// mirror posts can still create drift within its lifetime, so this periodically
+// compares each active balance with PostgreSQL and applies an additive
+// correction. Page-local source snapshots and additive corrections are
+// required; see model.ReconcileNetEscrow and SIGNALS.md §5.11.
 
 type ReconcileNetEscrowArgs struct {
 }

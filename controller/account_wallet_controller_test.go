@@ -42,6 +42,15 @@ func TestAccountWallet(t *testing.T) {
 		connect.AssertEqual(t, result, nil)
 		connect.AssertEqual(t, err, ErrInvalidBlockchain)
 
+		// Ethereum is recognized for wallet authentication elsewhere, but this
+		// endpoint only creates SOL/MATIC payout wallets (plus non-payout TAO).
+		result, err = CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
+			Blockchain:    "ETHEREUM",
+			WalletAddress: "0xB3f448b9C395F9833BE866577254799c23BBa682",
+		}, ownerSession)
+		connect.AssertEqual(t, result, nil)
+		connect.AssertEqual(t, err, ErrInvalidBlockchain)
+
 		// invalid address
 		result, err = CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
 			Blockchain:    "SOL",

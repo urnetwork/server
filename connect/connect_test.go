@@ -1240,6 +1240,76 @@ type testConnectConfig struct {
 	allowFallback bool
 }
 
+// Cancel every carrier first, then join the whole group so H3 reservations and
+// route publications are gone before a replacement group is constructed.
+func closeTestConnectPlatformTransports(
+	ctx context.Context,
+	transports []*connect.PlatformTransport,
+) error {
+	for _, transport := range transports {
+		transport.Close()
+	}
+	for i, transport := range transports {
+		if err := transport.CloseAndWait(ctx); err != nil {
+			return fmt.Errorf("join platform transport %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// Wait until one member of a replacement group has published live routes.
+// H3's shared memory budget intentionally permits some peers to remain queued.
+func waitForTestConnectPlatformTransport(
+	ctx context.Context,
+	transports []*connect.PlatformTransport,
+	timeout time.Duration,
+) error {
+	waitCtx, waitCancel := context.WithTimeout(ctx, timeout)
+	defer waitCancel()
+	for {
+		for _, transport := range transports {
+			if transport.IsConnected() {
+				return nil
+			}
+		}
+		select {
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// Give each logical client the production carrier capacity of the separate
+// device process it represents while preserving contention among its routes.
+func newTestConnectPlatformBudget() *connect.PlatformTransportBudget {
+	defaults := connect.DefaultPlatformTransportBudget().Stats()
+	return connect.NewPlatformTransportBudget(
+		defaults.TotalByteCount,
+		defaults.MaxTransportCount,
+	)
+}
+
+// Prove simulated devices cannot starve each other's carrier working set while
+// each device still keeps the production-sized admission ceiling.
+func TestConnectFixturePlatformBudgetsAreIndependent(t *testing.T) {
+	budgetA := newTestConnectPlatformBudget()
+	budgetB := newTestConnectPlatformBudget()
+	if budgetA == budgetB {
+		t.Fatal("logical clients shared one platform transport budget")
+	}
+	settings := connect.DefaultPlatformTransportSettings()
+	for name, budget := range map[string]*connect.PlatformTransportBudget{
+		"client A": budgetA,
+		"client B": budgetB,
+	} {
+		stats := budget.Stats()
+		if stats.TotalByteCount < settings.H3BudgetByteCount {
+			t.Errorf("%s platform budget=%d, below one H3 working set=%d", name, stats.TotalByteCount, settings.H3BudgetByteCount)
+		}
+	}
+}
+
 // this test that two clients can communicate via the connect server
 // spin up two connect servers on different ports, and connect one client to each server
 // send message bursts between the clients
@@ -1499,6 +1569,22 @@ func testConnect(
 		endpoints := slices.Collect(maps.Values(hostEndpoints))
 		endpoint := endpoints[mathrand.Intn(len(endpoints))]
 		return fmt.Sprintf("ws://127.0.0.1:%d", endpoint.h1Port), endpoint
+	}
+	// Every carrier generation uses the same hermetic endpoint policy. The DNS
+	// pump destination is distinct from TLS SNI in production, but this fixture's
+	// pump listener is the loopback DNS socket selected below.
+	newPlatformSettings := func(
+		endpoint testServerEndpoint,
+		platformBudget *connect.PlatformTransportBudget,
+	) *connect.PlatformTransportSettings {
+		settings := connect.DefaultPlatformTransportSettings()
+		settings.QuicTlsConfig.InsecureSkipVerify = true
+		settings.H3Port = endpoint.h3Port
+		settings.DnsPort = endpoint.dnsPort
+		settings.DnsPumpHost = "127.0.0.1"
+		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
+		settings.PlatformTransportBudget = platformBudget
+		return settings
 	}
 
 	maxMessageContentSize := ByteCount(0)
@@ -1768,15 +1854,13 @@ func testConnect(
 		InstanceId: connect.Id(clientAInstanceId),
 		AppVersion: "0.0.0",
 	}
+	platformBudgetA := newTestConnectPlatformBudget()
+	platformBudgetB := newTestConnectPlatformBudget()
 
 	transportAs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
 		host, endpoint := randServer()
-		settings := connect.DefaultPlatformTransportSettings()
-		settings.QuicTlsConfig.InsecureSkipVerify = true
-		settings.H3Port = endpoint.h3Port
-		settings.DnsPort = endpoint.dnsPort
-		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
+		settings := newPlatformSettings(endpoint, platformBudgetA)
 		transportA := connect.NewPlatformTransportWithTargetMode(
 			ctx,
 			clientStrategyA,
@@ -1808,11 +1892,7 @@ func testConnect(
 	transportBs := []*connect.PlatformTransport{}
 	for i := 0; i < transportCount; i += 1 {
 		host, endpoint := randServer()
-		settings := connect.DefaultPlatformTransportSettings()
-		settings.QuicTlsConfig.InsecureSkipVerify = true
-		settings.H3Port = endpoint.h3Port
-		settings.DnsPort = endpoint.dnsPort
-		settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
+		settings := newPlatformSettings(endpoint, platformBudgetB)
 		transportB := connect.NewPlatformTransportWithTargetMode(
 			ctx,
 			clientStrategyB,
@@ -1824,6 +1904,44 @@ func testConnect(
 		)
 		transportBs = append(transportBs, transportB)
 		// go transportB.Run(clientB.RouteManager())
+	}
+
+	cleanupComplete := false
+	cleanup := func() {
+		if cleanupComplete {
+			return
+		}
+		cleanupComplete = true
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), progressTimeout)
+		defer closeCancel()
+		clientA.Close()
+		clientB.Close()
+		if err := clientA.CloseAndWait(closeCtx); err != nil {
+			t.Errorf("join client A: %v", err)
+		}
+		if err := clientB.CloseAndWait(closeCtx); err != nil {
+			t.Errorf("join client B: %v", err)
+		}
+		if err := closeTestConnectPlatformTransports(closeCtx, transportAs); err != nil {
+			t.Errorf("join client A transports: %v", err)
+		}
+		if err := closeTestConnectPlatformTransports(closeCtx, transportBs); err != nil {
+			t.Errorf("join client B transports: %v", err)
+		}
+		for _, testServer := range servers {
+			testServer.Close()
+		}
+		for _, exchange := range exchanges {
+			exchange.Close()
+		}
+	}
+	defer cleanup()
+
+	if err := waitForTestConnectPlatformTransport(ctx, transportAs, progressTimeout); err != nil {
+		t.Fatalf("client A initial platform transport: %v", err)
+	}
+	if err := waitForTestConnectPlatformTransport(ctx, transportBs, progressTimeout); err != nil {
+		t.Fatalf("client B initial platform transport: %v", err)
 	}
 
 	initialTransferBalance := ByteCount(1024) * ByteCount(1024) * ByteCount(1024) * ByteCount(1024)
@@ -1983,9 +2101,13 @@ func testConnect(
 				)
 
 				if config.enableTransportReform {
-					for _, transportA := range transportAs {
-						transportA.Close()
+					closeCtx, closeCancel := context.WithTimeout(ctx, progressTimeout)
+					if err := closeTestConnectPlatformTransports(closeCtx, transportAs); err != nil {
+						closeCancel()
+						panic(fmt.Errorf("retire client A transports: %w", err))
 					}
+					closeCancel()
+					transportAs = nil
 					fmt.Printf("pause\n")
 					select {
 					case <-ctx.Done():
@@ -2006,11 +2128,7 @@ func testConnect(
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport a\n")
 						host, endpoint := randServer()
-						settings := connect.DefaultPlatformTransportSettings()
-						settings.QuicTlsConfig.InsecureSkipVerify = true
-						settings.H3Port = endpoint.h3Port
-						settings.DnsPort = endpoint.dnsPort
-						settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
+						settings := newPlatformSettings(endpoint, platformBudgetA)
 						transportA := connect.NewPlatformTransportWithTargetMode(
 							ctx,
 							clientStrategyA,
@@ -2023,10 +2141,8 @@ func testConnect(
 						transportAs = append(transportAs, transportA)
 						// go transportA.Run(clientA.RouteManager())
 					}
-					// let the closed transports remove, otherwise messages will be send to closing tranports
-					// (this will affect the nack delivery)
-					select {
-					case <-time.After(200 * time.Millisecond):
+					if err := waitForTestConnectPlatformTransport(ctx, transportAs, progressTimeout); err != nil {
+						panic(fmt.Errorf("connect replacement client A transport: %w", err))
 					}
 				}
 
@@ -2161,9 +2277,13 @@ func testConnect(
 				// }
 
 				if config.enableTransportReform {
-					for _, transportB := range transportBs {
-						transportB.Close()
+					closeCtx, closeCancel := context.WithTimeout(ctx, progressTimeout)
+					if err := closeTestConnectPlatformTransports(closeCtx, transportBs); err != nil {
+						closeCancel()
+						panic(fmt.Errorf("retire client B transports: %w", err))
 					}
+					closeCancel()
+					transportBs = nil
 					fmt.Printf("pause\n")
 					select {
 					case <-ctx.Done():
@@ -2184,11 +2304,7 @@ func testConnect(
 					for i := 0; i < transportCount; i += 1 {
 						fmt.Printf("new transport b\n")
 						host, endpoint := randServer()
-						settings := connect.DefaultPlatformTransportSettings()
-						settings.QuicTlsConfig.InsecureSkipVerify = true
-						settings.H3Port = endpoint.h3Port
-						settings.DnsPort = endpoint.dnsPort
-						settings.FramerSettings.MaxMessageLen = framerMaxMessageLen
+						settings := newPlatformSettings(endpoint, platformBudgetB)
 						transportB := connect.NewPlatformTransportWithTargetMode(
 							ctx,
 							clientStrategyB,
@@ -2201,10 +2317,8 @@ func testConnect(
 						transportBs = append(transportBs, transportB)
 						// go transportB.Run(clientB.RouteManager())
 					}
-					// let the closed transports remove, otherwise messages will be send to closing tranports
-					// (this will affect the nack delivery)
-					select {
-					case <-time.After(200 * time.Millisecond):
+					if err := waitForTestConnectPlatformTransport(ctx, transportBs, progressTimeout); err != nil {
+						panic(fmt.Errorf("connect replacement client B transport: %w", err))
 					}
 				}
 
@@ -2424,30 +2538,7 @@ func testConnect(
 	case <-time.After(5 * time.Second):
 	}
 
-	clientA.Close()
-	clientB.Close()
-
-	select {
-	case <-time.After(1 * time.Second):
-	}
-
-	for _, transportA := range transportAs {
-		transportA.Close()
-	}
-	for _, transportB := range transportBs {
-		transportB.Close()
-	}
-
-	for _, server := range servers {
-		server.Close()
-	}
-	for _, exchange := range exchanges {
-		exchange.Close()
-	}
-
-	select {
-	case <-time.After(1 * time.Second):
-	}
+	cleanup()
 
 	connect.AssertEqual(
 		t,

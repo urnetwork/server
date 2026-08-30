@@ -22,14 +22,36 @@ root="$1"
     exit 1
 }
 
+if command -v sha256sum >/dev/null 2>&1; then
+    hash_file() {
+        sha256sum < "$1" | awk '{print $1}'
+    }
+    hash_stream() {
+        sha256sum | awk '{print $1}'
+    }
+elif command -v shasum >/dev/null 2>&1; then
+    hash_file() {
+        shasum -a 256 < "$1" | awk '{print $1}'
+    }
+    hash_stream() {
+        shasum -a 256 | awk '{print $1}'
+    }
+else
+    printf 'SHA-256 utility is unavailable\n' >&2
+    exit 1
+fi
+
 (
-    while IFS= read -r -d '' relative; do
+    cd -- "$root"
+    find . -type f -print0 | sort -z | while IFS= read -r -d '' relative; do
+        relative="${relative#./}"
         case "$relative" in
             *$'\n'*|*$'\r'*)
                 printf 'local mount contains an unsafe path\n' >&2
                 exit 1
                 ;;
         esac
-        printf '%s  %s\n' "$(sha256sum "$root/$relative" | awk '{print $1}')" "$relative"
-    done < <(find "$root" -type f -printf '%P\0' | sort -z)
-) | sha256sum | awk '{print $1}'
+        digest="$(hash_file "$root/$relative")" || exit 1
+        printf '%s  %s\n' "$digest" "$relative"
+    done
+) | hash_stream

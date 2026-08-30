@@ -28,6 +28,10 @@ func canceledCircleRetryRestoreMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "restore_canceled_circle_retries")
 }
 
+func accountPaymentContractRetentionMigrationIndex(t testing.TB) int {
+	return sqlMigrationIndex(t, "account_payment_contract_retention_queue")
+}
+
 // Competition migrations were developed against an older main. They must
 // remain a contiguous suffix so every migration integrated from origin runs
 // first and retains its published version number.
@@ -41,7 +45,7 @@ func TestCompetitionMigrationsFollowOriginMigrations(t *testing.T) {
 		"competition_candidate_review_gate",
 	}
 	firstCompetitionIndex := len(migrations) - len(markers)
-	if firstCompetitionIndex <= canceledCircleRetryRestoreMigrationIndex(t) {
+	if firstCompetitionIndex <= accountPaymentContractRetentionMigrationIndex(t) {
 		t.Fatalf("competition migration suffix starts at %d before latest origin migration", firstCompetitionIndex)
 	}
 	for i, marker := range markers {
@@ -333,6 +337,117 @@ func TestCanceledCircleRetryRestoreMigration(t *testing.T) {
 		}
 		if version := DbVersion(ctx); version != migrationIndex+1 {
 			t.Fatalf("DB version = %d, want %d", version, migrationIndex+1)
+		}
+	})
+}
+
+// Existing payments completed by the synchronous pre-deploy path normally
+// already have reap_time. Queue only the recent edge defensively so a deadline
+// inherited from the former straggler rule cannot shorten the seven-day
+// post-completion window; older history remains a one-time backfill concern.
+func TestAccountPaymentContractRetentionMigration(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		migrationIndex := accountPaymentContractRetentionMigrationIndex(t)
+		ApplyDbMigrationsUpTo(ctx, migrationIndex)
+
+		recentPaymentId := NewId()
+		oldPaymentId := NewId()
+		networkId := NewId()
+		paymentPlanId := NewId()
+		now := NowUtc()
+		MaintenanceTx(ctx, func(tx PgTx) {
+			for _, payment := range []struct {
+				id           Id
+				completeTime time.Time
+			}{
+				{id: recentPaymentId, completeTime: now.Add(-24 * time.Hour)},
+				{id: oldPaymentId, completeTime: now.Add(-8 * 24 * time.Hour)},
+			} {
+				RaisePgResult(tx.Exec(ctx, `
+					INSERT INTO account_payment (
+						payment_id,
+						payment_plan_id,
+						network_id,
+						payout_byte_count,
+						payout_nano_cents,
+						min_sweep_time,
+						create_time,
+						completed,
+						complete_time
+					)
+					VALUES ($1, $2, $3, 1, 1, $4, $4, true, $4)
+				`,
+					payment.id,
+					paymentPlanId,
+					networkId,
+					payment.completeTime,
+				))
+			}
+		})
+
+		ApplyDbMigrationsUpTo(ctx, migrationIndex+1)
+
+		states := map[Id]struct {
+			pending bool
+			cursor  *Id
+		}{}
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT payment_id, contract_retention_pending, contract_retention_cursor
+				FROM account_payment
+				WHERE payment_id IN ($1, $2)
+			`, recentPaymentId, oldPaymentId)
+			WithPgResult(result, err, func() {
+				for result.Next() {
+					var paymentId Id
+					var state struct {
+						pending bool
+						cursor  *Id
+					}
+					Raise(result.Scan(&paymentId, &state.pending, &state.cursor))
+					states[paymentId] = state
+				}
+			})
+		}, OptReadOnly())
+
+		if len(states) != 2 {
+			t.Fatalf("loaded %d payment retention states, want 2", len(states))
+		}
+		if state := states[recentPaymentId]; !state.pending || state.cursor != nil {
+			t.Fatalf("recent completed payment retention state = %+v, want pending with nil cursor", state)
+		}
+		if state := states[oldPaymentId]; state.pending || state.cursor != nil {
+			t.Fatalf("old completed payment retention state = %+v, want converged", state)
+		}
+		if version := DbVersion(ctx); version != migrationIndex+1 {
+			t.Fatalf("DB version = %d, want %d", version, migrationIndex+1)
+		}
+	})
+}
+
+// Net-escrow reconciliation now reads fresh bounded balance pages instead of
+// one fleet-wide snapshot. This index is what keeps each page from rescanning
+// the complete transfer_escrow history.
+func TestNetEscrowReconcileBalanceIndex(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var indexDefinition string
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT indexdef
+				FROM pg_indexes
+				WHERE schemaname = current_schema()
+				  AND indexname = 'transfer_escrow_balance_contract'
+			`)
+			WithPgResult(result, err, func() {
+				if result.Next() {
+					Raise(result.Scan(&indexDefinition))
+				}
+			})
+		}, OptReadOnly())
+		if !strings.Contains(indexDefinition, "(balance_id, contract_id)") {
+			t.Fatalf("transfer_escrow reconciliation index = %q", indexDefinition)
 		}
 	})
 }

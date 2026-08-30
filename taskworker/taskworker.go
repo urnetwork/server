@@ -106,6 +106,9 @@ func InitTasks(ctx context.Context) {
 				glog.Infof("[taskworker]reaped %d pending tasks for removed target %s\n", removedCount, functionName)
 			}
 		}
+		if removedCount := work.RemoveDisabledVerifyTasks(ctx, tx); 0 < removedCount {
+			glog.Infof("[taskworker]reaped %d pending verification tasks while the subnet is disabled\n", removedCount)
+		}
 	})
 
 	// apply per-stream stats retention (MinIO ILM, or the local reaper) once at

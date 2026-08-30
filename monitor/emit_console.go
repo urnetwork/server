@@ -2,7 +2,7 @@
 // one-line json event to stderr — machine-parseable from day one, so the
 // deferred webhook / github pr emitters cost nothing to add behind the same
 // ticketEmitter interface.
-package main
+package monitor
 
 import (
 	"context"

@@ -104,14 +104,15 @@ type fullTunPath struct {
 	bridgeWaitGroup sync.WaitGroup
 	bridgeStarted   bool
 
-	measurementLock         sync.Mutex
-	preparedCarrierStart    *perfvarCarrierBoundary
-	carrierMeasurementStart *perfvarCarrierBoundary
-	carrierMeasurementEnd   *perfvarCarrierBoundary
-	activePackFailureFloor  *perfvarPackFailureCounts
-	carrierFencePackets     int
-	readinessAppFence       atomic.Bool
-	readinessObservation    fullTunRouteReadinessObservation
+	measurementLock                   sync.Mutex
+	preparedCarrierStart              *perfvarCarrierBoundary
+	carrierMeasurementStart           *perfvarCarrierBoundary
+	carrierMeasurementEnd             *perfvarCarrierBoundary
+	activePackFailureFloor            *perfvarPackFailureCounts
+	allowProviderDatagramPackFailures bool
+	carrierFencePackets               int
+	readinessAppFence                 atomic.Bool
+	readinessObservation              fullTunRouteReadinessObservation
 	// Nil test seams can hold or drop an exact terminal-marker attempt.
 	beforeUdpTerminalMarkerForTest      func(context.Context, bool, int) error
 	afterUdpTerminalCarrierForTest      func(context.Context, bool, int) error
@@ -692,14 +693,47 @@ func (self *fullTunPath) setActivePackFailureFloor(boundary perfvarCarrierBounda
 }
 
 // Ownership-only tests and setup joins may run without an active measurement.
-func (self *fullTunPath) activePackFailureFloorSnapshot() (*perfvarPackFailureCounts, bool) {
+func (self *fullTunPath) activePackFailureFloorSnapshot() (
+	*perfvarPackFailureCounts,
+	bool,
+	bool,
+) {
 	self.measurementLock.Lock()
 	defer self.measurementLock.Unlock()
 	if self.activePackFailureFloor == nil {
-		return nil, false
+		return nil, false, self.allowProviderDatagramPackFailures
 	}
 	packFailureFloor := *self.activePackFailureFloor
-	return &packFailureFloor, true
+	return &packFailureFloor, true, self.allowProviderDatagramPackFailures
+}
+
+// A successful boundary accounts every failure through that exact carrier
+// end. Later enclosing boundaries must validate only newer failures instead
+// of reclassifying already accepted probe loss after its narrow scope exits.
+func (self *fullTunPath) advanceActivePackFailureFloor(
+	expected perfvarPackFailureCounts,
+	next perfvarPackFailureCounts,
+) bool {
+	self.measurementLock.Lock()
+	defer self.measurementLock.Unlock()
+	if self.activePackFailureFloor == nil ||
+		*self.activePackFailureFloor != expected {
+		return false
+	}
+	packFailureFloor := next
+	self.activePackFailureFloor = &packFailureFloor
+	return true
+}
+
+// Latency-under-load explicitly measures lossy UDP probes while a TCP bulk
+// transfer owns the same route. Only that helper may account provider datagram
+// Pack refusals through its attempt/failure sample contract.
+func (self *fullTunPath) setAllowProviderDatagramPackFailures(allow bool) bool {
+	self.measurementLock.Lock()
+	defer self.measurementLock.Unlock()
+	previous := self.allowProviderDatagramPackFailures
+	self.allowProviderDatagramPackFailures = allow
+	return previous
 }
 
 // The performance observer consumes a workload-specific start at most once.
@@ -2927,14 +2961,36 @@ func fullTunRaceInstrumentationAllowance() time.Duration {
 	return 2 * fullTunMinimumDirectionalWorkloadTimeout()
 }
 
-// Platform settings retain production defaults while placing H3 on the TUN.
+// A full-TUN endpoint clones the production transport-budget capacity because
+// PERFVAR hosts independent device and provider processes in one test process.
+// Replacement transports still share their endpoint-local budget.
+func newFullTunEndpointPlatformBudget() *clientconnect.PlatformTransportBudget {
+	defaults := clientconnect.DefaultPlatformTransportBudget().Stats()
+	return clientconnect.NewPlatformTransportBudget(
+		defaults.TotalByteCount,
+		defaults.MaxTransportCount,
+	)
+}
+
+// Platform settings place H3 on the TUN. The Auto correctness candidate makes
+// H1 and H3 equal-priority routes explicitly; production Auto deliberately
+// treats H3 as a fallback and therefore does not keep both routes live.
 func fullTunPlatformSettings(
 	h3Port int,
+	platformMode clientconnect.TransportMode,
 	tun *clientconnect.Tun,
 	receiveStats *clientconnect.PlatformTransportReceiveStats,
+	platformBudget *clientconnect.PlatformTransportBudget,
 ) *clientconnect.PlatformTransportSettings {
 	settings := clientconnect.DefaultPlatformTransportSettings()
+	if platformMode == clientconnect.TransportModeAuto {
+		settings.ModePreferences = map[clientconnect.TransportMode]int{
+			clientconnect.TransportModeH1: 1,
+			clientconnect.TransportModeH3: 1,
+		}
+	}
 	settings.ReceiveStats = receiveStats
+	settings.PlatformTransportBudget = platformBudget
 	if allowance := fullTunRaceInstrumentationAllowance(); 0 < allowance {
 		settings.HttpConnectTimeout = max(settings.HttpConnectTimeout, allowance)
 		settings.WsHandshakeTimeout = max(settings.WsHandshakeTimeout, allowance)
@@ -2956,6 +3012,49 @@ func fullTunPlatformSettings(
 		})
 	}
 	return settings
+}
+
+// Simulated endpoints must not consume each other's carrier working sets.
+func TestFullTunPlatformSettingsUseIndependentEndpointBudgets(t *testing.T) {
+	deviceBudget := newFullTunEndpointPlatformBudget()
+	providerBudget := newFullTunEndpointPlatformBudget()
+	deviceSettings := fullTunPlatformSettings(
+		0,
+		clientconnect.TransportModeAuto,
+		nil,
+		nil,
+		deviceBudget,
+	)
+	providerSettings := fullTunPlatformSettings(
+		0,
+		clientconnect.TransportModeAuto,
+		nil,
+		nil,
+		providerBudget,
+	)
+	if deviceSettings.PlatformTransportBudget == providerSettings.PlatformTransportBudget {
+		t.Fatal("independent full-TUN endpoints shared one platform transport budget")
+	}
+	for name, settings := range map[string]*clientconnect.PlatformTransportSettings{
+		"device":   deviceSettings,
+		"provider": providerSettings,
+	} {
+		workingSet := settings.H1BudgetByteCount + settings.H3BudgetByteCount
+		if total := settings.PlatformTransportBudget.Stats().TotalByteCount; total < workingSet {
+			t.Errorf("%s platform budget=%d, below Auto working set=%d", name, total, workingSet)
+		}
+		if h1Priority, h3Priority := settings.ModePreferences[clientconnect.TransportModeH1], settings.ModePreferences[clientconnect.TransportModeH3]; h1Priority == 0 || h1Priority != h3Priority {
+			t.Errorf(
+				"%s Auto priorities H1=%d H3=%d, want equal nonzero priorities",
+				name,
+				h1Priority,
+				h3Priority,
+			)
+		}
+		if _, ok := settings.ModePreferences[clientconnect.TransportModeH3Dns]; ok {
+			t.Errorf("%s Auto preferences unexpectedly enabled H3 DNS", name)
+		}
+	}
 }
 
 // Client settings select exactly one production P2P data plane when requested.
@@ -3437,10 +3536,13 @@ func tryNewFullTunPathWithTopologyHooks(
 	if err := afterStage(fullTunConstructionStageProviderClient); err != nil {
 		return nil, err
 	}
+	providerPlatformBudget := newFullTunEndpointPlatformBudget()
 	providerPlatformSettings := fullTunPlatformSettings(
 		environment.providerH3Port,
+		platformMode,
 		providerTun,
 		path.providerPlatformReceiveStats,
+		providerPlatformBudget,
 	)
 	providerPlatformSettings.H3DatagramStats = path.providerH3DatagramStats
 	if hooks != nil && hooks.configureProviderPlatformSettings != nil {
@@ -3584,11 +3686,14 @@ func tryNewFullTunPathWithTopologyHooks(
 	}
 	generatorSettings := clientconnect.DefaultApiMultiClientGeneratorSettings()
 	generatorSettings.PlatformTransportMode = platformMode
+	devicePlatformBudget := newFullTunEndpointPlatformBudget()
 	generatorSettings.PlatformTransportSettingsGenerator = func() *clientconnect.PlatformTransportSettings {
 		settings := fullTunPlatformSettings(
 			environment.h3Port,
+			platformMode,
 			deviceCarrierTun,
 			path.devicePlatformReceiveStats,
+			devicePlatformBudget,
 		)
 		settings.H3DatagramStats = path.deviceH3DatagramStats
 		if hooks != nil && hooks.configureDevicePlatformSettings != nil {
@@ -4688,18 +4793,26 @@ func (self *fullTunPath) joinSourcePackCarrierBoundary(
 	)
 }
 
-// A measured interval rejects only terminal failures newer than its exact
-// workload-local start. Setup candidate failures remain before the floor.
+// A measured interval rejects terminal failures newer than its exact
+// workload-local start unless the Pack's caller identified an enclosing TCP
+// state that retains the exact bytes or can regenerate the control packet.
+// Setup candidate failures remain before the floor; UDP outside an explicitly
+// lossy probe, public callbacks, and unclassified failures remain fatal.
 func (self *fullTunPath) validateMeasuredPackFailures(
 	carrierEnd perfvarCarrierBoundary,
 ) error {
-	packFailureFloor, active := self.activePackFailureFloorSnapshot()
+	packFailureFloor, active, allowProviderDatagramFailures :=
+		self.activePackFailureFloorSnapshot()
 	if !active {
 		return nil
 	}
 	packFailures := carrierEnd.packFailures
 	if packFailures.deviceFailureCount < packFailureFloor.deviceFailureCount ||
-		packFailures.providerFailureCount < packFailureFloor.providerFailureCount {
+		packFailures.providerFailureCount < packFailureFloor.providerFailureCount ||
+		packFailures.providerRecoverableFailureCount <
+			packFailureFloor.providerRecoverableFailureCount ||
+		packFailures.providerDatagramFailureCount <
+			packFailureFloor.providerDatagramFailureCount {
 		return fmt.Errorf(
 			"Pack failure counters moved backward: start=%+v end=%+v",
 			*packFailureFloor,
@@ -4710,7 +4823,37 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 		packFailureFloor.deviceFailureCount
 	providerFailureCount := packFailures.providerFailureCount -
 		packFailureFloor.providerFailureCount
-	if deviceFailureCount == 0 && providerFailureCount == 0 {
+	providerRecoverableFailureCount :=
+		packFailures.providerRecoverableFailureCount -
+			packFailureFloor.providerRecoverableFailureCount
+	providerDatagramFailureCount :=
+		packFailures.providerDatagramFailureCount -
+			packFailureFloor.providerDatagramFailureCount
+	providerAllowedFailureCount := providerRecoverableFailureCount
+	if allowProviderDatagramFailures {
+		providerAllowedFailureCount += providerDatagramFailureCount
+	}
+	if providerFailureCount < providerAllowedFailureCount {
+		return fmt.Errorf(
+			"provider allowed Pack failures exceeded all failures: total=%d recoverable=%d datagram=%d allow-datagram=%t start=%+v end=%+v",
+			providerFailureCount,
+			providerRecoverableFailureCount,
+			providerDatagramFailureCount,
+			allowProviderDatagramFailures,
+			*packFailureFloor,
+			packFailures,
+		)
+	}
+	providerUnrecoverableFailureCount :=
+		providerFailureCount - providerAllowedFailureCount
+	if deviceFailureCount == 0 && providerUnrecoverableFailureCount == 0 {
+		if !self.advanceActivePackFailureFloor(*packFailureFloor, packFailures) {
+			return fmt.Errorf(
+				"Pack failure floor changed while validating: start=%+v end=%+v",
+				*packFailureFloor,
+				packFailures,
+			)
+		}
 		return nil
 	}
 	deviceFailureSamples := []clientconnect.SendPackLifecycleObservation{}
@@ -4722,9 +4865,13 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 		providerFailureSamples = self.providerPackSends.workloadFailureSnapshot()
 	}
 	return fmt.Errorf(
-		"measured Pack terminal failures device=%d provider=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
+		"measured Pack terminal failures device=%d provider=%d provider-recoverable=%d provider-datagram=%d allow-provider-datagram=%t provider-unrecoverable=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
 		deviceFailureCount,
 		providerFailureCount,
+		providerRecoverableFailureCount,
+		providerDatagramFailureCount,
+		allowProviderDatagramFailures,
+		providerUnrecoverableFailureCount,
 		*packFailureFloor,
 		packFailures,
 		deviceFailureSamples,
@@ -5124,7 +5271,13 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 	clientSettings := fullTunClientSettings(fullTunRouteP2pFast, nil, nil, nil, 0)
 	clientDefaults := clientconnect.DefaultClientSettings()
 	p2pSettings := clientSettings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings
-	platformSettings := fullTunPlatformSettings(0, nil, nil)
+	platformSettings := fullTunPlatformSettings(
+		0,
+		clientconnect.TransportModeH1,
+		nil,
+		nil,
+		newFullTunEndpointPlatformBudget(),
+	)
 	platformDefaults := clientconnect.DefaultPlatformTransportSettings()
 	if !perfvarRaceEnabled {
 		if settings.SendStallTimeout != defaults.SendStallTimeout ||

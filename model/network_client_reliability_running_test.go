@@ -128,6 +128,110 @@ func testingAssertScoresEquivalent(
 	}
 }
 
+func TestReliabilityRunningRecomputeCadence(t *testing.T) {
+	if got, want := time.Duration(ReliabilityRunningRecomputeBlocks)*ReliabilityBlockDuration, 4*time.Hour; got != want {
+		t.Fatalf("recompute cadence = %s, want %s", got, want)
+	}
+	if got, want := reliabilityRunningMaintenanceDeferralAfter, 5*time.Minute; got != want {
+		t.Fatalf("maintenance deferral floor = %s, want %s", got, want)
+	}
+
+	base := reliabilityRunningWindow{
+		exists:             true,
+		minBlockNumber:     1000,
+		maxBlockNumber:     2000,
+		lastRecomputeBlock: 2000,
+	}
+	tests := []struct {
+		name                    string
+		prev                    reliabilityRunningWindow
+		newMin                  int64
+		newMax                  int64
+		periodicReanchorAllowed bool
+		recompute               bool
+		deferred                bool
+	}{
+		{name: "missing state ignores maintenance", prev: reliabilityRunningWindow{}, newMin: 1001, newMax: 2001, recompute: true},
+		{name: "one cycle rolls", prev: base, newMin: 1030, newMax: 2030, periodicReanchorAllowed: true},
+		{name: "just below cadence rolls", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks - 1, newMax: 2000 + ReliabilityRunningRecomputeBlocks - 1, periodicReanchorAllowed: true},
+		{name: "cadence boundary reanchors when quiet", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks, newMax: 2000 + ReliabilityRunningRecomputeBlocks, periodicReanchorAllowed: true, recompute: true},
+		{name: "cadence boundary defers during maintenance", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks, newMax: 2000 + ReliabilityRunningRecomputeBlocks, deferred: true},
+		{name: "backward max ignores maintenance", prev: base, newMin: 999, newMax: 1999, recompute: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recompute, deferred := reliabilityRunningNeedsRecompute(
+				test.prev,
+				test.newMin,
+				test.newMax,
+				test.periodicReanchorAllowed,
+			)
+			if recompute != test.recompute || deferred != test.deferred {
+				t.Fatalf(
+					"decision = (recompute=%t deferred=%t), want (recompute=%t deferred=%t)",
+					recompute,
+					deferred,
+					test.recompute,
+					test.deferred,
+				)
+			}
+		})
+	}
+}
+
+// A task timeout used to roll back every lookback because all four running
+// aggregates shared one transaction. Inject a failure immediately after the
+// first per-lookback commit and prove that marker remains durable, then resume
+// the same operation and finish the next lookback.
+func TestClientReliabilityRunningCheckpointSurvivesLaterFailure(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		maxTime := server.NowUtc()
+		lookbacks := reliabilityRunningLookbacks()[:2]
+		sentinel := "synthetic failure after committed lookback"
+		panicked := false
+
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panicked = true
+					if recovered != sentinel {
+						t.Fatalf("unexpected panic: %v", recovered)
+					}
+				}
+			}()
+			updateClientReliabilityRunningCheckpointed(
+				ctx,
+				maxTime,
+				lookbacks,
+				func(lb reliabilityRunningLookback) {
+					if lb.lookbackIndex == lookbacks[0].lookbackIndex {
+						panic(sentinel)
+					}
+				},
+			)
+		}()
+		if !panicked {
+			t.Fatal("synthetic later-step failure did not fire")
+		}
+
+		first := testingReadRunningWindow(ctx, lookbacks[0].lookbackIndex)
+		second := testingReadRunningWindow(ctx, lookbacks[1].lookbackIndex)
+		if !first.exists {
+			t.Fatal("first lookback checkpoint rolled back after later failure")
+		}
+		if second.exists {
+			t.Fatalf("second lookback unexpectedly ran before injected failure: %+v", second)
+		}
+
+		updateClientReliabilityRunningCheckpointed(ctx, maxTime, lookbacks, nil)
+		second = testingReadRunningWindow(ctx, lookbacks[1].lookbackIndex)
+		if !second.exists {
+			t.Fatal("retry did not resume and commit the remaining lookback")
+		}
+	})
+}
+
 // TestClientReliabilityRunningRollingEquivalence is the correctness proof for the
 // rolling incremental reliability-score maintenance: driving the running sums
 // forward block-by-block (the ROLLING path) produces the exact same client
@@ -140,10 +244,9 @@ func TestClientReliabilityRunningRollingEquivalence(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		// prod defaults to recompute-every-cycle (the INCLUDE index made the
-		// full recompute ~10s, so no drift can accumulate); force a long
-		// rolling horizon here so this test still exercises and proves the
-		// rolling add/subtract path
+		// Pin the production four-hour rolling horizon so this test continues to
+		// exercise the add/subtract path even if unrelated tests adjust the
+		// package variable.
 		defer func(prev int64) { ReliabilityRunningRecomputeBlocks = prev }(ReliabilityRunningRecomputeBlocks)
 		ReliabilityRunningRecomputeBlocks = int64(4 * time.Hour / ReliabilityBlockDuration)
 

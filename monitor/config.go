@@ -3,21 +3,25 @@
 // vault/<env>/pg.yml, and (lan mode) host routes from
 // config/<env>/settings.yml. Shared facts are read from their source of
 // truth, never duplicated in monitor.yml.
-package main
+package monitor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 )
 
 // monitorYaml mirrors vault/<env>/monitor.yml.
 type monitorYaml struct {
 	Ssh struct {
-		User    string `yaml:"user"`
-		DevUser string `yaml:"dev_user"`
+		User          string   `yaml:"user"`
+		DevUser       string   `yaml:"dev_user"`
+		IdentityFiles []string `yaml:"identity_files"`
+		KeyPaths      []string `yaml:"key_paths"`
 	} `yaml:"ssh"`
 	AddressMode string `yaml:"address_mode"`
 	Hosts       []struct {
@@ -25,71 +29,126 @@ type monitorYaml struct {
 		OverlayIp string   `yaml:"overlay_ip"`
 		Roles     []string `yaml:"roles"`
 		Redis     *struct {
-			EntryPort int   `yaml:"entry_port"`
-			NodePorts []int `yaml:"node_ports"`
+			EntryPort        int   `yaml:"entry_port"`
+			NodePorts        []int `yaml:"node_ports"`
+			ExpectedReplicas int   `yaml:"expected_replicas"`
 		} `yaml:"redis"`
+		Proxy *struct {
+			PublicHostname   string   `yaml:"public_hostname"`
+			PublicInterface  string   `yaml:"public_interface"`
+			RoutingTable     int      `yaml:"routing_table"`
+			LoadBalancerUnit string   `yaml:"load_balancer_unit"`
+			AddressFamilies  []string `yaml:"address_families"`
+		} `yaml:"proxy"`
 	} `yaml:"hosts"`
 	Pg struct {
 		Port          int `yaml:"port"`
 		PgbouncerPort int `yaml:"pgbouncer_port"`
 	} `yaml:"pg"`
+	SourceAttribution struct {
+		IPv4URL      string `yaml:"ipv4_url"`
+		IPv6URL      string `yaml:"ipv6_url"`
+		ExpectedIPv4 string `yaml:"expected_ipv4"`
+		ExpectedIPv6 string `yaml:"expected_ipv6"`
+	} `yaml:"source_attribution"`
 }
 
-func loadConfig() *monitorConfig {
+// LoadSignalSettings loads production settings from the standard WARP_HOME
+// config/vault resolvers. Keeping this here makes cli/monitor a thin wrapper.
+func LoadSignalSettings() (SignalSettings, error) {
+	env, err := server.Env()
+	if err != nil {
+		return SignalSettings{}, err
+	}
+	monitorResource, err := server.Vault.SimpleResource("monitor.yml")
+	if err != nil {
+		return SignalSettings{}, fmt.Errorf("monitor.yml: %w", err)
+	}
 	var y monitorYaml
-	server.Vault.RequireSimpleResource("monitor.yml").UnmarshalYaml(&y)
-
-	cfg := &monitorConfig{
-		env:               server.RequireEnv(),
-		sshUser:           y.Ssh.User,
-		sshDevUser:        y.Ssh.DevUser,
-		addressMode:       y.AddressMode,
-		pgPort:            y.Pg.Port,
-		pgbouncerPort:     y.Pg.PgbouncerPort,
-		sshConnectTimeout: 10 * time.Second,
-		commandTimeout:    60 * time.Second,
-	}
-	if cfg.addressMode == "" {
-		cfg.addressMode = addressModeOverlay
-	}
-	if cfg.pgPort == 0 {
-		cfg.pgPort = 5432
+	if err := monitorResource.UnmarshalYamlE(&y); err != nil {
+		return SignalSettings{}, err
 	}
 
-	// baselines and other local persistence
+	pgResource, err := server.Vault.SimpleResource("pg.yml")
+	if err != nil {
+		return SignalSettings{}, fmt.Errorf("pg.yml: %w", err)
+	}
+	pgKeys, err := pgResource.ParseE()
+	if err != nil {
+		return SignalSettings{}, err
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
 	}
-	cfg.stateDir = filepath.Join(home, ".urnetwork-monitor", cfg.env)
-
-	// pg credentials from vault pg.yml (same source the app uses)
-	pgKeys := server.Vault.RequireSimpleResource("pg.yml").Parse()
-	cfg.pgUser = yamlString(pgKeys["user"])
-	cfg.pgPassword = yamlString(pgKeys["password"])
-	cfg.pgDb = yamlString(pgKeys["db"])
-
-	// lan routes (config settings.yml) — only needed in lan mode; overlay
-	// uses the overlay_ip carried in monitor.yml
+	settings := SignalSettings{
+		Environment:         env,
+		VerificationEnabled: controller.StEnabled(),
+		SSHUser:             y.Ssh.User,
+		SSHDevUser:          y.Ssh.DevUser,
+		SSHKeyPaths:         append(append([]string(nil), y.Ssh.IdentityFiles...), y.Ssh.KeyPaths...),
+		AddressMode:         AddressMode(y.AddressMode),
+		StateDir:            filepath.Join(home, ".urnetwork-monitor", env),
+		SSHConnectTimeout:   10 * time.Second,
+		CommandTimeout:      60 * time.Second,
+		PostgreSQL: PostgreSQLSettings{
+			Port:          y.Pg.Port,
+			PgBouncerPort: y.Pg.PgbouncerPort,
+			User:          yamlString(pgKeys["user"]),
+			Password:      yamlString(pgKeys["password"]),
+			Database:      yamlString(pgKeys["db"]),
+		},
+		SourceAttribution: SourceAttributionSettings{
+			IPv4URL:      y.SourceAttribution.IPv4URL,
+			IPv6URL:      y.SourceAttribution.IPv6URL,
+			ExpectedIPv4: y.SourceAttribution.ExpectedIPv4,
+			ExpectedIPv6: y.SourceAttribution.ExpectedIPv6,
+		},
+	}
+	settings = settings.withDefaults()
 	routes := lanRoutes()
-
-	for _, hostYaml := range y.Hosts {
-		h := &host{
-			name:      hostYaml.Name,
-			overlayIp: hostYaml.OverlayIp,
-			lanIp:     routes[hostYaml.Name],
-			roles:     hostYaml.Roles,
+	for _, configured := range y.Hosts {
+		h := HostSettings{
+			Name:           configured.Name,
+			LANAddress:     routes[configured.Name],
+			OverlayAddress: configured.OverlayIp,
+			Roles:          append([]string(nil), configured.Roles...),
 		}
-		if hostYaml.Redis != nil {
-			h.redisEntryPort = hostYaml.Redis.EntryPort
-			if len(hostYaml.Redis.NodePorts) == 2 {
-				h.redisNodeLo = hostYaml.Redis.NodePorts[0]
-				h.redisNodeHi = hostYaml.Redis.NodePorts[1]
+		if configured.Redis != nil {
+			h.RedisEntryPort = configured.Redis.EntryPort
+			h.RedisExpectedReplicas = configured.Redis.ExpectedReplicas
+			if len(configured.Redis.NodePorts) == 2 {
+				for port := configured.Redis.NodePorts[0]; port <= configured.Redis.NodePorts[1]; port++ {
+					h.RedisNodePorts = append(h.RedisNodePorts, port)
+				}
+			} else {
+				h.RedisNodePorts = append([]int(nil), configured.Redis.NodePorts...)
 			}
 		}
-		cfg.hosts = append(cfg.hosts, h)
+		if configured.Proxy != nil {
+			h.Proxy = &ProxyHostSettings{
+				PublicHostname:   configured.Proxy.PublicHostname,
+				PublicInterface:  configured.Proxy.PublicInterface,
+				RoutingTable:     configured.Proxy.RoutingTable,
+				LoadBalancerUnit: configured.Proxy.LoadBalancerUnit,
+				AddressFamilies:  append([]string(nil), configured.Proxy.AddressFamilies...),
+			}
+		}
+		settings.Hosts = append(settings.Hosts, h)
 	}
-	return cfg
+	if err := settings.validate(); err != nil {
+		return SignalSettings{}, err
+	}
+	return settings, nil
+}
+
+func loadConfig() *monitorConfig {
+	settings, err := LoadSignalSettings()
+	if err != nil {
+		panic(err)
+	}
+	return configFromSignalSettings(settings)
 }
 
 // lanRoutes reads config/<env>/settings.yml and returns host name -> lan ip.

@@ -128,15 +128,18 @@ func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 // its contracts together with the contract_close/transfer_escrow/
 // transfer_escrow_sweep rows in the same pass (no orphans for a later sweep) --
 // but only once now() passes the contract's reap_time (complete_time +
-// CompletedContractExpiration). A contract whose reap_time is still in the future
-// and an open/live contract must both be left untouched.
+// CompletedContractExpiration). CompletePayment only queues that retention
+// work; the bounded worker stamps it after the payment commit. A contract whose
+// reap_time is still in the future and an open/live contract must both be left
+// untouched.
 func TestRemoveCompletedContractsCascades(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
 		sourceNetworkId, sourceId, destinationNetworkId, destinationId, paidContractIds := testingSettledPayoutContracts(ctx, t)
 
-		// pay out the plan; completing a payment stamps reap_time on its contracts
+		// Pay out the plan. Completing the payment must commit without fanning out
+		// an update to every contract.
 		completeTime := server.NowUtc()
 		plan, err := PlanPayments(ctx)
 		connect.AssertEqual(t, err, nil)
@@ -145,7 +148,13 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 			CompletePayment(ctx, payment.PaymentId, "", "0xtest")
 		}
 
-		// each paid contract now has reap_time ~= complete_time + 7d (in the future)
+		for _, contractId := range paidContractIds {
+			connect.AssertEqual(t, testingReapTime(ctx, contractId) == nil, true)
+		}
+
+		// The recurring reaper drains the durable per-payment cursor in bounded
+		// transactions and stamps complete_time + 7d.
+		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
 		for _, contractId := range paidContractIds {
 			reapTime := testingReapTime(ctx, contractId)
 			connect.AssertEqual(t, reapTime != nil, true)
@@ -215,6 +224,84 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 		connect.AssertNotEqual(t, countBalances(), 0)
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(2*365*24*time.Hour))
 		connect.AssertEqual(t, countBalances(), 0)
+	})
+}
+
+// Contract retention for a completed payment is keyset-paged independently of
+// CompletePayment. A committed cursor must survive a worker budget cutoff and
+// resume with the remaining contracts on the next run.
+func TestCompletedContractRetentionResumesInBatches(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		_, _, _, _, contractIds := testingSettledPayoutContracts(ctx, t)
+		connect.AssertEqual(t, 2 < len(contractIds), true)
+
+		plan, err := PlanPayments(ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(plan.NetworkPayments), 1)
+		var paymentId server.Id
+		for _, payment := range plan.NetworkPayments {
+			paymentId = payment.PaymentId
+			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
+			connect.AssertEqual(t, CompletePayment(ctx, payment.PaymentId, "", "0xtest"), nil)
+		}
+
+		countStamped := func() int {
+			count := 0
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT COUNT(*) FROM transfer_contract WHERE contract_id = ANY($1) AND reap_time IS NOT NULL`,
+					contractIds,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&count))
+					}
+				})
+			})
+			return count
+		}
+		countPendingCursor := func() int {
+			count := 0
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+					SELECT COUNT(*)
+					FROM account_payment
+					WHERE
+						payment_id = $1 AND
+						contract_retention_pending AND
+						contract_retention_cursor IS NOT NULL
+					`,
+					paymentId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&count))
+					}
+				})
+			})
+			return count
+		}
+
+		defer func() { reaperRunBudget = 5 * time.Minute }()
+		reaperRunBudget = -time.Minute
+		connect.AssertEqual(t, assignCompletedContractReapTimeBatches(ctx, 2), int64(2))
+		connect.AssertEqual(t, countStamped(), 2)
+		connect.AssertEqual(t, countPendingCursor(), 1)
+
+		reaperRunBudget = 5 * time.Minute
+		connect.AssertEqual(
+			t,
+			assignCompletedContractReapTimeBatches(ctx, 2),
+			int64(len(contractIds)-2),
+		)
+		connect.AssertEqual(t, countStamped(), len(contractIds))
+		connect.AssertEqual(t, countPendingCursor(), 0)
+		connect.AssertEqual(t, assignCompletedContractReapTimeBatches(ctx, 2), int64(0))
 	})
 }
 
@@ -758,13 +845,11 @@ func TestSweepOrphanContractDataStaleCursorRestarts(t *testing.T) {
 	})
 }
 
-// A closed contract with no completed-payment sweep is a straggler: it never
-// gets a reap_time from CompletePayment, so it survives the normal completed-
-// payout cascade. Once it ages past StragglerContractExpiration the reaper's
-// assign pass stamps reap_time = now() and the delete pass hard deletes it with
-// its whole group. This covers both a contract whose sweep is planned into a
-// payment that never completes and a contract that was never swept at all. The
-// pending account_payment row itself is never deleted.
+// A closed contract with no payment owner is a straggler. It is retained for
+// the full 300-day window and then reaped. A contract owned by an active or
+// otherwise ambiguous incomplete payment is never a straggler: even if an old
+// deployment already stamped reap_time, the compatibility pass clears it and
+// the delete guard preserves the contract and sweep.
 func TestRemoveStragglerContracts(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -815,8 +900,23 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		}
 		connect.AssertNotEqual(t, countPendingPayments(), 0)
 
-		// inside the straggler window the contracts are too young to be reaped, so
-		// they carry no reap_time and survive
+		// Inside the straggler window the contracts carry no reap_time and survive.
+		// Age them beyond the old 90-day window to prove the new 300-day horizon is
+		// effective for the sweep-less contract too.
+		agedIds := append(append([]server.Id{}, contractIds...), sweeplessEscrow.ContractId)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				UPDATE transfer_contract
+				SET create_time = $2, reap_time = $3
+				WHERE contract_id = ANY($1)
+				`,
+				agedIds,
+				server.NowUtc().Add(-100*24*time.Hour),
+				server.NowUtc().Add(-time.Hour),
+			))
+		})
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
 		contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, contractIds[0])
 		connect.AssertEqual(t, contractCount, 1)
@@ -826,10 +926,10 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		connect.AssertEqual(t, testingReapTime(ctx, contractIds[0]) == nil, true)
 		sweeplessCount, _, _, _ := testingCountContractRows(ctx, sweeplessEscrow.ContractId)
 		connect.AssertEqual(t, sweeplessCount, 1)
+		connect.AssertEqual(t, testingReapTime(ctx, sweeplessEscrow.ContractId) == nil, true)
 
-		// age the whole group (pending-payment contracts + the sweep-less one) past
-		// the straggler expiration
-		agedIds := append(append([]server.Id{}, contractIds...), sweeplessEscrow.ContractId)
+		// Age the whole group past 300 days. Simulate reap_time left by the old
+		// 90-day implementation on the pending payment's contracts.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -841,43 +941,52 @@ func TestRemoveStragglerContracts(t *testing.T) {
 				agedIds,
 				server.NowUtc().Add(-StragglerContractExpiration-24*time.Hour),
 			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE transfer_contract SET reap_time = $2 WHERE contract_id = ANY($1)`,
+				contractIds,
+				server.NowUtc().Add(-time.Hour),
+			))
 		})
 
-		// the reaper's assign pass marks every aged closed straggler with a
-		// reap_time; the delete pass then hard deletes each with its whole group.
-		// Split this across two runs and advance the assigned reap_time into the
+		// The pending-payment contracts are repaired back to reap_time = NULL and
+		// survive. Only the sweep-less contract is a straggler. Split its cleanup
+		// across two runs and advance the assigned reap_time into the
 		// clear past between them, so the delete is deterministic regardless of
 		// DB/app clock skew: the assign stamps SQL now() (the DB clock) while the
 		// delete compares reap_time against server.NowUtc() (the app clock), so a
 		// just-assigned straggler is only due once the app clock passes it (in
 		// production, a later 30-minute run).
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
-		for _, contractId := range agedIds {
-			// each aged straggler is now either already reaped or marked for it,
-			// which proves the assign pass ran
-			reaped := func() bool {
-				c, _, _, _ := testingCountContractRows(ctx, contractId)
-				return c == 0
-			}()
-			connect.AssertEqual(t, reaped || testingReapTime(ctx, contractId) != nil, true)
+		for _, contractId := range contractIds {
+			contractCount, _, _, sweepCount := testingCountContractRows(ctx, contractId)
+			connect.AssertEqual(t, contractCount, 1)
+			connect.AssertEqual(t, sweepCount, 1)
+			connect.AssertEqual(t, testingReapTime(ctx, contractId) == nil, true)
 		}
+		sweeplessCount, _, _, _ = testingCountContractRows(ctx, sweeplessEscrow.ContractId)
+		connect.AssertEqual(
+			t,
+			sweeplessCount == 0 || testingReapTime(ctx, sweeplessEscrow.ContractId) != nil,
+			true,
+		)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
-				`UPDATE transfer_contract SET reap_time = $2 WHERE contract_id = ANY($1) AND reap_time IS NOT NULL`,
-				agedIds,
+				`UPDATE transfer_contract SET reap_time = $2 WHERE contract_id = $1 AND reap_time IS NOT NULL`,
+				sweeplessEscrow.ContractId,
 				server.NowUtc().Add(-time.Hour),
 			))
 		})
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
 
-		// the whole group is gone, sweeps included
+		// The incomplete payment's whole contract group remains intact.
 		for _, contractId := range contractIds {
 			contractCount, closeCount, escrowCount, sweepCount := testingCountContractRows(ctx, contractId)
-			connect.AssertEqual(t, contractCount, 0)
-			connect.AssertEqual(t, closeCount, 0)
-			connect.AssertEqual(t, escrowCount, 0)
-			connect.AssertEqual(t, sweepCount, 0)
+			connect.AssertEqual(t, contractCount, 1)
+			connect.AssertNotEqual(t, closeCount, 0)
+			connect.AssertNotEqual(t, escrowCount, 0)
+			connect.AssertEqual(t, sweepCount, 1)
 		}
 		// the sweep-less straggler is gone too, escrow included
 		sweeplessCount, _, sweeplessEscrowCount, _ := testingCountContractRows(ctx, sweeplessEscrow.ContractId)

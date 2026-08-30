@@ -1391,7 +1391,14 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{`! -type d ! -type f`, `sort -z`, `sha256sum "$root/$relative"`} {
+	for _, required := range []string{
+		`! -type d ! -type f`,
+		`sort -z`,
+		`command -v sha256sum`,
+		`command -v shasum`,
+		`hash_file "$root/$relative"`,
+		`hash_stream`,
+	} {
 		if !strings.Contains(string(hashBytes), required) {
 			t.Errorf("direct local digest helper is missing %q", required)
 		}
@@ -2036,13 +2043,21 @@ func TestResourceBombGateCoversOOMAndCleanup(t *testing.T) {
 			t.Errorf("resource bomb gate is missing %q", required)
 		}
 	}
-	fixtureBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/testdata/resource-bomb/main.go")
-	if err != nil {
-		t.Fatal(err)
+	var fixtureBuilder strings.Builder
+	for _, path := range []string{
+		"../connect/sim-latency/evaluator/container/testdata/resource-bomb/main.go",
+		"../connect/sim-latency/evaluator/container/testdata/resource-bomb/cpu_linux.go",
+	} {
+		fixtureBytes, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixtureBuilder.Write(fixtureBytes)
 	}
-	fixture := string(fixtureBytes)
+	fixture := fixtureBuilder.String()
 	for _, required := range []string{
 		"runtime.LockOSThread()",
+		"//go:build linux",
 		"unix.SchedSetaffinity(0, &affinity)",
 		"unix.SYS_GETCPU",
 		`fmt.Println("cpu-bomb-ready")`,
@@ -2235,7 +2250,10 @@ func TestEvaluatorRequestBindsCanonicalPatchDigest(t *testing.T) {
 }
 
 func TestHashLocalMountDirectoryIsDeterministicAndRejectsLinks(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(filepath.Join(root, "nested"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -2256,13 +2274,16 @@ func TestHashLocalMountDirectoryIsDeterministicAndRejectsLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shellDigest, err := exec.Command("../connect/sim-latency/evaluator/container/hash-local-mount.sh", root).Output()
+	shellDigest, err := exec.Command(
+		"../connect/sim-latency/evaluator/container/hash-local-mount.sh",
+		root,
+	).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(shellDigest)) != first {
 		t.Fatalf("host and Go local-mount digests differ: %q %q %v", first, shellDigest, err)
 	}
 	hostileLocaleCommand := exec.Command("../connect/sim-latency/evaluator/container/hash-local-mount.sh", root)
 	hostileLocaleCommand.Env = append(os.Environ(), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8")
-	hostileLocaleDigest, err := hostileLocaleCommand.Output()
+	hostileLocaleDigest, err := hostileLocaleCommand.CombinedOutput()
 	if err != nil || strings.TrimSpace(string(hostileLocaleDigest)) != first {
 		t.Fatalf(
 			"caller locale changed local-mount digest: want %q, got %q (%v)",

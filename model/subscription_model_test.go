@@ -1929,6 +1929,54 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 	})
 }
 
+// A durable balance may intentionally be valid for decades, but its Redis
+// reservation mirror must remain rolling state. Before the cap, every contract
+// on a 100-year balance issued EXPIREAT for 2126 and retained the key for the
+// balance's full lifetime.
+func TestNetEscrowLongLivedBalanceTtlIsCapped(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		day := 24 * time.Hour
+
+		sourceNetworkId := server.NewId()
+		sourceUserId := server.NewId()
+		sourceClientId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationUserId := server.NewId()
+		destinationClientId := server.NewId()
+		Testing_CreateNetwork(ctx, sourceNetworkId, "long-source", sourceUserId)
+		Testing_CreateNetwork(ctx, destinationNetworkId, "long-destination", destinationUserId)
+
+		err := AddBasicTransferBalance(
+			ctx,
+			sourceNetworkId,
+			10*Tib,
+			now,
+			now.Add(100*365*day),
+		)
+		connect.AssertEqual(t, err, nil)
+		balances := GetActiveTransferBalances(ctx, sourceNetworkId)
+		connect.AssertEqual(t, len(balances), 1)
+
+		_, _, err = CreateContract(
+			ctx,
+			sourceNetworkId,
+			sourceClientId,
+			destinationNetworkId,
+			destinationClientId,
+			Mib,
+		)
+		connect.AssertEqual(t, err, nil)
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl := r.TTL(ctx, netEscrowKey(balances[0].BalanceId)).Val()
+			if !(89*day < ttl && ttl <= netEscrowFallbackTtl) {
+				t.Fatalf("100-year balance mirror ttl = %s, want rolling horizon <= %s", ttl, netEscrowFallbackTtl)
+			}
+		})
+	})
+}
+
 // A companion may pair to an origin contract that CLOSED within
 // originContractTimeout, not only an open one -- the
 // `open = false AND close_time >= $3` branch of the companion lookup in

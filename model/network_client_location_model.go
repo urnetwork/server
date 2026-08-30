@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	// "math"
 	mathrand "math/rand"
 	"slices"
@@ -30,6 +31,193 @@ import (
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/stats"
 )
+
+const (
+	// One UpdateClientScores export contains thousands of cross-slot SETs for
+	// each caller location. Sending all of them through one ClusterClient
+	// pipeline from each of 48 workers can fill a node socket until the 15s
+	// write deadline; generating a complete operation list before batching also
+	// retained tens of GiB across those workers. Produce and flush one bounded
+	// batch at a time; completed chunks are not replayed when a later chunk
+	// needs a transient retry.
+	clientScoreExportBatchSize   = 512
+	clientScoreExportBatchBytes  = 8 << 20
+	clientScoreExportMaxAttempts = 3
+)
+
+type clientScoreRedisSet struct {
+	key   string
+	value []byte
+}
+
+type clientScoreExportBatchExec func([]clientScoreRedisSet) error
+type clientScoreExportRetryWait func(context.Context, int) error
+type clientScoreExportProduce func(func(clientScoreRedisSet) error) error
+
+func transientClientScoreExportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Pool exhaustion is local backpressure. Retrying it in-place adds more
+	// demand to the same saturated pool, matching server.Redis's fail-fast
+	// rule for this class.
+	if strings.Contains(err.Error(), "redis: connection pool timeout") {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	message := err.Error()
+	for _, marker := range []string{
+		"i/o timeout",
+		"connection reset by peer",
+		"cannot assign requested address",
+		"redis: client is closed",
+		"CLUSTERDOWN",
+		"LOADING",
+		"READONLY",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// runClientScoreExportStream is the deterministic bounded-working-set and
+// retry core. Produce cannot get past either the command-count or payload-byte
+// budget ahead of execBatch: a full batch is synchronously written and cleared
+// before emit returns. SET is idempotent and every value carries the same ttl, so retrying
+// exactly the failed chunk is safe; successful earlier chunks are deliberately
+// not replayed. retryWait is injected so tests never depend on wall-clock
+// sleeps.
+func runClientScoreExportStream(
+	ctx context.Context,
+	batchSize int,
+	maxBatchBytes int,
+	maxAttempts int,
+	produce clientScoreExportProduce,
+	execBatch clientScoreExportBatchExec,
+	retryWait clientScoreExportRetryWait,
+) error {
+	if batchSize <= 0 || maxBatchBytes <= 0 || maxAttempts <= 0 || produce == nil || execBatch == nil || retryWait == nil {
+		return fmt.Errorf("client score export requires positive batch size, byte budget, and attempts")
+	}
+	batch := make([]clientScoreRedisSet, 0, batchSize)
+	batchBytes := 0
+	batchIndex := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		batchIndex++
+		var err error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			err = execBatch(batch)
+			if err == nil {
+				break
+			}
+			if !transientClientScoreExportError(err) || attempt == maxAttempts {
+				return fmt.Errorf("client score export batch %d attempt %d/%d: %w", batchIndex, attempt, maxAttempts, err)
+			}
+			if waitErr := retryWait(ctx, attempt); waitErr != nil {
+				return waitErr
+			}
+		}
+		// Release every encoded payload before produce resumes. Re-slicing alone
+		// leaves the old []byte references in the backing array and lets a short
+		// tail retain almost a full prior batch until the worker exits.
+		clear(batch)
+		batch = batch[:0]
+		batchBytes = 0
+		return nil
+	}
+	emit := func(set clientScoreRedisSet) error {
+		setBytes := len(set.key) + len(set.value)
+		// Count and bytes are independent guards. Encoded samples vary with
+		// provider population, so a 512-command batch alone is not a bounded
+		// working set. Flush before adding a value that would cross the byte
+		// budget. One individually oversized value is unavoidable, but is sent
+		// alone immediately instead of being combined with other payloads.
+		if 0 < len(batch) && (maxBatchBytes-batchBytes < setBytes) {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		batch = append(batch, set)
+		batchBytes += setBytes
+		if len(batch) == batchSize || maxBatchBytes <= batchBytes {
+			return flush()
+		}
+		return nil
+	}
+	if err := produce(emit); err != nil {
+		return err
+	}
+	return flush()
+}
+
+// runClientScoreExportBatches retains the slice-based seam for focused retry
+// tests and small callers. Production uses the streaming producer below, so a
+// whole caller-location export is never materialized at once.
+func runClientScoreExportBatches(
+	ctx context.Context,
+	sets []clientScoreRedisSet,
+	batchSize int,
+	maxBatchBytes int,
+	maxAttempts int,
+	execBatch clientScoreExportBatchExec,
+	retryWait clientScoreExportRetryWait,
+) error {
+	return runClientScoreExportStream(
+		ctx,
+		batchSize,
+		maxBatchBytes,
+		maxAttempts,
+		func(emit func(clientScoreRedisSet) error) error {
+			for _, set := range sets {
+				if err := emit(set); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		execBatch,
+		retryWait,
+	)
+}
+
+func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl time.Duration, produce clientScoreExportProduce) error {
+	return runClientScoreExportStream(
+		ctx,
+		clientScoreExportBatchSize,
+		clientScoreExportBatchBytes,
+		clientScoreExportMaxAttempts,
+		produce,
+		func(batch []clientScoreRedisSet) error {
+			pipe := r.Pipeline()
+			for _, set := range batch {
+				pipe.Set(ctx, set.key, set.value, ttl)
+			}
+			_, err := pipe.Exec(ctx)
+			return err
+		},
+		func(ctx context.Context, failedAttempt int) error {
+			timer := time.NewTimer(time.Duration(failedAttempt) * 250 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
+	)
+}
 
 func init() {
 	resetCountryCodeLocationIds()
@@ -3590,11 +3778,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 	exportClientScores := func(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) (
 		countsBytes []byte,
-		samplesBytes [][]byte,
 		filterBytes []byte,
 		counts []int,
-		samples [][]*ClientScore,
-		filter *ClientFilter,
+		encodeSample func(int) []byte,
 	) {
 		clientScores := []*ClientScore{}
 		publicCount := 0
@@ -3617,7 +3803,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		// UpdateClientLocations it counts only providers a stranger can reach:
 		// a location whose only supply is network-only is not stable, and with
 		// zero public providers it reports no providers at all.
-		filter = &ClientFilter{
+		filter := &ClientFilter{
 			Count:                publicCount,
 			NetReliabilityWeight: publicNetReliabilityWeight,
 		}
@@ -3629,24 +3815,26 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		n := (len(clientScores) + ClientScoreSampleCount - 1) / ClientScoreSampleCount
 
 		counts = make([]int, n)
-		samples = make([][]*ClientScore, n)
-		samplesBytes = make([][]byte, n)
-
+		clientsPerSample := 0
 		if 0 < n {
-			c := (len(clientScores) + n - 1) / n
+			clientsPerSample = (len(clientScores) + n - 1) / n
 			for i := range n {
-				i0 := i * c
-				i1 := min((i+1)*c, len(clientScores))
-				sample := clientScores[i0:i1]
-
-				counts[i] = len(sample)
-				samples[i] = sample
-
-				b := bytes.NewBuffer(nil)
-				e := gob.NewEncoder(b)
-				e.Encode(sample)
-				samplesBytes[i] = b.Bytes()
+				i0 := i * clientsPerSample
+				i1 := min((i+1)*clientsPerSample, len(clientScores))
+				counts[i] = i1 - i0
 			}
+		}
+		// Encode on demand so 48 parallel caller-location exporters retain at
+		// most one sample each, rather than every encoded sample for their
+		// current provider location. The returned bytes move directly into the
+		// 512-item/8MiB streaming writer and are cleared after the synchronous Exec.
+		encodeSample = func(i int) []byte {
+			i0 := i * clientsPerSample
+			i1 := min((i+1)*clientsPerSample, len(clientScores))
+			b := bytes.NewBuffer(nil)
+			e := gob.NewEncoder(b)
+			e.Encode(clientScores[i0:i1])
+			return b.Bytes()
 		}
 
 		b := bytes.NewBuffer(nil)
@@ -3733,34 +3921,52 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				for _, forceMinimum := range []bool{false, true} {
 					for rankMode, _ := range performanceTargets {
 						for _, clientLocationId := range blockClientLocationIds {
-							// plain pipeline instead of tx: the sets are independent and the
-							// keys hash to different cluster slots, which multi/exec cannot span
-							pipe := r.Pipeline()
-
-							exportIndex := exportCount.Add(1)
-							glog.Infof("[nclm]export client location[%d/%d] %s\n", exportIndex, 2*len(performanceTargets)*len(clientLocationIds), clientLocationId)
-							for locationId, clientScores := range locationClientScores {
-								activeClientScores := filterActive(clientScores, clientLocationId)
-								countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
-								pipe.Set(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId), countsBytes, ttl)
-								pipe.Set(ctx, clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId), filterBytes, ttl)
-								for i, sampleBytes := range samplesBytes {
-									pipe.Set(ctx, clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, clientLocationId, i), sampleBytes, ttl)
+							// The sets are independent and hash to different cluster slots, so
+							// multi/exec cannot span them. Encode directly into the bounded
+							// writer: with 48 parallel exporters, retaining a complete operation
+							// list per caller location produced a 6–31GiB allocated-heap sawtooth even
+							// after the wire pipeline itself was chunked.
+							err := writeClientScoreRedisStream(ctx, r, ttl, func(emit func(clientScoreRedisSet) error) error {
+								exportIndex := exportCount.Add(1)
+								glog.Infof("[nclm]export client location[%d/%d] %s\n", exportIndex, 2*len(performanceTargets)*len(clientLocationIds), clientLocationId)
+								for locationId, clientScores := range locationClientScores {
+									activeClientScores := filterActive(clientScores, clientLocationId)
+									countsBytes, filterBytes, counts, encodeSample := exportClientScores(forceMinimum, rankMode, activeClientScores)
+									for _, set := range []clientScoreRedisSet{
+										{key: clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId), value: countsBytes},
+										{key: clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId), value: filterBytes},
+									} {
+										if err := emit(set); err != nil {
+											return err
+										}
+									}
+									for i := range counts {
+										if err := emit(clientScoreRedisSet{key: clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, clientLocationId, i), value: encodeSample(i)}); err != nil {
+											return err
+										}
+									}
+									glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
 								}
-								glog.V(2).Infof("[nclm]update client scores location samples(%s)[%d] = %v\n", locationId, len(counts), counts)
-							}
-							for locationGroupId, clientScores := range locationGroupClientScores {
-								activeClientScores := filterActive(clientScores, clientLocationId)
-								countsBytes, samplesBytes, filterBytes, counts, _, _ := exportClientScores(forceMinimum, rankMode, activeClientScores)
-								pipe.Set(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId), countsBytes, ttl)
-								pipe.Set(ctx, clientScoreLocationGroupFilterKey(forceMinimum, rankMode, locationGroupId, clientLocationId), filterBytes, ttl)
-								for i, sampleBytes := range samplesBytes {
-									pipe.Set(ctx, clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, clientLocationId, i), sampleBytes, ttl)
+								for locationGroupId, clientScores := range locationGroupClientScores {
+									activeClientScores := filterActive(clientScores, clientLocationId)
+									countsBytes, filterBytes, counts, encodeSample := exportClientScores(forceMinimum, rankMode, activeClientScores)
+									for _, set := range []clientScoreRedisSet{
+										{key: clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId), value: countsBytes},
+										{key: clientScoreLocationGroupFilterKey(forceMinimum, rankMode, locationGroupId, clientLocationId), value: filterBytes},
+									} {
+										if err := emit(set); err != nil {
+											return err
+										}
+									}
+									for i := range counts {
+										if err := emit(clientScoreRedisSet{key: clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, clientLocationId, i), value: encodeSample(i)}); err != nil {
+											return err
+										}
+									}
+									glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
 								}
-								glog.V(2).Infof("[nclm]update client scores location group samples(%s)[%d] = %v\n", locationGroupId, len(counts), counts)
-							}
-
-							_, err := pipe.Exec(ctx)
+								return nil
+							})
 							if err != nil {
 								select {
 								case <-ctx.Done():

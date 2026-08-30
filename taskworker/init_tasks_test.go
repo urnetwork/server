@@ -7,8 +7,10 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
+	"github.com/urnetwork/server/taskworker/work"
 )
 
 type orphanSeedArgs struct{}
@@ -16,6 +18,50 @@ type orphanSeedResult struct{}
 
 func orphanSeedTask(args *orphanSeedArgs, clientSession *session.ClientSession) (*orphanSeedResult, error) {
 	return &orphanSeedResult{}, nil
+}
+
+// TestInitTasksReapsVerificationChainsWhileDisabled is the regression for
+// main's RefreshVerifyProxyEgress row retrying "Interrupted: Done" / context
+// canceled hundreds of times although st.yml deliberately had enabled=false.
+// Old pending RunOnce chains are removed, and the normal InitTasks scheduling
+// pass cannot recreate any verification task while disabled.
+func TestInitTasksReapsVerificationChainsWhileDisabled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+
+		controller.SetStConfig(&controller.StConfig{Enabled: true})
+		defer controller.SetStConfig(nil)
+		server.Tx(ctx, func(tx server.PgTx) {
+			work.ScheduleSweepVerifyTrails(clientSession, tx)
+			work.ScheduleRollupVerifyProviderStats(clientSession, tx)
+			work.ScheduleRemoveOldVerifyProviderStats(clientSession, tx)
+			work.ScheduleRefreshVerifyProxyEgress(clientSession, tx)
+		})
+
+		countVerifyTasks := func() (count int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT count(*) FROM pending_task WHERE function_name = ANY($1)`,
+					work.VerifyTaskFunctionNames(),
+				)
+				server.WithPgResult(result, err, func() {
+					connect.AssertEqual(t, result.Next(), true)
+					server.Raise(result.Scan(&count))
+				})
+			})
+			return
+		}
+
+		connect.AssertEqual(t, countVerifyTasks(), len(work.VerifyTaskFunctionNames()))
+		controller.SetStConfig(&controller.StConfig{Enabled: false})
+
+		InitTasks(ctx)
+
+		connect.AssertEqual(t, countVerifyTasks(), 0)
+	})
 }
 
 // TestInitTasksReapsRemovedTargets is the integration test for the

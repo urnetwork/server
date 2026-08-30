@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 // a subprocess with a 2s teardown bound and pins that the failure now FAILS
 // fast instead of hanging.
 func TestTeardownBoundedOnLeakedConnections(t *testing.T) {
+	const dbNamePathEnv = "WARP_TEST_TEARDOWN_DB_NAME_PATH"
 	if os.Getenv("WARP_TEST_TEARDOWN_SUBPROCESS") == "1" {
 		// the inner (intentionally failing) test: single attempt, no
 		// migrations, one goroutine parked on a pool connection when the
@@ -31,6 +34,12 @@ func TestTeardownBoundedOnLeakedConnections(t *testing.T) {
 			acquired := make(chan struct{})
 			go func() {
 				Db(ctx, func(conn PgConn) {
+					var datname string
+					Raise(conn.QueryRow(ctx, `SELECT current_database()`).Scan(&datname))
+					if _, ok := parseTestPgDbName(datname); !ok {
+						panic(fmt.Errorf("invalid generated test database name %q", datname))
+					}
+					Raise(os.WriteFile(os.Getenv(dbNamePathEnv), []byte(datname), 0o600))
 					close(acquired)
 					// hold the pool connection past the attempt's death
 					select {}
@@ -43,7 +52,34 @@ func TestTeardownBoundedOnLeakedConnections(t *testing.T) {
 	}
 
 	// outer: run the inner in a subprocess so its failure doesn't fail us,
-	// with a tight teardown bound so the abandon path runs in seconds
+	// with a tight teardown bound so the abandon path runs in seconds. The
+	// child's deliberately leaked connection makes its normal teardown
+	// impossible, so record and remove that exact disposable database after the
+	// process exits instead of leaving it for the age-based orphan reaper.
+	dbNamePath := filepath.Join(t.TempDir(), "database-name")
+	t.Cleanup(func() {
+		datnameBytes, err := os.ReadFile(dbNamePath)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			t.Errorf("read leaked test database name: %v", err)
+			return
+		}
+		datname := string(datnameBytes)
+		if _, ok := parseTestPgDbName(datname); !ok {
+			t.Errorf("refuse to drop invalid test database name %q", datname)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		Db(ctx, func(conn PgConn) {
+			_, err := conn.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, datname))
+			if err != nil {
+				t.Errorf("drop leaked test database %s: %v", datname, err)
+			}
+		}, OptReadWrite())
+	})
 	cmd := exec.Command(
 		os.Args[0],
 		"-test.run", "^TestTeardownBoundedOnLeakedConnections$",
@@ -54,6 +90,7 @@ func TestTeardownBoundedOnLeakedConnections(t *testing.T) {
 		os.Environ(),
 		"WARP_TEST_TEARDOWN_SUBPROCESS=1",
 		"WARP_TEST_TEARDOWN_BOUND_SECONDS=2",
+		dbNamePathEnv+"="+dbNamePath,
 	)
 	start := time.Now()
 	out, err := cmd.CombinedOutput()

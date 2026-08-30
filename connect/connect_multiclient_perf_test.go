@@ -74,13 +74,17 @@ const (
 	mcUdpDeliveryMinFraction = 0.01
 	// seq (8) + send nanos (8)
 	mcPayloadHeaderByteCount = 16
+	// the harness consumes packets directly from the multi-client callback,
+	// without a kernel IP stack to reassemble IPv4 fragments. Keep each UDP
+	// datagram at the product tunnel MTU so a callback is one complete packet.
+	mcUdpPayloadByteCount = connect.DefaultMtu - connect.Ipv4HeaderSizeWithoutExtensions - connect.UdpHeaderSize
 
 	// download blast volume and pacing. The pace is set above the expected
 	// stack ceiling so the path stays saturated; the kernel drops the excess
 	// at the nat ingress socket, and the delivered goodput measures the
 	// sustainable download rate of the full stack.
 	mcDownloadTotalByteCount   = 100 * 1024 * 1024
-	mcDownloadPayloadByteCount = 1400
+	mcDownloadPayloadByteCount = mcUdpPayloadByteCount
 	// pace in 64 KiB chunks with a 1ms sleep: ~62 MiB/s
 	mcDownloadPaceChunkByteCount = 64 * 1024
 
@@ -936,7 +940,7 @@ func testConnectMultiClientPerformance(t testing.TB) {
 	// the blast is run several times and the run with the best delivery is
 	// taken, to ride out host scheduling noise on the build server.
 
-	payloadByteCount := 1400
+	payloadByteCount := mcUdpPayloadByteCount
 	sourcePorts := []int{41000, 41001, 41002, 41003}
 
 	// profile the single-client send/receive path across the throughput runs

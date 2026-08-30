@@ -78,6 +78,7 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		excusedStatsRecorded := make(chan server.Id, 4)
 
 		// DrainAllTimeout also sets the announce transition time
 		// (2x DrainAllTimeout after start): after that, a reconnect announces
@@ -97,6 +98,18 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 			func(handlerSettings *ConnectHandlerSettings) {
 				handlerSettings.ConnectionAnnounceTimeout = 100 * time.Millisecond
 				handlerSettings.ConnectionAnnounceSettings.SyncConnectionTimeout = 200 * time.Millisecond
+				handlerSettings.ConnectionAnnounceSettings.reliabilityStatsRecordedForTest = func(
+					clientId server.Id,
+					stats model.ClientReliabilityStats,
+				) {
+					if stats.ConnectionExcusedNewCount == 0 {
+						return
+					}
+					select {
+					case excusedStatsRecorded <- clientId:
+					default:
+					}
+				}
 			})
 		defer env.Close()
 
@@ -113,8 +126,6 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 		defer clientA.Close()
 		clientB := env.newClient(clientIdB)
 		defer clientB.Close()
-
-		startBlock := testingReliabilityBlockNumber(server.NowUtc()) - 1
 
 		transportA := env.newTransport(byClientJwtA, server.NewId(), clientA.RouteManager())
 		defer transportA.Close()
@@ -145,6 +156,13 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 		case <-time.After(2*drainAllTimeout + 1*time.Second):
 		}
 
+		// Keep setup's initial connection/provide changes out of the row whose
+		// validity proves the drain excuse. Reliability counters merge by
+		// minute, so querying a shared setup block cannot attribute its invalid
+		// state to either the organic setup change or the excused reconnect.
+		waitForNextReliabilityBlock(ctx)
+		startBlock := testingReliabilityBlockNumber(server.NowUtc())
+
 		excusesWrittenBefore := testingCounterValue(drainExcusesWrittenCounter)
 
 		drainStartTime := time.Now()
@@ -157,44 +175,38 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 		excusesWritten := testingCounterValue(drainExcusesWrittenCounter) - excusesWrittenBefore
 		connect.AssertEqual(t, true, 2 <= excusesWritten)
 
-		// the redialing connections consume the markers. Whichever bounce
-		// consumes the marker records an excused reconnect; across the fleet
-		// at least one excused reconnect lands (the strict per-client
-		// excused-recording is asserted deterministically in
-		// TestConnectionAnnounceDrainExcuse and TestExchangeDrainMigrateE2e).
-		var totals testingReliabilityTotals
-		anyExcused := false
-		endTime := time.Now().Add(90 * time.Second)
-		for {
-			model.RollupClientReliabilityStats(ctx, server.NowUtc().Add(3*model.ReliabilityBlockDuration))
-			endBlock := testingReliabilityBlockNumber(server.NowUtc()) + 1
-			for _, clientId := range []server.Id{clientIdA, clientIdB} {
-				if 1 <= testingReadClientReliabilityTotals(ctx, clientId, startBlock, endBlock).excusedNew {
-					anyExcused = true
-				}
-			}
-			totals = testingReadClientReliabilityTotals(ctx, clientIdA, startBlock, endBlock)
-			// the markers are consumed once the clients have redialed
-			markersConsumed := !model.HasDrainExcuse(ctx, clientIdA) && !model.HasDrainExcuse(ctx, clientIdB)
-			// wait for every asserted condition, not just the excuse ones:
-			// clientA's valid-rollup row can land a beat after clientB's excuse,
-			// and breaking before it exists races the anyValid assert below
-			if anyExcused && markersConsumed && totals.anyValid {
-				break
-			}
-			if endTime.Before(time.Now()) {
-				break
-			}
+		// Marker consumption precedes the reliability Redis write inside one
+		// announce sync. Wait for the post-record barrier before fast-forwarding
+		// rollup; otherwise the artificial future clock can finalize this block
+		// ahead of a reconnect that is still running under the race detector.
+		recordedClientIds := map[server.Id]bool{}
+		recordEndTime := time.NewTimer(30 * time.Second)
+		defer recordEndTime.Stop()
+		for len(recordedClientIds) < 2 {
 			select {
+			case clientId := <-excusedStatsRecorded:
+				recordedClientIds[clientId] = true
+			case <-recordEndTime.C:
+				t.Fatalf("wait for excused reconnect records: got %v", recordedClientIds)
 			case <-ctx.Done():
 				return
-			case <-time.After(500 * time.Millisecond):
 			}
 		}
-		connect.AssertEqual(t, true, anyExcused)
+		model.RollupClientReliabilityStats(
+			ctx,
+			server.NowUtc().Add(3*model.ReliabilityBlockDuration),
+		)
+		endBlock := testingReliabilityBlockNumber(server.NowUtc()) + 1
+		totalsA := testingReadClientReliabilityTotals(ctx, clientIdA, startBlock, endBlock)
+		totalsB := testingReadClientReliabilityTotals(ctx, clientIdB, startBlock, endBlock)
+		connect.AssertEqual(t, true, 1 <= totalsA.excusedNew)
+		connect.AssertEqual(t, true, 1 <= totalsB.excusedNew)
 		connect.AssertEqual(t, false, model.HasDrainExcuse(ctx, clientIdA))
 		connect.AssertEqual(t, false, model.HasDrainExcuse(ctx, clientIdB))
-		connect.AssertEqual(t, true, totals.anyValid)
+		// The drain contract is that each row carrying an excused reconnect
+		// remains valid.
+		connect.AssertEqual(t, true, totalsA.excusedRowsAllValid)
+		connect.AssertEqual(t, true, totalsB.excusedRowsAllValid)
 
 		// the drain left no persistent disconnect marker: the observer still
 		// sees the provider once the dust settles
@@ -393,6 +405,7 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		excusedStatsRecorded := make(chan server.Id, 4)
 
 		drainAllTimeout := 10 * time.Second
 		mutateExchangeSettings := func(exchangeSettings *ExchangeSettings) {
@@ -407,6 +420,18 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 		mutateHandlerSettings := func(handlerSettings *ConnectHandlerSettings) {
 			handlerSettings.ConnectionAnnounceTimeout = 100 * time.Millisecond
 			handlerSettings.ConnectionAnnounceSettings.SyncConnectionTimeout = 200 * time.Millisecond
+			handlerSettings.ConnectionAnnounceSettings.reliabilityStatsRecordedForTest = func(
+				clientId server.Id,
+				stats model.ClientReliabilityStats,
+			) {
+				if stats.ConnectionExcusedNewCount == 0 {
+					return
+				}
+				select {
+				case excusedStatsRecorded <- clientId:
+				default:
+				}
+			}
 		}
 
 		env1 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, mutateExchangeSettings, mutateHandlerSettings)
@@ -431,8 +456,6 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 		defer clientA.Close()
 		clientB := env1.newClient(clientIdB)
 		defer clientB.Close()
-
-		startBlock := testingReliabilityBlockNumber(server.NowUtc()) - 1
 
 		mtA := newMigratingTransport(ctx, clientA, byClientJwtA, server.NewId(), lb.port(), 0, 0)
 		defer mtA.Close()
@@ -506,8 +529,12 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 		}
 
 		// align the drain to a fresh reliability block (see
-		// waitForNextReliabilityBlock)
+		// waitForNextReliabilityBlock). Capture the query floor only after the
+		// boundary: setup can run past the service transition under -race, in
+		// which case its initial organic connection belongs to an earlier block
+		// and must not be misattributed to migration.
 		waitForNextReliabilityBlock(ctx)
+		startBlock := testingReliabilityBlockNumber(server.NowUtc())
 
 		// take env1 out of rotation, then drain it: the broadcast asks the
 		// clients to migrate; new dials land on env2
@@ -596,26 +623,31 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 		stopWatch()
 		connect.AssertEqual(t, false, blipped.Load())
 
-		// the migrated reconnects are excused, with no invalid blocks
-		var totalsA, totalsB testingReliabilityTotals
-		rollupEndTime := time.Now().Add(90 * time.Second)
-		for {
-			model.RollupClientReliabilityStats(ctx, server.NowUtc().Add(3*model.ReliabilityBlockDuration))
-			endBlock := testingReliabilityBlockNumber(server.NowUtc()) + 1
-			totalsA = testingReadClientReliabilityTotals(ctx, clientIdA, startBlock, endBlock)
-			totalsB = testingReadClientReliabilityTotals(ctx, clientIdB, startBlock, endBlock)
-			if 1 <= totalsA.excusedNew && 1 <= totalsB.excusedNew {
-				break
-			}
-			if rollupEndTime.Before(time.Now()) {
-				break
-			}
+		// Wait until both announce loops have written their excused stats to
+		// Redis before advancing the rollup clock. Marker consumption happens
+		// earlier in the same sync and is not a sufficient write barrier.
+		recordedClientIds := map[server.Id]bool{}
+		recordEndTime := time.NewTimer(30 * time.Second)
+		defer recordEndTime.Stop()
+		for len(recordedClientIds) < 2 {
 			select {
+			case clientId := <-excusedStatsRecorded:
+				recordedClientIds[clientId] = true
+			case <-recordEndTime.C:
+				t.Fatalf("wait for excused migrated reconnect records: got %v", recordedClientIds)
 			case <-ctx.Done():
 				return
-			case <-time.After(500 * time.Millisecond):
 			}
 		}
+
+		// the migrated reconnects are excused, with no invalid blocks
+		model.RollupClientReliabilityStats(
+			ctx,
+			server.NowUtc().Add(3*model.ReliabilityBlockDuration),
+		)
+		endBlock := testingReliabilityBlockNumber(server.NowUtc()) + 1
+		totalsA := testingReadClientReliabilityTotals(ctx, clientIdA, startBlock, endBlock)
+		totalsB := testingReadClientReliabilityTotals(ctx, clientIdB, startBlock, endBlock)
 		connect.AssertEqual(t, true, 1 <= totalsA.excusedNew)
 		connect.AssertEqual(t, true, 1 <= totalsB.excusedNew)
 		connect.AssertEqual(t, int64(0), totalsA.connectionNew)

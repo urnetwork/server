@@ -3,7 +3,7 @@
 // pre-loaded with the measurements a diagnostician would run first. Batteries
 // are read-only and bounded; a battery error degrades to a note in the
 // evidence, never a probe failure.
-package main
+package monitor
 
 import (
 	"context"
@@ -204,10 +204,11 @@ func redisNodeBattery(ctx context.Context, env *probeEnv, port int) string {
 	info, err := env.runner.redis(ctx, h, port, "INFO", "memory")
 	if err == nil {
 		kv := parseRedisInfo(info)
+		clientBytes := atof(kv["mem_clients_normal"]) + atof(kv["mem_clients_slaves"])
 		parts = append(parts, fmt.Sprintf(
-			"node %d memory: used=%s maxmemory=%s dataset=%s clients=%s frag=%s",
+			"node %d memory: used=%s maxmemory=%s dataset=%.2fG clients=%.2fG frag=%s",
 			port, kv["used_memory_human"], kv["maxmemory_human"],
-			kv["used_memory_dataset"], kv["used_memory_clients"],
+			gb(atof(kv["used_memory_dataset"])), gb(clientBytes),
 			kv["mem_fragmentation_ratio"]))
 	} else {
 		parts = append(parts, fmt.Sprintf("node %d INFO memory failed: %s", port, err))
@@ -230,6 +231,71 @@ func redisNodeBattery(ctx context.Context, env *probeEnv, port int) string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+// redisConnectionBattery is the SIGNALS.md §3.5 discriminator for a node
+// whose client count is far above its peers. It collapses CLIENT LIST on the
+// Redis host before returning it, so the alert identifies whether the extra
+// sockets are one source/process cohort repeatedly touching one hot slot or a
+// fleet-wide reconnect storm without transferring thousands of raw client
+// rows to the monitor.
+func redisConnectionBattery(ctx context.Context, env *probeEnv, port int) string {
+	h := env.cfg.hostByRole("redis-cluster")
+	if h == nil {
+		return ""
+	}
+	command := fmt.Sprintf(`marker_slot=$(redis-cli --raw -p %d CLUSTER KEYSLOT client_reliability_stats_blocks 2>/dev/null)
+marker_owner=$(redis-cli --raw -p %d CLUSTER NODES 2>/dev/null | awk -v slot="$marker_slot" '
+function owns(token, slot, range) {
+  if (token ~ /^\[/) return 0
+  if (token ~ /^[0-9]+$/) return token + 0 == slot
+  if (token ~ /^[0-9]+-[0-9]+$/) {
+    split(token, range, "-")
+    return range[1] + 0 <= slot && slot <= range[2] + 0
+  }
+  return 0
+}
+$3 ~ /master/ {
+  for (i=9; i<=NF; i++) if (owns($i, slot)) {
+    address=$2
+    sub(/@.*/, "", address)
+    sub(/^.*:/, "", address)
+    print address
+    exit
+  }
+}')
+owns_marker=false
+[ "$marker_owner" = "%d" ] && owns_marker=true
+echo "reliability_marker_slot=$marker_slot reliability_marker_owner_port=$marker_owner queried_node_owns_reliability_marker=$owns_marker"
+redis-cli -p %d CLIENT LIST 2>/dev/null | awk '
+{
+  source="-"; flags="-"; cmd="-"; lib="-"; idle=0; age=0
+  for (i=1; i<=NF; i++) {
+    split($i, value, "=")
+    if (value[1] == "addr") { source=value[2]; sub(/:[0-9]+$/, "", source) }
+    else if (value[1] == "flags") flags=value[2]
+    else if (value[1] == "cmd") cmd=value[2]
+    else if (value[1] == "lib-name") lib=value[2]
+    else if (value[1] == "idle") idle=value[2]+0
+    else if (value[1] == "age") age=value[2]+0
+  }
+  key="source=" source " flags=" flags " cmd=" cmd " lib=" lib
+  count[key]++
+  if (maxIdle[key] < idle) maxIdle[key]=idle
+  if (maxAge[key] < age) maxAge[key]=age
+}
+END {
+  for (key in count) print count[key], "max_idle_s=" maxIdle[key], "max_age_s=" maxAge[key], key
+}' | sort -rn | head -20`, port, port, port, port)
+	out, err := env.runner.shell(ctx, h, command)
+	if err != nil {
+		return fmt.Sprintf("node %d CLIENT LIST cohort aggregation failed: %s", port, err)
+	}
+	if strings.TrimSpace(out) == "" {
+		return fmt.Sprintf("node %d CLIENT LIST returned no cohorts", port)
+	}
+	return fmt.Sprintf("node %d CLIENT LIST top cohorts (count, idle/age, source, flags, last command, library):\n  %s",
+		port, strings.ReplaceAll(strings.TrimSpace(out), "\n", "\n  "))
 }
 
 // logWindowBattery pulls the recent log window for a service around an

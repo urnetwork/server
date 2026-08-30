@@ -5,6 +5,7 @@ import (
 	"fmt"
 	mathrand "math/rand"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -595,26 +596,50 @@ func TestExpireLeakedStreamKeys(t *testing.T) {
 		_, healthyKey, found := GetStream(ctx, healthyContractId)
 		connect.AssertEqual(t, found, true)
 
-		// a leaked stream id key: reproduce the pre-fix state, an EXPIRE of
-		// the 8h ttl in nanoseconds
-		leakedKey := streamIdKey(newStreamKey(server.NewId(), server.NewId(), nil))
+		// Reproduce the pre-fix state: EXPIRE received the 8h ttl in
+		// nanoseconds. Use fixed IDs containing NULs so this test proves SCAN
+		// -> PTTL -> EXPIRE preserves binary Redis keys. A shell variable does
+		// not, and can turn a valid key into a different hash slot and a false
+		// MOVED.
+		leakedStreamKey := newStreamKey(
+			server.Id{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+			server.Id{16, 0, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31},
+			nil,
+		)
+		currentLeakedKey := streamIdKey(leakedStreamKey)
+		// Cast to []byte to reproduce the historical formatter. Formatting
+		// streamKey directly would call its diagnostic String method instead.
+		legacyLeakedKey := fmt.Sprintf("{%s}s_sk_cs", []byte(leakedStreamKey))
+		unrelatedKey := fmt.Sprintf("{%s}nonsense_sk_cache", []byte(leakedStreamKey))
+		connect.AssertEqual(t, strings.IndexByte(currentLeakedKey, 0) >= 0, true)
+		connect.AssertEqual(t, strings.IndexByte(legacyLeakedKey, 0) >= 0, true)
+		connect.AssertEqual(t, isStreamTTLKey(currentLeakedKey), true)
+		connect.AssertEqual(t, isStreamTTLKey(legacyLeakedKey), true)
+		connect.AssertEqual(t, isStreamTTLKey(unrelatedKey), false)
 		server.Redis(ctx, func(r server.RedisClient) {
-			connect.AssertEqual(t, r.Set(ctx, leakedKey, server.NewId().Bytes(), 0).Err(), nil)
-			connect.AssertEqual(t, r.Do(ctx, "EXPIRE", leakedKey, int64(8*time.Hour/time.Nanosecond)).Err(), nil)
-			leakedTtl, err := r.TTL(ctx, leakedKey).Result()
-			connect.AssertEqual(t, err, nil)
-			connect.AssertEqual(t, 8*time.Hour < leakedTtl, true)
+			for _, key := range []string{currentLeakedKey, legacyLeakedKey, unrelatedKey} {
+				connect.AssertEqual(t, r.Set(ctx, key, server.NewId().Bytes(), 0).Err(), nil)
+				connect.AssertEqual(t, r.Do(ctx, "EXPIRE", key, int64(8*time.Hour/time.Nanosecond)).Err(), nil)
+				leakedTTL, err := r.TTL(ctx, key).Result()
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, 8*time.Hour < leakedTTL, true)
+			}
 		})
 
 		scannedCount, fixedCount, err := ExpireLeakedStreamKeys(ctx)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, 2 <= scannedCount, true)
-		connect.AssertEqual(t, 1 <= fixedCount, true)
+		connect.AssertEqual(t, 3 <= scannedCount, true)
+		connect.AssertEqual(t, 2 <= fixedCount, true)
 
 		server.Redis(ctx, func(r server.RedisClient) {
-			leakedTtl, err := r.TTL(ctx, leakedKey).Result()
+			for _, key := range []string{currentLeakedKey, legacyLeakedKey} {
+				leakedTTL, err := r.TTL(ctx, key).Result()
+				connect.AssertEqual(t, err, nil)
+				connect.AssertEqual(t, 0 < leakedTTL && leakedTTL <= 8*time.Hour, true)
+			}
+			unrelatedTTL, err := r.TTL(ctx, unrelatedKey).Result()
 			connect.AssertEqual(t, err, nil)
-			connect.AssertEqual(t, 0 < leakedTtl && leakedTtl <= 8*time.Hour, true)
+			connect.AssertEqual(t, 8*time.Hour < unrelatedTTL, true)
 
 			healthyTtl, err := r.TTL(ctx, streamIdKey(healthyKey)).Result()
 			connect.AssertEqual(t, err, nil)

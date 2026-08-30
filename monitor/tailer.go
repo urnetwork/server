@@ -10,7 +10,7 @@
 // A tailer that exits or goes silent while its service is running restarts
 // with backoff; repeated failure raises a monitor/visibility finding through
 // the same findings channel.
-package main
+package monitor
 
 import (
 	"bufio"
@@ -19,6 +19,8 @@ import (
 	"io"
 	"os/exec"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +29,10 @@ import (
 type logClass struct {
 	name string
 	re   *regexp.Regexp
+	// groupBy splits one class into independently actionable frames. Most log
+	// classes intentionally aggregate retry volume by service; route-bound
+	// configuration defects must retain their resource, route, and generation.
+	groupBy func(string) string
 	// per-minute rate above which the class is a finding; §4 healthy is ~0
 	// for all classes, but transient blips (LOADING during a restart) are
 	// tolerated by the higher thresholds
@@ -34,6 +40,14 @@ type logClass struct {
 	tier          string
 	playbook      string
 	meaning       string
+	mechanism     string
+	context       string
+	action        string
+	verify        string
+	// redactIDs removes UUID/server.Id values from the retained sample. Some
+	// classes need a representative site/error but their entity identifiers
+	// must not be copied into alert artifacts.
+	redactIDs bool
 	// metricOnly classes are still recognized so their rate-limited
 	// exemplars do not become "novel" log errors, but alerting comes from a
 	// lossless counter rather than the sampled log volume.
@@ -69,6 +83,30 @@ var logClasses = []logClass{
 	{name: "redis-loading", re: regexp.MustCompile(`LOADING|READONLY`),
 		rateThreshold: 50, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "node restarting (rdb load) / replica mid-failover; only sustained > 2 min matters"},
+	{name: "required-vault-resource", re: regexp.MustCompile(`Resource not found in vault \([^\)]+\.yml\)`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.7",
+		groupBy:   requiredVaultLogGroup,
+		meaning:   "a route reached a lazily resolved vault file absent from the active config generation; gate an intentionally disabled subsystem before vault access, otherwise treat the missing enabled-subsystem config as a deployment blocker",
+		mechanism: "Required vault resources are resolved lazily, so the process and /hello can stay green until one dependent request reaches the loader and returns 500. If the optional subsystem is disabled, the defect is an unguarded HTTP boundary; if it is enabled, the deployed vault generation is incomplete.",
+		context:   "Branch on the subsystem feature state before changing configuration. A deliberately absent secret for a disabled subsystem is not evidence that a new secret should be fabricated. Resource, route, and active binary generation are retained as the alert frame because mixed generations can return different results.",
+		action:    "When the subsystem is disabled, fail closed with the documented 503 and Retry-After before parsing, vault access, or database work, and stop its recurring task chain. When it is enabled, provision and validate the required resource through the supported vault mechanism before release. Do not invent or commit signing material merely to turn the 500 into a 200.",
+		verify:    "For five minutes, every active generation emits zero missing-resource lines. An enabled route returns its documented success response; an intentionally disabled route returns its documented 503 without touching the resource. A green /hello alone is not verification.",
+	},
+	{name: "grafana-plugin-unregistered", re: regexp.MustCompile(`plugin\.notRegistered|plugin not registered`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 11.15",
+		meaning: "Grafana accepted the provisioned datasource but cannot load its datasource plugin; dashboards and every rule using that datasource fail even while Grafana and Mimir health endpoints stay green"},
+	{name: "source-attribution", re: regexp.MustCompile(`X-UR-Forwarded-For .*was not one ip:port value|X-UR-Forwarded-For from untrusted peer`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
+		meaning: "the service rejected the trusted ingress source tuple and fell back to the proxy peer, collapsing unrelated users onto one rate-limit identity"},
+	{name: "netescrow-negative", re: regexp.MustCompile(`\[netescrow\]negative counter after`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
+		groupBy:   netEscrowNegativeLogGroup,
+		meaning:   "a settlement/release found fewer bytes in a Redis reservation mirror than PostgreSQL durably released; old binaries leave that negative value available until reconciliation, while a clamped_to=0 line means the current atomic release retained the diagnostic result and deleted the bad mirror in the same command",
+		mechanism: "The dominant production cause is the pre-fix full-fleet reconciler: it snapshots reservations, walks roughly 898,000 balances, then overwrites each Redis mirror with an absolute SET or DEL. A live release after that old snapshot can be clobbered near the end of a long pass. A smaller race remains even with page-local additive reconciliation because PostgreSQL settlement commits before its Redis release: reconciliation can observe the commit and remove the reservation before the delayed release arrives. Current release Lua clamps that irreducible negative atomically. This line is mutation-site aftermath, not evidence that the site independently created fleet-wide drift.",
+		context:   "Correlate the line with the nearest ReconcileNetEscrow duration and aggregate correction, query taskworker, API, and Connect for the complete interval after allowing for log-ingestion delay, and retain whether clamped_to=0 was present. The rate is observed settlement/release exposure, not overwritten bytes or necessarily unique balances. Samples retain the non-sensitive site while redacting balance and contract ids.",
+		action:    "Do not manually zero/delete individual mirrors or invoke a pre-fix reconciler. Install the transfer_escrow(balance_id, contract_id) index first, then roll out the page-local additive reconciler, which rereads each bounded PostgreSQL page, skips already-correct mirrors, and applies INCRBY(delta), together with the atomic release Lua that deletes a zero/negative result while preserving the negative return value for evidence. Let scheduled passes converge legacy drift.",
+		verify:    "After allowing for log-ingestion delay, require one scheduled pass below 120 seconds, its aggregate correction below 256GiB and back in the ordinary tens-of-GiB band, and zero netescrow-negative lines from taskworker, API, and Connect for a full following interval. After rollout, any residual race line must say clamped_to=0 and its key must already be absent.",
+	},
 	{name: "panic", re: regexp.MustCompile(`panic:|Unexpected error|goroutine [0-9]+ \[`),
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
 		meaning: "panic stack — the innermost app frame identifies the load-bearing call path"},
@@ -89,13 +127,25 @@ var logClasses = []logClass{
 	{name: "payout-wallet-insufficient", re: regexp.MustCompile(`asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet`),
 		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "the payout wallet balance cannot cover pending payouts (usdc) — fund the wallet or pause payouts; retries park AdvancePayment tasks until funded"},
-	// server-side redis ttl guard (server/redis_ttl_warn.go): any command
+	// A durable transfer balance can intentionally span decades, but its Redis
+	// escrow counter is a derived, reconciled mirror. The old creation path
+	// copied the durable end time into EXPIREAT and therefore retained a cache
+	// key for the balance's complete lifetime.
+	{name: "redis-netescrow-ttl", re: regexp.MustCompile(`\[redis\]\[ttl\].*"expireat".*key="\{escrow_[^}]+\}net"`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §3.3a and §5.11", redactIDs: true,
+		meaning:   "a net-escrow Redis mirror inherited a decades-long durable balance end time instead of a bounded rolling cache horizon",
+		mechanism: "The transfer balance may legitimately remain valid for decades, but `{escrow_<balance-id>}net` is a derived reservation mirror rebuilt by reconciliation. Copying end_time plus slack into EXPIREAT retains the Redis key for the full durable lifetime and repeats the warning on every reservation.",
+		context:   "This is independent of the legacy stream duration-as-seconds residue. Do not shorten the durable PostgreSQL balance or delete an active reservation mirror to silence it.",
+		action:    "Roll out the net-escrow expiry cap that chooses the earlier of balance end_time plus 30 days and a rolling 90-day horizon. Let normal writes/reconciliation refresh active mirrors.",
+		verify:    "New net-escrow writes have TTL at most 90 days, the durable long-lived balance remains unchanged, and no redis-netescrow-ttl line recurs.",
+	},
+	// server-side redis ttl guard (server/redis_ttl_warn.go): any other command
 	// carrying a raw time.Duration arg (serialized as nanoseconds) or an
 	// effective ttl > 120 days logs this line — the 2026-07-20 stream-key
 	// leak signature (EXPIRE <8h-in-ns> ≈ 913,000 years, ~1.1M orphaned keys)
 	{name: "redis-ttl-suspect", re: regexp.MustCompile(`\[redis\]\[ttl\]`),
-		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4",
-		meaning: "a redis write carried a ttl beyond 120 days or a raw time.Duration arg — a unit conversion issue at the named command/key; find the write site and convert to seconds/ms"},
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §4", redactIDs: true,
+		meaning: "a redis write carried a ttl beyond its family limit or a raw time.Duration arg — inspect the named command/key to distinguish a unit conversion from an unbounded durable deadline"},
 	// taskworker drain outcome (§12.1): the drain phases log exactly one
 	// outcome line; "finished cleanly" / "finished after cancel" are healthy
 	// and not classified — only "gave up" means a ctx-ignoring task rode to
@@ -124,8 +174,10 @@ var errorShapedRe = regexp.MustCompile(`(?i)\berror\b|\bfatal\b|\bpanic\b|\bfail
 
 // novelNormalizeRes strip identifiers so distinct occurrences of one shape
 // group together: hex ids, uuids, ips, ports, numbers.
+var logIDRe = regexp.MustCompile(`[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}`)
+
 var novelNormalizeRes = []*regexp.Regexp{
-	regexp.MustCompile(`[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}`),
+	logIDRe,
 	regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?`),
 	regexp.MustCompile(`\b[0-9]+\b`),
 }
@@ -135,6 +187,58 @@ const novelRateThreshold = 20
 // targetRe extracts the ip:port a class line is about (the sick-node
 // attribution from §4: identity is class + target + frame).
 var targetRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+`)
+
+var requiredVaultResourceRe = regexp.MustCompile(`Resource not found in vault \(([^\)]+\.yml)\)`)
+var requiredVaultRouteRe = regexp.MustCompile(`route ([A-Z]+) \^?([^$:\s]+)\$?:`)
+var netEscrowNegativeSiteRe = regexp.MustCompile(`\[netescrow\]negative counter after ([a-z][a-z -]{0,40}):`)
+var warpLogIdentityRe = regexp.MustCompile(`^\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[cid:([^\]]+)\]`)
+
+type warpLogIdentity struct {
+	host       string
+	service    string
+	generation string
+	container  string
+}
+
+func parseWarpLogIdentity(line string) warpLogIdentity {
+	match := warpLogIdentityRe.FindStringSubmatch(line)
+	if len(match) < 5 {
+		return warpLogIdentity{}
+	}
+	return warpLogIdentity{
+		host:       match[1],
+		service:    match[2],
+		generation: match[3],
+		container:  match[4],
+	}
+}
+
+func requiredVaultLogGroup(line string) string {
+	parts := []string{}
+	if match := requiredVaultResourceRe.FindStringSubmatch(line); len(match) > 1 {
+		parts = append(parts, "resource="+match[1])
+	}
+	if match := requiredVaultRouteRe.FindStringSubmatch(line); len(match) > 2 {
+		parts = append(parts, "route="+match[1]+" "+match[2])
+	}
+	if identity := parseWarpLogIdentity(line); identity.generation != "" {
+		parts = append(parts, "generation="+identity.generation)
+	}
+	return strings.Join(parts, " ")
+}
+
+// netEscrowNegativeLogGroup retains the non-sensitive mutation site as the
+// structured alert frame. Without a group, the generic log target extractor
+// looks for an ip:port and renders `target=` for these lines, even though
+// `settle` versus `quarantine release` is the first discriminator an operator
+// needs. Balance and contract ids remain confined to the redacted sample.
+func netEscrowNegativeLogGroup(line string) string {
+	match := netEscrowNegativeSiteRe.FindStringSubmatch(line)
+	if len(match) < 2 {
+		return ""
+	}
+	return "site=" + strings.TrimSpace(match[1])
+}
 
 // logTailer tails one service's logs and aggregates per-minute class counts.
 // Safe for one run goroutine plus concurrent snapshot calls.
@@ -274,11 +378,25 @@ func (self *logTailer) classify(line string) {
 
 	for _, c := range logClasses {
 		if c.re.MatchString(line) {
-			self.classCounts[c.name] += 1
-			if _, ok := self.classSamples[c.name]; !ok {
-				self.classSamples[c.name] = truncateLine(line)
-				if m := targetRe.FindString(line); m != "" {
-					self.classTargets[c.name] = m
+			key := c.name
+			attribution := ""
+			if c.groupBy != nil {
+				attribution = c.groupBy(line)
+				if attribution != "" {
+					key += "\x00" + attribution
+				}
+			}
+			self.classCounts[key] += 1
+			if _, ok := self.classSamples[key]; !ok {
+				sample := line
+				if c.redactIDs {
+					sample = logIDRe.ReplaceAllString(sample, "<id>")
+				}
+				self.classSamples[key] = truncateLine(sample)
+				if attribution != "" {
+					self.classTargets[key] = attribution
+				} else if target := targetRe.FindString(line); target != "" {
+					self.classTargets[key] = target
 				}
 			}
 			return
@@ -320,19 +438,44 @@ func (self *logTailer) drainWindow() []finding {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
 			continue
 		}
-		count := self.classCounts[c.name]
-		attribution := self.classTargets[c.name]
-		if count >= c.rateThreshold {
+		keys := []string{c.name}
+		if c.groupBy != nil {
+			keys = keys[:0]
+			prefix := c.name + "\x00"
+			for key := range self.classCounts {
+				if key == c.name || strings.HasPrefix(key, prefix) {
+					keys = append(keys, key)
+				}
+			}
+			sort.Strings(keys)
+		}
+		broken := false
+		for _, key := range keys {
+			count := self.classCounts[key]
+			if count < c.rateThreshold {
+				continue
+			}
+			broken = true
+			attribution := self.classTargets[key]
+			attributionLabel := "target"
+			if c.groupBy != nil {
+				attributionLabel = "frame"
+			}
 			findings = append(findings, finding{
 				probeId: "logs/" + c.name, tier: c.tier,
 				class: c.name, target: self.service, frame: attribution, sustain: 1,
-				symptom:  fmt.Sprintf("service %s: %d/min lines of class %s (threshold %d/min)", self.service, count, c.name, c.rateThreshold),
-				baseline: "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)",
-				observed: fmt.Sprintf("rate=%d/min class=%s target=%s", count, c.name, attribution),
-				evidence: "meaning: " + c.meaning + "\nsample: " + self.classSamples[c.name],
-				playbook: c.playbook,
+				symptom:   fmt.Sprintf("service %s: %d/min lines of class %s (threshold %d/min)", self.service, count, c.name, c.rateThreshold),
+				baseline:  "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)",
+				observed:  fmt.Sprintf("rate=%d/min class=%s %s=%s", count, c.name, attributionLabel, attribution),
+				mechanism: c.mechanism,
+				evidence:  "meaning: " + c.meaning + "\nsample: " + self.classSamples[key],
+				context:   c.context,
+				action:    c.action,
+				verify:    c.verify,
+				playbook:  c.playbook,
 			})
-		} else {
+		}
+		if !broken {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
 		}
 	}
@@ -347,7 +490,11 @@ func (self *logTailer) drainWindow() []finding {
 			topShape, topCount = shape, count
 		}
 	}
-	if novelTotal >= novelRateThreshold {
+	// A novel failure mode is one normalized signature repeating at rate.
+	// Do not sum unrelated one-off shapes: public web services routinely see
+	// scanner bursts across many nonexistent paths, and 20 different nginx
+	// ENOENT lines are not 20 occurrences of one server defect.
+	if topCount >= novelRateThreshold {
 		// identity discipline: the top shape varies minute to minute, so it
 		// must NOT be the frame — frame is part of ticket identity, and a
 		// shifting frame resets the sustain-2 streak so the ticket would
@@ -356,7 +503,7 @@ func (self *logTailer) drainWindow() []finding {
 			probeId: "logs/novel", tier: tierWarn,
 			class: "novel", target: self.service, sustain: 2,
 			symptom:  fmt.Sprintf("service %s: %d/min error-shaped lines matching no known class (top shape %d/min)", self.service, novelTotal, topCount),
-			baseline: "unmatched error-shaped lines ~0/min; a new signature at rate = new failure mode (1.5)",
+			baseline: "each unmatched normalized error shape < 20/min; one new signature at rate = new failure mode (1.5)",
 			observed: fmt.Sprintf("rate=%d/min distinct_shapes=%d", novelTotal, len(self.novelCounts)),
 			evidence: "top shape: " + topShape + "\nsample: " + self.novelSample,
 			playbook: "SIGNALS.md §4",

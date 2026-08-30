@@ -686,6 +686,22 @@ func TestGetNetworkProvideStats(t *testing.T) {
 		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, paidByteCount)
 		connect.AssertEqual(t, transferStats.PaidBytesProvided, ByteCount(0))
 
+		// Once a payment owns the value, its payout_byte_count is the durable
+		// unpaid ledger. Losing the supporting sweep rows must not make the user's
+		// unpaid total fall while the processor payment remains incomplete.
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, payment := range plan.NetworkPayments {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`DELETE FROM transfer_escrow_sweep WHERE payment_id = $1`,
+					payment.PaymentId,
+				))
+			}
+		})
+		transferStats = GetTransferStats(ctx, destinationNetworkId)
+		connect.AssertEqual(t, transferStats.UnpaidBytesProvided, paidByteCount)
+		connect.AssertEqual(t, transferStats.PaidBytesProvided, ByteCount(0))
+
 		// mark plan items as complete
 		for _, payment := range plan.NetworkPayments {
 			RemovePaymentRecord(ctx, payment.PaymentId)

@@ -110,6 +110,7 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 	seekerHolderNetworkIds := GetAllSeekerHolders(ctx)
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		configurePaymentPlanTransaction(ctx, tx)
 		if dryRun {
 			// force this transaction to roll back however the callback exits, so
 			// the dry run persists nothing. `paymentPlan` is populated before
@@ -183,6 +184,24 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 	}, server.TxReadCommitted)
 
 	return
+}
+
+// configurePaymentPlanTransaction preserves the outer plan transaction while
+// calculateReliabilityPayoutInTx runs its deliberately separate maintenance
+// transaction. Production sets idle_in_transaction_session_timeout=5min; the
+// reliability recompute can exceed that, during which the outer transaction is
+// intentionally idle. PostgreSQL then closes the outer connection and the
+// otherwise successful bounded plan fails later with pgconn "conn closed".
+//
+// This override is LOCAL to this one transaction. The task itself remains
+// bounded by its MaxTime and each committed plan is bounded by maxDuration, so
+// the global protection remains in force for every other application session.
+type paymentPlanTransactionConfigurer interface {
+	Exec(context.Context, string, ...any) (server.PgTag, error)
+}
+
+func configurePaymentPlanTransaction(ctx context.Context, tx paymentPlanTransactionConfigurer) {
+	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL idle_in_transaction_session_timeout = 0`))
 }
 
 // computePlanUpperBound restricts a bounded plan (maxDuration > 0) to contracts

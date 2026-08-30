@@ -1120,6 +1120,14 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 	defer handleCancel()
+	// Cancellation alone cannot interrupt a net.Conn blocked before its header
+	// is decoded. Close the accepted socket at the context edge so Exchange
+	// shutdown joins pre-header owners immediately instead of waiting for the
+	// independent header deadline.
+	stopContextClose := context.AfterFunc(handleCtx, func() {
+		_ = conn.Close()
+	})
+	defer stopContextClose()
 
 	receiveBuffer := NewReceiveOnlyExchangeBuffer(self.settings)
 
@@ -2137,6 +2145,13 @@ func NewExchangeConnection(
 	if err != nil {
 		return nil, err
 	}
+	// The caller context must also interrupt the header handshake. A deadline
+	// alone can otherwise retain a half-open outbound socket after its resident
+	// owner has begun teardown.
+	stopContextClose := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
+	defer stopContextClose()
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetNoDelay(true)
 		tcpConn.SetLinger(0)

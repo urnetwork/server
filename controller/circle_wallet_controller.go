@@ -34,6 +34,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -117,31 +118,38 @@ func WalletValidateAddress(
 	walletValidateAddress *WalletValidateAddressArgs,
 	session *session.ClientSession,
 ) (*WalletValidateAddressResult, error) {
-
-	// bittensor addresses are ss58, validated locally (recorded for future
-	// use only; not a payout destination)
-	if strings.EqualFold(walletValidateAddress.Chain, "TAO") || strings.EqualFold(walletValidateAddress.Chain, "BITTENSOR") {
-		return &WalletValidateAddressResult{
-			Valid: model.IsValidBittensorAddress(walletValidateAddress.Address),
-		}, nil
-	}
-
-	if walletValidateAddress.Address == solanaUSDCAddress() {
-		return &WalletValidateAddressResult{
-			Valid: false,
-		}, nil
-	}
-
-	_, err := solana.PublicKeyFromBase58(walletValidateAddress.Address)
+	blockchain, err := model.ParseBlockchain(walletValidateAddress.Chain)
 	if err != nil {
-		return &WalletValidateAddressResult{
-			Valid: false,
-		}, nil
+		return &WalletValidateAddressResult{Valid: false}, nil
 	}
 
-	return &WalletValidateAddressResult{
-		Valid: true,
-	}, nil
+	address := strings.TrimSpace(walletValidateAddress.Address)
+	if address == "" || address != walletValidateAddress.Address {
+		return &WalletValidateAddressResult{Valid: false}, nil
+	}
+
+	valid := false
+	switch blockchain {
+	case model.SOL:
+		publicKey, parseErr := solana.PublicKeyFromBase58(address)
+		valid = parseErr == nil &&
+			publicKey != (solana.PublicKey{}) &&
+			address != solanaUsdcMint
+	case model.MATIC, model.ETHEREUM:
+		// Circle expects an EVM destination, including its 0x prefix. A
+		// Solana base58 public key can also be 40-44 characters long, so
+		// validating only that shape lets a MATIC wallet survive registration
+		// and then fail every payout as "Invalid destination address."
+		valid = (strings.HasPrefix(address, "0x") || strings.HasPrefix(address, "0X")) &&
+			common.IsHexAddress(address) &&
+			common.HexToAddress(address) != (common.Address{})
+	case model.TAO:
+		// Bittensor wallets are recorded for future use only; they are not a
+		// payout destination.
+		valid = model.IsValidBittensorAddress(address)
+	}
+
+	return &WalletValidateAddressResult{Valid: valid}, nil
 }
 
 type WalletBalanceResult struct {

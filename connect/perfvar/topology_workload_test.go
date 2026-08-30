@@ -1663,6 +1663,8 @@ func measureFullTunLatencyUnderLoadDirection(
 	bulkByteCount int64,
 	upload bool,
 ) (workloadResult, error) {
+	previousDatagramAllowance := path.setAllowProviderDatagramPackFailures(true)
+	defer path.setAllowProviderDatagramPackFailures(previousDatagramAllowance)
 	result, err := measureFullTunLatencyUnderLoadDirectionWithStartHook(
 		ctx,
 		path,

@@ -1,0 +1,278 @@
+package monitor
+
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+func TestNetEscrowSignalSyntheticReconcileOverrun(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if !strings.Contains(query, "run_end_time > now() - interval '45 minutes'") {
+				t.Fatalf("query does not retain a completed overrun through its aftermath: %s", query)
+			}
+			if !strings.Contains(query, "ORDER BY run_end_time DESC") {
+				t.Fatalf("query does not select the latest completed overrun for lifecycle attribution: %s", query)
+			}
+			if strings.Contains(query, "pending_task") || strings.Contains(query, "now()-run_at") {
+				t.Fatalf("query mistakes a pending task's due time for its execution start: %s", query)
+			}
+			return []Row{{"completed", "1182", "300"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-reconcile-overrun")
+	if !strings.Contains(alert.Observed, "duration_s=1182") ||
+		!strings.Contains(alert.Mechanism, "SET or DEL for every balance") ||
+		!strings.Contains(alert.Action, "page-local additive reconciler that skips in-band mirrors") ||
+		!strings.Contains(alert.Verify, "already-correct mirrors receive no rewrite") {
+		t.Fatalf("overrun alert lost its discriminating evidence or remediation: %+v", alert)
+	}
+}
+
+func TestNetEscrowSignalCompletedRunSupersedesLingeringHeartbeat(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) {
+			return []Row{{"completed", "1492", "60"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "[taskworker]eval active(1481.89s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
+		},
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-reconcile-overrun")
+	if !strings.Contains(alert.Symptom, "a completed run lasting 1492s") ||
+		!strings.Contains(alert.Observed, "phase=completed") {
+		t.Fatalf("finished_task did not supersede the same run's lingering active heartbeat: %+v", alert)
+	}
+}
+
+func TestNetEscrowSignalSyntheticActiveHeartbeat(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) { return nil, nil },
+		localFn: func(name string, args ...string) (string, error) {
+			joined := strings.Join(args, " ")
+			if name != "warpctl" {
+				t.Fatalf("unexpected active-task command: %s %s", name, strings.Join(args, " "))
+			}
+			if strings.Contains(joined, "--query=[sm]reconcile net escrow") {
+				return "", nil
+			}
+			if !strings.Contains(joined, "--query=ReconcileNetEscrow") {
+				t.Fatalf("unexpected active-task command: %s %s", name, strings.Join(args, " "))
+			}
+			return "[edge-3][taskworker][g2][cid:old123][I][2026-08-30T14:03:44Z][task.go:1938][01a05319-b85b-2d49-4564-7eb70075486c]eval active(243.75s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})\n" +
+				"[taskworker]eval active(900.00s) github.com/urnetwork/server/taskworker/work.DbMaintenance({})", nil
+		},
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-reconcile-overrun")
+	if !strings.Contains(alert.Observed, "phase=active duration_s=243") {
+		t.Fatalf("active heartbeat was not used as live duration: %+v", alert)
+	}
+	for _, want := range []string{
+		"active_task_id=01a05319-b85b-2d49-4564-7eb70075486c",
+		"active_host=edge-3",
+		"active_generation=g2",
+		"active_container=old123",
+		"fleet alternates fast and long runs",
+		"one executor's fast pass does not prove the deployed algorithm is fixed",
+		"every active taskworker generation",
+		"one fast run does not prove the deployed algorithm fixed",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("active alert lost rollout identity %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Observed, "completed_age_s") {
+		t.Fatalf("active run without a completed precursor fabricated completion age: %+v", alert)
+	}
+}
+
+func TestNetEscrowSignalSyntheticShortMatchedLargeDrift(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) { return nil, nil },
+		localFn: func(name string, args ...string) (string, error) {
+			joined := strings.Join(args, " ")
+			if name != "warpctl" {
+				t.Fatalf("unexpected local command: %s %s", name, joined)
+			}
+			if strings.Contains(joined, "--query=ReconcileNetEscrow") {
+				return "[taskworker]eval active(20.01s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
+			}
+			if !strings.Contains(joined, "--since=15m") || !strings.Contains(joined, "--query=[sm]reconcile net escrow") {
+				t.Fatalf("aggregate query lost its bounded incident window: %s", joined)
+			}
+			return "[edge-3][taskworker][g2][cid:old123][I][2026-08-30T13:47:40Z][subscription_work.go:341][sm]reconcile net escrow: 897957 balances, 1678 networks drifted, over-reserved 15.14gib, under-reserved 1004.36gib\n" +
+				"[edge-4][taskworker][g1][cid:new456][I][2026-08-30T13:53:00Z][subscription_work.go:341][sm]reconcile net escrow: 897970 balances, 1661 networks drifted, over-reserved 1006.26gib, under-reserved 14.09gib", nil
+		},
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("short large drift should produce one aggregate alert, got %+v", alerts)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-large-drift")
+	markdown := alert.Markdown()
+	for _, detail := range []string{
+		"over_reserved=1006.26gib",
+		"under_reserved=14.09gib",
+		"previous_under_reserved=1004.36gib",
+		"matched_reversal=true",
+		"reversal_direction=under-to-over",
+		"source_host=edge-4",
+		"source_generation=g1",
+		"source_container=new456",
+		"previous_source_host=edge-3",
+		"previous_source_generation=g2",
+		"previous_source_container=old123",
+		"within the nominal 120s duration band",
+		"Negative counters can remain zero",
+		"page-local additive reconciler",
+		"every active taskworker generation",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("large-drift alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(markdown, "matched_reversal=false") {
+		t.Fatalf("matched reversal rendered a contradictory false field:\n%s", markdown)
+	}
+}
+
+func TestNetEscrowSignalSyntheticShortOneDirectionLargeDrift(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) { return nil, nil },
+		localFn: func(_ string, args ...string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), "--query=[sm]reconcile net escrow") {
+				return "[sm]reconcile net escrow: 898091 balances, 1464 networks drifted, over-reserved 29.05gib, under-reserved 380.77gib", nil
+			}
+			return "[taskworker]eval active(19.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
+		},
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("one-direction large drift should produce one aggregate alert, got %+v", alerts)
+	}
+	markdown := alerts[0].Markdown()
+	for _, detail := range []string{"under_reserved=380.77gib", "threshold_bytes=274877906944", "matched_reversal=false", "requires tracing the affected durable reservation"} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("one-direction large-drift alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(markdown, "do not clear a matched aggregate reversal") {
+		t.Fatalf("one-direction alert claimed that an unmatched correction was already a matched reversal:\n%s", markdown)
+	}
+}
+
+func TestNetEscrowSignalWindowBoundaryDoesNotRewriteMatchedHistory(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) { return nil, nil },
+		localFn: func(_ string, args ...string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), "--query=[sm]reconcile net escrow") {
+				// The preceding 2.70TiB over-reserved half of this proven
+				// reversal has just aged out; only its 2.37TiB inverse and two
+				// later healthy passes remain in the bounded window.
+				return "[sm]reconcile net escrow: 898179 balances, 2047 networks drifted, over-reserved 115.91gib, under-reserved 2.37tib\n" +
+					"[sm]reconcile net escrow: 898192 balances, 994 networks drifted, over-reserved 66.33gib, under-reserved 42.61gib\n" +
+					"[sm]reconcile net escrow: 898206 balances, 1012 networks drifted, over-reserved 37.03gib, under-reserved 65.06gib", nil
+			}
+			return "", nil
+		},
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-large-drift")
+	markdown := alert.Markdown()
+	for _, detail := range []string{
+		"matched_reversal=unknown_window_boundary",
+		"oldest aggregate retained",
+		"preceding scheduled aggregate is no longer observable",
+		"Do not replace an earlier matched-reversal attribution",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("window-boundary alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(markdown, "matched_reversal=false") {
+		t.Fatalf("truncated history was rewritten as an unmatched correction:\n%s", markdown)
+	}
+}
+
+func TestNetEscrowSignalSyntheticShortOrdinaryDriftIsHealthy(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) { return nil, nil },
+		localFn: func(_ string, args ...string) (string, error) {
+			if strings.Contains(strings.Join(args, " "), "--query=[sm]reconcile net escrow") {
+				return "[sm]reconcile net escrow: 897944 balances, 966 networks drifted, over-reserved 45.63gib, under-reserved 42.09gib", nil
+			}
+			return "[taskworker]eval active(20.01s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
+		},
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("ordinary short reconcile drift produced alerts: %+v", alerts)
+	}
+}
+
+func TestNetEscrowSignalActiveSuccessorRetainsCompletedPrecursor(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) {
+			return []Row{{"completed", "1096", "420"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "[taskworker]eval active(265.12s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
+		},
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "netescrow-reconcile-overrun")
+	for _, detail := range []string{
+		"phase=active duration_s=265",
+		"precursor_completed_duration_s=1096",
+		"precursor_completed_age_s=420",
+		"active successor follows a completed 1096s overrun",
+		"active successor does not erase its completed overrun precursor",
+	} {
+		if markdown := alert.Markdown(); !strings.Contains(markdown, detail) {
+			t.Fatalf("overrun chain alert missing %q:\n%s", detail, markdown)
+		}
+	}
+}
+
+func TestNetEscrowSignalSyntheticHealthyRun(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) { return nil, nil },
+		localFn:    func(string, ...string) (string, error) { return "", nil },
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("healthy reconciliation produced alerts: %+v", alerts)
+	}
+}

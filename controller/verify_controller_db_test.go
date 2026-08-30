@@ -555,9 +555,13 @@ func TestVerifyControllerPoisonAndFailurePaths(t *testing.T) {
 
 		// --- V1: extending a poison trail from a real provider's ip fails with
 		// the IDENTICAL error (no observable branch on poison)
+		poisonWrongIp := providerIps[p1]
+		if server.Id(poison1.NextHop) == p1 {
+			poisonWrongIp = providerIps[p2]
+		}
 		_, poisonExtendErr := Verify(
 			testVerifyExtendArgs(t, poisonValidator, poisonVpk, poisonKey, poison1),
-			testVerifySession(ctx, providerIps[p3]),
+			testVerifySession(ctx, poisonWrongIp),
 		)
 		if poisonExtendErr == nil || poisonExtendErr.Error() != realExtendErr.Error() {
 			t.Fatalf("poison extend err %q must equal real wrong-source err %q", poisonExtendErr, realExtendErr)

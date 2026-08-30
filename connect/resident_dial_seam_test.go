@@ -167,6 +167,74 @@ func TestExchangeConnectionInjectedDialFailureIsReturned(t *testing.T) {
 	}
 }
 
+// Parent cancellation closes a connected socket that is still waiting for
+// its header echo rather than retaining it until the handshake deadline.
+func TestExchangeConnectionCancellationInterruptsHeaderRead(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+	observedConn := newCloseObservedExchangeConn(clientConn)
+	settings := DefaultExchangeSettings()
+	settings.ExchangeReadHeaderTimeout = time.Hour
+	settings.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		return observedConn, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	headerRead := make(chan error, 1)
+	go func() {
+		buffer := NewReceiveOnlyExchangeBuffer(settings)
+		_, err := buffer.ReadHeader(context.Background(), serverConn)
+		headerRead <- err
+	}()
+	type connectionResult struct {
+		connection *ExchangeConnection
+		err        error
+	}
+	result := make(chan connectionResult, 1)
+	go func() {
+		connection, err := NewExchangeConnection(
+			ctx,
+			ExchangeHeader{
+				Version:    1,
+				ClientId:   server.NewId(),
+				ResidentId: server.NewId(),
+				Op:         ExchangeOpForward,
+			},
+			"edge-a",
+			18443,
+			map[string]string{"edge-a": "198.51.100.8"},
+			settings,
+		)
+		result <- connectionResult{connection: connection, err: err}
+	}()
+	select {
+	case err := <-headerRead:
+		if err != nil {
+			t.Fatalf("read outbound exchange header: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("outbound exchange did not send its header")
+	}
+	cancel()
+	select {
+	case connectionResult := <-result:
+		if connectionResult.connection != nil {
+			connectionResult.connection.Close()
+			t.Fatal("canceled header read returned a live connection")
+		}
+		if connectionResult.err == nil {
+			t.Fatal("canceled header read returned no error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled header read retained the outbound socket")
+	}
+	select {
+	case <-observedConn.closed:
+	case <-time.After(time.Second):
+		t.Fatal("canceled header read did not close the outbound socket")
+	}
+}
+
 // A nil callback retains the host TCP dial path and completes the production
 // exchange header handshake against a real local listener.
 func TestExchangeConnectionNilDialContextUsesHostNetwork(t *testing.T) {

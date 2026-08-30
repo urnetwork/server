@@ -4086,9 +4086,9 @@ var migrations = []any{
 
 	// Indexed reap-eligibility for the transfer_contract retention reaper. reap_time
 	// is the instant a contract becomes due for hard deletion: it is set to
-	// complete_time + CompletedContractExpiration when the contract's payment
-	// completes (CompletePayment), and to now() when an aged closed-but-never-
-	// completed straggler is marked by the retention task. The reaper then deletes
+	// complete_time + CompletedContractExpiration by the bounded retention worker
+	// after the contract's payment completes, and to now() when an aged closed
+	// straggler is marked by the retention task. The reaper then deletes
 	// by an index range-scan over reap_time instead of the old un-indexable
 	// anti-join full scan over the whole old-closed table that caused a prod
 	// incident. Nullable (no default), so the ADD COLUMN is a fast metadata-only
@@ -5984,6 +5984,62 @@ var migrations = []any{
 			PRIMARY KEY (provider, object_key, content_sha256)
 		);
 	`),
+
+	// Net-escrow reconciliation reads one fresh bounded balance page immediately
+	// before correcting Redis. Without this access path, every page would scan
+	// all transfer_escrow history and the cure for the stale-global-snapshot
+	// incident would be slower than the old scan. Build online because escrow
+	// creation and settlement are continuous production writes.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)`,
+		`CREATE INDEX IF NOT EXISTS transfer_escrow_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)`,
+	),
+
+	// Completing a processor payment must remain a small, durable transaction.
+	// The old implementation updated every transfer_contract owned by the
+	// payment before committing `completed = true`; large payouts timed out and
+	// could remain locally unpaid after the transfer was already on chain. The
+	// queue bit and UUID keyset cursor let the retention worker perform that
+	// fanout in bounded, resumable transactions. Existing rows default to not
+	// pending because the pre-deploy CompletePayment path stamped them inline.
+	// Recently completed rows are queued defensively: this repairs any deadline
+	// inherited from the former straggler rule while preserving the full seven
+	// days after completion. The explicit reap-time backfill remains the repair
+	// for older history.
+	newSqlMigration(`
+		/* account_payment_contract_retention_queue */
+		ALTER TABLE account_payment
+			ADD COLUMN contract_retention_cursor uuid NULL,
+			ADD COLUMN contract_retention_pending bool NOT NULL DEFAULT false;
+
+		UPDATE account_payment
+		SET contract_retention_pending = true
+		WHERE
+			completed AND
+			complete_time >= now() - interval '7 days'
+	`),
+	// The queue contains only newly completed payments, but account_payment is
+	// append-only and large enough that polling it should never become a table
+	// scan. Build online so payout writes continue during rollout.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS account_payment_contract_retention_pending
+		 ON account_payment (complete_time, payment_id)
+		 WHERE contract_retention_pending`,
+		`CREATE INDEX IF NOT EXISTS account_payment_contract_retention_pending
+		 ON account_payment (complete_time, payment_id)
+		 WHERE contract_retention_pending`,
+	),
+	// A payment's retention cursor reads its contract ids in UUID order. The old
+	// payment_id-only index found the rows but forced a potentially huge sort for
+	// every batch; this covering order makes each keyset step an index range.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_sweep_payment_contract
+		 ON transfer_escrow_sweep (payment_id, contract_id)`,
+		`CREATE INDEX IF NOT EXISTS transfer_escrow_sweep_payment_contract
+		 ON transfer_escrow_sweep (payment_id, contract_id)`,
+	),
 
 	// Durable sim-latency competition control plane. The queue is deliberately
 	// independent of pending_task: untrusted submissions are claimed by a

@@ -9,9 +9,6 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"unsafe"
-
-	"golang.org/x/sys/unix"
 )
 
 var retainedBuffers [][]byte
@@ -87,29 +84,8 @@ func runCPUBomb(value string) error {
 	for _, cpu := range cpus {
 		go func() {
 			runtime.LockOSThread()
-			var affinity unix.CPUSet
-			affinity.Set(cpu)
-			if !affinity.IsSet(cpu) {
-				errs <- fmt.Errorf("CPU %d exceeds the fixed affinity set", cpu)
-				return
-			}
-			if err := unix.SchedSetaffinity(0, &affinity); err != nil {
-				errs <- fmt.Errorf("pin CPU %d: %w", cpu, err)
-				return
-			}
-			var currentCPU uint32
-			_, _, errno := unix.RawSyscall(
-				unix.SYS_GETCPU,
-				uintptr(unsafe.Pointer(&currentCPU)),
-				0,
-				0,
-			)
-			if errno != 0 {
-				errs <- fmt.Errorf("read current CPU for %d: %w", cpu, errno)
-				return
-			}
-			if int(currentCPU) != cpu {
-				errs <- fmt.Errorf("worker for CPU %d executed on CPU %d", cpu, currentCPU)
+			if err := pinCurrentThreadToCPU(cpu); err != nil {
+				errs <- err
 				return
 			}
 			readyCPUs <- cpu

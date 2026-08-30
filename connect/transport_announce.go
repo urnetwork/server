@@ -121,6 +121,8 @@ type ConnectionAnnounceSettings struct {
 	// are nil in production.
 	LifecycleStarted func()
 	LifecycleDone    func()
+	// Synchronous test barrier after the Redis recorder returns.
+	reliabilityStatsRecordedForTest func(server.Id, model.ClientReliabilityStats)
 }
 
 type LatencyTest struct {
@@ -624,6 +626,9 @@ func (self *ConnectionAnnounce) run() {
 					nextStartTime,
 					stats,
 				)
+				if recorded := self.settings.reliabilityStatsRecordedForTest; recorded != nil {
+					recorded(self.clientId, *stats)
+				}
 			}
 		}
 	}

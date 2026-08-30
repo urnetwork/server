@@ -2556,15 +2556,11 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		}
 	}
 
-	// Sweep per-client redis state for each reaped client_id. Outside the DB tx
-	// since redis isn't transactional with Postgres; a failure just leaves keys
-	// until the next sweep or overwrite.
-	for _, clientId := range reapedClientIds {
-		RemoveClientPublicKey(ctx, clientId)
-		// clear the reaped client's verify egress index entries so a
-		// reassigned ip is never miscredited (sn/VALIDATOR.md §8.2)
-		RemoveVerifyEgressForClient(ctx, clientId)
-	}
+	// Sweep per-client redis state outside the DB transaction. Plain pipelines
+	// auto-route these unrelated client hash slots, while bounded chunks avoid
+	// the old several-serialized-round-trips-per-id tail (which stretched a
+	// large production reap beyond 95 minutes after all PG bands were empty).
+	removeReapedClientRedisState(ctx, reapedClientIds)
 
 	// (cascade) the dependent tables are all keyed by the reaped ids, so the
 	// cascades below are targeted deletes on those ids (chunked to bound
@@ -2615,6 +2611,67 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 // cascade delete statement.
 const removeCascadeChunkCount = 10000
 
+// Redis cleanup keys span arbitrary cluster slots. Keep each plain pipeline
+// bounded while amortizing one Redis health check / network round trip over a
+// meaningful cohort. Every queued operation below is idempotent, so the
+// cluster client's documented pipeline retry behavior is safe.
+const removeRedisCleanupChunkCount = 1000
+
+func forEachReapedClientRedisChunk(clientIds []server.Id, cleanup func([]server.Id)) {
+	for chunk := range slices.Chunk(clientIds, removeRedisCleanupChunkCount) {
+		cleanup(chunk)
+	}
+}
+
+func removeReapedClientRedisState(ctx context.Context, clientIds []server.Id) {
+	forEachReapedClientRedisChunk(clientIds, func(chunk []server.Id) {
+		server.Redis(ctx, func(r server.RedisClient) {
+			reverseCmds := make([]*redis.MapStringStringCmd, len(chunk))
+			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for i, clientId := range chunk {
+					pipe.Del(ctx, clientPublicKeyRedisKey(clientId))
+					reverseCmds[i] = pipe.HGetAll(ctx, verifyClientEgressKey(clientId))
+				}
+				return nil
+			})
+			server.Raise(err)
+
+			forwardEntryCount := 0
+			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for i, clientId := range chunk {
+					entries, err := reverseCmds[i].Result()
+					server.Raise(err)
+					for egressHashHex := range entries {
+						// Atomic compare-delete: a recycled address may already
+						// belong to another client, which must not be clobbered.
+						server.RedisRemoveIfEqual(pipe, ctx, verifyEgressKeyFromHex(egressHashHex), []byte(clientId.String()))
+						forwardEntryCount++
+					}
+				}
+				return nil
+			})
+			if 0 < forwardEntryCount {
+				server.Raise(err)
+			}
+
+			// Only discard the reverse evidence after every conditional forward
+			// delete has succeeded. Cross-slot pipeline execution is not globally
+			// ordered; separating the waves keeps a partial cluster failure
+			// retryable instead of orphaning an undeleted forward entry.
+			eligibleMembers := make([]any, len(chunk))
+			_, err = r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for i, clientId := range chunk {
+					pipe.Del(ctx, verifyClientEgressKey(clientId))
+					eligibleMembers[i] = clientId.String()
+				}
+				pipe.SRem(ctx, verifyEligibleKey, eligibleMembers...)
+				return nil
+			})
+			server.Raise(err)
+		})
+	})
+}
+
 type releasedProxyEgress struct {
 	ClientID server.Id
 	IPv4     *int64
@@ -2659,8 +2716,13 @@ func removeProxyDeviceConfigsForClientIds(ctx context.Context, clientIds []serve
 	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		for _, proxyId := range removedProxyIds {
-			err := r.Del(ctx, proxyDeviceConfigKey(proxyId)).Err()
+		for chunk := range slices.Chunk(removedProxyIds, removeRedisCleanupChunkCount) {
+			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for _, proxyId := range chunk {
+					pipe.Del(ctx, proxyDeviceConfigKey(proxyId))
+				}
+				return nil
+			})
 			server.Raise(err)
 		}
 	})
@@ -2715,7 +2777,7 @@ func removeProxyClientData(ctx context.Context, proxyIds []server.Id) {
 // removeProvideKeysForClientIds deletes the provide keys of the given clients
 // and their redis mirrors (provide modes and per-mode secret keys).
 func removeProvideKeysForClientIds(ctx context.Context, clientIds []server.Id) {
-	for chunk := range slices.Chunk(clientIds, removeCascadeChunkCount) {
+	for chunk := range slices.Chunk(clientIds, removeRedisCleanupChunkCount) {
 		clientProvideModes := map[server.Id][]ProvideMode{}
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// reset in case the tx is retried on a transient error
@@ -2741,15 +2803,16 @@ func removeProvideKeysForClientIds(ctx context.Context, clientIds []server.Id) {
 		}, server.TxReadCommitted)
 
 		server.Redis(ctx, func(r server.RedisClient) {
-			for clientId, provideModes := range clientProvideModes {
-				pipe := r.TxPipeline()
-				pipe.Del(ctx, provideModesKey(clientId))
-				for _, provideMode := range provideModes {
-					pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
+			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for clientId, provideModes := range clientProvideModes {
+					pipe.Del(ctx, provideModesKey(clientId))
+					for _, provideMode := range provideModes {
+						pipe.Del(ctx, provideModeSecretKeyKey(clientId, provideMode))
+					}
 				}
-				_, err := pipe.Exec(ctx)
-				server.Raise(err)
-			}
+				return nil
+			})
+			server.Raise(err)
 		})
 	}
 }

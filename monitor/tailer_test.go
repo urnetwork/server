@@ -1,4 +1,4 @@
-package main
+package monitor
 
 import (
 	"bufio"
@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,6 +30,62 @@ func fakeStream(script string) func(ctx context.Context) (*exec.Cmd, io.ReadClos
 		}
 		pw.Close()
 		return cmd, pr, nil
+	}
+}
+
+func TestNetEscrowAlertRetainsSiteAndRedactsEntityIDs(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	tailer.classify("[netescrow]negative counter after settle: balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-21434368")
+	finding := findingByClass(t, tailer.drainWindow(), "netescrow-negative")
+	if finding.healthy {
+		t.Fatal("one negative mirror must alert")
+	}
+	if !strings.Contains(finding.evidence, "after settle") || !strings.Contains(finding.evidence, "balance=<id> contract=<id>") {
+		t.Fatalf("redacted evidence lost its useful site: %q", finding.evidence)
+	}
+	if logIDRe.MatchString(finding.evidence) {
+		t.Fatalf("net-escrow alert leaked an entity id: %q", finding.evidence)
+	}
+	if finding.frame != "site=settle" || !strings.Contains(finding.observed, "frame=site=settle") {
+		t.Fatalf("net-escrow alert lost its structured mutation site: frame=%q observed=%q", finding.frame, finding.observed)
+	}
+}
+
+func TestNetEscrowAlertSeparatesMutationSites(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	tailer.classify("[netescrow]negative counter after settle: balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-1")
+	tailer.classify("[netescrow]negative counter after quarantine release: balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-2")
+
+	findings := tailer.drainWindow()
+	frames := map[string]bool{}
+	for _, finding := range findings {
+		if finding.class == "netescrow-negative" && !finding.healthy {
+			frames[finding.frame] = true
+			if logIDRe.MatchString(finding.evidence) {
+				t.Fatalf("net-escrow alert leaked an entity id: %q", finding.evidence)
+			}
+		}
+	}
+	for _, want := range []string{"site=settle", "site=quarantine release"} {
+		if !frames[want] {
+			t.Fatalf("net-escrow findings frames = %v, missing %q", frames, want)
+		}
+	}
+}
+
+func TestRedisNetEscrowTTLAlertRedactsEntityIDs(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	tailer.classify(`[redis][ttl]"expireat" key="{escrow_019c640e-f467-4fa7-177f-d7ca43c33b6f}net" ttl 3139421360s-from-now exceeds 9600h0m0s`)
+	finding := findingByClass(t, tailer.drainWindow(), "redis-netescrow-ttl")
+	if finding.healthy {
+		t.Fatal("one suspect Redis TTL must alert")
+	}
+	if !strings.Contains(finding.evidence, `"expireat"`) ||
+		!strings.Contains(finding.evidence, `{escrow_<id>}net`) {
+		t.Fatalf("redacted evidence lost command or key family: %q", finding.evidence)
+	}
+	if logIDRe.MatchString(finding.evidence) {
+		t.Fatalf("Redis TTL alert leaked an entity id: %q", finding.evidence)
 	}
 }
 
@@ -195,5 +252,25 @@ func TestNovelTicketOpensAcrossVaryingShapes(t *testing.T) {
 	}
 	if !opened {
 		t.Fatal("two consecutive novel minutes with different top shapes did not open a ticket")
+	}
+}
+
+// Public endpoints receive bursts of unrelated vulnerability probes. Nginx
+// logs every nonexistent path as an error, but many one-off paths are not one
+// novel server failure recurring at rate. The novelty threshold is per
+// normalized shape, not the sum of unrelated shapes in the minute.
+func TestNovelDiverseOneOffShapesDoNotAlert(t *testing.T) {
+	tailer := newLogTailer("web", nil)
+	for i := 0; i < novelRateThreshold*3; i += 1 {
+		path := fmt.Sprintf("%c%c", 'a'+rune(i/26), 'a'+rune(i%26))
+		tailer.classify(fmt.Sprintf(
+			`2026/08/30 04:08:45 [error] 16#16: *4607 open() "/etc/nginx/html/probe-%s.php" failed (2: No such file or directory)`,
+			path,
+		))
+	}
+
+	novel := findingByClass(t, tailer.drainWindow(), "novel")
+	if !novel.healthy {
+		t.Fatalf("unrelated one-off web probes produced a novel alert: %+v", novel)
 	}
 }

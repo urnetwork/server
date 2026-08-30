@@ -286,13 +286,18 @@ func DefaultTestEnv() *TestEnv {
 	}
 }
 
+// Runs package tests inside one environment and tears it down before returning
+// the status that the caller passes to os.Exit.
+func runTestMain(setup func() func(), run func() int) int {
+	teardown := setup()
+	defer teardown()
+	return run()
+}
+
 // in each test file, `func TestMain(m *testing.M) {(&server.TestEnv{}).TestMain(m)}`
 // https://pkg.go.dev/testing
 func (self *TestEnv) TestMain(m *testing.M) {
-	teardown := self.setup()
-	defer teardown()
-	code := m.Run()
-	defer os.Exit(code)
+	os.Exit(runTestMain(self.setup, m.Run))
 }
 
 func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
@@ -627,6 +632,23 @@ const testPgDbOrphanAge = 2 * time.Hour
 
 var reapOrphanedTestPgDbsOnce sync.Once
 
+// Validates the generated identifier and returns its embedded creation time.
+func parseTestPgDbName(datname string) (int64, bool) {
+	parts := strings.Split(datname, "_")
+	if len(parts) != 3 || parts[0] != "test" {
+		return 0, false
+	}
+	millis, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	randomBytes, err := hex.DecodeString(parts[2])
+	if err != nil || len(randomBytes) != 16 {
+		return 0, false
+	}
+	return millis, true
+}
+
 // reapOrphanedTestPgDbs drops test databases left behind by test processes
 // that died before teardown.
 //
@@ -660,12 +682,8 @@ func reapOrphanedTestPgDbs(ctx context.Context) {
 					for result.Next() {
 						var datname string
 						Raise(result.Scan(&datname))
-						parts := strings.Split(datname, "_")
-						if len(parts) < 2 {
-							continue
-						}
-						millis, err := strconv.ParseInt(parts[1], 10, 64)
-						if err != nil {
+						millis, ok := parseTestPgDbName(datname)
+						if !ok {
 							continue
 						}
 						if millis < cutoff {

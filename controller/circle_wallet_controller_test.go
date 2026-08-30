@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -19,6 +22,95 @@ import (
 // var circleUserIdWithWallet = server.RequireParseId("018c3c3c-8265-1b71-e827-902beb3233c4")
 var circleUserIdWithWallet = server.RequireParseId("018c4b12-1a76-aaca-acce-72ddae03f60d")
 var circleUserIdWithWalletAndBalance = server.RequireParseId("018c3c7f-82f3-341b-6fd9-fe8d180c366c")
+
+func TestWalletValidateAddressMatchesDeclaredChain(t *testing.T) {
+	tests := []struct {
+		name    string
+		chain   string
+		address string
+		valid   bool
+	}{
+		{
+			name:    "solana",
+			chain:   "SOL",
+			address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
+			valid:   true,
+		},
+		{
+			name:    "polygon",
+			chain:   "MATIC",
+			address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
+			valid:   true,
+		},
+		{
+			name:    "production regression - solana key labeled polygon",
+			chain:   "MATIC",
+			address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
+			valid:   false,
+		},
+		{
+			name:    "polygon address labeled solana",
+			chain:   "SOL",
+			address: "0xB3f448b9C395F9833BE866577254799c23BBa682",
+			valid:   false,
+		},
+		{
+			name:    "zero polygon address",
+			chain:   "MATIC",
+			address: "0x0000000000000000000000000000000000000000",
+			valid:   false,
+		},
+		{
+			name:    "solana usdc mint is not a wallet",
+			chain:   "SOL",
+			address: solanaUsdcMint,
+			valid:   false,
+		},
+		{
+			name:    "unknown chain",
+			chain:   "BTC",
+			address: "DgTYzxzYRpkGQ8e3Un71GoQf494VLDBnyqXNXB38MP73",
+			valid:   false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := WalletValidateAddress(&WalletValidateAddressArgs{
+				Address: test.address,
+				Chain:   test.chain,
+			}, nil)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Valid, test.valid)
+		})
+	}
+}
+
+func TestCircleInvalidDestinationErrorClassification(t *testing.T) {
+	invalidDestination := &server.HttpStatusError{
+		StatusCode:   http.StatusBadRequest,
+		Status:       "400 Bad Request",
+		ResponseBody: `{"code":155219,"message":"Invalid destination address."}`,
+	}
+	tests := []struct {
+		name  string
+		err   error
+		match bool
+	}{
+		{name: "exact", err: invalidDestination, match: true},
+		{name: "wrapped", err: fmt.Errorf("submit: %w", invalidDestination), match: true},
+		{name: "rate limit", err: &server.HttpStatusError{StatusCode: http.StatusTooManyRequests, ResponseBody: invalidDestination.ResponseBody}, match: false},
+		{name: "other bad request", err: &server.HttpStatusError{StatusCode: http.StatusBadRequest, ResponseBody: `{"code":123,"message":"bad amount"}`}, match: false},
+		{name: "matching text without typed status", err: errors.New("Invalid destination address."), match: false},
+		{name: "malformed body", err: &server.HttpStatusError{StatusCode: http.StatusBadRequest, ResponseBody: `not-json`}, match: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			connect.AssertEqual(t, isCircleInvalidDestinationError(test.err), test.match)
+		})
+	}
+}
 
 func TestWalletCircleInit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

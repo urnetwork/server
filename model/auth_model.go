@@ -753,7 +753,14 @@ func AuthLoginWithPassword(
 	})
 
 	if userId == nil {
-		return nil, errors.New("User does not exist.")
+		// Authentication failure is an ordinary API result, not a server error.
+		// Use the same response as a wrong password so callers cannot enumerate
+		// accounts and a clean acceptance fixture does not surface as HTTP 500.
+		return &AuthLoginWithPasswordResult{
+			Error: &AuthLoginWithPasswordResultError{
+				Message: "Invalid user or password.",
+			},
+		}, nil
 	}
 
 	// server.Logger().Printf("Comparing password hashes\n")

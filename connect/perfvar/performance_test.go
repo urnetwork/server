@@ -1149,11 +1149,14 @@ func subtractPlatformTransportReceiveStats(
 
 // Monotonic workload-Pack terminal failures are baselined separately from
 // ownership. Candidate-client admission failures before a measured interval
-// are valid setup history; any IP data failure inside the interval invalidates
-// the run. Independent control failures remain in tracker diagnostics.
+// are valid setup history. Within the interval, only a Pack explicitly marked
+// retained or regenerable by its upstream TCP state may have a failed attempt
+// without invalidating the run. Independent failures remain in diagnostics.
 type perfvarPackFailureCounts struct {
-	deviceFailureCount   uint64
-	providerFailureCount uint64
+	deviceFailureCount              uint64
+	providerFailureCount            uint64
+	providerRecoverableFailureCount uint64
+	providerDatagramFailureCount    uint64
 }
 
 // A boundary retains Client identity so lifetime receive and send-recovery
@@ -1919,6 +1922,10 @@ func snapshotPerfvarPackFailures(path *fullTunPath) perfvarPackFailureCounts {
 	}
 	if path.providerPackSends != nil {
 		counts.providerFailureCount = path.providerPackSends.workloadFailures.Load()
+		counts.providerRecoverableFailureCount =
+			path.providerPackSends.workloadRecoverableFailures.Load()
+		counts.providerDatagramFailureCount =
+			path.providerPackSends.workloadDatagramFailures.Load()
 	}
 	return counts
 }

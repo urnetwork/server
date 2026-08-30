@@ -32,8 +32,16 @@ func CreateAccountWalletExternal(
 	if err != nil {
 		return nil, ErrInvalidBlockchain
 	}
+	// This endpoint creates USDC payout wallets, for which the payment path
+	// supports Solana and Polygon. TAO is retained as a non-payout identity.
+	// ParseBlockchain also knows Ethereum for authentication elsewhere, but an
+	// Ethereum wallet here could be auto-selected and later fail formatBlockchain.
+	if blockchain != model.SOL && blockchain != model.MATIC && blockchain != model.TAO {
+		return nil, ErrInvalidBlockchain
+	}
 
 	wallet.Blockchain = blockchain.String()
+	wallet.WalletAddress = strings.TrimSpace(wallet.WalletAddress)
 
 	walletValidateAddressArgs := WalletValidateAddressArgs{
 		Address: wallet.WalletAddress,

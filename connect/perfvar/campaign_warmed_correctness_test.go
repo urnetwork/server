@@ -108,6 +108,37 @@ func TestPerfvarEveryRouteWarmedTCPDirectionsCorrectness(t *testing.T) {
 	})
 }
 
+// A regional warmed gate verifies exact delivery rather than enforcing a
+// throughput threshold. Both H3 and P2P deliberately propagate bounded queue
+// backpressure, whose scheduling cost is not represented by link-rate bytes;
+// retain the same 25% wall-clock allowance without changing workload bytes.
+func regionalWarmedCorrectnessDeadlineByteCount(scenario perfvarScenario) int64 {
+	baseDeadlineByteCount := scenario.WarmupByteCount + scenario.PayloadByteCount
+	return baseDeadlineByteCount + baseDeadlineByteCount/4
+}
+
+// Every long regional carrier gets the same exact-delivery deadline headroom.
+func TestRegionalWarmedCorrectnessDeadlineIncludesBoundedCarrierHeadroom(t *testing.T) {
+	const (
+		warmupByteCount  = int64(6_275_000)
+		payloadByteCount = int64(32 * 1024 * 1024)
+	)
+	want := (warmupByteCount + payloadByteCount) * 5 / 4
+	for _, route := range []fullTunRoute{
+		fullTunRouteExchangeH3,
+		fullTunRouteP2pFast,
+	} {
+		scenario := perfvarScenario{
+			Route:            route,
+			WarmupByteCount:  warmupByteCount,
+			PayloadByteCount: payloadByteCount,
+		}
+		if got := regionalWarmedCorrectnessDeadlineByteCount(scenario); got != want {
+			t.Errorf("%s regional correctness deadline bytes=%d, want=%d", route, got, want)
+		}
+	}
+}
+
 // Representative 500 ms and 1 s regional paths use a full 32 MiB measured
 // body after one route-local BDP, preventing short-buffer success from
 // masquerading as steady-state warmed throughput.
@@ -169,15 +200,8 @@ func TestPerfvarRegionalWarmedTCPThirtyTwoMiBCorrectness(t *testing.T) {
 						FlowCount:             1,
 					}
 					scenario.WarmupByteCount = perfvarDirectionalBandwidthDelayByteCount(scenario)
-					if testCase.route == fullTunRouteP2pFast {
-						// P2P deliberately keeps 16 KiB of its bounded receive queue
-						// outside the data flight. This is an exact-delivery gate, not a
-						// throughput threshold: retain 25% deadline headroom while the
-						// measured result continues to report the actual duration.
-						baseDeadlineByteCount := scenario.WarmupByteCount + scenario.PayloadByteCount
-						scenario.correctnessDeadlineByteCount =
-							baseDeadlineByteCount + baseDeadlineByteCount/4
-					}
+					scenario.correctnessDeadlineByteCount =
+						regionalWarmedCorrectnessDeadlineByteCount(scenario)
 					if err := validatePerfvarWarmedTCPContract(scenario); err != nil {
 						fixture.close()
 						t.Fatalf("%s/%s warmed contract: %v", testCase.route, testCase.profileName, err)

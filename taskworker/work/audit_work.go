@@ -43,6 +43,13 @@ const exportStatsDisabled = false
 // stays fresh well within a day's resolution.
 const exportStatsInterval = 1 * time.Hour
 
+// exportStatsMaxTime gives the four 90-day aggregate passes enough headroom
+// for normal primary-load variance. The generic task default is two minutes;
+// production exports commonly take 60-80s and occasionally crossed that
+// boundary, causing a healthy export to be canceled and recomputed from the
+// beginning. Keep this bounded well below the hourly cadence.
+const exportStatsMaxTime = 10 * time.Minute
+
 func ScheduleExportStats(clientSession *session.ClientSession, tx server.PgTx) {
 	if exportStatsDisabled {
 		return
@@ -54,6 +61,7 @@ func ScheduleExportStats(clientSession *session.ClientSession, tx server.PgTx) {
 		clientSession,
 		task.RunOnce("export_stats"),
 		task.RunAt(server.NowUtc().Add(exportStatsInterval)),
+		task.MaxTime(exportStatsMaxTime),
 	)
 }
 

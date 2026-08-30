@@ -1,0 +1,55 @@
+package monitor
+
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+func TestRedisMemorySignalSyntheticHighMemoryNode(t *testing.T) {
+	source := &syntheticSource{
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, "for p in") {
+				return "6380 8600000000 10000000000 8000000000 1500000000 10", nil
+			}
+			return "", nil
+		},
+		redisFn: func(HostSettings, int, ...string) (string, error) {
+			return "used_memory_human:8.60G\nmaxmemory_human:10.00G\nused_memory_dataset:8000000000\nmem_clients_normal:1000000000\nmem_clients_slaves:500000000\nmem_fragmentation_ratio:1.01", nil
+		},
+	}
+	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "node-mem-high")
+	if alert.Sustain != 2 {
+		t.Fatalf("sustain = %d, want 2 consecutive 5-minute ticks", alert.Sustain)
+	}
+	if !strings.Contains(alert.Evidence, "dataset=8.00G clients=1.50G") {
+		t.Fatalf("evidence did not attribute current Redis client fields: %q", alert.Evidence)
+	}
+}
+
+func TestRedisMemorySignalSyntheticCriticalAndSkewedNodes(t *testing.T) {
+	tests := []struct {
+		name  string
+		rows  string
+		class string
+	}{
+		{name: "critical", rows: "6380 93 100 80 1 10", class: "node-mem-critical"},
+		{name: "skew", rows: "6380 10 1000 9 1 10\n6381 10 1000 9 1 10\n6382 40 1000 39 1 10", class: "mem-skew"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {
+				return test.rows, nil
+			}}
+			alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireAlertClass(t, alerts, test.class)
+		})
+	}
+}

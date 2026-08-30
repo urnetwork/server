@@ -420,10 +420,11 @@ func AddContractToPairStream(
 // evals passed the 8h ttl as a raw `time.Duration` eval arg, which go-redis
 // writes as its int64 NANOSECONDS — `EXPIRE <key> 28800000000000` (~913,000
 // years). Orphaned streams therefore never aged out (~1.1M stream id keys
-// plus their contract sets observed on main 2026-07-20). Any
-// `s2_sk_sid` / `s2_sk_cs` key with a ttl beyond the intended 8h is clamped
-// to 8h: an active stream re-refreshes on its next contract add, an orphan
-// finally expires.
+// plus their contract sets observed on main 2026-07-20). The production leak
+// used the legacy `s_sk_sid` / `s_sk_cs` names; current writers use
+// `s2_sk_sid` / `s2_sk_cs`. Any generation with a ttl beyond the intended 8h
+// is clamped to 8h: an active stream re-refreshes on its next contract add,
+// and an orphan finally expires.
 func ExpireLeakedStreamKeys(ctx context.Context) (scannedCount int64, fixedCount int64, returnErr error) {
 	ttl := 8 * time.Hour
 
@@ -431,10 +432,20 @@ func ExpireLeakedStreamKeys(ctx context.Context) (scannedCount int64, fixedCount
 		fixNode := func(nodeCtx context.Context, node redis.UniversalClient) error {
 			var cursor uint64
 			for {
-				keys, nextCursor, err := node.Scan(nodeCtx, cursor, "*s2_sk_*", 5000).Result()
+				keys, nextCursor, err := node.Scan(nodeCtx, cursor, "*s*_sk_*", 5000).Result()
 				if err != nil {
 					return err
 				}
+				// MATCH is only a scan optimization. Validate exact suffixes
+				// before changing a key so an unrelated binary key containing
+				// the same byte fragment cannot be clamped.
+				streamKeys := keys[:0]
+				for _, key := range keys {
+					if isStreamTTLKey(key) {
+						streamKeys = append(streamKeys, key)
+					}
+				}
+				keys = streamKeys
 				if 0 < len(keys) {
 					atomic.AddInt64(&scannedCount, int64(len(keys)))
 
@@ -488,6 +499,13 @@ func ExpireLeakedStreamKeys(ctx context.Context) (scannedCount int64, fixedCount
 		}
 	})
 	return
+}
+
+func isStreamTTLKey(key string) bool {
+	return strings.HasSuffix(key, "}s_sk_sid") ||
+		strings.HasSuffix(key, "}s_sk_cs") ||
+		strings.HasSuffix(key, "}s2_sk_sid") ||
+		strings.HasSuffix(key, "}s2_sk_cs")
 }
 
 // joinStream adds `contractId` to the stream at `key`, if that stream is

@@ -13,13 +13,14 @@
 // ever run. Every command carries a hard timeout — a probe that times out is
 // an observation (often the strongest one, e.g. a wedged redis ping), never a
 // hot retry. All functions here are safe for concurrent use.
-package main
+package monitor
 
 import (
 	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -39,9 +40,12 @@ type host struct {
 	overlayIp string // from monitor.yml (overlay mode)
 	roles     []string
 	// redis-cluster hosts only
-	redisEntryPort int
-	redisNodeLo    int
-	redisNodeHi    int
+	redisEntryPort        int
+	redisPorts            []int
+	redisNodeLo           int
+	redisNodeHi           int
+	redisExpectedReplicas int
+	proxy                 *ProxyHostSettings
 }
 
 func (self *host) hasRole(role string) bool {
@@ -63,6 +67,9 @@ func (self *host) addr(mode string) string {
 
 // redisNodePorts is the inclusive port range of cluster nodes on this host.
 func (self *host) redisNodePorts() []int {
+	if len(self.redisPorts) > 0 {
+		return append([]int(nil), self.redisPorts...)
+	}
 	if self.redisNodeLo == 0 || self.redisNodeHi < self.redisNodeLo {
 		return nil
 	}
@@ -76,10 +83,12 @@ func (self *host) redisNodePorts() []int {
 // monitorConfig is the monitor's view of the environment
 // (from monitor.yml + pg.yml + config settings.yml).
 type monitorConfig struct {
-	env string // WARP_ENV
+	env                 string // WARP_ENV
+	verificationEnabled bool
 
 	sshUser     string // deployed login user
 	sshDevUser  string // login user for local dev over the overlay
+	sshKeyPaths []string
 	addressMode string
 
 	hosts []*host
@@ -89,6 +98,11 @@ type monitorConfig struct {
 	pgUser        string
 	pgPassword    string
 	pgDb          string
+
+	sourceIPv4URL      string
+	sourceIPv6URL      string
+	expectedSourceIPv4 string
+	expectedSourceIPv6 string
 
 	// state dir for baselines and other local persistence
 	stateDir string
@@ -173,15 +187,8 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	defer cancel()
 
 	target := fmt.Sprintf("%s@%s", self.cfg.activeSshUser(), addr)
-	cmd := exec.CommandContext(
-		cmdCtx,
-		"ssh",
-		"-o", "BatchMode=yes",
-		"-o", fmt.Sprintf("ConnectTimeout=%d", int(connectTimeout.Seconds())),
-		"-o", "StrictHostKeyChecking=accept-new",
-		target,
-		remoteCmd,
-	)
+	sshArgs := self.sshArgs(target, remoteCmd, connectTimeout)
+	cmd := exec.CommandContext(cmdCtx, "ssh", sshArgs...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -200,6 +207,21 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 		return out.String(), fmt.Errorf("%s: %w: %s", h.name, err, strings.TrimSpace(errOut.String()))
 	}
 	return out.String(), nil
+}
+
+func (self *runner) sshArgs(target, remoteCmd string, connectTimeout time.Duration) []string {
+	sshArgs := []string{
+		"-o", "BatchMode=yes",
+		"-o", fmt.Sprintf("ConnectTimeout=%d", int(connectTimeout.Seconds())),
+		"-o", "StrictHostKeyChecking=accept-new",
+	}
+	for _, keyPath := range self.cfg.sshKeyPaths {
+		if strings.TrimSpace(keyPath) != "" {
+			sshArgs = append(sshArgs, "-i", keyPath)
+		}
+	}
+	sshArgs = append(sshArgs, target, remoteCmd)
+	return sshArgs
 }
 
 // pg runs a read-only sql battery on the pg-primary host, direct to 5432
@@ -253,9 +275,16 @@ func parsePgRows(out string) []pgRow {
 // redis runs redis-cli against a node port on a redis host and returns raw
 // stdout. args are the redis-cli arguments (e.g. "CLUSTER", "INFO").
 func (self *runner) redis(ctx context.Context, h *host, port int, args ...string) (string, error) {
-	remoteCmd := fmt.Sprintf("redis-cli -p %d %s", port, strings.Join(args, " "))
-	out, err := self.ssh(ctx, h, remoteCmd, "")
+	out, err := self.redisRaw(ctx, h, port, args...)
 	return strings.TrimSpace(out), err
+}
+
+// redisRaw preserves binary command output. redis-cli appends a newline, but
+// decoders such as encoding/gob safely stop after their value; trimming all
+// whitespace could corrupt a legitimate first/last payload byte.
+func (self *runner) redisRaw(ctx context.Context, h *host, port int, args ...string) (string, error) {
+	remoteCmd := fmt.Sprintf("redis-cli -p %d %s", port, strings.Join(args, " "))
+	return self.ssh(ctx, h, remoteCmd, "")
 }
 
 // shell runs an observational shell command on a host (top, ss, dmesg,
@@ -264,30 +293,65 @@ func (self *runner) shell(ctx context.Context, h *host, remoteCmd string) (strin
 	return self.ssh(ctx, h, remoteCmd, "")
 }
 
-// warpctl runs warpctl locally on the monitor machine (assumed present, like
-// by-ip/by-pass). Used for fleet-wide log reads (`warpctl logs`) and the
-// publish side of the deploy clock (`warpctl ls versions`). Output is the
-// combined stdout+stderr — warpctl emits informational lines through Go's
-// log package (stderr), and callers parse those too.
-func (self *runner) warpctl(ctx context.Context, args ...string) (string, error) {
+// local runs a bounded command on the monitor machine. Output is combined
+// stdout+stderr because several operational tools emit useful structured
+// context on stderr even on success.
+func (self *runner) local(ctx context.Context, name string, args ...string) (string, error) {
 	timeout := self.cfg.commandTimeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "warpctl", args...)
+	cmd := exec.CommandContext(cmdCtx, name, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
 	if cmdCtx.Err() == context.DeadlineExceeded {
-		return out.String(), fmt.Errorf("warpctl timeout after %s", timeout)
+		return out.String(), fmt.Errorf("%s timeout after %s", name, timeout)
 	}
 	if err != nil {
-		return out.String(), fmt.Errorf("warpctl %s: %w", strings.Join(args, " "), err)
+		return out.String(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
 	return out.String(), nil
+}
+
+func (self *runner) tcpExchange(ctx context.Context, network, address string, payload []byte, responseBytes int) ([]byte, error) {
+	timeout := self.cfg.commandTimeout
+	if timeout <= 0 || timeout > 5*time.Second {
+		timeout = 5 * time.Second
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	connection, err := (&net.Dialer{Timeout: timeout}).DialContext(commandCtx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
+	if len(payload) > 0 {
+		if _, err := connection.Write(payload); err != nil {
+			return nil, err
+		}
+	}
+	response := make([]byte, responseBytes)
+	if responseBytes == 0 {
+		return response, nil
+	}
+	if _, err := io.ReadFull(connection, response); err != nil {
+		return response, err
+	}
+	return response, nil
+}
+
+// warpctl runs warpctl locally on the monitor machine (assumed present, like
+// by-ip/by-pass). Used for fleet-wide log reads (`warpctl logs`) and the
+// publish side of the deploy clock (`warpctl ls versions`).
+func (self *runner) warpctl(ctx context.Context, args ...string) (string, error) {
+	return self.local(ctx, "warpctl", args...)
 }
 
 // warpctlStream starts a long-running warpctl command (e.g. `logs ... -f`) and

@@ -28,6 +28,9 @@ func TestExportStatsScheduledAtHourlyCadence(t *testing.T) {
 		if exportStatsInterval < 15*time.Minute {
 			t.Fatalf("export cadence %v is under 15m — the 30s-loop load problem returns", exportStatsInterval)
 		}
+		if exportStatsMaxTime >= exportStatsInterval {
+			t.Fatalf("export max time %v must stay below cadence %v", exportStatsMaxTime, exportStatsInterval)
+		}
 
 		before := server.NowUtc()
 		var taskId server.Id
@@ -53,8 +56,45 @@ func TestExportStatsScheduledAtHourlyCadence(t *testing.T) {
 		})
 
 		tasks := task.GetTasks(ctx, taskId)
-		if tasks[taskId] == nil {
+		scheduledTask := tasks[taskId]
+		if scheduledTask == nil {
 			t.Fatal("scheduled export task not readable")
+		}
+		if got, want := time.Duration(scheduledTask.RunMaxTimeSeconds)*time.Second, exportStatsMaxTime; got != want {
+			t.Fatalf("export max time = %v, want %v", got, want)
+		}
+	})
+}
+
+// A rollout encounters the existing hourly RunOnce row rather than an empty
+// queue. Pin that ScheduleTaskInTx's conflict merge raises its old generic
+// deadline, so deploying the fix repairs the live chain without a manual task
+// delete or kick.
+func TestExportStatsScheduleUpgradesPendingDefaultDeadline(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+
+		var existingTaskID server.Id
+		server.Tx(ctx, func(tx server.PgTx) {
+			existingTaskID = task.ScheduleTaskInTx(
+				tx,
+				ExportStats,
+				&ExportStatsArgs{},
+				clientSession,
+				task.RunOnce("export_stats"),
+				task.RunAt(server.NowUtc().Add(exportStatsInterval)),
+			)
+			ScheduleExportStats(clientSession, tx)
+		})
+
+		scheduledTask := task.GetTasks(ctx, existingTaskID)[existingTaskID]
+		if scheduledTask == nil {
+			t.Fatal("existing export task disappeared during RunOnce merge")
+		}
+		if got, want := time.Duration(scheduledTask.RunMaxTimeSeconds)*time.Second, exportStatsMaxTime; got != want {
+			t.Fatalf("merged export max time = %v, want %v", got, want)
 		}
 	})
 }

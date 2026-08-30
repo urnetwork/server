@@ -40,19 +40,20 @@ const UnpaidPriority = 0
 const PaidPriority = 100
 const TrustedPriority = 200
 
-// closed contracts that have not been bundled into a completed payout after
-// this long will not be paid; `RemoveCompletedContracts` hard deletes them
-const StragglerContractExpiration = 90 * 24 * time.Hour
+// Closed contracts that remain safely unplanned after this long expire. Active
+// and ambiguous processor payments are protected independently of age.
+const StragglerContractExpiration = 300 * 24 * time.Hour
 
 // completed contracts are reaped this long after their payment completes
-// (reap_time = complete_time + CompletedContractExpiration, set in CompletePayment)
+// (reap_time = complete_time + CompletedContractExpiration, assigned by the
+// bounded retention worker after CompletePayment durably queues the payment)
 const CompletedContractExpiration = 7 * 24 * time.Hour
 
-// per-call wall-clock budget for the contract reaper's assign + delete passes.
-// Bounds each RemoveCompletedContracts run so a large one-time backlog drains
-// over many 30-min runs instead of one unbounded run; steady state finishes well
-// under it. A var (not const) so tests can inject a tiny budget to exercise the
-// mid-backlog stop.
+// Per-phase wall-clock budget for the contract reaper's completed assignment,
+// straggler assignment, and delete passes. A large one-time backlog drains over
+// many 30-min runs instead of one unbounded transaction; steady state finishes
+// well under it. A var (not const) so tests can inject a tiny budget to exercise
+// the mid-backlog stop.
 var reaperRunBudget = 5 * time.Minute
 
 func ByteCountHumanReadable(count ByteCount) string {
@@ -255,19 +256,26 @@ func netEscrowKey(balanceId server.Id) string {
 	return fmt.Sprintf("{escrow_%s}net", balanceId)
 }
 
-// netEscrowEndTimeSlack extends the counter ttl past the balance `end_time`
-// at the escrow-creation write, which knows the end time. The counter is only
-// meaningful while the balance is active; the slack covers contracts that
-// straddle the end of the balance window.
+// netEscrowEndTimeSlack extends the precise counter deadline past the balance
+// `end_time`. The counter is only meaningful while the balance is active; the
+// slack covers contracts that straddle the end of the balance window.
 const netEscrowEndTimeSlack = 30 * 24 * time.Hour
 
-// netEscrowFallbackTtl bounds counters touched at write sites that do not
-// know the balance `end_time` (the reconcile `Set`, and a `DecrBy` that
-// recreates a missing key). The reconcile task revisits every active balance
-// and refreshes this, and the escrow-creation write restores the precise
-// end-time deadline, so the fallback only has to outlast the gap between
-// those writes.
+// netEscrowFallbackTtl bounds every counter, including balances whose durable
+// end_time is intentionally many years away. A missing counter reads as zero;
+// the recurring reconcile compares it with PostgreSQL reservations and
+// recreates it, so Redis never needs to retain the mirror for the balance's
+// complete lifetime.
 const netEscrowFallbackTtl = 90 * 24 * time.Hour
+
+func netEscrowExpiration(now time.Time, balanceEndTime time.Time) time.Time {
+	preciseExpiration := balanceEndTime.Add(netEscrowEndTimeSlack)
+	rollingExpiration := now.Add(netEscrowFallbackTtl)
+	if rollingExpiration.Before(preciseExpiration) {
+		return rollingExpiration
+	}
+	return preciseExpiration
+}
 
 type TransferBalance struct {
 	BalanceId             server.Id `json:"balance_id"`
@@ -388,8 +396,8 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 
 // ReconcileNetEscrow compares the redis net escrow counters for all active
 // transfer balances against the postgres source of truth and, when apply is
-// true, resets them to it -- correcting accumulated drift. It returns the drift
-// it found per network either way.
+// true, corrects their drift. It returns the drift it found per network either
+// way.
 //
 // The `netEscrowKey` counter is an approximate, non-atomic mirror with no
 // other reconciliation: a leaked `IncrBy` (a quarantined malformed close, a
@@ -409,13 +417,15 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 // (`outcome` still null, generated `open` false) still holds its reservation, so
 // it is matched by `outcome IS NULL` and would be missed by `open`.
 //
-// When apply is true the counter is written with SET, so a concurrent
-// `IncrBy`/`DecrBy` in the small window between the postgres read and the redis
-// write can be lost; the next run re-derives the value and converges. The
-// lost-write bias is toward a lower counter (more available), the same fail-open
-// direction as a missing counter (see `TestProxyContractRedisMirrorLoss`). When
-// apply is false the counters are only read (a dry run): the returned drift
-// reports the accumulated error without changing anything.
+// Each PostgreSQL reservation snapshot is taken for only the Redis batch that
+// is about to be corrected. The old implementation took one fleet-wide
+// snapshot, then spent about 30 minutes walking 1.8M balances; by the last
+// batch its SET values were 30 minutes stale and overwrote live mirror traffic
+// (5.79TiB of under-reservation followed by >10k negative-counter lines in 29s
+// on 2026-08-29). Corrections use INCRBY(delta), not SET: a concurrent mirror
+// increment/decrement between our GET and correction remains in the result.
+// The irreducible PostgreSQL-commit-to-mirror window is therefore bounded to
+// one fresh batch instead of the duration of the entire fleet scan.
 //
 // Drift is the signed difference (previous counter minus reconciled value)
 // summed per network. Positive drift means the counter was over-reserved -- the
@@ -425,12 +435,12 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 	now := server.NowUtc()
 	driftByNetworkId = map[server.Id]ByteCount{}
 
-	pending := openEscrowReservedByBalance(ctx, nil)
-
 	// visit every active balance -- the same set `createTransferEscrowInTx`
-	// reads -- paginated by balance_id (the primary key) so the scan is bounded
-	// and resumable
-	const batchSize = 1000
+	// reads -- paginated by balance_id (the primary key) so the scan is bounded.
+	// Ten thousand keeps 1.8M mostly-empty balances to ~180 source reads rather
+	// than the former ~1,800 round trips while remaining a bounded Redis/SQL
+	// payload.
+	const batchSize = 10000
 	var cursor server.Id
 	for {
 		type balanceRow struct {
@@ -470,6 +480,10 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 		for i, row := range rows {
 			balanceIds[i] = row.balanceId
 		}
+		// Read reservations immediately before correcting this page. Do not move
+		// this above the pagination loop: that recreates the stale-global-snapshot
+		// incident described in the function comment.
+		pending := openEscrowReservedForBalances(ctx, balanceIds)
 		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
 		for _, row := range rows {
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
@@ -525,57 +539,45 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 		return
 	}
 
-	pending := openEscrowReservedByBalance(ctx, &networkId)
-	drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
-	for _, d := range drift {
-		driftByteCount += d
+	const batchSize = 10000
+	for start := 0; start < len(balanceIds); start += batchSize {
+		end := min(start+batchSize, len(balanceIds))
+		batch := balanceIds[start:end]
+		pending := openEscrowReservedForBalances(ctx, batch)
+		drift := reconcileNetEscrowBatch(ctx, pending, batch, apply)
+		for _, d := range drift {
+			driftByteCount += d
+		}
 	}
 	return driftByteCount, len(balanceIds)
 }
 
-// openEscrowReservedByBalance returns the reserved (open-contract) escrow bytes
-// per balance, the source of truth for the net escrow counter. When networkId
-// is non-nil the scan is restricted to that network's balances.
-func openEscrowReservedByBalance(ctx context.Context, networkId *server.Id) map[server.Id]ByteCount {
+// openEscrowReservedForBalances returns the current reserved (open-contract)
+// escrow bytes for exactly one bounded balance page. The balance_id index is a
+// required part of this algorithm: it prevents every page from scanning the
+// complete transfer_escrow history.
+func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) map[server.Id]ByteCount {
 	pending := map[server.Id]ByteCount{}
+	if len(balanceIds) == 0 {
+		return pending
+	}
 	server.Db(ctx, func(conn server.PgConn) {
-		var result server.PgResult
-		var err error
-		if networkId == nil {
-			result, err = conn.Query(
-				ctx,
-				`
-                    SELECT
-                        transfer_escrow.balance_id,
-                        SUM(transfer_escrow.balance_byte_count)
-                    FROM transfer_escrow
-                    INNER JOIN transfer_contract ON
-                        transfer_contract.contract_id = transfer_escrow.contract_id
-                    WHERE
-                        transfer_contract.outcome IS NULL
-                    GROUP BY transfer_escrow.balance_id
-                `,
-			)
-		} else {
-			result, err = conn.Query(
-				ctx,
-				`
-                    SELECT
-                        transfer_escrow.balance_id,
-                        SUM(transfer_escrow.balance_byte_count)
-                    FROM transfer_escrow
-                    INNER JOIN transfer_contract ON
-                        transfer_contract.contract_id = transfer_escrow.contract_id
-                    INNER JOIN transfer_balance ON
-                        transfer_balance.balance_id = transfer_escrow.balance_id
-                    WHERE
-                        transfer_contract.outcome IS NULL AND
-                        transfer_balance.network_id = $1
-                    GROUP BY transfer_escrow.balance_id
-                `,
-				*networkId,
-			)
-		}
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT
+                    transfer_escrow.balance_id,
+                    SUM(transfer_escrow.balance_byte_count)
+                FROM transfer_escrow
+                INNER JOIN transfer_contract ON
+                    transfer_contract.contract_id = transfer_escrow.contract_id
+                WHERE
+                    transfer_escrow.balance_id = ANY($1::uuid[]) AND
+                    transfer_contract.outcome IS NULL
+                GROUP BY transfer_escrow.balance_id
+            `,
+			balanceIds,
+		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var balanceId server.Id
@@ -591,9 +593,72 @@ func openEscrowReservedByBalance(ctx context.Context, networkId *server.Id) map[
 // reconcileNetEscrowBatch reads the current net escrow counter for each balance
 // and returns the signed drift against the reserved (true) value (previous
 // counter minus reserved; positive means over-reserved). When apply is true it
-// then resets each counter to its reserved value -- zero (no live reservation)
-// deletes the key so it reads as zero, matching the "missing counter is zero"
-// invariant.
+// atomically adds only nonzero corrections. An already-correct mirror receives
+// no write or TTL refresh; this avoids the old fleet-wide SET/DEL storm on a
+// logically no-op pass. A corrected zero result deletes the key, matching the
+// "missing counter is zero" invariant.
+const netEscrowCorrectionScript = `
+local value = redis.call('INCRBY', KEYS[1], ARGV[1])
+if value == 0 then
+    redis.call('DEL', KEYS[1])
+else
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return value
+`
+
+func applyNetEscrowCorrection(
+	ctx context.Context,
+	scripter redis.Scripter,
+	key string,
+	correction ByteCount,
+) *redis.Cmd {
+	return scripter.Eval(
+		ctx,
+		netEscrowCorrectionScript,
+		[]string{key},
+		correction,
+		int64(netEscrowFallbackTtl/time.Second),
+	)
+}
+
+// A PostgreSQL reservation is committed before its Redis mirror post. Even a
+// page-local additive reconcile cannot make those two stores atomic: it can
+// observe a just-settled PostgreSQL row before that settlement's Redis DECRBY,
+// correct the still-reserved mirror to zero, and then receive the delayed
+// decrement. Apply releases through one Lua command so that irreducible race
+// still returns the negative value for diagnosis but never leaves a negative
+// counter behind. Positive counters retain a shorter precise deadline and cap
+// a missing/legacy-long ttl at the rolling fallback horizon.
+const netEscrowReleaseScript = `
+local value = redis.call('DECRBY', KEYS[1], ARGV[1])
+if value <= 0 then
+    redis.call('DEL', KEYS[1])
+else
+    local ttl = redis.call('TTL', KEYS[1])
+    local max_ttl = tonumber(ARGV[2])
+    if ttl < 0 or max_ttl < ttl then
+        redis.call('EXPIRE', KEYS[1], max_ttl)
+    end
+end
+return value
+`
+
+func applyNetEscrowRelease(
+	ctx context.Context,
+	scripter redis.Scripter,
+	key string,
+	release ByteCount,
+) *redis.Cmd {
+	return scripter.Eval(
+		ctx,
+		netEscrowReleaseScript,
+		[]string{key},
+		release,
+		int64(netEscrowFallbackTtl/time.Second),
+	)
+}
+
 func reconcileNetEscrowBatch(
 	ctx context.Context,
 	pending map[server.Id]ByteCount,
@@ -611,41 +676,41 @@ func reconcileNetEscrowBatch(
 			}
 			return nil
 		})
+		corrections := map[server.Id]ByteCount{}
 		for _, balanceId := range balanceIds {
-			previous, _ := getCmds[balanceId].Int64() // missing key -> 0
+			previous, getErr := getCmds[balanceId].Int64()
+			if errors.Is(getErr, redis.Nil) {
+				previous = 0
+			} else if getErr != nil {
+				server.Raise(getErr)
+			}
 			drift[balanceId] = ByteCount(previous) - pending[balanceId]
+			if correction := pending[balanceId] - ByteCount(previous); correction != 0 {
+				corrections[balanceId] = correction
+			}
 		}
 
-		if !apply {
+		if !apply || len(corrections) == 0 {
 			return
 		}
 
-		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for _, balanceId := range balanceIds {
-				if reserved := pending[balanceId]; 0 < reserved {
-					// the reconcile does not know the balance end time; the
-					// fallback ttl is refreshed on every apply and the
-					// escrow-creation write restores the end-time deadline
-					pipe.Set(ctx, netEscrowKey(balanceId), reserved, netEscrowFallbackTtl)
-				} else {
-					pipe.Del(ctx, netEscrowKey(balanceId))
-				}
+		_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for balanceId, correction := range corrections {
+				applyNetEscrowCorrection(ctx, pipe, netEscrowKey(balanceId), correction)
 			}
 			return nil
 		})
+		server.Raise(pipelineErr)
 	})
 	return
 }
 
-// reportNegativeNetEscrow reports a net escrow counter that a decrement drove
-// below zero. The counter mirrors postgres-durable reservations, so a negative
-// value is always a defect: bytes were released that were never reserved (a
-// lost create mirror, or a reservation released twice). It over-reports
-// available balance until a reconcile resets it, so it is logged
-// unconditionally with the contract and balance that revealed it — the
-// decrementing site is the only place with both the delta and the result.
+// reportNegativeNetEscrow reports a net escrow counter that a release drove
+// below zero. applyNetEscrowRelease has already atomically deleted the negative
+// key, so the log retains the original result and mutation identity without
+// leaving availability overstated until the next reconcile.
 func reportNegativeNetEscrow(
-	decrCmds map[server.Id]*redis.IntCmd,
+	decrCmds map[server.Id]*redis.Cmd,
 	contractId server.Id,
 	site string,
 ) {
@@ -653,9 +718,9 @@ func reportNegativeNetEscrow(
 		if cmd == nil {
 			continue
 		}
-		if netEscrow, err := cmd.Result(); err == nil && netEscrow < 0 {
+		if netEscrow, err := cmd.Int64(); err == nil && netEscrow < 0 {
 			glog.Errorf(
-				"[netescrow]negative counter after %s: balance=%s contract=%s result=%d\n",
+				"[netescrow]negative counter after %s: balance=%s contract=%s result=%d clamped_to=0\n",
 				site,
 				balanceId,
 				contractId,
@@ -699,15 +764,12 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 	mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
 	defer mirrorCancel()
 	server.Redis(mirrorCtx, func(r server.RedisClient) {
-		decrCmds := map[server.Id]*redis.IntCmd{}
+		decrCmds := map[server.Id]*redis.Cmd{}
 		// per-balance hash tags (different slots): plain pipeline auto-routes
 		r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 			for balanceId, byteCount := range escrowed {
 				key := netEscrowKey(balanceId)
-				decrCmds[balanceId] = pipe.DecrBy(mirrorCtx, key, byteCount)
-				// a decr that recreates a missing key must not leave it
-				// without a ttl; nx never shortens the end-time deadline
-				pipe.ExpireNX(mirrorCtx, key, netEscrowFallbackTtl)
+				decrCmds[balanceId] = applyNetEscrowRelease(mirrorCtx, pipe, key, byteCount)
 			}
 			return nil
 		})
@@ -1193,15 +1255,17 @@ func createTransferEscrowInTx(
 		mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
 		defer mirrorCancel()
 		server.Redis(mirrorCtx, func(r server.RedisClient) {
+			mirrorTime := server.NowUtc()
 			// per-balance hash tags (different slots): plain pipeline auto-routes
 			r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 				for balanceId, escrow := range balanceEscrows {
 					key := netEscrowKey(balanceId)
 					pipe.IncrBy(mirrorCtx, key, escrow.balanceByteCount)
-					// the counter is only meaningful while the balance is
-					// active; pin the ttl to the balance end time plus slack
-					// (non-nx, so it also corrects a shorter fallback ttl)
-					pipe.ExpireAt(mirrorCtx, key, escrow.endTime.Add(netEscrowEndTimeSlack))
+					// Prefer the balance end time plus slack for short
+					// balances, but cap intentionally multi-year balances at
+					// the rolling fallback horizon. Non-NX also repairs an old
+					// effectively permanent deadline on the next mirror write.
+					pipe.ExpireAt(mirrorCtx, key, netEscrowExpiration(mirrorTime, escrow.endTime))
 				}
 				return nil
 			})
@@ -2270,16 +2334,17 @@ func settleEscrowInTx(
 			mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
 			defer mirrorCancel()
 			server.Redis(mirrorCtx, func(r server.RedisClient) {
-				decrCmds := map[server.Id]*redis.IntCmd{}
+				decrCmds := map[server.Id]*redis.Cmd{}
 				// per-balance hash tags (different slots): plain pipeline auto-routes
 				r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 					for balanceId, sweepPayout := range sweepPayouts {
 						key := netEscrowKey(balanceId)
-						decrCmds[balanceId] = pipe.DecrBy(mirrorCtx, key, sweepPayout.escrowBalanceByteCount)
-						// a decr that recreates a missing key must not leave
-						// it without a ttl; nx never shortens the end-time
-						// deadline
-						pipe.ExpireNX(mirrorCtx, key, netEscrowFallbackTtl)
+						decrCmds[balanceId] = applyNetEscrowRelease(
+							mirrorCtx,
+							pipe,
+							key,
+							sweepPayout.escrowBalanceByteCount,
+						)
 					}
 					return nil
 				})
@@ -3736,29 +3801,33 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 		})
 	})
 
-	// The reaper is driven entirely by the indexed reap_time column, never an
-	// anti-join or full scan. reap_time is the instant a contract becomes due for
-	// hard deletion:
-	//   - CompletePayment sets it to complete_time + CompletedContractExpiration
-	//     for the payment's contracts (the completed-payout retention window),
-	//   - the assign pass below stamps now() on aged closed-but-never-completed
-	//     contracts (stragglers and sweep-less quarantine rows) so they too become
-	//     due.
+	// The reaper is driven by the indexed reap_time column. reap_time is the
+	// instant a contract becomes due for hard deletion:
+	//   - CompletePayment queues bounded retention work; the completed-payment
+	//     pass stamps complete_time + CompletedContractExpiration,
+	//   - the straggler pass stamps now() on aged closed contracts that are not
+	//     owned by an active or otherwise ambiguous payment.
 	// The delete pass then removes every contract whose reap_time has passed,
 	// cascading contract_close/transfer_escrow/transfer_escrow_sweep for those same
-	// contract ids in one statement so dependents never linger as orphans. Both
-	// passes are bounded by a partial index and batched (one maintenance tx each,
-	// no long lock), so a single run drains the eligible set regardless of cadence.
+	// contract ids in one statement so dependents never linger as orphans. Every
+	// pass is index-driven, row-bounded, and committed one batch at a time, so a
+	// backlog is worked down without one long lock or transaction.
 	//
 	// This replaces three prior reaper blocks: the sweep-driven completed reaper,
 	// the sweep-less reaper, and the straggler reaper. The last two ran a
 	// non-selective, un-indexable anti-join over ~the whole old-closed contract
 	// table (open = false is nearly every old contract; the sweep / completed-
-	// payment anti-join can't be indexed on transfer_contract) with a LIMIT that
+	// payment anti-join could not be indexed on transfer_contract) with a LIMIT that
 	// never early-terminates -- so every run walked the world and tanked the DB
 	// (prod incident 2026-07-14). SweepOrphanContractData is the low-cadence safety
 	// net for orphans left by any other path (e.g. crashes mid-statement in older
 	// releases).
+
+	// CompletePayment only records the payment and queues this work. Advance each
+	// queued payment through its sweeps in keyset batches, committing the cursor
+	// after every batch so a timeout or worker restart resumes instead of replaying
+	// one enormous update.
+	assignCompletedContractReapTimeBatches(ctx, maxRowCount)
 
 	// assign pass: give aged closed-but-never-completed contracts a reap_time so
 	// the delete pass removes them. Bounded by the
@@ -3770,38 +3839,217 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	// delete pass: hard delete every contract whose reap_time is due, cascading
 	// its dependent rows. Bounded by the transfer_contract_reap_time partial index.
 	// This reaps both completed contracts (reap_time = complete_time +
-	// CompletedContractExpiration, set at CompletePayment) and the stragglers just
-	// assigned above. Candidate contract_ids are distinct (from the
-	// transfer_contract primary key), so a batch deletes exactly its candidates;
-	// removeContractBatches drains until an empty batch.
-	removeContractBatches(
+	// CompletedContractExpiration) and the stragglers just assigned above.
+	// Candidate contract_ids are distinct (from the transfer_contract primary
+	// key). removeDueContractBatches drains until an empty batch; protected
+	// candidates are repaired back to reap_time = NULL instead of deleted.
+	reapTime := server.NowUtc()
+	removeDueContractBatches(
 		ctx,
-		`
-			WITH candidate AS (
-				SELECT transfer_contract.contract_id
-				FROM transfer_contract
-				WHERE transfer_contract.reap_time IS NOT NULL AND transfer_contract.reap_time < $1
-				LIMIT $2
-			), deleted_close AS (
-				DELETE FROM contract_close
-				USING candidate
-				WHERE contract_close.contract_id = candidate.contract_id
-			), deleted_escrow AS (
-				DELETE FROM transfer_escrow
-				USING candidate
-				WHERE transfer_escrow.contract_id = candidate.contract_id
-			), deleted_sweep AS (
-				DELETE FROM transfer_escrow_sweep
-				USING candidate
-				WHERE transfer_escrow_sweep.contract_id = candidate.contract_id
-			)
-			DELETE FROM transfer_contract
-			USING candidate
-			WHERE transfer_contract.contract_id = candidate.contract_id
-			`,
-		server.NowUtc(),
+		reapTime,
+		reapTime.Add(-StragglerContractExpiration),
 		maxRowCount,
 	)
+}
+
+// assignCompletedContractReapTimeBatches drains the durable retention queue set
+// by CompletePayment. One payment is advanced by at most maxRowCount distinct
+// contract ids per transaction. The UUID cursor is committed with the contract
+// updates, making the work resumable without ever delaying payment completion.
+func assignCompletedContractReapTimeBatches(ctx context.Context, maxRowCount int) (assignedCount int64) {
+	budgetEnd := server.NowUtc().Add(reaperRunBudget)
+	for {
+		var batchCount int64
+		var stampedCount int64
+		processedPayment := false
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			result, err := tx.Query(
+				ctx,
+				`
+				WITH payment AS MATERIALIZED (
+					SELECT
+						account_payment.payment_id,
+						account_payment.complete_time,
+						account_payment.contract_retention_cursor
+					FROM account_payment
+					WHERE
+						account_payment.contract_retention_pending AND
+						account_payment.completed AND
+						account_payment.complete_time IS NOT NULL
+					ORDER BY account_payment.complete_time, account_payment.payment_id
+					LIMIT 1
+					FOR UPDATE SKIP LOCKED
+				), batch AS MATERIALIZED (
+					SELECT DISTINCT transfer_escrow_sweep.contract_id
+					FROM payment
+					INNER JOIN transfer_escrow_sweep ON
+						transfer_escrow_sweep.payment_id = payment.payment_id
+					WHERE
+						payment.contract_retention_cursor IS NULL OR
+						payment.contract_retention_cursor < transfer_escrow_sweep.contract_id
+					ORDER BY transfer_escrow_sweep.contract_id
+					LIMIT $1
+				), stamped AS (
+					UPDATE transfer_contract
+					SET reap_time = GREATEST(
+						COALESCE(transfer_contract.reap_time, '-infinity'::timestamp),
+						payment.complete_time + interval '7 days'
+					)
+					FROM payment, batch
+					WHERE
+						transfer_contract.contract_id = batch.contract_id AND
+						(
+							transfer_contract.reap_time IS NULL OR
+							transfer_contract.reap_time < payment.complete_time + interval '7 days'
+						)
+					RETURNING transfer_contract.contract_id
+				), advanced AS (
+					UPDATE account_payment
+					SET
+						contract_retention_cursor = COALESCE(
+							(
+								SELECT batch.contract_id
+								FROM batch
+								ORDER BY batch.contract_id DESC
+								LIMIT 1
+							),
+							account_payment.contract_retention_cursor
+						),
+						contract_retention_pending = ((SELECT COUNT(*) FROM batch) = $1)
+					FROM payment
+					WHERE account_payment.payment_id = payment.payment_id
+					RETURNING (SELECT COUNT(*) FROM batch) AS batch_count
+				)
+				SELECT
+					advanced.batch_count,
+					(SELECT COUNT(*) FROM stamped) AS stamped_count
+				FROM advanced
+				`,
+				maxRowCount,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					processedPayment = true
+					server.Raise(result.Scan(&batchCount, &stampedCount))
+				}
+			})
+		}, server.TxReadCommitted)
+		assignedCount += stampedCount
+		if !processedPayment || budgetEnd.Before(server.NowUtc()) {
+			return
+		}
+	}
+}
+
+// removeDueContractBatches consumes the first bounded slice of the reap_time
+// index before doing any payment lookup. Due contracts held by an active or
+// ambiguous payment are repaired to reap_time = NULL. So are unpaid contracts
+// stamped by the former 90-day rule that have not yet reached the new 300-day
+// horizon. All other due contracts and their dependent rows are deleted.
+// Classifying only the already-bounded slice avoids turning the safety checks
+// into an anti-join over contract history. The payment guard also covers
+// completed payments whose queued retention cursor has not finished yet.
+func removeDueContractBatches(ctx context.Context, minTime time.Time, minStragglerCreateTime time.Time, maxRowCount int) {
+	budgetEnd := server.NowUtc().Add(reaperRunBudget)
+	for {
+		var processedCount int64
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			result, err := tx.Query(
+				ctx,
+				`
+				WITH due AS MATERIALIZED (
+					SELECT
+						transfer_contract.contract_id,
+						transfer_contract.create_time
+					FROM transfer_contract
+					WHERE
+						transfer_contract.reap_time IS NOT NULL AND
+						transfer_contract.reap_time < $1
+					ORDER BY transfer_contract.reap_time
+					LIMIT $3
+				), protected AS MATERIALIZED (
+					SELECT due.contract_id
+					FROM due
+					WHERE
+						EXISTS (
+							SELECT 1
+							FROM transfer_escrow_sweep
+							INNER JOIN account_payment ON
+								account_payment.payment_id = transfer_escrow_sweep.payment_id
+							WHERE
+								transfer_escrow_sweep.contract_id = due.contract_id AND
+								(
+									account_payment.contract_retention_pending OR
+									(
+										NOT account_payment.completed AND
+										(
+											NOT account_payment.canceled OR
+											account_payment.circle_idempotency_key IS NOT NULL OR
+											account_payment.payment_record IS NOT NULL OR
+											account_payment.tx_hash IS NOT NULL
+										)
+									)
+								)
+						) OR
+						(
+							due.create_time >= $2 AND
+							NOT EXISTS (
+								SELECT 1
+								FROM transfer_escrow_sweep
+								INNER JOIN account_payment ON
+									account_payment.payment_id = transfer_escrow_sweep.payment_id
+								WHERE
+									transfer_escrow_sweep.contract_id = due.contract_id AND
+									account_payment.completed
+							)
+						)
+				), cleared AS (
+					UPDATE transfer_contract
+					SET reap_time = NULL
+					FROM protected
+					WHERE transfer_contract.contract_id = protected.contract_id
+					RETURNING transfer_contract.contract_id
+				), candidate AS MATERIALIZED (
+					SELECT due.contract_id
+					FROM due
+					WHERE NOT EXISTS (
+						SELECT 1
+						FROM protected
+						WHERE protected.contract_id = due.contract_id
+					)
+				), deleted_close AS (
+					DELETE FROM contract_close
+					USING candidate
+					WHERE contract_close.contract_id = candidate.contract_id
+				), deleted_escrow AS (
+					DELETE FROM transfer_escrow
+					USING candidate
+					WHERE transfer_escrow.contract_id = candidate.contract_id
+				), deleted_sweep AS (
+					DELETE FROM transfer_escrow_sweep
+					USING candidate
+					WHERE transfer_escrow_sweep.contract_id = candidate.contract_id
+				), deleted_contract AS (
+					DELETE FROM transfer_contract
+					USING candidate
+					WHERE transfer_contract.contract_id = candidate.contract_id
+				)
+				SELECT COUNT(*) FROM due
+				`,
+				minTime.UTC(),
+				minStragglerCreateTime.UTC(),
+				maxRowCount,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&processedCount))
+				}
+			})
+		}, server.TxReadCommitted)
+		if processedCount == 0 || budgetEnd.Before(server.NowUtc()) {
+			return
+		}
+	}
 }
 
 // removeContractBatches repeatedly runs a bounded contract-delete cascade (one
@@ -3834,13 +4082,12 @@ func removeContractBatches(ctx context.Context, sql string, minTime time.Time, m
 }
 
 // assignStragglerReapTimeBatches stamps reap_time = now() on closed contracts
-// that were never reaped (reap_time IS NULL) and are older than minCreateTime, so
-// the reaper's delete pass removes them. This is the straggler + sweep-less
-// cleanup: a closed contract whose payment never completed (or that was never
-// swept at all) is never assigned a reap_time by CompletePayment, so it would
-// otherwise live forever. Bounded by the transfer_contract_reap_pending_create_time
-// partial index (reap_time IS NULL AND close_time IS NOT NULL), this is an index
-// range-scan, not the anti-join full scan it replaces.
+// that were never reaped (reap_time IS NULL), are older than minCreateTime, and
+// are not held by an active/ambiguous payment. This is the straggler + sweep-less
+// cleanup: safely unplanned value otherwise lives forever. Bounded by the
+// transfer_contract_reap_pending_create_time partial index (reap_time IS NULL
+// AND close_time IS NOT NULL), this is an index range-scan, not the anti-join
+// full scan it replaces.
 //
 // Runs one bounded batch per maintenance tx (no long lock) until a batch marks
 // fewer than maxRowCount rows. Each candidate is a distinct transfer_contract row
@@ -3870,7 +4117,27 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 					WHERE
 						transfer_contract.reap_time IS NULL AND
 						transfer_contract.close_time IS NOT NULL AND
-						transfer_contract.create_time < $1
+						transfer_contract.create_time < $1 AND
+						NOT EXISTS (
+							SELECT 1
+							FROM transfer_escrow_sweep
+							INNER JOIN account_payment ON
+								account_payment.payment_id = transfer_escrow_sweep.payment_id
+							WHERE
+								transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
+								(
+									account_payment.contract_retention_pending OR
+									(
+										NOT account_payment.completed AND
+										(
+											NOT account_payment.canceled OR
+											account_payment.circle_idempotency_key IS NOT NULL OR
+											account_payment.payment_record IS NOT NULL OR
+											account_payment.tx_hash IS NOT NULL
+										)
+									)
+								)
+						)
 					ORDER BY transfer_contract.create_time
 					LIMIT $2
 				)
@@ -4373,8 +4640,9 @@ const completedReapBackfillPaymentLookback = StragglerContractExpiration + 7*24*
 
 // BackfillCompletedContractReapTime seeds reap_time on existing contracts whose
 // payment already completed, so the indexed reaper can retire them on the normal
-// completed-payout window. New completions are stamped inline by CompletePayment;
-// this is the one-time companion to the reap_time deploy. Idempotent: stamped
+// completed-payout window. New completions are handled by the recurring bounded
+// retention queue; this is the one-time companion to the reap_time deploy.
+// Idempotent: stamped
 // contracts (reap_time set) are skipped, so a converged re-run writes nothing.
 //
 // It drives from the payment side: only payments completed within
@@ -4390,7 +4658,8 @@ const completedReapBackfillPaymentLookback = StragglerContractExpiration + 7*24*
 //
 // A contract with several completed payments takes the first-encountered
 // payment's complete_time (the reap_time IS NULL guard, same semantics as the
-// original backfill); live CompletePayment converges new completions with LEAST.
+// original backfill); live queued retention keeps at least seven days after
+// every completion.
 // Each statement stamps at most rowLimit contracts of ONE payment in its own tx
 // (a single payment can cover a huge number of contracts, so bounding by
 // payments alone produced multi-minute WAL-heavy transactions — observed live as

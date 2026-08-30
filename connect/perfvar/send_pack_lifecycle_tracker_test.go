@@ -37,16 +37,19 @@ type sendPackLifecycleTracker struct {
 	// Terminal failure counts are monotonic measurement watermarks. Exact
 	// ownership joins accept a failed terminal; measured intervals compare
 	// their start and end watermarks separately.
-	failures               atomic.Uint64
-	started                atomic.Uint64
-	publishing             atomic.Int64
-	workloadFailures       atomic.Uint64
-	workloadStarted        atomic.Uint64
-	workloadPublishing     atomic.Int64
-	nextClient             atomic.Uint64
-	failureLock            sync.Mutex
-	failureSamples         []clientconnect.SendPackLifecycleObservation
-	workloadFailureSamples []clientconnect.SendPackLifecycleObservation
+	failures                    atomic.Uint64
+	recoverableFailures         atomic.Uint64
+	started                     atomic.Uint64
+	publishing                  atomic.Int64
+	workloadFailures            atomic.Uint64
+	workloadRecoverableFailures atomic.Uint64
+	workloadDatagramFailures    atomic.Uint64
+	workloadStarted             atomic.Uint64
+	workloadPublishing          atomic.Int64
+	nextClient                  atomic.Uint64
+	failureLock                 sync.Mutex
+	failureSamples              []clientconnect.SendPackLifecycleObservation
+	workloadFailureSamples      []clientconnect.SendPackLifecycleObservation
 
 	// Nil test barriers expose publication races without delaying production
 	// measurement callbacks.
@@ -102,12 +105,13 @@ type sendPackLifecycleKey struct {
 
 // sendPackLifecycleEntry retains immutable identity and terminal publication.
 type sendPackLifecycleEntry struct {
-	key           sendPackLifecycleKey
-	clientId      clientconnect.Id
-	destinationId clientconnect.Id
-	ackRequired   bool
-	messageType   protocol.MessageType
-	phase         atomic.Uint32
+	key                 sendPackLifecycleKey
+	clientId            clientconnect.Id
+	destinationId       clientconnect.Id
+	ackRequired         bool
+	messageType         protocol.MessageType
+	upstreamRecoverable bool
+	phase               atomic.Uint32
 }
 
 // sendPackLifecycleBoundary captures exact unfinished identities plus the
@@ -324,12 +328,13 @@ func (self *sendPackLifecycleTracker) run() {
 				break
 			}
 			entries[key] = &sendPackLifecycleEntry{
-				key:           key,
-				clientId:      observation.ClientId,
-				destinationId: observation.DestinationId,
-				ackRequired:   observation.AckRequired,
-				messageType:   observation.MessageType,
-				phase:         atomic.Uint32{},
+				key:                 key,
+				clientId:            observation.ClientId,
+				destinationId:       observation.DestinationId,
+				ackRequired:         observation.AckRequired,
+				messageType:         observation.MessageType,
+				upstreamRecoverable: observation.UpstreamRecoverable,
+				phase:               atomic.Uint32{},
 			}
 		case clientconnect.SendPackLifecyclePhaseFirstRouteWrite:
 			entry, ok := entries[key]
@@ -349,13 +354,25 @@ func (self *sendPackLifecycleTracker) run() {
 				break
 			}
 			if observation.Err != nil {
+				recoverableAttempt := observation.UpstreamRecoverable &&
+					errors.Is(observation.Err, clientconnect.ErrSendPackNotAdmitted)
 				self.failures.Add(1)
+				if recoverableAttempt {
+					self.recoverableFailures.Add(1)
+				}
 				self.failureLock.Lock()
 				if len(self.failureSamples) < sendPackLifecycleFailureSampleCapacity {
 					self.failureSamples = append(self.failureSamples, observation)
 				}
 				if sendPackLifecycleWorkloadMessageType(observation.MessageType) {
 					self.workloadFailures.Add(1)
+					if recoverableAttempt {
+						self.workloadRecoverableFailures.Add(1)
+					}
+					if !observation.AckRequired &&
+						observation.MessageType == protocol.MessageType_IpIpPacketFromProvider {
+						self.workloadDatagramFailures.Add(1)
+					}
 					if len(self.workloadFailureSamples) < sendPackLifecycleFailureSampleCapacity {
 						self.workloadFailureSamples = append(
 							self.workloadFailureSamples,
@@ -417,7 +434,8 @@ func sameSendPackLifecycleIdentity(
 	return entry.clientId == observation.ClientId &&
 		entry.destinationId == observation.DestinationId &&
 		entry.ackRequired == observation.AckRequired &&
-		entry.messageType == observation.MessageType
+		entry.messageType == observation.MessageType &&
+		entry.upstreamRecoverable == observation.UpstreamRecoverable
 }
 
 // waitForPublishers joins callbacks that entered before a boundary request.
@@ -968,10 +986,12 @@ func TestSendPackLifecycleTrackerJoinsFailedTerminalAndRetainsWatermark(t *testi
 	defer tracker.close()
 	observer := tracker.newObserver()
 	identity := clientconnect.SendPackLifecycleObservation{
-		Phase:         clientconnect.SendPackLifecyclePhaseStarted,
-		ClientId:      clientconnect.NewId(),
-		DestinationId: clientconnect.NewId(),
-		Token:         1,
+		Phase:               clientconnect.SendPackLifecyclePhaseStarted,
+		ClientId:            clientconnect.NewId(),
+		DestinationId:       clientconnect.NewId(),
+		Token:               1,
+		AckRequired:         true,
+		UpstreamRecoverable: true,
 	}
 	observer(identity)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1010,7 +1030,7 @@ func TestSendPackLifecycleTrackerJoinsFailedTerminalAndRetainsWatermark(t *testi
 	go func() {
 		terminal := identity
 		terminal.Phase = clientconnect.SendPackLifecyclePhaseTerminal
-		terminal.Err = errors.New("terminal failure")
+		terminal.Err = clientconnect.ErrSendPackNotAdmitted
 		observer(terminal)
 		close(terminalPublisherReturned)
 	}()
@@ -1056,6 +1076,12 @@ func TestSendPackLifecycleTrackerJoinsFailedTerminalAndRetainsWatermark(t *testi
 	if tracker.failures.Load() != 1 {
 		t.Fatalf("terminal failure was not classified before release: %d", tracker.failures.Load())
 	}
+	if tracker.recoverableFailures.Load() != 1 {
+		t.Fatalf(
+			"recoverable terminal failure count=%d, want one",
+			tracker.recoverableFailures.Load(),
+		)
+	}
 	failureSamples := tracker.failureSnapshot()
 	if len(failureSamples) != 1 ||
 		failureSamples[0].Token != identity.Token ||
@@ -1085,5 +1111,76 @@ func TestSendPackLifecycleTrackerJoinsFailedTerminalAndRetainsWatermark(t *testi
 	}
 	if !tracker.waitThrough(ctx, laterBoundary) {
 		t.Fatalf("historical failure poisoned later ownership boundary: %v", ctx.Err())
+	}
+}
+
+// Provider NoAck data failures are tracked separately so only the
+// latency-under-load probe scope can account them as measured loss.
+func TestSendPackLifecycleTrackerClassifiesProviderDatagramFailure(t *testing.T) {
+	tracker := newSendPackLifecycleTracker()
+	defer tracker.close()
+	observer := tracker.newObserver()
+	identity := clientconnect.SendPackLifecycleObservation{
+		Phase:         clientconnect.SendPackLifecyclePhaseStarted,
+		ClientId:      clientconnect.NewId(),
+		DestinationId: clientconnect.NewId(),
+		Token:         1,
+		MessageType:   protocol.MessageType_IpIpPacketFromProvider,
+	}
+	observer(identity)
+	firstWrite := identity
+	firstWrite.Phase = clientconnect.SendPackLifecyclePhaseFirstRouteWrite
+	firstWrite.Err = clientconnect.ErrSendPackNotAdmitted
+	observer(firstWrite)
+	terminal := firstWrite
+	terminal.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+	observer(terminal)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	boundary, ok := tracker.workloadBoundary(ctx)
+	if !ok || len(boundary.entries) != 0 || boundary.failedAtCapture != 1 {
+		t.Fatalf("provider datagram boundary=%+v ok=%t", boundary, ok)
+	}
+	if got := tracker.workloadDatagramFailures.Load(); got != 1 {
+		t.Fatalf("provider datagram failures=%d, want one", got)
+	}
+	if got := tracker.workloadRecoverableFailures.Load(); got != 0 {
+		t.Fatalf("provider datagram counted as recoverable: %d", got)
+	}
+}
+
+// Upstream ownership makes a refused attempt retryable; it cannot recover a
+// Pack that was admitted and later exhausted Transfer's terminal reliability.
+func TestSendPackLifecycleTrackerRejectsRecoverablePostAdmissionError(t *testing.T) {
+	tracker := newSendPackLifecycleTracker()
+	defer tracker.close()
+	observer := tracker.newObserver()
+	identity := clientconnect.SendPackLifecycleObservation{
+		Phase:               clientconnect.SendPackLifecyclePhaseStarted,
+		ClientId:            clientconnect.NewId(),
+		DestinationId:       clientconnect.NewId(),
+		Token:               1,
+		AckRequired:         true,
+		MessageType:         protocol.MessageType_IpIpPacketFromProvider,
+		UpstreamRecoverable: true,
+	}
+	observer(identity)
+	firstWrite := identity
+	firstWrite.Phase = clientconnect.SendPackLifecyclePhaseFirstRouteWrite
+	observer(firstWrite)
+	terminal := firstWrite
+	terminal.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+	terminal.Err = context.DeadlineExceeded
+	observer(terminal)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	boundary, ok := tracker.workloadBoundary(ctx)
+	if !ok || len(boundary.entries) != 0 || boundary.failedAtCapture != 1 {
+		t.Fatalf("post-admission failure boundary=%+v ok=%t", boundary, ok)
+	}
+	if got := tracker.workloadRecoverableFailures.Load(); got != 0 {
+		t.Fatalf("post-admission failure counted as recoverable: %d", got)
 	}
 }

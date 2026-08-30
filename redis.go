@@ -595,7 +595,7 @@ func redisExpirySeconds(ttl time.Duration) int64 {
 	return int64((ttl + time.Second/2) / time.Second)
 }
 
-func RedisRemoveIfEqual(r RedisClient, ctx context.Context, key string, test []byte) *redis.Cmd {
+func RedisRemoveIfEqual(r redis.Scripter, ctx context.Context, key string, test []byte) *redis.Cmd {
 	script := `local key = KEYS[1] local expected_value = ARGV[1] local current_value = redis.call('GET', key) if current_value == expected_value then redis.call('DEL', key) return 1 else return 0 end`
 	return r.Eval(ctx, script, []string{key}, test)
 }

@@ -509,6 +509,16 @@ func advancePayment(
 		)
 		if err != nil {
 			auditAccountPayment(clientSession, payment.PaymentId, err)
+			if isCircleInvalidDestinationError(err) {
+				// Circle rejected the destination before creating a transfer, so
+				// this is the one submit error for which it is safe to release the
+				// pinned attempt. On the next retry UpdatePaymentWallet can select a
+				// corrected payout wallet. Ambiguous failures retain the key.
+				if resetErr := model.RemovePaymentRecord(clientSession.Ctx, payment.PaymentId); resetErr != nil {
+					returnErr = fmt.Errorf("[%s]Payment create transaction error = %s; invalid destination reset error = %s", payment.PaymentId, err, resetErr)
+					return
+				}
+			}
 			returnErr = fmt.Errorf("[%s]Payment create transaction error = %s", payment.PaymentId, err)
 			return
 		}

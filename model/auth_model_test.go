@@ -393,6 +393,36 @@ func TestUserAuthLogin(t *testing.T) {
 	})
 }
 
+func TestAuthLoginWithPasswordUnknownUserIsGenericFailure(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "198.51.100.243:443", nil)
+		unknownUserAuths := []string{
+			fmt.Sprintf("unknown-%s@example.invalid", server.NewId()),
+			"+13125550198",
+		}
+
+		for _, unknown := range unknownUserAuths {
+			result, err := AuthLoginWithPassword(AuthLoginWithPasswordArgs{
+				UserAuth: unknown,
+				Password: "not-a-real-password",
+			}, clientSession)
+			if err != nil {
+				t.Fatalf("unknown user %q became a server error: %v", unknown, err)
+			}
+			if result == nil || result.Error == nil {
+				t.Fatalf("unknown user %q returned no authentication failure: %#v", unknown, result)
+			}
+			if result.Error.Message != "Invalid user or password." {
+				t.Fatalf("unknown user %q exposed a distinct response: %q", unknown, result.Error.Message)
+			}
+			if result.Network != nil || result.VerificationRequired != nil {
+				t.Fatalf("unknown user %q returned authenticated state: %#v", unknown, result)
+			}
+		}
+	})
+}
+
 func TestLoginWithWallet(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

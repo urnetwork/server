@@ -13,13 +13,43 @@ package work
 //     while allocated and age out after release (§8.2).
 
 import (
+	"context"
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
+
+// VerifyTaskFunctionNames is the complete recurring-task surface owned by the
+// verification subsystem.  It is derived from the same function values the
+// worker registers, so disabled-subsystem cleanup cannot drift from the
+// canonical version-normalized names stored in pending_task.
+func VerifyTaskFunctionNames() []string {
+	return []string{
+		task.NewTaskTarget(SweepVerifyTrails).TargetFunctionName(),
+		task.NewTaskTarget(RollupVerifyProviderStats).TargetFunctionName(),
+		task.NewTaskTarget(RemoveOldVerifyProviderStats).TargetFunctionName(),
+		task.NewTaskTarget(RefreshVerifyProxyEgress).TargetFunctionName(),
+	}
+}
+
+// RemoveDisabledVerifyTasks removes an old generation's pending chains after
+// the subnet is disabled. Merely skipping seeding is insufficient because a
+// RunOnce row survives deploys and its Post hook would otherwise perpetuate
+// the chain. Enabling later seeds fresh rows through InitTasks.
+func RemoveDisabledVerifyTasks(ctx context.Context, tx server.PgTx) int64 {
+	if controller.StEnabled() {
+		return 0
+	}
+	var removed int64
+	for _, functionName := range VerifyTaskFunctionNames() {
+		removed += task.RemovePendingTasksForFunctionInTx(ctx, tx, functionName)
+	}
+	return removed
+}
 
 type SweepVerifyTrailsArgs struct {
 }
@@ -28,6 +58,9 @@ type SweepVerifyTrailsResult struct {
 }
 
 func ScheduleSweepVerifyTrails(clientSession *session.ClientSession, tx server.PgTx) {
+	if !controller.StEnabled() {
+		return
+	}
 	task.ScheduleTaskInTx(
 		tx,
 		SweepVerifyTrails,
@@ -43,6 +76,9 @@ func SweepVerifyTrails(
 	sweepVerifyTrails *SweepVerifyTrailsArgs,
 	clientSession *session.ClientSession,
 ) (*SweepVerifyTrailsResult, error) {
+	if !controller.StEnabled() {
+		return &SweepVerifyTrailsResult{}, nil
+	}
 	model.SweepExpiredVerifyTrails(
 		clientSession.Ctx,
 		server.NowUtc(),
@@ -68,6 +104,9 @@ type RollupVerifyProviderStatsResult struct {
 }
 
 func ScheduleRollupVerifyProviderStats(clientSession *session.ClientSession, tx server.PgTx) {
+	if !controller.StEnabled() {
+		return
+	}
 	task.ScheduleTaskInTx(
 		tx,
 		RollupVerifyProviderStats,
@@ -83,6 +122,9 @@ func RollupVerifyProviderStats(
 	rollupVerifyProviderStats *RollupVerifyProviderStatsArgs,
 	clientSession *session.ClientSession,
 ) (*RollupVerifyProviderStatsResult, error) {
+	if !controller.StEnabled() {
+		return &RollupVerifyProviderStatsResult{}, nil
+	}
 	model.RollupVerifyProviderStats(
 		clientSession.Ctx,
 		server.NowUtc(),
@@ -108,6 +150,9 @@ type RefreshVerifyProxyEgressResult struct {
 }
 
 func ScheduleRefreshVerifyProxyEgress(clientSession *session.ClientSession, tx server.PgTx) {
+	if !controller.StEnabled() {
+		return
+	}
 	task.ScheduleTaskInTx(
 		tx,
 		RefreshVerifyProxyEgress,
@@ -123,6 +168,9 @@ func RefreshVerifyProxyEgress(
 	refreshVerifyProxyEgress *RefreshVerifyProxyEgressArgs,
 	clientSession *session.ClientSession,
 ) (*RefreshVerifyProxyEgressResult, error) {
+	if !controller.StEnabled() {
+		return &RefreshVerifyProxyEgressResult{}, nil
+	}
 	model.RefreshVerifyProxyEgress(
 		clientSession.Ctx,
 		model.DefaultVerifySettings(),
@@ -147,6 +195,9 @@ type RemoveOldVerifyProviderStatsResult struct {
 }
 
 func ScheduleRemoveOldVerifyProviderStats(clientSession *session.ClientSession, tx server.PgTx) {
+	if !controller.StEnabled() {
+		return
+	}
 	task.ScheduleTaskInTx(
 		tx,
 		RemoveOldVerifyProviderStats,
@@ -162,6 +213,9 @@ func RemoveOldVerifyProviderStats(
 	removeOldVerifyProviderStats *RemoveOldVerifyProviderStatsArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldVerifyProviderStatsResult, error) {
+	if !controller.StEnabled() {
+		return &RemoveOldVerifyProviderStatsResult{}, nil
+	}
 	limit := 50000
 	model.RemoveOldVerifyProviderStats(clientSession.Ctx, server.NowUtc(), limit)
 	return &RemoveOldVerifyProviderStatsResult{}, nil

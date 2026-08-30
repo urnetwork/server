@@ -476,8 +476,9 @@ func dbBackfillSweepDestinationId(opts docopt.Opts) {
 // dbBackfillContractReapTime seeds transfer_contract.reap_time for the indexed
 // retention reaper. reap_time replaced the anti-join full-scan reaper that
 // caused a prod incident. Two passes, in order: first every aged closed contract
-// (older than StragglerContractExpiration) is assigned reap_time = now() via the
-// partial index; then contracts of recently completed payments are stamped with
+// (older than StragglerContractExpiration) that is not held by an active or
+// ambiguous payment is assigned reap_time = now() via the partial index; then
+// contracts of recently completed payments are stamped with
 // complete_time + the completed-payout window. Older payments' contracts are
 // already covered by the first pass -- a contract is strictly older than its
 // payment's completion -- which is what keeps the second pass's work bounded to

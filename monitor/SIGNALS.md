@@ -103,6 +103,22 @@ specifies: WHAT to measure, HOW (query/command), HEALTHY vs BROKEN bands, and
 the ACTION line the alert should carry. Section 6 explains how we separated
 real issues from noise; section 7 is the alert emission spec.
 
+Automated entries declare a short semantic key on a `Probe:` line. That key
+maps to `server/monitor/signal_short_key.go` and
+`signal_short_key_test.go`; the Go file keeps a comment linking back to this
+section number. Use the same convention for every new automated entry.
+
+Cadence mode starts each probe immediately, but admits at most four concurrent
+probe executions. Most probes reach the production boundary through SSH; an
+unbounded 29-probe startup wave caused a real SSH connection rejection on
+2026-08-29 and a false visibility alert while the same target remained healthy
+when sampled alone. Keep this bound when adding probes, including probes whose
+cadences collide after startup. Likewise, a probe interrupted by an intentional
+monitor shutdown is a lifecycle event, not loss of production visibility, and
+must not emit a `monitor/visibility` alert. Cadence mode enforces each alert's
+consecutive-tick `Sustain` value and resets that identity after a healthy tick;
+`--once` deliberately reports current violations immediately for diagnosis.
+
 Related docs: FOLLOWUP.md (open items ledger), redis conf overrides in
 xops .../redis/redis.conf.j2, grafana redis-cluster dashboard + alert rules.
 
@@ -114,6 +130,8 @@ The five numbers that, together, tell you in one glance whether main is fine.
 During the incident we polled exactly these in a 65s loop.
 
 ### 1.1 Contract creation rate — THE user-facing throughput proxy
+Probe: `contract-rate`
+
 ```sql
 SELECT count(*) FROM transfer_contract
 WHERE create_time >= date_trunc('minute', now()) - interval '1 minute'
@@ -130,6 +148,8 @@ WHERE create_time >= date_trunc('minute', now()) - interval '1 minute'
   deploys/restarts in the last 10 min".
 
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
+Probe: `task-canaries`
+
 `UpdateClientLocations` runs every ~30s, writes redis across many slots,
 completes in 3–15s. It is the perfect canary: if redis is sick ANYWHERE on the
 write path, it errors within a minute.
@@ -140,11 +160,17 @@ WHERE function_name LIKE '%UpdateClientLocations%'
   AND run_end_time > now() - interval '3 minutes';
 
 -- error state of all redis-heavy recurring tasks + THE ERROR TEXT
-SELECT split_part(function_name,'.',3) AS task,
-       reschedule_error_count,
-       left(coalesce(reschedule_error,''), 120) AS last_error
-FROM pending_task
-WHERE reschedule_error_count > 0;
+WITH failures AS (
+  SELECT split_part(function_name,'.',3) AS task,
+         reschedule_error_count, run_at, claim_time,
+         left(coalesce(reschedule_error,''), 160) AS last_error
+  FROM pending_task WHERE reschedule_error_count > 0
+)
+SELECT task, count(*) AS failing_rows,
+       count(*) FILTER (WHERE run_at > now()+interval '5 minutes') AS parked,
+       count(*) FILTER (WHERE claim_time > now()-interval '2 minutes') AS fresh_claim,
+       max(reschedule_error_count) AS max_errors
+FROM failures GROUP BY task;
 ```
 - The error TEXT is diagnostic gold: `CLUSTERDOWN` vs `OOM command not
   allowed` vs `dial tcp <ip>:<port>: i/o timeout` vs `connection refused`
@@ -159,16 +185,50 @@ UPDATE pending_task SET run_at = now()
 WHERE function_name LIKE '%UpdateClient%'
   AND release_time < now() AND run_at > now() + interval '60 seconds';
 ```
+- GOTCHA — group before limiting. On 2026-08-29, ten unfunded
+  `AdvancePayment` rows filled the monitor's old `ORDER BY error_count LIMIT
+  10`, hiding the independently failed `UpdateClientScores` row and its Redis
+  `:6402` write timeout. The probe now groups the complete failing set by task
+  function and emits one alert identity per family, carrying family/parked/live
+  counts and one representative error. Never cap raw rows before this grouping.
+- GOTCHA — one task family can still contain several causes. On 2026-08-30,
+  `AdvancePayment` had 384 failing rows: 368 wallet-insufficient, ten
+  connection-cleanup deadlines from §2.10 retention, five
+  `processor-invalid-destination` 400s, and one processor 429. The
+  highest-error representative belonged to the wallet class and made a
+  single-cause explanation falsely describe the other 16 rows. The probe now
+  computes a complete bounded cause breakdown before it selects a
+  representative error. When more than one class exists, the family alert says
+  it is mixed and gives per-class actions; a sample is evidence, not permission
+  to apply its diagnosis to every row. Keep invalid-destination separate from
+  generic processor 400s because only that typed, definitive pre-chain result
+  is safe to unpin (§5.7).
+- GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
+  buckets. During reschedule handoff, a row can already have `run_at` more than
+  five minutes in the future while its prior attempt's claim heartbeat remains
+  fresh. On 2026-08-30 the one disabled `RefreshVerifyProxyEgress` row therefore
+  read parked=1 and fresh_claim=1. Report that overlap explicitly and never add
+  the two counts or describe `fresh_claim` as a guaranteed active retry.
 - GOTCHA — long-running vs stuck: a live run shows claim_time refreshing
   every ~10s (the keepalive bumps claim_time+release_time). Frozen claim +
   future release_time = pre-lease-fix binary or killed worker. Current workers
   use a five-minute rolling lease, so a killed worker's claim self-releases
   within five minutes of its final heartbeat. A direct-postgres session lock
   still prevents duplicate execution if only the heartbeat is starved and the
-  original worker remains alive. claim age > 2× the task's historical duration
-  (finished_task history) = investigate.
+  original worker remains alive. A raw p95 is not sufficient when repeated
+  defects have polluted the tail: use `min(2*p95, max(4*p50, 20m))`, with the
+  original one-hour fallback when history is absent. First select only the
+  worst live row per task family so many payment rows cannot hide a singleton
+  maintenance task. Then query and verify the matching task id's authoritative
+  `eval active` elapsed time; `run_at` is only the due time, and a task that
+  waited in the queue but began less than the guard ago is not long-running.
+  The 2026-08-30 reaper recurrence supplied the regression values: p50 42s,
+  p95 3,552s, due age 6,283s, and matching heartbeat 6,220s. The old p95-only
+  rule waited until 7,104s; the median-tail guard alerts at 1,200s.
 
 ### 1.3 pg idle-in-transaction count — the redis-latency mirror
+Probe: `pg-state`
+
 ```sql
 SELECT count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx,
        count(*) FILTER (WHERE state = 'active') AS active,
@@ -176,10 +236,13 @@ SELECT count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx,
 FROM pg_stat_activity WHERE backend_type = 'client backend';
 ```
 - HEALTHY: idle_in_tx < 30, active < 20, oldest < 1 min.
-- BROKEN: idle_in_tx > 100 = redis latency is leaking into pg through
-  tx-scoped redis calls (observed 563 during brownouts, 2 when healthy —
-  it is a live graph of redis health seen from pg). oldest > 30 min = leaked
-  transaction pinning the vacuum xmin horizon (kills autovacuum silently).
+- BROKEN: idle_in_tx > 100 requires attribution. Redis latency leaking through
+  tx-scoped calls produced 563 during brownouts (2 when healthy), but a bounded
+  close cohort can also put many workers briefly between statements. Report
+  both the highest-count query shapes and the single continuously oldest
+  transaction; they can have different owners. Oldest transaction age > 30
+  min = leaked transaction pinning the vacuum xmin horizon (kills autovacuum
+  silently).
 - BROKEN: active > 100 with wait_event '-' (on-CPU) = a query-plan CPU wall,
   not load (360–390 seen 2026-07-17 vs ~6 healthy; idle-in-tx elevated too but
   redis was healthy — check 1.4 to disambiguate). pgbouncer kills queued
@@ -189,6 +252,8 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   by state before concluding anything about load.
 
 ### 1.4 redis cluster state + per-node liveness
+Probe: `redis-cluster`
+
 ```bash
 redis-cli -p 6379 CLUSTER INFO | grep -E 'cluster_state|slots_fail|known_nodes'
 # per-node PING with a hard timeout — a wedged node hangs, it does not error
@@ -207,6 +272,8 @@ for p in $(seq 6380 6411); do timeout 2 redis-cli -p $p PING >/dev/null || echo 
   MUST check per-node liveness, not just cluster_state.
 
 ### 1.5 log error-class rates (per service, per minute) — ALWAYS-ON TAIL
+Probe: `log-errors`
+
 The monitor tails the logs of ALL services AT ALL TIMES, classifying lines
 against the section 4 signatures. This is a standing collector, not a
 sampled probe: `warpctl logs <env> <service> -f` streams a service's logs
@@ -222,13 +289,19 @@ be one sick node × fleet retry loops. The monitor should report class + rate
 + distinct target (ip:port) set, never raw volume as severity. A NEW
 signature appearing at rate (an unseen error shape / panic frame) is a
 signal even when no known class matches — report it as class `novel` with
-the sample line.
+the sample line. Apply the novelty threshold to the most frequent normalized
+shape, not the sum of unrelated shapes. Public web endpoints routinely receive
+scanner bursts across dozens of nonexistent paths; nginx logs those misses at
+error level, but many one-off paths do not constitute one recurring server
+failure. Keep the total and distinct-shape counts as diagnostic context.
 
 ---
 
 ## 2. pg signal catalog (beyond tier-0)
 
 ### 2.1 Active query sampling (what is the load, really)
+Probe: `active-queries`
+
 Repeated snapshots beat any single view. 12 samples × 2s apart, aggregate:
 ```sql
 SELECT state, coalesce(wait_event_type,'-')||':'||coalesce(wait_event,'-'),
@@ -241,13 +314,182 @@ load. On healthy main the persistent actives are exactly two background
 workers (client_reliability_running INSERT drain + contract_close keyset
 sweep) + the pending_task poll. Anything else persistently active = new.
 
+Use completed runtime history before calling a known heavy shape stuck. On
+2026-08-29 the `network_connection_reliability_score` INSERT had one backend at
+877s, but 99 completed calls averaged 640s and its observed maximum was 950s;
+that was normal work, not a database incident. The probe now warns for a new
+shape after two minutes, a known shape after twice its completed mean, or five
+concurrent copies regardless of history. The aggregate active-pileup signal
+still independently pages whole-database saturation.
+
+PostgreSQL utility statements are not represented in `pg_stat_statements`.
+Daily `DbMaintenance` intentionally runs `REINDEX TABLE/INDEX CONCURRENTLY`
+with a two-hour per-object timeout; a 40KiB `web_search_ingest_state` rotation
+was observed completing normally after 420s. The active probe treats those
+statements as known bounded maintenance until the same two-hour limit, after
+which it warns; task canaries report the resulting maintenance error as well.
+
 ### 2.2 Wait events on active queries
+Probe: `wait-events`
+
 `LWLock:WALWrite` clusters = WAL pressure (check checkpoint cadence,
 max_wal_size — a forced checkpoint every < 5 min melted main earlier this
 month). `IPC:MessageQueueReceive` = parallel workers. `Client:ClientRead` on
 active = server waiting on client mid-protocol.
 
+Count alone is not a stall discriminator for `Client:ClientRead`. At 11:28Z on
+2026-08-30, consecutive samples contained five to seven active ClientRead rows,
+but the oldest was reported as 0s; direct millisecond sampling showed rotating
+PIDs only 2–4ms old on ordinary `BEGIN`, `COMMIT`, and indexed reads. That is
+healthy protocol handoff under concurrency, not five persistent waiters. The
+probe now ignores a ClientRead cluster until its oldest active command reaches
+one minute. Other wait classes retain the five-backend cluster rule, and a
+single ClientRead older than one minute still identifies a client/pool path
+that must be attributed. The rebuilt watcher validated the negative branch:
+a direct production sample again found seven distinct ClientRead PIDs with a
+4ms oldest command, while the wait-events probe emitted no alert.
+
+`Lock:virtualxid` usually means concurrent index maintenance is waiting for an
+older transaction. Apply the same two-hour `REINDEX ... CONCURRENTLY` grace as
+§2.1: at 07:08Z on 2026-08-30, the daily reindex of `pending_task` had waited
+493s behind an expected reliability rebuild, and the old generic one-minute
+rule emitted a contradictory warning even though §2.1 correctly classified the
+reindex as bounded maintenance. The probe now suppresses only that named
+maintenance shape below two hours. A non-reindex virtual-XID wait, or a reindex
+at/above two hours, still warns and must identify its blocker with
+`pg_blocking_pids` before either backend is canceled.
+
+At 08:01Z the same chain crossed the task-overdue band: `DbMaintenance` had a
+fresh claim heartbeat 3,683s after `run_at`, while its `pending_task` concurrent
+reindex was in `waiting for old snapshots` and PostgreSQL named the active
+`client_reliability_running` INSERT as blocker. That is one shared reliability
+anchor incident, not an independently stuck maintenance worker. With fewer
+than ten recent maintenance completions there is no meaningful seven-day p95;
+the task probe uses and now displays its 1,800s fallback instead of rendering a
+misleading `p95 0s`. The reliability operation later proved not to be bounded
+by ordinary duration: it reached the exact task deadline described below. Let
+the configured deadline arbitrate it, roll out §3.7's checkpointed cadence fix,
+and verify the reindex advances after each short checkpoint releases its
+snapshot.
+
+At 08:29:40Z the shared cause crossed its decisive boundary. Taskworker logged
+`eval error(7200.00s)` for `UpdateReliabilities` with
+`Interrupted: failed to deallocate cached statement(s): conn closed`; three
+seconds later a new claim was active with the identical
+`min_time=2026-08-30T05:46:09.315400597Z`. The original blocker disappeared and
+the concurrent maintenance advanced from `pending_task` to
+`network_create_attempt`, but replacement PID 788299 immediately became the
+new `waiting for old snapshots` locker. This is a rollback/retry loop, not
+successful release: a single all-lookback transaction throws away completed
+work at the deadline and repeats it. The task alert recognizes this exact error
+shape only after the matching eval duration and unchanged successor args are
+confirmed. Its action is per-lookback transaction checkpoints plus §3.7's
+maintenance-aware cadence—not a larger deadline or manual retry.
+
+The replacement did eventually complete at 08:43:45Z in 842s. All four
+`client_reliability_running_window` rows advanced durably from max block
+29,801,147 to 29,801,310 (last re-anchor 29,801,308), and the next task was
+scheduled cleanly for 09:13. The concurrent reindex then left
+`waiting for old snapshots` and entered `building index: scanning table` on
+`transfer_contract_pair_open_create_time_ccnew`. This validates both sides of
+the discriminator: marker movement plus an advancing downstream phase is real
+recovery; the first attempt's PID replacement without either was not.
+
+That recovery exposed a second alert-state distinction. At 08:47Z the overall
+`DbMaintenance` task was still 6,529s past `run_at`, but its current
+`transfer_contract_pair_open_create_time_ccnew` rebuild had no blocker and was
+actively in `building index: scanning table` at 10,114,170 / 23,790,366 heap
+blocks. A generic "stuck task" action discards the evidence just as badly as
+calling a blocked reindex healthy. The task probe now carries relation, index,
+phase, query age, wait/blocker fields, and block progress in either state. When
+no blocker is present, compare query age with the two-hour per-object limit and
+require phase/block movement on consecutive samples; do not cancel or duplicate
+a progressing rebuild merely because the serial task's total age includes its
+earlier objects and waits.
+
+The progressing case then completed cleanly at 08:50:10Z: DbMaintenance's
+total duration was 6,609s, with no task or post error. A new transfer-contract
+autovacuum began immediately afterward and was scanning the heap normally.
+This validates the alert transition end to end: old-snapshot evidence required
+the shared reliability diagnosis; later block progress required observation;
+and clean task completion—not cancellation—was the terminal state.
+
+The next nominal reliability cycle supplied a clean recurrence of the cadence
+defect. Its markers were only at max block 29,801,310 / last re-anchor
+29,801,308, yet the row claimed at 09:13:56Z and by 09:14:02Z was already
+executing another full `INSERT INTO client_reliability_running`. At that instant
+the transfer-contract autovacuum had been active for more than 20 minutes. No
+error retry or missing marker was needed: the deployed 20-minute threshold is
+simply shorter than the 30-minute task cadence, so every ordinary cycle
+qualifies for a full anchor and starts it beside established maintenance. This
+is direct production validation for both the four-hour cadence and the
+five-minute optional-anchor maintenance deferral. Bootstrap/backward-window
+repairs remain mandatory; this marker state was neither.
+
+That clean recurrence completed at 09:27:17Z in 811.12s. All four markers
+advanced together from max block 29,801,310 to 29,801,354 (last re-anchor
+29,801,352); until that final commit every marker remained unchanged even as
+the backend moved through the lookbacks. The successful result confirms that
+the deployed math can finish, but not that its transaction boundary is safe:
+an interruption before the one all-lookback commit would still discard all
+811s. The checkpointed implementation makes each marker movement durable, and
+the maintenance deferral would have selected rolling updates rather than
+starting this optional anchor beside the already 20-minute-old autovacuum.
+
+The 09:57 cycle repeated the same clean discriminator. It completed in
+701.08s with no task error, but all four markers stayed unchanged for roughly
+11 minutes before advancing together from max block 29,801,354 to re-anchor
+block 29,801,394; the final rolling update reached 29,801,398 while retaining
+29,801,394 as the re-anchor marker. The next task was scheduled normally for
+10:39. This proves the deployed computation can recover and finish even while
+the concurrent vacuum completes, but also proves every ordinary 30-minute
+cycle still selects another full all-lookback anchor. Keep the four-hour
+cadence, maintenance deferral, and per-lookback commits; one successful
+701-second transaction does not make that rollback unit acceptable.
+
+The 10:39 cycle repeated the deployed anchor under heavier overlap. It ran
+948.17s while Payout, close recovery, and the successor transfer-contract
+vacuum were active, then completed cleanly at 10:54:51Z. All four final
+markers reached max block 29,801,440 with re-anchor block 29,801,435, and the
+next cycle was scheduled normally for 11:24:51Z. This is a completed but
+needlessly recurring full anchor, not a stuck task: retain the four-hour
+source cadence and per-lookback commit boundary, and let the progressing
+vacuum use the released horizon.
+
+The scheduled 11:24:53Z cycle repeated the same behavior and completed
+cleanly at 11:38:11Z in 798.39s. All four windows again advanced together to
+max block 29,801,485 with recompute block 29,801,483, and the deployed
+scheduler immediately queued the next cycle for 12:08:11Z. This is another
+successful computation but another needless full-anchor transaction beside
+close and vacuum recovery. It strengthens the cadence/checkpoint diagnosis;
+it does not justify the deployed 30-minute re-anchor behavior.
+
+The 12:08:14Z cycle completed cleanly at 12:26:22Z in 1,088.04s while two
+legacy retention fan-outs, close recovery, and the index-vacuum phase
+overlapped. Until commit, all four markers remained at max block 29,801,485;
+they then advanced together to 29,801,529 with recompute block 29,801,526.
+During the anchor, `transfer_contract` dead tuples crossed 10.59M and the
+vacuum advanced to 3/13 indexes; the monitor correctly named the reliability
+INSERT as the old MVCC horizon and advised letting it finish. Marker movement
+plus the authoritative `finished_task` row prove clean release. The longer
+duration under shared write load reinforces the four-hour optional-anchor
+cadence and per-lookback commits; it is not evidence for a larger deadline or
+vacuum cancellation.
+
+The 12:56:25Z cycle extended the same load-sensitive tail. It completed
+cleanly at 13:19:01Z in 1,356.13s while the successor vacuum, a close cohort,
+Payout, and the tenth net-escrow sequence overlapped. Direct samples at
+12:57Z, 13:04Z, and during the run showed all four markers fixed at max block
+29,801,529/recompute block 29,801,526; the final commit advanced them together
+to max block 29,801,577/recompute block 29,801,575. At completion the
+`transfer_contract` vacuum had reached `vacuuming indexes`, so neither worker
+was stuck. This is another clean deployed result and another 22-minute
+all-lookback rollback unit. Retain the four-hour optional-anchor cadence,
+maintenance deferral, and per-lookback commits.
+
 ### 2.3 Planner-flip detection
+Probe: `planner-flips`
+
 The catastrophic mode: stale statistics flip a hot query to a bad plan
 (observed: pair-lookup 58ms → 6.1s scanning all open contracts). Signals:
 one query's mean time step-changes ×10–100 in pg_stat_statements without a
@@ -283,15 +525,169 @@ each = 96 cores pegged.
   mine.
 
 ### 2.4 Vacuum health
+Probe: `vacuum-health`
+
 ```sql
 SELECT relname, n_dead_tup, last_autovacuum FROM pg_stat_user_tables
 ORDER BY n_dead_tup DESC LIMIT 10;
 ```
-n_dead_tup > 10M on a hot table, or oldest idle-in-tx > 30 min (pins xmin
-fleet-wide) → warn. (Autovacuum thresholds are hand-tuned per giant table;
-default scale factors never fire on 600M-row tables.)
+`n_dead_tup` above 10M on a hot table, or an old `backend_xid`/`backend_xmin`
+horizon candidate → warn. If a table declares a larger fixed
+`autovacuum_vacuum_threshold`, use that value as the dead-tuple alert floor;
+the effective threshold is `max(10M, configured fixed threshold)`. Rank the
+oldest combined horizon, then break equal-horizon ties by the oldest
+transaction/query start; fresh snapshots inherit an old in-progress xid and
+must not arbitrarily displace its real long-running owner. Report PID, both
+xids, backend/application name, age, and query, and include
+`pg_stat_progress_vacuum`: an active `pg_dump` / `COPY TO` snapshot pins
+cleanup just as an idle-in-transaction session does. Autovacuum thresholds are
+hand-tuned per giant table because default scale factors never fire on 600M-row
+tables.
+
+That configured-threshold rule prevents an intentional cascade victim from
+becoming noise. At 06:53Z on 2026-08-30, `transfer_escrow` reported 10.59M dead
+tuples with no active vacuum and no old horizon holder, but its fixed vacuum
+threshold is 25M (and insert threshold 50M). Vacuum was not due. The former
+generic 10M comparison emitted a false warning; the probe now reads each
+table's reloptions and keeps the 10M floor for tables without a larger fixed
+threshold.
+
+2026-08-30 cross-signal example: `transfer_contract` reached 11.74M dead
+tuples while the legacy §2.10 retention statement continued updating about
+2.16M rows/call. The sampled oldest MVCC horizon candidates had transactions
+only 0–1s old, so no long snapshot pinned cleanup. Autovacuum completed at
+05:20Z and reduced the estimate to 7.35M, then a new scan began normally. The
+table already had its fixed threshold and 2ms cost delay. This is writer churn
+outrunning vacuum, not a reason to lower the threshold or kill ordinary
+sub-second client transactions; remove the unbounded retention writer.
+
+The same writer made the required sampling cadence explicit later that hour.
+Between 06:13Z and 06:24Z, `transfer_contract` dead tuples rose from 10.35M to
+14.23M. Its autovacuum was 3,570s old, had scanned all 23,781,003 heap blocks,
+and remained in `vacuuming indexes` while one to two legacy payment-retention
+updates overlapped and the aged open-contract cohort resumed rising. An hourly
+probe cannot describe that feedback loop in time, so `vacuum-health` samples
+every five minutes and carries vacuum age, heap scan/vacuum progress, index
+vacuum count, and the oldest combined MVCC horizon candidate. When the heap is fully
+scanned, no old horizon exists, and dead tuples still rise, bound the writer;
+do not cancel a progressing index vacuum or misdiagnose a sub-second client
+transaction as the pin. The estimate peaked at 16.03M, then fell to 705,980
+when that autovacuum completed at 06:34:09Z; the retention probe was also clear.
+That recovery confirms cleanup was progressing and the bounded writer—not a
+vacuum kill or threshold change—is the durable fix.
+
+The 07:23Z sample exposed an attribution trap and a second shared cause. Every
+fresh PostgreSQL snapshot inherited the same old `backend_xmin`, so ordering on
+that field alone had arbitrarily named a seconds-old contract read. Ranking
+`max(age(backend_xid), age(backend_xmin))` and then the oldest transaction/query
+start instead selected the 3,200s `UpdateReliabilities` transaction, whose xid
+horizon was 6.46M transactions old. It had begun before the active
+`transfer_contract` autovacuum, which had scanned the full heap and was in index
+vacuum while dead tuples reached 13.10M. The task's pre-fix full re-anchor on
+every half-hour cycle therefore also pinned cleanup and the concurrent reindex;
+use the four-hour re-anchor fix in §3.7, let a progressing bounded anchor
+finish, and verify both task cadence and vacuum recovery. Do not cancel the task
+or retune vacuum to hide the common root.
+
+That horizon restricted visibility; it did not make all reclamation
+impossible. The long vacuum completed at 07:54:11Z while the reliability
+transaction was still active, reducing the estimate from 16.09M to 9.52M dead
+tuples, and a successor vacuum began five minutes later. An old horizon can
+therefore leave a newer dead cohort behind while still allowing older tuples to
+be removed. Verify consecutive samples and downstream maintenance after the
+anchor releases instead of interpreting either partial recovery or one active
+horizon as an all-or-nothing vacuum state.
+
+The anchor did not commit at its 08:29:40Z deadline. Its retry opened a new old
+snapshot within seconds, so a momentary blocker-PID change was not vacuum
+recovery. Verification must follow the replacement claim and require durable
+running-window marker movement, then observe the concurrent reindex and vacuum
+chain advance. The checkpointed implementation makes that observable boundary
+one lookback transaction at a time; a later timeout no longer rolls all earlier
+markers back.
+
+The next cycle demonstrated the resulting write feedback even though it
+completed. By 09:31Z the transfer-contract autovacuum had run for 2,454s,
+scanned all 23,793,748 heap blocks, and was still vacuuming indexes while the
+dead-row estimate rose to 20.91M. The reliability anchor had released, but one
+legacy retention execution was still active at 116s. This transition matters:
+after the old horizon disappears, continued growth is evidence of the bounded
+but still-deployed high-row writers, not permission to cancel a progressing
+vacuum. Roll out both source fixes and require the eventual vacuum completion
+plus consecutive sub-10M samples.
+
+At 09:42Z the oldest useful horizon made that remaining writer explicit: a
+98s transaction was executing the legacy `UPDATE transfer_contract SET
+reap_time = ...` while dead tuples held at 21.66M. The autovacuum itself was
+active on `IO:WalSync`, had no blocker, and remained in index cleanup. The
+vacuum probe now recognizes this query shape and names the shared
+`retention-fanout` cause, the durable pending-queue/cursor-batch fix, and the
+payment retry-safety constraint. It must not suggest canceling the healthy
+vacuum or tuning around the unbounded writer.
+
+The same live vacuum exposed a monitor compatibility blind spot at 09:47Z.
+PostgreSQL reported that it had processed 4 of 13 indexes while the legacy
+`index_vacuum_count` remained zero. Reporting only that completed-cycle
+counter hid real forward progress. The probe now reads
+`index_vacuum_count`, `indexes_processed`, and `indexes_total` through
+`to_jsonb`, so an absent version-specific field does not break the query, and
+reports both the legacy count and current per-index progress.
+
+That discriminator was validated minutes later without intervention. The
+same vacuum advanced from 5/13 to 9/13 processed indexes, completed at
+10:03:44Z, and reduced the dead-tuple estimate from 22.68M to 17,612 while
+`UpdateReliabilities` was still seven minutes into another full anchor.
+Autovacuum count advanced to 101. This was a progressing cleanup worker with a
+large removable cohort, not a candidate for cancellation; retain consecutive
+post-completion samples because continuing deployed writers can build the next
+dead cohort quickly. Ten minutes later the estimate had already returned to
+7.19M while the next 100k close cohort was actively draining the open backlog.
+No legacy `reap_time` fan-out was active; the sampled writers were ordinary
+roughly one-second per-contract `SET outcome, close_time` transactions. When
+that query is the selected horizon, the probe now names it as bounded recovery
+work rather than an old pin: let the closer and vacuum advance, retain the 25k
+task checkpoint, and use the open-contract age buckets to verify drain before
+attributing the next dead-row wave to retention.
+
+The successor vacuum exposed a second benign-reader attribution case at
+10:36Z. After scanning all 23,980,545 heap blocks it entered index vacuum while
+dead tuples reached 14.10M, and the selected horizon was a seconds-old Payout
+transaction first building `temp_account_payment` and then reading the
+`transfer_escrow_sweep` subsidy time range. That bounded payment planner can
+retain an MVCC snapshot, but it is not the legacy multi-million-row
+`transfer_contract.reap_time` writer that created the dead-row wave. The probe
+now recognizes both payment-plan query shapes and defers task diagnosis to the
+Payout canary: let the attempt reach its bounded outcome, roll out the
+transaction-local idle-timeout override and plan slices, and retain the global
+five-minute timeout for every unrelated session. Live validation at 10:40Z
+reported this classification while the vacuum advanced to 1/13 processed
+indexes; it no longer advised removing an imaginary write fan-out.
+
+After the old reliability and Payout horizons released, the 11:01Z sample
+exposed the complementary false-owner case. The ranked candidate was an
+ordinary two-second `search_provider_stats` SELECT carrying an inherited
+`backend_xmin`, while the vacuum itself had advanced to 4/13 indexes. Its xid
+age did not make that fresh reader the writer or persistent horizon owner.
+The probe now treats a sub-minute read-only candidate as negative attribution
+evidence, tells the operator not to cancel it, and redirects writer diagnosis
+to the retention, close-backlog, and active-query probes. The rebuilt monitor
+validated the branch at 11:02Z on another one-second network-client SELECT;
+index progress and the sampled reader's normal disappearance, not intervention,
+are the required checks.
+
+That successor vacuum completed the proof at 11:33Z without cancellation or
+retuning. After advancing through the index pass and heap-vacuum phase, the
+dead-tuple estimate fell from about 15.09M to 5.45M; a new autovacuum then
+started scanning the 23,980,545-block heap normally. The open set was still
+791,095 (724,618 older than five minutes and 390,289 older than 30), one legacy
+retention writer was active, and a full close cohort was still running. The
+remaining close backlog and fresh writer churn therefore did not retroactively
+make the completed vacuum stuck. Keep the bounded writer/close fixes and use
+the new vacuum's consecutive progress samples as the next cleanup check.
 
 ### 2.5 Task-system meta-health
+Probe: `task-health`
+
 - finished_task per-function duration percentiles vs history (regression
   detector — e.g. scores export 12.5min normal; 37min during recovery).
 - Duplicate concurrent executions (pre-lease-fix signature): same function
@@ -301,6 +697,8 @@ default scale factors never fire on 600M-row tables.)
   hours (observed 23-28 during the day). Every such row is an incident.
 
 ### 2.6 Open-contract set size — the close-backlog canary
+Probe: `open-contracts`
+
 ```sql
 SELECT count(*) FROM transfer_contract WHERE open = true;
 -- walks only the open partial index; seconds even under load
@@ -315,8 +713,283 @@ SELECT count(*) FROM transfer_contract WHERE open = true;
   2026-07-17 peak. Observed drain after the fix: ~440k closed in 8 min, so a
   high reading self-heals fast once close runs are healthy — alert on
   sustained rise, not a spot value during recovery.
+- Trend evidence is the immediately preceding five-minute sample. On monitor
+  startup, a high one-shot diagnostic says the trend is warming up rather than
+  claiming growth. The continuous loop requires three high/rising ticks (ten
+  minutes from the first observation); any flat or falling tick resets the
+  streak. Do not default `rising` true while a longer baseline warms up. The
+  2026-08-30 hardening was prompted by a 212,497 alert whose persisted samples
+  later confirmed that this instance really was rising: 90,328, 91,679,
+  124,317, 155,901, 182,471, then 212,497 at roughly five-minute intervals.
+
+2026-08-30 close-tail discriminator: the set reached 244,019 (204,756 older
+than five minutes, only 11,765 older than 30 minutes) while one
+`CloseExpiredContracts` run processed a 52,970-contract cohort for 1,548s.
+Immediately afterward, two cohorts of roughly 100,000 each completed in 22–23s
+and the open set fell to 63,926 (23,387 older than five minutes). During the
+slow tail, PostgreSQL showed only two active backends; 59 `idle in transaction`
+sessions were the closer's 92 workers between commands (about 0.1s average
+idle, 1.5s oldest transaction), not leaked transactions or a database CPU/lock
+wall. Post-close aggregate comparison did not support a special contract mix:
+the sampled slow and fast cohorts were each about 91–92% escrow-backed and
+24–26% had nonzero used bytes. Instead, the legacy §2.10 payment-retention
+statement was concurrently updating millions of `transfer_contract` rows (the
+monitor repeatedly saw 72–110s active executions) and cleared immediately
+before the two fast close cohorts. Treat that timing as strong evidence that
+the close backlog was downstream write/storage contention from the retention
+fan-out; deploy and verify the bounded retention fix before rewriting the
+closer or raising its concurrency/connection pools.
+
+The follow-on 2026-08-30 sample made the persisted-debt variant explicit. A
+new close run logged a full 100,003-contract cohort and remained live for more
+than 20 minutes while the open set rose from 299,011 to 323,756. At the first
+sample, 250,518 were older than five minutes but only 6,891 were older than 30
+minutes; three minutes later those buckets were 277,030 and 34,379. No
+retention statement was then active and closer worker transactions were
+sub-second. However, `transfer_contract` autovacuum had run for 1,958s, scanned
+all 23,781,003 heap blocks, was still vacuuming indexes, and 8.1M dead tuples
+remained. This is the same retention root after the fan-out statement clears:
+write/vacuum debt continues to suppress close throughput. The probe therefore
+includes five- and 30-minute age buckets in every high/rising alert and directs
+the operator to correlate the close task, retention signal, and autovacuum
+phase before changing closer concurrency. That 100,003-row cohort ultimately
+logged `eval error(1800.82s) ... = Timeout`, exactly matching its 1,800-second
+task deadline, then retried 18 seconds later. Per-contract commits survived,
+but task-level progress did not: the retry had to select and scan again. The
+source now caps a task cohort at 25,000 while retaining 92-way internal
+parallelism and the 30-minute safety ceiling. A production-sized 100,003-row
+backlog therefore checkpoints through five independently acknowledged tasks;
+full cohorts schedule their successor immediately. Verify no new exact-1,800s
+timeouts and that the aged buckets fall across those checkpoints.
+
+The still-running legacy build reproduced that boundary once more at 06:55Z:
+its next 100,000-row attempt logged `eval error(1800.77s) ... = Timeout`.
+Automatic retry completed in 20.6s, the next six cohorts completed in 19.8–25s,
+and the open set fell from 696,015 to 95,717 by 06:58Z, with zero rows older
+than 30 minutes. That recovery proves the timeout was contention-sensitive and
+that per-contract commits survived, but it also proves a task-level 100,000-row
+checkpoint can still repeat expensive discovery after an exact deadline. Keep
+the 25,000-row source checkpoint; do not raise the deadline based on the fast
+retries.
+
+The legacy boundary recurred a third time at 08:39:35Z:
+`eval error(1801.18s) ... CloseExpiredContracts ... = Timeout`. The open set
+had risen to 419,520 (358,485 older than five minutes and 70,126 older than 30
+minutes). The identical task id retried 14 seconds later; within the next
+minute, fresh successor task ids appeared about every 20–30 seconds, confirming
+that per-contract commits survived and full cohorts were again draining. This
+is the exact `Timeout` variant the task alert now explains as the deployed 100k
+scheduler boundary. It reinforces, rather than changes, the deterministic 25k
+checkpoint fix and its verification against consecutive aged-bucket samples.
+
+The next deployed 100k cohort completed rather than timing out, but remained
+too close to the same boundary: it ran from 09:33:04Z to 09:57:57Z
+(1,493.20s) with `full=true`. Over the surrounding recovery, total open
+contracts fell from 419,520 to 367,692 and the older-than-30-minute tail fell
+from 70,126 to 1,607. That is durable close progress with only about five
+minutes of deadline margin, not evidence that a 100k task checkpoint is safe.
+This cohort also overlapped §5.11's sixth long reconcile and its subsequent
+21,436 negative counters. The exact 2.02TiB opposite-direction repair proves
+the closer exposed stale Redis reservations; it did not create them. Keep the
+25k scheduler checkpoint and the page-local additive escrow fix as separate,
+complementary remediations.
+
+The following 100k cohort then hit the boundary again. Taskworker logged
+`eval error(1801.33s) ... CloseExpiredContracts ... = Timeout` at 10:29:19Z;
+the same task id was reclaimed seconds later and emitted a fresh 10s heartbeat
+at 10:29:33Z. At the surrounding sample the open set was 436,567
+(371,408 older than five minutes and 36,769 older than 30), three legacy
+retention writers overlapped, and the successor autovacuum was still scanning
+the heap. This is the deployed 100k checkpoint failing under recurring shared
+write pressure exactly as diagnosed—not a reason to raise the deadline or
+restart PostgreSQL. The deterministic 25k cohort remains the fix.
+
+A later deployed cohort reproduced the full chain while cleanup debt was still
+present. Task `01a05242-c226-d02d-1a3a-907f6084a454` reached
+`eval error(1801.55s) ... = Timeout` at 11:11:46Z, was reclaimed under the
+same id 17 seconds later, and needed another 504.55s to return `full=true`.
+The immediate successor then completed another full legacy cohort in 33.13s,
+while its successor was again still active after five minutes. Per-contract
+commits therefore survived, but neither the quick second cohort nor the
+successful retry made the 100k scheduler checkpoint safe. At the surrounding
+monitor tick the open set reached 786,024, up 57,931 from the preceding sample;
+719,370 were older than five minutes and 390,607 older than 30 minutes. Two
+legacy retention writers simultaneously remained active for 114s, while
+autovacuum had completed an index pass and entered heap vacuuming. This is
+durable cleanup progress coexisting with arrival/write pressure above close
+throughput, not a stalled vacuum or justification for a larger task deadline.
+Retain the deterministic 25k checkpoint and bounded retention fixes. Even
+after that vacuum completed, the 11:40Z monitor tick reached 881,722 open
+contracts, up 57,493 from its preceding sample; 814,243 were older than five
+minutes and 479,092 older than 30. The still-active 100k cohort was not keeping
+pace with arrivals, so cleanup completion alone did not resolve the scheduler
+checkpoint deficit. That cohort ultimately reached
+`eval error(1800.72s) ... = Timeout` at 11:50:55Z. Its same-id retry returned
+`full=true` in 22.57s, and the next two full successor cohorts completed in
+21.33s and 21.72s. This is the same durable-per-contract/task-level-rollback
+split: fast recovery after the boundary does not make the deployed 100k
+checkpoint safe.
+
+The next legacy cohort completed rather than timing out, but repeated the same
+near-boundary/fast-successor shape. It ran from 11:52:36Z to 12:13:59Z
+(1,283.00s), after the open set had climbed back to 852,348 (788,638 older than
+five minutes and 448,648 older than 30). Its next three full cohorts completed
+in 21.70s, 25.95s, and 22.00s; by 12:15:51Z the open set had fallen to 584,367
+(517,757 older than five minutes and 182,292 older than 30). The 268k drain is
+durable progress, while the 21-minute checkpoint remains much too sensitive to
+shared write/vacuum pressure. Keep the 25k source cap and require consecutive
+aged-bucket decline; do not infer safety from the fast successors.
+
+The deployed boundary then recurred under another retention/vacuum overlap.
+Task `01a05298-6315-fa3e-3719-55e95aac9de1` reached
+`eval error(1800.69s) ... = Timeout` at 12:45:18Z. Its same-id retry completed
+in 27.55s, and four new full successor cohorts completed in 20.01s, 22.11s,
+19.96s, and 30.34s. The open set had peaked at 919,950 (854,226 older than five
+minutes and 523,677 older than 30), then fell to 494,974 (422,960 and 95,016)
+by 12:47:42Z. The concurrent autovacuum completed at 12:44:57Z and reduced the
+dead-tuple estimate from 17.15M to 532,715. Both cleanup paths therefore made
+durable progress, but the oversized task checkpoint still failed exactly at
+its deadline while arrival and legacy retention pressure overlapped. Retain
+the 25k checkpoint and bounded retention queue; neither a larger task deadline
+nor vacuum cancellation addresses this reproduced boundary.
+
+The following legacy cohort repeated the exact deadline under the successor
+vacuum and reliability anchor. Task
+`01a052b5-dd90-0999-08a1-de70429d62df` reached
+`eval error(1800.86s) ... = Timeout` at 13:17:30Z. Its same-id retry ran from
+13:17:36Z to 13:24:14Z and committed successfully in 397.89s; the historical
+`Timeout` remains on that finished row, while a new successor task id proves
+the recurring chain advanced. This is durable retry progress, not proof that
+the deployed 100k checkpoint is safe: the first attempt still spent its whole
+deadline beside vacuum/reliability work. Keep the 25k source checkpoint and
+follow the new successor plus aged open buckets.
+
+That successor supplied the next exact boundary. Task
+`01a052d7-9750-7771-3efd-a76cd0275248` ran from 13:24:18Z until
+`eval error(1800.72s) ... = Timeout` at 13:54:19Z while the successor vacuum,
+an 18-minute net-escrow reconcile, and a 3,356,615-row legacy payment-retention
+update overlapped. Its same-id retry committed in 24.84s. Eight immediately
+following full cohorts then committed in 18.89–24.44s through 13:57:52Z, with
+new task ids proving the chain advanced. This is the strongest form of the
+checkpoint discriminator: the database and per-contract writes were not
+wedged, because the exact same remaining work and its successors drained
+quickly after the task-level rollback. The 30-minute first attempt is still a
+production failure. Retain the 25k source checkpoint and bounded retention
+queue; do not convert the fast retry into evidence for a larger deadline.
+
+The following cohort supplied a tighter same-executor coupling to net-escrow
+write amplification. Task `01a052f6-5c55-e78b-110d-dad7afffe710` ran from
+13:57:54Z to 14:20:41Z (1,367.15s) on
+`by-us-fmt-5-edge-3/g2`, container `4cf91fd25a2e`. The same executor was
+simultaneously applying a 1,021.01s legacy `ReconcileNetEscrow` pass from
+14:03:23Z to 14:20:24Z. The close cohort committed only 16.61s after that
+fleet-wide Redis writer stopped; its next three full successors then completed
+in 21.35s, 27.30s, and 22.29s. No task timeout was required to expose the
+boundary, but executor overlap alone was not the causal discriminator. The
+following close task `01a0530c-65aa-153e-19d8-82ad3698cf40` began on the same
+container at 14:21:56Z, after the escrow writer had stopped, and still remained
+live after 769s. At 14:28:18Z the open set was 435,994 (368,281 older than five
+minutes), a legacy payment-retention writer had been active for 106s, and the
+`transfer_contract` autovacuum had spent 1,521s scanning 15,383,494 of
+23,980,545 heap blocks with about 10.0M dead tuples. It later entered index
+vacuuming while the close task remained live. That follow-up falsifies simple
+same-process Redis-walker interference and identifies the already-diagnosed
+PostgreSQL write/vacuum debt plus the oversized 100k checkpoint as the close
+path. Executor identity is still valuable chronology, but is not standalone
+causal proof. Keep both source fixes—the 25k close cohort and the
+page-local/no-op-skipping escrow reconciler—and do not raise the deadline.
+
+The same close id then reached the exact boundary at 14:52:00Z:
+`eval error(1800.83s) ... = Timeout` on
+`by-us-fmt-5-edge-3/g2`, container `4cf91fd25a2e`. Its same-id retry moved to
+edge-1/g2 and committed in 31.41s. A new full successor
+`01a05328-7ab0-20bf-7a56-da7de2a04be3` moved to edge-0/g1 and committed in
+21.89s. The following full successor
+`01a05328-d675-7e6d-1991-20f454b4e1ce` landed back on edge-3/g2 and exceeded
+1,000s while the open set rose from 621,149 to 676,121. That A/B/A executor
+sequence proves a container-local contention component in addition to the
+global retention/vacuum debt; the same 100k algorithm and live fleet state
+were fast on two peers and slow again on the original executor. The slow
+container concurrently carried a 34.7GiB-resident taskworker,
+`RemoveDisconnectedNetworkClients` beyond 6,200s, and `UpdateClientScores`
+beyond 2,500s. Host load was 20 on 72 CPUs, memory had 803GiB free, and the
+container had no CPU throttle, memory event, or pressure, so this is
+co-resident application work rather than host/cgroup starvation. The exact
+share—Go heap scanning, serialized Redis cleanup, or task scheduling—is not
+uniquely identified; keep the bounded fixes for all three paths and do not
+restart the executor to erase the evidence.
+
+That successor then supplied a same-host generation control. Edge-3/g2 reached
+`eval error(1801.06s) ... = Timeout` at 15:23:04Z. The same task id retried on
+edge-3/g1 container `786ae804bb97` and committed in 22.450s; its authoritative
+`finished_task` row retained the prior `Timeout`. The next full successor
+`01a05344-c984-35a7-ff1f-89df7a57b0ea` returned immediately to edge-3/g2.
+Moving only between g2 and g1 on the same physical host reproduces the slow/
+fast split without changing host memory, network, PostgreSQL, or Redis. The
+process-level allocated-heap evidence in §2.12 is therefore the local discriminator,
+while the 25k close cohort remains the durable checkpoint fix.
+
+The next independent edge-1/g2 cohort supplied the deadline/reclaim sequence
+again. Task `01a0534c-0b80-16c9-d801-6b052913efcc` started at 15:31:31Z,
+logged `eval error(1801.47s) ... = Timeout` at 16:01:32Z, and was reclaimed
+under the same id seconds later. The retry emitted a fresh 10.02s heartbeat at
+16:01:49Z, then completed from 16:01:39Z to 16:19:15Z in 1,056.375s; its
+finished row correctly retained `reschedule_error=Timeout` from the first
+attempt. Six fresh full successor cohorts then completed in 20.961–24.270s.
+The open set was 796,882 and rising near the boundary. A transient 585-session
+`idle in transaction` count contracted to 147; sampled transactions were only
+1–3 seconds old and dominated by the closer's bounded statements, so this was
+worker fan-out between commands, not 585 abandoned sessions. The exact
+deadline, durable retry, and immediate fast drain again validate the 25k task
+checkpoint. Do not raise the deadline or connection pool based on either the
+successful retry or transient count.
+
+### 2.6a Close-task checkpoint duration — the live backlog precursor
+Probe: `close-duration`
+
+The open-set trend is the durable user-impact signal, but it intentionally
+needs consecutive five-minute samples. Watch the authoritative taskworker
+`eval active(<seconds>s) ... CloseExpiredContracts` heartbeat so an individual
+checkpoint that leaves its healthy band is visible before the open backlog has
+had ten minutes to mature. `pending_task.run_at` is only the due time and
+`claim_time` is a moving lease heartbeat; neither is an execution-start clock.
+For completed incidents, read `finished_task.run_end_time-run_start_time`.
+Also retain taskworker `eval error(<seconds>s) (reschedule)` attempts: a timeout
+never becomes a finished duration because the same pending task id is reclaimed.
+Retain the latest overrun for 45 minutes so an immediate fast successor cannot
+erase its precursor.
+
+- HEALTHY: full deployed legacy cohorts normally finish in roughly 20–30s.
+- WARN: a live or completed checkpoint reaches 120s. Include task id plus the
+  live heartbeat's host/generation/container when present.
+- DEADLINE: 1,800s is failure even when the per-contract commits survived.
+  The retry repeats discovery because the task-level checkpoint did not
+  commit; do not treat those durable child writes as task success.
+
+The 14:21:56Z task `01a0530c-65aa-153e-19d8-82ad3698cf40` demonstrated the
+lead time: its taskworker heartbeat exceeded 900s before the existing
+open-contract probe's sustained trend opened at 536,761 contracts (474,389
+older than five minutes and 141,039 older than 30). The live probe therefore
+alerts at 120s, while the open-set buckets remain authoritative for impact and
+drain. Correlate the duration with §2.10 and vacuum state. Executor identity is
+chronology, not causal proof: the same task remained slow after the overlapping
+net-escrow writer ended, while a legacy retention writer and
+`transfer_contract` vacuum debt were active.
+
+Implementation convention: SIGNALS.md §2.6a (`close-duration`) maps to
+`signal_close_duration.go` and `signal_close_duration_test.go`. The synthetic
+lifecycle tests require the newest timestamped heartbeat to supersede an older
+one, the same completed task id to suppress its lingering heartbeat, and a
+different active successor id to remain visible. They also preserve the exact
+1,800.83s rescheduled timeout when a short same-id retry follows it and the only
+`finished_task` overrun belongs to an older checkpoint. When that different
+successor also crosses 120s, its active alert retains the precursor failure's
+duration, task id, error, timestamp, and executor identity rather than letting
+new activity erase the deadline incident.
 
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
+Probe: `connection-rate`
+
 ```sql
 SELECT date_trunc('minute', connect_time), count(*)
 FROM network_client_connection
@@ -337,11 +1010,11 @@ GROUP BY 1 ORDER BY 1;
   connections establish then die young, so clients cycle. Confirm with the
   median connection lifetime (it halves during churn):
   ```sql
-  SELECT date_trunc('hour', connect_time),
+  SELECT date_trunc('hour', disconnect_time),
          percentile_cont(0.5) WITHIN GROUP (ORDER BY
            EXTRACT(EPOCH FROM (disconnect_time - connect_time)))
   FROM network_client_connection
-  WHERE connected = false AND connect_time >= now() - interval '6 hours'
+  WHERE disconnect_time >= now() - interval '6 hours'
     AND disconnect_time IS NOT NULL GROUP BY 1 ORDER BY 1;
   ```
   First correlate with deploys AND unit restarts (8.5): 2026-07-19 22:55 an
@@ -350,6 +1023,14 @@ GROUP BY 1 ORDER BY 1;
   with contract rate, canary, api error rates all healthy throughout. If NOT
   restart-correlated, a storm means something is killing established
   connections (transport, lb flapping, provide churn).
+- LIFETIME-CENSORING CAUTION: compare matched `disconnect_time` windows, not a
+  still-open recent `connect_time` cohort. The latter excludes every long-lived
+  survivor and biases its median short. At 2026-08-30 06:32Z, the naive recent
+  connect cohort read 24.7s versus 44.8s an hour earlier; disconnect-time
+  cohorts read 35.7s versus 45.4s, with p90 375.1s versus 376.6s. Together with
+  only 1.1–1.5x matching-hour connection rates and 14% higher contract
+  creation, that ruled out a new reconnect storm as the primary cause of the
+  open backlog and left slow close throughput under vacuum debt as the cause.
 - MEDIAN-POLLUTION CAUTION: a 40-minute storm drags any trailing-hour median
   up to storm levels, so (a) the storm signal un-trips as the window fills,
   and (b) the RECOVERY back to true baseline then reads as < 50% "collapse"
@@ -370,6 +1051,8 @@ GROUP BY 1 ORDER BY 1;
   set to recover after the last restart.
 
 ### 2.8 Provider-selection freshness — the score-cache staleness canary
+Probe: `selection-freshness`
+
 `FindProviders2` (the app's provider list) reads ONLY the redis
 `{cs_<fm>_<rank>_<callerLoc>_<targetLoc>}` score cache (counts `c_l`/`c_g`,
 filters `f_l`/`f_g`, samples `s_l_N`/`s_g_N`), and that cache has exactly ONE
@@ -395,8 +1078,41 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   must fire long before the ttl.
 - The task-overdue signal (§7) is the leading indicator: the rebuild grinding
   past 2x its p95 is what precedes the gap.
+- 2026-08-29 export-timeout variant: a rebuild ran 3,651s and then one
+  cross-slot Redis pipeline failed with `write tcp ... -> ...:6402: i/o
+  timeout`. The task-level retry restarted the entire hour-scale export after
+  backoff, allowing the completion gap to cross 90 minutes even though the
+  cluster was healthy when checked. `UpdateClientScores` used to send every
+  location/group `SET` for one caller location as one giant pipeline from each
+  of 48 workers. The writer now caps a wire batch at 512 idempotent `SET`s and
+  retries only the failed chunk up to three attempts for transient transport,
+  failover, LOADING, or READONLY errors. It deliberately does not retry pool
+  exhaustion or permanent Redis errors. A completed earlier chunk is never
+  replayed by the local retry. The pre-fix production row then recovered on
+  its next task-level attempt: it completed at 2026-08-30 02:32:20 UTC in 598s
+  and cleared `reschedule_error_count`, confirming a transient transport
+  failure rather than a persistently unhealthy 6402 node.
+
+  The 2026-08-30 process-level trace exposed the corresponding working-set
+  defect before that first batching change was rolled out. Edge-3/g2 repeatedly
+  cycled between 6.46GiB and 31.43GiB of allocated heap while its score task
+  ran.
+  Merely building a complete immutable operation list and then executing
+  512-item slices would still retain every encoded sample for one caller
+  location on each of 48 exporters. The writer now produces into the bounded
+  buffer: a batch executes synchronously at either 512 commands or 8MiB of
+  key/value payload, and its payload references are cleared before encoding
+  resumes. An individually oversized value is sent alone. Each provider sample
+  is encoded lazily as it is emitted, rather than materializing every sample
+  for the current location first. Deterministic regressions produce 10,000 synthetic 1KiB
+  values, prove the producer never gets 512 unexecuted values ahead, observe
+  19 full batches plus one 272-value tail, exercise the independent byte cap
+  including an isolated oversized value, prove flushed slots release their
+  payloads, and retain the exact failed-batch retry checks above.
 
 ### 2.9 Provider-selection population — the fresh-but-empty cache canary
+Probe: `selection-population`
+
 Freshness is necessary but NOT sufficient. `UpdateClientScores` can complete
 successfully, refresh every ttl, and publish an empty provider market. Check the
 database supply and the exported cache as separate stages:
@@ -470,6 +1186,8 @@ gate before the probe pipeline was populated. This signal, not 2.8 alone,
 localized the outage.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
+Probe: `retention-fanout`
+
 `CompletePayment` stamps `transfer_contract.reap_time` for every contract in a
 payment's `transfer_escrow_sweep`. The lookup is indexed by `payment_id`, so an
 indexed plan can still be catastrophically expensive when one payment owns
@@ -495,8 +1213,49 @@ WHERE state = 'active' AND query_id = -3312164664690273449;
 dirtied blocks. One to three copies remained active for tens of seconds to
 minutes while the storage device ran in high-utilization write bursts.
 
+2026-08-30 live monitor confirmation: query id `-3312164664690273449` had
+reached 36 calls, 326,707ms mean, 544,554ms max, and 2,156,191 rows/call; one
+sample saw three active copies with the oldest at 72s and the next saw one at
+105s. The current source no longer issues that synchronous statement:
+`CompletePayment` sets the durable `contract_retention_pending` queue bit, and
+`RemoveCompletedContracts` advances `contract_retention_cursor` in bounded,
+committed batches. Seeing the legacy query id after that source change therefore
+identifies an older deployed generation; deploy the fixed generation and then
+require the exact query id to disappear rather than tuning PostgreSQL around it.
+The same live window supplied a cross-signal check: a 1,548s
+`CloseExpiredContracts` run accumulated 244k open contracts while this query
+remained active, then two comparable 100k close cohorts finished in 22–23s
+immediately after the retention executions cleared (§2.6). This is the
+retention fan-out delaying unrelated writers, not evidence that the closer
+needs a larger pool.
+It also pushed `transfer_contract` above the 10M dead-tuple warning while
+autovacuum was active; vacuum brought the estimate back below threshold, but
+cannot make an unbounded multi-million-row update cheap. Treat §2.4 bloat as a
+downstream symptom until the legacy query id disappears.
+
+A later read-only sample separated the payment backlog into causes instead of
+letting its largest class hide the retention failures. Of 384 failing
+`AdvancePayment` rows, 368 carried the known unfunded-wallet error, while ten
+different rows retained `Interrupted: failed to deallocate cached
+statement(s): conn closed` after their exact 120-second task boundary. Those
+ten rows spanned two payment plans and nine networks; each payment referenced
+1,184,684–3,356,615 sweep rows, or 21,875,448 in total. All ten had a processor
+record and idempotency key but no receipt/hash or terminal state. One selected
+retry supplied direct causal proof: taskworker began it at 13:49:03Z while
+PostgreSQL began query id `-3312164664690273449` for its 3,356,615-row payment.
+The same backend remained in that exact `UPDATE` from 0.5s through 118.5s,
+alternating ordinary execution with WAL/data-file waits and no blocker; at
+13:51:03Z taskworker reported `eval error(120.00s)` with the connection-cleanup
+text. The cleanup message is cancellation aftermath, not the slow operation.
+The probe therefore retains this durable correlation between retries when both
+the legacy statement averages at least 100,000 rows/call and an
+`AdvancePayment` row carries that deadline signature. The error alone is not
+enough to attribute retention.
+
 - WARN: one execution active >30s, or >=2 concurrent executions for two
-  samples. Include rows/call and storage/WAL signals; backend count alone
+  samples; also warn between retries when the exact legacy query has at least
+  100,000 rows/call and an `AdvancePayment` row retains the 120-second cleanup
+  signature. Include rows/call and storage/WAL signals; backend count alone
   understates this load.
 - This is not the rare-value planner landmine (§2.3):
   `transfer_escrow_sweep_payment_id` exists and is used to find the fan-out.
@@ -507,6 +1266,8 @@ minutes while the storage device ran in high-utilization write bursts.
   without first proving retry/idempotency safety.
 
 ### 2.11 PgBouncer client-write stall — pool path vs postgres load
+Probe: `pgbouncer-stalls`
+
 The application-side error
 `pgproto3.writeError=write failed: write tcp <app>:<ephemeral>-><pg>:6432: i/o timeout`
 is distinct from PgBouncer's `FATAL: query_wait_timeout`. The client could not
@@ -531,11 +1292,117 @@ Diagnosis order:
    Raising the socket timeout only hides either failure and retains scarce
    connections longer.
 
+### 2.12 Taskworker allocated-heap skew — the local executor discriminator
+Probe: `worker-memory`
+
+Query the pushed Go runtime metrics through any services host's loopback Mimir
+front and compare fresh taskworker processes, keeping host, block, and runtime
+instance identity:
+
+```promql
+go_memstats_heap_alloc_bytes{env="main",job="taskworker"}
+```
+
+- HEALTHY: allocated heap stays below 8GiB or within 4× of the fresh fleet median.
+  Require both limits to fail for two consecutive one-minute samples. With
+  fewer than three fresh instances, use a conservative 16GiB absolute guard.
+- BROKEN: the process exceeds both guards. Include
+  `go_memstats_heap_objects`, `process_resident_memory_bytes`, cumulative
+  allocations, GC cycles, process age, exact host/block/instance, and
+  five-minute CPU-core, allocation-byte, GC-cycle, and GC-pause rates plus
+  fleet medians. Join the newest active task IDs/durations from that
+  host/block's taskworker heartbeats. Ignore a sample older than 90s so a
+  drained generation cannot create a false skew. The rate query is
+  best-effort: an unavailable range evaluation must not hide a decisive heap
+  outlier, but its absence is recorded in the evidence.
+- This is process-local evidence. `HeapAlloc` includes reachable objects and
+  objects not yet reclaimed by the next GC; unlike RSS, it excludes retained
+  pages with no allocated objects. Host free memory, CPU count, cgroup limits,
+  and pressure remain necessary controls, but they do not clear a worker whose
+  allocated heap is hundreds of times its peers. Correlate exact
+  taskworker `eval active` task IDs on that executor, then compare those task
+  families on other workers. Co-residency proves local contention; it does not
+  assign every byte to one task.
+- Action: bound or stream the implicated working sets; retain task deadlines.
+  Do not restart merely to erase the evidence, and do not raise deadlines to
+  normalize allocator/GC contention.
+
+On 2026-08-30, edge-3/g2 container `4cf91fd25a2e` supplied the production
+shape while it carried the long client reaper, score rebuild, close checkpoint,
+and net-escrow pass. Its pushed runtime metrics showed a 29.62GiB allocated
+heap, 27.25M allocated objects, a 32.13GiB RSS, and 7.63TiB cumulatively
+allocated after about 15 hours. The allocated heap had repeatedly cycled
+between 6.46GiB and 31.43GiB; edge-3/g1 was 0.145GiB and the fresh taskworker fleet median was
+about 0.14GiB. The host still had more than 800GiB free and the container had
+no CPU throttle, OOM event, or pressure. That rules out host/cgroup starvation
+and explains the A/B/A task-duration split as local allocator/GC contention.
+The oscillation predated the current reaper, so retain the bounded fixes for
+every co-resident large path rather than assigning the whole heap to that one
+task. Source inspection then found the matching score-export allocator: all 48
+exporters encoded and retained a whole caller-location operation list before
+the first bounded Redis write. §2.8 now streams and clears each 512-item/8MiB
+batch and lazily encodes one provider sample at a time; its deterministic
+10,000-value test caps producer lead at 511, a separate regression proves
+every flushed backing-array slot releases its payload, and the retry tests preserve
+failed-batch-only replay.
+
+The task boundaries supplied a second discriminator. Edge-3's score task
+`01a0530b-0e6a-9c14-6694-11a165f3c27b` completed at 15:30:03Z in
+4,143.294s, but its allocated heap stayed near 25GiB until a later GC; the
+co-resident reaper completed at 15:32:16Z in 7,932.960s in the same scrape
+where heap and RSS contracted. That coincidence does not assign those bytes
+to the reaper: `HeapAlloc` can retain unreachable objects between collections.
+The independent reproduction did assign the allocator. Edge-1/g2 began score
+task `01a0534a-c1c9-fb11-37e6-98740046f7eb` at 15:30:34Z: allocated heap rose
+from 0.91GiB at 15:30:30Z to 5.55GiB at 15:31:00Z and 8.74GiB at 15:31:30Z,
+before its later close and reliability-rollup tasks began, then reached
+13.94GiB at 15:32:00Z. That clean start-aligned reproduction validates the
+score-export working-set fix independently of the edge-3 task mixture. A
+simultaneous negative control separated the reaper: task
+`01a0534c-cb89-633c-78b2-417bb4ea3717` ran past 460s on edge-4/g1 while that
+process stayed between 0.07GiB and 0.16GiB allocated heap and near 0.50GiB RSS.
+The reaper's old serialized Redis path explains its wall-clock tail, but not
+the multi-GiB allocation pattern. The probe now performs this correlation in
+its alert by joining the outlier's exact host/block to recent taskworker
+heartbeats and listing active task IDs plus elapsed times. A timestamped
+terminal line supersedes an older active line; successful `eval done` is V(1)
+and absent from the production stream, so an otherwise unterminated active
+line also expires after 45 seconds (four missed 10–12-second heartbeats).
+Synthetic lifecycle coverage proves both paths and rejects a heartbeat more
+than 30 seconds in the future, so a completed task cannot remain attached to
+later heap samples merely because its last informational line was retained.
+
+The five-minute rates made the independent reproduction quantitative at
+15:51Z. Edge-1/g2 consumed 4.01 CPU cores and allocated approximately
+910–916MB/s while the score export was active; every other taskworker was at
+or below 0.184 cores and 7.84MB/s. Its GC counter advanced at about 0.125/s
+(one cycle per eight seconds), while the stop-the-world pause sum grew by only
+about 0.000041 seconds per second. This is sustained encoding/allocation work,
+not an executor paused by GC or a host starved of CPU. The alert now carries
+these rates and their fleet-median ratios so a post-completion heap awaiting a
+collection is distinguishable from an actively allocating task.
+
+The reproduction then reached an authoritative terminal boundary. Task
+`01a0534a-c1c9-fb11-37e6-98740046f7eb` completed at 16:18:55Z in
+2,901.257s; Mimir's 60-minute maximum allocated heap for that exact instance
+was 23.24GiB. Heap was still 20.98GiB at 16:18:47Z, then collapsed to 0.28GiB
+by 16:19:19Z and 0.20–0.25GiB thereafter. The ordinary two-minute log query
+continued returning the last `eval active(2890.84s)` line well after the
+finished row existed because successful `eval done` was not ingested. That is
+the live production discriminator for the 45-second heartbeat freshness rule:
+raw log retention is not task liveness. It also completes the clean score-only
+allocator reproduction; the streaming/bounded writer remains a source fix and
+must still be verified after rollout by bounded heap and producer lead while
+the task runs. Encoding may continue to use CPU and allocate bytes; those
+rates alone are not a regression if live heap no longer grows by tens of GiB.
+
 ---
 
 ## 3. redis signal catalog
 
 ### 3.1 Per-node memory table (the skew detector)
+Probe: `redis-memory`
+
 For each master: `INFO memory` → used_memory, maxmemory, pct.
 - HEALTHY: all nodes within ~2× of each other (fleet baseline was 3–8G).
 - BROKEN: any node > 85% of maxmemory (warn) / > 92% (page); any node > 3×
@@ -545,8 +1412,18 @@ For each master: `INFO memory` → used_memory, maxmemory, pct.
   allowed`) while reads keep working and cluster_state stays ok — invisible
   to naive health checks, devastating to write paths. Monitor writes-error
   class per node (or canary tasks, 1.2) to catch it.
+- 2026-08-29 discriminator: node 6406 held 10.60G of dataset at 86% of its
+  12.88G ceiling while client buffers were negligible. Slot key counts were
+  uniform; a bounded memory sample attributed its extra bytes to expiring
+  `{cs_1_q_*}s_l_N` provider-selection samples (typical sampled TTL ~14,000s),
+  not a no-TTL leak or stale out-of-slot keys. Trend it through the five-hour
+  score-cache cycle; the first sustained high-memory tick now attaches the
+  dataset/client/accept-queue battery using `mem_clients_normal` plus
+  `mem_clients_slaves`.
 
 ### 3.2 Memory attribution: dataset vs client buffers
+Probe: `redis-buffers`
+
 ```
 INFO memory → used_memory_dataset, mem_clients_normal + mem_clients_slaves
 ```
@@ -561,6 +1438,8 @@ during the peers outage). Alert separately:
   accumulation; check CLIENT LIST omem + subscriber consumer health".
 
 ### 3.3 Keyspace family histogram (what is growing)
+Probe: `key-families`
+
 ```bash
 redis-cli -p <port> --scan --count 5000 \
  | sed -E 's/[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/<id>/g' \
@@ -572,7 +1451,66 @@ legacy pile families were identified. The monitor can run this on the
 fullest node daily + on any skew alert, and diff family counts week-over-week
 (a family growing without bound = missing TTL — the recurring disease).
 
+### 3.3a Impossible TTL residue (writer fixed, stale keys remain)
+Probe: `ttl-leaks`
+
+`[redis][ttl]` catches a new suspect write, but it becomes quiet after the
+writer is fixed even though old keys retain their original expiry. Read each
+node's `INFO keyspace` `avg_ttl` as the persistent-state counterpart. Annual
+net-escrow balances legitimately approach 395 days, so the probe uses a
+conservative two-year average threshold.
+
+On 2026-08-29/30, 30 of 32 nodes had an impossible fleet-wide average TTL;
+the four nodes already at 85–89% memory each held roughly 6.45–6.57M keys,
+4.82–4.94M with expiry, and reported average TTLs from 5.09e14 to 9.08e14ms.
+The probe emits one fleet incident rather than one markdown alert per affected
+port. A bounded Redis-side, binary-safe sample on the worst-average node found
+99 over-limit keys among 4,914 examined: 47 legacy `s_sk_cs` contract sets and
+52 legacy `s_sk_sid` stream-id keys, with zero current-generation or unknown
+suspects. The maximum PTTL was 28,799,985,310,940,036ms: the exact
+pre-2026-07-20 fingerprint where an 8h Go `time.Duration` was serialized as
+nanoseconds and Lua `EXPIRE` consumed that integer as seconds (about 913,000
+years). Fragmentation was only 1.02 and client buffers below 1MiB, proving the
+high-memory class was dataset residue. The probe repeats this bounded
+classification through `EVAL_RO` on the node with the largest average, so a
+future unrelated TTL family receives attribution rather than stream-specific
+cleanup advice.
+
+- Do not inspect binary stream keys through shell variables; embedded bytes
+  can truncate or corrupt family attribution. The existing
+  `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each
+  shard. Its first implementation scanned only the newer `*s2_sk_*` names and
+  therefore missed the production residue, which predates that namespace and
+  uses `*s_sk_*`. The corrected scanner covers both generations and validates
+  the exact suffix before changing a key.
+- Classify every new `redis-ttl-suspect` line by command and redacted key
+  family. Require zero new stream-family warnings before cleanup; a warning on
+  another family is an independent writer defect, not proof that stream writes
+  resumed. Running `bringyourctl streams expire-leaked-ttls` changes production
+  TTLs and therefore requires explicit maintenance authority. It clamps only
+  legacy/current stream-id and stream-contract keys beyond 8h, allowing active
+  streams to refresh and orphaned residue to expire.
+- 2026-08-30 net-escrow variant: API emitted repeated `EXPIREAT` warnings for
+  one `{escrow_<balance-id>}net` key with about 3.139B seconds (99.5 years)
+  remaining. PostgreSQL confirmed a legitimate 10TiB balance ending
+  2126-01-24 with 1,240 active escrows. The durable balance is valid; the bug
+  is copying its century-long end time into a derived Redis mirror that
+  reconciliation can recreate. Current source caps creation at the earlier of
+  `end_time + 30d` and `now + 90d`; every other mirror write already uses the
+  90-day fallback. The `redis-netescrow-ttl` log class now reports this
+  mechanism and explicitly separates it from legacy stream cleanup. Its
+  deterministic real-Redis test creates a 100-year balance and requires the
+  mirror TTL to remain in the 89–90 day rolling band. The corrected invocation
+  passed three race-enabled real-Redis runs; a rebuilt standing monitor then
+  classified the continuing production line as `redis-netescrow-ttl`, rendered
+  the key as `{escrow_<id>}net`, and included the cap plus the durable-balance
+  non-action in its Markdown.
+- Verify with a binary-safe sample, `avg_ttl` below two years, falling dataset
+  memory, and no new TTL warnings. Raising maxmemory does not repair the leak.
+
 ### 3.4 Node process signals (host-level)
+Probe: `redis-process`
+
 - top: a redis process at >200% CPU = io-threads + lazyfree churn (normal
   under storms, but sustained = investigate); pegged 100% children with VIRT
   matching a parent = BGSAVE fork wave (32 simultaneous forks stall event
@@ -584,9 +1522,50 @@ fullest node daily + on any skew alert, and diff family counts week-over-week
   first, but the alert should still page.
 
 ### 3.5 Connection-level signals
+Probe: `redis-connections`
+
 - connected_clients per node: baseline ~pool_floor × processes; step change
   +50% in 10 min = reconnect storm or pool misconfig (min_connections is PER
   NODE ×32 — a config of 64 = 2k idle conns per process).
+- On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
+  battery and aggregates on the Redis host by source, flags, last command, and
+  client library. This distinguishes one fixed-slot key touched fleet-wide
+  from a reconnect storm without transferring raw client rows.
+- 2026-08-29 fixed-slot variant: node 6382 reached 2,535 clients against a
+  fleet median near 231 (6394 briefly reached 1,271). The new battery found
+  the dominant 6382 cohorts ending in `EXPIRE` and `SADD`—788 `EXPIRE`
+  connections from edge-4 alone, with idle ages near 288s—rather than newly
+  connected clients spread uniformly. The reliability recorder wrote every
+  block number to the single `client_reliability_stats_blocks` discovery set;
+  one touch by each process creates that process's per-node `MinIdleConns`
+  pool, so merely coalescing writes once per process per minute still leaves
+  the fixed node with the fleet's pools. Current writers no longer touch a
+  discovery set. `RollupClientReliabilityStats` derives candidates after its
+  durable pg high-water mark, bounded to the hashes' 15-minute TTL, and does
+  not mark an absent/expired block covered. Roll this compatibility change out
+  taskworker-first (new rollup), then api/connect (marker-free writers); after
+  all processes restart, require connection counts to return near the fleet
+  shape and the `SADD`/`EXPIRE` cohorts to disappear.
+- The ratio is not itself attribution. At 07:26Z on 2026-08-30, a one-shot
+  sample also placed nodes 6388, 6401, and 6406 above 3x the temporarily low
+  fleet median, but their dominant cohorts ended in ordinary
+  `PING`/`GET`/`EXEC`, not `SADD`. The former probe attached the fixed-slot
+  rollout action to every outlier. Current alerts choose that action only when
+  the bounded battery resolves the owner of
+  `client_reliability_stats_blocks` and finds a `SADD` cohort on that owner;
+  other shapes require command-rate/hot-slot, cohort-age/source, node-latency,
+  pool-timeout, accept-queue, and output-memory discrimination first.
+  The simultaneous 32-node `reliability-pipeline` latency sample had no active
+  alert, and a repeat connection sample retained only 6382 with its explicit
+  `SADD`/`EXPIRE` fingerprint; that validated the conditional diagnosis.
+- A larger 08:15Z retry wave validated the discriminator with simultaneous
+  positives and controls. Port 6382 had 2,002 clients versus a 212 median,
+  owned marker slot 9508, and retained `SADD` cohorts, so it received the
+  marker-free-writer action. Ports 6389, 6402, 6407, and 6409 were also above
+  3x median, but each explicitly reported owner 6382 and ordinary
+  `PING`/`GET`/`EXEC`-dominated cohorts; all four received the generic hot-node
+  investigation instead. A stray `EXPIRE` or high ratio is not ownership
+  proof.
 - `CLIENT LIST` sorted by omem: any client > 32mb = a stalled consumer.
 - Accept-queue: `ss -lnt` Recv-Q pegged at backlog on a redis port = event
   loop too busy to accept() = wedge in progress (dials time out while the
@@ -596,6 +1575,8 @@ fullest node daily + on any skew alert, and diff family counts week-over-week
   680 sustainable dials/sec per destination); drains ~60s after the storm.
 
 ### 3.6 Cluster topology hygiene
+Probe: `redis-topology`
+
 - `CLUSTER NODES | grep -cE 'noaddr|:0@0'` — phantom entries from restarted
   processes; they break every iterate-the-cluster tool (scripts must filter
   `fail|noaddr|handshake` and `^:`); purge with CLUSTER FORGET on every node.
@@ -610,6 +1591,8 @@ fullest node daily + on any skew alert, and diff family counts week-over-week
   partial outage until manual restart — standing risk, unchanged.
 
 ### 3.7 Reliability/scores pipeline load — busy vs degraded
+Probe: `reliability-pipeline`
+
 The reliability pipeline is the standing top redis load: announce-path
 `HINCRBY client_reliability_stats.<block>` (observed ~7,500/s on one node)
 plus block-drain and score-rebuild `HGETALL`s of those giant hashes (200–290ms
@@ -635,6 +1618,12 @@ Rollout observations (2026-07-18, the live cutover):
 - `SCARD client_reliability_stats_blocks` ≈ 3 (current + previous + one
   pending) = the drain is healthy through the transition; a growing set =
   the drain is not keeping up or cannot see the keys (wrong build order).
+  This is one cluster-wide value: the set occupies one hash slot and
+  `redis-cli -c` redirects every entry port to its owner. Collect it once and
+  target one cluster alert. The 2026-08-30 monitor audit caught the old probe
+  attaching the same value of 7 to 13 node identities, manufacturing 13
+  alerts while every independently sampled node latency was 0.3ms. Node
+  latency remains per-process evidence and alerts only for the affected port.
 - Deploy order matters: the drain lives in TASKWORKER, the writers in
   CONNECT. Until the new taskworker lands, sharded counters are invisible
   to the old drain (bounded stats loss via the 15-min ttl backstop). Roll
@@ -655,6 +1644,49 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
 - When a score/reliability rebuild task grinds (task-overdue, §7), this load
   runs continuously instead of in bursts — the sustained version of this
   signature accompanies a selection-freshness problem (2.8).
+- 2026-08-30 re-anchor cadence and checkpoint root cause:
+  `client_reliability` held an estimated 3.16B rows. The code's 20-minute
+  threshold forced a full scan on every 30-minute task cycle, contradicting the
+  documented four-hour cadence. More importantly, all lookbacks shared one
+  transaction. At 08:29:40Z the task hit its exact 7,200-second deadline and
+  rolled the whole attempt back; by 08:29:43Z the same task id and `min_time`
+  were active again. `pg_stat_statements` showed the full-anchor statement's
+  long-tail maximum at 12,392.06s (34 calls, 482.53s mean), so changing cadence
+  alone would merely make the same unbounded failure less frequent.
+- Durable fix: keep the four-hour anchor cadence and the equivalence-proven
+  add-entering/subtract-leaving path between anchors, but checkpoint each
+  lookback in its own `READ COMMITTED` maintenance transaction before either
+  score writer runs. A timeout on a later lookback preserves earlier aggregate
+  rows and markers, so the retry rolls those windows instead of rescanning
+  them. If a VACUUM or concurrent index build is already present in PostgreSQL's
+  progress views for at least five minutes, defer only the optional cadence
+  anchor and roll this cycle; reconsider it on the next half-hour run. Missing
+  state and backward-window recovery still re-anchor immediately because they
+  have no correct delta path. Do not raise the task deadline.
+- Deterministic proof: the model test injects a failure immediately after the
+  first lookback transaction commits, verifies that its marker survives while
+  the second is absent, then resumes and commits the remaining lookback. The
+  cadence table separately proves that established maintenance defers a due
+  periodic anchor but never suppresses bootstrap or backward-window repair.
+  Production verification is: most cycles remain below p95; a quiet anchor
+  commits markers one lookback at a time; an interrupted retry retains them;
+  the task error clears; and downstream REINDEX/VACUUM progress rather than
+  acquiring an immediate replacement blocker.
+- Observed legacy recovery: the same-argument retry completed at 08:43:45Z in
+  842s, advanced every marker by 163 blocks, and released REINDEX into an active
+  transfer-contract index scan. The fast retry does not invalidate the fix: the
+  preceding 7,200-second attempt performed no durable marker work, while the
+  statement history already contains a 12,392-second tail. Checkpoints remove
+  that all-or-nothing exposure without changing the score result.
+- A later deployed run, task `01a05333-245b-2c2e-4e8e-1ad790efe454`, ran on
+  edge-4/g2 from 15:34:17Z to 15:53:29Z (1,152.120s). Its exact PostgreSQL
+  statement remained active with no wait event while the task heartbeat
+  advanced, then the task completed normally. Concurrent
+  `transfer_contract` autovacuum continued scanning its 23.98M-block heap.
+  That terminal state rules out an orphaned/canceled backend in this sample;
+  it does not make the all-lookback transaction safe. Retain the four-hour
+  anchor cadence, per-lookback checkpoints, and maintenance-aware optional
+  deferral, then verify their marker-by-marker behavior after rollout.
 
 ---
 
@@ -681,20 +1713,22 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
+| `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` | Grafana has the provisioned datasource row but cannot load that datasource's plugin. `/api/health`, Mimir `/ready`, and the UI can all stay green while every affected dashboard query and alert rule fails. | Query through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13.2, bake the signed standalone Prometheus plugin into the image as in §11.15; do not recreate a datasource row that already exists. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
 | `EOF` / `connection reset by peer` | Server closed the conn (COBL kill, maxmemory-clients eviction, restart). | Correlate with server-side events; retried in-client. |
 | `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
-| `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl > 120 days, or a raw Go `time.Duration` command/eval arg — go-redis serializes Durations as int64 NANOSECONDS, so an 8h ttl becomes `EXPIRE <key> 28800000000000` (~913,000 years). The 2026-07-20 signature: ~1.1M immortal `s2_sk_*` stream keys from exactly this in the AddToStream eval; nothing in the system keeps a >120d ttl intentionally. | The warning names the command + key: find the write site, pass seconds/ms ints to evals (never a Duration). Clean already-written keys with `bringyourctl streams expire-leaked-ttls`; per-key check: `TTL <key>` in the trillions = this bug. |
+| `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
 | `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, circle payment path) | The payout wallet cannot cover pending payouts (usdc on solana — mint EPjFWdd5...Dt1v in the error text). NOT an api failure: every AdvancePayment retry 400s until the wallet is funded, parking the tasks on backoff (decoded 2026-07-18 from the novel class — the full error text names the wallet id, its balance, and the required amount). | Finance/ops: fund the payout wallet (or pause payouts). Task-side symptoms clear on their own once funded and the backoff run_at arrives. |
+| `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The destination is invalid for its declared chain and Circle rejected it before creating a transfer. On 2026-08-30 all five rows were 44-character Solana base58 keys stored on active `MATIC` wallets; the chain-blind validator always parsed base58 regardless of `chain`. Their stable submit keys then pinned each payment to the bad wallet even after a payout-wallet correction. | Correct the payout wallet and deploy chain-specific SOL/MATIC validation. Clear the pinned attempt only after the typed Circle 400/code confirms this definitive pre-chain rejection, allowing `UpdatePaymentWallet` to select the correction. Preserve the key for transport failures, 429s, and every ambiguous submit; never delete payment/sweep rows. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
-| `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved required resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-27, `/verify/keys` and `/verify/stats` returned 500 on every probe while `/hello` remained 200 because `verify.yml` was absent. | Compare the route's running config generation with the mounted vault files, add/deploy the required resource, and probe the affected route—not just `/hello`—on every active generation (§8.7). |
+| `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
-| `[netescrow]negative counter after <site>` | A Redis reservation mirror went below zero after settlement/release. The durable pg ledger says bytes were released that the mirror never reserved (lost create mirror or double release); the negative value overstates available balance until reconciliation. Any occurrence is a defect. | Run `bringyourctl contracts reconcile-net-escrow --dry-run`, group by `site` and balance, verify the recurring reconcile task, then repair the create/release ordering before applying reconciliation. |
+| `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create/double release, a long legacy reconcile can overwrite live mirror traffic (§5.11); even the fixed page-local reconciler retains a small PostgreSQL-commit/Redis-post ordering window. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting it while retaining the negative diagnostic result. Any occurrence remains a defect. | Correlate the first burst with `ReconcileNetEscrow` duration and aggregate drift. Roll out both the page-local additive reconciler and atomic release clamp; after rollout verify any residual line says `clamped_to=0` and its key is absent. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
 Extract (class, target ip:port, innermost app frame) as the alert identity;
@@ -764,17 +1798,218 @@ publisher (feature kill switch — EnableNetworkPeers) and bound the blast
 redesign (FOLLOWUP "network peers pubsub").
 
 ### 5.6 idle-in-tx storm (pg pool exhaustion)
-1.3 count > 100: it is redis latency inside tx scopes (escrow-in-tx is the
-one known site until restructured). Verify with the last-query shapes of the
-idle-in-tx backends. Fix the redis side; the pg side recovers instantly
-(observed 563 → 2 within minutes of the deploy). Kill zombies > 30 min;
-idle_in_transaction_session_timeout is the standing guard.
+For a 1.3 count > 100, first separate the count owner from the age owner.
+Redis latency inside tx scopes remains one known cause: the same grouped query
+shape stays continuously idle and the pool recovers instantly when Redis does
+(563 → 2 observed). Backlog close workers instead appear as many
+per-contract query shapes with sub-second continuous idle ages; do not
+mass-terminate them. The battery always reports the single continuously oldest
+transaction even when its one-row query shape falls below the top six groups.
+Follow a subsidy-window query to the Payout canary and its transaction-local
+idle-timeout fix. Kill only proven zombies > 30 min;
+`idle_in_transaction_session_timeout` is the standing guard.
+
+The 10:43Z recovery sample demonstrated why this split matters. There were 121
+idle-in-transaction clients and the oldest transaction was 532s old, but the
+high-count closer shapes were only 0–1s continuously idle. One Payout planner
+was the age owner: its subsidy-window transaction was 277s continuously idle
+and disappeared as it crossed the global 300s cutoff. The prior battery listed
+only shapes ordered by count, omitted that singleton, and therefore suggested
+generic Redis leakage. The probe now emits an explicit oldest PID/query line,
+labels summary age as transaction age rather than continuous idle duration,
+and explains the bounded-closer/Payout split.
 
 ### 5.7 Task parked / task long-running
 Covered in 1.2 gotchas: parked = error_count>0 ∧ run_at far ∧ lease expired →
 pull forward once the cause is fixed. Long-running = live lease + claim
 heartbeat advancing → let it run; compare against finished_task history
-before declaring it stuck.
+before declaring it stuck. The grouped task alert includes the representative
+row's `sample_max_time_s`; for a non-`Drained:` context cancellation, compare
+that value with the taskworker `eval error` duration before deciding whether
+the task-specific deadline is undersized.
+
+Two 2026-08-29 task-family variants were formerly hidden behind the raw-row
+limit:
+
+- `AdvancePayment`, five `400 Bad Request` rows with Circle
+  `Invalid destination address.`: a complete read-only breakdown found two
+  active external wallets across two networks (three payment plans), all
+  declared `MATIC` but carrying 44-character Solana base58 public keys. Both
+  wallets were still selected for payout; the rows had retried 373–1,059
+  times. `WalletValidateAddress` ignored the declared chain and always called
+  the Solana base58 parser, so these addresses passed registration before
+  Circle rejected them as Polygon destinations. The payment path creates a
+  stable idempotency key before submission, and `UpdatePaymentWallet` correctly
+  refuses to change a wallet once that key exists; without distinguishing this
+  definitive rejection, a user correction cannot reach the parked payment.
+  Validate SOL with the Solana parser and MATIC with a nonzero, `0x`-prefixed
+  EVM address; reject Ethereum in this SOL/MATIC payout-wallet endpoint (TAO
+  remains a non-payout identity). After typed HTTP 400/code 155219, Circle has
+  created no transfer, so clear only that pre-chain attempt and let the next
+  retry select the corrected payout wallet. An arbitrary string match is not
+  enough: malformed responses, generic 400s, 429s, and transport errors retain
+  their stable key because submission may be ambiguous. Deterministic tests
+  cover both cross-chain address directions, zero/unknown destinations, typed
+  and wrapped error classification, corrected-wallet selection with a fresh
+  key, and key reuse after an ambiguous error.
+- `Payout`, `pgconn.connLockError=conn closed`, repeatedly after roughly
+  16 minutes: production's database-level
+  `idle_in_transaction_session_timeout=5min` closed the outer payment-plan
+  transaction while a deliberately separate, long reliability maintenance
+  transaction ran. The bounded payout task now applies `SET LOCAL
+  idle_in_transaction_session_timeout=0` to that transaction only. Its task
+  `MaxTime` and four-day plan slices remain the bounds; the global five-minute
+  guard still protects every unrelated session. Verify one payout slice
+  commits, the same pending row's error clears, and a fresh DB session still
+  reports the configured five-minute setting.
+  A live 2026-08-30 retry reproduced every boundary: Payout began at 07:58:25Z;
+  its outer transaction reached 726s total and 260s continuously idle on the
+  subsidy-overlap query, then disappeared after crossing the 300s database
+  cutoff while a separate `network_connection_reliability_score` INSERT kept
+  running. The task finally failed at 08:17:36Z after 1,150.90s with
+  `pgconn.connLockError=conn closed`, raising the same row to 143 failures.
+  This is affirmative validation for the transaction-local override, not a
+  reason to disable the global guard.
+  The next retry reproduced the separation even more precisely. It began at
+  09:17:37Z; outer PID 1554457 entered `idle in transaction` on the
+  subsidy-overlap query at approximately 09:24:33Z and disappeared as that
+  uninterrupted interval crossed 300s near 09:29:33Z. The task claim kept
+  heartbeating while its separate computation finished, then taskworker logged
+  `eval error(1011.80s)` at 09:34:28Z and advanced the same row from 143 to 144
+  failures. The roughly five-minute delay between connection death and error
+  observation explains why task duration alone cannot identify the timeout;
+  follow the outer backend state and the nested work together.
+  A third retry repeated the boundary under the later recovery load. Payout
+  began at 10:34:31Z; its outer transaction became continuously idle on the
+  same subsidy-window query near 10:42:41Z, was still present at 298s idle,
+  and disappeared before the next 12-second sample after crossing 300s. The
+  task claim continued for almost eight more minutes, then logged
+  `eval error(1264.30s)` with the same `pgconn.connLockError=conn closed` at
+  10:55:35Z and advanced the row to 145 failures. The next retry remained on
+  the normal hourly backoff at 11:55:35Z. Repeatedly observing the database
+  guard fire long before task error presentation is direct validation for
+  changing only the outer transaction's local setting.
+  That fourth retry began at 11:55:36Z. Outer PID 1846780 spent roughly seven
+  minutes actively building the subsidy window, then became idle in transaction
+  on the `subsidy_payment` overlap query near 12:03:03Z. It was still present at
+  291 seconds of uninterrupted idle and absent at the 12:08:10Z sample, while
+  taskworker continued heartbeating beyond 753 seconds. Total transaction age
+  had already exceeded 700 seconds, so the disappearance again follows the
+  continuous-idle guard, not a total-runtime limit. This fourth independent
+  boundary reproduction keeps the same scoped remediation and supplies a
+  post-vacuum-load control. Taskworker ultimately logged
+  `eval error(1068.46s)` with the same `pgconn.connLockError=conn closed` at
+  12:13:25Z and advanced the row to 146 failures, completing the expected
+  database-cutoff-to-late-task-error chain.
+  The fifth retry began at 13:13:26Z. During the attempt, a direct PostgreSQL
+  sample found its outer subsidy-window transaction 533s old and continuously
+  idle for 89s; a later sample found no matching outer backend while the task
+  heartbeat continued through 1,307s. Taskworker then logged
+  `eval error(1312.95s)` with the same `pgconn.connLockError=conn closed` at
+  13:35:19Z and advanced the row to 147 failures. This is the same
+  database-connection-loss chain under the longest observed tail so far, not a
+  reason to raise the task's 21,600s deadline.
+  Two more deployed attempts reproduced the identical terminal class. The
+  sixth ran on edge-3/g1 until `eval error(1346.46s)` at 14:57:48Z and raised
+  the row to 148 failures. The seventh ran on edge-3/g2 from approximately
+  15:57:49Z until `eval error(1278.54s)` at 16:19:09Z and raised it to 149;
+  both stacks ended in `createPaymentPlan` with
+  `pgconn.connLockError=conn closed`. The hourly recurrence across taskworker
+  generations rules out a one-process connection accident and continues to
+  validate the transaction-local timeout override. Do not pull the parked row
+  forward or disable the global five-minute policy; verify the same slice
+  commits only after the scoped source fix is rolled out.
+  The deterministic regression first records the session baseline, installs a
+  25ms transaction-local timeout, applies the payment-plan override, idles for
+  100ms, and requires a successful commit; it then requires the same connection
+  to report its original baseline again. This proves survival and scope without
+  weakening the standing database policy. It passed three race-enabled runs
+  against real local PostgreSQL after the fourth production reproduction.
+- `RefreshVerifyProxyEgress`, `Interrupted: Done` / `Interrupted: context
+  canceled`, 940 retries observed while
+  `st.yml enabled:false`: this is disabled work, not a Redis incident. All four
+  verification recurring-task schedulers now stop when `StEnabled()` is false,
+  their task functions return before dependency access, their Post hooks cannot
+  perpetuate a chain, and taskworker startup removes surviving RunOnce rows
+  from older generations. The function guard closes the claim/config race in
+  which cleanup sees no row because a worker already owns it. Do not pull this
+  row forward; deploy the feature-state gate and require the family to
+  disappear. The 940th retry supplied the exact deadline discriminator: its
+  live heartbeat advanced from 10.01s through 899.27s and `eval error` landed
+  at 900.05s, matching `run_max_time_seconds=900`. Increasing that deadline
+  would only let disabled work run longer. The same surviving disabled row
+  reproduced the boundary at 12:42:32Z: its heartbeat reached 890.39s, then
+  taskworker logged `eval error(900.00s) ... = Interrupted: context canceled`
+  and advanced the row from 942 to 943 failures with its next run parked an
+  hour later. The monitor simultaneously reported the fresh-claim/parked
+  handoff overlap, so this is another exact stale-chain reproduction rather
+  than verification traffic or a short deadline. The task-canary probe now carries
+  the canonical verification feature state in `SignalSettings`: in a disabled
+  environment it reports the stale ungated RunOnce chain and startup reap,
+  while an enabled environment retains the generic deadline diagnosis.
+- `ExportStats`, `Interrupted: context canceled` at **120.1–120.3s** followed
+  by a successful 60–80s retry: this is the generic two-minute task deadline,
+  not a deploy drain. Confirm in taskworker logs that `eval error` lands at the
+  row's `run_max_time_seconds` and that there is no contemporaneous
+  `[taskworker]drain canceling` line. This task performs four 90-day aggregate
+  passes, whose normal primary-load variance can cross two minutes. Its
+  scheduler now sets a bounded ten-minute `MaxTime` (still well below the
+  hourly cadence), preventing the canceled pass from being recomputed from the
+  beginning. After rollout, require `run_max_time_seconds=600`, one completion
+  per hour, and no new non-`Drained:` context-canceled retries. Do not enlarge
+  the global default: short tasks should retain the tighter bound. The deployed
+  boundary recurred at 10:47:34Z: taskworker logged `eval error(120.04s)` with
+  no drain line, then the same task id retried on another worker and completed
+  in 68.125s. Its next hourly row retained the old 120-second configuration.
+  That exact-error/fast-retry pair is another production validation of the
+  task-specific 600-second source fix, not a reason to change global task
+  cancellation semantics. The next scheduled attempt at 11:48:50Z completed
+  normally in 64.49s under the same deployed limit. That healthy sample
+  confirms the task is not deterministically slow, but does not erase the
+  observed load-sensitive 120-second cancellation; retain the task-specific
+  ceiling and verify it after rollout across multiple hourly cycles.
+- `RemoveDisconnectedNetworkClients`, completed in **6,530.6s** (108.8m)
+  versus a 7-day
+  p95 of 2,754s (four-hour task ceiling): distinguish PostgreSQL backlog from
+  the post-delete Redis tail before changing indexes. For the 2026-08-30
+  03:30Z run, all five capped eligibility probes using that invocation's fixed
+  thresholds were zero (old connections, idle top-levels, inactive reap,
+  connected-child bump, and disconnected-child reap), and no reaper backend
+  was active in `pg_stat_activity`, while the task heartbeat advanced every
+  ~10s. PostgreSQL stats since the six-day reset showed the real scale—about
+  12.5M inactive and 2.37M child-client deletes. Its immediate successor still
+  took 424.9s, the expected catch-up tail after rows accumulated during the
+  108.8-minute run. The old post-delete path then
+  re-entered `server.Redis` separately for every reaped client (a PING plus
+  public-key deletion, another PING plus HGETALL/conditional forward deletes/
+  reverse deletion), and executed a separate provide-key pipeline per client.
+  Current code processes 1,000-client chunks through idempotent, cluster-aware
+  plain pipelines. It completes conditional forward compare-deletes before
+  discarding reverse evidence, so a partial cluster error remains retryable
+  and an address already reassigned to another client is never clobbered.
+  Verify a large run returns toward its historical seconds/minutes band, the
+  `task-overdue` alert clears, and the Redis regression still removes target
+  public/reverse/eligible state while preserving a reassigned forward owner.
+  The defect recurred at 13:20Z in task
+  `01a052d2-9c33-c78e-1e37-66e411e45c1e` on edge-3/g2 container
+  `4cf91fd25a2e`: its heartbeat passed 6,220s with a fresh claim and no task
+  error. Its 7-day distribution had become p50 42s, p95 3,552s, and max
+  6,644s, so the old `>2*p95` monitor rule treated another hour-scale tail as
+  normal. The taskworker was 34.7GiB RSS versus 0.46GiB for its g1 sibling and
+  shared the executor with the slow close and net-escrow passes. The host had
+  ample CPU and memory and the cgroup reported zero throttling, OOM, or
+  pressure. The task-canary probe now applies the median-tail cap from §1.2,
+  carries the exact task id plus heartbeat executor identity, and includes the
+  bounded Redis cleanup diagnosis. Its two synthetic regressions repeat the
+  6,283s/42s/3,552s/6,220s shape and also prove that a 600s new attempt whose
+  due time is 6,283s old is suppressed rather than misreported. The next
+  production run supplied an independent memory control: task
+  `01a0534c-cb89-633c-78b2-417bb4ea3717` ran on edge-4/g1 from 15:35:01Z to
+  15:51:28Z and completed normally in 987.628s. Its process stayed near
+  0.61–0.71GiB RSS (and was only 0.07–0.16GiB allocated heap during the
+  earlier samples), while another executor's score export cycled through
+  10–30GiB. Keep the bounded Redis latency fix, but do not attribute the score
+  allocator's heap to this reaper.
 
 ### 5.8 Query-plan CPU wall (the 2026-07-17 planner-stats landmine)
 Signature: db host load ≫ cores (490 on 96 observed), hundreds of client
@@ -838,6 +2073,12 @@ control plane and selection API work; the per-candidate contract path fails.
    reliability nodes fall back to baseline, dots green on next app
    connect). Clients holding pre-rebuild candidate lists keep failing until
    they re-fetch — a decaying tail, not a re-incident.
+   If the pending row still carries a prior error but its claim heartbeat is
+   live, a recovery run is in progress; watch its `[nclm]export client
+   location[N/total]` index increase. Do not release or duplicate that live
+   task. A transport timeout late in the export is addressed by the bounded,
+   failed-chunk-only retry described in §2.8; require a finished_task row and a
+   refreshed sample-key ttl before declaring recovery.
 7. POST-CHURN VARIANT (2026-07-19): a rebuild that OVERLAPS a churn window
    is itself polluted, so ONE completion does not recover — the snapshot
    scores "flash clients" that connected for only 9–30 SECONDS during the
@@ -888,6 +2129,390 @@ reconnected clients must re-select providers and re-establish tunnels before
 their traffic resumes. The trough levels off and ramps; check selection
 freshness (2.8) is healthy and then WATCH — do not diagnose the trough
 itself as a new incident.
+
+### 5.11 Net-escrow reconcile clobbers live reservations
+
+Probe: `netescrow`
+
+Signature: `[netescrow]negative counter after settle` rises immediately during
+or after `ReconcileNetEscrow`; its completion log reports a large
+`under-reserved` correction, while Redis and PostgreSQL are otherwise healthy.
+This differs from an isolated lost create/double release: many unrelated
+balances flip together at reconcile cadence.
+
+On 2026-08-29/30, normal pre-fix runs completed in roughly 15–55s, but several
+took 1,021–1,502s. One 1.8M-balance run reported 5.79TiB under-reserved; a later
+1,182s run reported 597.3GiB, and its 17s successor corrected roughly the same
+amount in the opposite direction (594.29GiB over-reserved). That alternating
+drift proves reconcile-created corruption rather than independent lost writes.
+The next observed long run completed in 990s with 976.53GiB over-reserved; its
+10s successor flipped to 975.37GiB under-reserved. Two more short runs alternated
+165.84GiB under then 160.84GiB over before the fifth converged to
+16.72GiB/13.04GiB. This repeated long-run/short-repair sequence is the exact
+stale-snapshot clobber and convergence signature.
+The negative-counter class peaked at 964/min (more than 10,000 lines were
+observed in one 29s burst). The old
+algorithm took one fleet-wide PostgreSQL reservation snapshot, then walked all
+balances and used Redis `SET`. By the end of a long run the snapshot was many
+minutes stale, so `SET` erased reservations/decrements that had happened since
+the snapshot. Subsequent settlements drove the overwritten counters negative.
+
+A second production recurrence at 06:48Z on 2026-08-30 sharpened the temporal
+test. Five preceding runs finished in 16–23s; the next remained live past 724s
+without a matching long PostgreSQL statement. While it was live, a close-task
+cohort settled contracts and emitted 732 negative-counter lines/min, falling to
+107/min after the burst. The run eventually finished in 1,107s with 5.38TiB
+under-reserved and 483.73GiB over-reserved. Its immediate 22s successor then
+reported 5.38TiB over-reserved and 478.22GiB under-reserved, after which the
+negative-counter stream reached zero. This matched-value, opposite-direction
+repair is stronger evidence than timing alone. The close site revealed the
+corruption, but did not create the shared stale state: correlate the long
+reconcile precursor before blaming thousands of independent settlements.
+
+A third recurrence at 07:17Z supplied the full convergence sequence. The run
+lasted 1,492s over 897,486 balances and ended with 546.45GiB over-reserved plus
+451.05GiB under-reserved; taskworker's negative-counter class reached
+7,960/min in its immediate aftermath. A 22s successor reversed the dominant
+directions to 442.58GiB over and 531.10GiB under, and the following 20s pass
+converged to 26.52GiB over and 37.70GiB under. This long-run, short reversal,
+short convergence sequence again identifies stale absolute writes rather than
+independent balance defects. All three emitting services then recorded zero
+new negative-counter lines for the next full five-minute reconciliation
+interval.
+
+A fourth sequence made both the reversal and the live-writer timing explicit.
+The 08:30Z pass ran 1,306s over 897,616 balances and ended with 495.31GiB over
+plus 2.68TiB under. Its 21s successor reversed those dominant values to
+2.68TiB over plus 488.13GiB under, and all three emitting services reached zero
+negative lines by 08:59:53Z. The following 09:02Z pass ran 1,211.90s over
+897,659 balances and ended with 569.42GiB over plus 632.26GiB under. While that
+old fleet snapshot was still being applied, four closer
+cohorts completed in 24s/full, 34s/full, 7s/full, and 2s/not-full. Taskworker
+emitted 11,625 negative-counter lines from 09:16:26.279Z through
+09:17:28.940Z—almost exactly the closer interval. Two later close cohorts
+finished in 16s and 4s while the same reconcile was still live; their
+09:22:30–09:22:33Z settlement interval exposed another 5,221 negative writes.
+Across those two live-run bursts, taskworker emitted 16,846 lines (18,248 when
+the preceding 1,402-line decay minute is included). PostgreSQL had no long
+reconcile statement, the owning taskworker was consuming CPU, and every Redis
+master was serving operations with zero blocked clients. This rules out a
+wedged dependency: the pre-fix walk was spending its time issuing a read and
+an unconditional `SET`/`DEL` for roughly 898k balances. A ten-second
+`INFO commandstats` delta on node 6406 while the pass was live recorded 5,961
+GETs, 261 SETs, and 2,065 DELs, with no blocked client. The close cohorts exposed
+stale values but did not create them; the corruption source was the
+many-minutes-old absolute snapshot being written concurrently.
+
+The first repair pass began at 09:27:55Z and completed in only 16.39s, proving
+the dependencies and page count were healthy. It still found 1,629 drifted
+networks (621.2GiB over and 561.59GiB under), and the intervening 14s/full close
+cohort exposed another 8,289 negative counters from 09:27:01Z through
+09:28:11Z. Thus the fourth sequence produced 26,537 taskworker negative lines
+across its decay/live-reveal/repair windows. A short successor does not by
+itself prove convergence; follow scheduled passes until the opposite-direction
+aggregate contracts and all emitting services stay at zero for a full interval.
+The following scheduled pass supplied that terminal check: it completed in
+17.85s, reduced the aggregate to 29.43GiB over plus 34.57GiB under across 790
+networks, and taskworker emitted no negative counters for the full six minutes
+after 09:28:11Z. This is recovery from the corruption, not evidence the old
+writer is safe; a later long absolute pass can recreate the same sequence.
+
+A sixth long recurrence proved that warning immediately. The 09:38:34Z pass
+ran 1,005.43s over 905,318 balances and recreated a strongly one-directional
+drift across 1,687 networks: 2.02TiB over-reserved versus only 65.88GiB
+under-reserved. Settlements then exposed 21,436 taskworker negative counters
+from 09:58:37Z through 10:00:39Z. The scheduled repair completed in 17.52s and
+reversed the same dominant quantity—66.97GiB over and 2.02TiB under across
+1,707 networks—with the last negative line arriving immediately before that
+completion. Thus a short pass that had converged to tens of GiB did not make
+the deployed algorithm safe: its next unconditional full-fleet `SET`/`DEL`
+walk recreated TiB-scale corruption. Skipping an already-correct mirror is
+therefore part of the root fix, not merely a performance optimization; retain
+the page-local additive race regression and the no-op-write regression. The
+next scheduled pass completed in 16.33s and contracted the aggregate to
+31.66GiB over plus 34.41GiB under across 819 networks; no negative counters
+appeared for the full five-minute interval after repair. That supplies the
+terminal convergence check for this sequence without making the next legacy
+full-fleet pass safe.
+
+A seventh recurrence showed that even the first corrective successor can
+become another stale writer. The 10:11:00Z pass ran 1,095.56s over 905,372
+balances and ended with 2.17TiB over-reserved versus 85.94GiB under-reserved
+across 1,760 networks. Four API and five connect settlements exposed negative
+counters from 10:29:06Z through 10:30:50Z. Its scheduled successor then ran
+405.88s—not the normal 15–20s repair—and reversed the dominant drift to
+393.04GiB over plus 1.79TiB under across 2,018 networks. That second stale
+walk produced 41 more negatives (35 taskworker, five API, one connect) from
+10:41:07Z through 10:43:44Z. A 22.02s pass only partially contracted the
+aggregate to 184.81GiB over plus 865.12GiB under; short duration alone was not
+a terminal recovery check. The following 15.80s pass finally reached
+32.49GiB over plus 50.49GiB under across 852 networks, and all three emitting
+services were at zero for the full interval after the last negative. This
+chain reinforces both halves of the fix: page-local observations bound
+staleness, while skipping already-correct mirrors avoids enough fleet writes
+to keep a corrective pass from becoming the next incident. The monitor now
+retains the latest completed precursor's duration and age in an active
+successor alert, so two consecutive overruns are represented as one explicit
+lifecycle chain rather than the second silently replacing the first.
+The next scheduled pass remained in the healthy band at 36.47GiB over plus
+34.15GiB under, with no negative counters, confirming the terminal state.
+
+An eighth recurrence immediately demonstrated why one healthy pass was not a
+rollout substitute. The 11:02:05Z run lasted 1,071.15s over 897,891 balances
+and ended with 2.15TiB over-reserved versus 98.3GiB under-reserved across 1,905
+networks. Seven API and four connect settlements exposed negative counters
+from 11:18:48.831Z through 11:21:22.337Z; taskworker emitted none in that
+window. Its first corrective successor completed in about 22.5s and reversed
+the dominant quantity to 106.82GiB over plus 2.15TiB under across 1,949
+networks. That short reversal proves the same stale absolute-write mechanism,
+but is not terminal convergence: require the following scheduled aggregate to
+contract toward the tens-of-GiB band and all three emitting services to remain
+at zero for a full interval. The following scheduled pass supplied that check:
+it completed in about 21s, reduced drift to 42.07GiB over plus 47.33GiB under
+across 926 networks, and taskworker, API, and connect each remained at zero
+negative counters for the full interval. The incident recovered without making
+the next legacy full-fleet pass safe.
+
+A ninth recurrence closed a duration-only monitoring blind spot. A pass ending
+at 11:52:10Z finished in about 19 seconds but corrected 1004.36GiB
+under-reserved versus only 15.14GiB over-reserved. Its roughly 20-second
+successor ending at 11:57:32Z moved the same quantity back: 1006.26GiB
+over-reserved versus 14.09GiB under-reserved. Taskworker, API, and Connect each
+remained at zero negative-counter lines because no sampled settlement happened
+to decrement the overwritten mirrors before the corrective pass. The matched
+inverse still proves the fleet-wide absolute snapshot clobber; neither a
+sub-120-second duration nor a quiet negative-counter stream is a recovery
+certificate. The `netescrow` probe now also retains 15 minutes of aggregate
+logs and emits `netescrow-large-drift` when either direction reaches 256GiB.
+It labels adjacent quantities within 20% in opposite directions as a matched
+reversal, while leaving a one-direction event for durable-reservation tracing
+instead of overclaiming its cause. The deterministic synthetic pair reproduces
+the exact short under-to-over flip; a tens-of-GiB short pass remains healthy.
+The following two scheduled passes supplied the terminal check: they contracted
+to 38.51GiB over/45.15GiB under and then 36.93GiB over/41.65GiB under, while
+taskworker, API, and Connect each remained at zero negative counters throughout
+the full intervals.
+
+A tenth sequence showed that the initial 512GiB aggregate threshold was too
+coarse. A 20.73s pass ending at 12:45:35Z corrected 380.77GiB under-reserved
+versus 29.05GiB over-reserved across 1,464 networks. That is more than eight
+times the preceding 24-hour median pass maximum of 45.15GiB, but the first
+aggregate probe would have called it healthy. Its successor then ran from
+12:50:37Z to 13:08:31Z (1,073.80s) and corrected 2.70TiB over-reserved versus
+81.85GiB under-reserved across 2,257 networks. The rebuilt monitor reported the
+short 380.77GiB event with `matched_reversal=false`, then retained the live and
+completed overrun and the 2.70TiB aggregate independently. The threshold is
+therefore 256GiB: still over five times the healthy median band, but low enough
+to preserve the short precursor instead of relying on its successor to become
+catastrophic. The exact 380.77GiB synthetic case and the ordinary 45GiB control
+both run under race detection. The negative aftermath began during the final
+minute of the apply: the first sampled Connect error was at 13:07:58Z and API
+at 13:08:13Z, before the aggregate log at 13:08:31Z. By 13:10:24Z the exact
+eight-minute query found six API and seven Connect negatives, while taskworker
+remained at zero; the monitor's first one-minute sample reported five and three.
+An immediate post-completion query returned no lines because the remote log
+results had not arrived yet, so completion-time silence is not a safe negative
+control. Keep this sequence open until the corrective aggregate contracts and
+all three emitters remain quiet for a full interval.
+
+The first scheduled successor confirmed the inverse but did not converge. Task
+`01a052c9-2ecc-a48f-5f1a-4f79b0c831a9` ran from 13:13:33Z to
+13:13:55Z in 21.85s and corrected 115.91GiB over-reserved plus 2.37TiB
+under-reserved across 2,047 networks. The monitor matched its dominant
+under-reserved quantity to the preceding 2.70TiB over-reserved correction and
+reported `reversal_direction=over-to-under`. A short inverse is causal evidence
+for the stale absolute write, not a recovery certificate: 2.37TiB remains far
+outside the 256GiB band. Follow the next scheduled aggregate, and start the
+full three-emitter quiet interval only after a genuinely contracting pass.
+
+The next two scheduled passes supplied that terminal certificate. Task
+`01a052ce-207b-164e-e724-2df892d11bcd` completed at 13:19:25Z in 28.42s and
+contracted to 66.33GiB over/42.61GiB under across 994 networks. Task
+`01a052d3-2948-c5cd-bb58-752bed8f963d` completed at 13:24:45Z in 17.93s
+and remained in band at 37.03GiB over/65.06GiB under across 1,012 networks.
+Taskworker, API, and Connect each stayed at zero negative lines throughout the
+full interval between them, including the post-pass ingestion allowance. The
+tenth sequence therefore recovered without intervention, but the deployed
+full-fleet apply remains unsafe.
+
+That recovery exposed a trailing-window alert bug. Once the 13:08:31Z
+2.70TiB precursor aged out of the 15-minute log query, the still-retained
+13:13:55Z 2.37TiB inverse was incorrectly rendered as
+`matched_reversal=false`, contradicting the same monitor's earlier proven
+match. The probe now reports `matched_reversal=unknown_window_boundary` when
+a large correction is the oldest retained aggregate and later passes follow
+it. A bounded window may lose the predecessor; it must not rewrite retained
+incident history into a one-direction claim. The deterministic regression
+uses the exact inverse plus both healthy successors and rejects `false`.
+
+An eleventh sequence then proved why executor identity belongs in the monitor.
+Task `01a052d8-0c5e-3471-5ac8-2ec7ef3aeca4` ran from 13:29:48Z to
+13:47:40Z (1,071.29s), ending with 2.30TiB over-reserved and 148.44GiB
+under-reserved across 2,107 networks. Six API settlements after completion
+exposed exact -1MiB counters before the 18.42s successor reversed the dominant
+quantity to 148.18GiB over and 2.30TiB under. A second 18.46s pass contracted
+to 49.40GiB over/37.01GiB under, and all three emitters remained quiet for the
+full following interval.
+
+The next scheduled pass showed that convergence and fast successors still do
+not make the deployed writer safe. The monitor followed task
+`01a052f6-cbde-7a3b-ce45-cb6e8554c036` on
+`by-us-fmt-5-edge-3/g2`, container `4cf91fd25a2e`, from 14:03:23Z to
+14:20:24Z (1,021.01s). It rewrote 898,352 balances and recreated 2.23TiB
+over-reserved versus 118.03GiB under-reserved across 2,060 networks. No
+PostgreSQL transaction remained active during the long tail and all three
+negative emitters were initially zero; dominant over-reservation can deny new
+contracts without producing a negative decrement, so silence is not a recovery
+certificate. `warpctl ls versions main taskworker --sample` showed the same
+`2026.8.28+1031763440` binary/config version in all 20 g1 and all 20 g2
+samples. The earlier 18-second passes were therefore runtime variance, not a
+partial fixed rollout. The `netescrow` alert now carries source
+task id plus host/generation/container for active heartbeats, and source
+host/generation/container for aggregate pairs. That
+identity lets operators connect a long writer to sibling work and prevents one
+fast executor from erasing it.
+
+The scheduled successors supplied the correction sequence. Task
+`01a0530a-ff8e-5d3b-de01-16d864868d75` ran on
+`by-us-fmt-5-edge-3/g1`, container `786ae804bb97`, from 14:25:26Z to
+14:25:47Z (20.92s) and reversed the dominant quantity to 122.19GiB over and
+2.24TiB under across 2,083 networks. One exact -1MiB taskworker settle went
+negative at 14:25:22Z—five minutes after the stale writer completed and four
+seconds before the correction began—so it is aftermath of the stale mirror,
+not damage caused by the corrective pass. Task
+`01a0530f-eaf7-3701-855e-2a8cf6c2d32c` then ran on
+`by-us-fmt-5-edge-1/g2`, container `06abfbe03c32`, from 14:30:48Z to
+14:31:10Z (21.46s) and contracted to 40.69GiB over/46.04GiB under across 921
+networks. By 14:33:59Z taskworker, API, and Connect all reported zero negative
+lines in the trailing eight minutes. Task
+`01a05314-d7d0-473e-9e5d-6140352a6b5c` supplied the terminal certificate on
+`by-us-fmt-5-edge-4/g2`, container `3c0a752d4433`: it ran from 14:36:11Z to
+14:36:29Z (18.00s), remained in band at 38.77GiB over/43.52GiB under across
+847 networks, and all three emitters were still zero after the ingestion
+allowance. The sequence therefore recovered without intervention, while the
+recurring deployed fleet writer remains unsafe until the page-local additive
+fix is rolled out.
+
+The next sequence recreated the incident and supplied an executor control.
+Task `01a05319-b85b-2d49-4564-7eb70075486c` ran on edge-3/g2 container
+`4cf91fd25a2e` from 14:41:32Z to 14:59:35Z (1,082.77s). It rewrote 898,443
+balances and reported 1.26TiB over-reserved plus 1.17TiB under-reserved across
+2,237 networks; API and Connect each emitted negative-counter lines after the
+apply. Its scheduled successor `01a0532e-dff2-7a25-199e-cb9e6e935865` moved
+to edge-1/g1 and completed in 23.26s, immediately reversing the quantities to
+1.18TiB over and 1.26TiB under across 2,290 networks. That fast inverse is both
+the stale-write repair signature and an A/B executor control: fleet Redis and
+PostgreSQL could complete the same deployed algorithm in seconds while the
+edge-3 taskworker was co-resident with the long reaper, score rebuild, and
+close checkpoint. The next scheduled pass
+`01a05333-d6b7-6573-ec1d-0fac2c382c9f` moved again, to edge-0/g1, and ran from
+15:10:02Z to 15:10:23Z (20.453s). It contracted the residual to 38.73GiB over
+and 48.03GiB under across 873 networks. By 15:12:10Z taskworker, API, and
+Connect all reported zero negative-counter lines in the trailing eight minutes,
+and the next two samples remained quiet. That contraction plus the full
+three-emitter ingestion window is the terminal recovery certificate for this
+sequence; it does not make the recurring deployed fleet writer safe before the
+page-local additive fix is rolled out.
+
+The following recurrence reproduced the same causal inversion and exposed the
+last cross-store race that remains after page-local reconciliation. Task
+`01a0534c-7dce-2fa4-d40b-6e28adcc03c3` ran on edge-1/g2 from 15:37:00Z to
+15:54:51Z (1,071.751s), rewrote 898,581 balances, and reported 2.25TiB
+over-reserved versus 129.43GiB under-reserved across 2,035 networks. Four API
+and five Connect releases then exposed exact -1MiB negative counters; the
+first was at 15:53:29Z while the stale apply was still live, and taskworker
+emitted none. Its successor
+`01a05361-7b03-7f6e-7ab9-4d52336aceb8` ran for 24.248s and reversed the
+dominant quantity to 131.74GiB over/2.25TiB under across 2,050 networks. The
+next scheduled pass `01a05366-735f-cd75-31f1-7ee0f1586af8` completed in
+20.751s, contracted to 46.26GiB over/49.31GiB under across 945 networks, and
+taskworker, API, and Connect were all at zero negative lines after the full
+following interval and ingestion allowance. This is another terminal recovery
+certificate for the legacy incident, not evidence that its full-fleet writer
+is safe. Two further scheduled passes stayed in band at 52.59GiB/45.38GiB and
+45.04GiB/55.28GiB over/under, respectively, while every emitter remained
+quiet; the convergence was durable across executor changes.
+
+The negative aftermath also revealed an irreducible ordering window: a
+PostgreSQL settlement commits before its Redis mirror post. Even a bounded
+additive reconciler can observe that committed settlement and correct the
+still-reserved mirror to zero before the delayed release arrives. The release
+would then decrement a missing key below zero. Current source routes both
+normal settlement and quarantine release through one Lua command: it performs
+`DECRBY`, deletes a zero or negative result atomically, and returns the original
+negative value for a `clamped_to=0` diagnostic; a positive result preserves a
+shorter precise TTL and caps only a missing/legacy-long TTL at 90 days. This
+defense does not replace the page-local fix—the production TiB-scale matched
+reversals still prove the old absolute writer—but it prevents the residual
+commit/post race from leaving available balance overstated until another pass.
+
+Diagnosis and recovery:
+
+1. Read `finished_task` duration for `ReconcileNetEscrow` and the matching
+   `[sm]reconcile net escrow` aggregate log. A long run plus a large
+   under-reserved correction immediately preceding a fleet-wide burst proves
+   this variant; do not attribute thousands of balances to independent lost
+   creates.
+2. Do not repeatedly apply the pre-fix reconciler as mitigation—it can recreate
+   the drift it is meant to repair. A dry run is observational; any task pause
+   or manual apply is an operations mutation and requires explicit authority.
+3. The `netescrow` probe warns when taskworker's authoritative `eval active`
+   heartbeat or a completed duration reaches 120s, and retains a completed
+   precursor for 45 minutes; a quick corrective successor must not hide the
+   clobber. A completed PostgreSQL task row supersedes the same run's lingering
+   two-minute `eval active` log line; otherwise a just-finished overrun is
+   falsely described as still active. If the successor itself crosses the
+   limit, retain the latest completed precursor duration and age alongside the
+   live heartbeat. Retain the heartbeat's host/generation/container as well:
+   recurring tasks can land on different fleet members, and a fast member does
+   not prove the deployed algorithm fixed. Do not calculate live duration from
+   `pending_task.run_at`: it is the due time, while `claim_time` is a moving
+   heartbeat. Current code reads PostgreSQL
+   reservations immediately before each bounded balance page and applies
+   `INCRBY(delta)` in Lua, deleting an exact zero and otherwise restoring the
+   fallback TTL. It emits no Redis write at all when the observed mirror already
+   equals PostgreSQL; the pre-fix loop still issued a `SET` or `DEL` for every
+   one of roughly 898k balances, so even a logically no-op pass created a full
+   fleet write storm. A concurrent mirror change between Redis `GET` and
+   correction is therefore preserved; the reconciliation snapshot window is
+   bounded to one fresh page rather than the whole fleet scan. A separate
+   PostgreSQL-commit/Redis-post window still exists, so settlement and
+   quarantine release use the atomic decrement-and-clamp Lua command rather
+   than a bare `DECRBY`.
+4. The deterministic regression changes the mirror between observation and
+   correction and requires the additive result to retain that write. A second
+   regression gives an already-correct mirror a 30-minute TTL and requires the
+   apply pass to preserve it, proving the no-op balance did not receive the
+   old 90-day rewrite. A third starts at 100 bytes, releases 40, and requires
+   the positive 60-byte value plus the original short TTL; it then releases
+   100, requires the diagnostic return value `-40`, and proves the key is
+   absent in the same command. The page query requires the online
+   `transfer_escrow(balance_id, contract_id)` index;
+   apply that migration before rolling taskworker, or every bounded page can
+   regress into a history scan. After rollout, require recurring runs to return
+   to their short band, aggregate drift to converge, `netescrow-negative` to
+   reach zero, and the lossless insufficient-balance counter to remain below
+   its incident band. Monitor alert samples retain the non-sensitive `site` but
+   redact balance/contract ids. The log alert also carries the full causal
+   discriminator: negative lines are mutation-site aftermath, their rate is not
+   an overwritten-byte count, and recovery requires a sub-120-second scheduled
+   pass below the 256GiB aggregate threshold plus a full quiet interval across
+   taskworker, API, and Connect after allowing for log-ingestion delay.
+
+An independent live-writer variant appeared during the same observation
+window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
+`{escrow_<id>}net`, with roughly 36,306 days remaining. PostgreSQL showed this
+was not nanoseconds or a malformed timestamp: 574 active paid/Pro balances were
+intentionally created with 36,501-day lifetimes, totaling roughly 6.31PB of
+remaining data. The old mirror writer copied `balance.end_time + 30d` directly
+into Redis, so a hot lifetime balance was refreshed into 2126 by every API
+generation. Do not shorten or delete those durable balances. The Redis mirror
+now uses the earlier of `end_time + 30d` and a rolling 90-day fallback. Early
+mirror expiry is already a supported state: the recurring reconciler compares
+the missing zero with PostgreSQL reservations and recreates the counter. The
+deterministic regression creates a 100-year balance through the real contract
+path and requires its Redis TTL to remain within 90 days. Alert samples retain
+`expireat` and `{escrow_<id>}net` while redacting the balance id.
 
 ## 6. How we decided what was REAL (methodology)
 
@@ -957,14 +2582,15 @@ Tier-0 (page):
 Tier-1 (warn):
 | id | source | check | threshold |
 |---|---|---|---|
-| task-parked | pg | error_count>0 ∧ run_at>now()+5min ∧ lease expired | any |
-| task-overdue | pg | claim keepalive live ∧ run_at > 10min past ∧ overdue > 2× function's 7-day p95 | any (the 2026-07-17 UpdateClientScores 2.5h grind froze provider selection: stale {cs_} scores → apps offered dead providers → pings refused) |
+| task-parked | pg | all `error_count>0` rows grouped by task family before reporting; payload separates parked, live-retrying, and total rows | any family (never limit raw rows first) |
+| task-overdue | pg+task logs | one worst row/task family with live claim; due age over `min(2*p95,max(4*p50,20m))`, then matching `eval active` confirms actual elapsed time | any (median cap prevents repeated long failures from polluting p95; exact task/executor identity retained) |
 | task-duration-regression | pg | run duration vs 7-day p95 per function | > 2× |
 | idle-in-tx | pg | 1.3 count / oldest | > 100 / > 30 min |
 | node-mem-high | redis | used/maxmemory | > 85% for 5 min |
 | mem-skew | redis | max/median used across nodes | > 3× |
+| ttl-leaks | redis | 3.3a `INFO keyspace` average TTL | > 2 years; longest intentional family exception is 395 days |
 | client-buffers | redis | used_memory_clients | > 25% of used or > 2G |
-| clients-spike | redis | connected_clients step | +50% in 10 min |
+| clients-spike | redis | connected_clients own-node step and fleet shape; trip battery groups `CLIENT LIST` cohorts | +50% in 10 min or >3× fleet median for 2 probes |
 | pubsub-drops | logs | channel-is-full rate | > 10/min/service |
 | tls-key-mitm | logs | 15.2 identity cross-check mismatch class | any |
 | e2e-key-coverage | pg | 15.1 coverage vs trailing 24h median (armed ≥ 5%) | < 50% of median, 3 probes |
@@ -975,11 +2601,14 @@ Tier-1 (warn):
 | dead-tuples | pg | n_dead_tup hot tables | > 10M |
 | replica-cover | redis | CLUSTER NODES slave count | < expected |
 | open-set-size | pg | 2.6 open-contract count | > 150k sustained 10 min |
+| close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
 | stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, or any open-partial index reltuples=0 after analyze | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
-| retention-fanout | pg | 2.10 active query id `-3312164664690273449` | one execution > 30s or >= 2 concurrent for 2 probes |
+| retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
+| grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
+| worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
 | missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` 5-minute rate vs its ~90/min background | > 500/min for 5 min |
@@ -987,6 +2616,8 @@ Tier-1 (warn):
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
+| netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
+| netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | logs | `[netescrow]negative counter after` | any; payload includes site (never raw balance/contract ids) |
 | proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
@@ -1219,24 +2850,50 @@ healthy sample.
 `Resolver.RequireSimpleResource` is evaluated lazily by some controllers. A
 missing resource therefore does not necessarily crash startup or fail
 `/hello`; the first request to its route panics inside the router and returns
-500. On 2026-08-27 the deployed config omitted `verify.yml`: 20/20 probes to
-each of `/verify/keys` and `/verify/stats` returned 500 while 20/20 `/hello`
-probes returned 200.
+500. On 2026-08-29 main omitted `verify.yml` by design because `st.yml` had the
+unreleased subnet disabled, yet unconditional `/verify/*` handlers still
+reached the required-resource loaders: `/verify/keys` and `/verify/stats`
+returned 500 while `/hello` remained 200.
 
 - Log signal: `Resource not found in vault (<resource>.yml)`, grouped by
   resource + route + config generation. One occurrence is a deterministic
-  configuration defect, not an intermittent application panic.
+  configuration defect, not an intermittent application panic. The monitor
+  preserves those three fields as the alert frame instead of folding two
+  broken routes into one service-wide count, and the rendered Markdown carries
+  the disabled-versus-enabled mechanism, action, and five-minute verification.
+- Feature-state discriminator: an intentionally disabled optional subsystem
+  must stop at its HTTP boundary. The `/verify`, `/verify/keys`,
+  `/verify/stats`, and `/verify/proofs` handlers now return 503 with
+  `Retry-After` before body/query parsing, vault access, or database work when
+  `StEnabled()` is false. That is healthy fail-closed behavior. Do not generate
+  or commit Ed25519 seeds or an egress hash key merely to make a disabled
+  route return 200.
+- Apply the same gate to background work. Main also had a
+  `RefreshVerifyProxyEgress` RunOnce row that reached 940 failures
+  (`Interrupted: Done` and an exact 900.05s `Interrupted: context canceled`)
+  even though verification was disabled. Verification task seeding and
+  Post rescheduling now require `StEnabled()`, and InitTasks deletes stale
+  Sweep/Rollup/Retention/Egress rows when disabled. Otherwise an old pending
+  row survives every deploy and keeps retrying even after route handlers are
+  fixed.
+- Enabled-subsystem discriminator: if `StEnabled()` is true, absent or invalid
+  `verify.yml` remains a hard release failure. Provision its signing and hash
+  material through the supported vault secret mechanism, validate that its
+  profile/policy hash matches `st.yml`, and retain historical public key IDs.
 - Deployment gate: enumerate every resource declared required by newly added
   routes, confirm it exists in the mounted vault generation, and probe at
   least one dependent route. A liveness-only canary cannot cover this class.
 - Mixed generations matter: sample enough times to reach every active binary
   generation. A route may be 404 on an old binary and 500 on a new binary;
   neither result proves the intended route is healthy.
-- Recovery requires a 2xx response from the dependent route on every active
-  generation and zero new missing-resource lines for five minutes. Restarting
-  the process without deploying the resource reproduces the failure.
+- Recovery requires zero new missing-resource lines for five minutes on every
+  active generation. Require 2xx for an enabled subsystem; require the
+  documented 503 response for one intentionally disabled. Restarting an old
+  process without either gating the route or deploying the enabled resource
+  reproduces the failure.
 
 ### 8.8 Source attribution — liveness can be green while every client is the ingress
+Probe: `source-attribution`
 
 Probe `api-v4.bringyour.com/my-ip-info` over IPv4 and
 `api-v6.bringyour.com/my-ip-info` over IPv6 from a runner whose public source
@@ -1298,6 +2955,7 @@ Signals for the redis keyspace-notification transport for peers + stream hops
   O(processes × nodes), never O(clients) (the v1 outage shape).
 
 ### 9.1 Redis-side keyspace-event diagnostics
+Probe: `redis-keyevents`
 
 Concrete probes for "are keyspace events actually being generated and
 consumed", ordered from config to delivery. Run against any entry node with
@@ -1727,6 +3385,11 @@ the exact live DNAT rule.
     any metric is short a host → that host's fluent-bit is dead (11.14).
     Check `systemctl is-active fluent-bit` on the hosts with NO grafana bundle
     too (edge-6, edge-2) — they appear in no §11.1 reading.
+13. Grafana UI/health and Mimir are green, the datasource row exists, but
+    `/api/ds/query` and every scheduler rule fail with
+    `[plugin.notRegistered]` → the datasource implementation is absent from
+    the image (11.15). Inspect the plugin directory; recreating the row does
+    not install the plugin.
 
 ### 11.10 grafana.yml `{{ env: }}` → fleet-wide startup panic (2026-08-11)
 A config value may thread `{{ env:KEY }}`, but the KEYs live in settings.yml
@@ -2009,6 +3672,37 @@ grep -cE '^ *name +prometheus_scrape' /etc/fluent-bit/fluent-bit.conf
   `xops/main/ansible/tests/test_fluent_bit_shipper.py` asserts the limit leads
   `redis_count`, so the next time that number grows the test fails first.
 
+### 11.15 Grafana 13.2 datasource row without its Prometheus plugin (2026-08-29)
+
+Grafana 13.2 extracted the formerly core Prometheus datasource into a
+standalone native plugin. Main retained its provisioned `warp-mimir` datasource
+row and every front/backend health endpoint stayed green, but Grafana could not
+execute the datasource. The alert scheduler retried each rule on every Grafana
+host, producing roughly 220–250 error-shaped lines/minute:
+```
+error="the result-set has errors that can be retried: [plugin.notRegistered] plugin not registered"
+```
+The decisive check is a query through Grafana itself, not a direct Mimir read:
+```
+# authenticated against a live Grafana child/front
+POST /api/ds/query   {"queries":[{"datasource":{"uid":"warp-mimir"},"expr":"vector(1)"}],...}
+# broken: HTTP 500 / plugin.notRegistered
+find /var/lib/grafana/plugins -maxdepth 2 -type f | grep '/prometheus/'
+# broken image: no standalone Prometheus plugin files
+```
+- A datasource database row proves only configuration. Direct Mimir success
+  proves only storage/query health. Neither proves Grafana can instantiate the
+  datasource implementation.
+- Runtime plugin preinstallation is deliberately disabled so readiness does
+  not depend on internet access. The image fix in `warp/grafana/Dockerfile`
+  bakes Prometheus plugin 13.1.7 for both amd64 and arm64 with catalog-published
+  SHA-256 checksums; `grafana/prometheus_plugin_test.go` holds that offline
+  invariant.
+- Verify after rollout with `vector(1)` through `/api/ds/query`, zero new
+  `grafana-plugin-unregistered` lines, and successful evaluation of one
+  provisioned rule. Do not silence scheduler errors or recreate the existing
+  datasource as remediation.
+
 ---
 
 ## 12. Taskworker drain (deploy) — TASKDRAIN1
@@ -2057,7 +3751,9 @@ error — deliberate, so fleet status sampling doesn't count drains).
   does not flip /status; that is 1.2's job (task canaries).
 
 ### 12.3 Stuck leases (post-SIGKILL / crash)
-PROBE: `pg/task-lease-stranded` (probe_taskworker_drain.go, 60s cadence):
+Probe: `stuck-leases`
+
+Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence):
 claim with a future release_time whose keepalive (claim_time refresh every
 ~10s while running) has been silent > 2 minutes = claiming worker gone.
 ```sql
@@ -2089,10 +3785,12 @@ ORDER BY release_time DESC;
   duplicate-execution window — verify first.
 
 ### 12.4 Post-deploy convergence
-PROBES: `pg/task-due-lag` (oldest due-and-unclaimed > 180s sustained = the
+Probe: `task-convergence`
+
+Alert ids: `pg/task-due-lag` (oldest due-and-unclaimed > 180s sustained = the
 plane stopped claiming) and `pg/task-target-missing` (`Target not found`
 past 100 retries = beyond any overlap, a missing registration) — both in
-probe_taskworker_drain.go, 60s cadence.
+`signal_task_convergence.go`, 60s cadence.
 Within ~1min of a taskworker deploy completing:
 - oldest-due lag returns to ~0:
 ```sql
@@ -2170,6 +3868,63 @@ service-neutral `urnetwork_http_server_*` gauges keyed by the stats pusher's
 - BROKEN: a deploy that keeps reverting with `error not ready: redis ...`
   = the new build/config cannot reach a dependency the old build can —
   diagnose the dependency (vault drift, network, auth), not the poll.
+
+### 13.5 Password-auth failure classification
+
+- A missing account and a wrong password are ordinary authentication failures.
+  `/auth/login-with-password` must return the same generic `Invalid user or
+  password.` result for both; neither case may become HTTP 500. A distinct
+  missing-account response also creates an account-enumeration oracle.
+- Acceptance first inspects whether its configured phone or email identity is
+  stale. A clean identity therefore deliberately exercises the missing-account
+  branch before signup. `inspect stale ... /auth/login-with-password returned
+  HTTP 500` is an API failure, not bad acceptance data and not evidence that the
+  fixture needs to be pre-created.
+- When this signal appears, query API logs for `login-with-password` over the
+  exact acceptance interval and compare route 5xx counts with the client
+  artifact. The deterministic boundary regression is
+  `TestAuthLoginWithPasswordUnknownUserIsGenericFailure`; retain the acceptance
+  parser's legacy-500 case only for rolling deployments where an old API block
+  may still answer during the upgrade. That old handler's wire response is
+  `text/plain` with body `User does not exist.`, not the API's usual nested JSON
+  error. Preserve the short plain-text detail, but tolerate only that exact
+  missing-account message; `TestPhoneLifecycleRejectsUnrelatedPlainTextServerError`
+  guards against turning arbitrary 500s into a clean-fixture result.
+
+### 13.6 Cross-platform acceptance contract failures
+
+- `Network name must contain only lowercase letters, numbers, and dashes`
+  immediately after an otherwise valid signup is an acceptance identity
+  generator failure when the generated name contains `_`. URL-safe base64 is
+  not a safe network-name alphabet: `_` is valid base64url and invalid here.
+  Current fixtures encode their random suffix as lowercase hex; the all-`ff`
+  deterministic case guards the exact pre-fix underscore output. Do not debug
+  PostgreSQL uniqueness or email verification before inspecting the submitted
+  name.
+- `rpc_pin_required` from the Linux or Windows service after all account cases
+  pass means the acceptance controller and the privileged daemon disagree on
+  the `start_tunnel` contract. The request must carry one generated server PEM,
+  its pinned client certificate, the loopback listen address, and a CSPRNG
+  `rpc_session_id`; the remote client must be configured with the matching
+  material before the request is sent. Current Linux and Windows controllers
+  build this shared payload through one helper. Recreating only the service or
+  retrying provider selection cannot repair missing request fields.
+- `socket cgroupv2 level ...: No such file or directory` can mean two different
+  things. First verify `/sys/fs/cgroup/<reported-path>` exists. If it does not,
+  the process is in the wrong/private cgroup namespace or the path is stale. If
+  it does exist, inspect `/proc/config.gz`; Docker Desktop's LinuxKit kernel can
+  report `# CONFIG_NFT_SOCKET is not set`, so nft rejects every socket-cgroup
+  expression even though cgroup v2 itself is healthy. Run
+  `urnetworkd --selftest-egress` to distinguish that from a missing cgroup-BPF
+  marker. A proven marker permits the explicit floorless mark-only fallback;
+  kill-switch floors and helper-DNS reconnect permits still refuse rather than
+  silently weakening their cgroup dependency. The Docker acceptance container
+  therefore uses the host cgroup namespace and its disposable privileged
+  profile; `NET_ADMIN` alone cannot load and attach the BPF program. It also
+  moves only `urnetworkd` into a dedicated child cgroup before exec. Leaving
+  the test agent beside the daemon in the container-wide cgroup marks the
+  agent's sockets too, making its public-egress probe bypass the tunnel and
+  turning a green result into a harness false positive.
 
 ## 14. Proxy drain (deploy) — PROXYDRAIN1
 
@@ -2251,6 +4006,8 @@ are pushed by the standard stats pusher {env, service=proxy, block, host}.
   are worth investigating (source flow state being lost somewhere).
 
 ### 14.5 Public proxy protocol and return-path proof
+Probe: `proxy-path`
+
 
 Proxy health has five layers; none substitutes for the next:
 
@@ -2405,6 +4162,45 @@ restart is not a diagnosis.
 
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
 
+**False post-deploy verification against a stale proxy artifact:** do not use
+an operator rollout statement, an `Up` container, or the configured desired
+version as proof that the return-path fixes are running. Before interpreting a
+post-deploy acceptance failure as a regression, inspect the running containers
+and the exact image on both proxy hosts:
+```bash
+sudo docker ps --no-trunc | grep main-proxy
+sudo docker inspect $(sudo docker ps --filter name=main-proxy -q) \
+  | jq -r '.[] | [.Name,.Created,.Config.Image,.Image] | @tsv'
+sudo docker images --digests bringyour/main-proxy
+sudo docker image inspect <image-id> | jq -r '.[0].Created'
+sudo journalctl --utc -u 'warp-main-proxy-*' --since=-10m \
+  | grep -E 'Latest version|Polled latest versions'
+```
+Compare the tag and image creation time with the release containing the fix,
+not merely with the container start time; a reboot can restart an old image.
+If every controller repeatedly polls the old version as `Latest`, the rollout
+is not stalled on those hosts: the corrected artifact is not selected as
+latest (and may not have been published). Do not restart healthy old
+containers to conceal that control-plane state; publish/select a distinct
+corrected version first.
+On 2026-08-30, the sustained suite selected Crisp and reproduced isolated plus
+overlapping return stalls, but every Crisp and Fireside block still ran image
+`2026.8.28-1031763440`, created at `2026-08-29T05:53:13Z`. That predates the
+finite-TUN handoff, lossless WireGuard return queue, and destination-keyed
+cross-protocol demultiplexing fixes. The image still had all three pre-fix
+behaviors: finite TUN tails waited for a later cadence packet, a full WireGuard
+queue dropped returns, and every HTTP/SOCKS dial detached WireGuard receive.
+Those old behaviors exactly explain a green 9/9 window with isolated SOCKS or
+WireGuard stalls and overlapping three-protocol stalls. If the expected image
+does not appear in `docker images` on either host, the new rollout never
+reached the proxy fleet; deploy a distinct new version before using another
+acceptance run to judge the fixes.
+An unchanged rerun is an especially useful discriminator: all three isolated
+campaigns can pass 60/60 on this old image, while the overlapping campaign
+then loses WireGuard and SOCKS returns with the hosted device still connected
+and its exit window ready. Isolated green results therefore do not disprove
+the stale-artifact diagnosis; require the simultaneous three-protocol soak.
+
 `providers-unresponsive` is not sufficient evidence that providers failed.
 The main proxy failure on 2026-08-28 had healthy public ingress, healthy proxy
 RPC/API access, H1 correctly pinned, and fill retries still running. The
@@ -2473,6 +4269,66 @@ processing the DNS response. Count this stack independently from window stalls;
 after deploying the fix, require zero new occurrences throughout the sustained
 acceptance window.
 
+**Cross-protocol return-path theft:** a hosted proxy client can legitimately
+use HTTP CONNECT, SOCKS, and WireGuard at the same time. A pre-fix proxy device
+had one process-global return mode: attaching WireGuard redirected every
+DeviceLocal return packet to the WireGuard receive channel, while a later Tun
+dial detached that channel. The decisive live signature is an overlapping
+campaign where HTTP and SOCKS never complete readiness, WireGuard works for a
+while and then stalls, and its inner-packet trace records foreign-destination
+TCP resets with no payload for the WireGuard address. All paths can pass when
+run alone, so sequential acceptance is not sufficient. This is not provider
+window failure or carrier-budget saturation when readiness remains one and
+pending H1 remains zero. Current code attaches the WireGuard receive channel to
+its assigned client IP and demultiplexes each returned IPv4/IPv6 packet by
+destination; every other packet remains on the private HTTP/SOCKS Tun.
+`DialContext` must never toggle that attachment. Require the acceptance suite's
+concurrent three-protocol campaign and zero foreign-address packets in its
+WireGuard trace. The deterministic boundary regression is
+`TestProxyDeviceTunDialDoesNotStealWireGuardReturn`: it attaches WireGuard,
+starts a Tun dial on the same device, then injects a returned WireGuard packet
+through the production callback path and requires delivery to the peer channel.
+
+**WireGuard return-queue loss:** before the lossless handoff fix, a full shared
+WireGuard receive queue made a hosted DeviceLocal silently discard the returned
+inner packet. Provider NAT has already consumed the upstream TCP bytes at this
+boundary and does not retransmit the discarded device-side segment. One brief
+queue-full event can therefore appear as TCP/TLS success followed by a permanent
+single-flow sequence hole: outbound inner retransmits continue, inbound inner
+traffic stops, and the next fresh connection works. Current code waits for the
+fixed queue's capacity or lifecycle cancellation, after flushing every Tun
+return in the batch so HTTP/SOCKS are not held behind that wait. Watch
+`urnetwork_proxy_wireguard_return_backpressure_total` and the
+`urnetwork_proxy_wireguard_return_backpressure_seconds` histogram. A rising
+count is bounded flow control, not loss; sustained or long waits identify a
+WireGuard reader that is not draining and require correlating the process
+lifecycle rather than increasing an unbounded queue.
+
+**Finite TUN return-burst stall:** HTTP CONNECT and SOCKS can lose a completed
+origin response even with no active WireGuard attachment. The decisive
+2026-08-29 reproduction was an isolated SOCKS request beginning at
+06:09:38.867Z: the client completed TLS and timed out awaiting headers, while
+the LB owning the selected `.85` address logged the same
+`urnetwork-proxy-acceptance/1` request at 06:09:40.672Z as HTTP 200 with a 1 ms
+upstream response. The hosted window stayed satisfied (9/9), proxy readiness
+was 1, pending H1 was zero, and the subsequent isolated plus overlapping
+WireGuard campaigns passed. That proves the response vanished after the origin
+and isolates the failing branch to the hosted device's private TUN, rather than
+the origin, rate limiter, carrier budget, or WireGuard queue.
+
+The pre-fix Connect TUN forced gVisor's documented `LockUser`/`UnlockUser` TCP
+processor handoff only every 16 injected return packets. A short TLS/HTTP
+response can end before that cadence; if its final segment was queued while the
+endpoint was syscall-owned, no later packet existed to repair the wakeup. The
+provider NAT had already consumed the upstream bytes, so ordinary TCP
+retransmission could not recreate the device-side segment. Current TUN code
+finishes the handoff at the end of every finite `WriteBatch` and after every
+single-packet `Write`, while retaining the 16-packet mid-batch bound for large
+bursts. When diagnosing this signature, join the acceptance request's exact UTC
+start and resolved destination from its device timeline to the LB access log;
+an LB 200 before the client timeout is affirmative return-path-loss evidence,
+not merely a healthy control request.
+
 **HTTP transient-dial amplification:** one sustained HTTP CONNECT request may
 time out while the same temporary device subsequently passes all SOCKS and
 WireGuard requests. On its exact block, the distinguishing counter edge is one
@@ -2500,6 +4356,8 @@ lines of the connect stacks the server itself hosts — the proxy service's
 devices are the tailer's vantage point for §15.2/15.3.
 
 ### 15.1 Key-publication coverage — the provider e2e rollout/health proxy
+Probe: `key-publication`
+
 ```sql
 -- coverage among recently-connected clients (probe pg/e2e-key-publication)
 SELECT count(DISTINCT ncc.client_id) AS active,

@@ -47,8 +47,14 @@ spec this service implements).
    from the warp logs (journalctl) and docker container status on the edge
    hosts themselves — not from a side-channel feed or a dashboard. The same
    rule everywhere: pg state from pg_stat_* on the primary, redis state from
-   the nodes' own INFO/CLUSTER NODES, host state from the host. Derived or
-   aggregated sources (grafana, exported metrics) are never a probe input.
+   the nodes' own INFO/CLUSTER NODES, host state from the host. Dashboards and
+   inferred aggregates are not probe inputs. The narrow exception is §2.12:
+   Go runtime counters are emitted by the process itself and queried from
+   Mimir with host/block/instance identity plus a 90-second freshness bound,
+   because `/proc` RSS cannot distinguish allocated Go heap from retained
+   pages. `HeapAlloc` can include unreachable objects awaiting the next GC;
+   it is still the direct allocator/collector pressure signal, not a claim
+   that every sampled byte remains reachable.
 6. **Identity, not volume.** Dedup key = (signal id, class, target, frame)
    per SIGNALS.md §6. Rate is reported; volume is never severity. One ticket
    per identity, updated in place, auto-resolved when the signal returns to
@@ -148,25 +154,35 @@ while 5432 connects instantly" is itself a documented discriminator
    of pg/redis so it works precisely when they don't
 ```
 
-### 3.1 Probes
+### 3.1 Signals
 
-One probe per SIGNALS.md signal, registered with id, tier, cadence, and the
-alert-spec row it implements (§7 tables are the authoritative probe list).
+One reusable `Signal` per automated SIGNALS.md check is registered by
+`NewSignals`. Each catalog section declares a short semantic `Probe:` key;
+`contract-rate`, for example, lives in `signal_contract_rate.go` and has a
+synthetic failure in `signal_contract_rate_test.go`. The Go file comments its
+source section (`SIGNALS.md §1.1`). The registry test enforces the catalog key,
+semantic filenames, source comment, and registration together.
 
 ```go
-type Probe interface {
-    Id() string                  // "pg/active-pileup" — matches §7 id
-    Tier() Tier                  // TierPage | TierWarn
-    Cadence() time.Duration      // 60s tier-0; 5m–1h tier-1; 24h daily
-    Check(ctx context.Context, env *Env) ([]Observation, error)
+type Signal interface {
+    Number() string
+    Key() string
+    ID() string
+    Name() string
+    Cadence() time.Duration
+    Run(context.Context, SignalSettings) (Alerts, error)
 }
 ```
 
-An `Observation` is a named metric sample plus structured evidence
-(query text, node ip:port, error class, sample log line). `Check` returning
-an error is itself an observation about reachability (see §3.6) — probes
-must distinguish "the check ran and the value is X" from "the check could
-not run".
+`SignalSettings` contains environment inventory, canonical feature state used
+to classify feature-owned work, PostgreSQL settings, SSH users and identity
+paths, timeouts, state directory, and an injectable `SignalSource`. Production
+uses the read-only SSH transport; every synthetic
+test supplies a source with deterministic PostgreSQL, Redis, host-command,
+local-command, and raw TCP-exchange output. An `Alert` carries stable identity
+plus symptom, mechanism, baseline, observed values, evidence, action,
+verification, and playbook fields. `Alert.Markdown` and `AlertsMarkdown`
+render the same value as a detailed human-readable alert file.
 
 Probes are cheap by construction: tier-0 is five queries/commands per 60s
 tick (SIGNALS.md §1 — contract rate, canaries, idle-in-tx/active split,
@@ -315,7 +331,7 @@ non-interactively with `--since=<duration>` instead of tailing.
 
 | cadence | probes (SIGNALS.md ref) |
 |---|---|
-| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4 |
+| 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12 |
 | 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
 | continuous | log tailers §3.7: one `warpctl logs <service> -f` per service, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
@@ -328,29 +344,27 @@ cheapest first read on most log classes and stays as its own probe.
 
 ## 6. Package layout
 
-One flat `package main` at `server/monitor` (connect/CODESTYLE.md package
-layering: a package must never import its own subpackages; shared code that
-several files need is just a file in the package, grouped by filename
-prefix — the `bringyourctl` precedent):
+One importable `package monitor` at `server/monitor`; process wiring is the
+thin `server/cli/monitor` command:
 
 ```
 server/monitor/
   MONITOR.md            this design
   SIGNALS.md            the signal catalog (what "wrong" looks like)
-  main.go               docopt usage, probe registry, scheduler loop, --once
+  alert.go              structured Alert and Markdown rendering
+  settings.go           SignalSettings and injectable SignalSource
+  signal.go             Signal interface and common adapter
+  registry.go           Monitor constructor and explicit signal registry
+  run.go                run-all, one-signal, and cadence scheduling utilities
+  signal_short_key.go       focused implementation linked to SIGNALS.md §X.Y
+  signal_short_key_test.go  synthetic broken-state test for that probe
   config.go             monitor.yml + pg.yml + settings.yml routes assembly
   conn.go               ssh-exec transport; pg/redis/shell/warpctl runners
   baseline.go           local metric history (trailing medians, retention)
-  probe.go              probe interface, finding, tiers, small helpers
-  probe_pg.go           tier-0 pg: state split 1.3, contract rate 1.1
-  probe_pg_tier1.go     open-set 2.6, pgbouncer, vacuum 2.4, stats-landmine
-  probe_tasks.go        canary + parked 1.2, duration regression 2.5
-  probe_redis.go        tier-0 redis: cluster state + per-node ping 1.4
-  probe_redis_tier1.go  per-node memory/skew/buffers/conns 3.1-3.5, topology 3.6
   battery.go            escalation batteries (5.8 plan wall, 5.2/5.4 node)
   tailer.go             always-on log tailers + §4 classifier + novel class
-  ticket.go             identity, lifecycle, hysteresis, §6b rendering
-  emit_console.go       console emitter (webhook/github pr deferred)
+server/cli/monitor/
+  main.go               flags, process signals, and calls into package monitor
 ```
 
 Follows the repo's conventions: built automatically by the existing
@@ -367,6 +381,8 @@ the full inventory; abbreviated shape):
 ssh:
   user: monitor       # deployed login user (in-lan)
   dev_user: by        # login user for local dev over the overlay
+  identity_files:     # optional; otherwise ~/.ssh/config remains authoritative
+    - /run/secrets/monitor_ed25519
 address_mode: overlay # lan (deployed) | overlay (local dev)
 hosts:                # only monitor-specific facts; lan ips come
   - name: by-us-fmt-5-edge-2   # from config settings.yml routes by name
@@ -375,14 +391,25 @@ hosts:                # only monitor-specific facts; lan ips come
   - name: by-us-fmt-5-edge-6
     overlay_ip: 172.28.208.177
     roles: [redis-cluster, minio]
-    redis: {entry_port: 6379, node_ports: [6380, 6411]}
+    redis: {entry_port: 6379, node_ports: [6380, 6411], expected_replicas: 0}
+  - name: fireside.bringyour.com
+    roles: [services]
+    proxy:
+      public_hostname: fireside.bringyour.com
+      public_interface: eno1
+      routing_table: 100
+      load_balancer_unit: warp-main-lb-eno1.service
+      address_families: [ipv4, ipv6]
   # ... service hosts with roles [services], snow [subtensor]
 pg:
   port: 5432          # direct; 6432 probed separately as pgbouncer
+source_attribution:   # optional; each expected address arms that family
+  expected_ipv4: 203.0.113.10
+  expected_ipv6: 2001:db8::10
 ```
 
-ssh keys are not stored here — `~/.ssh/config` supplies the IdentityFile per
-host (assumed set up). Everything else shared is read from its source of
+SSH identity paths are optional; when omitted, `~/.ssh/config` supplies the
+IdentityFile per host. Everything else shared is read from its source of
 truth, never duplicated here (§2): pg credentials from `vault/<env>/pg.yml`
 (password passed on stdin line 1 of each battery, never argv), redis
 credentials from `vault/<env>/redis.yml`, LAN routes from
@@ -399,8 +426,8 @@ Run it locally:
 
 ```
 WARP_HOME=/Users/brien/urnetwork WARP_ENV=main WARP_VERSION=0.0.0 \
-  go run ./monitor --once        # one pass, print what would fire
-WARP_HOME=... WARP_ENV=main ... go run ./monitor   # the 60s loop
+  go run ./cli/monitor --once        # one pass, render a Markdown alert file
+WARP_HOME=... WARP_ENV=main ... go run ./cli/monitor   # cadence loop
 ```
 
 1. **Skeleton + tier-0 — DONE (2026-07-17).** main loop + `--once`, sshExec
@@ -472,12 +499,12 @@ Decided (2026-07-17):
   control-plane probe maintains the per-host "last deploy/restart" clock
   that every ticket's CONTEXT line reads from. No side-channel feed.
 - **Grafana split**: the monitor identifies issues — events/alerts that
-  need investigation, delivered as tickets. Grafana collects metrics to
-  support decisions: it is the data source for the *fixer/debugger* working
-  a ticket. The monitor never consumes Grafana/Prometheus as a probe input
-  (principle 5). File-provisioned Grafana alerts are the explicit exception
-  for bounded application counters whose lossless rate cannot be reconstructed
-  after required log sampling; contract-failure causes use that path.
+  need investigation, delivered as tickets. Grafana normally supports the
+  *fixer/debugger* working a ticket, not detection. Explicit exceptions are
+  bounded application-counter rates whose lossless rate cannot be reconstructed
+  after required log sampling, plus §2.12's fresh process-originated Go heap
+  metrics. Both retain concrete series identity and static bands; neither uses
+  a dashboard-derived judgment as the signal.
 - **Runtime**: developed and run locally first (address_mode: overlay,
   ssh_override with the existing workstation access) against main; in-LAN
   deployment as a warp service comes after the probe set stabilizes.

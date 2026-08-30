@@ -222,6 +222,14 @@ func UpdateReliabilities(
 		}, nil
 	}
 
+	// Checkpoint each running-sum lookback before either score writer opens its
+	// own atomic transaction. The 7-day full anchor has a long I/O-contention
+	// tail in production; if the task deadline interrupts a later lookback, the
+	// committed earlier markers survive and the retry rolls them forward instead
+	// of restarting every full scan from zero. The score writers call the same
+	// maintenance again at this maxTime, which is deliberately idempotent.
+	model.UpdateClientReliabilityRunningCheckpointed(clientSession.Ctx, maxTime)
+
 	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
 
 	model.UpdateClientReliabilityScores(clientSession.Ctx, maxTime, false)

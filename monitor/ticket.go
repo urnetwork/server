@@ -8,7 +8,7 @@
 // ticket per identity, with hysteresis (n consecutive failing ticks before it
 // opens) and auto-resolve (healthy band held for the resolve window). The
 // manager is not safe for concurrent use; the caller serializes ingest.
-package main
+package monitor
 
 import (
 	"context"

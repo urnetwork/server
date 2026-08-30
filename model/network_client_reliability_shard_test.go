@@ -13,6 +13,34 @@ import (
 	"github.com/urnetwork/server"
 )
 
+func TestClientReliabilityRollupCandidatesUseHighWaterAndRetentionBound(t *testing.T) {
+	current := int64(1000)
+	tests := []struct {
+		name          string
+		maxDrained    int64
+		hasHighWater  bool
+		wantFirst     int64
+		wantLast      int64
+		wantCandidate int
+	}{
+		{name: "normal", maxDrained: 996, hasHighWater: true, wantFirst: 997, wantLast: 998, wantCandidate: 2},
+		{name: "caught up", maxDrained: 998, hasHighWater: true, wantCandidate: 0},
+		{name: "outage bounded by ttl", maxDrained: 1, hasHighWater: true, wantFirst: 984, wantLast: 998, wantCandidate: 15},
+		{name: "first run bounded by ttl", hasHighWater: false, wantFirst: 984, wantLast: 998, wantCandidate: 15},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := clientReliabilityRollupBlockNumbers(current, test.maxDrained, test.hasHighWater)
+			if len(got) != test.wantCandidate {
+				t.Fatalf("candidate count = %d (%v), want %d", len(got), got, test.wantCandidate)
+			}
+			if len(got) > 0 && (got[0] != test.wantFirst || got[len(got)-1] != test.wantLast) {
+				t.Fatalf("candidate range = [%d,%d], want [%d,%d]", got[0], got[len(got)-1], test.wantFirst, test.wantLast)
+			}
+		})
+	}
+}
+
 // TestClientReliabilityStatsShardedDrain records stats for clients spread
 // across multiple shards in one block and verifies: each client's counters
 // land only in its own shard key (packed binary fields), the drain merges
@@ -108,11 +136,9 @@ func TestClientReliabilityStatsShardedDrain(t *testing.T) {
 	})
 }
 
-// Production defaults to the legacy writer until every taskworker can read
-// shards. This models an old-reader/new-writer overlap: with the gate closed,
-// the new binary still emits exactly the legacy hash the old rollup expects.
-// TestClientReliabilityStatsShardedWriter asserts writers always shard: a
-// recorded range lands in the shard key and never in the legacy unsharded key.
+// TestClientReliabilityStatsShardedWriter asserts the current hot path writes
+// only its sharded hash: it neither recreates the legacy unsharded hash nor
+// touches the fixed-slot block-discovery set.
 func TestClientReliabilityStatsShardedWriter(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -143,6 +169,9 @@ func TestClientReliabilityStatsShardedWriter(t *testing.T) {
 			legacy, err := r.HGetAll(ctx, clientReliabilityStatsLegacyKey(blockNumber)).Result()
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, len(legacy), 0)
+			markers, err := r.SMembers(ctx, clientReliabilityBlocksKey).Result()
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(markers), 0)
 		})
 	})
 }

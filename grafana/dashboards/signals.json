@@ -2681,13 +2681,313 @@
     },
     {
       "type": "row",
-      "title": "coverage notes",
+      "title": "proxy device resources and return-path pressure",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 141
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "proxy DeviceLocal memory and carrier bytes",
+      "description": "Fleet totals for the per-device steady-state memory target, tracked live use, private platform-carrier budget and use, and H1 bytes waiting for carrier admission. Tracked use excludes allocator/runtime and bounded NAT endpoint memory. Sustained pending H1 bytes with used carrier bytes at budget indicates carrier starvation rather than provider reachability.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 142
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_device_memory_target_bytes{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "device target"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_device_memory_tracked_used_bytes{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "device tracked used"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transport_budget_bytes{env=\"$env\"})",
+          "refId": "C",
+          "legendFormat": "carrier budget"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transport_used_bytes{env=\"$env\"})",
+          "refId": "D",
+          "legendFormat": "carrier used"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transports_pending_h1_bytes{env=\"$env\"})",
+          "refId": "E",
+          "legendFormat": "pending H1"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "proxy platform-carrier admission",
+      "description": "Fleet carrier slots: private per-device limits, acquired carriers, and H1 reservations waiting for admission. The limit should scale with live hosted devices; a flat limit while device count grows indicates a stale shared-budget build. Sustained pending H1 at the limit is the direct carrier-starvation signature.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 142
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transports_max{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "limit"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transports_used{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "used"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(urnetwork_proxy_platform_transports_pending_h1{env=\"$env\"})",
+          "refId": "C",
+          "legendFormat": "pending H1"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "proxy WireGuard return backpressure / s",
+      "description": "Returned WireGuard packets that had to wait for the fixed receive queue. A rising count means bounded flow control was applied rather than dropping the packet; correlate sustained events with wait duration and process lifecycle.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 150
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_wireguard_return_backpressure_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "packets waiting / s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "proxy WireGuard return backpressure duration",
+      "description": "Fleet histogram of time spent waiting for bounded WireGuard receive-queue capacity. Quantiles are computed after merging histogram buckets across instances; the mean uses the merged sum and count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 150
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(urnetwork_proxy_wireguard_return_backpressure_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_proxy_wireguard_return_backpressure_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
+          "refId": "B",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_wireguard_return_backpressure_seconds_sum{env=\"$env\"}[$__rate_interval])) / sum(rate(urnetwork_proxy_wireguard_return_backpressure_seconds_count{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "mean"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "coverage notes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 158
       }
     },
     {
@@ -2698,7 +2998,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 142
+        "y": 159
       },
       "options": {
         "mode": "markdown",

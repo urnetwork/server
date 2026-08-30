@@ -660,7 +660,9 @@ func CompletePayment(
                     payment_receipt = $2,
                     completed = true,
                     complete_time = $3,
-                    tx_hash = $4
+                    tx_hash = $4,
+                    contract_retention_cursor = NULL,
+                    contract_retention_pending = true
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled
@@ -698,25 +700,11 @@ func CompletePayment(
 			paymentId,
 		))
 
-		// Mark this payment's contracts due for retention. reap_time drives the
-		// indexed reaper (RemoveCompletedContracts): a completed contract is hard
-		// deleted once now() passes reap_time. The bounded update touches only this
-		// payment's sweeps' contracts; LEAST keeps the earliest reap time when a
-		// contract is paid by more than one payment.
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                UPDATE transfer_contract
-                SET reap_time = LEAST(COALESCE(transfer_contract.reap_time, 'infinity'::timestamp), $2)
-                WHERE transfer_contract.contract_id IN (
-                    SELECT transfer_escrow_sweep.contract_id
-                    FROM transfer_escrow_sweep
-                    WHERE transfer_escrow_sweep.payment_id = $1
-                )
-            `,
-			paymentId,
-			server.NowUtc().Add(CompletedContractExpiration),
-		))
+		// Contract retention is deliberately not fanned out here. A payment can
+		// own hundreds of thousands of sweeps, and updating every contract in the
+		// same transaction made recording an already-sent payment vulnerable to a
+		// statement timeout. contract_retention_pending is a durable queue bit;
+		// RemoveCompletedContracts advances the cursor in bounded transactions.
 	})
 	return
 }
@@ -965,10 +953,14 @@ type TransferStats struct {
 	UnpaidBytesProvided ByteCount `json:"unpaid_bytes_provided"`
 }
 
-/**
- * Total paid and unpaid bytes for a network
- * This is not live data, and depends on transfer_escrow_sweep
- */
+// GetTransferStats returns the durable paid/unpaid byte totals for a network.
+// Unplanned and safely canceled value still comes from transfer_escrow_sweep,
+// because those rows can be collected into a future payment. Once a payment is
+// active, its immutable payout_byte_count is authoritative. This keeps the
+// user's unpaid total stable if retention or repair removes some of the
+// payment's sweep rows. Canceled rows with processor evidence are reconciliation
+// anomalies rather than a second unpaid ledger: counting them after their sweeps
+// were reassigned would double-count the replacement payment.
 func GetTransferStats(
 	ctx context.Context,
 	networkId server.Id,
@@ -995,14 +987,29 @@ func GetTransferStats(
 				SELECT
 					0 AS paid_bytes_provided,
 					COALESCE(SUM(transfer_escrow_sweep.payout_byte_count), 0) AS unpaid_bytes_provided
-				FROM account_payment
+				FROM transfer_escrow_sweep
 
-				INNER JOIN transfer_escrow_sweep ON
-                        transfer_escrow_sweep.payment_id = account_payment.payment_id
+				INNER JOIN account_payment ON
+					account_payment.payment_id = transfer_escrow_sweep.payment_id
 
 				WHERE
 					account_payment.network_id = $1 AND
-					account_payment.completed = false
+					NOT account_payment.completed AND
+					account_payment.canceled AND
+					account_payment.circle_idempotency_key IS NULL AND
+					account_payment.payment_record IS NULL AND
+					account_payment.tx_hash IS NULL
+
+				UNION ALL
+
+				SELECT
+					0 AS paid_bytes_provided,
+					COALESCE(SUM(account_payment.payout_byte_count), 0) AS unpaid_bytes_provided
+				FROM account_payment
+				WHERE
+					account_payment.network_id = $1 AND
+					NOT account_payment.completed AND
+					NOT account_payment.canceled
 
 				UNION ALL
 

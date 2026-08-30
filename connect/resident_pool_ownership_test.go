@@ -30,6 +30,37 @@ func requireResidentPoolOwnerReturned(t *testing.T, witness []byte, description 
 	}
 }
 
+// Exposes entry into the first socket read without changing its blocking edge.
+type exchangeReadObservedConn struct {
+	net.Conn
+	readEntered chan struct{}
+	readOnce    sync.Once
+}
+
+// Publishes once before delegating to the real accepted connection.
+func (self *exchangeReadObservedConn) Read(buffer []byte) (int, error) {
+	self.readOnce.Do(func() { close(self.readEntered) })
+	return self.Conn.Read(buffer)
+}
+
+// Decorates every accepted socket with the deterministic read barrier.
+type exchangeReadObservedListener struct {
+	net.Listener
+	readEntered chan struct{}
+}
+
+// Retains normal listener errors and wraps only successful accepts.
+func (self *exchangeReadObservedListener) Accept() (net.Conn, error) {
+	conn, err := self.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &exchangeReadObservedConn{
+		Conn:        conn,
+		readEntered: self.readEntered,
+	}, nil
+}
+
 // Verifies a collection of independently retained exact-message references.
 func requireResidentPoolOwnersReturned(t *testing.T, witnesses [][]byte, description string) {
 	t.Helper()
@@ -774,6 +805,56 @@ func TestExchangeWaitForIdleJoinsAcceptedConnectionOwnership(t *testing.T) {
 	}
 	if !clientconnect.MessagePoolReturn(witnessAfterJoin) {
 		t.Fatal("accepted connection retained its pooled owner after exchange idle")
+	}
+}
+
+// Closing an exchange must interrupt an accepted socket that has not sent its
+// header; its independent header deadline cannot delay the lifecycle join.
+func TestExchangeWaitForIdleInterruptsPreHeaderRead(t *testing.T) {
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+	exchangeCtx, exchangeCancel := context.WithCancel(context.Background())
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readEntered := make(chan struct{})
+	observedListener := &exchangeReadObservedListener{
+		Listener:    listener,
+		readEntered: readEntered,
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	settings := DefaultExchangeSettings()
+	settings.ExchangeReadHeaderTimeout = time.Hour
+	exchange := &Exchange{
+		ctx:                  exchangeCtx,
+		cancel:               exchangeCancel,
+		hostToServicePorts:   map[int]int{port: port},
+		settings:             settings,
+		servicePortListeners: map[int]net.Listener{port: observedListener},
+		residents:            map[server.Id]*Resident{},
+		connections:          map[server.Id]map[server.Id]context.CancelFunc{},
+		drainedClients:       map[server.Id]struct{}{},
+	}
+	go exchange.Run()
+	peerConn, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		exchange.Close()
+		t.Fatal(err)
+	}
+	defer peerConn.Close()
+	select {
+	case <-readEntered:
+	case <-testCtx.Done():
+		exchange.Close()
+		t.Fatalf("accepted connection did not enter its header read: %v", testCtx.Err())
+	}
+
+	exchange.Close()
+	idleCtx, idleCancel := context.WithTimeout(testCtx, time.Second)
+	defer idleCancel()
+	if !exchange.WaitForIdle(idleCtx) {
+		t.Fatalf("pre-header connection outlived exchange close: %v", idleCtx.Err())
 	}
 }
 

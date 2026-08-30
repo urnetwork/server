@@ -19,7 +19,8 @@ trap cleanup EXIT
 
 (
   cd "$baseline_root"
-  LC_ALL=C find . -type f ! -path './MANIFEST.sha256' -printf '%P\n' |
+  LC_ALL=C find . -type f ! -path './MANIFEST.sha256' -print |
+    sed 's#^\./##' |
     LC_ALL=C sort >"$tmp_dir/actual.paths"
   sed -nE 's/^[0-9a-f]{64}  (.*)$/\1/p' MANIFEST.sha256 |
     LC_ALL=C sort >"$tmp_dir/manifest.paths"
@@ -33,7 +34,14 @@ trap cleanup EXIT
     exit 1
   fi
 
-  sha256sum --check --strict MANIFEST.sha256
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum --check --strict MANIFEST.sha256
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 --check MANIFEST.sha256
+  else
+    echo "no SHA-256 checker found (need sha256sum or shasum)" >&2
+    exit 1
+  fi
 )
 
 echo "sim-latency baseline snapshot: verified"
