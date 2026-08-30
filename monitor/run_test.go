@@ -288,6 +288,80 @@ func TestRunLoopBoundsConcurrentSignalExecutions(t *testing.T) {
 	}
 }
 
+func TestRunLoopDropsTickElapsedDuringSlowSignal(t *testing.T) {
+	var active atomic.Int64
+	var maximum atomic.Int64
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	signal := &blockingLoopSignal{
+		number:  "synthetic-slow-cadence",
+		active:  &active,
+		maximum: &maximum,
+		started: started,
+		release: release,
+	}
+	ticks := make(chan time.Time, 2)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handled := make(chan struct{}, 2)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- NewWithSignals(SignalSettings{}, signal).runLoop(
+			ctx,
+			func(context.Context, Signal, Alerts) error {
+				handled <- struct{}{}
+				return nil
+			},
+			func(time.Duration) runLoopTicker { return &manualRunLoopTicker{c: ticks} },
+		)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow signal did not start its initial observation")
+	}
+	// This cadence elapsed while the first observation was still running. It
+	// must not trigger an immediate catch-up execution after the release.
+	ticks <- time.Now()
+	release <- struct{}{}
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("slow signal did not finish its initial observation")
+	}
+	select {
+	case <-started:
+		t.Fatal("slow signal replayed a cadence tick that elapsed while it was running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// A tick arriving after completion starts the next observation normally.
+	ticks <- time.Now()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow signal did not start on the next fresh cadence tick")
+	}
+	release <- struct{}{}
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("slow signal did not finish its second observation")
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("RunLoop returned an error after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunLoop did not stop after cancellation")
+	}
+}
+
 func TestRunLoopDoesNotAlertForShutdownCancellation(t *testing.T) {
 	var active atomic.Int64
 	var maximum atomic.Int64

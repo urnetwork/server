@@ -319,6 +319,9 @@ non-interactively with `--since=<duration>` instead of tailing.
 ## 4. Scheduler and load budget
 
 - Per-probe tickers with jitter; a probe never overlaps itself.
+- A cadence tick that elapses while its probe is queued or running is dropped;
+  the probe waits for the next fresh tick after completion instead of entering
+  a back-to-back catch-up loop against an already-slow dependency.
 - Per-host semaphore (1 concurrent battery, small cap for probes) so the
   monitor cannot pile onto a struggling host.
 - Global kill: SIGTERM drains in-flight commands (same quitEvent pattern as

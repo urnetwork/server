@@ -26,6 +26,25 @@ func (t *wallClockRunLoopTicker) Stop()               { t.ticker.Stop() }
 
 type runLoopTickerFactory func(time.Duration) runLoopTicker
 
+// discardElapsedRunLoopTicks drops cadence events that accumulated while a
+// probe was queued or running. A slow observational probe must not enter a
+// back-to-back catch-up loop: that amplifies load on the same dependency that
+// is already slow. The next execution begins on a tick that arrives after the
+// completed observation.
+func discardElapsedRunLoopTicks(ticker runLoopTicker) {
+	ticks := ticker.C()
+	for {
+		select {
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
 // cadenceAlertGate applies the consecutive-tick contract carried by
 // Alert.Sustain. One-shot Monitor.Run intentionally bypasses this gate so a
 // diagnostic invocation still returns every current band violation.
@@ -244,6 +263,7 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 					cancel()
 					return
 				}
+				discardElapsedRunLoopTicks(ticker)
 				select {
 				case <-ctx.Done():
 					return
