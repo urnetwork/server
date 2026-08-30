@@ -3,6 +3,9 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"io"
+	"os/exec"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +22,19 @@ type blockingLoopSignal struct {
 type steppedAlertSignal struct {
 	started chan<- struct{}
 	release <-chan struct{}
+}
+
+type runLoopStreamingSource struct {
+	*syntheticSource
+	started chan<- []string
+}
+
+func (s *runLoopStreamingSource) StreamLocal(ctx context.Context, name string, args ...string) (*exec.Cmd, io.ReadCloser, error) {
+	if name != "warpctl" {
+		return nil, nil, fmt.Errorf("stream command = %q, want warpctl", name)
+	}
+	s.started <- append([]string(nil), args...)
+	return fakeStream("exec sleep 3600")(ctx)
 }
 
 func (s *steppedAlertSignal) Number() string         { return "synthetic-stepped" }
@@ -61,6 +77,44 @@ func (s *blockingLoopSignal) Run(ctx context.Context, _ SignalSettings) (Alerts,
 		return nil, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+func TestRunLoopStartsStandingLogTailers(t *testing.T) {
+	started := make(chan []string, 1)
+	source := &runLoopStreamingSource{
+		syntheticSource: &syntheticSource{localFn: func(name string, args ...string) (string, error) {
+			if name != "warpctl" || strings.Join(args, " ") != "ls services synthetic" {
+				return "", fmt.Errorf("unexpected local command %s %s", name, strings.Join(args, " "))
+			}
+			return "repo names synthetic-taskworker", nil
+		}},
+		started: started,
+	}
+	monitor := NewWithSignals(syntheticSettings(source), NewLogErrorsSignal())
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- monitor.RunLoop(ctx, func(context.Context, Signal, Alerts) error { return nil })
+	}()
+
+	select {
+	case args := <-started:
+		if got, want := strings.Join(args, " "), "logs synthetic taskworker --since=1s -f"; got != want {
+			t.Fatalf("standing log command = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunLoop did not start the standing taskworker log tailer")
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("RunLoop returned an error after cancellation: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunLoop did not stop its standing log tailer")
 	}
 }
 

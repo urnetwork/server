@@ -73,6 +73,30 @@ func TestNetEscrowAlertSeparatesMutationSites(t *testing.T) {
 	}
 }
 
+func TestNetEscrowNegativeStormPages(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for range netEscrowNegativePageRate {
+		tailer.classify("[netescrow]negative counter after settle: balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-10760936105")
+	}
+
+	finding := findingByClass(t, tailer.drainWindow(), "netescrow-negative")
+	if finding.tier != tierPage {
+		t.Fatalf("storm tier = %q, want page: %+v", finding.tier, finding)
+	}
+	for _, want := range []string{
+		"rate=100/min",
+		"page_threshold=100/min",
+		"frame=site=settle",
+	} {
+		if !strings.Contains(finding.observed, want) {
+			t.Fatalf("storm observation missing %q: %s", want, finding.observed)
+		}
+	}
+	if logIDRe.MatchString(finding.evidence) {
+		t.Fatalf("storm evidence leaked an entity id: %q", finding.evidence)
+	}
+}
+
 func TestRedisNetEscrowTTLAlertRedactsEntityIDs(t *testing.T) {
 	tailer := newLogTailer("api", nil)
 	tailer.classify(`[redis][ttl]"expireat" key="{escrow_019c640e-f467-4fa7-177f-d7ca43c33b6f}net" ttl 3139421360s-from-now exceeds 9600h0m0s`)

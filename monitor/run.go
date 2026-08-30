@@ -70,6 +70,55 @@ func (m *Monitor) RunSignal(ctx context.Context, identifier string) (Alerts, err
 	return nil, fmt.Errorf("monitor: signal %s is not registered", identifier)
 }
 
+// prepareRunLoop replaces the bounded §1.5 log-window probe with standing
+// warpctl streams when the runtime transport supports them. Monitor.Run and
+// RunSignal deliberately retain the bounded probe for one-shot diagnostics;
+// only the long-running scheduler owns stream lifecycle.
+func (m *Monitor) prepareRunLoop(ctx context.Context) ([]Signal, []*logTailer, error) {
+	signals := append([]Signal(nil), m.signals...)
+	if m.settings.Source != nil {
+		if _, ok := m.settings.Source.(StreamingSignalSource); !ok {
+			return signals, nil, nil
+		}
+	}
+
+	logSignalIndex := -1
+	var logSignal *signalAdapter
+	for i, signal := range signals {
+		adapter, ok := signal.(*signalAdapter)
+		if !ok {
+			continue
+		}
+		if _, ok := adapter.probe.(logWindowProbe); !ok {
+			continue
+		}
+		logSignalIndex = i
+		logSignal = adapter
+		break
+	}
+	if logSignalIndex < 0 {
+		return signals, nil, nil
+	}
+
+	env, err := newProbeEnv(m.settings)
+	if err != nil {
+		return nil, nil, err
+	}
+	services := warpServices(ctx, env)
+	tailers := make([]*logTailer, 0, len(services))
+	for _, service := range services {
+		tailers = append(tailers, newLogTailer(service, env))
+	}
+	signals[logSignalIndex] = &signalAdapter{
+		number: logSignal.number,
+		key:    logSignal.key,
+		name:   logSignal.name,
+		probe:  &logTailProbe{tailers: tailers},
+		accept: logSignal.accept,
+	}
+	return signals, tailers, nil
+}
+
 // RunLoop schedules every registered signal at its own cadence. All execution
 // and scheduling logic lives here so cli/monitor only handles process wiring.
 func (m *Monitor) RunLoop(ctx context.Context, handle AlertHandler) error {
@@ -80,12 +129,25 @@ func (m *Monitor) RunLoop(ctx context.Context, handle AlertHandler) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	signals, tailers, err := m.prepareRunLoop(ctx)
+	if err != nil {
+		return err
+	}
+
 	var handleLock sync.Mutex
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 	runSlots := make(chan struct{}, runLoopMaxConcurrentSignals)
 	alertGate := newCadenceAlertGate()
-	for _, registered := range m.signals {
+	for _, registered := range tailers {
+		tailer := registered
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tailer.run(ctx)
+		}()
+	}
+	for _, registered := range signals {
 		signal := registered
 		wg.Add(1)
 		go func() {

@@ -286,7 +286,10 @@ Count lines per minute matching each class in section 4. Healthy ≈ 0 for all
 classes. Alert on rate, include the class name and one sample line. Error
 VOLUME is retry amplification, not incident size — 100k identical lines can
 be one sick node × fleet retry loops. The monitor should report class + rate
-+ distinct target (ip:port) set, never raw volume as severity. A NEW
++ distinct target (ip:port) set, and normally should not use raw volume as
+severity. The explicit exception is a class where each line is itself a
+mutation exposure: `netescrow-negative` warns on any line and pages at
+>=100/minute for one service/site. A NEW
 signature appearing at rate (an unseen error shape / panic frame) is a
 signal even when no known class matches — report it as class `novel` with
 the sample line. Apply the novelty threshold to the most frequent normalized
@@ -294,6 +297,17 @@ shape, not the sum of unrelated shapes. Public web endpoints routinely receive
 scanner bursts across dozens of nonexistent paths; nginx logs those misses at
 error level, but many one-off paths do not constitute one recurring server
 failure. Keep the total and distinct-shape counts as diagnostic context.
+
+Implementation regression learned 2026-08-30: the standing tailer, restart
+health, and scanner-overflow tests existed, but `Monitor.RunLoop` still ran the
+bounded one-minute `logWindowProbe`; no production path instantiated the
+tailers. Sequential service pulls therefore undercounted a net-escrow storm
+whose manual pull reached the 10,000-line query cap in 14 seconds. `RunLoop`
+now replaces only the registered bounded `log-errors` probe with one
+`warpctl logs ... --since=1s -f` stream per discovered service and owns their
+shutdown. One-shot `Run`/`RunSignal` retain the bounded query. The deterministic
+runtime test requires the exact standing command, so tested-but-dormant tailer
+code cannot recur.
 
 ---
 
@@ -2700,6 +2714,31 @@ stale-snapshot damage, not merely scheduling latency. Recovery remains open
 until a scheduled inverse and a subsequent in-band pass complete, followed by
 a full quiet interval across all three emitters.
 
+Instead of supplying that recovery, two consecutive scheduled passes landed
+on the same old edge-0/g1 container and amplified the damage. Task
+`01a053e6-d5e1-a07e-ca22-a9fe98395e34` ran from 18:25:35.186328Z to
+18:44:36.869386Z (1,141.683s), rewrote 900,295 balances, and corrected
+2.05TiB over-reserved plus 777.02GiB under-reserved across 2,469 networks.
+Six exact -1MiB settlement negatives appeared across API and Connect from
+18:44:15Z through 18:45:53Z, beginning while the apply was still live.
+
+Its successor `01a053fc-e925-686d-b08a-fa82b2ee3864` ran from
+18:49:41.687654Z to 19:08:43.856564Z (1,142.169s) on the same process. Its
+terminal aggregate rewrote 900,556 balances and corrected 586.11GiB over plus
+8.53TiB under across 2,562 networks. This was not a matched inverse: the
+dominant under-reserved error grew far beyond the preceding quantities. A
+redacted full-interval pull counted 160 API and 100 Connect negative
+settlements, and the taskworker pull hit its 10,000-line cap within 14 seconds;
+individual results approached -10GiB and no old-generation line reported
+`clamped_to=0`. This is fleet-scale mirror corruption from repeated legacy
+absolute writes, not independent lost creates. The log signal now pages at
+100 negatives/minute for one service/site and uses standing streams so the
+burst cannot fall between sequential snapshots. Recovery remains open until
+the append-only schema gate passes, new taskworker generations run the
+page-local additive/no-op-skipping reconciler, a scheduled aggregate returns
+to the tens-of-GiB band, and all three emitters remain quiet for a full
+following interval.
+
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
 additive reconciler can observe that committed settlement and correct the
@@ -2886,7 +2925,7 @@ Tier-1 (warn):
 | migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every published schema artifact | page when any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
-| netescrow-negative | logs | `[netescrow]negative counter after` | any; payload includes site (never raw balance/contract ids) |
+| netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
 | proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |

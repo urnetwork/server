@@ -36,14 +36,15 @@ type logClass struct {
 	// per-minute rate above which the class is a finding; §4 healthy is ~0
 	// for all classes, but transient blips (LOADING during a restart) are
 	// tolerated by the higher thresholds
-	rateThreshold int
-	tier          string
-	playbook      string
-	meaning       string
-	mechanism     string
-	context       string
-	action        string
-	verify        string
+	rateThreshold     int
+	pageRateThreshold int
+	tier              string
+	playbook          string
+	meaning           string
+	mechanism         string
+	context           string
+	action            string
+	verify            string
 	// redactIDs removes UUID/server.Id values from the retained sample. Some
 	// classes need a representative site/error but their entity identifiers
 	// must not be copied into alert artifacts.
@@ -99,7 +100,7 @@ var logClasses = []logClass{
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
 		meaning: "the service rejected the trusted ingress source tuple and fell back to the proxy peer, collapsing unrelated users onto one rate-limit identity"},
 	{name: "netescrow-negative", re: regexp.MustCompile(`\[netescrow\]negative counter after`),
-		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
+		rateThreshold: 1, pageRateThreshold: netEscrowNegativePageRate, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
 		groupBy:   netEscrowNegativeLogGroup,
 		meaning:   "a settlement/release found fewer bytes in a Redis reservation mirror than PostgreSQL durably released; old binaries leave that negative value available until reconciliation, while a clamped_to=0 line means the current atomic release retained the diagnostic result and deleted the bad mirror in the same command",
 		mechanism: "The dominant production cause is the pre-fix full-fleet reconciler: it snapshots reservations, walks roughly 898,000 balances, then overwrites each Redis mirror with an absolute SET or DEL. A live release after that old snapshot can be clobbered near the end of a long pass. A smaller race remains even with page-local additive reconciliation because PostgreSQL settlement commits before its Redis release: reconciliation can observe the commit and remove the reservation before the delayed release arrives. Current release Lua clamps that irreducible negative atomically. This line is mutation-site aftermath, not evidence that the site independently created fleet-wide drift.",
@@ -183,6 +184,13 @@ var novelNormalizeRes = []*regexp.Regexp{
 }
 
 const novelRateThreshold = 20
+
+// One negative mirror is an integrity defect. A hundred mutation exposures in
+// one service/site minute is a fleet-scale availability/accounting incident,
+// as opposed to the small irreducible cross-store race retained for diagnosis.
+// The standing stream collector is required for this threshold: bounded log
+// searches can truncate the exact burst that makes the severity actionable.
+const netEscrowNegativePageRate = 100
 
 // targetRe extracts the ip:port a class line is about (the sick-node
 // attribution from §4: identity is class + target + frame).
@@ -456,17 +464,28 @@ func (self *logTailer) drainWindow() []finding {
 				continue
 			}
 			broken = true
+			tier := c.tier
+			baseline := "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)"
+			observed := fmt.Sprintf("rate=%d/min class=%s", count, c.name)
+			if c.pageRateThreshold > 0 {
+				observed += fmt.Sprintf(" page_threshold=%d/min", c.pageRateThreshold)
+				baseline += fmt.Sprintf("; page at >= %d/min", c.pageRateThreshold)
+				if count >= c.pageRateThreshold {
+					tier = tierPage
+				}
+			}
 			attribution := self.classTargets[key]
 			attributionLabel := "target"
 			if c.groupBy != nil {
 				attributionLabel = "frame"
 			}
+			observed += fmt.Sprintf(" %s=%s", attributionLabel, attribution)
 			findings = append(findings, finding{
-				probeId: "logs/" + c.name, tier: c.tier,
+				probeId: "logs/" + c.name, tier: tier,
 				class: c.name, target: self.service, frame: attribution, sustain: 1,
 				symptom:   fmt.Sprintf("service %s: %d/min lines of class %s (threshold %d/min)", self.service, count, c.name, c.rateThreshold),
-				baseline:  "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)",
-				observed:  fmt.Sprintf("rate=%d/min class=%s %s=%s", count, c.name, attributionLabel, attribution),
+				baseline:  baseline,
+				observed:  observed,
 				mechanism: c.mechanism,
 				evidence:  "meaning: " + c.meaning + "\nsample: " + self.classSamples[key],
 				context:   c.context,
