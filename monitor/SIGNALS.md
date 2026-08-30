@@ -1696,7 +1696,9 @@ cleanup advice.
   passed three race-enabled real-Redis runs; a rebuilt standing monitor then
   classified the continuing production line as `redis-netescrow-ttl`, rendered
   the key as `{escrow_<id>}net`, and included the cap plus the durable-balance
-  non-action in its Markdown.
+  non-action in its Markdown. The first complete fixed-cadence production
+  stream later measured 20/min on old API g4, followed by 12/min and 15/min;
+  this is a rollout target, not evidence to shorten the durable balance.
 - Verify with a binary-safe sample, `avg_ttl` below two years, falling dataset
   memory, and no new TTL warnings. Raising maxmemory does not repair the leak.
 
@@ -2759,6 +2761,23 @@ the append-only schema gate passes, new taskworker generations run the
 page-local additive/no-op-skipping reconciler, a scheduled aggregate returns
 to the tens-of-GiB band, and all three emitters remain quiet for a full
 following interval.
+
+The final pre-deploy sequence supplied that terminal control while also
+reproducing a short-duration clobber. Task
+`01a05417-ef96-3dc9-4448-e5f849e7f296` ran for about 108 seconds on old
+edge-0/g1 and ended at 19:21:00.946518Z with 185.27GiB over plus 267.55GiB
+under across 1,596 networks. Its approximately 23-second successor
+`01a0541e-3516-546c-9cb5-8c0c8c1cfa88` moved to old edge-1/g1 and ended at
+19:26:25.921346Z with 268.32GiB over plus 186.55GiB under across 1,620
+networks. The monitor preserved both executor identities and rendered the
+near-exact 267.55GiB-under to 268.32GiB-over flip as
+`matched_reversal=true reversal_direction=under-to-over`. Task
+`01a05423-2a85-ac78-d438-085f46362b21` then moved to old edge-0/g2, completed
+in about 21 seconds at 19:31:48.963077Z, and contracted to 42.95GiB over plus
+47.14GiB under across 868 networks. The overlapping v71/v72 standing streams
+recorded zero negative-counter lines across the reversal and contraction.
+This is a complete legacy clobber/reversal/convergence chain; it clears the
+individual sequence without making the old absolute writer safe.
 
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
