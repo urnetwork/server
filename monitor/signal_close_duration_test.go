@@ -12,8 +12,10 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 			for _, want := range []string{
 				"task_id::text",
 				"run_end_time > now() - interval '45 minutes'",
-				"run_end_time-run_start_time >= interval '120 seconds'",
-				"ORDER BY run_end_time DESC",
+				"AS is_overrun",
+				"latest_rank = 1",
+				"(is_overrun AND band_rank = 1)",
+				"ORDER BY completed_unix_s DESC",
 			} {
 				if !strings.Contains(query, want) {
 					t.Fatalf("close-duration query lost %q: %s", want, query)
@@ -143,15 +145,72 @@ func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *t
 		"failed_at=2026-08-30T14:52:00.815957Z",
 		"failed_host=edge-3",
 		"failed_container=failed",
+		"retry_phase=active",
+		"retry_last_heartbeat_duration_s=20",
+		"retry_observed_at=2026-08-30T14:52:25.507527Z",
+		"retry_host=edge-1",
+		"retry_generation=g2",
+		"retry_container=retry",
 		"a failed checkpoint lasting 1800s",
 		"eval-error retains rescheduled deadline attempts",
+		"fast peer retry is an A/B control",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("rescheduled timeout was lost after its short retry, missing %q:\n%s", want, alert.Markdown())
 		}
 	}
-	if strings.Contains(alert.Observed, "duration_s=1367") || strings.Contains(alert.Observed, "phase=active") {
+	if strings.Contains(alert.Observed, "phase=completed duration_s=1367") ||
+		strings.HasPrefix(alert.Observed, "phase=active ") {
 		t.Fatalf("older completion or short retry replaced timeout: %+v", alert)
+	}
+}
+
+func TestCloseDurationSignalReportsCompletedSameIDRetryWithoutErasingTimeout(t *testing.T) {
+	taskID := "01a0530c-65aa-153e-19d8-82ad3698cf40"
+	successorTaskID := "01a05311-f53e-ebcd-dc07-ec4835d420c5"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if !strings.Contains(query, "task_id = '"+taskID+"'") {
+				t.Fatalf("query did not retain the terminal task id after later successors: %s", query)
+			}
+			return []Row{
+				{successorTaskID, "completed", "22", "1", "1788101600"},
+				{taskID, "completed", "24", "5", "1788101545"},
+				{"01a052f6-5c55-e78b-110d-dad7afffe710", "completed", "1367", "1902", "1788098400"},
+			}, nil
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "[edge-3][taskworker][g2][cid:failed][I][2026-08-30T14:52:00.815957Z][task.go:1930][" + taskID + "]eval error(1800.83s) (reschedule) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({}) = Timeout\n" +
+				"[edge-1][taskworker][g2][cid:retry][I][2026-08-30T14:52:25.507527Z][task.go:1938][" + taskID + "]eval active(20.01s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})\n" +
+				"[edge-4][taskworker][g1][cid:successor][I][2026-08-30T14:53:15.507527Z][task.go:1938][" + successorTaskID + "]eval active(10.01s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
+		},
+	}
+
+	alerts, err := NewCloseDurationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "close-duration-overrun")
+	for _, want := range []string{
+		"phase=failed duration_s=1800",
+		"task_id=" + taskID,
+		`failed_error="Timeout"`,
+		"retry_phase=completed",
+		"retry_duration_s=24",
+		"retry_completed_age_s=5",
+		"retry_completed_at=2026-08-30T14:52:25Z",
+		"retry_host=edge-1",
+		"retry_generation=g2",
+		"retry_container=retry",
+		"fast peer retry is an A/B control",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("completed retry lost timeout evidence %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Observed, "phase=completed duration_s=24") ||
+		strings.Contains(alert.Observed, "phase=completed duration_s=1367") {
+		t.Fatalf("completion erased timeout: %+v", alert)
 	}
 }
 

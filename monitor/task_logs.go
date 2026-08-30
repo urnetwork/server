@@ -150,6 +150,14 @@ func formatExecutorActiveTasks(runs []executorActiveTask, limit int) string {
 // largest elapsed value. Selecting the newest run matters for immediate
 // recurring successors: an older long heartbeat must not hide a newer run.
 func parseTaskActiveRun(logOutput, taskName string) taskActiveRun {
+	return parseTaskActiveRunForID(logOutput, taskName, "")
+}
+
+// parseTaskActiveRunForID selects one exact task lifecycle while retaining
+// parseTaskActiveRun's newest-heartbeat semantics. This matters after a retry
+// completes: a later successor can be the newest function heartbeat without
+// being the executor that ran the failed task id's retry.
+func parseTaskActiveRunForID(logOutput, taskName, taskID string) taskActiveRun {
 	active := taskActiveRun{}
 	marker := "." + taskName + "("
 	for _, line := range strings.Split(logOutput, "\n") {
@@ -170,6 +178,9 @@ func parseTaskActiveRun(logOutput, taskName string) taskActiveRun {
 		}
 		if idMatch := taskRunIDRe.FindStringSubmatch(line); len(idMatch) == 2 {
 			candidate.taskID = idMatch[1]
+		}
+		if taskID != "" && candidate.taskID != taskID {
+			continue
 		}
 		if timeMatch := warpLogTimeRe.FindStringSubmatch(line); len(timeMatch) == 2 {
 			candidate.observedAt, _ = time.Parse(time.RFC3339Nano, timeMatch[1])

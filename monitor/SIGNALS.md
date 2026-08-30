@@ -1047,10 +1047,13 @@ lifecycle tests require the newest timestamped heartbeat to supersede an older
 one, the same completed task id to suppress its lingering heartbeat, and a
 different active successor id to remain visible. They also preserve the exact
 1,800.83s rescheduled timeout when a short same-id retry follows it and the only
-`finished_task` overrun belongs to an older checkpoint. When that different
-successor also crosses 120s, its active alert retains the precursor failure's
-duration, task id, error, timestamp, and executor identity rather than letting
-new activity erase the deadline incident.
+`finished_task` overrun belongs to an older checkpoint. A completed-retry case
+places an even newer successor completion and heartbeat after that retry; the
+query must still retain the terminal task id's own row, and executor attribution
+must come from that exact id's heartbeat rather than the newest function
+heartbeat. When a different successor crosses 120s, its active alert retains
+the precursor failure's duration, task id, error, timestamp, and executor
+identity rather than letting new activity erase the deadline incident.
 
 Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
 control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged
@@ -1118,6 +1121,24 @@ run. It was still only 232 seconds below the hard deadline and roughly 65x the
 healthy 20–30-second band. A successful terminal row therefore does not clear
 the latency incident or weaken the 25k checkpoint fix; it shows the amplifier
 is continuous near the deadline rather than a binary timeout-only failure.
+
+The last observed old-generation checkpoint repeated the failed/fast-peer
+control. Task `01a0541e-82bf-5677-cb49-aa25a23ecdf0` reached
+`eval error(1801.41s) ... = Timeout` at 19:51:23.925745Z on edge-1/g2
+container `06abfbe03c32`. The same id was reclaimed on edge-3/g1 container
+`786ae804bb97`, emitted 10s and 20s heartbeats, and `finished_task` recorded a
+rounded 25-second completion ending at 19:51:53Z. The monitor retains the
+failed attempt as the incident while rendering `retry_phase=completed`, retry
+duration/time, and the exact retry executor. This live validation also exposed
+and fixed two evidence-loss bugs: selecting only the latest completion plus
+latest overrun lost a retry after later cohorts completed, and using the newest
+function heartbeat mislabeled that retry with a later successor's executor.
+The probe now selects the exact active and terminal task ids in addition to the
+ranked rows and parses executor identity for the terminal id specifically. The
+deterministic later-successor test locks both invariants. This approximately
+72x same-task split remains pre-rollout evidence for the 25k checkpoint and
+process-local load sensitivity; it is not permission to erase the timeout or
+raise its deadline.
 
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
