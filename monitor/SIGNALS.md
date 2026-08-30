@@ -1517,6 +1517,18 @@ go_memstats_heap_alloc_bytes{env="main",job="taskworker"}
   taskworker `eval active` task IDs on that executor, then compare those task
   families on other workers. Co-residency proves local contention; it does not
   assign every byte to one task.
+- Query the loopback Mimir API through service hosts in inventory order rather
+  than treating the first host as a unique metrics authority. A transport
+  failure falls through to the next gateway, and the gateway that served the
+  primary heap query is tried first for its related five-minute rate query.
+  Emit `monitor/visibility` only if every service gateway fails. At
+  2026-08-30 21:57Z, edge-0's local query timed out after 15s while edge-1,
+  edge-3, and edge-4 each returned a valid Mimir API response immediately;
+  that is a gateway-path failure, not evidence that the replicated metrics
+  backend is unavailable. The synthetic regression forces the first gateway
+  to time out, proves the second preserves the heap finding, and proves the
+  rate query stays on the successful gateway instead of repeating the known
+  timeout.
 - Action: bound or stream the implicated working sets; retain task deadlines.
   Do not restart merely to erase the evidence, and do not raise deadlines to
   normalize allocator/GC contention.

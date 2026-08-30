@@ -232,10 +232,55 @@ func TestWorkerMemorySignalSyntheticRateFailureDoesNotHideHeapSkew(t *testing.T)
 		t.Fatal(err)
 	}
 	markdown := requireAlertClass(t, alerts, "worker-memory-skew").Markdown()
-	if !strings.Contains(markdown, "best-effort five-minute rate lookup failed: synthetic rate query unavailable") {
+	if !strings.Contains(markdown, "best-effort five-minute rate lookup failed: metrics-1: synthetic rate query unavailable") {
 		t.Fatalf("heap alert did not preserve rate-query degradation evidence:\n%s", markdown)
 	}
 	if strings.Contains(markdown, "cpu_cores_5m=") {
 		t.Fatalf("heap alert rendered unavailable rate values:\n%s", markdown)
+	}
+}
+
+func TestWorkerMemorySignalSyntheticFallsBackToAnotherServiceGateway(t *testing.T) {
+	now := time.Date(2026, 8, 30, 21, 57, 10, 0, time.UTC)
+	const gib = float64(uint64(1) << 30)
+	workers := []workerMetricFixture{
+		{host: "edge-0", block: "g1", instance: "a", heap: 0.125 * gib, cpuRate: 0.02, allocRate: 1 << 20, gcRate: 0.01, gcPauseRate: 0.000001},
+		{host: "edge-1", block: "g1", instance: "hot", heap: 12 * gib, cpuRate: 4, allocRate: 700 << 20, gcRate: 0.125, gcPauseRate: 0.00004},
+		{host: "edge-3", block: "g1", instance: "c", heap: 0.25 * gib, cpuRate: 0.04, allocRate: 3 << 20, gcRate: 0.03, gcPauseRate: 0.000003},
+	}
+	payload := workerMetricsFixtureJSON(t, now, workers...)
+	ratePayload := workerRatesFixtureJSON(t, now, workers...)
+	calls := []string{}
+	source := &syntheticSource{
+		hostFn: func(host HostSettings, command string) (string, error) {
+			query := "metrics"
+			if strings.Contains(command, "monitor_rate") {
+				query = "rates"
+			}
+			calls = append(calls, host.Name+":"+query)
+			if host.Name == "metrics-1" {
+				return "", errors.New("synthetic gateway timeout")
+			}
+			if query == "rates" {
+				return ratePayload, nil
+			}
+			return payload, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	settings := workerMemorySyntheticSettings(source, now)
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-2", Roles: []string{"services"}})
+
+	alerts, err := NewWorkerMemorySignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "worker-memory-skew").Markdown()
+	if !strings.Contains(markdown, "12.00GiB of allocated Go heap") || !strings.Contains(markdown, "cpu_cores_5m=4.000") {
+		t.Fatalf("fallback did not preserve the primary and rate observations:\n%s", markdown)
+	}
+	wantCalls := []string{"metrics-1:metrics", "metrics-2:metrics", "metrics-2:rates"}
+	if fmt.Sprint(calls) != fmt.Sprint(wantCalls) {
+		t.Fatalf("gateway calls = %v, want %v", calls, wantCalls)
 	}
 }

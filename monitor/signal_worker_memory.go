@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -92,9 +93,15 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		strconv.Quote(env.cfg.env),
 	)
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(query)
-	out, err := env.runner.shell(ctx, metricHosts[0], "curl -fsS --max-time 15 '"+queryURL+"'")
+	out, metricHost, err := shellFirstServiceGateway(
+		ctx,
+		env.runner,
+		metricHosts,
+		nil,
+		"curl -fsS --max-time 15 '"+queryURL+"'",
+	)
 	if err != nil {
-		return nil, fmt.Errorf("worker memory: query Mimir through %s: %w", metricHosts[0].name, err)
+		return nil, fmt.Errorf("worker memory: query Mimir through service gateways: %w", err)
 	}
 
 	var response mimirInstantResponse
@@ -166,7 +173,13 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		fmt.Sprintf(`label_replace(rate(go_gc_duration_seconds_sum{env=%s,job="taskworker"}[5m]),"monitor_rate","gc_pause","job",".*")`, strconv.Quote(env.cfg.env)),
 	}, " or ")
 	rateURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(rateQuery)
-	rateOut, rateErr := env.runner.shell(ctx, metricHosts[0], "curl -fsS --max-time 15 '"+rateURL+"'")
+	rateOut, _, rateErr := shellFirstServiceGateway(
+		ctx,
+		env.runner,
+		metricHosts,
+		metricHost,
+		"curl -fsS --max-time 15 '"+rateURL+"'",
+	)
 	if rateErr == nil {
 		var rateResponse mimirInstantResponse
 		if err := json.Unmarshal([]byte(rateOut), &rateResponse); err != nil {
@@ -303,6 +316,43 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	}
 	sort.Slice(findings, func(i, j int) bool { return findings[i].target < findings[j].target })
 	return findings, nil
+}
+
+// shellFirstServiceGateway queries a loopback service through the first
+// reachable services host. Service gateways front the same replicated
+// backend, so one host's SSH or local proxy failure must not make that backend
+// unobservable. The gateway that served the primary query is preferred for a
+// related follow-up, avoiding a repeated timeout on a gateway that just
+// failed.
+func shellFirstServiceGateway(
+	ctx context.Context,
+	runner probeRunner,
+	hosts []*host,
+	preferred *host,
+	command string,
+) (string, *host, error) {
+	ordered := make([]*host, 0, len(hosts))
+	if preferred != nil {
+		ordered = append(ordered, preferred)
+	}
+	for _, candidate := range hosts {
+		if candidate != preferred {
+			ordered = append(ordered, candidate)
+		}
+	}
+
+	errs := make([]error, 0, len(ordered))
+	for _, candidate := range ordered {
+		out, err := runner.shell(ctx, candidate, command)
+		if err == nil {
+			return out, candidate, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", candidate.name, err))
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return "", nil, errors.Join(errs...)
 }
 
 func mimirInstantValue(raw []json.RawMessage) (time.Time, float64, error) {
