@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -28,6 +30,7 @@ type monitorYaml struct {
 		Name      string   `yaml:"name"`
 		OverlayIp string   `yaml:"overlay_ip"`
 		Roles     []string `yaml:"roles"`
+		Disabled  bool     `yaml:"disabled"`
 		Redis     *struct {
 			EntryPort        int   `yaml:"entry_port"`
 			NodePorts        []int `yaml:"node_ports"`
@@ -53,6 +56,27 @@ type monitorYaml struct {
 	} `yaml:"source_attribution"`
 }
 
+// servicesYaml is the narrow active-LB view needed by edge-ipv6. The first
+// versions entry is the active warpctl configuration; older entries are
+// intentionally ignored because they retain historical interface identities.
+type servicesYaml struct {
+	Domain   string                `yaml:"domain"`
+	Versions []servicesVersionYaml `yaml:"versions"`
+}
+
+type servicesVersionYaml struct {
+	LB servicesLBYaml `yaml:"lb"`
+}
+
+type servicesLBYaml struct {
+	Interfaces map[string]map[string]servicesLBInterfaceYaml `yaml:"interfaces"`
+}
+
+type servicesLBInterfaceYaml struct {
+	IPv6        string `yaml:"ipv6"`
+	Transparent bool   `yaml:"transparent"`
+}
+
 // LoadSignalSettings loads production settings from the standard WARP_HOME
 // config/vault resolvers. Keeping this here makes cli/monitor a thin wrapper.
 func LoadSignalSettings() (SignalSettings, error) {
@@ -74,6 +98,19 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, fmt.Errorf("pg.yml: %w", err)
 	}
 	pgKeys, err := pgResource.ParseE()
+	if err != nil {
+		return SignalSettings{}, err
+	}
+
+	servicesResource, err := server.Vault.SimpleResource("services.yml")
+	if err != nil {
+		return SignalSettings{}, fmt.Errorf("services.yml: %w", err)
+	}
+	var services servicesYaml
+	if err := servicesResource.UnmarshalYamlE(&services); err != nil {
+		return SignalSettings{}, err
+	}
+	edgeIPv6ByHost, err := activeEdgeIPv6FromServices(services)
 	if err != nil {
 		return SignalSettings{}, err
 	}
@@ -109,11 +146,15 @@ func LoadSignalSettings() (SignalSettings, error) {
 	settings = settings.withDefaults()
 	routes := lanRoutes()
 	for _, configured := range y.Hosts {
+		if configured.Disabled {
+			continue
+		}
 		h := HostSettings{
 			Name:           configured.Name,
 			LANAddress:     routes[configured.Name],
 			OverlayAddress: configured.OverlayIp,
 			Roles:          append([]string(nil), configured.Roles...),
+			EdgeIPv6:       cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
 		}
 		if configured.Redis != nil {
 			h.RedisEntryPort = configured.Redis.EntryPort
@@ -141,6 +182,41 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+func activeEdgeIPv6FromServices(services servicesYaml) (map[string][]EdgeIPv6InterfaceSettings, error) {
+	if len(services.Versions) == 0 {
+		return nil, fmt.Errorf("services.yml: no active version")
+	}
+	domain := strings.TrimSpace(services.Domain)
+	if domain == "" {
+		return nil, fmt.Errorf("services.yml: domain is required for edge IPv6 SNI")
+	}
+
+	byHost := map[string][]EdgeIPv6InterfaceSettings{}
+	for configuredHost, interfaces := range services.Versions[0].LB.Interfaces {
+		host := strings.TrimSuffix(configuredHost, "."+domain)
+		if !strings.Contains(host, "-edge-") {
+			continue
+		}
+		for interfaceName, configured := range interfaces {
+			address := strings.TrimSpace(configured.IPv6)
+			if address == "" || configured.Transparent {
+				continue
+			}
+			byHost[host] = append(byHost[host], EdgeIPv6InterfaceSettings{
+				Interface:     interfaceName,
+				Address:       address,
+				ProbeHostname: "api-v6." + domain,
+			})
+		}
+	}
+	for host := range byHost {
+		sort.Slice(byHost[host], func(i, j int) bool {
+			return byHost[host][i].Interface < byHost[host][j].Interface
+		})
+	}
+	return byHost, nil
 }
 
 func loadConfig() *monitorConfig {

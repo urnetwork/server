@@ -35,6 +35,20 @@ type HostSettings struct {
 	// discovered from running containers on every probe; no dynamic port is
 	// cached here.
 	Proxy *ProxyHostSettings
+
+	// EdgeIPv6 is derived from the active services.yml LB version. It is not
+	// duplicated in monitor.yml, so public probes always compare the live host
+	// with the same configured identity used by warpctl.
+	EdgeIPv6 []EdgeIPv6InterfaceSettings
+}
+
+// EdgeIPv6InterfaceSettings describes one configured public IPv6 LB path.
+// ProbeHostname supplies TLS SNI while Address pins the request to this exact
+// interface instead of allowing DNS health selection to hide one failed edge.
+type EdgeIPv6InterfaceSettings struct {
+	Interface     string
+	Address       string
+	ProbeHostname string
 }
 
 // ProxyHostSettings contains only stable public/routing identity. Address
@@ -247,6 +261,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 			redisEntryPort:        configured.RedisEntryPort,
 			redisExpectedReplicas: configured.RedisExpectedReplicas,
 			proxy:                 cloneProxyHostSettings(configured.Proxy),
+			edgeIPv6:              cloneEdgeIPv6Settings(configured.EdgeIPv6),
 		}
 		if len(configured.RedisNodePorts) > 0 {
 			h.redisPorts = append([]int(nil), configured.RedisNodePorts...)
@@ -271,6 +286,7 @@ func hostSettingsFromHost(h *host) HostSettings {
 		RedisNodePorts:        h.redisNodePorts(),
 		RedisExpectedReplicas: h.redisExpectedReplicas,
 		Proxy:                 cloneProxyHostSettings(h.proxy),
+		EdgeIPv6:              cloneEdgeIPv6Settings(h.edgeIPv6),
 	}
 }
 
@@ -281,6 +297,10 @@ func cloneProxyHostSettings(settings *ProxyHostSettings) *ProxyHostSettings {
 	clone := *settings
 	clone.AddressFamilies = append([]string(nil), settings.AddressFamilies...)
 	return &clone
+}
+
+func cloneEdgeIPv6Settings(settings []EdgeIPv6InterfaceSettings) []EdgeIPv6InterfaceSettings {
+	return append([]EdgeIPv6InterfaceSettings(nil), settings...)
 }
 
 type sourceRunner struct {

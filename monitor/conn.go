@@ -46,6 +46,7 @@ type host struct {
 	redisNodeHi           int
 	redisExpectedReplicas int
 	proxy                 *ProxyHostSettings
+	edgeIPv6              []EdgeIPv6InterfaceSettings
 }
 
 func (self *host) hasRole(role string) bool {

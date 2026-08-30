@@ -70,7 +70,7 @@ host, redis-cli on the redis hosts, top/ss/dmesg/journalctl/docker anywhere.
 ssh authentication is delegated to `~/.ssh/config` (host → IdentityFile),
 assumed set up on whatever runs the monitor; no key material lives in
 `vault/<env>/monitor.yml` — it carries only the login user, host roles,
-overlay IPs, and redis ports.
+operator-disabled state, overlay IPs, and redis ports.
 
 **ssh-exec is the universal transport.** Every command in SIGNALS.md is
 written as a run-on-the-host command, and that is exactly how the monitor
@@ -109,9 +109,11 @@ The monitor has full vault + config access (the standard WARP_HOME
 resolvers) and reads every shared fact from its source of truth rather than
 duplicating it: pg credentials from `vault/<env>/pg.yml`, redis credentials
 from `vault/<env>/redis.yml`, host LAN IPs from `config/<env>/settings.yml`
-routes. `vault/<env>/monitor.yml` (§7) carries only what exists nowhere
-else: the monitor ssh identity, host roles, overlay IPs (local dev), and
-redis port layout. The pg path has one special rule from
+routes. Public edge IPv6 identities come from the first active version in
+`vault/<env>/services.yml`; historical versions are never probe targets.
+`vault/<env>/monitor.yml` (§7) carries only what exists nowhere else: the
+monitor ssh identity, host roles, explicit operator-disabled state, overlay
+IPs (local dev), and redis port layout. The pg path has one special rule from
 the 2026-07-17 incident: diagnose on **direct 5432**, never through
 pgbouncer 6432 — but *also* probe 6432 cheaply, because "6432 queues/dies
 while 5432 connects instantly" is itself a documented discriminator
@@ -392,6 +394,10 @@ hosts:                # only monitor-specific facts; lan ips come
   - name: by-us-fmt-5-edge-2   # from config settings.yml routes by name
     overlay_ip: 172.28.208.182
     roles: [pg-primary]
+  - name: by-us-fmt-5-edge-5
+    disabled: true             # known offline; excluded from all probes
+    overlay_ip: 172.28.208.176
+    roles: [services]
   - name: by-us-fmt-5-edge-6
     overlay_ip: 172.28.208.177
     roles: [redis-cluster, minio]
@@ -417,7 +423,8 @@ IdentityFile per host. Everything else shared is read from its source of
 truth, never duplicated here (§2): pg credentials from `vault/<env>/pg.yml`
 (password passed on stdin line 1 of each battery, never argv), redis
 credentials from `vault/<env>/redis.yml`, LAN routes from
-`config/<env>/settings.yml`.
+`config/<env>/settings.yml`, and active nontransparent edge IPv6 interfaces
+from the first `vault/<env>/services.yml` version.
 
 ## 8. Development plan
 

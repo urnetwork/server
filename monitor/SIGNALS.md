@@ -6058,3 +6058,48 @@ Reboot snow once as a deployment gate: nginx must wait until
 `172.28.208.185` exists or restart on the transient bind failure.
 `network-online.target` alone does not guarantee that the later OpenVPN address
 is present.
+
+## 18. Edge IPv6 ingress — EDGEIPV61
+
+### 18.1 Exact-address HTTPS and upstream identity
+
+Probe: `edge-ipv6`
+
+Take public edge targets only from the first (active) `services.yml` version.
+Ignore historical versions and transparent proxy interfaces. For every enabled
+edge interface with an IPv6 address, pin `api-v6.<domain>` HTTP/1.1 HTTPS to that
+exact address so DNS health selection cannot hide a failed interface. Healthy
+means HTTP 200; recovery requires three consecutive pinned 200 responses.
+
+Compare every target with the exact global IPv6 address on the configured live
+interface and the matching `warp-main-lb-<interface>.service`. Classify a
+missing active address as identity drift: reconcile active Vault, persistent
+host networking, DNS, and the upstream router permit destination before
+changing routes or containers. Disabled hosts in `monitor.yml` are deliberately
+excluded; this is how an operator-declared offline edge such as edge-5 stays out
+of both the health denominator and remote diagnostics.
+
+A curl exit 7 in less than one second is the immediate-reset signature. Inspect
+DNAT rules in order and compare every pool target with live listening sockets.
+During a duplicate-to-single rolling transition, an old first rule can point at
+a listener that closed after the overlap scan while shadowing a later live
+rule. Remove only the proven dead target and deploy Warp's final
+socket-authoritative reconciliation on that transition.
+
+A timeout is different. If the host owns the exact address, serves HTTP 200 when
+the same SNI request is pinned locally to it, and a request bound to that source
+address proves IPv6 egress, local identity, DNAT, TLS, service readiness, and the
+return path are intact. If the external pinned SYN also does not increment the
+host's exact DNAT rule, the failure is upstream default-drop/ACL. Compare the
+router permit destination with active `services.yml`, preserving the existing
+ports, actions, ICMPv6 permit, and default drop. On 2026-08-30 edge-3 owned active
+addresses ending `e380` and `e381`, but its WANv6 permit rules still named
+historical destinations ending `e382` and `e383`; that identity mismatch allowed
+ICMPv6 while silently dropping new TCP/80 and TCP/443 ingress.
+
+For any other timeout, capture the pinned SYN, check NDP, policy routing, and
+exact DNAT counters, then change only the first layer where packets disappear.
+A connected request with a non-200 response is instead a TLS/SNI, LB generation,
+or application-readiness fault. Verification for every repair is three pinned
+HTTP/1.1 IPv6 200 responses per configured address plus advancing counters at
+the repaired layer.

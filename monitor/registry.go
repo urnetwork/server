@@ -73,6 +73,7 @@ func NewSignals() []Signal {
 		NewTaskConvergenceSignal(),
 		NewProxyPathSignal(),
 		NewKeyPublicationSignal(),
+		NewEdgeIPv6Signal(),
 	}
 }
 
