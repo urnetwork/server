@@ -80,6 +80,81 @@ const taskFailureSummarySQL = `
 	ORDER BY reschedule_error_count DESC, task;
 `
 
+func taskCauseClasses(summary string) map[string]struct{} {
+	classes := map[string]struct{}{}
+	for _, part := range strings.Split(summary, ",") {
+		class, _, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && class != "" {
+			classes[class] = struct{}{}
+		}
+	}
+	return classes
+}
+
+func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
+	classes := taskCauseClasses(causeSummary)
+	actions := []string{}
+	verifications := []string{}
+	known := map[string]struct{}{}
+	add := func(class, action, verification string) {
+		known[class] = struct{}{}
+		if _, ok := classes[class]; !ok {
+			return
+		}
+		actions = append(actions, action)
+		verifications = append(verifications, verification)
+	}
+
+	add("wallet-insufficient",
+		"fund or pause the payout wallet for wallet-insufficient rows",
+		"funded wallet rows clear")
+	add("schema-object-missing",
+		"restore migration coherence per §8.9 for schema-object-missing rows before dependent services run; do not hand-create the artifact",
+		"the migration head and artifacts reach the binary requirement and schema-object-missing clears")
+	add("connection-cleanup-deadline",
+		"deploy the queued, cursor-batched CompletePayment retention path for connection-cleanup-deadline rows",
+		"the legacy retention query and new 120-second cleanup failures disappear")
+	add("processor-invalid-destination",
+		"correct chain-mismatched payout wallets and release only Circle's definitive invalid-destination pre-chain attempts while preserving ambiguous-submit idempotency keys",
+		"corrected destination retries switch wallets without duplicate sends")
+	add("processor-bad-request",
+		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
+		"processor-bad-request rows reach a definitive safe outcome")
+	add("processor-rate-limit",
+		"retain normal backoff for processor-rate-limit rows",
+		"processor-rate-limit returns to its normal bounded retry rate")
+	add("deadline-timeout",
+		"correlate deadline-timeout rows with their exact evaluator boundary before changing batch size or MaxTime",
+		"deadline-timeout rows finish inside their justified boundary")
+	add("context-canceled",
+		"separate context-canceled rows by deploy drain versus exact task deadline before changing their retry policy",
+		"context-canceled rows reach their documented drain or deadline outcome")
+
+	unknown := false
+	for class := range classes {
+		if _, ok := known[class]; !ok {
+			unknown = true
+			break
+		}
+	}
+	if unknown {
+		actions = append(actions, "inspect the original task error for every remaining cause class")
+		verifications = append(verifications, "every remaining cause class is diagnosed and clears")
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "inspect and remediate each listed cause class independently")
+		verifications = append(verifications, "each listed cause class is diagnosed and clears")
+	}
+
+	playbook := "SIGNALS.md §1.2 and §5.7"
+	if _, ok := classes["schema-object-missing"]; ok {
+		playbook = "SIGNALS.md §1.2, §5.7, and §8.9"
+	}
+	return "Handle only the present AdvancePayment classes: " + strings.Join(actions, "; ") + ". Do not delete or manually replay the mixed family.",
+		"Verify each present cause independently: " + strings.Join(verifications, "; ") + ".",
+		playbook
+}
+
 // taskCanaryProbe is SIGNALS.md 1.2: the cheapest end-to-end redis probes.
 // UpdateClientLocations runs ~every 30s and writes redis across many slots; if
 // redis is sick anywhere on the write path it errors within a minute. It also
@@ -377,8 +452,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertMechanism = fmt.Sprintf("This task family contains %d distinct error classes. Its representative row is selected by error count for bounded evidence and cannot describe every failing row; use the complete cause breakdown instead of attributing the whole family to that sample.", causeClassCount)
 			alertContext += " The cause breakdown is computed across every failing row in this function before selecting the representative error."
 			if task == "AdvancePayment" {
-				alertAction = "Handle each AdvancePayment class independently: fund or pause the payout wallet for wallet-insufficient rows; deploy the queued, cursor-batched CompletePayment retention path for connection-cleanup-deadline rows; correct chain-mismatched payout wallets and release only Circle's definitive invalid-destination pre-chain attempts; inspect other redacted 400 responses while preserving ambiguous-submit idempotency keys; retain backoff for rate limits. Do not delete or manually replay the mixed family."
-				alertVerify = "Each cause count converges independently: funded transfers clear, the legacy retention query and new 120-second cleanup failures disappear, corrected destination retries switch wallets without duplicate sends, other processor 400s are resolved safely, and 429s return to their normal bounded retry rate."
+				alertAction, alertVerify, alertPlaybook = advancePaymentMixedGuidance(causeSummary)
 			} else {
 				alertAction = "Investigate and remediate each listed cause class independently; do not apply the representative error's action to the entire mixed family or delete task rows to hide it."
 				alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."

@@ -199,10 +199,12 @@ WHERE function_name LIKE '%UpdateClient%'
   single-cause explanation falsely describe the other 16 rows. The probe now
   computes a complete bounded cause breakdown before it selects a
   representative error. When more than one class exists, the family alert says
-  it is mixed and gives per-class actions; a sample is evidence, not permission
-  to apply its diagnosis to every row. Keep invalid-destination separate from
-  generic processor 400s because only that typed, definitive pre-chain result
-  is safe to unpin (§5.7).
+  it is mixed and builds its action and verification from only the classes
+  present in that snapshot; stale guidance for an absent class is itself an
+  alerting defect. A sample is evidence, not permission to apply its diagnosis
+  to every row. Keep invalid-destination separate from generic processor 400s
+  because only that typed, definitive pre-chain result is safe to unpin
+  (§5.7).
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains

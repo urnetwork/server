@@ -406,6 +406,54 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 	if strings.Contains(markdown, "The external payout wallet does not own enough") {
 		t.Fatalf("dominant wallet sample misdescribed the mixed family:\n%s", markdown)
 	}
+	if strings.Contains(markdown, "processor-bad-request rows") {
+		t.Fatalf("mixed-family alert rendered guidance for an absent class:\n%s", markdown)
+	}
+}
+
+func TestTaskCanariesSignalMixedGuidanceMatchesPresentMigrationCauses(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{
+				"AdvancePayment", "384", "384", "0", "1071", "1864",
+				"the asset amount owned by the wallet is insufficient", "120", "3",
+				"wallet-insufficient=369,schema-object-missing=10,processor-invalid-destination=5",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"Handle only the present AdvancePayment classes",
+		"restore migration coherence per §8.9",
+		"schema-object-missing clears",
+		"definitive invalid-destination pre-chain attempts",
+		"SIGNALS.md §1.2, §5.7, and §8.9",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("migration mixed-family alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, absent := range []string{
+		"CompletePayment retention path",
+		"processor-bad-request rows",
+		"processor-rate-limit rows",
+	} {
+		if strings.Contains(markdown, absent) {
+			t.Fatalf("migration mixed-family alert rendered absent cause %q:\n%s", absent, markdown)
+		}
+	}
 }
 
 func TestTaskCanariesSignalExplainsInvalidDestinationRecovery(t *testing.T) {
