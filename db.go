@@ -107,9 +107,10 @@ type safePgPool struct {
 // maintenance pool uses pg_maintenance.yml (direct Postgres, bypassing
 // PgBouncer) and db_maintenance.yml (its own max_connections) — and falls back
 // to the defaults (pg.yml / db.yml) when the pool-specific resource is absent
-// or does not define the size. That fallback keeps tests working (they only
-// redirect pg.yml) and tolerates an empty db_maintenance.yml. The main pool's
-// names ARE the defaults, so its resolution is unchanged.
+// or does not define the size. The test harness redirects both pool resources
+// when a production-shaped profile supplies pg_maintenance.yml, and the
+// fallback still tolerates that resource being absent. The main pool's names
+// ARE the defaults, so its resolution is unchanged.
 func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKeys *SimpleResource) {
 	vaultKeys = Vault.RequireSimpleResource(DefaultPgVaultResourceName)
 	if self.vaultResourceName != DefaultPgVaultResourceName {

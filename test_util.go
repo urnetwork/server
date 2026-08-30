@@ -294,6 +294,41 @@ func runTestMain(setup func() func(), run func() int) int {
 	return run()
 }
 
+func testPgResourceForDatabase(pg map[string]any, database string) []byte {
+	return []byte(fmt.Sprintf(
+		`
+authority: "%s"
+user: "%s"
+password: "%s"
+db: "%s"`,
+		pg["authority"],
+		pg["user"],
+		pg["password"],
+		database,
+	))
+}
+
+// Redirect both application and direct-maintenance pools to one ephemeral
+// test database. Production-shaped profiles define pg_maintenance.yml; if it
+// remained pointed at the persistent database, migrations would run there
+// while the test itself saw an empty temporary schema.
+func pushTestPgResources(pg, maintenancePg map[string]any, database string) func() {
+	popPg := Vault.PushSimpleResource(
+		DefaultPgVaultResourceName,
+		testPgResourceForDatabase(pg, database),
+	)
+	popMaintenance := Vault.PushSimpleResource(
+		MaintenancePgVaultResourceName,
+		testPgResourceForDatabase(maintenancePg, database),
+	)
+	PgReset()
+	return func() {
+		popMaintenance()
+		popPg()
+		PgReset()
+	}
+}
+
 // in each test file, `func TestMain(m *testing.M) {(&server.TestEnv{}).TestMain(m)}`
 // https://pkg.go.dev/testing
 func (self *TestEnv) TestMain(m *testing.M) {
@@ -476,7 +511,11 @@ func (self *TestEnv) setup() func() {
 
 	ctx := context.Background()
 
-	pg := Vault.RequireSimpleResource("pg.yml").Parse()
+	pg := Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse()
+	maintenancePg := pg
+	if resource, resourceErr := Vault.SimpleResource(MaintenancePgVaultResourceName); resourceErr == nil {
+		maintenancePg = resource.Parse()
+	}
 	redisResource := Vault.RequireSimpleResource("redis.yml")
 	redisAuthority := redisResource.RequireString("authority")
 	redisPassword := redisResource.RequireString("password")
@@ -534,21 +573,7 @@ func (self *TestEnv) setup() func() {
 		Raise(err)
 	}, OptReadWrite())
 
-	popPg := Vault.PushSimpleResource(
-		"pg.yml",
-		[]byte(fmt.Sprintf(
-			`
-authority: "%s"
-user: "%s"
-password: "%s"
-db: "%s"`,
-			pg["authority"],
-			pg["user"],
-			pg["password"],
-			testPgDbName,
-		)),
-	)
-	PgReset()
+	popPgResources := pushTestPgResources(pg, maintenancePg, testPgDbName)
 
 	popRedis := Vault.PushSimpleResource(
 		"redis.yml",
@@ -606,8 +631,7 @@ cluster: %t`,
 		popRedis()
 		RedisReset()
 
-		popPg()
-		PgReset()
+		popPgResources()
 
 		Db(ctx, func(conn PgConn) {
 			_, err := conn.Exec(

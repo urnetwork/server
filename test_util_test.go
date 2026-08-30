@@ -74,6 +74,50 @@ func TestParseTestPgDbNameValidatesFullIdentifier(t *testing.T) {
 	}
 }
 
+func TestPgResourcesRedirectMaintenancePoolAndRestore(t *testing.T) {
+	popBasePg := Vault.PushSimpleResource(DefaultPgVaultResourceName, []byte(`
+authority: "app.example:5432"
+user: "app"
+password: "app-secret"
+db: "app-db"
+`))
+	defer popBasePg()
+	popBaseMaintenance := Vault.PushSimpleResource(MaintenancePgVaultResourceName, []byte(`
+authority: "direct.example:5432"
+user: "maintenance"
+password: "maintenance-secret"
+db: "maintenance-db"
+`))
+	defer popBaseMaintenance()
+
+	app := Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse()
+	maintenance := Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse()
+	popTest := pushTestPgResources(app, maintenance, "test_exact")
+
+	testApp := Vault.RequireSimpleResource(DefaultPgVaultResourceName)
+	testMaintenance := Vault.RequireSimpleResource(MaintenancePgVaultResourceName)
+	if got := testApp.RequireString("db"); got != "test_exact" {
+		t.Fatalf("test application database = %q, want test_exact", got)
+	}
+	if got := testMaintenance.RequireString("db"); got != "test_exact" {
+		t.Fatalf("test maintenance database = %q, want test_exact", got)
+	}
+	if got := testMaintenance.RequireString("authority"); got != "direct.example:5432" {
+		t.Fatalf("test maintenance authority = %q, want direct authority", got)
+	}
+	if got := testMaintenance.RequireString("user"); got != "maintenance" {
+		t.Fatalf("test maintenance user = %q, want maintenance credentials", got)
+	}
+
+	popTest()
+	if got := Vault.RequireSimpleResource(DefaultPgVaultResourceName).RequireString("db"); got != "app-db" {
+		t.Fatalf("restored application database = %q, want app-db", got)
+	}
+	if got := Vault.RequireSimpleResource(MaintenancePgVaultResourceName).RequireString("db"); got != "maintenance-db" {
+		t.Fatalf("restored maintenance database = %q, want maintenance-db", got)
+	}
+}
+
 // TestRunRetriesUntilPass checks every failure mode is retried: attempt 1
 // panics, 2 calls t.Fail, 3 fails an assertion (assert.Equal -> FailNow ->
 // runtime.Goexit), and 4 passes. Each failure is recorded only on the retryTB
