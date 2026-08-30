@@ -1073,6 +1073,17 @@ its deadline on the hot process. This is another pre-rollout reproduction of
 both the oversized checkpoint and its process-local amplifier; retain the 25k
 checkpoint and bounded sibling paths.
 
+The immediately following same-sized checkpoint repeated that control again.
+Task `01a053e8-00d2-cdfd-7c2f-f4843d2f972a` reached
+`eval error(1801.43s) ... = Timeout` at 18:51:54.281835Z on the same
+edge-0/g1 container. The same id was reclaimed on edge-3/g1, and its
+authoritative row ran from 18:51:59.461170Z to 18:52:21.335651Z—21.874s—
+while retaining `reschedule_error=Timeout`. This approximately 82x same-task
+split is a fourth independent reproduction of the oversized 100k checkpoint
+plus the hot-process amplifier. It is pre-rollout evidence: require new
+generations to complete recurring 25k checkpoints below 120s before clearing
+the incident.
+
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
 
