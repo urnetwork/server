@@ -1054,6 +1054,15 @@ must come from that exact id's heartbeat rather than the newest function
 heartbeat. When a different successor crosses 120s, its active alert retains
 the precursor failure's duration, task id, error, timestamp, and executor
 identity rather than letting new activity erase the deadline incident.
+An exact completed task id is authoritative for the full 45-minute incident
+window; the two-minute completion-age bound applies only to the legacy
+unlabelled duration fallback. Live task
+`01a05446-9d23-9e06-7cd9-1e3db5d91423` exposed that distinction: the monitor
+correctly rendered its 253-second completion, then incorrectly resurrected its
+last 251-second heartbeat as active once the completion became 131 seconds old.
+The shared lifecycle comparator now checks exact ids before the age fallback,
+and the deterministic 131-second case prevents a completed run from
+resurfacing.
 
 Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
 control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged

@@ -81,6 +81,30 @@ func TestCloseDurationSignalCompletedRunSupersedesSameHeartbeat(t *testing.T) {
 	}
 }
 
+func TestCloseDurationSignalCompletedRunDoesNotResurfaceStaleSameIDHeartbeat(t *testing.T) {
+	taskID := "01a05446-9d23-9e06-7cd9-1e3db5d91423"
+	source := &syntheticSource{
+		postgresFn: func(string) ([]Row, error) {
+			// The completion has aged beyond the two-minute compatibility
+			// fallback, but its exact task id still makes it authoritative.
+			return []Row{{taskID, "completed", "253", "131", "1788106166"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "[edge-1][taskworker][g2][cid:hot][I][2026-08-30T20:09:24.977311Z][task.go:1938][" + taskID + "]eval active(251.78s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
+		},
+	}
+
+	alerts, err := NewCloseDurationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "close-duration-overrun")
+	if !strings.Contains(alert.Observed, "phase=completed duration_s=253") ||
+		!strings.Contains(alert.Observed, "completed_age_s=131") {
+		t.Fatalf("stale same-id heartbeat resurfaced after completion: %+v", alert)
+	}
+}
+
 func TestCloseDurationSignalDifferentSuccessorHeartbeatRemainsActive(t *testing.T) {
 	oldTaskID := "01a052f6-5c55-e78b-110d-dad7afffe710"
 	newTaskID := "01a0530c-65aa-153e-19d8-82ad3698cf40"

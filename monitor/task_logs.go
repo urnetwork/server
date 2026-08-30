@@ -251,11 +251,17 @@ func completedTaskSupersedesHeartbeat(
 	active taskActiveRun,
 	logLookback time.Duration,
 ) bool {
-	if active.seconds == 0 || completedAgeSeconds < 0 || int(logLookback/time.Second) < completedAgeSeconds {
+	if active.seconds == 0 {
 		return false
 	}
 	if completedTaskID != "" && active.taskID != "" {
+		// Task ids are unique lifecycle identities. Once this exact run has a
+		// finished row, no retained heartbeat for it can become active again
+		// merely because the completion aged past the unlabelled fallback.
 		return completedTaskID == active.taskID
+	}
+	if completedAgeSeconds < 0 || int(logLookback/time.Second) < completedAgeSeconds {
+		return false
 	}
 	return active.seconds <= completedDurationSeconds
 }
