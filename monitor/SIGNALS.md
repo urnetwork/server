@@ -2372,6 +2372,37 @@ missing, then installs its source/fwmark rules and the real RA default gateway.
 For a pre-fix binary, restarting only the transparent LB controller after the
 address appears restores the table without restarting proxy containers.
 
+**Dead-first DNAT after a partial LB cutover (2026-08-30):** An immediate TCP
+reset from `api-v6` while the LB unit and its sole container are Up can be a
+host-rule failure, not nginx, routing, or IPv6 address discovery. Capture all
+three views before changing anything:
+```bash
+sudo ip6tables -t nat -L WARP-MAIN-LB-<IFACE> -n --line-numbers
+sudo ip6tables -t nat -S WARP-MAIN-LB-<IFACE>
+sudo docker inspect <running-lb> --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep '^WARP_PORTS='
+```
+The decisive signature is two interface-scoped rules for the same public
+protocol/port: the FIRST target is a pool port no running container owns, and
+a later target is the port in the running container's `WARP_PORTS`. Packet
+capture then shows an inbound SYN followed immediately by the host's RST; a
+source-aware `ip -6 route get` can still be correct. On edge-1 eno2, public
+TCP/443 first targeted dead port 7232 while the live LB owned 7231; edge-0 eno4
+had the same 7659-before-7658 split.
+
+Root cause: `warpctl deploy()` inserted the candidate's DNAT first, then a
+fallible post-cutover container-discovery step ran before the deployment
+success flag was set. If that later step failed, deferred rollback stopped the
+candidate but did not restore DNAT, permanently leaving the dead rule first.
+Polling considered the old desired-version container healthy, so it never
+repaired the chain. Correct Warp behavior treats the start of a validated,
+non-transactional redirect as the irreversible commit boundary, keeps that
+candidate on later redirect/housekeeping errors, and on controller startup
+removes only current-pool DNAT targets that no running same-block container
+owns. With an old binary, delete only the fully inspected dead-target rules or
+restore service with a corrected Warp controller; a generic route or container
+restart is not a diagnosis.
+
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
 
 `providers-unresponsive` is not sufficient evidence that providers failed.
