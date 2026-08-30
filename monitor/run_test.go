@@ -288,7 +288,7 @@ func TestRunLoopBoundsConcurrentSignalExecutions(t *testing.T) {
 	}
 }
 
-func TestRunLoopDropsTickElapsedDuringSlowSignal(t *testing.T) {
+func TestRunLoopWaitsFullCadenceAfterSlowSignal(t *testing.T) {
 	var active atomic.Int64
 	var maximum atomic.Int64
 	started := make(chan struct{}, 2)
@@ -300,7 +300,7 @@ func TestRunLoopDropsTickElapsedDuringSlowSignal(t *testing.T) {
 		started: started,
 		release: release,
 	}
-	ticks := make(chan time.Time, 2)
+	createdTickers := make(chan chan time.Time, 2)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -313,7 +313,11 @@ func TestRunLoopDropsTickElapsedDuringSlowSignal(t *testing.T) {
 				handled <- struct{}{}
 				return nil
 			},
-			func(time.Duration) runLoopTicker { return &manualRunLoopTicker{c: ticks} },
+			func(time.Duration) runLoopTicker {
+				ticks := make(chan time.Time, 1)
+				createdTickers <- ticks
+				return &manualRunLoopTicker{c: ticks}
+			},
 		)
 	}()
 
@@ -322,22 +326,32 @@ func TestRunLoopDropsTickElapsedDuringSlowSignal(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("slow signal did not start its initial observation")
 	}
-	// This cadence elapsed while the first observation was still running. It
-	// must not trigger an immediate catch-up execution after the release.
-	ticks <- time.Now()
+	// No cadence exists while the observation is running. Starting it here
+	// would let its tick become stale or land immediately after completion.
+	select {
+	case <-createdTickers:
+		t.Fatal("slow signal started its next cadence before completing")
+	default:
+	}
 	release <- struct{}{}
 	select {
 	case <-handled:
 	case <-time.After(time.Second):
 		t.Fatal("slow signal did not finish its initial observation")
 	}
+	var ticks chan time.Time
+	select {
+	case ticks = <-createdTickers:
+	case <-time.After(time.Second):
+		t.Fatal("slow signal did not start a fresh cadence after completion")
+	}
 	select {
 	case <-started:
-		t.Fatal("slow signal replayed a cadence tick that elapsed while it was running")
+		t.Fatal("slow signal reran before its full post-completion cadence")
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	// A tick arriving after completion starts the next observation normally.
+	// The fresh post-completion cadence starts the next observation normally.
 	ticks <- time.Now()
 	select {
 	case <-started:

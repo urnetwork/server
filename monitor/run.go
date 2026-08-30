@@ -26,22 +26,18 @@ func (t *wallClockRunLoopTicker) Stop()               { t.ticker.Stop() }
 
 type runLoopTickerFactory func(time.Duration) runLoopTicker
 
-// discardElapsedRunLoopTicks drops cadence events that accumulated while a
-// probe was queued or running. A slow observational probe must not enter a
-// back-to-back catch-up loop: that amplifies load on the same dependency that
-// is already slow. The next execution begins on a tick that arrives after the
-// completed observation.
-func discardElapsedRunLoopTicks(ticker runLoopTicker) {
-	ticks := ticker.C()
-	for {
-		select {
-		case _, ok := <-ticks:
-			if !ok {
-				return
-			}
-		default:
-			return
-		}
+// waitRunLoopCadence starts the next cadence only after the preceding probe
+// and handler have completed. A wall-clock ticker created before a slow run
+// can otherwise buffer a missed tick, or fire just after completion, and drive
+// a back-to-back query against the same already-slow dependency.
+func waitRunLoopCadence(ctx context.Context, cadence time.Duration, newTicker runLoopTickerFactory) bool {
+	ticker := newTicker(cadence)
+	defer ticker.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-ticker.C():
+		return true
 	}
 }
 
@@ -210,17 +206,13 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ticker := newTicker(signal.Cadence())
-			defer ticker.Stop()
 			standingLogSignal := isStandingLogSignal(signal)
 			if standingLogSignal {
 				// Tailers begin just before these scheduler goroutines. Preserve
 				// their first complete cadence instead of immediately draining
 				// a startup fragment and calling it a per-minute rate.
-				select {
-				case <-ctx.Done():
+				if !waitRunLoopCadence(ctx, signal.Cadence(), newTicker) {
 					return
-				case <-ticker.C():
 				}
 			}
 			for {
@@ -263,11 +255,8 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 					cancel()
 					return
 				}
-				discardElapsedRunLoopTicks(ticker)
-				select {
-				case <-ctx.Done():
+				if !waitRunLoopCadence(ctx, signal.Cadence(), newTicker) {
 					return
-				case <-ticker.C():
 				}
 			}
 		}()
