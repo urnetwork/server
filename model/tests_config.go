@@ -1,6 +1,7 @@
 package model
 
 import (
+	"net/netip"
 	"strings"
 
 	"github.com/urnetwork/glog"
@@ -16,8 +17,9 @@ type testsVaultConfig struct {
 		SuppressAccountMessages bool     `yaml:"suppress_account_messages"`
 	} `yaml:"email_verification"`
 	Signup struct {
-		Password string `yaml:"password"`
-		Phone    struct {
+		Password                     string   `yaml:"password"`
+		SeedphraseRateLimitBypassIPs []string `yaml:"seedphrase_rate_limit_bypass_ips"`
+		Phone                        struct {
 			Number string `yaml:"number"`
 		} `yaml:"phone"`
 	} `yaml:"signup"`
@@ -64,6 +66,50 @@ func loadTestsVaultConfig() (*testsVaultConfig, error) {
 		return nil, err
 	}
 	return config, nil
+}
+
+// testSeedphraseRateLimitBypassForAddr is the narrowly scoped escape hatch
+// used by destructive acceptance campaigns. A seedphrase signup has no email,
+// phone, wallet, or SSO identity with which to identify the configured test
+// fixture, so the runner's source address is the only server-visible fixture.
+//
+// The bypass applies only to the seedphrase account-creation limiter. It does
+// not flow through server.RateLimitClient and therefore cannot disable auth,
+// API, Connect, or proxy limits. Any malformed entry rejects the whole list so
+// a configuration typo fails closed.
+func testSeedphraseRateLimitBypassForAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	addr = addr.Unmap()
+
+	config, err := loadTestsVaultConfig()
+	if err != nil {
+		return false
+	}
+	if config.Version != 1 {
+		glog.Errorf("[auth] refusing tests.yml seedphrase rate-limit bypass with version %d", config.Version)
+		return false
+	}
+
+	configuredAddresses := make([]netip.Addr, 0, len(config.Signup.SeedphraseRateLimitBypassIPs))
+	seenAddresses := map[netip.Addr]bool{}
+	for _, configuredIP := range config.Signup.SeedphraseRateLimitBypassIPs {
+		configuredAddr, err := netip.ParseAddr(configuredIP)
+		if err != nil || configuredAddr.Is4In6() || configuredAddr.String() != configuredIP || seenAddresses[configuredAddr] {
+			glog.Errorf("[auth] refusing tests.yml seedphrase rate-limit bypass with invalid source address")
+			return false
+		}
+		seenAddresses[configuredAddr] = true
+		configuredAddresses = append(configuredAddresses, configuredAddr)
+	}
+
+	for _, configuredAddr := range configuredAddresses {
+		if configuredAddr == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // testAuthPolicyForUserAuth returns an empty policy for every configuration

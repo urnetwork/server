@@ -52,6 +52,8 @@ func CheckNetworkCreateRateLimit(
 			return nil
 		}
 		rateLimitClient = server.NewStoredRateLimitClient(clientAddressHash)
+	} else if testSeedphraseRateLimitBypassForAddr(rateLimitClient.Addr()) {
+		return nil
 	}
 	result := server.CheckNetworkCreateIpRateLimit(
 		ctx,

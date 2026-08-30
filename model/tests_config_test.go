@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"net/netip"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -11,6 +12,82 @@ import (
 func pushTestsAuthPolicy(t testing.TB, yaml string) {
 	t.Helper()
 	t.Cleanup(server.Vault.PushSimpleResource(testsVaultResourceName, []byte(yaml)))
+}
+
+func TestSeedphraseRateLimitBypassExactAddressesAndFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		addr string
+		want bool
+	}{
+		{
+			name: "exact IPv4 host",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10]\n",
+			addr: "192.0.2.10",
+			want: true,
+		},
+		{
+			name: "different IPv4 host",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10]\n",
+			addr: "192.0.2.11",
+		},
+		{
+			name: "IPv4 mapped client is normalized",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10]\n",
+			addr: "::ffff:192.0.2.10",
+			want: true,
+		},
+		{
+			name: "exact IPv6 address",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: ['2001:db8:1:2::abcd']\n",
+			addr: "2001:db8:1:2::abcd",
+			want: true,
+		},
+		{
+			name: "different IPv6 address",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: ['2001:db8:1:2::abcd']\n",
+			addr: "2001:db8:1:2::abce",
+		},
+		{
+			name: "one malformed entry rejects the whole list",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10, not-an-address]\n",
+			addr: "192.0.2.10",
+		},
+		{
+			name: "duplicate entry rejects the whole list",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10, 192.0.2.10]\n",
+			addr: "192.0.2.10",
+		},
+		{
+			name: "whitespace is not canonical",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [' 192.0.2.10']\n",
+			addr: "192.0.2.10",
+		},
+		{
+			name: "subnet is rejected",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.0/24]\n",
+			addr: "192.0.2.10",
+		},
+		{
+			name: "mapped IPv4 address is rejected",
+			yaml: "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: ['::ffff:192.0.2.10']\n",
+			addr: "192.0.2.10",
+		},
+		{
+			name: "wrong version fails closed",
+			yaml: "version: 2\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10]\n",
+			addr: "192.0.2.10",
+		},
+	}
+
+	for _, test := range tests {
+		pushTestsAuthPolicy(t, test.yaml)
+		got := testSeedphraseRateLimitBypassForAddr(netip.MustParseAddr(test.addr))
+		if got != test.want {
+			t.Errorf("%s: testSeedphraseRateLimitBypassForAddr(%s) = %t, want %t", test.name, test.addr, got, test.want)
+		}
+	}
 }
 
 func TestTestAuthPolicyExactIdentityAndFailClosed(t *testing.T) {

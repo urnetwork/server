@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,62 @@ func mustSeedphraseCreate(t testing.TB, clientSession *session.ClientSession, wh
 	if result.Network == nil {
 		t.Fatalf("%s returned no network and no error", what)
 	}
+}
+
+// TestConfiguredAcceptanceSourceCanRepeatSeedphraseSignup reproduces the main
+// acceptance failure: one full cross-platform campaign creates more than five
+// seedphrase accounts from the runner's one public address. Before the scoped
+// tests.yml policy, the sixth app received HTTP 429 and Android reported only a
+// 90-second wait for a seedphrase that could never appear.
+func TestConfiguredAcceptanceSourceCanRepeatSeedphraseSignup(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		pushTestsAuthPolicy(t, "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10]\n")
+
+		ctx := context.Background()
+		acceptanceRunner := regressionSession(ctx, "192.0.2.10:41001")
+		defer acceptanceRunner.Cancel()
+		ordinaryClient := regressionSession(ctx, "198.51.100.20:41002")
+		defer ordinaryClient.Cancel()
+
+		for i := 0; i < NetworkCreateDailyLimit+2; i++ {
+			mustSeedphraseCreate(t, acceptanceRunner, fmt.Sprintf("acceptance signup %d", i+1))
+		}
+		if count := networkCreateAttemptRowCount(t, ctx); count != 0 {
+			t.Fatalf("configured acceptance source recorded %d rate-limit attempts, want 0", count)
+		}
+
+		// The exception must not weaken the same limiter for any other caller.
+		for i := 0; i < NetworkCreateDailyLimit; i++ {
+			mustSeedphraseCreate(t, ordinaryClient, fmt.Sprintf("ordinary signup %d", i+1))
+		}
+		if _, err := seedphraseCreate(ordinaryClient); err == nil || !strings.HasPrefix(err.Error(), "429 ") {
+			t.Fatalf("ordinary source over-limit result = %v, want a 429 refusal", err)
+		}
+	})
+}
+
+// TestStoredAddressHashCannotClaimAcceptanceSourceBypass pins the privacy and
+// authorization boundary. Deferred sessions retain only a peppered subnet
+// hash; the server cannot prove their raw source belongs to tests.yml and must
+// therefore enforce the normal budget.
+func TestStoredAddressHashCannotClaimAcceptanceSourceBypass(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		pushTestsAuthPolicy(t, "version: 1\nsignup:\n  seedphrase_rate_limit_bypass_ips: [192.0.2.10]\n")
+
+		ctx := context.Background()
+		addressHash := server.ClientIpHashForAddr(netip.MustParseAddr("192.0.2.10"))
+		deferred := session.NewLocalClientSessionWithAddressHash(ctx, addressHash, 41001, nil)
+		defer deferred.Cancel()
+
+		for i := 0; i < NetworkCreateDailyLimit; i++ {
+			if err := CheckNetworkCreateRateLimit(ctx, deferred); err != nil {
+				t.Fatalf("stored-hash attempt %d was limited early: %v", i+1, err)
+			}
+		}
+		if err := CheckNetworkCreateRateLimit(ctx, deferred); err == nil || !strings.HasPrefix(err.Error(), "429 ") {
+			t.Fatalf("stored-hash over-limit result = %v, want a 429 refusal", err)
+		}
+	})
 }
 
 // TestNetworkCreateBudgetIsNotSharedAcrossClientAddresses is the highest-value
