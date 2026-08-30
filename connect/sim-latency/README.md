@@ -130,16 +130,16 @@ any significant results still embargoed. The trusted agent harness enumerates
 the exact ranked candidate into a fresh mode-0700 directory:
 
 ```bash
-./run-main.sh epoch-review --epoch N next
+./run-local-main.sh epoch-review --epoch N next
 
 # After inspecting candidate.json, score.json, and canonical.patch, append one
 # immutable decision. Rejection returns/materializes the next ranked candidate.
-./run-main.sh epoch-review --epoch N reject \
+./run-local-main.sh epoch-review --epoch N reject \
   --job-id CANDIDATE_JOB_ID --reviewer HONESTY_AGENT_ID \
   --reason 'score-path tampering detected' --evidence honesty-report.json
 
 # Approval atomically finalizes this exact job as the winner.
-./run-main.sh epoch-review --epoch N approve \
+./run-local-main.sh epoch-review --epoch N approve \
   --job-id CANDIDATE_JOB_ID --reviewer HONESTY_AGENT_ID \
   --reason 'honesty checks passed' --evidence honesty-report.json
 ```
@@ -154,11 +154,11 @@ Only after review finalizes the epoch does the external control loop run one of:
 ```bash
 # Approved significant winner. Use the exact canonical.patch and score.json
 # materialized for the approved job.
-./run-main.sh promote --epoch N \
+./run-local-main.sh promote --epoch N \
   --winner /restricted/winner-N --winner-job-id WINNING_JOB_ID
 
 # No significant candidate, or all significant candidates rejected.
-./run-main.sh promote --epoch N --no-winner
+./run-local-main.sh promote --epoch N --no-winner
 ```
 
 Promotion creates one temporary root, clones `connect`, `sdk`, `server`, and
@@ -210,7 +210,7 @@ Measured `run`, `fleet`, and fresh `baseline` commands require a configured
 source epoch. Use a clean epoch checkout or an authenticated evaluator source
 lock; do not bypass the identity check for convenience.
 
-`run-main.sh` is a trusted operator/development wrapper for a local checkout
+`run-local-main.sh` is a trusted operator/development wrapper for a local checkout
 using port-forwarded main PostgreSQL and Redis endpoints. It is not the
 candidate-container entrypoint and does not replace the official evaluator.
 

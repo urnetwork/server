@@ -506,7 +506,7 @@ a fresh mode-0700 directory whose files are mode 0400:
 
 ```bash
 cd /home/by/urnetwork/server/connect/sim-latency
-review_json="$(./run-main.sh epoch-review --epoch "REPLACE_WITH_N" next)"
+review_json="$(./run-local-main.sh epoch-review --epoch "REPLACE_WITH_N" next)"
 winner_tmp="$(jq -er '.candidate_directory' <<<"$review_json")"
 candidate_job_id="$(jq -er '.state.candidate.job_id' <<<"$review_json")"
 
@@ -525,7 +525,7 @@ next ranked candidate without creating another temporary directory. Invoke
 is approved or the state becomes `finalized` with no winner:
 
 ```bash
-./run-main.sh epoch-review --epoch "REPLACE_WITH_N" reject \
+./run-local-main.sh epoch-review --epoch "REPLACE_WITH_N" reject \
   --job-id "$candidate_job_id" \
   --reviewer "REPLACE_WITH_STABLE_HARNESS_ID" \
   --reason "REPLACE_WITH_CONCISE_TAMPERING_FINDING" \
@@ -537,7 +537,7 @@ For an honest candidate, append approval. This is atomic with finalization and
 is the only database path that can publish a winner:
 
 ```bash
-./run-main.sh epoch-review --epoch "REPLACE_WITH_N" approve \
+./run-local-main.sh epoch-review --epoch "REPLACE_WITH_N" approve \
   --job-id "$candidate_job_id" \
   --reviewer "REPLACE_WITH_STABLE_HARNESS_ID" \
   --reason "honesty checks passed" \
@@ -554,8 +554,8 @@ When a winner exists, promote from the exact approved directory:
 
 ```bash
 
-./run-main.sh source-check --epoch "REPLACE_WITH_N_MINUS_1"
-./run-main.sh promote \
+./run-local-main.sh source-check --epoch "REPLACE_WITH_N_MINUS_1"
+./run-local-main.sh promote \
   --epoch "REPLACE_WITH_N" \
   --winner "$winner_tmp" \
   --winner-job-id "$candidate_job_id"
@@ -565,7 +565,7 @@ rm -rf -- "$winner_tmp"
 If review finalized no winner, do not fabricate a patch or job id:
 
 ```bash
-./run-main.sh promote --epoch "REPLACE_WITH_N" --no-winner
+./run-local-main.sh promote --epoch "REPLACE_WITH_N" --no-winner
 ```
 
 The winner directory must contain the evaluated `canonical.patch` and exact

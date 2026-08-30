@@ -54,7 +54,7 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		}
 	}
 
-	runnerBytes, err := os.ReadFile("run-main.sh")
+	runnerBytes, err := os.ReadFile("run-local-main.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		"exec go run . \"$@\"",
 	} {
 		if !strings.Contains(runner, required) {
-			t.Errorf("run-main.sh is missing %q", required)
+			t.Errorf("run-local-main.sh is missing %q", required)
 		}
 	}
 

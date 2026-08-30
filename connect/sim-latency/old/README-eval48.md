@@ -23,7 +23,7 @@ make
 ./tests.sh
 ```
 
-`run-main.sh` runs the local checkout against port-forwarded main PostgreSQL and
+`run-local-main.sh` runs the local checkout against port-forwarded main PostgreSQL and
 Redis endpoints, following the same environment contract as
 `server/bringyourctl/run-main.sh`.
 
