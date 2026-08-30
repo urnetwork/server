@@ -58,3 +58,44 @@ func TestStartupReadiness(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateMigrationHead(t *testing.T) {
+	tests := []struct {
+		name            string
+		databaseVersion int
+		requiredVersion int
+		wantError       bool
+	}{
+		{
+			name:            "database behind new binary",
+			databaseVersion: 596,
+			requiredVersion: 597,
+			wantError:       true,
+		},
+		{
+			name:            "database equals binary",
+			databaseVersion: 597,
+			requiredVersion: 597,
+		},
+		{
+			name:            "database ahead of rollback binary",
+			databaseVersion: 597,
+			requiredVersion: 590,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateMigrationHead(test.databaseVersion, test.requiredVersion)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "database migration head") {
+					t.Fatalf("validateMigrationHead(%d, %d) = %v, want migration-head error", test.databaseVersion, test.requiredVersion, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateMigrationHead(%d, %d) = %v, want nil", test.databaseVersion, test.requiredVersion, err)
+			}
+		})
+	}
+}

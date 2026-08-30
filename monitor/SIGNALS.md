@@ -2826,9 +2826,16 @@ and ended at 20:15:53.180148Z with 6.17TiB over plus 386.85GiB under across
 2,405 networks. The monitor correctly rendered the 5.54TiB-under to
 6.17TiB-over pair as `matched_reversal=true`, and its next full stream window
 paged on another 1,280 taskworker negatives/min. This is a causal inverse, not
-convergence: keep the sequence open until a later scheduled aggregate returns
-to the tens-of-GiB band and taskworker, API, and Connect remain at zero for a
-full following interval.
+convergence. The next task `01a05450-7164-89a5-becd-0ac85f54b68d` moved to
+old edge-4/g2 and completed in about 19 seconds at 20:21:12.648396Z, providing
+a peer-executor control and contracting the aggregate to 137.45GiB over plus
+838.12GiB under across 1,529 networks. A following g1 task completed its
+aggregate at 20:26:35.870259Z with 36.77GiB over plus 369.70GiB under across
+1,290 drifted balances. That is continuing contraction, but its under-reserved
+total remains above the 256GiB alert band and taskworker negatives recurred
+during the rollout; keep the sequence open until a later scheduled aggregate
+returns to the tens-of-GiB band and taskworker, API, and Connect remain at zero
+for a full following interval.
 
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
@@ -3342,6 +3349,21 @@ inserted before those published entries in source, shifting the competition
 sequence to 592–596. A rollout from that ordering would have skipped the new
 schema through 590 and then attempted to recreate existing competition tables.
 The root fix restored the published positions and appended the new work.
+
+The 2026-08-30 rollout also exposed a separate activation-order defect. While
+production's successful head remained 590, every sampled taskworker g1 block
+was already running binary `2026.8.30+1033129380`, whose source requires 597;
+g2 still ran the older binary with the new config generation. The shared
+startup readiness check proved only PostgreSQL connectivity (`SELECT 1`) and
+Redis PING, so a schema-dependent binary could become ready and claim work
+before its migrations. Startup readiness now reads the successful
+`migration_audit` head and rejects a binary when the database is below
+`server.MigrationCount()`. A database at or above the binary's requirement is
+accepted deliberately, preserving rollback to an older binary after
+append-only migrations. This gate prevents future activation-order failures;
+it does not make an already active mixed-generation rollout safe, so retain
+the independent monitor alert until the current head and all artifacts reach
+597.
 
 This is the version-to-artifact contract checked by the probe:
 
@@ -4585,12 +4607,12 @@ sudo docker inspect <running-lb> --format '{{range .Config.Env}}{{println .}}{{e
   | grep '^WARP_PORTS='
 ```
 The decisive signature is two interface-scoped rules for the same public
-protocol/port: the FIRST target is a pool port no running container owns, and
-a later target is the port in the running container's `WARP_PORTS`. Packet
-capture then shows an inbound SYN followed immediately by the host's RST; a
-source-aware `ip -6 route get` can still be correct. On edge-1 eno2, public
-TCP/443 first targeted dead port 7232 while the live LB owned 7231; edge-0 eno4
-had the same 7659-before-7658 split.
+protocol/port: the FIRST target is a pool port with no live socket, and a later
+target is the port in the current container's `WARP_PORTS`. Packet capture then
+shows an inbound SYN followed immediately by the host's RST; a source-aware
+`ip -6 route get` can still be correct. On edge-1 eno2, public TCP/443 first
+targeted dead port 7232 while the live LB owned 7231; edge-0 eno4 had the same
+7659-before-7658 split.
 
 Root cause: `warpctl deploy()` inserted the candidate's DNAT first, then a
 fallible post-cutover container-discovery step ran before the deployment
@@ -4600,10 +4622,26 @@ Polling considered the old desired-version container healthy, so it never
 repaired the chain. Correct Warp behavior treats the start of a validated,
 non-transactional redirect as the irreversible commit boundary, keeps that
 candidate on later redirect/housekeeping errors, and on controller startup
-removes only current-pool DNAT targets that no running same-block container
-owns. With an old binary, delete only the fully inspected dead-target rules or
-restore service with a corrected Warp controller; a generic route or container
-restart is not a diagnosis.
+removes only current-pool DNAT targets that have no live socket. Docker state
+is insufficient ownership evidence: during `docker stop -t 3600`, nginx closes
+its listeners at the start of the graceful wait while Docker can continue to
+report the container as running for an hour. Reuse the same bounded socket
+inventory as port allocation and stale-conntrack cleanup. With an old binary,
+delete only the fully inspected dead-target rules or restore service with a
+corrected Warp controller; a generic route or container restart is not a
+diagnosis.
+
+The post-warpctl check later on 2026-08-30 reproduced that graceful-stop
+variant on edge-1/eno2. Vault and the live interface both named
+`2001:470:99:56:e643:4bff:fec3:8446`; its source rule, policy default, gateway
+ping, and bound public egress all passed. Nevertheless every public TCP probe
+was refused. Port 7231 had live IPv4/IPv6 TCP and UDP sockets, port 7232 had
+none, and container `5e7c412aa0cd` remained underneath
+`docker container stop -t 3600`. Verify the socket-authoritative fix by seeing
+the dead 7232 rules removed in both families and three consecutive pinned IPv6
+HTTPS requests return 200. Do not group the simultaneous edge-3/fireside
+timeouts with this RST signature: those need inbound/upstream-path evidence
+even though their Vault addresses and source-policy routes also match.
 
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
 

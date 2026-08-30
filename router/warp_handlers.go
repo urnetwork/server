@@ -126,16 +126,18 @@ func collectStatus(ctx context.Context) (string, error) {
 	return "ok", nil
 }
 
-// StartupReadiness runs the one-shot deep checks behind the /status
-// readiness latch — pg SELECT 1 and redis PING, under a 15s budget — and
-// latches the outcome: ready ("ok") or not ready ("error not ready: ...",
-// which the deploy poll fails on). Call once at service startup, before
-// taking traffic or claiming work. On failure the service must keep serving
-// /status rather than exit: the poll then times out and warpctl reverts the
-// deploy while the old container keeps serving; an exit just flaps the
-// container without ever producing the truthful status (TASKDRAIN1 §2.2,
-// APIDRAIN1 §2.1). One-shot by design: /status stays O(1) per poll and
-// runtime health remains the monitor's job.
+// StartupReadiness runs the one-shot deep checks behind the /status readiness
+// latch — the database's successful migration head must be at least the
+// binary-required head, then Redis must answer PING, all under a 15s budget —
+// and latches the outcome: ready ("ok") or not ready ("error not ready: ...",
+// which the deploy poll fails on). Allowing the database to be ahead preserves
+// rollback compatibility for older binaries after append-only migrations.
+// Call once at service startup, before taking traffic or claiming work. On
+// failure the service must keep serving /status rather than exit: the poll then
+// times out and warpctl reverts the deploy while the old container keeps
+// serving; an exit just flaps the container without ever producing the truthful
+// status (TASKDRAIN1 §2.2, APIDRAIN1 §2.1). One-shot by design: /status stays
+// O(1) per poll and runtime health remains the monitor's job.
 func StartupReadiness(ctx context.Context) error {
 	err := startupReadinessCheck(ctx)
 	if err == nil {
@@ -147,21 +149,32 @@ func StartupReadiness(ctx context.Context) error {
 }
 
 func startupReadinessCheck(ctx context.Context) error {
+	return startupReadinessCheckAtMigration(ctx, server.MigrationCount())
+}
+
+func startupReadinessCheckAtMigration(ctx context.Context, requiredMigrationVersion int) error {
 	checkCtx, checkCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer checkCancel()
 
+	databaseVersion := 0
 	if r := server.HandleError(func() {
 		server.Db(checkCtx, func(conn server.PgConn) {
-			var one int
-			result, err := conn.Query(checkCtx, "SELECT 1")
+			result, err := conn.Query(checkCtx, `
+				SELECT COALESCE(MAX(end_version_number), 0)
+				FROM migration_audit
+				WHERE status = 'success'
+			`)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
-					server.Raise(result.Scan(&one))
+					server.Raise(result.Scan(&databaseVersion))
 				}
 			})
 		})
 	}); r != nil {
 		return fmt.Errorf("pg: %s", r)
+	}
+	if err := validateMigrationHead(databaseVersion, requiredMigrationVersion); err != nil {
+		return fmt.Errorf("pg: %w", err)
 	}
 
 	if r := server.HandleError(func() {
@@ -172,5 +185,16 @@ func startupReadinessCheck(ctx context.Context) error {
 		return fmt.Errorf("redis: %s", r)
 	}
 
+	return nil
+}
+
+func validateMigrationHead(databaseVersion int, requiredMigrationVersion int) error {
+	if databaseVersion < requiredMigrationVersion {
+		return fmt.Errorf(
+			"database migration head %d is below binary-required head %d",
+			databaseVersion,
+			requiredMigrationVersion,
+		)
+	}
 	return nil
 }
