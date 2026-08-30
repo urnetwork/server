@@ -2,11 +2,27 @@ package api
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/urnetwork/server"
 )
+
+func TestReadinessCheckDelegatesAndPropagatesFailure(t *testing.T) {
+	wantErr := errors.New("database migration head 590 is below binary-required head 597")
+	calls := 0
+	err := readinessCheckWith(context.Background(), func(context.Context) error {
+		calls++
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("readiness error = %v, want migration error", err)
+	}
+	if calls != 1 {
+		t.Fatalf("shared readiness calls = %d, want 1", calls)
+	}
+}
 
 func TestReadinessCheck(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

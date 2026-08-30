@@ -24,7 +24,7 @@ var readyGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "api",
 	Name:      "ready",
-	Help:      "1 when the readiness latch passed (pg+redis answered at startup) and the instance is not draining",
+	Help:      "1 when the migration-aware pg+redis startup gate passed and the instance is not draining",
 })
 
 func init() {
@@ -33,6 +33,21 @@ func init() {
 
 type RunOptions struct {
 	Port int
+}
+
+func activateAfterReadiness(
+	ctx context.Context,
+	readiness func(context.Context) error,
+	activate func(),
+) error {
+	if err := readiness(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	activate()
+	return nil
 }
 
 func (self RunOptions) Validate() error {
@@ -55,7 +70,6 @@ func Run(ctx context.Context, options RunOptions) error {
 
 	processCtx, processCancel := context.WithCancel(context.Background())
 	defer processCancel()
-	controller.StartMetrics(processCtx)
 	serveCtx, serveCancel := context.WithCancel(processCtx)
 	defer serveCancel()
 
@@ -84,19 +98,20 @@ func Run(ctx context.Context, options RunOptions) error {
 		}
 	})
 
-	statsHandle := stats.Enable(processCtx, nil)
-	defer statsHandle.Close()
-	if _, err := statsHandle.StartUpload(nil); err != nil {
-		glog.Infof("[api]stats upload init err=%s\n", err)
-	}
-	oauth.NewReaperWithDefaults(processCtx)
-
-	if err := ReadinessCheck(processCtx); err != nil {
+	var statsHandle *stats.Stats
+	if err := activateAfterReadiness(ctx, ReadinessCheck, func() {
+		server.Warmup()
+		controller.StartMetrics(processCtx)
+		statsHandle = stats.Enable(processCtx, nil)
+		if _, err := statsHandle.StartUpload(nil); err != nil {
+			glog.Infof("[api]stats upload init err=%s\n", err)
+		}
+		oauth.NewReaperWithDefaults(processCtx)
+	}); err != nil {
 		glog.Infof("[api]not ready (%s)\n", err)
 		router.SetWarpStatusNotReady(err)
 		readyGauge.Set(0)
 	} else if ctx.Err() == nil {
-		server.Warmup()
 		router.SetWarpStatusReady()
 		readyGauge.Set(1)
 		if ctx.Err() != nil {
@@ -104,7 +119,11 @@ func Run(ctx context.Context, options RunOptions) error {
 			readyGauge.Set(0)
 		}
 	} else {
-		server.Warmup()
+		router.SetWarpStatusDrainingIfReady()
+		readyGauge.Set(0)
+	}
+	if statsHandle != nil {
+		defer statsHandle.Close()
 	}
 
 	flushStats := server.StartStatsPusher(processCtx)

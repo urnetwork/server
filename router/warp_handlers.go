@@ -139,7 +139,7 @@ func collectStatus(ctx context.Context) (string, error) {
 // status (TASKDRAIN1 §2.2, APIDRAIN1 §2.1). One-shot by design: /status stays
 // O(1) per poll and runtime health remains the monitor's job.
 func StartupReadiness(ctx context.Context) error {
-	err := startupReadinessCheck(ctx)
+	err := CheckStartupReadiness(ctx)
 	if err == nil {
 		SetWarpStatusReady()
 	} else {
@@ -148,7 +148,10 @@ func StartupReadiness(ctx context.Context) error {
 	return err
 }
 
-func startupReadinessCheck(ctx context.Context) error {
+// CheckStartupReadiness runs the shared deep checks without changing the
+// /status latch. Services with additional startup sequencing can use this and
+// latch only after all of their own activation work is ready.
+func CheckStartupReadiness(ctx context.Context) error {
 	return startupReadinessCheckAtMigration(ctx, server.MigrationCount())
 }
 

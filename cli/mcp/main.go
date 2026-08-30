@@ -43,6 +43,7 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-quitEvent.Ctx.Done():
+			router.SetWarpStatusDrainingIfReady()
 			select {
 			case <-ctx.Done():
 				return
@@ -68,7 +69,9 @@ func main() {
 		}
 	})
 
-	server.Warmup()
+	if err := mcp.Startup(ctx); err != nil {
+		glog.Infof("[mcp]not ready (%s)\n", err)
+	}
 
 	glog.Infof(
 		"[mcp]serving %s %s on %s:%d\n",

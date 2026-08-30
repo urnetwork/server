@@ -2847,6 +2847,21 @@ during the rollout; keep the sequence open until a later scheduled aggregate
 returns to the tens-of-GiB band and taskworker, API, and Connect remain at zero
 for a full following interval.
 
+The completed service-version rollout did not supply that recovery. With the
+database still at 590 and therefore missing the version-594 balance/contract
+index, task `01a0546b-c769-9420-2055-cd95e18fab76` timed out on edge-3/g1 at
+exactly 1,800 seconds, retried on edge-1/g1, and reached a 1,799-second live
+heartbeat before its task row advanced from one to two `context-canceled`
+errors and immediately showed another fresh claim. During the second attempt,
+the standing taskworker stream rose from 75 to 394 and then 270 negative
+settlements per minute. Samples lacked `clamped_to=0`, directly proving that
+the deployed release still used the old non-atomic release path; this is not a
+regression in the current Lua fix. Migration lag made each old full-fleet pass
+miss its deadline, while automatic rescheduling repeatedly exposed legacy
+stale-write damage. Require migrations first, then a service build containing
+the page-local additive reconciler and atomic release before interpreting a
+later scheduled pass as post-fix verification.
+
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
 additive reconciler can observe that committed settlement and correct the
@@ -3374,6 +3389,18 @@ append-only migrations. This gate prevents future activation-order failures;
 it does not make an already active mixed-generation rollout safe, so retain
 the independent monitor alert until the current head and all artifacts reach
 597.
+
+A follow-up entry-point audit found that the first gate was not yet universal.
+Taskworker and Connect used the shared migration-aware check, but API retained
+a private `SELECT 1` check and started competition-metric database queries,
+stats upload, and its OAuth reaper before that check; MCP warmed and served
+without invoking startup readiness at all. API now delegates to the shared
+check and starts those background components only after it passes. MCP now
+gates warmup through the same latched check and preserves a not-ready error
+across SIGTERM. Deterministic lifecycle tests prove failed or canceled
+readiness cannot activate API background work or MCP warmup. Audit every new
+schema-dependent service entry point against this same activation boundary;
+adding a healthy `/status` route alone is not a migration gate.
 
 At the rollout's promised 21:15Z completion boundary, all sampled taskworker,
 API, Connect, and LB blocks reported binary `2026.8.30+1033129380`, but the
