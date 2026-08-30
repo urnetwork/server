@@ -386,6 +386,13 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alert.action = "Roll out the four-hour re-anchor cadence plus per-lookback transaction checkpoints, and defer optional anchors while established VACUUM/REINDEX work is active. Retain the 30-minute incremental cadence; do not raise the two-hour task deadline or cancel a progressing query merely to hide this alert."
 			alert.verify = "Most half-hour cycles take the rolling path and finish below the historical p95. A quiet-period anchor commits one lookback at a time; an interrupted retry preserves those checkpoints, and rolling-equivalence tests remain green."
 		}
+		if task == "ReconcileNetEscrow" {
+			alert.mechanism = "The legacy reconciler snapshots and rewrites the full reservation fleet. Without the balance_id lookup index, one pass can exceed the historical tail and approach its 1,800-second safety boundary while its stale absolute snapshot remains exposed to concurrent settlements."
+			alert.context += " This task has a dedicated §5.11 aggregate and negative-counter discriminator. A live heartbeat proves progress chronology but does not make a fleet-wide stale writer safe or justify a larger deadline."
+			alert.action = "Keep the task deadline. Restore migration coherence for the balance_id index and roll out the page-local additive reconciler plus atomic negative clamp across every taskworker generation. Do not raise MaxTime, manually kick the live claim, or interpret one later fast pass as fleet convergence."
+			alert.verify = "The migration artifact exists, every scheduled reconciliation finishes below 120s, aggregate drift converges, and taskworker, API, and Connect emit no new negative counters for a full interval."
+			alert.playbook = "SIGNALS.md §5.11 and §8.9"
+		}
 		if task == "DbMaintenance" && len(dbMaintenanceEvidence) > 0 {
 			alert.evidence = fmt.Sprintf(
 				"relation=%s index=%s phase=%s query_age_s=%s wait=%s:%s blocking_pids=%s blocker_pid=%s blocker_query=%s blocks_done=%s blocks_total=%s",

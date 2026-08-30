@@ -107,6 +107,49 @@ func TestTaskCanariesSignalMedianTailCapCatchesRepeatedReaperOverrun(t *testing.
 	}
 }
 
+func TestTaskCanariesSignalDiagnosesLiveNetEscrowOverrun(t *testing.T) {
+	taskID := "01a0546b-c769-9420-2055-cd95e18fab76"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return []Row{{"ReconcileNetEscrow", "1530", "1142", "t", "1800", "21", taskID}}, nil
+			case strings.Contains(query, "WITH failures AS"):
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		localFn: func(name string, args ...string) (string, error) {
+			joined := strings.Join(args, " ")
+			if name != "warpctl" || !strings.Contains(joined, "--query="+taskID) {
+				t.Fatalf("unexpected task heartbeat command: %s %s", name, joined)
+			}
+			return "[by-us-fmt-5-edge-4][taskworker][g1][cid:52c4c3be3b3f][I][2026-08-30T22:16:30Z][task.go:1938][" + taskID + "]eval active(1517.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
+		},
+	}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-overdue").Markdown()
+	for _, want := range []string{
+		"has run for 1517s",
+		"balance_id lookup index",
+		"1,800-second safety boundary",
+		"dedicated §5.11 aggregate and negative-counter discriminator",
+		"Do not raise MaxTime, manually kick the live claim",
+		"SIGNALS.md §5.11 and §8.9",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("live net-escrow diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
 func TestTaskCanariesSignalDoesNotMistakeDueQueueDelayForExecutionTime(t *testing.T) {
 	taskID := "01a052d2-9c33-c78e-1e37-66e411e45c1e"
 	source := &syntheticSource{
