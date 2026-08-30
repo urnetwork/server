@@ -611,6 +611,19 @@ the anchor, while the avoidable all-lookback transaction still prolongs the
 horizon and writer feedback. Preserve the maintenance deferral and
 per-lookback checkpoints; do not cancel either progressing operation.
 
+The successor vacuum supplied the terminal cleanup boundary for that same
+writer wave. While the next edge-0 score, reaper, and close tasks remained
+active, `transfer_contract` dead tuples rose through 10.8M, 13.75M, 15.51M,
+and 18.20M. The vacuum had already scanned all 23,989,241 heap blocks and was
+advancing through index cleanup rather than waiting on a lock. It completed at
+17:58:48.522408Z without intervention, and the 18:02Z table sample reported
+884,223 dead tuples. That is a decisive recovery certificate for the vacuum,
+not for the writers: at the same sample the still-slow close path left 513,826
+contracts open, including 444,919 older than five minutes and 100,709 older
+than 30 minutes. Preserve the bounded score, retention, reaper, and close
+fixes; vacuum completion removes accumulated cleanup debt but cannot make an
+unbounded or process-starved task checkpoint safe.
+
 The anchor did not commit at its 08:29:40Z deadline. Its retry opened a new old
 snapshot within seconds, so a momentary blocker-PID change was not vacuum
 recovery. Verification must follow the replacement claim and require durable
@@ -1023,6 +1036,43 @@ the deployed 100k checkpoint is load-sensitive and proves why a fast retry
 must not erase its failed precursor. It validates the monitor lifecycle rule
 and the 25k source checkpoint; it is not a reason to raise 1,800 seconds.
 
+Its later scheduled successor made the local amplifier visible without another
+timeout. Task `01a05397-bb73-ca07-2df7-cd1e483c0e70` landed back on the
+edge-1/g1 score-heavy process and ran from 16:54:11.917863Z to
+17:17:32.289278Z (1,400.371s). During it the open set resumed rising through
+315,750, 395,199, and 452,844. The colocated score export completed at
+17:17:13Z, and this close committed 19 seconds later; the colocated reaper
+followed 14 seconds after that. This ordering makes allocator pressure a
+strong process-local wall-clock amplifier, while the 100k task still owns the
+large rollback/discovery unit. Preserve both fixes: stream score export and
+checkpoint close at 25k. A successful 1,400-second cohort is still far outside
+the 20–30-second band and only 400 seconds from failure.
+
+The next hourly placement repeated the exact A/B boundary on a third
+executor. Task `01a053ad-eae5-752f-3e04-95696dff3a2e` shared edge-0/g1 with
+the next score export, reached `eval error(1800.90s) ... = Timeout` at
+17:48:27.076631Z, and let the open set rise to 567,403. The same id was
+reclaimed on edge-3/g2 14 seconds later and its authoritative row ran from
+17:48:31.198071Z to 17:48:54.551346Z—23.353s—while retaining
+`reschedule_error=Timeout`. That roughly 77x split reproduces the failed
+precursor/fast retry lifecycle and local allocator amplification independently
+of edge-1. Keep the 25k checkpoint; do not normalize the rising historical p95
+or raise the deadline.
+
+Its full successor repeated the boundary on the same score-heavy executor.
+Task `01a053ca-bd27-e4b7-5d8e-f5b6c2acd410` reached
+`eval error(1801.17s) ... = Timeout` at 18:19:55.787918Z on edge-0/g1
+container `4a6bbf31e2d4`; the open set had reached 720,664 and was still
+rising. The same id was reclaimed on edge-1/g2 container `06abfbe03c32`, and
+its authoritative row ran from 18:20:00.088051Z to 18:20:29.683999Z—29.596s—
+while retaining `reschedule_error=Timeout`. The score-heavy edge-0 task did
+not finish until 19 seconds after this peer retry, and its colocated legacy
+net-escrow pass did not finish until two seconds after the retry. The same
+work therefore remained healthy on a peer while the 100k checkpoint exhausted
+its deadline on the hot process. This is another pre-rollout reproduction of
+both the oversized checkpoint and its process-local amplifier; retain the 25k
+checkpoint and bounded sibling paths.
+
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
 
@@ -1313,6 +1363,16 @@ of an unbounded row writer and delayed cancellation cleanup, not a reason to
 expand connection pools; keep the bounded retention implementation and use
 the retained task errors only as attribution between active executions.
 
+The next execution brought the lifetime total to 41 calls and then cleared
+from `pg_stat_activity`. At 18:02Z the statement averaged 2,170,158 rows and
+325,648ms per call, with a 544,554ms maximum, 3,329,316,398 shared-buffer hits,
+31,981,964 reads, 118,226,752 dirtied blocks, and only 173,741 written blocks.
+All ten cleanup-deadline task rows remained durable. The concurrent
+`transfer_contract` vacuum completed and cut its dead-tuple estimate below one
+million, but that cleanup result does not make the 2.17M-row payment
+transaction bounded. Require the query id and deadline-error cohort to
+disappear after the queued cursor path is deployed.
+
 ### 2.11 PgBouncer client-write stall — pool path vs postgres load
 Probe: `pgbouncer-stalls`
 
@@ -1454,9 +1514,33 @@ CPU near 4.00 cores. GC pause accumulation was only
 and allocation rather than stopping in GC. At 16:56Z its claim and
 10–12-second heartbeats were still fresh beyond 2,200s, alongside a long
 client reaper. This independent recurrence strengthens the streaming
-512-command/8MiB, lazy-encode, cleared-slot fix. Keep the incident open until
-the authoritative finish row and post-completion heap collapse are observed;
-do not infer liveness from a retained final heartbeat.
+512-command/8MiB, lazy-encode, cleared-slot fix.
+
+The terminal boundary closed that proof. The task completed at
+17:17:13.039655Z in 3,466.538s. Mimir's 70-minute maximum for the exact
+instance was 30,436,930,688 bytes (28.35GiB); its heap was still 20.78GB at
+17:17:10Z and had collapsed to 252.9MB by 17:17:25Z. The colocated close and
+reaper then completed 19 and 33 seconds after score, respectively. At
+17:17:44Z the next hourly score task
+`01a053ac-ddd5-a88a-f7f3-88e1f63d11d6` began on edge-0/g1 and reached
+19.33GiB allocated heap after only 135s, later allocating roughly
+760–915MiB/s. Its new close and reaper siblings immediately developed the same
+slow tail while edge-1/g1 stayed near 0.16GiB. That start/stop/cross-host
+sequence identifies the deployed score exporter as the portable allocator and
+local amplifier; it does not erase the independent need to bound the sibling
+paths. By 1,324s the edge-0 process reached 44.01GiB allocated heap and about
+49.7GiB RSS while still allocating roughly 910MiB/s. The host retained 843GB
+free/890GB available with no swap use; the cgroup had no memory limit, zero
+high/max/OOM events, zero memory pressure, and zero CPU throttling. This is
+application allocation, not host or container starvation.
+
+That pre-rollout task completed at 18:20:49.147041Z in 3,784.989s. Mimir's
+90-minute maximum for the exact instance was 48,189,121,640 bytes
+(44.88GiB), while five-minute allocation remained near 0.9GiB/s through the
+tail. The terminal duration and instance-local peak are the baseline for the
+streaming exporter: after rollout, a successful task alone is insufficient;
+live heap must remain bounded throughout the export while all 1,008 locations
+complete.
 
 ---
 
@@ -1999,6 +2083,12 @@ limit:
   validate the transaction-local timeout override. Do not pull the parked row
   forward or disable the global five-minute policy; verify the same slice
   commits only after the scoped source fix is rolled out.
+  The eighth retry ran independently on edge-4/g2 and ended at 17:35:44Z with
+  `eval error(994.66s)` and the same `*pgconn.connLockError=conn closed`,
+  advancing the row to 150 failures. Its fresh claim then expired and the row
+  returned to the normal hourly backoff. This independent executor recurrence
+  preserves the same classification and remediation; it is not score-worker
+  contention or a reason to disable the database-wide guard.
   The deterministic regression first records the session baseline, installs a
   25ms transaction-local timeout, applies the payment-plan override, idles for
   100ms, and requires a successful commit; it then requires the same connection
@@ -2098,6 +2188,15 @@ limit:
   but the independent low-heap control above still separates reaper latency
   from score allocation. Follow this row to its authoritative terminal state;
   the bounded 1,000-client, compare-delete cleanup remains the root fix.
+  The row completed cleanly at 17:17:46.333688Z in 3,162.175s—33 seconds
+  after its colocated score export ended and heap collapsed. Its successor
+  then landed beside the next score export on edge-0/g1 and again crossed
+  several minutes with fresh heartbeats. The paired low-heap 987.628s control,
+  score-boundary acceleration, and recurring high wall time support both
+  conclusions: old per-client Redis round trips are intrinsically slow, and
+  score allocation amplifies them locally. Keep the idempotent 1,000-client
+  pipelines and compare-delete safety; do not replace them with scheduler
+  affinity or a larger deadline.
 
 ### 5.8 Query-plan CPU wall (the 2026-07-17 planner-stats landmine)
 Signature: db host load ≫ cores (490 on 96 observed), hundreds of client
@@ -2542,6 +2641,54 @@ writer and atomic release clamp. Alert grouping now preserves
 `frame=site=settle` while redacting balance and contract ids, so separate
 mutation sites cannot collapse into one opaque target.
 
+The immediately following sequence proved that duration alone cannot clear
+the legacy writer. Four scheduled passes from 16:55Z through 17:11Z completed
+in 15.997–23.394s and stayed within 28.7–51.33GiB in either direction. Task
+`01a053a7-c9ff-805e-78b8-9df21c8bf561` then ran on edge-1/g1 from
+17:16:43.785282Z to 17:17:29.346654Z (45.561s) and abruptly corrected
+59.78GiB over plus 536.69GiB under across 1,570 networks. Its successor
+`01a053ad-1d8a-fe42-fdce-f6eef954abf6` moved to edge-3/g2, completed in
+18.761s, and reversed the same dominant quantity to 525.76GiB over plus
+62.9GiB under across 1,571 networks. The monitor rendered
+`matched_reversal=true reversal_direction=under-to-over` and retained both
+executor identities. No settlement happened to expose a negative counter.
+The next scheduled task `01a053b2-0002-dfba-240e-b302d2ef7429` completed in
+22.133s and contracted the aggregate to 50.5GiB over/30.4GiB under across 837
+networks. This short-pass inversion is the exact synthetic aggregate
+regression: skipping already-correct mirrors is required even when the full
+fleet walk stays below 120 seconds. Another scheduled pass
+`01a053b6-f72f-beb4-2a87-683c53a3fe89` then completed in 17.653s and stayed in
+band at 31.29GiB over/52.27GiB under across 858 networks. API, Connect, and
+taskworker each remained at zero negative lines through 17:41:58Z, more than
+eight minutes after that pass and beyond the ingestion allowance. This is the
+terminal recovery certificate; it does not make a later legacy absolute walk
+safe.
+
+One more short legacy sequence reproduced the same matched reversal before
+the rollout boundary. Task `01a053c5-a2b7-053b-5583-e8ea35e63aee` completed
+in 19.708s at 17:49:37Z with 19.37GiB over-reserved and 604.48GiB
+under-reserved across 1,574 networks. Its successor
+`01a053ca-8796-54e3-24ea-02bf8923b555` moved to edge-1/g1 and completed in
+23.294s at 17:55:01Z, reversing the quantities to 619.08GiB over and
+16.87GiB under across 1,615 networks. The following pass
+`01a053cf-7ae3-752e-6e14-dba61deb77bc` completed in 16.821s at 18:00:19Z and
+contracted to 29.53GiB over/51.05GiB under across 903 networks. API, Connect,
+and taskworker remained at zero negative lines through 18:07Z. This is a
+second short-duration proof that a quick full-fleet write can still clobber a
+newer mirror; no-op skipping is part of the root fix, not only an optimization
+for long passes.
+
+The very next legacy pass escalated on the score-heavy edge-0/g1 executor.
+Task `01a053d4-54d7-89b7-4910-8f757791cb0e` ran from
+18:05:21.913100Z to 18:20:32.094955Z—910.182s—and rewrote 900,039 balances.
+Its terminal aggregate corrected 1.58TiB over-reserved plus 553.29GiB
+under-reserved across 2,076 networks. Two API and two Connect settlements
+then exposed exact -1MiB counters from 18:20:49Z through 18:21:17Z;
+taskworker emitted none in the first post-pass sample. This is pre-rollout
+stale-snapshot damage, not merely scheduling latency. Recovery remains open
+until a scheduled inverse and a subsequent in-band pass complete, followed by
+a full quiet interval across all three emitters.
+
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
 additive reconciler can observe that committed settlement and correct the
@@ -2985,6 +3132,12 @@ returned 500 while `/hello` remained 200.
   Sweep/Rollup/Retention/Egress rows when disabled. Otherwise an old pending
   row survives every deploy and keeps retrying even after route handlers are
   fixed.
+  A later independent retry on edge-0/g2 reached its exact 900.00-second
+  boundary at 17:42:41.335251Z with `Interrupted: Done`, increasing the same
+  row from 946 to 947 failures before its fresh claim expired and it parked
+  again. That recurrence confirms a durable ungated RunOnce chain rather than
+  a transient route request; retain the startup reap and all execution/Post
+  guards, and do not raise the task deadline.
 - Enabled-subsystem discriminator: if `StEnabled()` is true, absent or invalid
   `verify.yml` remains a hard release failure. Provision its signing and hash
   material through the supported vault secret mechanism, validate that its
