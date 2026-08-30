@@ -1974,6 +1974,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `failed to create TTRPC connection: unsupported protocol: \b\x03\x12Yunix` in `docker.service` (a pre-fix Warp build reports only `Start container failed: exit status 125`) | A partial Docker/containerd package upgrade left a pre-2.3 containerd daemon running while the on-disk 2.3 shim is used for each new container. The old daemon interprets the shim's protobuf bootstrap result as a socket address, so no new container can start even though every Warp systemd unit remains `active (running)`. | Compare `ctr version` client/server and check whether `/proc/<containerd-pid>/exe` is `(deleted)`. Stop retrying/restarting Warp units; restart/reboot the container runtime one host at a time, then require client/server versions to match and a replacement container to reach `Up`. See §8.5a. |
 | `systemd-networkd-wait-online.service: Timeout occurred while waiting for network connectivity` after an edge reboot | At least one configured link never reached online. On the 2026-08-28 recovery, unused no-carrier NICs remained `configuring` while every serving interface was already `routable`; this failed the boot wait unit but did not imply a traffic outage. | Use `networkctl list`, source-specific `ip route get`, and public probes. The authoritative edge netplans mark known non-serving links `optional: true`; recurrence after those netplans take effect means a new required-link failure or config drift. Do not restart working networkd during recovery. |
 | `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
+| `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
@@ -2872,7 +2873,10 @@ regression in the current Lua fix. Migration lag made each old full-fleet pass
 miss its deadline, while automatic rescheduling repeatedly exposed legacy
 stale-write damage. Require migrations first, then a service build containing
 the page-local additive reconciler and atomic release before interpreting a
-later scheduled pass as post-fix verification.
+later scheduled pass as post-fix verification. The exact 1,800-second
+`context-canceled` boundary is containment, not evidence that this task needs
+a larger `MaxTime`; the task-canary alert routes this family to §5.11 and §8.9
+and explicitly preserves the deadline.
 
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
@@ -4235,6 +4239,36 @@ find /var/lib/grafana/plugins -maxdepth 2 -type f | grep '/prometheus/'
   `grafana-plugin-unregistered` lines, and successful evaluation of one
   provisioned rule. Do not silence scheduler errors or recreate the existing
   datasource as remediation.
+
+### 11.16 Alert interval outside Grafana's scheduler grid (2026-08-30)
+
+A new Grafana container can remain `Up` while its supervised Grafana child
+restarts forever and Warp correctly refuses to activate it. The definitive
+child error is:
+```
+invalid alert rule: interval (15s) should be non-zero and divided exactly by scheduler interval: 10
+```
+On the `2026.8.30+1033129380` rollout, the competition alert group used `15s`.
+Grafana 13 schedules provisioned rules on a 10-second grid, rejected the file
+during provisioning, and shut down every dependent module. The parent
+`warp-grafana` process and Docker container stayed running, while `/status`
+reported the Grafana child connection refused until the 120-second deployment
+attempt failed. The old generation continued serving.
+
+Inspect both layers; `docker ps` alone is a false green:
+```bash
+docker logs <new-grafana-container> 2>&1 | grep 'invalid alert rule'
+journalctl --utc -u warp-main-grafana-<interface>-g1 \
+  | grep -E 'Poll result|Deploy fail'
+```
+The fix changes the group to `20s`, preserving a short heartbeat cadence while
+aligning with the scheduler. Warp's
+`TestProvisionedAlertIntervalsMatchGrafanaScheduler` parses every embedded
+`grafana/alerting/*.yml` file and requires every group interval to be a positive
+multiple of 10 seconds. Run `go test ./grafana` before building the image. A
+restart cannot repair the current artifact; publish a corrected Grafana image
+and require the new container's `/status` to become ready before draining the
+old generation.
 
 ---
 

@@ -440,12 +440,15 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			!env.cfg.verificationEnabled &&
 			(strings.Contains(lowerError, "context canceled") ||
 				strings.Contains(lowerError, "interrupted: done"))
+		reconcileNetEscrowDeadline := task == "ReconcileNetEscrow" &&
+			strings.Contains(lowerError, "context canceled") &&
+			!strings.Contains(lastError, "Drained:")
 		alertMechanism, alertAction, alertVerify := "", "", ""
 		alertPlaybook := "SIGNALS.md 5.7"
 		alertContext := "Each task function is grouped before reporting; another noisy function cannot consume a global row limit and hide this failure. Parked and fresh-claim counts are independent predicates and can overlap briefly during reschedule handoff; do not add them together."
 		if strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
 			alertContext += fmt.Sprintf(" This literal Timeout is the task evaluator's configured deadline of %ss. Compare the matching eval-error duration; an exact match means the task needs a smaller checkpointed batch or a justified task-specific MaxTime, not a database restart.", maxTimeSeconds)
-		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry {
+		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry && !reconcileNetEscrowDeadline {
 			alertContext += fmt.Sprintf(" This is a non-drain context cancellation with a configured task deadline of %ss; compare the taskworker eval-error duration with that deadline. An exact match identifies an undersized task-specific MaxTime, not a deploy drain.", maxTimeSeconds)
 		}
 		if mixedCauses {
@@ -468,6 +471,12 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertContext += fmt.Sprintf(" The monitor loaded verification_enabled=false from the same environment. A matching eval error at the configured %ss boundary confirms the stale ungated chain; `Interrupted: Done` is the same disabled-work family.", maxTimeSeconds)
 			alertAction = "Roll out the StEnabled guards on verification task seeding, execution, and Post scheduling, plus the taskworker-startup reap for all four verification task functions. Do not raise the deadline or pull this row forward."
 			alertVerify = "After taskworker startup, this pending row disappears without a replacement, all disabled verification task families remain absent, and disabled /verify routes fail closed before required-vault access."
+		} else if reconcileNetEscrowDeadline {
+			alertMechanism = "ReconcileNetEscrow reached its configured safety boundary. That cancellation contains an overrun; it is not evidence that MaxTime is undersized. The known legacy full-fleet reconciler can miss this boundary when the balance lookup index is absent, then automatic rescheduling repeats stale absolute-write exposure."
+			alertContext += fmt.Sprintf(" This is a non-drain cancellation at the configured %ss boundary. Correlate the exact eval-error duration with §5.11 aggregate and negative-counter evidence, and check migration coherence for the balance_id index before interpreting the retry.", maxTimeSeconds)
+			alertAction = "Keep the task deadline. Restore migration coherence for the balance_id index and roll out the page-local additive reconciler plus atomic negative clamp across every taskworker generation. Do not raise MaxTime or manually kick the fresh retry."
+			alertVerify = "The migration artifact exists, scheduled reconciliations finish below 120s on every generation, aggregate drift converges, and taskworker, API, and Connect emit no new negative counters for a full interval."
+			alertPlaybook = "SIGNALS.md §5.11 and §8.9"
 		} else if task == "UpdateReliabilities" &&
 			strings.Contains(lowerError, "failed to deallocate cached statement(s): conn closed") {
 			alertMechanism = "A full reliability running-window anchor exhausted the task's configured deadline. pgx surfaced the interrupted connection while deallocating cached statements, after PostgreSQL canceled the work. Without per-lookback commits, the transaction rollback discards every completed lookback and the retry starts the same full anchor sequence again."

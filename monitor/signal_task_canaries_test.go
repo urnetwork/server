@@ -520,6 +520,45 @@ func TestTaskCanariesSignalExplainsNonDrainDeadlineCancellation(t *testing.T) {
 	}
 }
 
+func TestTaskCanariesSignalTreatsNetEscrowDeadlineAsContainment(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{
+				"ReconcileNetEscrow", "1", "0", "1", "2", "-1498",
+				"Interrupted: context canceled", "1800", "1", "context-canceled=1",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"ReconcileNetEscrow reached its configured safety boundary",
+		"not evidence that MaxTime is undersized",
+		"balance_id index",
+		"page-local additive reconciler",
+		"Do not raise MaxTime or manually kick",
+		"SIGNALS.md §5.11 and §8.9",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("net-escrow deadline diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "undersized task-specific MaxTime") {
+		t.Fatalf("net-escrow containment was rendered as an undersized deadline:\n%s", markdown)
+	}
+}
+
 func TestTaskCanariesSignalExplainsLiteralTaskDeadlineTimeout(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
