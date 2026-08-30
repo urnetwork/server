@@ -2762,7 +2762,7 @@ page-local additive/no-op-skipping reconciler, a scheduled aggregate returns
 to the tens-of-GiB band, and all three emitters remain quiet for a full
 following interval.
 
-The final pre-deploy sequence supplied that terminal control while also
+A later pre-deploy sequence supplied that terminal control while also
 reproducing a short-duration clobber. Task
 `01a05417-ef96-3dc9-4448-e5f849e7f296` ran for about 108 seconds on old
 edge-0/g1 and ended at 19:21:00.946518Z with 185.27GiB over plus 267.55GiB
@@ -2778,6 +2778,9 @@ in about 21 seconds at 19:31:48.963077Z, and contracted to 42.95GiB over plus
 recorded zero negative-counter lines across the reversal and contraction.
 This is a complete legacy clobber/reversal/convergence chain; it clears the
 individual sequence without making the old absolute writer safe.
+One further old-generation pass on edge-3/g1 completed at
+19:37:08.885440Z and remained in band at 36.24GiB over plus 46.47GiB under
+across 842 networks, while every negative-counter stream remained quiet.
 
 The negative aftermath also revealed an irreducible ordering window: a
 PostgreSQL settlement commits before its Redis mirror post. Even a bounded
