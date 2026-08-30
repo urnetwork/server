@@ -7,13 +7,15 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// fakeStream builds a stream shaped exactly like runner.warpctlStream (child
-// process writing into an os.Pipe) around an arbitrary shell script.
+// fakeStream builds the tailer's injected stream around an arbitrary shell
+// script. Tests that need runner.warpctlStream's stdout/stderr boundary use the
+// real runner below.
 func fakeStream(script string) func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error) {
 	return func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error) {
 		cmd := exec.CommandContext(ctx, "sh", "-c", script)
@@ -30,6 +32,38 @@ func fakeStream(script string) func(ctx context.Context) (*exec.Cmd, io.ReadClos
 		}
 		pw.Close()
 		return cmd, pr, nil
+	}
+}
+
+// A Loki failure belongs to the local observation transport, not to the
+// remote service whose logs were requested. The production failure was an
+// exhausted 502 retry whose stderr included `panic:`; when warpctlStream
+// merged stderr with stdout, every standing service tailer classified that as
+// a page-tier service panic.
+func TestWarpctlStreamDoesNotClassifyTransportStderr(t *testing.T) {
+	binDir := t.TempDir()
+	warpctlPath := filepath.Join(binDir, "warpctl")
+	script := `#!/bin/sh
+printf '%s\n' '[edge-0][taskworker][g1][cid:abc] ordinary remote log line'
+printf '%s\n' 'panic: Loki query error (502): Bad Gateway' >&2
+`
+	if err := os.WriteFile(warpctlPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	tailer := newLogTailer("taskworker", &probeEnv{
+		cfg:    &monitorConfig{env: "main"},
+		runner: newRunner(&monitorConfig{env: "main"}),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := tailer.tailOnce(ctx); err != nil {
+		t.Fatalf("tailOnce: %v", err)
+	}
+
+	if finding := findingByClass(t, tailer.drainWindow(), "panic"); !finding.healthy {
+		t.Fatalf("local warpctl stderr became a remote panic finding: %+v", finding)
 	}
 }
 

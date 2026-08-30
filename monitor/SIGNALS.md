@@ -346,6 +346,18 @@ request is GET-only). Exhausted retries still fail visibly; they must not be
 relabelled as a healthy log window. Standing WebSocket tails retain their
 separate reconnect lifecycle.
 
+The replacement watcher exposed the corresponding stream-boundary defect at
+22:54Z. `warpctlStream` merged local stderr into the stdout stream containing
+remote log lines. When all three retryable Loki requests returned 502,
+`warpctl` wrote retry diagnostics and its final `panic: Loki query error` to
+stderr; `log-errors` consequently paged taskworker and web as though those
+services had panicked 70 times/minute. The stream now classifies stdout only
+and leaves stderr on the monitor's own diagnostic channel. The deterministic
+test emits an ordinary remote line on stdout and the exact exhausted-502 panic
+shape on stderr, then proves the service panic finding stays healthy. An
+exhausted query still restarts the tailer and is surfaced by tailer health; it
+is neither hidden nor attributed to the observed service.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)

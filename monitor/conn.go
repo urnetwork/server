@@ -355,9 +355,11 @@ func (self *runner) warpctl(ctx context.Context, args ...string) (string, error)
 }
 
 // warpctlStream starts a long-running warpctl command (e.g. `logs ... -f`) and
-// returns the running cmd plus a pipe carrying its combined stdout+stderr.
-// The caller owns reading the pipe and waiting on the cmd; ctx cancellation
-// kills the process, which closes the pipe and unblocks the reader.
+// returns the running cmd plus a pipe carrying stdout. warpctl writes its own
+// transport/retry diagnostics to stderr; those remain monitor diagnostics and
+// must never be classified as lines emitted by the remote service. The caller
+// owns reading the pipe and waiting on the cmd; ctx cancellation kills the
+// process, which closes the pipe and unblocks the reader.
 func (self *runner) warpctlStream(ctx context.Context, args ...string) (*exec.Cmd, io.ReadCloser, error) {
 	cmd := exec.CommandContext(ctx, "warpctl", args...)
 	pr, pw, err := os.Pipe()
@@ -365,7 +367,7 @@ func (self *runner) warpctlStream(ctx context.Context, args ...string) (*exec.Cm
 		return nil, nil, err
 	}
 	cmd.Stdout = pw
-	cmd.Stderr = pw
+	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		pr.Close()
 		pw.Close()
