@@ -772,7 +772,14 @@ func TestMeasurePerfvarUnderlayReplaysLiveProfileSchedule(t *testing.T) {
 	if err := validatePerfvarProfileScheduleScenario(scenario); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	// The schedule can contract a live queue and induce valid TCP
+	// retransmission backoff. Keep the outer liveness bound aligned with the
+	// workload's modeled, race-aware deadline instead of overriding it with a
+	// shorter wall-clock limit.
+	ctx, cancel := context.WithTimeout(
+		t.Context(),
+		calibrationWorkloadTimeout(perfvarCalibrationProfile(scenario), scenario.PayloadByteCount),
+	)
 	defer cancel()
 	result, err := measurePerfvarUnderlay(ctx, scenario)
 	if err != nil {
