@@ -29,6 +29,13 @@ type runLoopStreamingSource struct {
 	started chan<- []string
 }
 
+type manualRunLoopTicker struct {
+	c <-chan time.Time
+}
+
+func (t *manualRunLoopTicker) C() <-chan time.Time { return t.c }
+func (t *manualRunLoopTicker) Stop()               {}
+
 func (s *runLoopStreamingSource) StreamLocal(ctx context.Context, name string, args ...string) (*exec.Cmd, io.ReadCloser, error) {
 	if name != "warpctl" {
 		return nil, nil, fmt.Errorf("stream command = %q, want warpctl", name)
@@ -115,6 +122,98 @@ func TestRunLoopStartsStandingLogTailers(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("RunLoop did not stop its standing log tailer")
+	}
+}
+
+// Standing log counts are rates over arrival time, so their scheduler cannot
+// perform the generic immediate startup run or wait behind slow remote probes.
+// This pins both properties with every remote execution slot occupied.
+func TestRunLoopGivesStandingLogsOneCompleteDedicatedCadence(t *testing.T) {
+	var active atomic.Int64
+	var maximum atomic.Int64
+	started := make(chan struct{}, runLoopMaxConcurrentSignals)
+	release := make(chan struct{})
+	signals := make([]Signal, 0, runLoopMaxConcurrentSignals+1)
+	for i := range runLoopMaxConcurrentSignals {
+		signals = append(signals, &blockingLoopSignal{
+			number:  fmt.Sprintf("synthetic-blocker-%d", i),
+			active:  &active,
+			maximum: &maximum,
+			started: started,
+			release: release,
+		})
+	}
+
+	const logCadence = 2 * time.Hour
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify(`error="the result-set has errors: [plugin.notRegistered] plugin not registered"`)
+	logSignal := &signalAdapter{
+		number: "1.5",
+		key:    "log-errors",
+		name:   "Log error-class rates",
+		probe: &logTailProbe{
+			tailers:         []*logTailer{tailer},
+			cadenceOverride: logCadence,
+		},
+	}
+	signals = append(signals, logSignal)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handled := make(chan Alerts, 1)
+	runErr := make(chan error, 1)
+	logTicks := make(chan time.Time, 1)
+	newTicker := func(cadence time.Duration) runLoopTicker {
+		if cadence == logCadence {
+			return &manualRunLoopTicker{c: logTicks}
+		}
+		return &manualRunLoopTicker{c: make(chan time.Time)}
+	}
+	go func() {
+		runErr <- NewWithSignals(syntheticSettings(&syntheticSource{}), signals...).runLoop(
+			ctx,
+			func(_ context.Context, signal Signal, alerts Alerts) error {
+				if signal.Key() == logSignal.Key() {
+					handled <- alerts
+				}
+				return nil
+			},
+			newTicker,
+		)
+	}()
+
+	for range runLoopMaxConcurrentSignals {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out filling the remote execution slots")
+		}
+	}
+	select {
+	case alerts := <-handled:
+		t.Fatalf("standing logs drained a partial startup window: %+v", alerts)
+	default:
+	}
+	logTicks <- time.Now()
+
+	select {
+	case alerts := <-handled:
+		alert := requireAlertClass(t, alerts, "grafana-plugin-unregistered")
+		if alert.SignalKey != logSignal.Key() {
+			t.Fatalf("standing log alert signal key = %q, want %q", alert.SignalKey, logSignal.Key())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("standing log drain waited behind occupied remote execution slots")
+	}
+
+	cancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("RunLoop returned an error after cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunLoop did not stop after cancellation")
 	}
 }
 

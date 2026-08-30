@@ -554,6 +554,9 @@ func truncateLine(line string) string {
 // up). The tailers themselves run as standing goroutines started in main.
 type logTailProbe struct {
 	tailers []*logTailer
+	// cadenceOverride is a deterministic scheduler-test seam. Production
+	// always uses the one-minute default below.
+	cadenceOverride time.Duration
 	// restart counts at the previous check, per tailer, for the hot-restart
 	// delta. Only the probe goroutine touches this (a probe never overlaps
 	// itself).
@@ -569,9 +572,14 @@ const tailerSilentThreshold = 10 * time.Minute
 // oversized line replayed at each reconnect, or warpctl itself failing).
 const tailerHotRestartThreshold = 3
 
-func (self *logTailProbe) id() string             { return "logs/tail" }
-func (self *logTailProbe) tier() string           { return tierWarn }
-func (self *logTailProbe) cadence() time.Duration { return 60 * time.Second }
+func (self *logTailProbe) id() string   { return "logs/tail" }
+func (self *logTailProbe) tier() string { return tierWarn }
+func (self *logTailProbe) cadence() time.Duration {
+	if self.cadenceOverride > 0 {
+		return self.cadenceOverride
+	}
+	return 60 * time.Second
+}
 
 func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	if self.lastRestartCounts == nil {

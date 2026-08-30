@@ -309,6 +309,19 @@ shutdown. One-shot `Run`/`RunSignal` retain the bounded query. The deterministic
 runtime test requires the exact standing command, so tested-but-dormant tailer
 code cannot recur.
 
+A live scheduler control immediately found a second boundary in that wiring.
+The v71 watcher started its streams at 19:18:56Z, but the generic RunLoop
+startup wave drained `log-errors` at 19:19:15Z and labelled that roughly
+19-second fragment `/min`; the following drain arrived only 46 seconds later.
+The signal was also competing with SSH and database probes for the four remote
+execution slots, so a collision could stretch a later rate window. Standing
+logs now wait one complete cadence before their first drain and bypass the
+remote-command slots—the check only drains in-memory counters. The
+deterministic scheduler test fills every remote slot, proves there is no
+partial startup callback, then proves the log drain still runs exactly on its
+own cadence. This preserves both continuous ingestion and meaningful
+per-minute storm thresholds.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)
@@ -1097,6 +1110,14 @@ split is a fourth independent reproduction of the oversized 100k checkpoint
 plus the hot-process amplifier. It is pre-rollout evidence: require new
 generations to complete recurring 25k checkpoints below 120s before clearing
 the incident.
+
+The next old-generation checkpoint supplied the non-timeout side of the same
+boundary. Task `01a05406-222b-61a7-a780-cc6244cde015` remained on the
+edge-0/g1 hot process and `finished_task` recorded a successful 1,568-second
+run. It was still only 232 seconds below the hard deadline and roughly 65x the
+healthy 20–30-second band. A successful terminal row therefore does not clear
+the latency incident or weaken the 25k checkpoint fix; it shows the amplifier
+is continuous near the deadline rather than a binary timeout-only failure.
 
 ### 2.7 New-connection rate — existing-sessions vs new-connects discriminator
 Probe: `connection-rate`
