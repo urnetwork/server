@@ -185,6 +185,19 @@ func TestStEventsDedupOrderAndHighWater(t *testing.T) {
 		if block := GetStHighWaterBlock(ctx); block != 150 {
 			t.Fatalf("high water = %d, want 150", block)
 		}
+
+		SetStChainCheckpoint(ctx, StChainCheckpoint{NextBlock: 200, BlockHash: "0xabc"})
+		SetStHighWaterBlock(ctx, 175)
+		checkpoint := GetStChainCheckpoint(ctx)
+		if checkpoint.NextBlock != 200 || checkpoint.BlockHash != "0xabc" {
+			t.Fatalf("stale high water changed canonical checkpoint: %+v", checkpoint)
+		}
+
+		SetStHighWaterBlock(ctx, 250)
+		checkpoint = GetStChainCheckpoint(ctx)
+		if checkpoint.NextBlock != 250 || checkpoint.BlockHash != "" {
+			t.Fatalf("advanced hashless checkpoint = %+v", checkpoint)
+		}
 	})
 }
 

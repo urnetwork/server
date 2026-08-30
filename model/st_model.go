@@ -1368,7 +1368,23 @@ func GetStHighWaterBlock(ctx context.Context) uint64 {
 // SetStHighWaterBlock advances the event sync high-water mark. The mark
 // never moves backward (re-scans are idempotent but pointless).
 func SetStHighWaterBlock(ctx context.Context, block uint64) {
-	SetStChainCheckpoint(ctx, StChainCheckpoint{NextBlock: block})
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+                INSERT INTO st_chain_sync (singleton_id, high_water_block, block_hash, update_time)
+                VALUES (1, $1, '', $2)
+                ON CONFLICT (singleton_id) DO UPDATE
+                SET
+					high_water_block = EXCLUDED.high_water_block,
+					block_hash = EXCLUDED.block_hash,
+					update_time = EXCLUDED.update_time
+				WHERE st_chain_sync.high_water_block < EXCLUDED.high_water_block
+            `,
+			int64(block),
+			server.NowUtc(),
+		))
+	})
 }
 
 // SetStChainCheckpoint records the exact canonical boundary. It intentionally
