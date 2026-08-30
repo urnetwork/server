@@ -67,6 +67,7 @@ func NewSignals() []Signal {
 		NewRedisTopologySignal(),
 		NewReliabilityPipelineSignal(),
 		NewSourceAttributionSignal(),
+		NewMigrationsSignal(),
 		NewRedisKeyEventsSignal(),
 		NewStuckLeasesSignal(),
 		NewTaskConvergenceSignal(),

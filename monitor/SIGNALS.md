@@ -2872,6 +2872,7 @@ Tier-1 (warn):
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
+| migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every published schema artifact | page when any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | logs | `[netescrow]negative counter after` | any; payload includes site (never raw balance/contract ids) |
@@ -3183,6 +3184,47 @@ the UR header. Check public port exposure whenever this contract changes.
 Healthy recovery is the correct known address from both family-specific
 endpoints on every active generation, no new malformed-value resolver lines,
 and no legacy untrusted-peer lines. `/hello` alone proves none of this.
+
+### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
+Probe: `migrations`
+
+Migration versions are a published production protocol. Once a migration has
+run anywhere, its slice position and version must never move: corrections and
+new work are appended after the published sequence. A successful numeric head
+alone is not sufficient evidence because a source edit can insert migrations
+before that head. The runner will then skip the newly inserted work and can
+replay old non-idempotent migrations under later numbers.
+
+On 2026-08-30 production recorded successful version 590, with the first three
+competition artifacts present. Four escrow/retention migrations had been
+inserted before those published entries in source, shifting the competition
+sequence to 592–596. A rollout from that ordering would have skipped the new
+schema through 590 and then attempted to recreate existing competition tables.
+The root fix restored the published positions and appended the new work.
+
+This is the version-to-artifact contract checked by the probe:
+
+| Version | Required published artifact |
+|---:|---|
+| 588 | `competition_round` |
+| 589 | `competition_job_immutable_guard()` |
+| 590 | `competition_round.providers_sha256` |
+| 591 | `competition_round.epoch_number` |
+| 592 | `competition_job.api_image_digest` |
+| 593 | `competition_candidate_review` |
+| 594 | `transfer_escrow_balance_contract` |
+| 595 | `account_payment.contract_retention_cursor` and `contract_retention_pending` |
+| 596 | `account_payment_contract_retention_pending` |
+| 597 | `transfer_escrow_sweep_payment_contract` |
+
+Page immediately as `migration-schema-drift` when the successful audit head is
+at or above an artifact's version but that artifact is absent. Warn as
+`migration-behind` while the audit head is below this source tree's required
+head. The deployment gate is strict: run migrations from the exact service
+commit, require version 597 and all ten artifact checks, and only then activate
+dependent APIs or taskworkers. Never edit `migration_audit` or create objects
+by hand merely to silence the probe; repair the append-only migration stream
+and let its normal runner advance the database.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
