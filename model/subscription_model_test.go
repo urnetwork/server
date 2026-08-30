@@ -1839,11 +1839,11 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 }
 
 // Round trip of the net escrow counter through the real write and read paths,
-// pinning the per-balance key format (`{escrow_<balanceId>}net`) and the ttl
-// stamped at every write site:
+// pinning the per-balance key format (`{escrow_<balanceId>}net`) and its
+// lifecycle at every mutation site:
 //   - escrow creation (IncrBy + ExpireAt balance end_time + slack)
 //   - reconcile apply (Set with the fallback ttl)
-//   - settle (DecrBy + ExpireNX when the decr recreates a missing key)
+//   - settle (an atomic release deletes a non-positive mirror)
 //
 // The test redis is standalone, not a cluster, so slot spreading itself is
 // invisible here: this proves functional equivalence of the per-balance-tag
@@ -1913,18 +1913,18 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 			connect.AssertEqual(t, true, 89*day < ttl && ttl <= 90*day)
 		})
 
-		// a settle decr that recreates a missing counter stamps the fallback
-		// ttl (the counter reads negative raw, zero clamped)
+		// A settle release against a missing mirror returns a negative value for
+		// diagnostics, but atomically deletes the recreated counter. A missing
+		// counter reads as zero and cannot overstate the available balance.
 		Testing_DeleteNetEscrow(ctx, balanceId)
 		err = CloseContract(ctx, contractId, clientId, 0, false)
 		connect.AssertEqual(t, nil, err)
 		err = CloseContract(ctx, contractId, clientIdB, 0, false)
 		connect.AssertEqual(t, nil, err)
-		connect.AssertEqual(t, -contractByteCount, Testing_NetEscrowByteCount(ctx, balanceId))
+		connect.AssertEqual(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalanceA+initialBalanceB, GetActiveTransferBalanceByteCount(ctx, networkId))
 		server.Redis(ctx, func(r server.RedisClient) {
-			ttl := r.TTL(ctx, key).Val()
-			connect.AssertEqual(t, true, 0 < ttl && ttl <= 90*day)
+			connect.AssertEqual(t, int64(0), r.Exists(ctx, key).Val())
 		})
 	})
 }
