@@ -32,10 +32,10 @@ func accountPaymentContractRetentionMigrationIndex(t testing.TB) int {
 	return sqlMigrationIndex(t, "account_payment_contract_retention_queue")
 }
 
-// Competition migrations were developed against an older main. They must
-// remain a contiguous suffix so every migration integrated from origin runs
-// first and retains its published version number.
-func TestCompetitionMigrationsFollowOriginMigrations(t *testing.T) {
+// The release-1.0 testnet durably published this exact numeric prefix. New
+// migrations append after it; moving a suffix to make room changes the SQL
+// named by every shifted migration_audit version.
+func TestPublishedMigrationPrefixIsImmutable(t *testing.T) {
 	markers := []string{
 		"CREATE TABLE competition_round",
 		"competition_append_only_guard",
@@ -44,14 +44,22 @@ func TestCompetitionMigrationsFollowOriginMigrations(t *testing.T) {
 		"competition_image_identity_backfill_guard",
 		"competition_candidate_review_gate",
 	}
-	firstCompetitionIndex := len(migrations) - len(markers)
-	if firstCompetitionIndex <= accountPaymentContractRetentionMigrationIndex(t) {
-		t.Fatalf("competition migration suffix starts at %d before latest origin migration", firstCompetitionIndex)
+	firstCompetitionIndex := publishedMigrationPrefixCount - len(markers)
+	if len(migrations) <= publishedMigrationPrefixCount {
+		t.Fatalf("migration count = %d, want appended history after published prefix %d", len(migrations), publishedMigrationPrefixCount)
 	}
 	for i, marker := range markers {
 		if index := sqlMigrationIndex(t, marker); index != firstCompetitionIndex+i {
-			t.Fatalf("competition migration %q index = %d, want suffix index %d", marker, index, firstCompetitionIndex+i)
+			t.Fatalf("published competition migration %q index = %d, want immutable index %d", marker, index, firstCompetitionIndex+i)
 		}
+	}
+	identity, err := migrationPrefixIdentity(publishedMigrationPrefixCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expectedIdentity = "6b18ebd7cadd8413ef4c90385486c7516c272ed93105dfcfd7300228712a6aba"
+	if identity != expectedIdentity {
+		t.Fatalf("published migration prefix identity = %s, want %s", identity, expectedIdentity)
 	}
 }
 

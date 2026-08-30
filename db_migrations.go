@@ -49,11 +49,13 @@ func newOnlineSqlMigration(sql string, auditSql string) *OnlineSqlMigration {
 
 // important these migration functions must be idempotent
 type CodeMigration struct {
+	id       string
 	callback func(context.Context)
 }
 
-func newCodeMigration(callback func(context.Context)) *CodeMigration {
+func newCodeMigration(id string, callback func(context.Context)) *CodeMigration {
 	return &CodeMigration{
+		id:       id,
 		callback: callback,
 	}
 }
@@ -143,7 +145,9 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 	if upTo > len(migrations) {
 		upTo = len(migrations)
 	}
-	for i := DbVersion(ctx); i < upTo; i += 1 {
+	startVersion := DbVersion(ctx)
+	verifyMigrationCatalog(ctx, startVersion)
+	for i := startVersion; i < upTo; i += 1 {
 		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(
 				ctx,
@@ -188,6 +192,7 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 				i,
 				i+1,
 			))
+			Raise(recordMigrationIdentityIfCatalogExists(ctx, tx, i))
 		})
 	}
 }
@@ -1334,7 +1339,7 @@ var migrations = []any{
         ALTER TABLE device ALTER COLUMN device_spec TYPE varchar(256)
     `),
 
-	newCodeMigration(migration_20240124_PopulateDevice),
+	newCodeMigration("20240124_populate_device", migration_20240124_PopulateDevice),
 
 	// ALTERED the run_at_block size is 1 second
 	// extract(epoch ...) is epoch in seconds
@@ -1527,7 +1532,7 @@ var migrations = []any{
             UNIQUE (referral_code)
         )
     `),
-	newCodeMigration(migration_20240725_PopulateNetworkReferralCodes),
+	newCodeMigration("20240725_populate_network_referral_codes", migration_20240725_PopulateNetworkReferralCodes),
 
 	newSqlMigration(`
         ALTER TABLE transfer_contract ADD COLUMN payer_network_id uuid NULL
@@ -1584,7 +1589,7 @@ var migrations = []any{
         ALTER TABLE account_wallet ADD COLUMN circle_wallet_id uuid NULL
     `),
 
-	newCodeMigration(migration_20240802_AccountPaymentPopulateCircleWalletId),
+	newCodeMigration("20240802_account_payment_populate_circle_wallet_id", migration_20240802_AccountPaymentPopulateCircleWalletId),
 
 	newSqlMigration(`
         ALTER TABLE network_client_location
@@ -1744,7 +1749,7 @@ var migrations = []any{
         ALTER TABLE network_referral_code ADD CONSTRAINT network_referral_code_referral_code_key UNIQUE (referral_code);
     `),
 
-	newCodeMigration(migration_20250402_ReferralCodeToAlphaNumeric),
+	newCodeMigration("20250402_referral_code_to_alphanumeric", migration_20250402_ReferralCodeToAlphaNumeric),
 
 	newSqlMigration(
 		`ALTER TABLE account_feedback ADD COLUMN star_count integer NOT NULL DEFAULT 0;`,
@@ -4720,7 +4725,7 @@ var migrations = []any{
 			ALTER COLUMN client_address SET DEFAULT ''
 	`),
 	// rewrite the raw addresses already persisted by the three call sites
-	newCodeMigration(migration_20260807_ScrubTaskAndAuditClientAddresses),
+	newCodeMigration("20260807_scrub_task_and_audit_client_addresses", migration_20260807_ScrubTaskAndAuditClientAddresses),
 
 	// Ledger of Stripe invoices that have already been credited, mirroring the
 	// apple_subscription_transaction shape: the insert (ON CONFLICT DO NOTHING)
@@ -5623,7 +5628,7 @@ var migrations = []any{
 	// than 80 minutes, pinning xmin and blocking handler cleanup. New sessions
 	// inherit this database-level backstop; legitimate long-running statements
 	// are unaffected because the timer runs only while a transaction is idle.
-	newCodeMigration(migrationSetIdleInTransactionTimeout),
+	newCodeMigration("20260813_set_idle_in_transaction_timeout", migrationSetIdleInTransactionTimeout),
 
 	// pending_task has a few hundred live rows but updates its scheduling columns
 	// on every claim and heartbeat. Fixed thresholds keep vacuum cadence tied to
@@ -5638,7 +5643,7 @@ var migrations = []any{
 			autovacuum_analyze_threshold = 50
 		)
 	`),
-	newCodeMigration(migrationVacuumPendingTask),
+	newCodeMigration("20260813_vacuum_pending_task", migrationVacuumPendingTask),
 
 	// Superseded companion lookup index: since the 2026-08-09 stats reset this
 	// 99GB index served only eight scans, while the hot open branch uses the
@@ -5984,62 +5989,6 @@ var migrations = []any{
 			PRIMARY KEY (provider, object_key, content_sha256)
 		);
 	`),
-
-	// Net-escrow reconciliation reads one fresh bounded balance page immediately
-	// before correcting Redis. Without this access path, every page would scan
-	// all transfer_escrow history and the cure for the stale-global-snapshot
-	// incident would be slower than the old scan. Build online because escrow
-	// creation and settlement are continuous production writes.
-	newOnlineSqlMigration(
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_balance_contract
-		 ON transfer_escrow (balance_id, contract_id)`,
-		`CREATE INDEX IF NOT EXISTS transfer_escrow_balance_contract
-		 ON transfer_escrow (balance_id, contract_id)`,
-	),
-
-	// Completing a processor payment must remain a small, durable transaction.
-	// The old implementation updated every transfer_contract owned by the
-	// payment before committing `completed = true`; large payouts timed out and
-	// could remain locally unpaid after the transfer was already on chain. The
-	// queue bit and UUID keyset cursor let the retention worker perform that
-	// fanout in bounded, resumable transactions. Existing rows default to not
-	// pending because the pre-deploy CompletePayment path stamped them inline.
-	// Recently completed rows are queued defensively: this repairs any deadline
-	// inherited from the former straggler rule while preserving the full seven
-	// days after completion. The explicit reap-time backfill remains the repair
-	// for older history.
-	newSqlMigration(`
-		/* account_payment_contract_retention_queue */
-		ALTER TABLE account_payment
-			ADD COLUMN contract_retention_cursor uuid NULL,
-			ADD COLUMN contract_retention_pending bool NOT NULL DEFAULT false;
-
-		UPDATE account_payment
-		SET contract_retention_pending = true
-		WHERE
-			completed AND
-			complete_time >= now() - interval '7 days'
-	`),
-	// The queue contains only newly completed payments, but account_payment is
-	// append-only and large enough that polling it should never become a table
-	// scan. Build online so payout writes continue during rollout.
-	newOnlineSqlMigration(
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS account_payment_contract_retention_pending
-		 ON account_payment (complete_time, payment_id)
-		 WHERE contract_retention_pending`,
-		`CREATE INDEX IF NOT EXISTS account_payment_contract_retention_pending
-		 ON account_payment (complete_time, payment_id)
-		 WHERE contract_retention_pending`,
-	),
-	// A payment's retention cursor reads its contract ids in UUID order. The old
-	// payment_id-only index found the rows but forced a potentially huge sort for
-	// every batch; this covering order makes each keyset step an index range.
-	newOnlineSqlMigration(
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_sweep_payment_contract
-		 ON transfer_escrow_sweep (payment_id, contract_id)`,
-		`CREATE INDEX IF NOT EXISTS transfer_escrow_sweep_payment_contract
-		 ON transfer_escrow_sweep (payment_id, contract_id)`,
-	),
 
 	// Durable sim-latency competition control plane. The queue is deliberately
 	// independent of pending_task: untrusted submissions are claimed by a
@@ -6635,4 +6584,85 @@ var migrations = []any{
 		BEFORE UPDATE OF finalized_at, winner_job_id ON competition_round
 		FOR EACH ROW EXECUTE FUNCTION competition_round_honesty_review_guard();
 	`),
+
+	// These migrations were originally added after the six competition
+	// migrations above had already been executed by release-1.0 testnet. Keep
+	// that published 593-migration prefix immutable: moving new migrations in
+	// front of an applied suffix makes the numeric audit version name different
+	// SQL and can both skip new DDL and replay old DDL.
+	//
+	// Net-escrow reconciliation reads one fresh bounded balance page immediately
+	// before correcting Redis. Without this access path, every page would scan
+	// all transfer_escrow history and the cure for the stale-global-snapshot
+	// incident would be slower than the old scan. Build online because escrow
+	// creation and settlement are continuous production writes.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)`,
+		`CREATE INDEX IF NOT EXISTS transfer_escrow_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)`,
+	),
+
+	// Completing a processor payment must remain a small, durable transaction.
+	// The old implementation updated every transfer_contract owned by the
+	// payment before committing `completed = true`; large payouts timed out and
+	// could remain locally unpaid after the transfer was already on chain. The
+	// queue bit and UUID keyset cursor let the retention worker perform that
+	// fanout in bounded, resumable transactions. Existing rows default to not
+	// pending because the pre-deploy CompletePayment path stamped them inline.
+	// Recently completed rows are queued defensively: this repairs any deadline
+	// inherited from the former straggler rule while preserving the full seven
+	// days after completion. The explicit reap-time backfill remains the repair
+	// for older history.
+	newSqlMigration(`
+		/* account_payment_contract_retention_queue */
+		ALTER TABLE account_payment
+			ADD COLUMN contract_retention_cursor uuid NULL,
+			ADD COLUMN contract_retention_pending bool NOT NULL DEFAULT false;
+
+		UPDATE account_payment
+		SET contract_retention_pending = true
+		WHERE
+			completed AND
+			complete_time >= now() - interval '7 days'
+	`),
+
+	// The queue contains only newly completed payments, but account_payment is
+	// append-only and large enough that polling it should never become a table
+	// scan. Build online so payout writes continue during rollout.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS account_payment_contract_retention_pending
+		 ON account_payment (complete_time, payment_id)
+		 WHERE contract_retention_pending`,
+		`CREATE INDEX IF NOT EXISTS account_payment_contract_retention_pending
+		 ON account_payment (complete_time, payment_id)
+		 WHERE contract_retention_pending`,
+	),
+
+	// A payment's retention cursor reads its contract ids in UUID order. The old
+	// payment_id-only index found the rows but forced a potentially huge sort for
+	// every batch; this covering order makes each keyset step an index range.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_sweep_payment_contract
+		 ON transfer_escrow_sweep (payment_id, contract_id)`,
+		`CREATE INDEX IF NOT EXISTS transfer_escrow_sweep_payment_contract
+		 ON transfer_escrow_sweep (payment_id, contract_id)`,
+	),
+
+	// One release candidate briefly placed the four migrations above before the
+	// already-published competition suffix. A testnet operator reached numeric
+	// version 594 after replaying the workload migration, thereby skipping the
+	// first new index when the historical order was restored. Repeating this
+	// online, IF NOT EXISTS migration closes that exact durable partial state for
+	// every affected database without blocking live escrow writes.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)`,
+		`CREATE INDEX IF NOT EXISTS transfer_escrow_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)`,
+	),
+
+	newSqlMigration(migrationCatalogSchemaSQL),
+
+	newCodeMigration("20260830_install_migration_catalog", migrationInstallCatalog),
 }

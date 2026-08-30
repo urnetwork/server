@@ -548,13 +548,11 @@ func TestReserveTestListenPortsStayBelowEphemeralRange(t *testing.T) {
 }
 
 // TestReserveTestListenPortsProbeWildcardScope: the probe must run on the
-// wildcard address the servers actually bind. The test occupies 0.0.0.0:P,
-// rewinds the allocator so P is the next candidate, and requires the
-// allocator to skip it. It also pins the OS semantics that make a loopback
-// probe insufficient: with SO_REUSEADDR (Go's listener default), binding
-// 127.0.0.1:P SUCCEEDS while 0.0.0.0:P is held — so a loopback probe would
-// have accepted P and the server's wildcard bind would then have failed
-// EADDRINUSE, exactly like c12-1.
+// wildcard address the servers actually bind. The test occupies a second
+// loopback address, proves a 127.0.0.1-only probe still succeeds, rewinds the
+// allocator so the occupied port is next, and requires its wildcard probe to
+// skip it. A later wildcard server bind conflicts with every local address,
+// not only the one a loopback-only probe happened to inspect.
 func TestReserveTestListenPortsProbeWildcardScope(t *testing.T) {
 	// a port the allocator itself proved wildcard-free
 	ports, release, err := ReserveTestListenPorts("tcp")
@@ -564,20 +562,21 @@ func TestReserveTestListenPortsProbeWildcardScope(t *testing.T) {
 	occupiedPort := ports[0]
 	release()
 
-	// occupy it on the wildcard, playing the part of the process's own
-	// outbound dial (or any other socket) landing on the number
-	occupier, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", occupiedPort))
+	// Occupy a different address in the IPv4 loopback network. Binding does not
+	// require an interface alias on supported test hosts, and it models any
+	// other local interface already owning the server's eventual wildcard port.
+	occupier, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.2:%d", occupiedPort))
 	if err != nil {
-		t.Fatalf("occupy wildcard %d: %v", occupiedPort, err)
+		t.Fatalf("occupy alternate loopback port %d: %v", occupiedPort, err)
 	}
 	defer occupier.Close()
 
-	// the semantics pin: loopback bind succeeds while the wildcard is held,
-	// so probing loopback proves nothing about the server's wildcard bind
+	// The loopback-only probe sees the same port as free because it never checks
+	// the address already holding it.
 	loopback, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", occupiedPort))
 	if err != nil {
 		t.Fatalf(
-			"loopback bind on wildcard-held port %d failed (%v): the OS no longer allows the specific-over-wildcard bind, so the loopback-probe hazard this test pins has changed shape — revisit the allocator doc",
+			"loopback-only probe on alternate-address-held port %d failed: %v",
 			occupiedPort, err,
 		)
 	}

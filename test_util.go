@@ -756,11 +756,10 @@ func reapOrphanedTestPgDbs(ctx context.Context) {
 //     the range are never assigned to outbound sockets, which removes that
 //     collision class instead of narrowing the window.
 //
-//  2. Probe the WILDCARD address the servers actually bind, not loopback. Go
-//     listeners set SO_REUSEADDR, so binding 127.0.0.1:P succeeds even while
-//     another socket holds 0.0.0.0:P — a loopback reservation therefore never
-//     proves the server's wildcard bind can succeed. The reverse bind fails,
-//     which is exactly how c12-1 died.
+//  2. Probe the WILDCARD address the servers actually bind, not one loopback
+//     address. A 127.0.0.1:P probe can succeed while another local address
+//     already owns P, but the server's subsequent 0.0.0.0:P bind conflicts
+//     with that address. The reservation must cover the server's real scope.
 //
 // The counter is pid-salted so concurrent test processes walk disjoint
 // sequences, and each returned port is held by a wildcard reservation socket
