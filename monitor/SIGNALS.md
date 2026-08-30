@@ -3365,6 +3365,23 @@ it does not make an already active mixed-generation rollout safe, so retain
 the independent monitor alert until the current head and all artifacts reach
 597.
 
+At the rollout's promised 21:15Z completion boundary, all sampled taskworker,
+API, Connect, and LB blocks reported binary `2026.8.30+1033129380`, but the
+successful database head still reported 590. This was no longer merely a
+mixed-generation interval: the complete sampled fleet had activated seven
+migrations ahead of PostgreSQL. The long current-code net-escrow run supplied
+one direct consequence. Its page-local query requires version 594's
+`transfer_escrow_balance_contract` index; without that artifact, each bounded
+page can rescan the large escrow history. The run reached its exact
+1,800-second deadline at 21:20:46Z, was rescheduled with `context canceled`,
+and the same task ID was already 337 seconds into its retry on another edge by
+21:26:38Z. `RemoveCompletedContracts` independently began failing on the
+missing version-595 `account_payment.contract_retention_cursor` column, with
+seven reschedule errors observed by 21:26:22Z. These are direct schema-lag
+failures, not stale rollout telemetry. A successful binary/config rollout
+therefore does not satisfy the release gate. Require the migration phase and
+artifact probe to finish before accepting service-version convergence.
+
 This is the version-to-artifact contract checked by the probe:
 
 | Version | Required published artifact |
@@ -4622,14 +4639,16 @@ Polling considered the old desired-version container healthy, so it never
 repaired the chain. Correct Warp behavior treats the start of a validated,
 non-transactional redirect as the irreversible commit boundary, keeps that
 candidate on later redirect/housekeeping errors, and on controller startup
-removes only current-pool DNAT targets that have no live socket. Docker state
-is insufficient ownership evidence: during `docker stop -t 3600`, nginx closes
-its listeners at the start of the graceful wait while Docker can continue to
-report the container as running for an hour. Reuse the same bounded socket
-inventory as port allocation and stale-conntrack cleanup. With an old binary,
-delete only the fully inspected dead-target rules or restore service with a
-corrected Warp controller; a generic route or container restart is not a
-diagnosis.
+removes only current-pool DNAT targets that have no live socket. It repeats
+that socket-authoritative check at a bounded cadence while multiple containers
+of the current version overlap, because the listener can close after startup.
+Docker state is insufficient ownership evidence: during
+`docker stop -t 3600`, nginx closes its listeners at the start of the graceful
+wait while Docker can continue to report the container as running for an hour.
+Reuse the same bounded socket inventory as port allocation and stale-conntrack
+cleanup. With an old binary, delete only the fully inspected dead-target rules
+or restore service with a corrected Warp controller; a generic route or
+container restart is not a diagnosis.
 
 The post-warpctl check later on 2026-08-30 reproduced that graceful-stop
 variant on edge-1/eno2. Vault and the live interface both named
@@ -4642,6 +4661,21 @@ the dead 7232 rules removed in both families and three consecutive pinned IPv6
 HTTPS requests return 200. Do not group the simultaneous edge-3/fireside
 timeouts with this RST signature: those need inbound/upstream-path evidence
 even though their Vault addresses and source-policy routes also match.
+
+The completed `2026.8.30+1033129380` rollout reproduced the post-startup timing
+on edge-0/eno4. The first same-version container took port 7659 at 20:27Z. A
+warpctl restart at 20:36Z found 7659 occupied and launched the same target on
+7658; at 21:03Z its inherited one-hour stop began draining the 7659 container.
+Only 7658 retained live TCP/UDP sockets, while the pinned public IPv6 request
+to the exact Vault/interface address refused in roughly 60ms on three
+consecutive attempts. At 21:15Z, three pinned attempts on every reachable
+configured IPv6 interface produced four stable HTTP 200 interfaces
+(edge-0/eno2, edge-1/eno3, edge-4/eno3, edge-4/eno4), three immediate-refusal
+interfaces (edge-0/eno4, edge-1/eno2, crisp), and three timeout interfaces
+(both edge-3 interfaces and fireside). Edge-5 was operator-declared offline
+and is excluded from that denominator. Every failed reachable host's Vault
+address exactly matched its live interface; do not repair this incident by
+changing `services.yml`.
 
 ### 14.6 Hosted DeviceLocal carrier-budget saturation
 
