@@ -432,6 +432,21 @@ shape after two minutes, a known shape after twice its completed mean, or five
 concurrent copies regardless of history. The aggregate active-pileup signal
 still independently pages whole-database saturation.
 
+One exact Payout shape is not allowed to become normal through that history
+rule. A 2026-08-31 retry spent several minutes computing
+`MIN(transfer_contract.create_time), MAX(transfer_contract.close_time)` from
+the complete `transfer_escrow_sweep` history with no wait event. The same
+transaction had already materialized `temp_account_payment`, containing the
+exact unpaid/safely-canceled set and the bounded plan's close-time cutoff. The
+later historical scan therefore selected the wrong, broader epoch as well as
+making each bounded payout proportional to the lifetime sweep table. The
+probe recognizes the complete MIN/MAX/FROM shape and warns after two minutes
+even when its current duration is below twice the polluted completed mean.
+The source fix joins `transfer_contract` to `temp_account_payment`; do not add
+an index for the redundant scan or cancel a live bounded attempt. Verify zero
+new legacy executions in both `pg_stat_activity` and `pg_stat_statements`, then
+require the same Payout row to commit and clear its error.
+
 PostgreSQL utility statements are not represented in `pg_stat_statements`.
 Daily `DbMaintenance` intentionally runs `REINDEX TABLE/INDEX CONCURRENTLY`
 with a two-hour per-object timeout; a 40KiB `web_search_ingest_state` rotation
@@ -2712,6 +2727,17 @@ limit:
   ahead. This is a pre-fix recurrence, not evidence against the containment:
   do not pull the row forward, and require a post-rollout retry to observe 32
   inside the transaction and reach a terminal success.
+  The next live attempt exposed an independent planner defect before it
+  reached `finalizePayments`: its active backend spent several minutes with no
+  wait event on the subsidy-range MIN/MAX over `transfer_escrow_sweep`. That
+  query rescanned paid historical rows even though `temp_account_payment`
+  already held the exact selected and close-time-bounded slice. The planner now
+  derives the range from that temporary relation, removing both the semantic
+  overreach and the lifetime-table scan. A deterministic query-shape
+  regression forbids `transfer_escrow_sweep`, a second close-time predicate,
+  or an extra bound argument in that stage. This fix ships in `taskworker`
+  alongside the transaction-local PostgreSQL containment; verify both
+  independently on the same retry.
 - `Payout`, `pgconn.connLockError=conn closed`, repeatedly after roughly
   16 minutes: production's database-level
   `idle_in_transaction_session_timeout=5min` closed the outer payment-plan
@@ -4144,15 +4170,32 @@ This is the version-to-artifact contract checked by the probe:
 | 595 | `account_payment.contract_retention_cursor` and `contract_retention_pending` |
 | 596 | `account_payment_contract_retention_pending` |
 | 597 | `transfer_escrow_sweep_payment_contract` |
+| 598 | idempotent repair of `transfer_escrow_balance_contract` |
+| 599 | `migration_catalog` |
+| 600 | `migration_catalog` identities cover indices 0–599 |
 
 Page immediately as `migration-schema-drift` when the successful audit head is
 at or above an artifact's version but that artifact is absent. Warn as
-`migration-behind` while the audit head is below this source tree's required
-head. The deployment gate is strict: run migrations from the exact service
-commit, require version 597 and all ten artifact checks, and only then activate
+`migration-behind` while the audit head is below `server.MigrationCount()` for
+this source tree; never duplicate that count as a monitor constant. The
+deployment gate is strict: run migrations from the exact service commit,
+require the current head and all twelve artifact checks, and only then activate
 dependent APIs or taskworkers. Never edit `migration_audit` or create objects
 by hand merely to silence the probe; repair the append-only migration stream
 and let its normal runner advance the database.
+
+The 2026-08-31 taskworker rollout proved why the monitor must derive that head
+from code. Image `2026.8.31-outerwerld+1033599540` pulled and started on both
+generations of every active edge, but each candidate correctly remained
+unready with `database migration head 597 is below binary-required head 600`.
+Warp retained the serving predecessor and retried the candidate; this was not
+an image-pull, systemd, or host-specific stall. The monitor still carried a
+hard-coded required head of 597 and therefore missed the exact release gate
+the application enforced. The probe now calls `server.MigrationCount()`,
+checks the version-599 catalog table and version-600 complete identity range,
+and has a synthetic regression where 597/600 must alert. Apply versions
+598–600 from that exact binary commit, then require both taskworker generations
+to become ready before testing their task fixes.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 

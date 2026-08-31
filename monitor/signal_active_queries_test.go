@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +66,31 @@ func TestActiveQueriesSignalSyntheticKnownLongQueryIsNotAnIncident(t *testing.T)
 				t.Fatalf("persistent alert = %t, want %t: %+v", gotAlert, test.wantAlert, alerts)
 			}
 		})
+	}
+}
+
+func TestActiveQueriesSignalDiagnosesLegacyPayoutSubsidyRange(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{
+			"-7171", "1", "300",
+			"SELECT MIN(transfer_contract.create_time), MAX(transfer_contract.close_time) FROM transfer_escrow_sweep INNER JOIN transfer_contract ON transfer_contract.contract_id = transfer_escrow_sweep.contract_id",
+			"600",
+		}}, nil
+	}}
+	alerts, err := NewActiveQueriesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "persistent-active-query").Markdown()
+	for _, want := range []string{
+		"complete sweep history",
+		"temp_account_payment",
+		"semantically overbroad",
+		"below twice that bad mean",
+		"Deploy the taskworker payment planner",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("legacy Payout query diagnosis missing %q:\n%s", want, markdown)
+		}
 	}
 }

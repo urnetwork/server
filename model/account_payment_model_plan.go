@@ -439,6 +439,24 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 	return
 }
 
+// paymentPlanSubsidyRangeSQL derives the subsidy epoch from the exact sweep set
+// selected by planPayments. temp_account_payment has already applied the
+// unpaid/safely-canceled predicate and, for bounded plans, the close-time
+// upper bound. Reading transfer_escrow_sweep again would both broaden the
+// epoch to historical paid sweeps and force PostgreSQL to rescan the full
+// sweep history. Duplicate selected rows for one contract do not affect
+// MIN/MAX.
+const paymentPlanSubsidyRangeSQL = `
+	SELECT
+		MIN(transfer_contract.create_time) AS subsidy_start_time,
+		MAX(transfer_contract.close_time) AS subsidy_end_time
+
+	FROM temp_account_payment
+
+	INNER JOIN transfer_contract ON
+		transfer_contract.contract_id = temp_account_payment.contract_id
+`
+
 // this assumes the table `temp_account_payment` exists in the transaction
 func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	// roll up all the sweeps per payer network, payee network
@@ -560,35 +578,12 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		netRevenue += payerSubsidyNetRevenues[payerNetworkId]
 	}
 
-	// the subsidy time range is derived from the swept contracts. Bound it by
-	// the same close-time window as the paid set so the subsidy scale/amount
-	// match the sweeps actually being paid in this bounded plan; otherwise the
-	// subsidy would be sized off the full history while paid over a slice.
-	subsidyRangeBound := ""
-	subsidyRangeArgs := []any{}
-	if self.bounded {
-		subsidyRangeBound = "WHERE transfer_contract.close_time < $1"
-		subsidyRangeArgs = append(subsidyRangeArgs, self.upperBound)
-	}
-
 	// note the aggregates are NULL when no swept contracts exist
 	var subsidyStartTimePtr *time.Time
 	var subsidyEndTimePtr *time.Time
 	result, err = self.tx.Query(
 		self.ctx,
-		fmt.Sprintf(`
-    	SELECT
-            MIN(transfer_contract.create_time) AS subsidy_start_time,
-            MAX(transfer_contract.close_time) AS subsidy_end_time
-
-        FROM transfer_escrow_sweep
-
-        INNER JOIN transfer_contract ON
-        	transfer_contract.contract_id = transfer_escrow_sweep.contract_id
-
-        %s
-        `, subsidyRangeBound),
-		subsidyRangeArgs...,
+		paymentPlanSubsidyRangeSQL,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
