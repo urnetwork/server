@@ -112,6 +112,40 @@ func TestNetEscrowSignalDoesNotMisdiagnoseBoundedLateralAsLegacyPlan(t *testing.
 	if strings.Contains(markdown, "Deploy the bounded-lateral reservation page") {
 		t.Fatalf("bounded-lateral profile prescribed its already-present fix:\n%s", markdown)
 	}
+	if strings.Contains(markdown, "a adjacent-sample") {
+		t.Fatalf("bounded-lateral alert rendered the wrong timing-window article:\n%s", markdown)
+	}
+}
+
+func TestNetEscrowSignalAdjacentWindowRendersHumanReadableMarkdown(t *testing.T) {
+	profiles := []Row{
+		{"10", "10000", "2000", "10", "100", "10", "10", "0"},
+		{"12", "14000", "2000", "12", "120", "10", "12", "0"},
+	}
+	profileIndex := 0
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM pg_stat_statements") {
+				row := profiles[profileIndex]
+				profileIndex++
+				return []Row{row}, nil
+			}
+			return []Row{{"completed", "210", "30"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	signal := NewNetEscrowSignal()
+	if _, err := signal.Run(context.Background(), syntheticSettings(source)); err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "netescrow-reconcile-overrun").Markdown()
+	if !strings.Contains(markdown, "reports the adjacent-sample mean") || strings.Contains(markdown, "a adjacent-sample") {
+		t.Fatalf("adjacent timing window is not human readable:\n%s", markdown)
+	}
 }
 
 func TestNetEscrowStatementProfileUsesAdjacentCounterDelta(t *testing.T) {
