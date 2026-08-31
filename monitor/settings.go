@@ -126,6 +126,10 @@ type SignalSettings struct {
 	// environment-scoped public health hostnames without duplicating them in
 	// monitor.yml.
 	PublicDomain string
+	// LogServices is the active services.yml service inventory used to start
+	// standing log streams without querying the remote artifact registry.
+	// Alternate callers may leave it empty to use warpctl discovery.
+	LogServices []string
 	// VerificationEnabled is the canonical st-subsystem feature state. It lets
 	// task probes distinguish a legitimately slow enabled verification job
 	// from a stale recurring chain that must not exist while the subsystem is
@@ -235,6 +239,16 @@ func (s SignalSettings) validate() error {
 	if len(s.Hosts) == 0 {
 		return fmt.Errorf("monitor: at least one host is required")
 	}
+	seenLogServices := map[string]struct{}{}
+	for _, service := range s.LogServices {
+		if service == "" || strings.TrimSpace(service) != service {
+			return fmt.Errorf("monitor: invalid log service %q", service)
+		}
+		if _, ok := seenLogServices[service]; ok {
+			return fmt.Errorf("monitor: duplicate log service %q", service)
+		}
+		seenLogServices[service] = struct{}{}
+	}
 	return nil
 }
 
@@ -265,6 +279,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
 		env:                 settings.Environment,
 		publicDomain:        settings.PublicDomain,
+		logServices:         append([]string(nil), settings.LogServices...),
 		verificationEnabled: settings.VerificationEnabled,
 		sshUser:             settings.SSHUser,
 		sshDevUser:          settings.SSHDevUser,

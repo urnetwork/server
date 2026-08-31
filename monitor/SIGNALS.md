@@ -392,6 +392,19 @@ core service set rather than trusting partial output. Synthetic tests retain
 both the normal production-shaped table and the exact partial-output panic
 boundary, so local helper diagnostics cannot become remote service identity.
 
+The rebuilt watcher made the dependency problem measurable: `warpctl ls
+services` fetches tag histories for every Docker repository before printing
+the service table. A slow Docker Hub response consumed the monitor's complete
+60-second command budget; the safe core fallback then started no Grafana
+stream, preserving the very visibility gap discovery was meant to prevent.
+Production service inventory now comes directly from the `services` mapping
+in the first (active) `services.yml` version already loaded by the monitor.
+It starts deterministically without registry I/O and includes all eight active
+services. Warpctl discovery remains only a compatibility fallback for custom
+callers that omit the inventory. Synthetic coverage proves historical service
+versions are ignored and that a configured inventory performs no registry
+command at all.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)

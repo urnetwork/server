@@ -2,12 +2,19 @@ package monitor
 
 import (
 	"context"
+	"sort"
 	"strings"
 )
 
-// warpServices discovers log-producing services from the environment repo
-// registry and falls back to the core set when that source is unavailable.
+// warpServices uses the active services.yml inventory in production. The
+// registry path remains a compatibility fallback for custom SignalSettings
+// and synthetic callers that do not provide that inventory.
 func warpServices(ctx context.Context, env *probeEnv) []string {
+	if len(env.cfg.logServices) != 0 {
+		services := append([]string(nil), env.cfg.logServices...)
+		sort.Strings(services)
+		return services
+	}
 	coreServices := []string{"api", "connect", "taskworker"}
 	out, err := env.runner.warpctl(ctx, "ls", "services", env.cfg.env)
 	if err != nil {

@@ -29,6 +29,43 @@ func TestWarpServicesParsesOnlyRepositoryLogLine(t *testing.T) {
 	}
 }
 
+func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
+	services := servicesYaml{Versions: []servicesVersionYaml{
+		{Services: map[string]any{
+			"taskworker": map[string]any{"image": "current"},
+			"api":        map[string]any{"image": "current"},
+			"grafana":    map[string]any{"image": "current"},
+		}},
+		{Services: map[string]any{"historical": map[string]any{"image": "old"}}},
+	}}
+	got, err := activeLogServicesFromServices(services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"api", "grafana", "taskworker"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("active log services = %#v, want %#v", got, want)
+	}
+}
+
+func TestWarpServicesPrefersConfiguredActiveInventory(t *testing.T) {
+	source := &syntheticSource{localFn: func(string, ...string) (string, error) {
+		return "", errors.New("artifact registry must not be queried")
+	}}
+	settings := syntheticSettings(source)
+	settings.LogServices = []string{"taskworker", "api", "grafana"}
+	env, err := newProbeEnv(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := warpServices(context.Background(), env)
+	want := []string{"api", "grafana", "taskworker"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("configured services = %#v, want %#v", got, want)
+	}
+}
+
 func TestWarpServicesRejectsPartialOutputFromFailedDiscovery(t *testing.T) {
 	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
 		if name != "warpctl" || strings.Join(args, " ") != "ls services synthetic" {

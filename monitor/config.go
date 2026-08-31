@@ -65,7 +65,8 @@ type servicesYaml struct {
 }
 
 type servicesVersionYaml struct {
-	LB servicesLBYaml `yaml:"lb"`
+	LB       servicesLBYaml `yaml:"lb"`
+	Services map[string]any `yaml:"services"`
 }
 
 type servicesLBYaml struct {
@@ -114,6 +115,10 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, err
 	}
+	logServices, err := activeLogServicesFromServices(services)
+	if err != nil {
+		return SignalSettings{}, err
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -122,6 +127,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 	settings := SignalSettings{
 		Environment:         env,
 		PublicDomain:        strings.TrimSpace(services.Domain),
+		LogServices:         logServices,
 		VerificationEnabled: controller.StEnabled(),
 		SSHUser:             y.Ssh.User,
 		SSHDevUser:          y.Ssh.DevUser,
@@ -183,6 +189,29 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+func activeLogServicesFromServices(services servicesYaml) ([]string, error) {
+	if len(services.Versions) == 0 {
+		return nil, fmt.Errorf("services.yml: no active version")
+	}
+	configured := services.Versions[0].Services
+	if len(configured) == 0 {
+		return nil, fmt.Errorf("services.yml: active version has no services")
+	}
+	logServices := make([]string, 0, len(configured))
+	for service := range configured {
+		service = strings.TrimSpace(service)
+		if service == "" || service == "lb" || service == "config-updater" {
+			continue
+		}
+		logServices = append(logServices, service)
+	}
+	if len(logServices) == 0 {
+		return nil, fmt.Errorf("services.yml: active version has no log-producing services")
+	}
+	sort.Strings(logServices)
+	return logServices, nil
 }
 
 func activeEdgeIPv6FromServices(services servicesYaml) (map[string][]EdgeIPv6InterfaceSettings, error) {
