@@ -2014,13 +2014,15 @@ While it ran continuously, close task
 `01a05661-a88b-0b67-87e1-132dce59ce32` completed its 25,000-contract
 checkpoint in 920s (05:53:58Z–06:09:18Z), its immediate successor
 `01a0566f-dc4f-be77-0c0a-28ddd3a5a3bd` completed in 870s
-(06:09:29Z–06:23:59Z), and a third close began about 12 seconds later and
-crossed 187s. During the third overlap the exact worker consumed 4.003 cores
-and allocated 651MiB/s; PostgreSQL migration, wait-event, active-query, and
-transaction-age probes were clean. Repeated sequential close overruns under
-one uninterrupted score export strengthen the shared process-budget cause.
-Keep the 25,000 cap and deploy the score fanout fix; additional close workers
-would add contention without removing the allocator.
+(06:09:29Z–06:23:59Z), and third task
+`01a0567d-511c-b67c-69b0-c0509e164c98` completed in 889s
+(06:24:11Z–06:39:00Z). A fourth close began about 12 seconds later on the same
+process. During the third overlap the exact worker consumed 4.003 cores and
+allocated 651MiB/s; PostgreSQL migration, wait-event, active-query, and
+transaction-age probes were clean. Three sequential 14–15-minute close
+checkpoints under one uninterrupted score export strengthen the shared
+process-budget cause. Keep the 25,000 cap and deploy the score fanout fix;
+additional close workers would add contention without removing the allocator.
 
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
