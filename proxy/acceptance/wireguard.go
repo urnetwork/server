@@ -3,7 +3,9 @@ package acceptance
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -20,6 +22,7 @@ import (
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
@@ -127,30 +130,87 @@ type wireGuardStack struct {
 }
 
 type wireGuardPacketDirectionStats struct {
-	Packets            uint64
-	Bytes              uint64
-	LocalAddrPackets   uint64
-	ForeignAddrPackets uint64
-	TCPPackets         uint64
-	TCPPayloadPackets  uint64
-	TCPPayloadBytes    uint64
-	Syn                uint64
-	SynAck             uint64
-	Fin                uint64
-	Rst                uint64
-	LastPacketNanos    int64
+	Packets             uint64
+	Bytes               uint64
+	LocalAddrPackets    uint64
+	ForeignAddrPackets  uint64
+	TCPPackets          uint64
+	TCPPayloadPackets   uint64
+	TCPPayloadBytes     uint64
+	Syn                 uint64
+	SynAck              uint64
+	Fin                 uint64
+	Rst                 uint64
+	TCPChecksumValid    uint64
+	TCPChecksumInvalid  uint64
+	RstForDial          uint64
+	RstOther            uint64
+	RstSequenceMatch    uint64
+	RstSequenceMismatch uint64
+	LastDialRst         wireGuardTCPPacket
+	LastOtherRst        wireGuardTCPPacket
+	LastPacketNanos     int64
 }
 
 type wireGuardPacketStats struct {
 	Outbound wireGuardPacketDirectionStats
 	Inbound  wireGuardPacketDirectionStats
 	DialAddr netip.Addr
+	DialPort uint16
+	DialFlow wireGuardTCPFlow
+}
+
+type wireGuardTCPFlow struct {
+	SourcePort         uint16
+	ExpectedInboundSeq uint32
+	ExpectedSeqSet     bool
+}
+
+type wireGuardTCPPacket struct {
+	SourceAddr      netip.Addr
+	DestinationAddr netip.Addr
+	SourcePort      uint16
+	DestinationPort uint16
+	Sequence        uint32
+	Acknowledgment  uint32
+	Flags           header.TCPFlags
+	ChecksumValid   bool
+	ExpectedSeq     uint32
 }
 
 type wireGuardDiagnosticTransport struct {
 	*http.Transport
 	stack        *wireGuardStack
 	roundTripper http.RoundTripper
+}
+
+type wireGuardDiagnosticBody struct {
+	io.ReadCloser
+	stack  *wireGuardStack
+	before wireGuardPacketStats
+}
+
+func (b *wireGuardDiagnosticBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	return n, b.wrapError(err)
+}
+
+func (b *wireGuardDiagnosticBody) Close() error {
+	return b.wrapError(b.ReadCloser.Close())
+}
+
+func (b *wireGuardDiagnosticBody) wrapError(err error) error {
+	if foreignErr := wireGuardForeignReturnError(b.stack.packetStats(), time.Now()); foreignErr != nil {
+		return foreignErr
+	}
+	if err == nil || errors.Is(err, io.EOF) {
+		return err
+	}
+	return fmt.Errorf(
+		"WireGuard inner packet trace %s: %w",
+		wireGuardPacketStatsDelta(b.before, b.stack.packetStats(), time.Now()),
+		err,
+	)
 }
 
 func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -170,6 +230,13 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 				_ = response.Body.Close()
 			}
 			return nil, foreignErr
+		}
+		if response != nil && response.Body != nil {
+			response.Body = &wireGuardDiagnosticBody{
+				ReadCloser: response.Body,
+				stack:      t.stack,
+				before:     before,
+			}
 		}
 		return response, nil
 	}
@@ -232,7 +299,33 @@ func (s *wireGuardStack) observePacket(packet []byte, outbound bool) {
 		return
 	}
 	stats.TCPPackets++
-	flags := header.TCPFlags(packet[ipHeaderBytes+13])
+	tcpBytes := packet[ipHeaderBytes:totalBytes]
+	tcpHeader := header.TCP(tcpBytes)
+	payloadBytes := totalBytes - ipHeaderBytes - tcpHeaderBytes
+	checksumValid := tcpHeader.IsChecksumValid(
+		tcpip.AddrFrom4Slice(packet[12:16]),
+		tcpip.AddrFrom4Slice(packet[16:20]),
+		checksum.Checksum(tcpBytes[tcpHeaderBytes:], 0),
+		uint16(payloadBytes),
+	)
+	if checksumValid {
+		stats.TCPChecksumValid++
+	} else {
+		stats.TCPChecksumInvalid++
+	}
+	sourceAddr, _ := netip.AddrFromSlice(packet[12:16])
+	destinationAddr, _ := netip.AddrFromSlice(packet[16:20])
+	tcpPacket := wireGuardTCPPacket{
+		SourceAddr:      sourceAddr,
+		DestinationAddr: destinationAddr,
+		SourcePort:      tcpHeader.SourcePort(),
+		DestinationPort: tcpHeader.DestinationPort(),
+		Sequence:        tcpHeader.SequenceNumber(),
+		Acknowledgment:  tcpHeader.AckNumber(),
+		Flags:           tcpHeader.Flags(),
+		ChecksumValid:   checksumValid,
+	}
+	flags := tcpPacket.Flags
 	if flags&header.TCPFlagSyn != 0 {
 		stats.Syn++
 		if flags&header.TCPFlagAck != 0 {
@@ -244,29 +337,74 @@ func (s *wireGuardStack) observePacket(packet []byte, outbound bool) {
 	}
 	if flags&header.TCPFlagRst != 0 {
 		stats.Rst++
+		if !outbound && s.rstMatchesDial(tcpPacket) {
+			stats.RstForDial++
+			tcpPacket.ExpectedSeq = s.stats.DialFlow.ExpectedInboundSeq
+			if s.stats.DialFlow.ExpectedSeqSet && tcpPacket.Sequence == s.stats.DialFlow.ExpectedInboundSeq {
+				stats.RstSequenceMatch++
+			} else {
+				stats.RstSequenceMismatch++
+			}
+			stats.LastDialRst = tcpPacket
+		} else {
+			stats.RstOther++
+			stats.LastOtherRst = tcpPacket
+		}
 	}
-	payloadBytes := totalBytes - ipHeaderBytes - tcpHeaderBytes
 	if 0 < payloadBytes {
 		stats.TCPPayloadPackets++
 		stats.TCPPayloadBytes += uint64(payloadBytes)
 	}
+	if outbound &&
+		tcpPacket.SourceAddr == s.clientIPv4 &&
+		tcpPacket.DestinationAddr == s.stats.DialAddr &&
+		tcpPacket.DestinationPort == s.stats.DialPort {
+		if flags&header.TCPFlagSyn != 0 && flags&header.TCPFlagAck == 0 {
+			s.stats.DialFlow = wireGuardTCPFlow{SourcePort: tcpPacket.SourcePort}
+		}
+		if flags&header.TCPFlagAck != 0 && flags&header.TCPFlagRst == 0 &&
+			tcpPacket.SourcePort == s.stats.DialFlow.SourcePort {
+			s.stats.DialFlow.ExpectedInboundSeq = tcpPacket.Acknowledgment
+			s.stats.DialFlow.ExpectedSeqSet = true
+		}
+	}
+}
+
+func (s *wireGuardStack) rstMatchesDial(packet wireGuardTCPPacket) bool {
+	return packet.SourceAddr == s.stats.DialAddr &&
+		packet.DestinationAddr == s.clientIPv4 &&
+		packet.SourcePort == s.stats.DialPort &&
+		packet.DestinationPort == s.stats.DialFlow.SourcePort
 }
 
 func subtractWireGuardDirection(before, after wireGuardPacketDirectionStats) wireGuardPacketDirectionStats {
-	return wireGuardPacketDirectionStats{
-		Packets:            after.Packets - before.Packets,
-		Bytes:              after.Bytes - before.Bytes,
-		LocalAddrPackets:   after.LocalAddrPackets - before.LocalAddrPackets,
-		ForeignAddrPackets: after.ForeignAddrPackets - before.ForeignAddrPackets,
-		TCPPackets:         after.TCPPackets - before.TCPPackets,
-		TCPPayloadPackets:  after.TCPPayloadPackets - before.TCPPayloadPackets,
-		TCPPayloadBytes:    after.TCPPayloadBytes - before.TCPPayloadBytes,
-		Syn:                after.Syn - before.Syn,
-		SynAck:             after.SynAck - before.SynAck,
-		Fin:                after.Fin - before.Fin,
-		Rst:                after.Rst - before.Rst,
-		LastPacketNanos:    after.LastPacketNanos,
+	delta := wireGuardPacketDirectionStats{
+		Packets:             after.Packets - before.Packets,
+		Bytes:               after.Bytes - before.Bytes,
+		LocalAddrPackets:    after.LocalAddrPackets - before.LocalAddrPackets,
+		ForeignAddrPackets:  after.ForeignAddrPackets - before.ForeignAddrPackets,
+		TCPPackets:          after.TCPPackets - before.TCPPackets,
+		TCPPayloadPackets:   after.TCPPayloadPackets - before.TCPPayloadPackets,
+		TCPPayloadBytes:     after.TCPPayloadBytes - before.TCPPayloadBytes,
+		Syn:                 after.Syn - before.Syn,
+		SynAck:              after.SynAck - before.SynAck,
+		Fin:                 after.Fin - before.Fin,
+		Rst:                 after.Rst - before.Rst,
+		TCPChecksumValid:    after.TCPChecksumValid - before.TCPChecksumValid,
+		TCPChecksumInvalid:  after.TCPChecksumInvalid - before.TCPChecksumInvalid,
+		RstForDial:          after.RstForDial - before.RstForDial,
+		RstOther:            after.RstOther - before.RstOther,
+		RstSequenceMatch:    after.RstSequenceMatch - before.RstSequenceMatch,
+		RstSequenceMismatch: after.RstSequenceMismatch - before.RstSequenceMismatch,
+		LastPacketNanos:     after.LastPacketNanos,
 	}
+	if before.RstForDial != after.RstForDial {
+		delta.LastDialRst = after.LastDialRst
+	}
+	if before.RstOther != after.RstOther {
+		delta.LastOtherRst = after.LastOtherRst
+	}
+	return delta
 }
 
 func wireGuardPacketStatsDelta(before, after wireGuardPacketStats, now time.Time) string {
@@ -275,8 +413,8 @@ func wireGuardPacketStatsDelta(before, after wireGuardPacketStats, now time.Time
 		if direction.Packets != 0 && direction.LastPacketNanos != 0 {
 			last = now.Sub(time.Unix(0, direction.LastPacketNanos)).Round(time.Millisecond).String() + " ago"
 		}
-		return fmt.Sprintf(
-			"packets=%d bytes=%d local=%d foreign=%d tcp=%d payload=%d/%dB syn=%d synack=%d fin=%d rst=%d last=%s",
+		detail := fmt.Sprintf(
+			"packets=%d bytes=%d local=%d foreign=%d tcp=%d payload=%d/%dB syn=%d synack=%d fin=%d rst=%d checksum=%d/%d(valid/invalid) rst_dial=%d rst_other=%d rst_seq=%d/%d(match/mismatch) last=%s",
 			direction.Packets,
 			direction.Bytes,
 			direction.LocalAddrPackets,
@@ -288,15 +426,66 @@ func wireGuardPacketStatsDelta(before, after wireGuardPacketStats, now time.Time
 			direction.SynAck,
 			direction.Fin,
 			direction.Rst,
+			direction.TCPChecksumValid,
+			direction.TCPChecksumInvalid,
+			direction.RstForDial,
+			direction.RstOther,
+			direction.RstSequenceMatch,
+			direction.RstSequenceMismatch,
 			last,
 		)
+		if direction.RstForDial != 0 {
+			detail += " last_dial_rst={" + formatWireGuardTCPPacket(direction.LastDialRst, true) + "}"
+		}
+		if direction.RstOther != 0 {
+			detail += " last_other_rst={" + formatWireGuardTCPPacket(direction.LastOtherRst, false) + "}"
+		}
+		return detail
 	}
 	return fmt.Sprintf(
 		"target=%s out{%s} in{%s}",
-		after.DialAddr,
+		netip.AddrPortFrom(after.DialAddr, after.DialPort),
 		format(subtractWireGuardDirection(before.Outbound, after.Outbound)),
 		format(subtractWireGuardDirection(before.Inbound, after.Inbound)),
 	)
+}
+
+func formatWireGuardTCPPacket(packet wireGuardTCPPacket, includeExpected bool) string {
+	detail := fmt.Sprintf(
+		"%s->%s seq=%d ack=%d flags=%s checksum=%t",
+		netip.AddrPortFrom(packet.SourceAddr, packet.SourcePort),
+		netip.AddrPortFrom(packet.DestinationAddr, packet.DestinationPort),
+		packet.Sequence,
+		packet.Acknowledgment,
+		wireGuardTCPFlags(packet.Flags),
+		packet.ChecksumValid,
+	)
+	if includeExpected {
+		detail += fmt.Sprintf(" expected_seq=%d", packet.ExpectedSeq)
+	}
+	return detail
+}
+
+func wireGuardTCPFlags(flags header.TCPFlags) string {
+	values := make([]string, 0, 5)
+	for _, value := range []struct {
+		flag header.TCPFlags
+		name string
+	}{
+		{header.TCPFlagSyn, "SYN"},
+		{header.TCPFlagAck, "ACK"},
+		{header.TCPFlagPsh, "PSH"},
+		{header.TCPFlagFin, "FIN"},
+		{header.TCPFlagRst, "RST"},
+	} {
+		if flags&value.flag != 0 {
+			values = append(values, value.name)
+		}
+	}
+	if len(values) == 0 {
+		return "none"
+	}
+	return strings.Join(values, "+")
 }
 
 func newWireGuardStack(ctx context.Context, clientIPv4 netip.Addr, mtu int, tunDevice *tuntest.ChannelTUN) (*wireGuardStack, error) {
@@ -405,6 +594,8 @@ func (s *wireGuardStack) DialContext(ctx context.Context, network, address strin
 	}
 	s.statsLock.Lock()
 	s.stats.DialAddr, _ = netip.AddrFromSlice(ipv4Address)
+	s.stats.DialPort = uint16(port)
+	s.stats.DialFlow = wireGuardTCPFlow{}
 	s.statsLock.Unlock()
 	return gonet.DialContextTCP(ctx, s.stack, fullAddress, ipv4.ProtocolNumber)
 }

@@ -115,7 +115,7 @@ func TestHostedDeviceTrackerRetainsRecentTransitions(t *testing.T) {
 		t.Fatalf("history did not evict its oldest transitions: %s", first)
 	}
 	diagnostic := tracker.Diagnostic()
-	if diagnostic != "05:01:09.000Z state=69" {
+	if diagnostic != "events=[none] state={05:01:09.000Z state=69}" {
 		t.Fatalf("diagnostic = %q, want latest transition", diagnostic)
 	}
 	tracker.stateLock.Lock()
@@ -135,6 +135,145 @@ func TestHostedDeviceTrackerPrefersLastLiveFlow(t *testing.T) {
 	diagnostic := tracker.Diagnostic()
 	if !strings.Contains(diagnostic, "65.49.70.82->p1(1)") || strings.Contains(diagnostic, "destinations=[]") {
 		t.Fatalf("diagnostic did not preserve the last live flow: %s", diagnostic)
+	}
+}
+
+func TestHostedDeviceTrackerRetainsCausalReliabilityChanges(t *testing.T) {
+	tracker := &sdkHostedDeviceTracker{}
+	start := time.Date(2026, 8, 31, 7, 41, 38, 0, time.UTC)
+	tracker.recordReliability(start, &sdk.ReliabilityMetrics{
+		FlowsOpened:        247,
+		ExitLossEvents:     46,
+		FlowsLostToExit:    3,
+		RecoveryCount:      1,
+		RecoveryPending:    0,
+		RemovalsDeferred:   30,
+		ProbesSent:         4,
+		ProbesAnswered:     4,
+		StickyFlowsRetired: 2,
+	})
+	// Ordinary healthy request volume must not become a causal event.
+	tracker.recordReliability(start.Add(time.Second), &sdk.ReliabilityMetrics{
+		FlowsOpened:        248,
+		ExitLossEvents:     46,
+		FlowsLostToExit:    3,
+		RecoveryCount:      1,
+		RecoveryPending:    0,
+		RemovalsDeferred:   30,
+		ProbesSent:         4,
+		ProbesAnswered:     4,
+		StickyFlowsRetired: 2,
+	})
+	tracker.recordReliability(start.Add(2*time.Second), &sdk.ReliabilityMetrics{
+		FlowsOpened:                     248,
+		ExitLossEvents:                  47,
+		FlowsLostToExit:                 5,
+		RecoveryCount:                   1,
+		RecoveryPending:                 2,
+		RemovalsDeferred:                31,
+		ProbesSent:                      5,
+		ProbesAnswered:                  4,
+		QuarantineTcpResets:             2,
+		QuarantineAffinityInvalidations: 7,
+		StickyFlowsRetired:              3,
+	})
+	tracker.record(start.Add(3*time.Second), "remote=connected destinations=[65.49.70.85->p1(1)] active=[p1(flow=1)]")
+
+	diagnostic := tracker.Diagnostic()
+	for _, expected := range []string{
+		"events=[07:41:40.000Z",
+		"exit_loss=+1",
+		"lost=+2",
+		"qreset=+2",
+		"qaffinity=+7",
+		"sticky=+1",
+		"deferred=+1",
+		"probe=+1",
+		"pending=2",
+		"state={07:41:41.000Z remote=connected",
+	} {
+		if !strings.Contains(diagnostic, expected) {
+			t.Errorf("diagnostic %q does not contain %q", diagnostic, expected)
+		}
+	}
+	if strings.Contains(diagnostic, "flows=+1") {
+		t.Fatalf("healthy flow volume polluted causal history: %s", diagnostic)
+	}
+}
+
+func TestHostedDeviceTrackerRebasesAfterReliabilityCounterReset(t *testing.T) {
+	tracker := &sdkHostedDeviceTracker{}
+	start := time.Date(2026, 8, 31, 8, 42, 7, 0, time.UTC)
+	baseline := &sdk.ReliabilityMetrics{
+		FlowsOpened:         180,
+		ExitLossEvents:      12,
+		FlowsLostToExit:     16,
+		RecoveryCount:       3,
+		RemovalsDeferred:    9,
+		ProbesSent:          20,
+		ProbesAnswered:      19,
+		QuarantineTcpResets: 2,
+	}
+	tracker.recordReliability(start, baseline)
+
+	// DeviceRemote returns zeros while an rpc generation reconnects. That is
+	// a sampling boundary, not a negative provider event.
+	tracker.recordReliability(start.Add(time.Second), &sdk.ReliabilityMetrics{})
+	// The next successful sample re-establishes the baseline. Restoring the
+	// old cumulative values must not look like a burst of new failures.
+	tracker.recordReliability(start.Add(2*time.Second), baseline)
+	tracker.record(start.Add(3*time.Second), "remote=connected destinations=[] active=[]")
+
+	diagnostic := tracker.Diagnostic()
+	if !strings.Contains(diagnostic, "events=[08:42:08.000Z metrics_reset]") {
+		t.Fatalf("diagnostic did not retain the reset boundary: %s", diagnostic)
+	}
+	for _, impossible := range []string{"exit_loss=-", "lost=-", "exit_loss=+12", "lost=+16"} {
+		if strings.Contains(diagnostic, impossible) {
+			t.Errorf("rpc reconnect became a false causal delta %q: %s", impossible, diagnostic)
+		}
+	}
+}
+
+func TestHostedDeviceTrackerRetainsProviderQuarantineAndRemovalCause(t *testing.T) {
+	providerA := sdk.RequireIdFromBytes(bytes.Repeat([]byte{0x31}, 16))
+	providerB := sdk.RequireIdFromBytes(bytes.Repeat([]byte{0x32}, 16))
+	tracker := &sdkHostedDeviceTracker{aliases: map[string]string{
+		providerA.String(): "p1",
+		providerB.String(): "p2",
+	}}
+	start := time.Date(2026, 8, 31, 8, 51, 34, 0, time.UTC)
+	exits := func(a *sdk.Exit) *sdk.ExitList {
+		list := sdk.NewExitList()
+		if a != nil {
+			list.Add(a)
+		}
+		list.Add(&sdk.Exit{ClientId: providerB})
+		return list
+	}
+
+	tracker.recordExitTransitions(start, exits(&sdk.Exit{ClientId: providerA, FlowCount: 16}))
+	tracker.recordExitTransitions(start.Add(time.Second), exits(&sdk.Exit{
+		ClientId:     providerA,
+		FlowCount:    16,
+		Warning:      true,
+		Quarantined:  true,
+		WarningCause: "no-receive-ack",
+	}))
+	tracker.recordExitTransitions(start.Add(2*time.Second), exits(nil))
+	tracker.record(start.Add(3*time.Second), "remote=connected destinations=[] active=[]")
+
+	diagnostic := tracker.Diagnostic()
+	for _, expected := range []string{
+		"08:51:35.000Z exit=p1 warning=true quarantine=true done=false cause=no-receive-ack flows=16",
+		"08:51:36.000Z exit=p1 removed flows=16 warning=true quarantine=true done=false cause=no-receive-ack",
+	} {
+		if !strings.Contains(diagnostic, expected) {
+			t.Errorf("diagnostic %q does not contain %q", diagnostic, expected)
+		}
+	}
+	if strings.Contains(diagnostic, providerA.String()) {
+		t.Fatalf("provider id leaked into transition diagnostics: %s", diagnostic)
 	}
 }
 
@@ -207,6 +346,33 @@ func TestHostedDeviceDiagnosticRetainsTargetRouteAndBusyExitBeforeTruncation(t *
 		if !strings.Contains(diagnostic, evidence) {
 			t.Errorf("truncated diagnostic %q does not contain %q", diagnostic, evidence)
 		}
+	}
+}
+
+func TestHostedDeviceDiagnosticPrioritizesRequestTargetOverResolverTraffic(t *testing.T) {
+	provider := sdk.RequireIdFromBytes(bytes.Repeat([]byte{0x45}, 16))
+	destinations := sdk.NewDestinationExitList()
+	for _, destination := range []string{
+		"8.8.8.8",
+		"8.8.4.4",
+		"208.67.222.222",
+		"208.67.220.220",
+		"1.1.1.1",
+		"1.0.0.1",
+		"9.9.9.9",
+		"149.112.112.112",
+		"172.66.43.138",
+	} {
+		destinations.Add(&sdk.DestinationExit{
+			DestinationIp: destination,
+			ClientId:      provider,
+			FlowCount:     1,
+		})
+	}
+
+	summary := formatHostedDeviceState(nil, nil, "none", nil, destinations, map[string]string{})
+	if !strings.Contains(summary, "172.66.43.138->p1(1)") {
+		t.Fatalf("bounded destinations dropped the request target: %s", summary)
 	}
 }
 

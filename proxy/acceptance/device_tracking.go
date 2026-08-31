@@ -16,6 +16,7 @@ import (
 const (
 	hostedDevicePollInterval      = time.Second
 	hostedDeviceHistorySize       = 64
+	hostedDeviceCausalHistorySize = 32
 	hostedDeviceDiagnosticMaxSize = 768
 )
 
@@ -39,9 +40,13 @@ type sdkHostedDeviceTracker struct {
 
 	stateLock     sync.Mutex
 	history       []string
+	causalHistory []string
 	lastSignature string
 	closeOnce     sync.Once
 	packetState   hostedDevicePacketState
+	lastMetrics   sdk.ReliabilityMetrics
+	metricsReady  bool
+	lastExitState map[string]hostedDeviceExitState
 }
 
 type hostedDevicePacketState struct {
@@ -50,6 +55,15 @@ type hostedDevicePacketState struct {
 	lastRemoteIngressAt time.Time
 	lastRemoteIngressN  int64
 	lastRemoteIngressB  sdk.ByteCount
+}
+
+type hostedDeviceExitState struct {
+	alias       string
+	flowCount   int32
+	warning     bool
+	quarantined bool
+	done        bool
+	cause       string
 }
 
 // productionHostedDeviceTracker attaches only when provisioning returned the
@@ -126,14 +140,19 @@ func (self *sdkHostedDeviceTracker) snapshot() string {
 		return fmt.Sprintf("remote=disconnected sync_error=%s", syncState)
 	}
 	now := time.Now()
-	return formatHostedDeviceState(
+	metrics := self.remote.GetReliabilityMetrics()
+	exits := self.remote.GetExits()
+	snapshot := formatHostedDeviceState(
 		self.remote.GetWindowStatus(),
-		self.remote.GetReliabilityMetrics(),
+		metrics,
 		self.packetState.summary(now, self.remote.GetPacketStats()),
-		self.remote.GetExits(),
+		exits,
 		self.remote.GetDestinationExits(),
 		self.aliases,
 	)
+	self.recordReliability(now, metrics)
+	self.recordExitTransitions(now, exits)
+	return snapshot
 }
 
 // formatHostedDeviceState keeps the timeline compact enough to survive the
@@ -200,7 +219,7 @@ func formatHostedDeviceState(
 	metricsSummary := "unknown"
 	if metrics != nil {
 		metricsSummary = fmt.Sprintf(
-			"flows=%d exit_loss=%d lost=%d recovery=%d/%d pending=%d dial=%d reraced=%d held=%d deferred=%d",
+			"flows=%d exit_loss=%d lost=%d recovery=%d/%d pending=%d dial=%d reraced=%d qreset=%d sticky=%d held=%d deferred=%d",
 			metrics.FlowsOpened,
 			metrics.ExitLossEvents,
 			metrics.FlowsLostToExit,
@@ -209,6 +228,8 @@ func formatHostedDeviceState(
 			metrics.RecoveryPending,
 			metrics.DialFailuresIntercepted,
 			metrics.FlowsReraced,
+			metrics.QuarantineTcpResets,
+			metrics.StickyFlowsRetired,
 			metrics.VerdictsHeldUplinkStale+metrics.VerdictsHeldTransportDown+metrics.VerdictsHeldSharedFate,
 			metrics.RemovalsDeferred,
 		)
@@ -232,10 +253,20 @@ func formatHostedDeviceState(
 			))
 		}
 	}
-	// Public API targets sort ahead of resolver traffic in descending textual
-	// order. That keeps the destination/provider mapping which carried the
-	// failed acceptance request ahead of the bounded diagnostic suffix.
-	sort.Sort(sort.Reverse(sort.StringSlice(destinationSummaries)))
+	// Resolver and qualification traffic is usually present on every sample.
+	// Put it after ordinary destinations so it cannot consume the bounded list
+	// before the HTTPS address whose request is currently stalled. A reverse
+	// lexical sort did not provide that property: 8.8.8.8 sorted ahead of a
+	// Cloudflare 172.x target and erased the target/provider join in production
+	// diagnostics.
+	sort.Slice(destinationSummaries, func(i int, j int) bool {
+		iInfrastructure := isHostedDeviceInfrastructureDestination(destinationSummaries[i])
+		jInfrastructure := isHostedDeviceInfrastructureDestination(destinationSummaries[j])
+		if iInfrastructure != jInfrastructure {
+			return !iInfrastructure
+		}
+		return destinationSummaries[j] < destinationSummaries[i]
+	})
 	if 8 < len(destinationSummaries) {
 		destinationSummaries = destinationSummaries[:8]
 	}
@@ -303,6 +334,245 @@ func formatHostedDeviceState(
 		packetSummary,
 		totalExits,
 	)
+}
+
+func isHostedDeviceInfrastructureDestination(summary string) bool {
+	for _, prefix := range []string{
+		"1.0.0.1->",
+		"1.1.1.1->",
+		"8.8.4.4->",
+		"8.8.8.8->",
+		"9.9.9.9->",
+		"149.112.112.112->",
+		"208.67.220.220->",
+		"208.67.222.222->",
+	} {
+		if strings.HasPrefix(summary, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordReliability retains only causal control-plane changes. FlowsOpened and
+// packet totals intentionally stay out: they advance on every healthy request
+// and used to evict the one provider-removal or quarantine event that explains
+// a failure several seconds later.
+func (self *sdkHostedDeviceTracker) recordReliability(now time.Time, metrics *sdk.ReliabilityMetrics) {
+	if metrics == nil {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.metricsReady {
+		self.lastMetrics = *metrics
+		self.metricsReady = true
+		return
+	}
+
+	previous := self.lastMetrics
+	self.lastMetrics = *metrics
+	if reliabilityMetricsRegressed(previous, *metrics) {
+		// DeviceRemote reports a zero snapshot while its rpc generation is
+		// reconnecting, and an explicit metrics reset can also move every
+		// counter backwards. Neither is a negative causal event. Retain one
+		// boundary marker, then let the next successful sample establish a
+		// fresh baseline so restored counters are not reported as a huge jump.
+		self.metricsReady = false
+		self.appendCausalWithLock(fmt.Sprintf("%s metrics_reset", now.UTC().Format("15:04:05.000Z")))
+		return
+	}
+	parts := make([]string, 0, 16)
+	appendDelta := func(name string, before, after int64) {
+		if before == after {
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%s=%+d", name, after-before))
+	}
+	appendDelta("exit_loss", previous.ExitLossEvents, metrics.ExitLossEvents)
+	appendDelta("lost", previous.FlowsLostToExit, metrics.FlowsLostToExit)
+	appendDelta("recovery", previous.RecoveryCount, metrics.RecoveryCount)
+	appendDelta("missed", previous.RecoveryMissed, metrics.RecoveryMissed)
+	appendDelta("dial", previous.DialFailuresIntercepted, metrics.DialFailuresIntercepted)
+	appendDelta("reraced", previous.FlowsReraced, metrics.FlowsReraced)
+	appendDelta("qreset", previous.QuarantineTcpResets, metrics.QuarantineTcpResets)
+	appendDelta("qaffinity", previous.QuarantineAffinityInvalidations, metrics.QuarantineAffinityInvalidations)
+	appendDelta("sticky", previous.StickyFlowsRetired, metrics.StickyFlowsRetired)
+	appendDelta("held_uplink", previous.VerdictsHeldUplinkStale, metrics.VerdictsHeldUplinkStale)
+	appendDelta("held_transport", previous.VerdictsHeldTransportDown, metrics.VerdictsHeldTransportDown)
+	appendDelta("held_shared", previous.VerdictsHeldSharedFate, metrics.VerdictsHeldSharedFate)
+	appendDelta("deferred", previous.RemovalsDeferred, metrics.RemovalsDeferred)
+	appendDelta("probe", previous.ProbesSent, metrics.ProbesSent)
+	appendDelta("probe_ok", previous.ProbesAnswered, metrics.ProbesAnswered)
+	appendDelta("busy_probe", previous.BusyProbesSent, metrics.BusyProbesSent)
+	appendDelta("busy_ok", previous.BusyProbesAcquitted, metrics.BusyProbesAcquitted)
+	appendDelta("pause", previous.SchedulerPausesDetected, metrics.SchedulerPausesDetected)
+	if previous.RecoveryPending != metrics.RecoveryPending {
+		parts = append(parts, fmt.Sprintf("pending=%d", metrics.RecoveryPending))
+	}
+	if len(parts) == 0 {
+		return
+	}
+	self.appendCausalWithLock(fmt.Sprintf("%s %s", now.UTC().Format("15:04:05.000Z"), strings.Join(parts, ",")))
+}
+
+// reliabilityMetricsRegressed compares only cumulative counters. Gauges such
+// as RecoveryPending and derived means legitimately decrease during recovery.
+func reliabilityMetricsRegressed(before, after sdk.ReliabilityMetrics) bool {
+	beforeCounters := [...]int64{
+		before.FlowsOpened,
+		before.ExitLossEvents,
+		before.FlowsLostToExit,
+		before.MaxFlowsLostInOneEvent,
+		before.RecoveryCount,
+		before.RecoveryMissed,
+		before.DialFailuresIntercepted,
+		before.FlowsReraced,
+		before.FlowsRebound,
+		before.RebindsAccepted,
+		before.RebindsRedialed,
+		before.VerdictsHeldUplinkStale,
+		before.VerdictsHeldTransportDown,
+		before.VerdictsHeldSharedFate,
+		before.RemovalsDeferred,
+		before.ProbesSent,
+		before.ProbesAnswered,
+		before.ProvidersQualified,
+		before.BusyProbesSent,
+		before.BusyProbesAcquitted,
+		before.SchedulerPausesDetected,
+		before.GroupsFollowed,
+		before.GroupsScattered,
+		before.QuarantineTcpResets,
+		before.QuarantineAffinityInvalidations,
+		before.StickyFlowsRetired,
+		before.AffinityPerformanceSamples,
+		before.AffinityPerformanceDonorBypasses,
+		before.AffinityPerformanceCandidatesFiltered,
+	}
+	afterCounters := [...]int64{
+		after.FlowsOpened,
+		after.ExitLossEvents,
+		after.FlowsLostToExit,
+		after.MaxFlowsLostInOneEvent,
+		after.RecoveryCount,
+		after.RecoveryMissed,
+		after.DialFailuresIntercepted,
+		after.FlowsReraced,
+		after.FlowsRebound,
+		after.RebindsAccepted,
+		after.RebindsRedialed,
+		after.VerdictsHeldUplinkStale,
+		after.VerdictsHeldTransportDown,
+		after.VerdictsHeldSharedFate,
+		after.RemovalsDeferred,
+		after.ProbesSent,
+		after.ProbesAnswered,
+		after.ProvidersQualified,
+		after.BusyProbesSent,
+		after.BusyProbesAcquitted,
+		after.SchedulerPausesDetected,
+		after.GroupsFollowed,
+		after.GroupsScattered,
+		after.QuarantineTcpResets,
+		after.QuarantineAffinityInvalidations,
+		after.StickyFlowsRetired,
+		after.AffinityPerformanceSamples,
+		after.AffinityPerformanceDonorBypasses,
+		after.AffinityPerformanceCandidatesFiltered,
+	}
+	for i := range beforeCounters {
+		if afterCounters[i] < beforeCounters[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// appendCausalWithLock keeps causal history bounded. The caller holds
+// stateLock so a reconnect boundary cannot interleave with a real event.
+func (self *sdkHostedDeviceTracker) appendCausalWithLock(event string) {
+	self.causalHistory = append(self.causalHistory, event)
+	if hostedDeviceCausalHistorySize < len(self.causalHistory) {
+		self.causalHistory = append(
+			[]string(nil),
+			self.causalHistory[len(self.causalHistory)-hostedDeviceCausalHistorySize:]...,
+		)
+	}
+}
+
+// recordExitTransitions preserves the provider state change adjacent to a
+// reset or exit-loss counter. Provider ids remain in the private alias map;
+// artifacts contain only pN aliases and compact causes. Flow-count-only churn
+// is deliberately ignored because every healthy request changes it.
+func (self *sdkHostedDeviceTracker) recordExitTransitions(now time.Time, exits *sdk.ExitList) {
+	if exits == nil || exits.Len() == 0 {
+		// DeviceRemote briefly reports an empty list while its rpc generation
+		// reconnects. Treat that as unavailable, not removal of every exit.
+		return
+	}
+
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	next := make(map[string]hostedDeviceExitState, exits.Len())
+	events := []string{}
+	for i := 0; i < exits.Len(); i++ {
+		exit := exits.Get(i)
+		if exit == nil || exit.ClientId == nil {
+			continue
+		}
+		providerID := exit.ClientId.String()
+		alias := self.aliases[providerID]
+		if alias == "" {
+			alias = "unknown"
+		}
+		state := hostedDeviceExitState{
+			alias:       alias,
+			flowCount:   exit.FlowCount,
+			warning:     exit.Warning,
+			quarantined: exit.Quarantined,
+			done:        exit.Done,
+			cause:       compactDiagnosticToken(exit.WarningCause),
+		}
+		next[providerID] = state
+		previous, found := self.lastExitState[providerID]
+		if !found || (previous.warning == state.warning &&
+			previous.quarantined == state.quarantined &&
+			previous.done == state.done &&
+			previous.cause == state.cause) {
+			continue
+		}
+		events = append(events, fmt.Sprintf(
+			"exit=%s warning=%t quarantine=%t done=%t cause=%s flows=%d",
+			state.alias,
+			state.warning,
+			state.quarantined,
+			state.done,
+			state.cause,
+			state.flowCount,
+		))
+	}
+	for providerID, previous := range self.lastExitState {
+		if _, found := next[providerID]; found ||
+			(previous.flowCount == 0 && !previous.warning && !previous.quarantined && !previous.done) {
+			continue
+		}
+		events = append(events, fmt.Sprintf(
+			"exit=%s removed flows=%d warning=%t quarantine=%t done=%t cause=%s",
+			previous.alias,
+			previous.flowCount,
+			previous.warning,
+			previous.quarantined,
+			previous.done,
+			previous.cause,
+		))
+	}
+	self.lastExitState = next
+	sort.Strings(events)
+	stamp := now.UTC().Format("15:04:05.000Z")
+	for _, event := range events {
+		self.appendCausalWithLock(stamp + " " + event)
+	}
 }
 
 // summary retains the most recent remote-ingress transition across quiet
@@ -392,6 +662,13 @@ func (self *sdkHostedDeviceTracker) Diagnostic() string {
 			break
 		}
 	}
+	causal := "none"
+	if 0 < len(self.causalHistory) {
+		const causalEventCount = 6
+		start := max(0, len(self.causalHistory)-causalEventCount)
+		causal = strings.Join(self.causalHistory[start:], " | ")
+	}
+	diagnostic = "events=[" + causal + "] state={" + diagnostic + "}"
 	if hostedDeviceDiagnosticMaxSize < len(diagnostic) {
 		diagnostic = diagnostic[:hostedDeviceDiagnosticMaxSize] + "..."
 	}

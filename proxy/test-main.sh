@@ -13,7 +13,7 @@
 #   UR_ACCEPT_VAULT=<path>              default: vault/main/tests.yml
 #   UR_ACCEPT_RESULT_FILE=<path>        strict TSV result destination
 #   UR_ACCEPT_API_URL=<url>             default: https://api.bringyour.com
-#   UR_ACCEPT_PROXY_TARGET_URL=<url>    default: https://api.bringyour.com/hello
+#   UR_ACCEPT_PROXY_TARGET_URL=<url>    default: https://connectivitycheck.gstatic.com/generate_204
 #   UR_ACCEPT_PROXY_BIN=<path>          cached local runner binary
 #   UR_ACCEPT_PROXY_SOAK_DURATION=<dur> default: 5m per protocol
 #   UR_ACCEPT_PROXY_SOAK_INTERVAL=<dur> default: 5s between sustained requests
@@ -30,7 +30,7 @@ result_file="${UR_ACCEPT_RESULT_FILE:-}"
 repeat_count="${UR_ACCEPT_REPEAT:-1}"
 skip_build="${SKIP_BUILD:-0}"
 api_url="${UR_ACCEPT_API_URL:-https://api.bringyour.com}"
-target_url="${UR_ACCEPT_PROXY_TARGET_URL:-https://api.bringyour.com/hello}"
+target_url="${UR_ACCEPT_PROXY_TARGET_URL:-https://connectivitycheck.gstatic.com/generate_204}"
 binary="${UR_ACCEPT_PROXY_BIN:-$server_root/temp/acceptance/proxy-main}"
 soak_duration="${UR_ACCEPT_PROXY_SOAK_DURATION:-5m}"
 soak_interval="${UR_ACCEPT_PROXY_SOAK_INTERVAL:-5s}"

@@ -26,6 +26,7 @@ import (
 
 const (
 	Platform               = "server/proxy"
+	DefaultTargetURL       = "https://connectivitycheck.gstatic.com/generate_204"
 	defaultProbeTimeout    = 120 * time.Second
 	defaultSoakDuration    = 5 * time.Minute
 	defaultSoakInterval    = 5 * time.Second
@@ -546,6 +547,10 @@ func (r *runner) runIteration(ctx context.Context) map[string]error {
 		}
 	}
 	if tracker != nil {
+		// A clean campaign is measurement too. Preserve the same redacted,
+		// bounded provider lifecycle summary used on failures so repeated runs
+		// can compare churn and quarantine cost against user-visible errors.
+		r.progressf("hosted device final diagnostics: %s", tracker.Diagnostic())
 		tracker.Close()
 	}
 
@@ -860,7 +865,11 @@ func probeHTTPSRequest(ctx context.Context, client *http.Client, target string) 
 		return requestTrace.wrap(closeErr, time.Now())
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return &targetHTTPStatusError{statusCode: response.StatusCode}
+		// A target-side status is still boundary evidence: preserve when the
+		// request started and prove that the tunnel, TLS handshake, response
+		// headers, and body all completed. Without the trace, an LB-generated
+		// 429 looked indistinguishable from a WireGuard transport failure.
+		return requestTrace.wrap(&targetHTTPStatusError{statusCode: response.StatusCode}, time.Now())
 	}
 	return nil
 }

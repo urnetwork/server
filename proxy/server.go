@@ -34,8 +34,38 @@ var wgPeersGauge = prometheus.NewGauge(
 	},
 )
 
+var wgInboundPeerQueueDropPacketsGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_inbound_peer_queue_drop_packets",
+		Help:      "WireGuard ingress packets refused because one peer's queue was full or its lifecycle was transitioning",
+	},
+)
+
+var wgReceiveRoutineFailuresGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_receive_routine_failures",
+		Help:      "Unexpected WireGuard socket receive-routine failures in this process",
+	},
+)
+
+var wgInboundDecryptionQueueDropPacketsGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "wg_inbound_decryption_queue_drop_packets",
+		Help:      "WireGuard ingress packets refused because the device-global decryption queue was full",
+	},
+)
+
 func init() {
 	prometheus.MustRegister(wgPeersGauge)
+	prometheus.MustRegister(wgInboundPeerQueueDropPacketsGauge)
+	prometheus.MustRegister(wgInboundDecryptionQueueDropPacketsGauge)
+	prometheus.MustRegister(wgReceiveRoutineFailuresGauge)
 }
 
 const InternalSocksPort = 8080
@@ -573,6 +603,7 @@ func NewWgServer(
 		wgProxy:            wgProxy,
 	}
 
+	go s.runRuntimeMetrics()
 	go server.HandleError(s.run, cancel)
 
 	return s
@@ -584,8 +615,38 @@ func (self *wgServer) run() {
 	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.WgPort)
 
 	err := self.wgProxy.ListenAndServe(listenIpv4, listenIpv6, listenPort)
+	runtimeStats := self.wgProxy.RuntimeStats()
+	updateWgRuntimeMetrics(runtimeStats)
+	if 0 < runtimeStats.ReceiveRoutineFailureCount {
+		glog.Errorf(
+			"[wg]device stopped after %d socket receive-routine failure(s); peer_queue_drop_packets=%d decryption_queue_drop_packets=%d\n",
+			runtimeStats.ReceiveRoutineFailureCount,
+			runtimeStats.InboundPeerQueueDropPacketCount,
+			runtimeStats.InboundDecryptionQueueDropPacketCount,
+		)
+	}
 	if err != nil {
 		panic(err)
+	}
+}
+
+// updateWgRuntimeMetrics publishes one identity-free device generation.
+func updateWgRuntimeMetrics(stats proxy.WgRuntimeStats) {
+	wgInboundPeerQueueDropPacketsGauge.Set(float64(stats.InboundPeerQueueDropPacketCount))
+	wgInboundDecryptionQueueDropPacketsGauge.Set(float64(stats.InboundDecryptionQueueDropPacketCount))
+	wgReceiveRoutineFailuresGauge.Set(float64(stats.ReceiveRoutineFailureCount))
+}
+
+// runRuntimeMetrics keeps datagram refusals visible while the device remains
+// live; a fatal receiver exit also takes one final sample in run.
+func (self *wgServer) runRuntimeMetrics() {
+	for {
+		updateWgRuntimeMetrics(self.wgProxy.RuntimeStats())
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 

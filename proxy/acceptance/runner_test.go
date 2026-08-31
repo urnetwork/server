@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -118,6 +119,9 @@ func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
 				"wireguard": func(context.Context) error { return nil },
 			}
 		},
+		tracker: func(context.Context, provisionResult) (hostedDeviceTracker, error) {
+			return &staticHostedDeviceTracker{diagnostic: "events=[none] state={exit=p1}"}, nil
+		},
 	})
 
 	assertResult(t, results, "socks", "FAIL")
@@ -141,6 +145,7 @@ func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
 		"http campaign started",
 		"socks campaign failed",
 		"wireguard campaign passed",
+		"hosted device final diagnostics: events=[none] state={exit=p1}",
 		"temporary client cleanup completed",
 		"repetition 1/1 finished",
 	} {
@@ -439,6 +444,21 @@ func TestProbeHTTPSRunsConfiguredSustainedCampaign(t *testing.T) {
 	}
 }
 
+func TestDefaultProxyTargetIsDedicatedConnectivityValidation(t *testing.T) {
+	target, err := url.Parse(DefaultTargetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Scheme != "https" || target.Host == "" || target.Path != "/generate_204" {
+		t.Fatalf("default proxy target = %q, want an HTTPS generate_204 endpoint", DefaultTargetURL)
+	}
+	if strings.HasSuffix(target.Hostname(), "bringyour.com") ||
+		target.Hostname() == "ur.io" ||
+		strings.HasSuffix(target.Hostname(), ".ur.io") {
+		t.Fatalf("default proxy target %q uses a product/rate-limited origin", DefaultTargetURL)
+	}
+}
+
 func TestProbeHTTPSFailsImmediatelyOnRateLimitDuringSustainedCampaign(t *testing.T) {
 	requestCount := 0
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
@@ -462,7 +482,11 @@ func TestProbeHTTPSFailsImmediatelyOnRateLimitDuringSustainedCampaign(t *testing
 		func(context.Context, time.Duration) error { return nil },
 		nil,
 	)
-	if err == nil || !strings.Contains(err.Error(), "HTTP 429") || !strings.Contains(err.Error(), "sustained request 2/5") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "HTTP 429") ||
+		!strings.Contains(err.Error(), "sustained request 2/5") ||
+		!strings.Contains(err.Error(), "request started ") ||
+		!strings.Contains(err.Error(), "phase reading_response_body") {
 		t.Fatalf("rate-limit error = %v", err)
 	}
 	if successfulRequests != 2 {

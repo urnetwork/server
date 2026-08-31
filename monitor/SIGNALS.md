@@ -5478,6 +5478,22 @@ Proxy health has five layers; none substitutes for the next:
 5. **WireGuard traffic:** require a valid peer handshake and tunneled bytes in
    both directions. A UDP socket or `nc -u` result cannot prove WireGuard.
 
+Use a purpose-built network-validation endpoint for the sustained authenticated
+egress campaign. Do not use `ur.io/ip` or a normally rate-limited API route as
+the high-cadence transport oracle. On 2026-08-31, three `ur.io/ip` repetitions
+produced sub-second TLS EOFs across HTTP, SOCKS, and WireGuard: the WireGuard
+inner trace had a valid SYN-ACK followed by a valid FIN and no TLS response
+payload. Direct traffic from the test host passed 60/60, while three equivalent
+proxy repetitions against
+`https://connectivitycheck.gstatic.com/generate_204` passed every isolated and
+overlapping campaign (558 requests total) despite ordinary exit loss,
+quarantine resets, and dial reraces. That separates target/egress-IP treatment
+from a proxy transport outage. `proxy/test-main.sh` uses the validation endpoint
+by default; `UR_ACCEPT_PROXY_TARGET_URL` remains available for an explicit
+site-specific investigation. A site-specific EOF is still a real reachability
+result for that site, but it must not be generalized into block-wide proxy loss
+when the validation control passes.
+
 The proxy service intentionally has no normal public 443 status endpoint;
 `warpctl ls versions main proxy --sample` can therefore return a uniform 404.
 That is a probe-method mismatch, not evidence that all blocks are down. Use the
@@ -5824,6 +5840,49 @@ return in the batch so HTTP/SOCKS are not held behind that wait. Watch
 count is bounded flow control, not loss; sustained or long waits identify a
 WireGuard reader that is not draining and require correlating the process
 lifecycle rather than increasing an unbounded queue.
+
+**Shared WireGuard socket-reader head-of-line stall:** this is below the hosted
+DeviceLocal return queue above. One proxy block can keep HTTP/SOCKS and its
+container/control plane healthy while WireGuard intermittently or permanently
+loses every peer. On the block's WireGuard UDP socket, `ss -u -a -n -m -p`
+shows `Recv-Q` persistently near `rb` and the `skmem d` drop count rising. A
+short syscall trace sees no `recvmmsg`/`recvmsg` on that socket while a healthy
+block's equivalent fd is actively reading. During the 2026-08-31 fireside g3
+reproduction, the IPv4 queue grew from 191232 to 214272 bytes in 12 seconds,
+socket drops rose 12603 -> 12650, and HTTP/SOCKS continued; later WireGuard
+requests showed outbound retransmits while their last inbound inner packet
+aged past 16 seconds.
+
+The old userspace WireGuard receive routine grouped datagrams by peer, then
+performed a blocking send into each peer's 1024-entry inbound queue. One hosted
+DeviceLocal whose bounded send path was slow could therefore park the single
+shared IPv4 receiver and starve every unrelated peer in the block. An
+unexpected socket receive error had a second indistinguishable failure mode:
+the routine returned but left the device/container alive. Current code refuses
+an encrypted batch when only that peer's queue is full or its lifecycle lock is
+busy, allowing WireGuard/inner-protocol retransmission without cross-peer
+head-of-line blocking; an unexpected receiver exit closes the device for owner
+recovery. Watch:
+
+- `urnetwork_proxy_wg_inbound_peer_queue_drop_packets`: cumulative packets
+  refused at the isolated peer boundary because its queue was full or its
+  lifecycle lock was busy. A rise names an overloaded/transitioning peer path,
+  not a block-wide outage; it must no longer coincide with a filling kernel
+  socket queue.
+- `urnetwork_proxy_wg_inbound_decryption_queue_drop_packets`: cumulative
+  packets refused because the device-global crypto queue was full. This is CPU
+  saturation at a shared boundary; the socket reader must continue draining
+  even while this counter rises.
+- `urnetwork_proxy_wg_receive_routine_failures`: unexpected socket receiver
+  exits. Any nonzero value should be followed by device/process recovery, not
+  an indefinitely Up block with a dead UDP reader.
+
+Do not restart the block before collecting the socket queue/drop delta and a
+healthy-block syscall comparison; a restart empties the only decisive boundary
+evidence. After deploying the isolation fix, require sustained concurrent
+WireGuard/HTTP/SOCKS acceptance, a draining kernel `Recv-Q`, and zero receiver
+failures. Per-peer admission drops may occur under an individual client's
+backpressure, but unrelated WireGuard peers must continue.
 
 **Finite TUN return-burst stall:** HTTP CONNECT and SOCKS can lose a completed
 origin response even with no active WireGuard attachment. The decisive

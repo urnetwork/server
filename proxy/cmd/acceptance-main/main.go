@@ -19,7 +19,11 @@ func main() {
 	credentials := flag.String("credentials", "", "mode-0600 file containing user and password lines")
 	resultsPath := flag.String("result-file", "", "private TSV result path")
 	apiURL := flag.String("api", "https://api.bringyour.com", "API base URL")
-	targetURL := flag.String("target", "https://api.bringyour.com/hello", "HTTPS target loaded through every proxy")
+	targetURL := flag.String(
+		"target",
+		proxyacceptance.DefaultTargetURL,
+		"HTTPS target loaded through every proxy",
+	)
 	repeat := flag.Int("repeat", 1, "number of full proxy repetitions")
 	probeTimeout := flag.Duration("probe-timeout", 120*time.Second, "readiness and data-plane retry window per protocol")
 	soakDuration := flag.Duration("soak-duration", 5*time.Minute, "sustained data-plane duration per protocol")
