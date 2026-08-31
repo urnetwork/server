@@ -2007,6 +2007,21 @@ to break both the per-run duration and the repeated close overlap; do not use
 the start counter, a brief task-row handoff, or the absence of a restart as a
 recovery claim.
 
+The successor made that overlap repeatable rather than coincidental. Score
+task `01a05660-8743-e181-2a6c-be423b1089bd` began at approximately
+05:53:14Z on the same edge-3/g1 process and was still active beyond 2,040s.
+While it ran continuously, close task
+`01a05661-a88b-0b67-87e1-132dce59ce32` completed its 25,000-contract
+checkpoint in 920s (05:53:58Z–06:09:18Z), its immediate successor
+`01a0566f-dc4f-be77-0c0a-28ddd3a5a3bd` completed in 870s
+(06:09:29Z–06:23:59Z), and a third close began about 12 seconds later and
+crossed 187s. During the third overlap the exact worker consumed 4.003 cores
+and allocated 651MiB/s; PostgreSQL migration, wait-event, active-query, and
+transaction-age probes were clean. Repeated sequential close overruns under
+one uninterrupted score export strengthen the shared process-budget cause.
+Keep the 25,000 cap and deploy the score fanout fix; additional close workers
+would add contention without removing the allocator.
+
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
 
