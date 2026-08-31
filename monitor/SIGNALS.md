@@ -347,6 +347,21 @@ WHERE function_name LIKE '%UpdateClient%'
   `payment-processor-rate-limit` event appeared through that last window. This
   proves the UTC evidence fix is active while independently reaffirming that
   the still-deployed pre-`70b0d269` taskworker preserves narrow retry cohorts.
+
+  The same recurrence then crossed the processor boundary. Four canonical
+  wallet failures landed at `18:45:38Z`; at `18:45:39Z`, two more wallet
+  failures and two canonical 429s landed together. Five wallet failures at
+  `18:46:41Z` were followed at `18:46:42Z` by two wallet failures and a third
+  canonical 429. The standing monitor independently reported the first pair as
+  two logical events from four diagnostic lines, then the third as one event
+  from two lines. At `18:46:57Z`, the durable family snapshot changed from
+  `wallet-insufficient=817,processor-invalid-destination=6,processor-rate-limit=1`
+  to `814,6,4` while the total stayed 824. Exactly three rows changing class
+  matches the three canonical events and rules out a growing payment backlog
+  or a duplicate-log illusion. The stale cohort caused real provider
+  throttling even though several earlier four/five-per-second peaks did not;
+  deploy `70b0d269` rather than treating the empirical burst threshold as a
+  deterministic provider quota.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains
