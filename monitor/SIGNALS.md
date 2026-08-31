@@ -712,6 +712,9 @@ sole v157 watcher's eight fixed Warpctl tails reported zero direct
 client patch. The monitor retains the internal reset as
 `loki-tail-dropped-streams` and recovers all service windows through bounded
 reconciliation without claiming Grafana was the affected application tail.
+Its structured symptom says `observation service grafana` and
+`affected live-tail selector is unknown`; the target remains Grafana only as
+the concrete log-emitting component used for ticket identity.
 
 The next full synchronization at `22:09Z` supplied the saturated control with
 the corrected v158 classifier as the sole watcher. Of the first 10,000 Proxy

@@ -93,6 +93,9 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "loki-tail-dropped-streams").Markdown()
 	for _, detail := range []string{
+		"observation service grafana emitted 1/min",
+		"affected live-tail selector is unknown",
+		"observation_service=grafana affected_selector=unknown",
 		"ingester-side Loki live tail",
 		"100-stream processing queue",
 		"five-stream send queue",

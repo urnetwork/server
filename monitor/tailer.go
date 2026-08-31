@@ -77,6 +77,10 @@ type logClass struct {
 	context           string
 	action            string
 	verify            string
+	// observationOnly means this service emitted evidence about an internal
+	// shared layer but is not necessarily the affected application selector.
+	// Its alert symptom and observed fields must state that attribution limit.
+	observationOnly bool
 	// redactIDs removes UUID/server.Id values from the retained sample. Some
 	// classes need a representative site/error but their entity identifiers
 	// must not be copied into alert artifacts.
@@ -138,7 +142,7 @@ var logClasses = []logClass{
 	// field in pushTailResponseFromIngester, so the Grafana log is affirmative
 	// internal loss but cannot name the affected external selector.
 	{name: "loki-tail-dropped-streams", re: regexp.MustCompile(`caller=tailer\.go:[0-9]+\b.*\bmsg="tailer dropped streams is reset"(?:\s|$)`),
-		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4", observationOnly: true,
 		meaning:   "an ingester-side Loki live tail could not send streams through its bounded internal gRPC path, filled and reset its dropped-stream metadata list, and omitted records before they reached the querier",
 		mechanism: "Loki 3.7.3 gives each ingester tailer a 100-stream processing queue and a five-stream send queue. A blocked internal gRPC send, including the observed 60-second Warp ring read-deadline EOF, or a producer burst drops streams. After ten retained drop descriptors the ingester emits this reset. Its querier pushTailResponseFromIngester path forwards resp.Stream but discards resp.DroppedStreams, so HTTP dropped_entries and Warpctl cannot expose or attribute this earlier loss. On 2026-08-31, one Proxy block emitted 19,995 per-peer installation lines in one minute while Grafana emitted 18,165 resets.",
 		context:   "This is affirmative internal live-tail loss even when the external WebSocket process remains connected. Grafana is the observation service that emitted the reset, not the affected application-tail identity. The standing range reconciliation across every service is the recovery path, but a capped query is not proof of complete recovery. The Proxy burst was default info-log amplification, not 19,995 distinct peer-installation failures.",
@@ -1052,11 +1056,15 @@ func (self *logTailer) drainWindow() []finding {
 				}
 			}
 			attribution := self.classTargets[key]
-			attributionLabel := "target"
-			if c.groupBy != nil {
-				attributionLabel = "frame"
+			if c.observationOnly {
+				observed += fmt.Sprintf(" observation_service=%s affected_selector=unknown", self.service)
+			} else {
+				attributionLabel := "target"
+				if c.groupBy != nil {
+					attributionLabel = "frame"
+				}
+				observed += fmt.Sprintf(" %s=%s", attributionLabel, attribution)
 			}
-			observed += fmt.Sprintf(" %s=%s", attributionLabel, attribution)
 			canonicalEvidence := ""
 			if c.canonical != nil {
 				observed += fmt.Sprintf(
@@ -1071,10 +1079,14 @@ func (self *logTailer) drainWindow() []finding {
 					count,
 				)
 			}
+			symptom := fmt.Sprintf("service %s: %d/min lines of class %s (threshold %d/min)", self.service, count, c.name, c.rateThreshold)
+			if c.observationOnly {
+				symptom = fmt.Sprintf("observation service %s emitted %d/min lines of class %s (threshold %d/min); the affected live-tail selector is unknown", self.service, count, c.name, c.rateThreshold)
+			}
 			findings = append(findings, finding{
 				probeId: "logs/" + c.name, tier: tier,
 				class: c.name, target: self.service, frame: attribution, sustain: 1,
-				symptom:   fmt.Sprintf("service %s: %d/min lines of class %s (threshold %d/min)", self.service, count, c.name, c.rateThreshold),
+				symptom:   symptom,
 				baseline:  baseline,
 				observed:  observed,
 				mechanism: c.mechanism,
