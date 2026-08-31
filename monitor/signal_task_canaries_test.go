@@ -483,8 +483,9 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"cannot describe every failing row",
 		"cause_breakdown=wallet-insufficient=368,connection-cleanup-deadline=10,processor-invalid-destination=5,processor-rate-limit=1",
 		"queued, cursor-batched CompletePayment retention path",
-		"definitive invalid-destination pre-chain attempts",
-		"preserving ambiguous-submit idempotency keys",
+		"current taskworker automatically releases only Circle's typed invalid-destination pre-chain attempt",
+		"persistence after another retry means the invalid configured wallet is still selected",
+		"never clear payment rows or keys manually",
 		"Do not delete or manually replay the mixed family",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -526,7 +527,7 @@ func TestTaskCanariesSignalMixedGuidanceMatchesPresentMigrationCauses(t *testing
 		"Handle only the present AdvancePayment classes",
 		"restore migration coherence per §8.9",
 		"schema-object-missing clears",
-		"definitive invalid-destination pre-chain attempts",
+		"current taskworker automatically releases only Circle's typed invalid-destination pre-chain attempt",
 		"SIGNALS.md §1.2, §5.7, and §8.9",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -569,10 +570,15 @@ func TestTaskCanariesSignalExplainsInvalidDestinationRecovery(t *testing.T) {
 	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
 	for _, want := range []string{
 		"invalid for its declared chain",
-		"Solana base58 key registered as MATIC",
+		"pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC",
 		"definitively rejects the destination before creating a transfer",
-		"release only this typed definitive pre-chain rejection",
-		"Preserve the idempotency key for transport errors",
+		"current taskworker clears only that typed pre-chain attempt automatically",
+		"same invalid wallet on the next retry",
+		"one-hour backoff",
+		"through the supported account API",
+		"Do not manually release the attempt",
+		"preserving keys for transport errors",
+		"at most one backoff cap plus ingestion delay",
 		"without a duplicate transfer",
 	} {
 		if !strings.Contains(markdown, want) {

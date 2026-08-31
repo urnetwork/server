@@ -2742,6 +2742,20 @@ limit:
   cover both cross-chain address directions, zero/unknown destinations, typed
   and wrapped error classification, corrected-wallet selection with a fresh
   key, and key reuse after an ambiguous error.
+
+  Post-deployment validation on 2026-08-31 separated code convergence from
+  configuration convergence. All taskworker blocks reported
+  `2026.8.31-outerwerld+1033655820`, which contains the typed-reset path, but
+  the same six invalid-destination payments retried once in the
+  12:34–12:51Z hour and again in the 13:34–13:51Z hour. That exact spacing
+  matches the one-hour consecutive-error cap. Clearing the typed attempt does
+  not invent a replacement payout wallet: without an account-owner/operator
+  correction, `UpdatePaymentWallet` selects the same invalid configured wallet
+  and Circle rejects it again. Correct the wallet through the supported account
+  API and let the next retry converge. Do not manually clear payment rows,
+  processor keys, or sweeps; persistence after the reset release is an
+  operational configuration alert, not evidence that faster retries are
+  needed.
 - `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
   2026-08-31 UTC production row reached 153 failures on PostgreSQL 18.4 while
   `effective_io_concurrency=200` and `temp_buffers=8MB`. Its stack ended in

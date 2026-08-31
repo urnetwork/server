@@ -122,8 +122,8 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 		"deploy the queued, cursor-batched CompletePayment retention path for connection-cleanup-deadline rows",
 		"the legacy retention query and new 120-second cleanup failures disappear")
 	add("processor-invalid-destination",
-		"correct chain-mismatched payout wallets and release only Circle's definitive invalid-destination pre-chain attempts while preserving ambiguous-submit idempotency keys",
-		"corrected destination retries switch wallets without duplicate sends")
+		"correct chain-mismatched payout wallets through the supported account API; the current taskworker automatically releases only Circle's typed invalid-destination pre-chain attempt, so persistence after another retry means the invalid configured wallet is still selected; never clear payment rows or keys manually",
+		"the next retry selects the corrected wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination clears")
 	add("processor-bad-request",
 		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
 		"processor-bad-request rows reach a definitive safe outcome")
@@ -529,9 +529,9 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertAction = "Finance/operations must fund the named payout wallet with the required asset, or explicitly pause payouts. Do not treat this as an API, PostgreSQL, or Redis availability incident."
 			alertVerify = "After funding, AdvancePayment retries succeed and the family count converges to zero without manual row deletion."
 		} else if task == "AdvancePayment" && strings.Contains(lowerError, "invalid destination address") {
-			alertMechanism = "The payout wallet address is invalid for its declared chain. A Solana base58 key registered as MATIC passes the deployed chain-blind validator, then Circle definitively rejects the destination before creating a transfer; the pinned idempotency key prevents a corrected payout wallet from being selected."
-			alertAction = "Correct the network's payout wallet, roll out chain-specific SOL/MATIC validation, and release only this typed definitive pre-chain rejection so UpdatePaymentWallet can select the correction. Preserve the idempotency key for transport errors, rate limits, and any ambiguous submit result; do not delete payment or sweep rows."
-			alertVerify = "The retry selects the corrected chain-compatible wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination converges to zero."
+			alertMechanism = "The payout wallet address is invalid for its declared chain. A pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC, then Circle definitively rejects the destination before creating a transfer. The current taskworker clears only that typed pre-chain attempt automatically; if the configured payout wallet is not corrected, UpdatePaymentWallet selects the same invalid wallet on the next retry and the row persists on its one-hour backoff."
+			alertAction = "Correct the network's payout wallet through the supported account API. Do not manually release the attempt, edit payment rows, or rotate idempotency keys: the current taskworker already releases this exact typed rejection while preserving keys for transport errors, rate limits, and ambiguous submits."
+			alertVerify = "The next retry selects the corrected chain-compatible wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination converges to zero after at most one backoff cap plus ingestion delay."
 		}
 		symptom := fmt.Sprintf("task family %s has %d failing row(s) on %s (%d parked >5m; %d with a fresh claim heartbeat; sets may overlap)",
 			task, familyCount, target, parkedCount, freshClaimCount)
