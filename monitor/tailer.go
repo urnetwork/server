@@ -510,9 +510,10 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 const (
 	// Loki accepts out-of-order writes, but its tail cursor advances by source
 	// timestamp. A record ingested after that cursor has passed is recoverable
-	// only through an overlapping range query. Five minutes covers the observed
-	// production delay while keeping the all-line query comfortably bounded.
-	logReconcileLookback  = 5 * time.Minute
+	// only through an overlapping range query. Two minutes covers more than two
+	// query cadences and the observed production delay while retaining enough
+	// headroom below Loki's all-line result cap on the noisiest services.
+	logReconcileLookback  = 2 * time.Minute
 	logReconcileInterval  = 45 * time.Second
 	logReconcileRetention = logReconcileLookback + 2*time.Minute
 	logReconcileLimit     = 20000

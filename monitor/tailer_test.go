@@ -368,7 +368,7 @@ func TestPaymentProcessorRateLimitCountsOneLogicalEventPerDiagnosticPair(t *test
 	}
 }
 
-func TestStandingReconciliationUsesBoundedFiveMinuteOverlap(t *testing.T) {
+func TestStandingReconciliationUsesBoundedTwoMinuteOverlap(t *testing.T) {
 	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
 	var got string
 	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
@@ -384,7 +384,7 @@ func TestStandingReconciliationUsesBoundedFiveMinuteOverlap(t *testing.T) {
 	if _, err := tailer.reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := "warpctl logs main taskworker --since=5m0s --limit=20000"
+	want := "warpctl logs main taskworker --since=2m0s --limit=20000"
 	if got != want {
 		t.Fatalf("reconciliation command = %q, want %q", got, want)
 	}
@@ -438,7 +438,7 @@ func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 		}
 	}
 
-	// The next five-minute query necessarily contains the same records.
+	// The next overlapping query necessarily contains the same records.
 	tailer.reconcileOnce(context.Background())
 	replayed := tailer.drainWindow()
 	if finding := findingByClass(t, replayed, "payout-retry-microburst"); !finding.healthy {

@@ -608,14 +608,14 @@ WebSocket stream. A reconnect from the last source timestamp has the same
 blind spot.
 
 The standing collector now keeps the low-latency WebSocket and independently
-runs a bounded five-minute `warpctl logs` reconciliation every 45 seconds,
+runs a bounded two-minute `warpctl logs` reconciliation every 45 seconds,
 with a 20,000-line cap. Only timestamp-framed remote records enter the
 classifier, so local retry diagnostics remain monitor evidence rather than
 service errors. Exact fingerprints for alert-relevant lines are retained for
-seven minutes, making stream/query overlap and successive queries idempotent
+four minutes, making stream/query overlap and successive queries idempotent
 without retaining ordinary log volume. The first query remembers pre-start
 history but counts only source records at or after collector start, preventing
-a five-minute startup replay from becoming a one-minute rate. Reconciliation
+a two-minute startup replay from becoming a one-minute rate. Reconciliation
 does not refresh WebSocket liveness. A failed, stale, or cap-sized query raises
 the separate `tailer-reconcile` visibility class; the live findings already in
 memory are still drained. Deterministic synthetic tests reproduce a stream
@@ -623,6 +623,17 @@ that sees two of four same-second wallet attempts and misses a canonical 429,
 recover the absent records from the bounded query exactly once, exclude
 pre-start history, preserve a live finding on query failure, and reject a
 cap-sized result as incomplete.
+
+The first live reconciled watcher rejected the initial five-minute window
+rather than silently trusting it: both proxy and Grafana reached the
+20,000-line cap. A simultaneous volume matrix measured proxy at 771 and
+Grafana at 2,974 lines over one minute, 978 and 6,801 over two minutes, but
+17,073 and 16,808 over three minutes before both capped over five. The sharp
+boundary was real burst history, so raising the cap would trade visibility for
+observation-side memory. The production window is therefore two minutes every
+45 seconds: it covers more than two reconciliations and the observed
+sub-minute late-ingestion event while retaining measured cap headroom. A
+future two-minute cap still fails visibly; it is never shortened silently.
 
 ---
 

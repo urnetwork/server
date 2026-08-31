@@ -310,7 +310,7 @@ a tailer is a standing collector: one long-running `warpctl logs <env>
 <service> -f` per service, each line classified against the SIGNALS.md §4
 taxonomy as it arrives. Because Loki can ingest an older source timestamp
 behind an already-advanced WebSocket cursor, each tailer also runs a bounded
-five-minute range reconciliation every 45 seconds. Exact fingerprints make
+two-minute range reconciliation every 45 seconds. Exact fingerprints make
 alert-relevant overlap idempotent; ordinary lines are not retained. Per
 minute, each tailer folds its counts into
 findings — (class, target ip:port, innermost frame) identity, rate, one
@@ -507,7 +507,7 @@ probes; every other signal and host continues. Unknown host names fail closed.
 6. **Log tailers — DONE (2026-07-17; reconciled 2026-08-31)** (§3.7):
    standing `warpctl logs -f` per configured service, §4 taxonomy classifier
    + novel-class detection, per-minute drain through a probe into the same
-   ticket path; restart-with-backoff. A bounded five-minute reconciliation
+   ticket path; restart-with-backoff. A bounded two-minute reconciliation
    closes the late-ingestion timestamp-cursor gap and has independent
    visibility health. Loop mode only (--no-tail to disable); not exercised by
    --once.
