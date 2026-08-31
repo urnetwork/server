@@ -84,3 +84,38 @@ func TestRedisMemorySignalExplainsImpossibleTTLAtCriticalWall(t *testing.T) {
 		}
 	}
 }
+
+func TestRedisMemorySignalDetectsAggregateHostCapacityDeficit(t *testing.T) {
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		if strings.Contains(command, "for p in") {
+			return strings.Join([]string{
+				"host_memory 17179869184 536870912",
+				"6380 9500000000 10000000000 9200000000 0 100 volatile-ttl 5000000 4000000 800000000000000 1000 0 10 0 9800000000",
+				"6381 9500000000 10000000000 9200000000 0 100 volatile-ttl 5000000 4000000 800000000000000 1000 0 10 0 9800000000",
+			}, "\n"), nil
+		}
+		return "", nil
+	}}
+
+	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "redis-host-capacity")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"host_available_gib=0.5",
+		"remaining_configured_headroom_gib=0.9",
+		"capacity_deficit_gib=0.4",
+		"critical_nodes=2",
+		"Do not increase maxmemory",
+		"explicit maintenance authority",
+		"bringyourctl streams expire-leaked-ttls",
+		"unused swap is not healthy Redis capacity",
+		"SIGNALS.md §3.1, §3.3a, and §5.4",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("aggregate host-capacity diagnosis missing %q: %s", want, markdown)
+		}
+	}
+}

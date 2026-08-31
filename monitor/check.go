@@ -138,6 +138,10 @@ func gb(v float64) float64 {
 	return v / 1e9
 }
 
+func gib(v float64) float64 {
+	return v / (1 << 30)
+}
+
 func pgTarget(env *probeEnv) string {
 	if host := env.cfg.hostByRole("pg-primary"); host != nil {
 		return host.name

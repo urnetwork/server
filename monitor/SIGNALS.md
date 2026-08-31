@@ -1770,6 +1770,23 @@ counters. When its average TTL is impossible, it points to the independently
 attributed TTL cleanup with explicit maintenance authority; it does not
 recommend a blind maxmemory increase or arbitrary key deletion.
 
+The 2026-08-31T01:06Z host-capacity battery ruled out a safe ceiling increase.
+Across 32 masters, Redis held 354.5GiB used / 364.6GiB RSS beneath 384GiB of
+aggregate maxmemory, with 186.6M keys; 18 nodes were above 92% and another 13
+were above 85%. The 472GiB host had only 17GiB available and 8GiB of unused
+swap. Redis could therefore still consume 29.5GiB before reaching its
+per-process ceilings—12.5GiB more than physical RAM could supply even before
+RSS overhead, the kernel, or other processes. Raising maxmemory would exchange
+controlled per-node eviction for host swapping or OOM risk. The monitor now
+emits `redis-host-capacity` when a critical node coincides with this aggregate
+deficit. Immediate relief is the independently attributed, binary-safe stream
+TTL cleanup (`bringyourctl streams expire-leaked-ttls`) and still requires
+explicit maintenance authority; the durable fix is more physical memory,
+Redis masters on additional hosts, or a smaller retained key footprint. A
+rebuilt focused probe at 01:16Z rendered the page with a live 12.8GiB definite
+deficit (30.6GiB remaining configured growth versus 17.8GiB available), 15
+critical nodes, and no cumulative Redis OOM replies.
+
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
   `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each

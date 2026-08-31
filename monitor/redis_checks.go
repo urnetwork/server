@@ -61,6 +61,7 @@ type redisNodeMem struct {
 	currentEvictionExceededTime float64
 	totalErrorReplies           float64
 	oomErrors                   float64
+	rssBytes                    float64
 }
 
 type redisConnectionDiagnosis struct {
@@ -104,12 +105,13 @@ func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	// mem_clients_normal + mem_clients_slaves (the INFO fields this redis
 	// actually exposes — there is no used_memory_clients key; SIGNALS.md 3.2
 	// note). awk defaults keep every field numeric even if a key is absent.
-	script := fmt.Sprintf(`for p in $(seq %d %d); do
+	script := fmt.Sprintf(`awk '/^MemTotal:/{total=$2*1024}/^MemAvailable:/{available=$2*1024}END{print "host_memory",total,available}' /proc/meminfo 2>/dev/null
+for p in $(seq %d %d); do
   m=$(timeout 3 redis-cli -p $p INFO 2>/dev/null | tr -d '\r')
   [ -z "$m" ] && { echo "$p unreachable"; continue; }
   echo "$p $(echo "$m" | awk -F: '
-    BEGIN{u=0;x=0;d=0;c=0;n=0;policy="unknown";keys=0;expires=0;avg=0;evicted=0;exceeded=0;errors=0;oom=0}
-    /^used_memory:/{u=$2} /^maxmemory:/{x=$2} /^used_memory_dataset:/{d=$2}
+    BEGIN{u=0;rss=0;x=0;d=0;c=0;n=0;policy="unknown";keys=0;expires=0;avg=0;evicted=0;exceeded=0;errors=0;oom=0}
+    /^used_memory:/{u=$2} /^used_memory_rss:/{rss=$2} /^maxmemory:/{x=$2} /^used_memory_dataset:/{d=$2}
     /^mem_clients_normal:/{c+=$2} /^mem_clients_slaves:/{c+=$2}
     /^connected_clients:/{n=$2}
     /^maxmemory_policy:/{policy=$2}
@@ -117,7 +119,7 @@ func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
     /^total_error_replies:/{errors=$2}
     /^errorstat_OOM:/{split($2,a,"=");oom=a[2]+0}
     /^db0:/{split($2,a,",");for(i in a){split(a[i],v,"=");if(v[1]=="keys")keys=v[2];else if(v[1]=="expires")expires=v[2];else if(v[1]=="avg_ttl")avg=v[2]}}
-    END{print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom}')"
+    END{print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom" "rss}')"
 done`, lo, hi)
 	out, err := env.runner.shell(ctx, h, script)
 	if err != nil {
@@ -126,8 +128,15 @@ done`, lo, hi)
 
 	nodeMems := []redisNodeMem{}
 	unreachablePorts := []string{}
+	hostMemoryTotalBytes := 0.0
+	hostMemoryAvailableBytes := 0.0
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "host_memory" {
+			hostMemoryTotalBytes = atof(fields[1])
+			hostMemoryAvailableBytes = atof(fields[2])
+			continue
+		}
 		if len(fields) == 2 && fields[1] == "unreachable" {
 			unreachablePorts = append(unreachablePorts, fields[0])
 			continue
@@ -153,6 +162,9 @@ done`, lo, hi)
 			node.totalErrorReplies = atof(fields[12])
 			node.oomErrors = atof(fields[13])
 		}
+		if len(fields) >= 15 {
+			node.rssBytes = atof(fields[14])
+		}
 		nodeMems = append(nodeMems, node)
 	}
 	if len(nodeMems) == 0 {
@@ -162,9 +174,25 @@ done`, lo, hi)
 	// fleet medians for the skew checks
 	usedValues := make([]float64, 0, len(nodeMems))
 	connectedValues := make([]float64, 0, len(nodeMems))
+	sumUsedBytes := 0.0
+	sumRSSBytes := 0.0
+	sumMaxmemoryBytes := 0.0
+	totalKeys := 0.0
+	criticalNodeCount := 0
+	impossibleTTLNodeCount := 0
 	for _, n := range nodeMems {
 		usedValues = append(usedValues, n.usedBytes)
 		connectedValues = append(connectedValues, n.connectedClients)
+		sumUsedBytes += n.usedBytes
+		sumRSSBytes += n.rssBytes
+		sumMaxmemoryBytes += n.maxmemoryBytes
+		totalKeys += n.keys
+		if n.maxmemoryBytes > 0 && 92 < 100*n.usedBytes/n.maxmemoryBytes {
+			criticalNodeCount++
+		}
+		if n.averageTTLMillis > float64(redisImpossibleAverageTTL.Milliseconds()) {
+			impossibleTTLNodeCount++
+		}
 	}
 	sort.Float64s(usedValues)
 	sort.Float64s(connectedValues)
@@ -176,6 +204,29 @@ done`, lo, hi)
 	}
 
 	findings := []finding{}
+	remainingConfiguredHeadroom := max(0.0, sumMaxmemoryBytes-sumUsedBytes)
+	if criticalNodeCount > 0 && hostMemoryAvailableBytes > 0 && hostMemoryAvailableBytes < remainingConfiguredHeadroom {
+		capacityDeficit := remainingConfiguredHeadroom - hostMemoryAvailableBytes
+		action := "Do not increase maxmemory on this host. Add physical memory or Redis masters, or reduce the retained dataset, before expanding aggregate ceilings; preserve enough reserve for Redis RSS overhead, the kernel, and non-Redis processes."
+		if impossibleTTLNodeCount > 0 {
+			action = "Do not increase maxmemory on this host. With explicit maintenance authority, run the independently attributed binary-safe `bringyourctl streams expire-leaked-ttls` cleanup for immediate drain; the durable fix is additional RAM, Redis masters on additional hosts, or a smaller retained key footprint, with reserve for Redis RSS overhead, the kernel, and non-Redis processes."
+		}
+		findings = append(findings, finding{
+			probeId: "redis/host-capacity", tier: tierPage,
+			class: "redis-host-capacity", target: h.name, frame: "aggregate-maxmemory", sustain: 1,
+			symptom:   fmt.Sprintf("Redis can grow %.1fGiB to its configured ceilings but %s has only %.1fGiB available", gib(remainingConfiguredHeadroom), h.name, gib(hostMemoryAvailableBytes)),
+			mechanism: "The sum of per-node maxmemory ceilings exceeds the RAM the host can still supply. Each Redis process can remain below its own limit while their combined RSS exhausts host memory first; swap or an OOM kill can then turn controlled per-node eviction into a fleet outage.",
+			baseline:  "Host-available RAM exceeds all remaining configured Redis growth plus an explicit reserve for RSS overhead, kernel memory, and non-Redis processes; no node is above 92%.",
+			observed: fmt.Sprintf("host_total_gib=%.1f host_available_gib=%.1f redis_used_gib=%.1f redis_rss_gib=%.1f aggregate_maxmemory_gib=%.1f remaining_configured_headroom_gib=%.1f capacity_deficit_gib=%.1f nodes=%d critical_nodes=%d total_keys=%.0f impossible_ttl_nodes=%d",
+				gib(hostMemoryTotalBytes), gib(hostMemoryAvailableBytes), gib(sumUsedBytes), gib(sumRSSBytes), gib(sumMaxmemoryBytes), gib(remainingConfiguredHeadroom), gib(capacityDeficit), len(nodeMems), criticalNodeCount, totalKeys, impossibleTTLNodeCount),
+			context:  "MemAvailable already includes reclaimable cache. The comparison is intentionally conservative because remaining maxmemory excludes RSS-over-used overhead and every non-Redis allocation; unused swap is not healthy Redis capacity.",
+			action:   action,
+			verify:   "Aggregate Redis ceilings plus measured overhead fit beneath physical RAM with operational reserve, host swap and memory pressure remain zero, every node returns below 85%, and current OOM/error rates remain zero on consecutive samples.",
+			playbook: "SIGNALS.md §3.1, §3.3a, and §5.4",
+		})
+	} else {
+		findings = append(findings, healthyFinding("redis/host-capacity", tierPage, "redis-host-capacity", h.name))
+	}
 	for _, n := range nodeMems {
 		target := fmt.Sprintf("%s:%d", h.name, n.port)
 		usedPct := 0.0

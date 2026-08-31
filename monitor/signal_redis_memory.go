@@ -6,6 +6,6 @@ func NewRedisMemorySignal() Signal {
 	return &signalAdapter{
 		number: "3.1", key: "redis-memory", name: "Redis per-node memory table",
 		probe:  newRedisMemoryProbe("redis/node-mem-critical", "redis/node-mem-high"),
-		accept: acceptProbeIDs("redis/node-mem-critical", "redis/node-mem-high", "redis/mem-skew", "redis/node-mem"),
+		accept: acceptProbeIDs("redis/node-mem-critical", "redis/node-mem-high", "redis/mem-skew", "redis/host-capacity", "redis/node-mem"),
 	}
 }
