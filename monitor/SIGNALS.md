@@ -146,6 +146,15 @@ Client-side key-exchange resets are emitted as structured class
 database/service a command never reached. The alert treats MaxStartups as a
 journal-confirmed discriminator, not an inference from a generic TCP reset.
 
+The exact two-command monitor remained contained through a longer live control
+on 2026-08-31. From 14:40Z through 15:16Z, edge-2's readable ssh journal held
+1,985 lines and 680 accepted-key events but zero `MaxStartups`, throttle, or
+drop events. This verifies the source limiter under repeated full cadences; it
+does not prove the host hardening is deployed. The login could not run
+`sshd -T` without privilege, and its readable ssh config contained none of the
+new `LoginGraceTime`, `PerSourceMaxStartups`, or `MaxStartups` directives.
+Keep the shared xops hardening deployment as a separate verification gate.
+
 Likewise, a probe interrupted by an intentional monitor shutdown is a
 lifecycle event, not loss of production visibility, and must not emit a
 `monitor/visibility` alert. Cadence mode enforces each alert's consecutive-tick
@@ -454,6 +463,21 @@ services. Warpctl discovery remains only a compatibility fallback for custom
 callers that omit the inventory. Synthetic coverage proves historical service
 versions are ignored and that a configured inventory performs no registry
 command at all.
+
+The 15:15Z Redis writer validation exposed a different self-observation loop.
+The bounded application-service searches correctly returned zero
+`[redis][ttl]` result lines, but Loki and Mimir log each query at info level in
+the `grafana` service. Their `engine.go:274` and `roundtrip.go:412`
+`msg=\"executing query\"` metadata repeated the searched signature inside the
+quoted query. The standing Grafana tailer then reported six and 20
+`redis-ttl-suspect` lines/minute even though Grafana cannot be the application
+Redis writer. This can affect any class whose literal appears in a query, not
+only TTL warnings. Classification now ignores only info-level Grafana
+`executing query` metadata from those two query-engine callers, after updating
+tailer liveness. A real Grafana warning and the same text from another service
+remain classifiable. The deterministic regression feeds both production
+shapes (including a `panic:` query), proves they cannot create known or novel
+alerts, and proves the exclusion does not hide real log lines.
 
 ---
 
@@ -2332,6 +2356,17 @@ of Redis data. The probe now returns aggregate `MEMORY USAGE SAMPLES 1` for
 suspect keys and explicitly sends capacity attribution to §3.3b; an
 impossible average TTL alone no longer labels the residue as the memory root
 cause.
+
+The post-deployment writer gate was still clean at 2026-08-31T15:15Z. Bounded
+two-hour Grafana log queries across API, taskworker, Connect, proxy, MCP, app,
+and web returned zero application `[redis][ttl]` result lines. Those searches
+did make Grafana log their query literals; the pre-fix standing classifier
+mistook that metadata for six and then 20 warnings/minute (§1.5), but the
+samples were `executing query`, not Redis writes. After separating query echo,
+the evidence proves the sampled legacy stream keys are stale residue rather
+than a currently repeating writer defect. It satisfies the read-only
+precondition for cleanup, but not the authority gate: changing production TTLs
+still requires an explicit maintenance decision.
 
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing

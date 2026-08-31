@@ -258,6 +258,25 @@ func netEscrowNegativeLogGroup(line string) string {
 	return "site=" + strings.TrimSpace(match[1])
 }
 
+// isGrafanaQueryEcho identifies query-engine metadata that repeats the query
+// text verbatim. A standing search for an error signature therefore causes
+// Grafana to log that same signature in an innocuous `executing query` line;
+// classifying the metadata feeds the monitor's observation back into itself.
+// Keep this service- and shape-specific so a real Grafana error carrying the
+// same signature is still classified.
+func isGrafanaQueryEcho(service string, line string) bool {
+	if service != "grafana" || !strings.Contains(line, "level=info ") {
+		return false
+	}
+	if !strings.Contains(line, "caller=engine.go:") &&
+		!strings.Contains(line, "caller=roundtrip.go:") {
+		return false
+	}
+	return (strings.Contains(line, `msg=\"executing query\"`) ||
+		strings.Contains(line, `msg="executing query"`)) &&
+		strings.Contains(line, " query=")
+}
+
 // logTailer tails one service's logs and aggregates per-minute class counts.
 // Safe for one run goroutine plus concurrent snapshot calls.
 type logTailer struct {
@@ -399,6 +418,9 @@ func (self *logTailer) classify(line string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.lastLineTime = time.Now()
+	if isGrafanaQueryEcho(self.service, line) {
+		return
+	}
 
 	for _, c := range logClasses {
 		if c.re.MatchString(line) {

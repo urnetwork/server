@@ -67,6 +67,40 @@ printf '%s\n' 'panic: Loki query error (502): Bad Gateway' >&2
 	}
 }
 
+// Grafana's Loki/Mimir query engine logs the complete query at info level.
+// Searching for an error signature therefore echoes that signature into the
+// grafana service log; the standing grafana tailer must not feed the monitor's
+// own observation back into the error classifier.
+func TestGrafanaQueryEchoCannotCreateLogAlerts(t *testing.T) {
+	tailer := newLogTailer("grafana", nil)
+	redisEcho := `[by-us-fmt-5-edge-4][grafana][g1][cid:test][2026-08-31T15:16:29Z]level=info ts=2026-08-31T15:16:29Z caller=roundtrip.go:412 org_id=fake msg=\"executing query\" type=range query=\"{env=\\\"main\\\"} |= \\\"[redis][ttl]\\\"\" query_hash=1`
+	panicEcho := `[fireside][grafana][g1][cid:test][2026-08-31T15:16:30Z]level=info ts=2026-08-31T15:16:30Z caller=engine.go:274 component=querier org_id=fake msg=\"executing query\" query=\"{env=\\\"main\\\"} |= \\\"panic:\\\"\" query_hash=2`
+	tailer.classify(redisEcho)
+	for range 5 {
+		tailer.classify(panicEcho)
+	}
+
+	findings := tailer.drainWindow()
+	for _, class := range []string{"redis-ttl-suspect", "panic", "novel"} {
+		if finding := findingByClass(t, findings, class); !finding.healthy {
+			t.Fatalf("grafana query echo became a %s finding: %+v", class, finding)
+		}
+	}
+
+	// The exclusion is deliberately narrow: an actual Grafana warning and the
+	// same text from a non-Grafana service must remain visible.
+	grafanaWarning := newLogTailer("grafana", nil)
+	grafanaWarning.classify(`[fireside][grafana][g1][cid:test]level=warn caller=redis.go:89 [redis][ttl] suspicious ttl`)
+	if finding := findingByClass(t, grafanaWarning.drainWindow(), "redis-ttl-suspect"); finding.healthy {
+		t.Fatal("real Grafana TTL warning was hidden with query metadata")
+	}
+	apiEcho := newLogTailer("api", nil)
+	apiEcho.classify(redisEcho)
+	if finding := findingByClass(t, apiEcho.drainWindow(), "redis-ttl-suspect"); finding.healthy {
+		t.Fatal("query-echo exclusion leaked outside the grafana service")
+	}
+}
+
 func TestNetEscrowAlertRetainsSiteAndRedactsEntityIDs(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
 	tailer.classify("[netescrow]negative counter after settle: balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-21434368")
