@@ -2713,6 +2713,15 @@ query returned zero `redis-ttl-suspect` and zero `[redis][ttl]` lines. Connect
 `1033803620` is therefore verified fixed for this defect; only the explicitly
 authorized legacy-key cleanup can resolve the remaining TTL alert.
 
+The independent 22:17Z control remained clean after another two hours at the
+fully converged Connect version. The then-worst node moved to port 6395, where
+the binary-safe sample found 128 suspects: 64 legacy stream-contract names and
+64 legacy stream-id names, again with zero current-generation and zero unknown
+families. Bounded two-hour Connect queries returned zero `[redis][ttl]`,
+`redis-ttl-suspect`, panic, or fatal lines. A changing worst-node port or legacy
+residue count is therefore not evidence of a resumed writer; a new writer
+requires a current-family sample or a post-deploy TTL warning.
+
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
   `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each
