@@ -22,6 +22,10 @@ const taskFailureSummarySQL = `
 		       left(coalesce(reschedule_error,''),160) AS last_error,
 		       run_max_time_seconds,
 		       CASE
+		         WHEN split_part(function_name,'.',3) = 'Payout'
+		           AND lower(coalesce(reschedule_error,'')) LIKE '%no empty local buffer available%'
+		           AND lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 53000%'
+		           THEN 'postgres-local-buffer-exhaustion'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%asset amount owned by the wal%'
 		           OR lower(coalesce(reschedule_error,'')) LIKE '%insufficient token balance%'
 		           THEN 'wallet-insufficient'
@@ -73,7 +77,10 @@ const taskFailureSummarySQL = `
 	)
 	SELECT ranked.task, family_count, parked_count, fresh_claim_count,
 	       reschedule_error_count, run_at_in_s, last_error,
-	       run_max_time_seconds, cause_class_count, cause_summary
+	       run_max_time_seconds, cause_class_count, cause_summary,
+	       current_setting('server_version'),
+	       current_setting('effective_io_concurrency'),
+	       current_setting('temp_buffers')
 	FROM ranked
 	JOIN cause_summaries USING (task)
 	WHERE sample_rank = 1
@@ -445,6 +452,10 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		causeClassCount, causeSummary := atoiRow(r, 8), r.str(9)
 		mixedCauses := 1 < causeClassCount
 		lowerError := strings.ToLower(lastError)
+		localBufferExhaustion := task == "Payout" &&
+			(strings.Contains(causeSummary, "postgres-local-buffer-exhaustion=") ||
+				(strings.Contains(lowerError, "no empty local buffer available") &&
+					strings.Contains(lowerError, "sqlstate 53000")))
 		schemaObjectMissing := strings.Contains(causeSummary, "schema-object-missing=") ||
 			strings.Contains(lowerError, "sqlstate 42703") ||
 			strings.Contains(lowerError, "sqlstate 42p01") ||
@@ -474,6 +485,12 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				alertAction = "Investigate and remediate each listed cause class independently; do not apply the representative error's action to the entire mixed family or delete task rows to hide it."
 				alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."
 			}
+		} else if localBufferExhaustion {
+			alertMechanism = "PostgreSQL 18.4's read-stream lookahead can pin every local buffer while a high-I/O-concurrency transaction scans a temporary relation, then fail with SQLSTATE 53000 `no empty local buffer available`. This Payout stack reaches PaymentPlanner.finalizePayments while scanning its temporary planning tables, matching the upstream PostgreSQL 18 defect fixed in 18.6."
+			alertContext += fmt.Sprintf(" The connected server reports server_version=%s, effective_io_concurrency=%s, and temp_buffers=%s. The high I/O concurrency setting is valuable globally; the safe application containment is transaction-local to the affected payment plan.", r.str(10), r.str(11), r.str(12))
+			alertAction = "Upgrade to PostgreSQL 18.6 or newer for the server-side root fix. Until that upgrade is deployed, roll out the payment planner's `SET LOCAL effective_io_concurrency = 32` containment. Do not raise temp_buffers, delete the pending task, or blindly lower effective_io_concurrency for every session."
+			alertVerify = "Inside a Payout planning transaction, current_setting('effective_io_concurrency') reports 32; after commit, a fresh unrelated session retains the configured global value. The same pending Payout row must complete and clear its error. After PostgreSQL is upgraded to 18.6+, remove the containment only after a temporary-table regression proves the server fix under production-like concurrency."
+			alertPlaybook = "SIGNALS.md §5.7"
 		} else if schemaObjectMissing {
 			alertMechanism = "The running task references a PostgreSQL schema object that does not exist in its connected database. During a rollout this normally means schema-dependent code activated before its append-only migration and artifact check; if the successful migration head already claims that version, the database instead has migration-schema drift."
 			alertContext += " SQLSTATE 42703, 42P01, 42883, and 42704 identify undefined columns, tables, functions, and objects respectively; the exact object in the representative error must be mapped to the versioned artifact table in §8.9."
@@ -521,19 +538,23 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if mixedCauses {
 			symptom += fmt.Sprintf("; %d error classes", causeClassCount)
 		}
+		observed := fmt.Sprintf("task=%s failing_rows=%d parked_over_5m=%d fresh_claim_heartbeats=%d counts_may_overlap=true max_errors=%s sample_run_at_in_s=%s sample_max_time_s=%s cause_classes=%d cause_breakdown=%s",
+			task, familyCount, parkedCount, freshClaimCount, r.str(4), r.str(5), maxTimeSeconds, causeClassCount, causeSummary)
+		if localBufferExhaustion {
+			observed += fmt.Sprintf(" pg_server_version=%s effective_io_concurrency=%s temp_buffers=%s", r.str(10), r.str(11), r.str(12))
+		}
 		findings = append(findings, finding{
 			probeId: "pg/task-parked", tier: tierWarn,
 			class: "task-parked", target: target, frame: task, sustain: 1,
 			symptom:   symptom,
 			mechanism: alertMechanism,
 			baseline:  "reschedule_error_count 0 for all recurring tasks (1.2)",
-			observed: fmt.Sprintf("task=%s failing_rows=%d parked_over_5m=%d fresh_claim_heartbeats=%d counts_may_overlap=true max_errors=%s sample_run_at_in_s=%s sample_max_time_s=%s cause_classes=%d cause_breakdown=%s",
-				task, familyCount, parkedCount, freshClaimCount, r.str(4), r.str(5), maxTimeSeconds, causeClassCount, causeSummary),
-			evidence: "representative error from this task family:\n  " + lastError,
-			context:  alertContext,
-			action:   alertAction,
-			verify:   alertVerify,
-			playbook: alertPlaybook,
+			observed:  observed,
+			evidence:  "representative error from this task family:\n  " + lastError,
+			context:   alertContext,
+			action:    alertAction,
+			verify:    alertVerify,
+			playbook:  alertPlaybook,
 		})
 	}
 	if len(failRows) == 0 {

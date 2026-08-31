@@ -2154,6 +2154,27 @@ limit:
   cover both cross-chain address directions, zero/unknown destinations, typed
   and wrapped error classification, corrected-wallet selection with a fresh
   key, and key reuse after an ambiguous error.
+- `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
+  2026-08-31 UTC production row reached 153 failures on PostgreSQL 18.4 while
+  `effective_io_concurrency=200` and `temp_buffers=8MB`. Its stack ended in
+  `PaymentPlanner.finalizePayments` while scanning the planner's temporary
+  tables. This exactly matches PostgreSQL 18's read-stream lookahead defect:
+  high effective I/O concurrency can pin every local buffer for a temporary
+  relation. The [upstream bug report](https://www.postgresql.org/message-id/CAFMO8-rYPSJbXsDdWDzDdpNi-fQ%2B6bKvgbXwE%2BR=sGko4epq0Q@mail.gmail.com)
+  identifies the temporary-buffer failure, and PostgreSQL's
+  [18.6 release announcement](https://www.postgresql.org/about/news/postgresql-186-1711-1615-1519-1424-and-19-beta-3-released-3365/)
+  includes the server fix.
+  Upgrade PostgreSQL to 18.6 or newer for the root fix. Until then, the
+  payment-plan transaction applies `SET LOCAL effective_io_concurrency = 32`;
+  this contains the affected read stream without reducing the production-wide
+  value for unrelated queries. Do not raise `temp_buffers`, delete the task
+  row, or blindly lower the global concurrency setting. Verify 32 inside the
+  Payout transaction, the original value on a fresh session after commit, and
+  completion of the same pending row. Remove the containment after the server
+  upgrade only with a production-shaped temporary-table regression. The
+  deterministic regression records both exact `SET LOCAL` statements and
+  verifies that both transaction settings return to their session baselines
+  after commit.
 - `Payout`, `pgconn.connLockError=conn closed`, repeatedly after roughly
   16 minutes: production's database-level
   `idle_in_transaction_session_timeout=5min` closed the outer payment-plan

@@ -781,6 +781,51 @@ func TestTaskCanariesSignalExplainsPayoutIdleTransactionClosure(t *testing.T) {
 	}
 }
 
+func TestTaskCanariesSignalExplainsPostgresLocalBufferExhaustion(t *testing.T) {
+	var failureQuery string
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			failureQuery = query
+			return []Row{{
+				"Payout", "1", "1", "0", "153", "3600",
+				"Unhandled: *pgconn.PgError=ERROR: no empty local buffer available (SQLSTATE 53000)",
+				"21600", "1", "postgres-local-buffer-exhaustion=1",
+				"18.4 (Ubuntu 18.4-1.pgdg22.04+1)", "200", "8MB",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(failureQuery, "THEN 'postgres-local-buffer-exhaustion'") {
+		t.Fatalf("PostgreSQL local-buffer signature is not classified in SQL: %s", failureQuery)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"cause_breakdown=postgres-local-buffer-exhaustion=1",
+		"pg_server_version=18.4",
+		"effective_io_concurrency=200",
+		"temp_buffers=8MB",
+		"PaymentPlanner.finalizePayments",
+		"SET LOCAL effective_io_concurrency = 32",
+		"PostgreSQL 18.6",
+		"fresh unrelated session retains the configured global value",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("PostgreSQL local-buffer diagnosis missing %q: %s", want, markdown)
+		}
+	}
+}
+
 func TestTaskCanariesSignalExplainsMissingMigrationArtifact(t *testing.T) {
 	var failureQuery string
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {

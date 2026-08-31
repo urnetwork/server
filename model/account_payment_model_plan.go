@@ -193,6 +193,13 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 // intentionally idle. PostgreSQL then closes the outer connection and the
 // otherwise successful bounded plan fails later with pgconn "conn closed".
 //
+// PostgreSQL 18.4 also has a read-stream lookahead bug that can pin every local
+// buffer while the planner scans a temporary relation, producing SQLSTATE
+// 53000 "no empty local buffer available" when effective_io_concurrency is
+// high. PostgreSQL 18.6 fixes the server bug. Until production is upgraded,
+// keep this transaction below the affected lookahead range without reducing
+// I/O concurrency for unrelated sessions.
+//
 // This override is LOCAL to this one transaction. The task itself remains
 // bounded by its MaxTime and each committed plan is bounded by maxDuration, so
 // the global protection remains in force for every other application session.
@@ -202,6 +209,7 @@ type paymentPlanTransactionConfigurer interface {
 
 func configurePaymentPlanTransaction(ctx context.Context, tx paymentPlanTransactionConfigurer) {
 	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL idle_in_transaction_session_timeout = 0`))
+	server.RaisePgResult(tx.Exec(ctx, `SET LOCAL effective_io_concurrency = 32`))
 }
 
 // computePlanUpperBound restricts a bounded plan (maxDuration > 0) to contracts
