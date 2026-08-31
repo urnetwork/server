@@ -1889,6 +1889,12 @@ The independently attributed, binary-safe stream cleanup
 maintenance authority and is complementary: it clamps keys to an 8-hour TTL
 and begins a bounded drain, but cannot free all of that capacity immediately.
 
+The first corrected live sample at 2026-08-31T03:04Z caught the exact limiting
+case. Redis held 368.5GiB used / 377.6GiB RSS, 27 nodes were above 92%, and the
+host had 15.8GiB available. The old comparison would have cleared because its
+15.5GiB remaining configured growth was just below `MemAvailable`; including
+the 9.4GiB reserve correctly retained a 9.2GiB capacity-deficit page.
+
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
   `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each
