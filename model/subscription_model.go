@@ -424,8 +424,16 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 // (5.79TiB of under-reservation followed by >10k negative-counter lines in 29s
 // on 2026-08-29). Corrections use INCRBY(delta), not SET: a concurrent mirror
 // increment/decrement between our GET and correction remains in the result.
-// The irreducible PostgreSQL-commit-to-mirror window is therefore bounded to
-// one fresh batch instead of the duration of the entire fleet scan.
+//
+// INCRBY cannot make PostgreSQL and Redis atomic. PostgreSQL fixes the page's
+// statement snapshot before running the reservation query. A mirror write that
+// becomes visible after that snapshot but before the later Redis GET can still
+// be backed out by a correction toward the old snapshot; the next page pass
+// then reverses it. The unsettled partial covering index is correctness-critical
+// as well as a performance optimization because it keeps that exposure short.
+// Durable per-balance fencing/versioning is required if matched reversals remain
+// after pages are consistently fast. A separate commit-to-mirror-post window is
+// contained by the atomic release clamp below.
 //
 // Drift is the signed difference (previous counter minus reconciled value)
 // summed per network. Positive drift means the counter was over-reserved -- the
@@ -482,7 +490,9 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 		}
 		// Read reservations immediately before correcting this page. Do not move
 		// this above the pagination loop: that recreates the stale-global-snapshot
-		// incident described in the function comment.
+		// incident described in the function comment. Keep the query on the fast
+		// unsettled partial path so its statement-snapshot-to-Redis-GET window stays
+		// bounded as well.
 		pending := openEscrowReservedForBalances(ctx, balanceIds)
 		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
 		for _, row := range rows {
@@ -553,8 +563,8 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 }
 
 // openEscrowReservedForBalances returns the current reserved (open-contract)
-// escrow bytes for exactly one bounded balance page. The balance_id index is a
-// required part of this algorithm.
+// escrow bytes for exactly one bounded balance page. The partial unsettled
+// balance index is a required part of this algorithm.
 //
 // Keep the requested balances as the outer relation and OFFSET 0 as an
 // optimization boundary. On the billion-row production table PostgreSQL 18.4
@@ -562,8 +572,15 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 // sequential scan of all transfer_escrow history for every page, even though
 // most active balances have no historical escrow rows. The lateral lookup
 // makes the intended bound structural: each requested balance gets one range
-// scan of transfer_escrow_balance_contract, and no page can become a whole
-// transfer_escrow scan merely because statistics or table size change.
+// scan of transfer_escrow_unsettled_balance_contract, and no page can become a
+// whole transfer_escrow scan merely because statistics or table size change.
+//
+// outcome IS NULL remains the authoritative live-reservation predicate.
+// settled is changed only after claimContractOutcomeInTx commits a non-NULL
+// outcome, so an open contract's escrow is necessarily unsettled. The reverse
+// is intentionally not assumed: the best-effort settled post can be missed and
+// leave closed escrow rows unsettled. `settled = false` is therefore a safe
+// partial-index prefilter only while the outcome join remains in this query.
 const netEscrowReservationPageSQL = `
     SELECT
         selected_escrow.balance_id,
@@ -575,7 +592,9 @@ const netEscrowReservationPageSQL = `
             transfer_escrow.contract_id,
             transfer_escrow.balance_byte_count
         FROM transfer_escrow
-        WHERE transfer_escrow.balance_id = requested_balance.balance_id
+        WHERE
+            transfer_escrow.balance_id = requested_balance.balance_id AND
+            transfer_escrow.settled = false
         OFFSET 0
     ) AS selected_escrow
     INNER JOIN transfer_contract ON
@@ -613,7 +632,9 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 // atomically adds only nonzero corrections. An already-correct mirror receives
 // no write or TTL refresh; this avoids the old fleet-wide SET/DEL storm on a
 // logically no-op pass. A corrected zero result deletes the key, matching the
-// "missing counter is zero" invariant.
+// "missing counter is zero" invariant. The caller's pending values are an
+// earlier PostgreSQL statement snapshot; additive correction protects changes
+// after the Redis GET, not mirror changes already visible before that GET.
 const netEscrowCorrectionScript = `
 local value = redis.call('INCRBY', KEYS[1], ARGV[1])
 if value == 0 then

@@ -153,18 +153,22 @@ func TestLogErrorsSignalExplainsNegativeNetEscrowAftermath(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "netescrow-negative")
 	markdown := alert.Markdown()
 	for _, detail := range []string{
-		"full-fleet reconciler",
-		"absolute SET or DEL",
+		"legacy full-fleet reconciler",
+		"old absolute SET or DEL snapshot",
+		"current page-local additive path",
+		"PostgreSQL statement fixes its page snapshot",
+		"later Redis GET sees the newer mirror",
 		"not evidence that the site independently created",
 		"log-ingestion delay",
-		"page-local additive reconciler",
-		"transfer_escrow(balance_id, contract_id) index",
-		"Retain them where present",
-		"roll them out only where version or code evidence says they are absent",
-		"PostgreSQL settlement commits before its Redis release",
+		"reservation statement shape and timing",
+		"migration 601",
+		"unsettled-partial query",
+		"durable per-balance fencing/versioning",
+		"committed settlement before its delayed Redis release",
 		"atomic release Lua",
 		"clamped_to=0",
 		"contained commit/post ordering window",
+		"unsettled-partial pages below 1 second",
 		"below 120 seconds",
 		"below 256GiB",
 		"taskworker, API, and Connect",
@@ -183,6 +187,9 @@ func TestLogErrorsSignalExplainsNegativeNetEscrowAftermath(t *testing.T) {
 	}
 	if strings.Contains(markdown, "Install the transfer_escrow(balance_id, contract_id) index first, then roll out") {
 		t.Fatalf("negative net-escrow alert retained a stale unconditional rollout diagnosis:\n%s", markdown)
+	}
+	if strings.Contains(markdown, "The dominant production cause is the pre-fix full-fleet reconciler") {
+		t.Fatalf("negative net-escrow alert overclaimed the retired writer after the current additive reproduction:\n%s", markdown)
 	}
 }
 

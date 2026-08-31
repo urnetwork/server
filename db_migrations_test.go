@@ -508,6 +508,40 @@ func TestNetEscrowReconcileBalanceIndex(t *testing.T) {
 	})
 }
 
+// The bounded lateral query still overran on production because its complete
+// per-balance history ranges required heap fetches. The appended partial
+// covering index must contain only the necessary unsettled set while carrying
+// the aggregate payload; changing any of those three properties recreates the
+// billion-row history cost.
+func TestNetEscrowReconcileUnsettledCoveringIndex(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var indexDefinition string
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT indexdef
+				FROM pg_indexes
+				WHERE schemaname = current_schema()
+				  AND indexname = 'transfer_escrow_unsettled_balance_contract'
+			`)
+			WithPgResult(result, err, func() {
+				if result.Next() {
+					Raise(result.Scan(&indexDefinition))
+				}
+			})
+		}, OptReadOnly())
+		for _, want := range []string{
+			"(balance_id, contract_id)",
+			"INCLUDE (balance_byte_count)",
+			"WHERE (settled = false)",
+		} {
+			if !strings.Contains(indexDefinition, want) {
+				t.Fatalf("unsettled net-escrow index %q missing %q", indexDefinition, want)
+			}
+		}
+	})
+}
+
 func TestApplyDbMigrations(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := context.Background()

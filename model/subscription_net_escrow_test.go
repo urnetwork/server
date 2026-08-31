@@ -29,6 +29,7 @@ func TestNetEscrowReservationPageForcesPerBalanceIndexBoundary(t *testing.T) {
 		"FROM unnest($1::uuid[])",
 		"CROSS JOIN LATERAL",
 		"transfer_escrow.balance_id = requested_balance.balance_id",
+		"transfer_escrow.settled = false",
 		"OFFSET 0",
 		"transfer_contract.outcome IS NULL",
 	} {
@@ -38,6 +39,10 @@ func TestNetEscrowReservationPageForcesPerBalanceIndexBoundary(t *testing.T) {
 	}
 	if strings.Contains(netEscrowReservationPageSQL, "balance_id = ANY") {
 		t.Fatalf("net-escrow reservation page restored the full-scan-prone ANY shape:\n%s", netEscrowReservationPageSQL)
+	}
+	if strings.Index(netEscrowReservationPageSQL, "transfer_escrow.settled = false") >
+		strings.Index(netEscrowReservationPageSQL, "OFFSET 0") {
+		t.Fatalf("unsettled prefilter escaped the lateral optimization boundary:\n%s", netEscrowReservationPageSQL)
 	}
 }
 
@@ -144,6 +149,65 @@ func TestNetEscrowCorrectionPreservesConcurrentMirrorWrite(t *testing.T) {
 			}
 			if ttl := r.TTL(ctx, key).Val(); ttl <= 0 {
 				t.Fatalf("corrected counter has no fallback ttl: %s", ttl)
+			}
+		})
+	})
+}
+
+// A PostgreSQL statement takes its snapshot before executing the reservation
+// page. If a live settlement commits and updates Redis while that page is
+// still running, reconcileNetEscrowBatch receives the old PostgreSQL total but
+// its later Redis GET sees the new mirror. INCRBY preserves writes after GET;
+// it cannot identify this already-visible write as newer than the page
+// snapshot. Pin the matched inverse observed in production: the stale pass
+// re-adds the released bytes and the next fresh pass removes the same bytes.
+// The unsettled partial access path bounds this exposure by making the page
+// fast; durable cross-store fencing/versioning is required to eliminate it.
+func TestNetEscrowSlowReservationPageProducesMatchedReversal(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		balanceId := server.NewId()
+		key := netEscrowKey(balanceId)
+		defer server.Redis(ctx, func(r server.RedisClient) { r.Del(ctx, key) })
+
+		// The statement snapshot still contains 20 reserved bytes. While its
+		// slow page runs, a settlement commits and its mirror post leaves 10.
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, key, 10, time.Hour).Err())
+		})
+		staleDrift := reconcileNetEscrowBatch(
+			ctx,
+			map[server.Id]ByteCount{balanceId: 20},
+			[]server.Id{balanceId},
+			true,
+		)
+		if staleDrift[balanceId] != -10 {
+			t.Fatalf("stale-page drift = %d, want -10 under-reserved", staleDrift[balanceId])
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			value, err := r.Get(ctx, key).Int64()
+			server.Raise(err)
+			if value != 20 {
+				t.Fatalf("stale-page correction = %d, want old snapshot value 20", value)
+			}
+		})
+
+		// The next statement sees the committed settlement and reverses the
+		// exact quantity that the stale page reintroduced.
+		freshDrift := reconcileNetEscrowBatch(
+			ctx,
+			map[server.Id]ByteCount{balanceId: 10},
+			[]server.Id{balanceId},
+			true,
+		)
+		if freshDrift[balanceId] != 10 {
+			t.Fatalf("fresh-page drift = %d, want 10 over-reserved", freshDrift[balanceId])
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			value, err := r.Get(ctx, key).Int64()
+			server.Raise(err)
+			if value != 10 {
+				t.Fatalf("fresh-page correction = %d, want current value 10", value)
 			}
 		})
 	})

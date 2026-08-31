@@ -6665,4 +6665,26 @@ var migrations = []any{
 	newSqlMigration(migrationCatalogSchemaSQL),
 
 	newCodeMigration("20260830_install_migration_catalog", migrationInstallCatalog),
+
+	// ReconcileNetEscrow visits the roughly 1.8M active balances in bounded
+	// pages, but transfer_escrow retains more than a billion historical rows.
+	// Even a structural per-balance lateral lookup is slow when each range must
+	// visit settled history and then fetch balance_byte_count from the heap.
+	// `outcome IS NULL` remains the authoritative open-reservation test in the
+	// query; `settled = false` is only its safe necessary prefilter because the
+	// settled post runs after the contract outcome is claimed. The reverse need
+	// not hold when a best-effort settled post is missed.
+	//
+	// Keep this online: transfer_escrow receives continuous production writes,
+	// and the one-time build must not block escrow creation or settlement.
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_escrow_unsettled_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)
+		 INCLUDE (balance_byte_count)
+		 WHERE settled = false`,
+		`CREATE INDEX IF NOT EXISTS transfer_escrow_unsettled_balance_contract
+		 ON transfer_escrow (balance_id, contract_id)
+		 INCLUDE (balance_byte_count)
+		 WHERE settled = false`,
+	),
 }

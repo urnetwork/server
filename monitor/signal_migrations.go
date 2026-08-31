@@ -45,6 +45,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "account_payment_contract_retention_pending", requiredVersion: 596, rowColumn: 9},
 	{name: "transfer_escrow_sweep_payment_contract", requiredVersion: 597, rowColumn: 10},
 	{name: "migration_catalog", requiredVersion: 599, rowColumn: 11},
+	{name: "transfer_escrow_unsettled_balance_contract", requiredVersion: 601, rowColumn: 12},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -81,7 +82,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       ),
 		       to_regclass('public.account_payment_contract_retention_pending') IS NOT NULL,
 		       to_regclass('public.transfer_escrow_sweep_payment_contract') IS NOT NULL,
-		       to_regclass('public.migration_catalog') IS NOT NULL
+		       to_regclass('public.migration_catalog') IS NOT NULL,
+		       to_regclass('public.transfer_escrow_unsettled_balance_contract') IS NOT NULL
 		FROM version;
 	`)
 	if err != nil {

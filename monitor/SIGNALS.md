@@ -2571,7 +2571,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
-| `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create/double release, a long legacy reconcile can overwrite live mirror traffic (§5.11); even the fixed page-local reconciler retains a small PostgreSQL-commit/Redis-post ordering window. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting it while retaining the negative diagnostic result. Any occurrence remains a defect. | Correlate the first burst with `ReconcileNetEscrow` duration and aggregate drift. Roll out both the page-local additive reconciler and atomic release clamp; after rollout verify any residual line says `clamped_to=0` and its key is absent. Alert artifacts retain only `site`; balance/contract ids are redacted. |
+| `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create/double release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting it while retaining the negative diagnostic result. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, duration, reservation statement profile, and aggregate drift. Retain the page-local additive reconciler and atomic release clamp; for slow historical bounded pages apply migration 601 and deploy the unsettled-partial query. After rollout verify any residual line says `clamped_to=0`, its key is absent, pages stay below one second, and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
 Extract (class, target ip:port, innermost app frame) as the alert identity;
@@ -3517,9 +3517,11 @@ normal settlement and quarantine release through one Lua command: it performs
 `DECRBY`, deletes a zero or negative result atomically, and returns the original
 negative value for a `clamped_to=0` diagnostic; a positive result preserves a
 shorter precise TTL and caps only a missing/legacy-long TTL at 90 days. This
-defense does not replace the page-local fix—the production TiB-scale matched
-reversals still prove the old absolute writer—but it prevents the residual
-commit/post race from leaving available balance overstated until another pass.
+defense does not replace the page-local fix. The pre-rollout TiB-scale matched
+reversals paired with exact legacy executor evidence prove the old absolute
+writer; a matched inverse alone is not sufficient version attribution. The
+clamp prevents either the legacy aftermath or a current cross-store race from
+leaving available balance overstated until another pass.
 
 Diagnosis and recovery:
 
@@ -3641,9 +3643,71 @@ signal coverage prevents an already-deployed lateral plan from being
 misdiagnosed as the legacy scan. Verification is new bounded-lateral delta
 calls with zero new legacy-`ANY` calls, reservation-page adjacent mean below one
 second, full passes below 120 seconds, small aggregates, and a full quiet
-negative-counter interval. A covering index remains a separate option only if
-the bounded-lateral profile is still slow in an isolated production-shaped
-benchmark; it is not required for this root fix and no migration was added.
+negative-counter interval.
+
+Continued monitoring proved that the covering index is required as a second
+access-path fix. At 08:16Z on 2026-08-31, a current bounded-lateral run was
+still active after 951 seconds. Nine adjacent reservation-page calls averaged
+7,216.1ms each, while the matching balance keyset calls averaged only 19.3ms.
+The legacy `ANY` plan was absent. Production's `transfer_escrow` relation held
+roughly 1.087 billion historical rows, but only about 1.85 million (0.17%) had
+`settled=false`. All 1,726,789 rows joined to an `outcome IS NULL` contract were
+unsettled, and zero open-contract escrow rows were marked settled. This matches
+the write ordering: `claimContractOutcomeInTx` commits the non-NULL outcome
+before the best-effort post can set escrow `settled=true`. Therefore
+`outcome IS NULL => settled=false`, while the reverse is deliberately false
+when a post is missed.
+
+Migration 601 creates the online partial covering index
+`transfer_escrow_unsettled_balance_contract(balance_id, contract_id) INCLUDE
+(balance_byte_count) WHERE settled=false`. The reservation query adds
+`transfer_escrow.settled=false` inside the lateral `OFFSET 0` boundary but
+retains `transfer_contract.outcome IS NULL` as the authoritative reservation
+test. The predicate reduces each balance range from complete history to the
+small unsettled set; the included byte count removes the historical heap fetch
+from the aggregation. Never replace the outcome join with `settled=false`
+alone: a missed settled post can leave a closed row false. The `netescrow`
+probe distinguishes old bounded-lateral calls from the new
+unsettled-partial calls. Apply migration 601 before activating the matching
+taskworker binary, then require new unsettled-partial delta calls, a page mean
+below one second, complete runs below 120 seconds, small drift, and a full quiet
+negative-counter interval.
+
+The next production sequence exposed why matched reversals must retain exact
+executor and statement-shape attribution. Current taskworker
+`2026.8.31-outerwerld+1033599540`, task
+`01a056d0-cb51-3ea5-8d0b-09bc6936bb1e`, ran for 1,282 seconds on
+edge-0/g1 container `40f27d3cd53f`. At 08:21:42Z it reported 906,751
+balances, 1,060 drifted networks, 158.60GiB over-reserved, and 686.26GiB
+under-reserved. The same current container emitted many atomic
+`clamped_to=0` settlement diagnostics during the run. Its scheduled successor,
+task `01a056e8-f4bb-be02-7a27-d9f3b7e18d79`, completed on the same executor in
+165 seconds and at 08:29:30Z reported 906,827 balances, 544 drifted networks,
+703.87GiB over-reserved, and 20.85GiB under-reserved. The roughly 686--704GiB
+under-to-over inverse is a reconciliation-created stale write, but it cannot
+honestly be attributed to the retired fleet-wide absolute writer: both halves
+came from the current page-local additive executor.
+
+The remaining race is between the PostgreSQL page snapshot and the later Redis
+GET. A PostgreSQL statement fixes snapshot `P` before executing its reservation
+query. If live creates `C` and settlements `S` commit and update Redis while a
+multi-second page is still running, the later Redis GET sees `P+C-S`. The
+additive correction computes `P-(P+C-S)=S-C` and moves the mirror back toward
+stale `P`; the next pass sees current durable `P+C-S` and reverses nearly the
+same quantity. Lua `INCRBY` correctly preserves writes after the Redis GET, but
+cannot identify a write already visible at GET as newer than the earlier
+PostgreSQL snapshot. The deterministic slow-page regression pins this exact
+under-to-over signature.
+
+Migration 601 and the unsettled-partial query are the immediate root-cause fix
+for the measured amplifier: they reduce roughly 7.2-second historical range
+walks to the small active set and therefore shrink the snapshot-to-GET window.
+They do not make PostgreSQL and Redis atomic. After deployment, require
+unsettled-partial pages below one second, scheduled passes below 120 seconds,
+aggregates in the ordinary tens-of-GiB band, and a full quiet three-emitter
+interval. If matched reversals persist on fast unsettled-partial pages, the
+remaining correctness fix is durable per-balance fencing/versioning shared by
+live mirror posts and reconciliation; do not mask it with manual reruns.
 
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
@@ -4173,16 +4237,17 @@ This is the version-to-artifact contract checked by the probe:
 | 598 | idempotent repair of `transfer_escrow_balance_contract` |
 | 599 | `migration_catalog` |
 | 600 | `migration_catalog` identities cover indices 0–599 |
+| 601 | `transfer_escrow_unsettled_balance_contract` |
 
 Page immediately as `migration-schema-drift` when the successful audit head is
 at or above an artifact's version but that artifact is absent. Warn as
 `migration-behind` while the audit head is below `server.MigrationCount()` for
 this source tree; never duplicate that count as a monitor constant. The
 deployment gate is strict: run migrations from the exact service commit,
-require the current head and all twelve artifact checks, and only then activate
-dependent APIs or taskworkers. Never edit `migration_audit` or create objects
-by hand merely to silence the probe; repair the append-only migration stream
-and let its normal runner advance the database.
+require the current head and all version-gated artifact checks, and only then
+activate dependent APIs or taskworkers. Never edit `migration_audit` or create
+objects by hand merely to silence the probe; repair the append-only migration
+stream and let its normal runner advance the database.
 
 The 2026-08-31 taskworker rollout proved why the monitor must derive that head
 from code. Image `2026.8.31-outerwerld+1033599540` pulled and started on both

@@ -1926,6 +1926,25 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 		server.Redis(ctx, func(r server.RedisClient) {
 			connect.AssertEqual(t, int64(0), r.Exists(ctx, key).Val())
 		})
+
+		// settled=false is only the partial-index prefilter. Reproduce a missed
+		// best-effort settled post after the authoritative contract outcome has
+		// closed: reconciliation must still exclude this escrow through
+		// outcome IS NULL, rather than resurrecting a closed reservation.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE transfer_escrow
+				SET settled = false
+				WHERE contract_id = $1
+			`, contractId))
+		}, server.TxReadCommitted)
+		server.Redis(ctx, func(r server.RedisClient) {
+			r.IncrBy(ctx, key, int64(contractByteCount))
+		})
+		drift, balanceCount = ReconcileNetEscrowForNetwork(ctx, networkId, true)
+		connect.AssertEqual(t, 2, balanceCount)
+		connect.AssertEqual(t, contractByteCount, drift)
+		connect.AssertEqual(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
 	})
 }
 

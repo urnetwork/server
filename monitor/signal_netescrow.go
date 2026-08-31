@@ -23,24 +23,26 @@ func NewNetEscrowSignal() Signal {
 }
 
 type netEscrowStatementCounters struct {
-	reservationCalls        int64
-	reservationTotalMs      float64
-	reservationMaxMs        float64
-	legacyReservationCalls  int64
-	boundedReservationCalls int64
-	balanceCalls            int64
-	balanceTotalMs          float64
-	balanceMaxMs            float64
+	reservationCalls          int64
+	reservationTotalMs        float64
+	reservationMaxMs          float64
+	legacyReservationCalls    int64
+	boundedReservationCalls   int64
+	unsettledReservationCalls int64
+	balanceCalls              int64
+	balanceTotalMs            float64
+	balanceMaxMs              float64
 }
 
 type netEscrowStatementProfile struct {
 	netEscrowStatementCounters
-	reservationDeltaCalls        int64
-	reservationDeltaMeanMs       float64
-	legacyReservationDeltaCalls  int64
-	boundedReservationDeltaCalls int64
-	balanceDeltaCalls            int64
-	balanceDeltaMeanMs           float64
+	reservationDeltaCalls          int64
+	reservationDeltaMeanMs         float64
+	legacyReservationDeltaCalls    int64
+	boundedReservationDeltaCalls   int64
+	unsettledReservationDeltaCalls int64
+	balanceDeltaCalls              int64
+	balanceDeltaMeanMs             float64
 }
 
 type netEscrowProbe struct {
@@ -109,6 +111,9 @@ func (self *netEscrowProbe) observeStatementProfile(current netEscrowStatementCo
 	if self.profileInitialized && self.lastProfile.boundedReservationCalls <= current.boundedReservationCalls {
 		profile.boundedReservationDeltaCalls = current.boundedReservationCalls - self.lastProfile.boundedReservationCalls
 	}
+	if self.profileInitialized && self.lastProfile.unsettledReservationCalls <= current.unsettledReservationCalls {
+		profile.unsettledReservationDeltaCalls = current.unsettledReservationCalls - self.lastProfile.unsettledReservationCalls
+	}
 	self.lastProfile = current
 	self.profileInitialized = true
 	return profile
@@ -124,6 +129,11 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 			         AND query ILIKE '%CROSS JOIN LATERAL%'
 			         AND query ILIKE '%requested_balance.balance_id%'
 			         AND query ILIKE '%transfer_contract.outcome IS NULL%' AS bounded_reservation_page,
+			       query ILIKE '%FROM unnest(%'
+			         AND query ILIKE '%CROSS JOIN LATERAL%'
+			         AND query ILIKE '%requested_balance.balance_id%'
+			         AND query ILIKE '%transfer_escrow.settled%'
+			         AND query ILIKE '%transfer_contract.outcome IS NULL%' AS unsettled_reservation_page,
 			       query ILIKE '%FROM transfer_balance%'
 			         AND query ILIKE '%balance_id >%'
 			         AND query ILIKE '%ORDER BY balance_id%'
@@ -139,7 +149,8 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 		       coalesce(sum(total_exec_time) FILTER (WHERE balance_page),0),
 		       coalesce(max(max_exec_time) FILTER (WHERE balance_page),0),
 		       coalesce(sum(calls) FILTER (WHERE legacy_reservation_page),0),
-		       coalesce(sum(calls) FILTER (WHERE bounded_reservation_page),0)
+		       coalesce(sum(calls) FILTER (WHERE bounded_reservation_page),0),
+		       coalesce(sum(calls) FILTER (WHERE unsettled_reservation_page),0)
 		FROM statements;
 	`)
 	if err != nil {
@@ -149,14 +160,15 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 		return netEscrowStatementProfile{}, fmt.Errorf("net-escrow statement profile returned %d rows, want 1", len(rows))
 	}
 	return self.observeStatementProfile(netEscrowStatementCounters{
-		reservationCalls:        netEscrowProfileInt64(rows[0], 0),
-		reservationTotalMs:      atof(rows[0].str(1)),
-		reservationMaxMs:        atof(rows[0].str(2)),
-		balanceCalls:            netEscrowProfileInt64(rows[0], 3),
-		balanceTotalMs:          atof(rows[0].str(4)),
-		balanceMaxMs:            atof(rows[0].str(5)),
-		legacyReservationCalls:  netEscrowProfileInt64(rows[0], 6),
-		boundedReservationCalls: netEscrowProfileInt64(rows[0], 7),
+		reservationCalls:          netEscrowProfileInt64(rows[0], 0),
+		reservationTotalMs:        atof(rows[0].str(1)),
+		reservationMaxMs:          atof(rows[0].str(2)),
+		balanceCalls:              netEscrowProfileInt64(rows[0], 3),
+		balanceTotalMs:            atof(rows[0].str(4)),
+		balanceMaxMs:              atof(rows[0].str(5)),
+		legacyReservationCalls:    netEscrowProfileInt64(rows[0], 6),
+		boundedReservationCalls:   netEscrowProfileInt64(rows[0], 7),
+		unsettledReservationCalls: netEscrowProfileInt64(rows[0], 8),
 	}), nil
 }
 
@@ -244,8 +256,8 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				aggregate.identity.container,
 			)
 		}
-		mechanism := "A correction at least 256GiB is far outside the healthy tens-of-GiB band. It can be a lost large mirror write; if the adjacent pass moves nearly the same quantity in the opposite direction, the deployed fleet-wide absolute snapshot overwrote live mirror traffic even though the walk itself stayed below the 120s duration threshold."
-		evidence := "Follow the adjacent scheduled aggregate and all three negative-counter emitters. A matched opposite-direction correction identifies stale absolute writes; a one-direction event instead requires tracing the affected durable reservation before attribution."
+		mechanism := "A correction at least 256GiB is far outside the healthy tens-of-GiB band. It can be a lost large mirror write. If the adjacent pass moves nearly the same quantity in the opposite direction, reconciliation wrote a stale reservation view; exact executor and statement-shape evidence must distinguish the legacy fleet-wide absolute snapshot from the current page-local additive race."
+		evidence := "Follow the adjacent scheduled aggregate, exact source executor, reservation-page statement profile, and all three negative-counter emitters. A matched opposite-direction correction identifies a reconciliation-created stale write but does not by itself identify which reconciler version caused it; a one-direction event instead requires tracing the affected durable reservation before attribution."
 		if previous != nil && direction != "" {
 			observed += fmt.Sprintf(
 				" previous_over_reserved=%s previous_under_reserved=%s matched_reversal=true reversal_direction=%s",
@@ -261,8 +273,8 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 					previous.identity.container,
 				)
 			}
-			mechanism = "Adjacent scheduled passes moved nearly the same >=256GiB quantity in opposite directions. Independent lost writes do not repair as a matched inverse; the deployed fleet-wide absolute snapshot overwrote live mirror traffic, and the next pass restored it. This can happen within the nominal 120s duration band when a large live reservation changes during the walk."
-			evidence = "The adjacent aggregate pair is the root-cause discriminator. Negative counters can remain zero when no settlement decrements the overwritten mirror before the corrective successor runs."
+			mechanism = "Adjacent scheduled passes moved nearly the same >=256GiB quantity in opposite directions. Independent lost writes do not repair as a matched inverse: one reconciliation wrote a stale reservation view and the next pass restored it. A legacy executor can do this with its fleet-wide absolute snapshot. On the current additive executor, each PostgreSQL statement fixes its page snapshot before running; live creates or settlements can update PostgreSQL and Redis while a slow reservation query is still executing, then the later Redis GET sees the newer mirror and the additive correction moves it back toward the older PostgreSQL snapshot. This can happen within the nominal 120s duration band, although multi-second pages make the window much larger."
+			evidence = "The adjacent aggregate pair identifies a reconciliation-created stale write. Exact source executor version plus legacy-ANY, historical bounded-lateral, or unsettled-partial statement timing identifies which race was possible. Negative counters can remain zero when no settlement decrements the overwritten mirror before the corrective successor runs."
 		} else if windowBoundary {
 			observed += " matched_reversal=unknown_window_boundary"
 			mechanism = "A correction at least 256GiB remains outside the healthy tens-of-GiB band, but it is now the oldest aggregate retained in the observation window. Its preceding scheduled aggregate is no longer observable, so later healthy passes cannot safely reclassify this event as a one-direction correction."
@@ -278,9 +290,9 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			baseline:  "Scheduled aggregates normally remain in the tens-of-GiB band; alert when either direction reaches 256GiB, independent of task duration.",
 			observed:  observed,
 			evidence:  evidence,
-			context:   "This is reservation-mirror integrity, not Redis capacity. A short task and zero negative-counter lines do not clear a large aggregate correction; the adjacent pass determines whether it is a matched reversal. Source host/generation/container identify the exact executor, so a fast pass elsewhere cannot erase this pass's evidence.",
-			action:    "Do not manually re-run reconciliation. Confirm the exact source executor has the page-local additive reconciler and atomic release clamp. Retain them where present and roll them out only where version or code evidence says they are absent; if a matched reversal comes from a current executor, treat it as a regression in the bounded delta or release ordering. Let scheduled passes supply convergence evidence.",
-			verify:    "Every active taskworker generation produces recurring aggregates below 256GiB in the tens-of-GiB band, already-correct mirrors receive no rewrite, and all negative-counter emitters remain at zero for a full interval.",
+			context:   "This is reservation-mirror integrity, not Redis capacity. A short task and zero negative-counter lines do not clear a large aggregate correction; the adjacent pass determines whether it is a matched reversal. Source host/generation/container identify the exact executor, so a fast pass elsewhere cannot erase this pass's evidence. Additive INCRBY preserves mirror writes after Redis GET; it cannot preserve a write that became visible before GET but was absent from the earlier PostgreSQL statement snapshot.",
+			action:    "Do not manually re-run reconciliation. Confirm the exact source executor, reservation statement shape, page timing, and atomic release clamp. For a legacy absolute executor, deploy the page-local additive path. For a current additive executor with slow legacy-ANY or historical bounded-lateral pages, apply migration 601 and deploy the unsettled-partial query to shrink the PostgreSQL-snapshot-to-Redis-GET window. If matched reversals remain on fast unsettled-partial pages, treat the remaining cross-store window as a sequencing defect that requires durable per-balance fencing/versioning, not another blind rerun.",
+			verify:    "Every active taskworker generation uses unsettled-partial reservation pages below 1s, scheduled reconciliations remain below 120s, recurring aggregates stay below 256GiB in the tens-of-GiB band, already-correct mirrors receive no rewrite, and all negative-counter emitters remain at zero for a full interval.",
 			playbook:  "SIGNALS.md §5.11",
 		})
 	}
@@ -345,12 +357,13 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			balanceLifetimeMeanMs = profile.balanceTotalMs / float64(profile.balanceCalls)
 		}
 		observed += fmt.Sprintf(
-			" reservation_page_calls=%d reservation_page_lifetime_mean_ms=%.1f reservation_page_max_ms=%.1f reservation_page_legacy_any_calls=%d reservation_page_bounded_lateral_calls=%d balance_page_calls=%d balance_page_lifetime_mean_ms=%.1f balance_page_max_ms=%.1f",
+			" reservation_page_calls=%d reservation_page_lifetime_mean_ms=%.1f reservation_page_max_ms=%.1f reservation_page_legacy_any_calls=%d reservation_page_bounded_lateral_calls=%d reservation_page_unsettled_partial_calls=%d balance_page_calls=%d balance_page_lifetime_mean_ms=%.1f balance_page_max_ms=%.1f",
 			profile.reservationCalls,
 			reservationLifetimeMeanMs,
 			profile.reservationMaxMs,
 			profile.legacyReservationCalls,
 			profile.boundedReservationCalls,
+			profile.unsettledReservationCalls,
 			profile.balanceCalls,
 			balanceLifetimeMeanMs,
 			profile.balanceMaxMs,
@@ -381,24 +394,33 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		if 0 < profile.boundedReservationDeltaCalls {
 			observed += fmt.Sprintf(" reservation_page_bounded_lateral_delta_calls=%d", profile.boundedReservationDeltaCalls)
 		}
+		if 0 < profile.unsettledReservationDeltaCalls {
+			observed += fmt.Sprintf(" reservation_page_unsettled_partial_delta_calls=%d", profile.unsettledReservationDeltaCalls)
+		}
 		if 1000 <= reservationMeanMs && (balanceMeanMs == 0 || 10*balanceMeanMs < reservationMeanMs) {
 			evidence += " The statement comparison separates the reservation join from the cheap keyset scan; cumulative maxima retain tail risk, while adjacent-sample deltas describe only calls since the preceding monitor pass."
 			legacyShape := 0 < profile.legacyReservationDeltaCalls ||
 				(profile.reservationDeltaCalls == 0 && 0 < profile.legacyReservationCalls && profile.boundedReservationCalls == 0)
 			boundedShape := 0 < profile.boundedReservationDeltaCalls ||
 				(profile.reservationDeltaCalls == 0 && 0 < profile.boundedReservationCalls && profile.legacyReservationCalls == 0)
+			unsettledShape := 0 < profile.unsettledReservationDeltaCalls ||
+				(profile.reservationDeltaCalls == 0 && 0 < profile.unsettledReservationCalls && profile.legacyReservationCalls == 0)
 			switch {
 			case legacyShape:
 				mechanism = fmt.Sprintf("The page-local additive algorithm is present, but the deployed reservation statement still uses one 10,000-ID ANY predicate. A read-only production EXPLAIN at schema head 597 selected a parallel sequential scan of the roughly one-billion-row transfer_escrow table for every page instead of transfer_escrow_balance_contract; pg_stat_statements reports the %s mean of %.1fms/page versus %.1fms for the balance keyset. This repeated whole-history plan is the overrun, not the old absolute writer and not merely a missing INCLUDE payload.", profileWindow, reservationMeanMs, balanceMeanMs)
-				action = "Deploy the bounded-lateral reservation page: unnest the requested balances as the outer relation and retain the OFFSET 0 optimization boundary so each balance performs one transfer_escrow_balance_contract range scan. This needs no new index or migration. Keep page-local additive corrections and the task deadline; do not force a global planner setting or manually re-run reconciliation."
-				verify = "Post-deploy pg_stat_statements shows bounded-lateral delta calls and zero new legacy-ANY calls; the reservation-page adjacent mean stays below 1s, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
+				action = "Apply the online transfer_escrow_unsettled_balance_contract migration, then deploy the bounded-lateral reservation page with settled=false inside its OFFSET 0 optimization boundary while retaining the authoritative outcome IS NULL join. Keep page-local additive corrections and the task deadline; do not force a global planner setting or manually re-run reconciliation."
+				verify = "Post-deploy pg_stat_statements shows unsettled-partial bounded-lateral delta calls and zero new legacy-ANY calls; the reservation-page adjacent mean stays below 1s, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
+			case unsettledShape:
+				mechanism = fmt.Sprintf("The unsettled partial covering access path is present, but pg_stat_statements still attributes the %s mean of %.1fms/page versus %.1fms for the balance keyset. Historical settled escrow ranges and balance-byte heap fetches are excluded; remaining cost is in the small unsettled range, contract outcome probes, index visibility, or unrelated storage contention.", profileWindow, reservationMeanMs, balanceMeanMs)
+				action = "Keep the partial covering index, settled=false prefilter, authoritative outcome IS NULL join, bounded-lateral boundary, and page-local additive corrections. Capture an isolated EXPLAIN (ANALYZE, BUFFERS) for one production-shaped page before changing page size or planner settings."
+				verify = "The unsettled-partial adjacent mean stays below 1s with bounded tail latency, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
 			case boundedShape:
-				mechanism = fmt.Sprintf("The bounded-lateral reservation page is present, but pg_stat_statements still attributes the %s mean of %.1fms/page versus %.1fms for the balance keyset. The whole-table ANY-plan regression is excluded; remaining cost is inside the per-balance index ranges, contract-open probes, or heap fetches.", profileWindow, reservationMeanMs, balanceMeanMs)
-				action = "Keep the bounded-lateral and page-local additive boundaries. Use an isolated production-shaped benchmark to distinguish transfer_escrow heap fetches from contract-open probes before publishing a covering index or changing page size; do not remove the optimization boundary from one slow sample."
-				verify = "The bounded-lateral adjacent mean stays below 1s with bounded tail latency, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
+				mechanism = fmt.Sprintf("The bounded-lateral reservation page is present, but pg_stat_statements still attributes the %s mean of %.1fms/page versus %.1fms for the balance keyset. The whole-table ANY-plan regression is excluded, but each balance range still traverses settled history and fetches balance_byte_count from the heap; production has more than a billion escrow rows while only a small fraction is unsettled.", profileWindow, reservationMeanMs, balanceMeanMs)
+				action = "Apply the online transfer_escrow_unsettled_balance_contract partial covering index, then deploy the matching settled=false prefilter inside the existing lateral boundary. Retain outcome IS NULL as the authoritative open-reservation predicate; settled=false is only a necessary prefilter and must not replace the outcome join."
+				verify = "pg_stat_statements shows new unsettled-partial delta calls, its adjacent mean stays below 1s, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
 			default:
-				mechanism = fmt.Sprintf("The current page-local additive algorithm is present, and pg_stat_statements attributes its database cost to the open-reservation join: the %s mean is %.1fms/page versus %.1fms for the balance-id keyset page. Statement counters do not yet identify whether the latest run used the legacy ANY shape or the bounded-lateral shape.", profileWindow, reservationMeanMs, balanceMeanMs)
-				action = "Keep the page-local additive semantics and task deadline. Wait for an adjacent statement sample that identifies legacy-ANY versus bounded-lateral calls before changing the access path; do not manually re-run reconciliation."
+				mechanism = fmt.Sprintf("The current page-local additive algorithm is present, and pg_stat_statements attributes its database cost to the open-reservation join: the %s mean is %.1fms/page versus %.1fms for the balance-id keyset page. Statement counters do not yet identify whether the latest run used legacy ANY, historical bounded-lateral, or unsettled-partial bounded-lateral access.", profileWindow, reservationMeanMs, balanceMeanMs)
+				action = "Keep the page-local additive semantics and task deadline. Wait for an adjacent statement sample that identifies legacy-ANY, historical bounded-lateral, or unsettled-partial calls before changing the access path; do not manually re-run reconciliation."
 				verify = "A fresh adjacent sample identifies the deployed reservation shape, then its mean stays below 1s and scheduled runs finish below 120s without large drift or negative-counter aftermath."
 			}
 		}
