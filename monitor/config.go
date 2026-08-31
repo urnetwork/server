@@ -66,8 +66,12 @@ type servicesYaml struct {
 }
 
 type servicesVersionYaml struct {
-	LB       servicesLBYaml `yaml:"lb"`
-	Services map[string]any `yaml:"services"`
+	LB       servicesLBYaml                 `yaml:"lb"`
+	Services map[string]servicesServiceYaml `yaml:"services"`
+}
+
+type servicesServiceYaml struct {
+	Blocks []map[string]int `yaml:"blocks"`
 }
 
 type servicesLBYaml struct {
@@ -120,6 +124,10 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, err
 	}
+	logServiceBlocks, err := activeLogServiceBlocksFromServices(services)
+	if err != nil {
+		return SignalSettings{}, err
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -130,6 +138,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 		PublicDomain:        strings.TrimSpace(services.Domain),
 		WebsiteDomain:       activeWebsiteDomainFromServices(services),
 		LogServices:         logServices,
+		LogServiceBlocks:    logServiceBlocks,
 		VerificationEnabled: controller.StEnabled(),
 		SSHUser:             y.Ssh.User,
 		SSHDevUser:          y.Ssh.DevUser,
@@ -224,6 +233,41 @@ func activeLogServicesFromServices(services servicesYaml) ([]string, error) {
 	}
 	sort.Strings(logServices)
 	return logServices, nil
+}
+
+func activeLogServiceBlocksFromServices(services servicesYaml) (map[string][]string, error) {
+	if len(services.Versions) == 0 {
+		return nil, fmt.Errorf("services.yml: no active version")
+	}
+	configured := services.Versions[0].Services
+	if len(configured) == 0 {
+		return nil, fmt.Errorf("services.yml: active version has no services")
+	}
+
+	blocksByService := map[string][]string{}
+	for service, serviceConfig := range configured {
+		service = strings.TrimSpace(service)
+		if service == "" || service == "lb" || service == "config-updater" {
+			continue
+		}
+		seen := map[string]struct{}{}
+		for _, weights := range serviceConfig.Blocks {
+			for block := range weights {
+				block = strings.TrimSpace(block)
+				if block == "" {
+					continue
+				}
+				seen[block] = struct{}{}
+			}
+		}
+		blocks := make([]string, 0, len(seen))
+		for block := range seen {
+			blocks = append(blocks, block)
+		}
+		sort.Strings(blocks)
+		blocksByService[service] = blocks
+	}
+	return blocksByService, nil
 }
 
 func activeEdgeIPv6FromServices(services servicesYaml) (map[string][]EdgeIPv6InterfaceSettings, error) {

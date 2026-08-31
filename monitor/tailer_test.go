@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -390,10 +391,8 @@ func TestStandingReconciliationUsesBoundedTwoMinuteOverlap(t *testing.T) {
 		now:    func() time.Time { return fixedNow },
 	}
 	tailer := newLogTailer("taskworker", env)
-	if _, err := tailer.reconcile(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	want := "warpctl logs main taskworker --since=2m0s --limit=20000"
+	tailer.reconcileOnce(context.Background())
+	want := "warpctl logs main taskworker --since=2026-08-31T18:52:00Z --limit=20000"
 	if got != want {
 		t.Fatalf("reconciliation command = %q, want %q", got, want)
 	}
@@ -422,7 +421,7 @@ func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	tailer.ingestStanding(walletLines[0], true, true)
 	tailer.ingestStanding(walletLines[2], true, true)
 	reconciled := strings.Join(append(append([]string{}, walletLines...), rateLimitLine), "\n")
-	tailer.reconcile = func(context.Context) (string, error) { return reconciled, nil }
+	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return reconciled, nil }
 	tailer.reconcileOnce(context.Background())
 
 	findings := tailer.drainWindow()
@@ -466,7 +465,7 @@ func TestFirstStandingReconciliationDoesNotCountPreStartHistory(t *testing.T) {
 	tailer.lastLineTime = tailer.startedAt
 	oldLine := `[edge-0][taskworker][g1][cid:old][I][2026-08-31T18:52:30.100000Z][task.go:1930][019f77ae-de17-db98-b22d-111111111111]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
 	currentLine := `[edge-0][taskworker][g1][cid:new][I][2026-08-31T18:53:30.100000Z][task.go:1930][019f77ae-de17-db98-b22d-222222222222]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
-	tailer.reconcile = func(context.Context) (string, error) {
+	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
 		return oldLine + "\n" + currentLine, nil
 	}
 	tailer.reconcileOnce(context.Background())
@@ -493,7 +492,7 @@ func TestStandingReconciliationFailurePreservesStreamAndRaisesVisibility(t *test
 	tailer.lastLineTime = tailer.startedAt
 	streamLine := `[edge-0][taskworker][g1][cid:live][I][2026-08-31T18:53:31.100000Z][task.go:1930][019f77ae-de17-db98-b22d-333333333333]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
 	tailer.ingestStanding(streamLine, true, true)
-	tailer.reconcile = func(context.Context) (string, error) {
+	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
 		return "", fmt.Errorf("Loki query error (502): Bad Gateway")
 	}
 	tailer.reconcileOnce(context.Background())
@@ -522,7 +521,7 @@ func TestStandingReconciliationLimitIsVisibilityFailure(t *testing.T) {
 	for i := 0; i < logReconcileLimit; i++ {
 		fmt.Fprintf(&output, "[edge-0][grafana][g1][cid:test][2026-08-31T18:53:30.100000Z]ordinary line %d\n", i)
 	}
-	tailer.reconcile = func(context.Context) (string, error) { return output.String(), nil }
+	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return output.String(), nil }
 	tailer.reconcileOnce(context.Background())
 
 	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
@@ -532,6 +531,88 @@ func TestStandingReconciliationLimitIsVisibilityFailure(t *testing.T) {
 	visibility := tailerReconcileFinding("grafana", fixedNow, tailer.startedAt, lastSuccess, lastError)
 	if visibility.healthy {
 		t.Fatalf("truncated overlap did not raise visibility: %+v", visibility)
+	}
+}
+
+func TestStandingReconciliationPartitionsSaturatedAggregateByBlock(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	tailer := newLogTailer("proxy", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = fixedNow.Add(-time.Minute)
+	tailer.blocks = []string{"g1", "g2"}
+
+	var saturated strings.Builder
+	for i := 0; i < logReconcileLimit; i++ {
+		fmt.Fprintf(&saturated, "[edge-0][proxy][g1][cid:test][I][2026-08-31T18:53:30.%06dZ][server.go:764]ordinary peer sync %d\n", i, i)
+	}
+	blockLines := map[string]string{
+		"g1": `[edge-0][proxy][g1][cid:test][E][2026-08-31T18:53:31Z][synthetic.go:1]synthetic proxy error alpha`,
+		"g2": `[edge-0][proxy][g2][cid:test][E][2026-08-31T18:53:32Z][synthetic.go:1]synthetic proxy error beta`,
+	}
+	type queryCall struct {
+		start  time.Time
+		blocks []string
+	}
+	var calls []queryCall
+	tailer.reconcile = func(_ context.Context, start time.Time, blocks []string) (string, error) {
+		calls = append(calls, queryCall{start: start, blocks: append([]string(nil), blocks...)})
+		if len(blocks) == 0 {
+			return saturated.String(), nil
+		}
+		return blockLines[blocks[0]], nil
+	}
+
+	tailer.reconcileOnce(context.Background())
+	if len(calls) != 3 {
+		t.Fatalf("reconciliation calls = %#v, want aggregate plus two block partitions", calls)
+	}
+	wantStart := fixedNow.Add(-logReconcileLookback)
+	for _, call := range calls {
+		if !call.start.Equal(wantStart) {
+			t.Fatalf("partition start = %s, want shared absolute start %s", call.start, wantStart)
+		}
+	}
+	if len(calls[0].blocks) != 0 || !reflect.DeepEqual(calls[1].blocks, []string{"g1"}) || !reflect.DeepEqual(calls[2].blocks, []string{"g2"}) {
+		t.Fatalf("partition calls = %#v, want aggregate, g1, g2", calls)
+	}
+
+	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	if !lastSuccess.Equal(fixedNow) || lastError != "" {
+		t.Fatalf("partitioned overlap not accepted: last_success=%s error=%q", lastSuccess, lastError)
+	}
+	tailer.stateLock.Lock()
+	novelCount := 0
+	for _, count := range tailer.novelCounts {
+		novelCount += count
+	}
+	tailer.stateLock.Unlock()
+	if novelCount != 2 {
+		t.Fatalf("partitioned novel records = %d, want 2", novelCount)
+	}
+}
+
+func TestStandingReconciliationRejectsSaturatedBlockPartition(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	tailer := newLogTailer("proxy", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = fixedNow.Add(-time.Minute)
+	tailer.blocks = []string{"g1", "g2"}
+
+	var saturated strings.Builder
+	for i := 0; i < logReconcileLimit; i++ {
+		fmt.Fprintf(&saturated, "[edge-0][proxy][g2][cid:test][I][2026-08-31T18:53:30.%06dZ][server.go:764]ordinary peer sync %d\n", i, i)
+	}
+	tailer.reconcile = func(_ context.Context, _ time.Time, blocks []string) (string, error) {
+		if len(blocks) == 0 || blocks[0] == "g2" {
+			return saturated.String(), nil
+		}
+		return "", nil
+	}
+
+	tailer.reconcileOnce(context.Background())
+	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	if !lastSuccess.IsZero() || !strings.Contains(lastError, "proxy block g2") {
+		t.Fatalf("saturated block was accepted: last_success=%s error=%q", lastSuccess, lastError)
 	}
 }
 

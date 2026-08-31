@@ -514,7 +514,12 @@ probes; every other signal and host continues. Unknown host names fail closed.
    + novel-class detection, per-minute drain through a probe into the same
    ticket path; restart-with-backoff. A bounded two-minute reconciliation
    closes the late-ingestion timestamp-cursor gap and has independent
-   visibility health. A later exact 60-second Loki backend-EOF cadence exposed
+   visibility health. If the aggregate query reaches its 20,000-line cap, the
+   monitor repeats the same absolute window for each block in the active
+   `services.yml` version; every partition must independently stay below the
+   cap. A live Proxy full-sync burst exercised this fallback boundary, and
+   deterministic tests cover both recovery and a saturated-block rejection.
+   A later exact 60-second Loki backend-EOF cadence exposed
    Warp's ring TCP application read deadline; the classifier now distinguishes
    that internal EOF from expected client cancellation while reconciliation
    continues to cover the independent cursor boundary. The first v152 live

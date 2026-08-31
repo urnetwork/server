@@ -96,6 +96,8 @@ type logClass struct {
 	canonical *logCanonical
 }
 
+type logReconcileQuery func(ctx context.Context, start time.Time, blocks []string) (string, error)
+
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
 	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
@@ -422,6 +424,7 @@ func isGrafanaQueryEcho(service string, line string) bool {
 // Safe for one run goroutine plus concurrent snapshot calls.
 type logTailer struct {
 	service string
+	blocks  []string
 	env     *probeEnv
 	clock   func() time.Time
 	// startedAt separates history that predates this collector from records
@@ -472,7 +475,7 @@ type logTailer struct {
 	stream func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error)
 	// reconcile is a test seam over a bounded runner.warpctl query. It is nil
 	// for isolated classifier tests and configured for every production tailer.
-	reconcile func(ctx context.Context) (string, error)
+	reconcile logReconcileQuery
 }
 
 func newLogTailer(service string, env *probeEnv) *logTailer {
@@ -505,15 +508,16 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 		lastLineTime: startedAt,
 	}
 	if env != nil && env.runner != nil && env.cfg != nil {
-		tailer.reconcile = func(ctx context.Context) (string, error) {
-			return env.runner.warpctl(
-				ctx,
-				"logs",
-				env.cfg.env,
-				service,
-				"--since="+logReconcileLookback.String(),
+		tailer.blocks = append([]string(nil), env.cfg.logServiceBlocks[service]...)
+		tailer.reconcile = func(ctx context.Context, start time.Time, blocks []string) (string, error) {
+			args := []string{"logs", env.cfg.env, service}
+			args = append(args, blocks...)
+			args = append(
+				args,
+				"--since="+start.UTC().Format(time.RFC3339Nano),
 				fmt.Sprintf("--limit=%d", logReconcileLimit),
 			)
+			return env.runner.warpctl(ctx, args...)
 		}
 	}
 	return tailer
@@ -597,26 +601,12 @@ func (self *logTailer) runReconcile(ctx context.Context) {
 	}
 }
 
-// reconcileOnce folds entries absent from the live stream into the current
-// window. Failed and truncated queries are never treated as complete history;
-// their state is exposed by tailerReconcileFinding.
-func (self *logTailer) reconcileOnce(ctx context.Context) {
-	if self.reconcile == nil {
-		return
-	}
-	out, err := self.reconcile(ctx)
-	if ctx.Err() != nil {
-		return
-	}
-	if err != nil {
-		self.recordReconcile(err)
-		return
-	}
+type reconcileLine struct {
+	line       string
+	observedAt time.Time
+}
 
-	type reconcileLine struct {
-		line       string
-		observedAt time.Time
-	}
+func parseReconcileLines(out string) []reconcileLine {
 	lines := []reconcileLine{}
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -631,13 +621,61 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 		}
 		lines = append(lines, reconcileLine{line: line, observedAt: observedAt})
 	}
-	if len(lines) >= logReconcileLimit {
+	return lines
+}
+
+// reconcileOnce folds entries absent from the live stream into the current
+// window. Failed and truncated queries are never treated as complete history;
+// their state is exposed by tailerReconcileFinding. A service-wide query is
+// cheapest during ordinary traffic. If it reaches Loki's result cap, retry
+// the exact same absolute source-time window once per configured block; the
+// partition key is already a Loki label, so the batches are disjoint.
+func (self *logTailer) reconcileOnce(ctx context.Context) {
+	if self.reconcile == nil {
+		return
+	}
+	start := self.clock().Add(-logReconcileLookback)
+	out, err := self.reconcile(ctx, start, nil)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		self.recordReconcile(err)
+		return
+	}
+
+	lines := parseReconcileLines(out)
+	if len(lines) >= logReconcileLimit && len(self.blocks) <= 1 {
 		self.recordReconcile(fmt.Errorf(
 			"bounded overlap reached the %d-line limit for %s; late-entry coverage is incomplete",
 			logReconcileLimit,
 			self.service,
 		))
 		return
+	}
+	if len(lines) >= logReconcileLimit {
+		lines = nil
+		for _, block := range self.blocks {
+			out, err := self.reconcile(ctx, start, []string{block})
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				self.recordReconcile(fmt.Errorf("block %s overlap: %w", block, err))
+				return
+			}
+			blockLines := parseReconcileLines(out)
+			if len(blockLines) >= logReconcileLimit {
+				self.recordReconcile(fmt.Errorf(
+					"bounded overlap reached the %d-line limit for %s block %s; late-entry coverage is incomplete",
+					logReconcileLimit,
+					self.service,
+					block,
+				))
+				return
+			}
+			lines = append(lines, blockLines...)
+		}
 	}
 
 	self.stateLock.Lock()
@@ -1159,15 +1197,15 @@ func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, 
 			service,
 		),
 		baseline: fmt.Sprintf(
-			"a bounded %s overlap query succeeds below %d lines every %s",
+			"a bounded %s overlap succeeds below %d lines per query every %s, partitioning the same absolute window by configured block when the aggregate reaches the cap",
 			logReconcileLookback,
 			logReconcileLimit,
 			logReconcileInterval,
 		),
 		observed:  observed,
 		mechanism: "Loki accepts out-of-order records, but a WebSocket tail advances by source timestamp. Without a successful overlapping query, a late-ingested record older than that cursor can remain absent even while the tail process is connected and reading newer lines.",
-		action:    "Restore bounded warpctl/Loki query visibility or reduce the queried service volume below the cap. Keep the live tail running; do not interpret the missing reconciliation as a healthy error window.",
-		verify:    "Two consecutive overlap queries complete below the cap and the standing monitor remains free of tailer-reconcile visibility alerts.",
+		action:    "Restore bounded warpctl/Loki query visibility. If only the aggregate reaches the cap, provide the active services.yml block inventory and retain per-block fallback; if one block alone reaches the cap, diagnose that block's log burst before changing query limits. Keep the live tail running; do not interpret missing reconciliation as a healthy error window.",
+		verify:    "Two consecutive overlap windows complete below the cap in aggregate or in every configured block partition, and the standing monitor remains free of tailer-reconcile visibility alerts.",
 		playbook:  "SIGNALS.md 1.5",
 	}
 }

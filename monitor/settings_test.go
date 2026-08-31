@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -16,6 +17,15 @@ func TestSignalSettingsSSHKeyPathsBecomeIdentityArguments(t *testing.T) {
 		if i < 1 || args[i-1] != "-i" {
 			t.Fatalf("ssh args do not contain -i %s: %v", key, args)
 		}
+	}
+}
+
+func TestSignalSettingsRejectsUnknownBlockInventoryWithSyntheticSource(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	settings.LogServices = []string{"api"}
+	settings.LogServiceBlocks = map[string][]string{"proxy": {"g1"}}
+	if err := settings.Validate(); err == nil || !strings.Contains(err.Error(), `unknown service "proxy"`) {
+		t.Fatalf("invalid block inventory error = %v", err)
 	}
 }
 

@@ -134,6 +134,11 @@ type SignalSettings struct {
 	// standing log streams without querying the remote artifact registry.
 	// Alternate callers may leave it empty to use warpctl discovery.
 	LogServices []string
+	// LogServiceBlocks is the active services.yml block inventory used only
+	// when a service-wide Loki overlap reaches the bounded result cap. The
+	// tailer then repeats the same absolute window per block, preserving late
+	// ingestion coverage without raising the backend-wide query limit.
+	LogServiceBlocks map[string][]string
 	// VerificationEnabled is the canonical st-subsystem feature state. It lets
 	// task probes distinguish a legitimately slow enabled verification job
 	// from a stale recurring chain that must not exist while the subsystem is
@@ -239,15 +244,6 @@ func (s SignalSettings) validate() error {
 	if s.AddressMode != AddressModeLAN && s.AddressMode != AddressModeOverlay {
 		return fmt.Errorf("monitor: unsupported address mode %q", s.AddressMode)
 	}
-	if s.Source != nil {
-		return nil
-	}
-	if s.SSHUser == "" && s.SSHDevUser == "" {
-		return fmt.Errorf("monitor: SSH user is required")
-	}
-	if len(s.Hosts) == 0 {
-		return fmt.Errorf("monitor: at least one host is required")
-	}
 	seenLogServices := map[string]struct{}{}
 	for _, service := range s.LogServices {
 		if service == "" || strings.TrimSpace(service) != service {
@@ -257,6 +253,30 @@ func (s SignalSettings) validate() error {
 			return fmt.Errorf("monitor: duplicate log service %q", service)
 		}
 		seenLogServices[service] = struct{}{}
+	}
+	for service, blocks := range s.LogServiceBlocks {
+		if _, ok := seenLogServices[service]; !ok {
+			return fmt.Errorf("monitor: log blocks configured for unknown service %q", service)
+		}
+		seenBlocks := map[string]struct{}{}
+		for _, block := range blocks {
+			if block == "" || strings.TrimSpace(block) != block {
+				return fmt.Errorf("monitor: invalid log block %q for service %q", block, service)
+			}
+			if _, ok := seenBlocks[block]; ok {
+				return fmt.Errorf("monitor: duplicate log block %q for service %q", block, service)
+			}
+			seenBlocks[block] = struct{}{}
+		}
+	}
+	if s.Source != nil {
+		return nil
+	}
+	if s.SSHUser == "" && s.SSHDevUser == "" {
+		return fmt.Errorf("monitor: SSH user is required")
+	}
+	if len(s.Hosts) == 0 {
+		return fmt.Errorf("monitor: at least one host is required")
 	}
 	return nil
 }
@@ -290,6 +310,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		publicDomain:        settings.PublicDomain,
 		websiteDomain:       settings.WebsiteDomain,
 		logServices:         append([]string(nil), settings.LogServices...),
+		logServiceBlocks:    cloneLogServiceBlocks(settings.LogServiceBlocks),
 		verificationEnabled: settings.VerificationEnabled,
 		sshUser:             settings.SSHUser,
 		sshDevUser:          settings.SSHDevUser,
@@ -330,6 +351,17 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		cfg.hosts = append(cfg.hosts, h)
 	}
 	return cfg
+}
+
+func cloneLogServiceBlocks(source map[string][]string) map[string][]string {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string][]string, len(source))
+	for service, blocks := range source {
+		cloned[service] = append([]string(nil), blocks...)
+	}
+	return cloned
 }
 
 func hostSettingsFromHost(h *host) HostSettings {

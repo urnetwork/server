@@ -31,12 +31,15 @@ func TestWarpServicesParsesOnlyRepositoryLogLine(t *testing.T) {
 
 func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 	services := servicesYaml{Versions: []servicesVersionYaml{
-		{Services: map[string]any{
-			"taskworker": map[string]any{"image": "current"},
-			"api":        map[string]any{"image": "current"},
-			"grafana":    map[string]any{"image": "current"},
+		{Services: map[string]servicesServiceYaml{
+			"taskworker": {Blocks: []map[string]int{{"g2": 25}, {"g1": 74}, {"g1": 1}}},
+			"api":        {Blocks: []map[string]int{{"g1": 99}, {"beta": 1}}},
+			"grafana":    {Blocks: []map[string]int{{"g1": 100}}},
+			"lb":         {Blocks: []map[string]int{{"edge": 100}}},
 		}},
-		{Services: map[string]any{"historical": map[string]any{"image": "old"}}},
+		{Services: map[string]servicesServiceYaml{
+			"historical": {Blocks: []map[string]int{{"old": 100}}},
+		}},
 	}}
 	got, err := activeLogServicesFromServices(services)
 	if err != nil {
@@ -45,6 +48,19 @@ func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 	want := []string{"api", "grafana", "taskworker"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("active log services = %#v, want %#v", got, want)
+	}
+
+	gotBlocks, err := activeLogServiceBlocksFromServices(services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBlocks := map[string][]string{
+		"api":        {"beta", "g1"},
+		"grafana":    {"g1"},
+		"taskworker": {"g1", "g2"},
+	}
+	if !reflect.DeepEqual(gotBlocks, wantBlocks) {
+		t.Fatalf("active log blocks = %#v, want %#v", gotBlocks, wantBlocks)
 	}
 }
 

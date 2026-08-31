@@ -648,6 +648,23 @@ recover the absent records from the bounded query exactly once, exclude
 pre-start history, preserve a live finding on query failure, and reject a
 cap-sized result as incomplete.
 
+The `20:39:59Z` Proxy synchronization on 2026-08-31 supplied the first live
+cap control. One block's full WireGuard synchronization emitted 12,866 peer
+installation records and 3,338 no-configuration refusal diagnostics; its
+terminal summary covered 14,110 candidate clients and six removals. The next
+aggregate two-minute reconciliation reached exactly 20,000 lines even though
+the live tail remained connected. Repeating that same absolute source-time
+window for each active Proxy block left every individual partition below the
+cap. The tailer now takes its block inventory from the first (active)
+`services.yml` version: it uses the cheap aggregate query normally, and only
+on saturation retries the identical window once per block. Block labels make
+those batches disjoint. A failed or cap-sized block remains a visibility
+failure; do not shorten the late-ingestion overlap or raise Loki's global
+limit to hide it. Synthetic tests prove successful partition recovery uses
+one shared absolute timestamp and prove one saturated block is rejected.
+This event is query-volume evidence, not 20,000 distinct Proxy failures; alert
+artifacts retain aggregates rather than peer keys or client addresses.
+
 An independent audit of Grafana's own low-rate errors then found a second,
 concrete transport gap. With the v151 watcher and all eight external tails
 stable, Loki repeatedly emitted
