@@ -141,6 +141,10 @@ to bound pre-auth lifetime and per-source occupancy while reserving a larger
 global admission pool in the shared Ansible ssh hardening. Restrict public SSH
 at the network boundary where operational access permits. Do not merely raise
 `MaxStartups`, and do not attribute this signature to PostgreSQL.
+Client-side key-exchange resets are emitted as structured class
+`ssh-admission-reset`, grouped at the SSH host rather than mislabeled as the
+database/service a command never reached. The alert treats MaxStartups as a
+journal-confirmed discriminator, not an inference from a generic TCP reset.
 
 Likewise, a probe interrupted by an intentional monitor shutdown is a
 lifecycle event, not loss of production visibility, and must not emit a

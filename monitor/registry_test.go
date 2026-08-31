@@ -97,6 +97,47 @@ func TestMonitorRunPreservesProbeFailureAsVisibilityAlert(t *testing.T) {
 	requireAlertClass(t, alerts, "cannot-observe")
 }
 
+func TestVisibilityAlertClassifiesSSHAdmissionResetAtTheHostBoundary(t *testing.T) {
+	settings := syntheticSettings(&syntheticSource{})
+	alert := visibilityAlert(
+		settings,
+		NewMigrationsSignal(),
+		errors.New("by-us-fmt-5-edge-2: exit status 255: kex_exchange_identification: read: Connection reset by peer\nConnection reset by 172.28.208.182 port 22"),
+	)
+	if alert.Class != "ssh-admission-reset" {
+		t.Fatalf("class = %q, want ssh-admission-reset", alert.Class)
+	}
+	if alert.Target != "by-us-fmt-5-edge-2" {
+		t.Fatalf("target = %q, want by-us-fmt-5-edge-2", alert.Target)
+	}
+	for name, value := range map[string]string{
+		"mechanism": alert.Mechanism,
+		"action":    alert.Action,
+		"verify":    alert.Verify,
+	} {
+		if !strings.Contains(value, "MaxStartups") {
+			t.Errorf("%s does not preserve the MaxStartups discriminator: %q", name, value)
+		}
+	}
+	if !strings.Contains(alert.Action, "Do not blame PostgreSQL") {
+		t.Fatalf("action does not prevent false database attribution: %q", alert.Action)
+	}
+	if !strings.Contains(alert.Context, "failed_signal=migrations") {
+		t.Fatalf("context does not retain the failed probe: %q", alert.Context)
+	}
+}
+
+func TestVisibilityAlertKeepsRemoteCommandFailureGeneric(t *testing.T) {
+	alert := visibilityAlert(
+		syntheticSettings(&syntheticSource{}),
+		NewMigrationsSignal(),
+		errors.New("by-us-fmt-5-edge-2: exit status 1: psql: syntax error"),
+	)
+	if alert.Class != "cannot-observe" {
+		t.Fatalf("class = %q, want cannot-observe", alert.Class)
+	}
+}
+
 func TestMonitorSignalsReturnsCopy(t *testing.T) {
 	monitor := New(SignalSettings{})
 	first := monitor.Signals()
