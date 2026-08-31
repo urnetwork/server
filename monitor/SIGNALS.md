@@ -5990,9 +5990,16 @@ restores clients and drains. Treat a deploy as an explicit host-memory budget:
 - PAGE while process count exceeds running proxy block units and
   `MemAvailable` is below the largest current proxy RSS plus operational
   reserve. Another candidate cannot start safely at that boundary.
-- WARN before an all-block rollout when `MemAvailable` is below the current
-  fleet's aggregate RSS plus the larger of 8 GiB or 5% of physical RAM. The
-  current fleet is the best measured estimate of a second candidate fleet.
+- WARN when the installed Warp binary has the legacy drain-only rollout lock,
+  a proxy unit sets `WARPCTL_STAGGER_HOST_DRAIN=0`, or the executable's guard
+  cannot be verified. A safe guard takes the host lease before candidate start,
+  holds it through synchronous old-process drain, and refuses a candidate when
+  the lease times out.
+- WARN for the all-block parallel-capacity boundary when `MemAvailable` is
+  below the current fleet's aggregate RSS plus the larger of 8 GiB or 5% of
+  physical RAM. With a full-overlap guard this remains a hardware/operational
+  warning rather than an incident prediction: serialized replacement can be
+  safe even though a second complete fleet cannot fit.
 - Record proxy process count, aggregate/largest RSS, block-unit count, swap,
   cgroup `memory.max` coverage, and `UdpRcvbufErrors`. The UDP counter is
   cumulative since boot: use its incident-window delta as corroboration, never
@@ -6022,6 +6029,16 @@ operator action or physical-capacity change has been completed and verified.
   concurrency the existing host can hold. **Hardware required for greater
   concurrency:** add RAM/hosts if a full-fleet parallel rollout must remain
   supported. Do not close this class merely because an idle snapshot is green.
+- `proxy-rollout-guard-stale` is a software deployment gate, not a hardware
+  alert. **Operator action required:** install Warp commit `7e2075c` or later,
+  remove a disabling `WARPCTL_STAGGER_HOST_DRAIN=0`, restart every Warp service
+  worker, and verify the running executable before any proxy release. Adding
+  RAM does not close a stale-guard alert.
+- `proxy-rollout-guard-unverified` is an operational verification gate. It
+  cannot be closed by a server application release alone: resolve the actual
+  Warp executable used by the units, install the full-overlap build if needed,
+  and restart every worker until the probe observes `full-overlap`. Do not use
+  a full proxy rollout as the discovery test.
 
 There is also a separate steady-state service ceiling: each proxy process can
 serve only a bounded number of active clients (including the WireGuard peer
@@ -6064,14 +6081,28 @@ consistent with receive starvation during the OOM window, while the exact
 kernel kill and 19/10 process overlap remain the causal evidence.
 
 The immediate root-cause fix is host-aware bounded deployment concurrency.
-On a host with Fireside's capacity, start one block candidate, require
-`MemAvailable >= measured candidate RSS + reserve`, complete its redirect and
-old-process drain, then start the next block. Do not launch all ten candidates
-at once. Longer-term alternatives are reducing the roughly 5 GiB steady RSS
-per process or adding enough physical RAM for the desired parallelism. A
-cgroup ceiling below measured steady RSS merely kills a proxy earlier; adding
-swap or enlarging UDP buffers does not create safe rollout capacity. Do not
-restart WireGuard or reinstall peers for this signature.
+Warp commit `7e2075c` moves the existing service-scoped host lease before
+candidate start, holds it through synchronous old-container drain, and refuses
+the replacement on lock timeout. Its deterministic tests preserve both the
+complete-overlap exclusion and timeout refusal. On a host with Fireside's
+capacity, that permits one block candidate to restore and drain before the next
+worker enters; do not launch all ten candidates at once. Longer-term
+alternatives are reducing the roughly 5 GiB steady RSS per process or adding
+enough physical RAM for the desired parallelism. A cgroup ceiling below
+measured steady RSS merely kills a proxy earlier; adding swap or enlarging UDP
+buffers does not create safe rollout capacity. Do not restart WireGuard or
+reinstall peers for this signature.
+
+**Deployment audit (2026-08-31):** the Warp binary installed at
+`/usr/local/sbin/warpctl` on the sampled proxy hosts was built before commit
+`7e2075c`. It contained the legacy
+`Draining %d overlapping container(s) (staggered=%t)` signature and lacked the
+new `host rollout lock not acquired within` signature; Fireside's binary mtime
+was 07:11:52Z, while the root fix was committed at 13:00:33Z. Other enabled
+hosts either carried the same legacy binary or could not expose a recognizable
+guard. Therefore the earlier Warp rollout did not deploy this root fix. Deploy
+`7e2075c` or later and restart every Warp service worker before starting any
+proxy release; then require this probe to report `full-overlap` on each host.
 
 Verify a complete rollout, not an idle snapshot: proxy process count must stay
 at or below running blocks plus configured host concurrency; `MemAvailable`
@@ -6081,7 +6112,8 @@ HTTP/SOCKS acceptance request must complete. Implementation convention:
 SIGNALS.md §14.7 (`proxy-memory`) maps to `signal_proxy_memory.go` and
 `signal_proxy_memory_test.go`. Synthetic cases preserve the 19-process/ten-unit
 OOM, live unsafe overlap, steady Fireside headroom deficit, Crisp-sized healthy
-headroom, and a configured non-proxy host that must be skipped.
+headroom, legacy/disabled/unverified rollout guards, and a configured non-proxy
+host that must be skipped.
 
 ---
 

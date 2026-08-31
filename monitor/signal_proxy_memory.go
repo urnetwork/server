@@ -12,6 +12,13 @@ const (
 	proxyMemoryMarker        = "monitor-signal-14.7-proxy-memory"
 	proxyMemoryReserveKiB    = int64(8 * 1024 * 1024)
 	proxyMemoryReserveFactor = 0.05
+
+	proxyRolloutGuardFull      = "full-overlap"
+	proxyRolloutGuardDrainOnly = "drain-only"
+	proxyRolloutGuardDisabled  = "disabled"
+	proxyRolloutGuardMissing   = "missing"
+	proxyRolloutGuardUnknown   = "unknown"
+	proxyRolloutGuardCommit    = "7e2075c"
 )
 
 // Signal proxy-memory implements SIGNALS.md §14.7. It treats a proxy rollout
@@ -67,6 +74,22 @@ if [ "$running_units" -eq 0 ] && [ "$proxy_processes" -eq 0 ]; then
   exit 0
 fi
 printf 'proxy_host 1\n'
+
+warpctl_path=/usr/local/sbin/warpctl
+rollout_guard=missing
+if [ -r "$warpctl_path" ]; then
+  if systemctl show --all "$proxy_unit_pattern" -p Environment --value 2>/dev/null |
+       grep -Fq 'WARPCTL_STAGGER_HOST_DRAIN=0'; then
+    rollout_guard=disabled
+  elif grep -aFq 'host rollout lock not acquired within' "$warpctl_path"; then
+    rollout_guard=full-overlap
+  elif grep -aFq 'Draining %d overlapping container(s) (staggered=%t)' "$warpctl_path"; then
+    rollout_guard=drain-only
+  else
+    rollout_guard=unknown
+  fi
+fi
+printf 'warpctl_rollout_guard %s\n' "$rollout_guard"
 
 awk '
   /^MemTotal:/ {print "mem_total_kib", $2}
@@ -131,6 +154,7 @@ printf '%s\n' "$kernel_log" | awk '
 
 type proxyMemorySample struct {
 	proxyHost            bool
+	warpctlRolloutGuard  string
 	memTotalKiB          int64
 	memAvailableKiB      int64
 	swapTotalKiB         int64
@@ -185,6 +209,17 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 			sample.oomLine = value
 			continue
 		}
+		if key == "warpctl_rollout_guard" {
+			switch value {
+			case proxyRolloutGuardFull, proxyRolloutGuardDrainOnly, proxyRolloutGuardDisabled,
+				proxyRolloutGuardMissing, proxyRolloutGuardUnknown:
+				sample.warpctlRolloutGuard = value
+				seen[key] = true
+				continue
+			default:
+				return proxyMemorySample{}, fmt.Errorf("proxy memory: invalid %s %q", key, value)
+			}
+		}
 		destination, ok := values[key]
 		if !ok {
 			continue
@@ -204,6 +239,7 @@ func parseProxyMemorySample(output string) (proxyMemorySample, error) {
 		return sample, nil
 	}
 	for _, key := range []string{
+		"warpctl_rollout_guard",
 		"mem_total_kib", "mem_available_kib", "swap_total_kib", "swap_free_kib",
 		"running_units", "proxy_processes", "proxy_rss_kib", "proxy_max_rss_kib",
 		"proxy_memory_bounded", "proxy_memory_unbounded", "proxy_memory_unknown",
@@ -227,6 +263,42 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 	reserveKiB := max(proxyMemoryReserveKiB, int64(float64(sample.memTotalKiB)*proxyMemoryReserveFactor))
 	fullRolloutRequiredKiB := sample.proxyRSSKiB + reserveKiB
 	fullRolloutDeficitKiB := max(int64(0), fullRolloutRequiredKiB-sample.memAvailableKiB)
+	guardObservation := fmt.Sprintf("warpctl_rollout_guard=%s", sample.warpctlRolloutGuard)
+
+	switch sample.warpctlRolloutGuard {
+	case proxyRolloutGuardDrainOnly, proxyRolloutGuardDisabled:
+		mechanism := "The deployed Warp binary acquires its host lock only after every service worker can start a candidate. That drain-only scope permits a nearly complete duplicate proxy fleet before old processes leave."
+		if sample.warpctlRolloutGuard == proxyRolloutGuardDisabled {
+			mechanism = "At least one proxy service explicitly sets WARPCTL_STAGGER_HOST_DRAIN=0, disabling the host rollout lease. Service workers can therefore start candidates concurrently and create a nearly complete duplicate proxy fleet."
+		}
+		findings = append(findings, finding{
+			probeId: "proxy/host-memory", tier: tierWarn,
+			class: "proxy-rollout-guard-stale", target: host, frame: sample.warpctlRolloutGuard, sustain: 1,
+			symptom:   fmt.Sprintf("%s does not have the full-overlap proxy rollout guard enabled", host),
+			mechanism: mechanism,
+			baseline:  "Every proxy host runs Warp with a host lease that begins before candidate start, remains held through synchronous old-container drain, and refuses the replacement if the lease times out.",
+			observed: fmt.Sprintf("%s running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_available_gib=%.2f full_fleet_capacity_deficit_gib=%.2f",
+				guardObservation, sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB),
+				kiBToGiB(sample.memAvailableKiB), kiBToGiB(fullRolloutDeficitKiB)),
+			context:  "This is a deployable software guard, separate from the hardware headroom boundary. Installing it prevents all-block overlap; it does not create enough RAM for one old/candidate pair or raise the fleet's active-client ceiling.",
+			action:   fmt.Sprintf("Deploy Warp commit %s or later to this host and restart every Warp service worker before any proxy release. Remove WARPCTL_STAGGER_HOST_DRAIN=0 if present. Do not test the fix by starting a full proxy rollout while the drain-only or disabled guard is active.", proxyRolloutGuardCommit),
+			verify:   "The probe reports warpctl_rollout_guard=full-overlap after every worker restart. During a controlled proxy rollout, process count stays at or below running blocks plus one, memory reserve and swap remain available, and no OOM or UDP receive-drop delta occurs.",
+			playbook: "SIGNALS.md §14.7",
+		})
+	case proxyRolloutGuardMissing, proxyRolloutGuardUnknown:
+		findings = append(findings, finding{
+			probeId: "proxy/host-memory", tier: tierWarn,
+			class: "proxy-rollout-guard-unverified", target: host, frame: sample.warpctlRolloutGuard, sustain: 1,
+			symptom:   fmt.Sprintf("%s proxy rollout serialization cannot be verified", host),
+			mechanism: "The running proxy host either has no readable /usr/local/sbin/warpctl or its binary has neither the full-overlap nor known drain-only signature. A release could duplicate the fleet before the monitor can prove that candidate starts are serialized.",
+			baseline:  "The installed Warp binary exposes the full-overlap host-lease signature and no proxy service disables it.",
+			observed:  fmt.Sprintf("%s running_block_units=%d proxy_processes=%d", guardObservation, sample.runningUnits, sample.proxyProcesses),
+			context:   "Treat an unverified guard as unsafe for a memory-heavy fleet. This alert does not itself prove that a rollout or memory incident is active.",
+			action:    fmt.Sprintf("Resolve the Warp executable used by the proxy units, deploy commit %s or later if needed, and restart every Warp service worker. Do not begin a proxy rollout until this probe reports full-overlap.", proxyRolloutGuardCommit),
+			verify:    "The probe reports warpctl_rollout_guard=full-overlap for the host and a controlled single-overlap rollout completes without excess processes, reserve loss, OOM, or UDP receive-drop delta.",
+			playbook:  "SIGNALS.md §14.7",
+		})
+	}
 
 	if sample.kernelJournalStatus != 0 {
 		findings = append(findings, cannotObserveFinding(host+"/proxy-kernel-oom", fmt.Errorf("kernel journal exited with status %d", sample.kernelJournalStatus)))
@@ -235,54 +307,73 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 		if sample.runningUnits > 0 && sample.oomProxyProcesses > sample.runningUnits {
 			mechanism = fmt.Sprintf("The kernel OOM task table contained %d proxy processes for %d running block units, proving old and candidate fleets overlapped. Their aggregate resident memory exhausted host RAM and swap before the old fleet drained.", sample.oomProxyProcesses, sample.runningUnits)
 		}
+		action := "The full-overlap host guard is installed; preserve the incident processes and validate why more than one replacement entered. Then reduce steady proxy RSS or add RAM if one old/candidate pair plus reserve cannot fit. Do not restart WireGuard, reinstall peers, or set a cgroup limit below the measured steady process size."
+		if sample.warpctlRolloutGuard == proxyRolloutGuardDrainOnly || sample.warpctlRolloutGuard == proxyRolloutGuardDisabled {
+			action = fmt.Sprintf("Deploy Warp commit %s or later and restart every Warp service worker before another proxy release. It must serialize candidate start through old-process drain, not only the drains. Then reduce steady proxy RSS or add RAM if one old/candidate pair plus reserve cannot fit. Do not restart WireGuard, reinstall peers, or set a cgroup limit below measured steady RSS.", proxyRolloutGuardCommit)
+		} else if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
+			action = fmt.Sprintf("Do not start another proxy release until the installed Warp path is resolved and commit %s or later is running in every service worker. Then validate one serialized replacement, reduce steady proxy RSS, or add RAM if that pair plus reserve cannot fit. Do not restart WireGuard or reinstall peers for this signature.", proxyRolloutGuardCommit)
+		}
 		findings = append(findings, finding{
 			probeId: "proxy/host-memory", tier: tierPage,
 			class: "proxy-host-oom", target: host, frame: "global-oom", sustain: 1,
 			symptom:   fmt.Sprintf("%s entered a global OOM and the kernel killed a proxy process", host),
 			mechanism: mechanism,
 			baseline:  "No proxy process is OOM-killed; a rollout never overlaps more candidates than host memory can hold while preserving at least 8 GiB of operational reserve and unused swap.",
-			observed: fmt.Sprintf("recent_proxy_oom_kills=%d oom_task_table_proxy_processes=%d running_block_units=%d current_proxy_processes=%d current_proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f udp_rcvbuf_errors_since_boot=%d unbounded_proxy_cgroups=%d",
-				sample.recentProxyOOMKills, sample.oomProxyProcesses, sample.runningUnits, sample.proxyProcesses,
+			observed: fmt.Sprintf("%s recent_proxy_oom_kills=%d oom_task_table_proxy_processes=%d running_block_units=%d current_proxy_processes=%d current_proxy_rss_gib=%.2f mem_available_gib=%.2f swap_free_gib=%.2f udp_rcvbuf_errors_since_boot=%d unbounded_proxy_cgroups=%d",
+				guardObservation, sample.recentProxyOOMKills, sample.oomProxyProcesses, sample.runningUnits, sample.proxyProcesses,
 				kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memAvailableKiB), kiBToGiB(sample.swapFreeKiB),
 				sample.udpRcvbufErrors, sample.proxyMemoryUnbounded),
 			evidence: sample.oomLine,
 			context:  "UdpRcvbufErrors is cumulative since boot, not a current rate. A large incident-correlated increase supports host receive starvation, but the kernel OOM and excess proxy-process count are the causal memory evidence; changing WireGuard peers or only enlarging UDP buffers does not restore rollout capacity.",
-			action:   "Serialize proxy candidates per host (one block at a time on a host of this size) and require MemAvailable to exceed one candidate's measured RSS plus operational reserve before launching it. Then reduce steady proxy RSS or add RAM before increasing concurrency. Do not restart WireGuard, reinstall peers, or set a cgroup limit below the measured steady process size.",
+			action:   action,
 			verify:   "During a complete proxy rollout, process count never exceeds running blocks plus configured host concurrency, MemAvailable stays above the reserve, swap is not exhausted, no new kernel OOM appears, UdpRcvbufErrors has zero incident-window delta, and the WireGuard acceptance request succeeds.",
 			playbook: "SIGNALS.md §14.7",
 		})
 	}
 
 	if sample.proxyProcesses > sample.runningUnits && sample.memAvailableKiB < sample.proxyMaxRSSKiB+reserveKiB {
+		action := "Pause new candidates on this host until an old proxy exits or capacity is restored, then resume with host-aware bounded concurrency and the same memory preflight. Preserve the current processes long enough to identify old versus candidate ownership."
+		if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
+			action = fmt.Sprintf("Pause new candidates and do not resume a proxy release until Warp commit %s or later is installed and every service worker has restarted. Preserve the current processes long enough to identify old versus candidate ownership, then validate one serialized replacement with the memory preflight.", proxyRolloutGuardCommit)
+		}
 		findings = append(findings, finding{
 			probeId: "proxy/host-memory", tier: tierPage,
 			class: "proxy-rollout-overlap", target: host, frame: "live-overlap", sustain: 1,
 			symptom:   fmt.Sprintf("%s is overlapping proxy candidates without room for another process", host),
 			mechanism: "More proxy processes than block units proves a rollout overlap is live, while available memory is below the largest current proxy process plus the host reserve. Launching another candidate can force swap or a global OOM before an old process exits.",
 			baseline:  "Live proxy process count is at most block count plus bounded host rollout concurrency, and available memory exceeds the next candidate's expected RSS plus operational reserve.",
-			observed: fmt.Sprintf("running_block_units=%d proxy_processes=%d largest_proxy_rss_gib=%.2f mem_available_gib=%.2f next_candidate_plus_reserve_gib=%.2f swap_free_gib=%.2f",
-				sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyMaxRSSKiB), kiBToGiB(sample.memAvailableKiB),
+			observed: fmt.Sprintf("%s running_block_units=%d proxy_processes=%d largest_proxy_rss_gib=%.2f mem_available_gib=%.2f next_candidate_plus_reserve_gib=%.2f swap_free_gib=%.2f",
+				guardObservation, sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyMaxRSSKiB), kiBToGiB(sample.memAvailableKiB),
 				kiBToGiB(sample.proxyMaxRSSKiB+reserveKiB), kiBToGiB(sample.swapFreeKiB)),
 			context:  "This is a live capacity boundary, not proof that one proxy leaked. Compare per-process RSS and the old/candidate ownership before attributing growth to application state.",
-			action:   "Pause new candidates on this host until an old proxy exits or capacity is restored, then resume with host-aware bounded concurrency and the same memory preflight. Preserve the current processes long enough to identify old versus candidate ownership.",
+			action:   action,
 			verify:   "Process overlap returns within the configured bound, available memory stays above one candidate plus reserve throughout the remaining rollout, swap remains available, and no OOM or UDP receive-drop delta occurs.",
 			playbook: "SIGNALS.md §14.7",
 		})
 	}
 
 	if sample.proxyProcesses > 0 && fullRolloutDeficitKiB > 0 {
+		mechanism := "The installed full-overlap guard should serialize replacements to one old/candidate pair. This host still cannot hold a second complete fleet: the current fleet's aggregate RSS plus operational reserve exceeds MemAvailable, so all-block parallel rollout is a hardware-capacity requirement, not a safe software setting."
+		action := "Keep proxy deployment serialized. Reduce the roughly per-process steady RSS or provision enough RAM/hosts before requiring greater parallel rollout concurrency; the full-overlap guard does not raise the active-client ceiling."
+		if sample.warpctlRolloutGuard == proxyRolloutGuardDrainOnly || sample.warpctlRolloutGuard == proxyRolloutGuardDisabled {
+			mechanism = "The installed drain-only or disabled guard can start a candidate for every block before old processes drain. The current fleet's aggregate RSS is the best measured estimate of that second fleet; adding operational reserve exceeds MemAvailable on this host."
+			action = fmt.Sprintf("Deploy Warp commit %s or later and restart every service worker before another proxy release, then keep this host serialized. Separately reduce steady proxy RSS or add RAM/hosts if greater concurrency or client capacity is required.", proxyRolloutGuardCommit)
+		} else if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
+			mechanism = "The host cannot hold a second complete proxy fleet, and the monitor cannot verify that its deployed Warp serializes candidate starts. The current fleet's aggregate RSS plus operational reserve exceeds MemAvailable."
+			action = fmt.Sprintf("Do not release proxy until Warp commit %s or later is verified in every service worker. Keep rollout serialized, and add RAM/hosts if greater concurrency or client capacity is required.", proxyRolloutGuardCommit)
+		}
 		findings = append(findings, finding{
 			probeId: "proxy/host-memory", tier: tierWarn,
 			class: "proxy-rollout-headroom", target: host, frame: "full-fleet-overlap", sustain: 1,
 			symptom:   fmt.Sprintf("%s cannot hold a second full proxy fleet with host reserve", host),
-			mechanism: "The current deploy model can start a candidate for every block before old processes drain. The current fleet's aggregate RSS is the best measured estimate of that second fleet; adding the operational reserve exceeds MemAvailable on this host.",
+			mechanism: mechanism,
 			baseline:  "MemAvailable is at least the current proxy fleet's aggregate RSS plus the larger of 8 GiB or 5% of physical RAM before an all-block rollout begins.",
-			observed: fmt.Sprintf("running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_total_gib=%.2f mem_available_gib=%.2f operational_reserve_gib=%.2f full_rollout_required_available_gib=%.2f capacity_deficit_gib=%.2f unbounded_proxy_cgroups=%d udp_rcvbuf_errors_since_boot=%d",
-				sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memTotalKiB),
+			observed: fmt.Sprintf("%s running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_total_gib=%.2f mem_available_gib=%.2f operational_reserve_gib=%.2f full_rollout_required_available_gib=%.2f capacity_deficit_gib=%.2f unbounded_proxy_cgroups=%d udp_rcvbuf_errors_since_boot=%d",
+				guardObservation, sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memTotalKiB),
 				kiBToGiB(sample.memAvailableKiB), kiBToGiB(reserveKiB), kiBToGiB(fullRolloutRequiredKiB),
 				kiBToGiB(fullRolloutDeficitKiB), sample.proxyMemoryUnbounded, sample.udpRcvbufErrors),
 			context:  "Summed RSS is conservative because shared pages can be counted more than once, but proxy heaps dominate the measured processes and the kernel OOM task table uses the same resident-memory boundary. A host-safe serialized rollout needs only one candidate RSS plus reserve, not a duplicate full fleet.",
-			action:   "Make proxy deployment concurrency host-aware and serialize candidates on this host, with a MemAvailable preflight before each start. Separately reduce the roughly per-process steady RSS or provision enough RAM if all-block parallel rollout remains a requirement.",
+			action:   action,
 			verify:   "A full rollout completes with process count inside the configured bound, at least 8 GiB available, unused swap, no new OOM, flat UdpRcvbufErrors over the rollout window, and successful WireGuard plus public-proxy acceptance.",
 			playbook: "SIGNALS.md §14.7",
 		})

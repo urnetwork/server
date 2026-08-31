@@ -14,6 +14,7 @@ func TestProxyMemorySignalSyntheticGlobalOOM(t *testing.T) {
 			return "", errors.New("unexpected synthetic host command")
 		}
 		return proxyMemoryFixture(proxyMemorySample{
+			warpctlRolloutGuard:  proxyRolloutGuardDrainOnly,
 			memTotalKiB:          98284728,
 			memAvailableKiB:      36805604,
 			swapTotalKiB:         8388604,
@@ -42,8 +43,9 @@ func TestProxyMemorySignalSyntheticGlobalOOM(t *testing.T) {
 	markdown := oom.Markdown()
 	for _, want := range []string{
 		"19 proxy processes for 10 running block units",
+		"warpctl_rollout_guard=drain-only",
 		"udp_rcvbuf_errors_since_boot=122012",
-		"one block at a time",
+		"7e2075c",
 		"Do not restart WireGuard",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -62,6 +64,7 @@ func TestProxyMemorySignalSyntheticUnsafeLiveOverlap(t *testing.T) {
 			return "", errors.New("unexpected synthetic host command")
 		}
 		return proxyMemoryFixture(proxyMemorySample{
+			warpctlRolloutGuard:  proxyRolloutGuardFull,
 			memTotalKiB:          98284728,
 			memAvailableKiB:      10 * 1024 * 1024,
 			swapTotalKiB:         8388604,
@@ -96,6 +99,7 @@ func TestProxyMemorySignalSyntheticHealthyHost(t *testing.T) {
 			return "", errors.New("unexpected synthetic host command")
 		}
 		return proxyMemoryFixture(proxyMemorySample{
+			warpctlRolloutGuard:  proxyRolloutGuardFull,
 			memTotalKiB:          131314856,
 			memAvailableKiB:      68950196,
 			swapTotalKiB:         8388604,
@@ -115,6 +119,95 @@ func TestProxyMemorySignalSyntheticHealthyHost(t *testing.T) {
 	}
 	if len(alerts) != 0 {
 		t.Fatalf("healthy proxy host alerted: %+v", alerts)
+	}
+}
+
+func TestProxyMemorySignalSyntheticStaleRolloutGuard(t *testing.T) {
+	for _, guard := range []string{proxyRolloutGuardDrainOnly, proxyRolloutGuardDisabled} {
+		t.Run(guard, func(t *testing.T) {
+			source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+				if !strings.Contains(command, proxyMemoryMarker) {
+					return "", errors.New("unexpected synthetic host command")
+				}
+				return proxyMemoryFixture(proxyMemorySample{
+					warpctlRolloutGuard:  guard,
+					memTotalKiB:          128 * 1024 * 1024,
+					memAvailableKiB:      80 * 1024 * 1024,
+					swapTotalKiB:         8 * 1024 * 1024,
+					swapFreeKiB:          8 * 1024 * 1024,
+					runningUnits:         10,
+					proxyProcesses:       10,
+					proxyRSSKiB:          50 * 1024 * 1024,
+					proxyMaxRSSKiB:       5 * 1024 * 1024,
+					proxyMemoryUnbounded: 10,
+				}), nil
+			}}
+
+			alerts, err := NewProxyMemorySignal().Run(context.Background(), proxyMemorySyntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 1 {
+				t.Fatalf("stale rollout guard alerts = %d, want 1: %+v", len(alerts), alerts)
+			}
+			stale := requireAlertClass(t, alerts, "proxy-rollout-guard-stale")
+			if stale.Severity != SeverityWarn {
+				t.Fatalf("stale guard severity = %q", stale.Severity)
+			}
+			for _, want := range []string{
+				"warpctl_rollout_guard=" + guard,
+				"7e2075c",
+				"restart every Warp service worker",
+				"Do not test the fix by starting a full proxy rollout",
+				"separate from the hardware headroom boundary",
+			} {
+				if !strings.Contains(stale.Markdown(), want) {
+					t.Fatalf("stale rollout guard alert missing %q:\n%s", want, stale.Markdown())
+				}
+			}
+		})
+	}
+}
+
+func TestProxyMemorySignalSyntheticUnverifiedRolloutGuard(t *testing.T) {
+	for _, guard := range []string{proxyRolloutGuardMissing, proxyRolloutGuardUnknown} {
+		t.Run(guard, func(t *testing.T) {
+			source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+				if !strings.Contains(command, proxyMemoryMarker) {
+					return "", errors.New("unexpected synthetic host command")
+				}
+				return proxyMemoryFixture(proxyMemorySample{
+					warpctlRolloutGuard:  guard,
+					memTotalKiB:          128 * 1024 * 1024,
+					memAvailableKiB:      80 * 1024 * 1024,
+					swapTotalKiB:         8 * 1024 * 1024,
+					swapFreeKiB:          8 * 1024 * 1024,
+					runningUnits:         10,
+					proxyProcesses:       10,
+					proxyRSSKiB:          50 * 1024 * 1024,
+					proxyMaxRSSKiB:       5 * 1024 * 1024,
+					proxyMemoryUnbounded: 10,
+				}), nil
+			}}
+
+			alerts, err := NewProxyMemorySignal().Run(context.Background(), proxyMemorySyntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 1 {
+				t.Fatalf("unverified rollout guard alerts = %d, want 1: %+v", len(alerts), alerts)
+			}
+			unverified := requireAlertClass(t, alerts, "proxy-rollout-guard-unverified")
+			for _, want := range []string{
+				"warpctl_rollout_guard=" + guard,
+				"Do not begin a proxy rollout",
+				"7e2075c",
+			} {
+				if !strings.Contains(unverified.Markdown(), want) {
+					t.Fatalf("unverified rollout guard alert missing %q:\n%s", want, unverified.Markdown())
+				}
+			}
+		})
 	}
 }
 
@@ -153,7 +246,11 @@ func proxyMemorySyntheticSettings(source SignalSource) SignalSettings {
 }
 
 func proxyMemoryFixture(sample proxyMemorySample) string {
+	if sample.warpctlRolloutGuard == "" {
+		sample.warpctlRolloutGuard = proxyRolloutGuardFull
+	}
 	return fmt.Sprintf(`proxy_host 1
+warpctl_rollout_guard %s
 mem_total_kib %d
 mem_available_kib %d
 swap_total_kib %d
@@ -170,7 +267,7 @@ kernel_journal_status %d
 recent_proxy_oom_kills %d
 oom_proxy_processes %d
 oom_line %s
-`, sample.memTotalKiB, sample.memAvailableKiB, sample.swapTotalKiB, sample.swapFreeKiB,
+`, sample.warpctlRolloutGuard, sample.memTotalKiB, sample.memAvailableKiB, sample.swapTotalKiB, sample.swapFreeKiB,
 		sample.runningUnits, sample.proxyProcesses, sample.proxyRSSKiB, sample.proxyMaxRSSKiB,
 		sample.proxyMemoryBounded, sample.proxyMemoryUnbounded, sample.proxyMemoryUnknown,
 		sample.udpRcvbufErrors, sample.kernelJournalStatus, sample.recentProxyOOMKills,
