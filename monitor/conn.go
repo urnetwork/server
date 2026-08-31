@@ -37,7 +37,7 @@ const (
 	// signal fans out internally and other signal cadences collide. The budget
 	// is per destination host, so unrelated hosts remain observable in
 	// parallel. It is shared by every probe through signalRuntime.
-	maxConcurrentRemoteCommandsPerHost = 4
+	maxConcurrentRemoteCommandsPerHost = 2
 )
 
 // hostCommandLimiter is the monitor-wide SSH admission budget. Probe-local

@@ -325,7 +325,7 @@ non-interactively with `--since=<duration>` instead of tailing.
   handler complete. Time spent queued or running therefore cannot create a
   buffered or wall-aligned back-to-back catch-up query against an already-slow
   dependency.
-- One runtime-shared semaphore per destination host, capped at four actual SSH
+- One runtime-shared semaphore per destination host, capped at two actual SSH
   commands across every probe and probe-local battery. A limiter created per
   probe is not sufficient: four admitted signals can each fan out internally
   and cross OpenSSH's default `MaxStartups=10` before authentication. Different

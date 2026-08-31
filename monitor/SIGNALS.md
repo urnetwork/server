@@ -122,15 +122,25 @@ Edge-2's stock OpenSSH `MaxStartups` began throttling at connection `#10`,
 dropped 16 connections over 2m01s, and produced four unrelated
 `monitor/visibility` alerts even though PostgreSQL and the next standalone
 canary read were healthy. The sshd journal attributed every dropped connection
-to the monitor host; occasional unrelated public pre-auth scans were not the
-sustained source. Every real SSH execution now also passes through one shared
-four-command semaphore keyed by destination address. The semaphore lives in
-the monitor runtime, not a fresh probe runner, so internal fan-out and cadence
-collisions share the same budget while different hosts remain parallel. The
-deterministic transport test fills the budget through separate probe
-environments, proves a fifth same-host command cannot invoke SSH, proves its
-canceled wait releases no slot, and proves another host still runs. Do not
-raise `MaxStartups` to conceal monitor-generated admission pressure.
+to the monitor host. Every real SSH execution now also passes through one
+shared two-command semaphore keyed by destination address. The semaphore lives
+in the monitor runtime, not a fresh probe runner, so internal fan-out and
+cadence collisions share the same budget while different hosts remain
+parallel. The deterministic transport test fills the budget through separate
+probe environments, proves the next same-host command cannot invoke SSH,
+proves its canceled wait releases no slot, and proves another host still runs.
+
+The first capped production startup exposed the independent host boundary.
+The monitor admitted only three sessions in the trip second, but sshd was
+already holding seven unauthenticated sessions on its public-facing address,
+some 112 seconds old, and reported `7 of 10-100 startups`. Two public source
+addresses owned those long `[accepted]`/`[net]` children. The resulting
+one-second throttle dropped one overlay monitor connection. Source-side
+containment therefore uses two commands per host; the operational root fix is
+to bound pre-auth lifetime and per-source occupancy while reserving a larger
+global admission pool in the shared Ansible ssh hardening. Restrict public SSH
+at the network boundary where operational access permits. Do not merely raise
+`MaxStartups`, and do not attribute this signature to PostgreSQL.
 
 Likewise, a probe interrupted by an intentional monitor shutdown is a
 lifecycle event, not loss of production visibility, and must not emit a
