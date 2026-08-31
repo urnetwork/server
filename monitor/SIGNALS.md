@@ -6419,6 +6419,70 @@ headroom, legacy/disabled/unverified rollout guards, live UDP receive drops,
 first-sample/reboot/small-delta warmups, and a configured non-proxy host that
 must be skipped.
 
+### 14.7a Proxy message-pool capacity and ownership visibility
+Probe: `proxy-pool`
+
+The process RSS signal cannot distinguish live application objects from free
+buffers retained for reuse unless proxy exports the connect library's pool
+state. Join each fresh `process_resident_memory_bytes{job="proxy"}` series to
+these gauges on exact host, block, and runtime instance:
+
+- `urnetwork_message_pool_capacity_bytes`
+- `urnetwork_message_pool_retained_bytes`
+- `urnetwork_message_pool_packet_retained_bytes`
+- `urnetwork_message_pool_large_object_retained_bytes`
+- `urnetwork_message_pool_outstanding`
+
+WARN `proxy-message-pool-unobservable` when a fresh live process lacks any of
+the five pool gauges. This is affirmative instrumentation drift rather than a
+zero pool: before the 2026-08-31 correction, the collector lived in the
+`controller` package, which proxy does not import. The ordinary process metric
+was present on all 20 live proxies while every `urnetwork_message_pool_*`
+series was absent for `job="proxy"`; the same counters were visible on API,
+Connect, and taskworker. Do not diagnose a pool leak from that absence. Deploy
+the root server collector first and preserve host RSS/OOM evidence meanwhile.
+
+WARN `proxy-message-pool-capacity` when a live process permits more than 8 GiB
+plus 16 KiB of class-size rounding. The proxy's old source comment said “8gib
+message pool,” but called `ResizeMessagePools(Gib(8))`. That API's historical
+one-argument form gives the full argument to the packet classes and again to
+**each** large-object class. With today's 4 KiB and 8 KiB large classes, the
+logical process-wide free-list ceiling was therefore about 24 GiB, not 8 GiB.
+The corrected call assigns one third of one 8 GiB total to packet classes and
+passes the remaining two thirds as the combined large-object budget. This
+bounds only free-list retention; in-use messages remain live and allocate on a
+pool miss, so it does not trade correctness or liveness for the lower ceiling.
+
+WARN `proxy-message-pool-metrics-invalid` when retained bytes exceed capacity
+or packet plus large-object retained bytes do not exactly reconstruct total
+retained bytes. Those fields come from one allocation-free aggregate snapshot;
+an invariant failure is collector/library or label drift, not evidence that a
+pool physically owns impossible memory. Counters and gauges have different
+meanings: `taken_total-returned_total`/`outstanding` describe live root
+ownership, while `retained_bytes` describes returned buffers held for reuse.
+Capacity is merely their configured retention ceiling. Establish adjacent
+rates before calling rising ownership a leak.
+
+This software correction can lower steady and rollout memory pressure, but it
+does not add RAM or increase the hard active-client slots available per proxy.
+If steady demand approaches the aggregate client ceiling, the resolution is
+additional proxy instances on capable hardware (or an explicit operational
+load reduction). If a serialized old/candidate pair still cannot fit with
+reserve after the lower retention cap, additional RAM/hosts are likewise
+required. Neither alert may be closed by claiming the capacity limit itself
+created more customer capacity.
+
+Deployment gate: roll a proxy build containing both the root collector and the
+two-argument total-budget helper under the §14.7 full-overlap guard. Require a
+fresh complete gauge set for every live proxy, capacity no greater than 8 GiB
+plus rounding, retained no greater than capacity, and matching packet/large
+subtotals. Then follow RSS, `MemAvailable`, kernel OOM, and adjacent UDP drop
+deltas through the serialized rollout; the gauges supplement rather than
+replace those host boundaries. SIGNALS.md §14.7a (`proxy-pool`) maps to
+`signal_proxy_pool.go` and `signal_proxy_pool_test.go`; synthetic cases pin the
+controller-only blind spot, the legacy ~24 GiB cap, a fixed healthy cap, stale
+series, and internally inconsistent snapshots.
+
 ---
 
 ## 15. E2E encryption (post-quantum) signals — E2EPQ1

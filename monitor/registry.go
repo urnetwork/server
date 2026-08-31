@@ -78,6 +78,7 @@ func NewSignals() []Signal {
 		NewTaskConvergenceSignal(),
 		NewProxyPathSignal(),
 		NewProxyMemorySignal(),
+		NewProxyPoolSignal(),
 		NewKeyPublicationSignal(),
 		NewEdgeIPv6Signal(),
 		NewGrafanaIngressSignal(),

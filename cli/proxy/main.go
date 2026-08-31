@@ -22,6 +22,20 @@ import (
 // -ldflags "-X main.Version=$WARP_VERSION-$WARP_VERSION_CODE"
 var Version string
 
+const proxyMessagePoolByteCount connect.ByteCount = 8 << 30
+
+// resizeProxyMessagePools applies one total free-list budget across every
+// message size class. ResizeMessagePools' historical one-argument form gives
+// the supplied byte count to the packet classes and to each large-object
+// class, so passing 8 GiB once permits roughly 24 GiB process-wide.
+func resizeProxyMessagePools() {
+	packetByteCount := proxyMessagePoolByteCount / 3
+	connect.ResizeMessagePools(
+		packetByteCount,
+		proxyMessagePoolByteCount-packetByteCount,
+	)
+}
+
 func main() {
 	usage := `BringYour proxy server.
 
@@ -42,8 +56,8 @@ Options:
 
 	settings := proxy.DefaultProxySettings()
 
-	// use up to a 8gib message pool per instance
-	connect.ResizeMessagePools(connect.Gib(8))
+	// Use up to 8 GiB across all message-pool classes per instance.
+	resizeProxyMessagePools()
 
 	quitEvent := server.NewEventWithContext(context.Background())
 	defer quitEvent.Set()
