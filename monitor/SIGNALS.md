@@ -6159,6 +6159,23 @@ restores clients and drains. Treat a deploy as an explicit host-memory budget:
   counters are cumulative since boot: only a same-boot delta proves live loss;
   one old nonzero value is historical evidence, not a current incident.
 
+Release-validation boundary learned while preparing the full-overlap guard on
+2026-08-31: a focused host-lock test is not sufficient evidence that Warp is
+ready to deploy. The repository-local `nginx_local` fixture intentionally
+contains the patched UDP upstream PROXY-v2 stream path without requiring local
+OpenSSL/PCRE development packages; it omits HTTP SSL and explicitly disables
+the rewrite and gzip modules. `TestNginxConfigValidation` used to select the
+first executable by path, so installing that narrow fixture made the full Warp
+suite fail with `unknown directive "ssl_protocols"` even when a full system
+NGINX was available. Warp commit `a85a277` inspects `nginx -V`, requires the
+exact version/modules used by the generated production config, rejects an
+explicit incapable override, and falls through incapable default candidates.
+Its synthetic regression supplies the narrow build flags followed by a full
+build and proves the latter is selected. Before publishing the guard, require
+both the focused/race-enabled complete-overlap tests and `go test ./...`; this
+is a release-test capability defect, not evidence that the generated
+production config or a running LB lacks SSL.
+
 **Non-software remediation requirements by alert class:** a software release
 may prevent recurrence, but these classes must not be closed until the required
 operator action or physical-capacity change has been completed and verified.
