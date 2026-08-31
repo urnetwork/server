@@ -5770,6 +5770,69 @@ recoverable TUN dial error into a client-visible terminal timeout; current
 proxy/server defaults pace retries at one second and continue until the client
 leaves. A clean immediate rerun does not make the legacy interval safe.
 
+### 14.7 Proxy host rollout memory and UDP starvation
+Probe: `proxy-memory`
+
+Proxy readiness is not host-capacity proof. Every proxy block normally owns a
+large resident Go process, and the old process remains live while its candidate
+restores clients and drains. Treat a deploy as an explicit host-memory budget:
+
+- PAGE immediately when the kernel reports a recent global OOM that killed
+  `bringyour-proxy`.
+- PAGE while process count exceeds running proxy block units and
+  `MemAvailable` is below the largest current proxy RSS plus operational
+  reserve. Another candidate cannot start safely at that boundary.
+- WARN before an all-block rollout when `MemAvailable` is below the current
+  fleet's aggregate RSS plus the larger of 8 GiB or 5% of physical RAM. The
+  current fleet is the best measured estimate of a second candidate fleet.
+- Record proxy process count, aggregate/largest RSS, block-unit count, swap,
+  cgroup `memory.max` coverage, and `UdpRcvbufErrors`. The UDP counter is
+  cumulative since boot: use its incident-window delta as corroboration, never
+  as proof of a current failure from one old nonzero value.
+
+**Fireside global-OOM signature (2026-08-31):** at
+07:17:09.432994Z journald entered memory pressure. At 07:17:16.675993Z the
+kernel killed PID 2515221 (`bringyour-proxy`) with 5,014,876 KiB anonymous RSS.
+The OOM task table contained 19 distinct proxy processes against ten running
+block units: nine old processes at roughly 4.6–5.0 GiB RSS and ten candidates
+already growing toward the same size. Free swap was 0 of 8,388,604 KiB on a
+roughly 94 GiB host. This is direct evidence that all-block old/candidate
+overlap exhausted the host; it is not a WireGuard handshake, peer-install, or
+single-process leak diagnosis.
+
+A post-incident control made the capacity mismatch reproducible without
+another failure. Fireside's ten steady proxies used 52,842,940 KiB RSS in
+aggregate (roughly 50.4 GiB), while `MemAvailable` was 36,805,604 KiB. A
+second equivalent fleet plus the 8 GiB reserve therefore had a roughly
+23.3 GiB deficit. Crisp's ten proxies used a similar 53,323,752 KiB, but its
+68,950,196 KiB available memory could hold that estimate plus reserve. Every
+sampled proxy Docker cgroup on both hosts had `memory.max=max` and
+`memory.high=max`; cgroups did not contain the overlap. Fireside had 122,012
+cumulative UDP receive-buffer errors versus 25 on Crisp, and neither counter
+advanced during a later five-second idle control. The large Fireside delta is
+consistent with receive starvation during the OOM window, while the exact
+kernel kill and 19/10 process overlap remain the causal evidence.
+
+The immediate root-cause fix is host-aware bounded deployment concurrency.
+On a host with Fireside's capacity, start one block candidate, require
+`MemAvailable >= measured candidate RSS + reserve`, complete its redirect and
+old-process drain, then start the next block. Do not launch all ten candidates
+at once. Longer-term alternatives are reducing the roughly 5 GiB steady RSS
+per process or adding enough physical RAM for the desired parallelism. A
+cgroup ceiling below measured steady RSS merely kills a proxy earlier; adding
+swap or enlarging UDP buffers does not create safe rollout capacity. Do not
+restart WireGuard or reinstall peers for this signature.
+
+Verify a complete rollout, not an idle snapshot: proxy process count must stay
+at or below running blocks plus configured host concurrency; `MemAvailable`
+must remain above reserve; swap must not exhaust; kernel OOM and incident-window
+`UdpRcvbufErrors` deltas must remain zero; and the simultaneous WireGuard plus
+HTTP/SOCKS acceptance request must complete. Implementation convention:
+SIGNALS.md §14.7 (`proxy-memory`) maps to `signal_proxy_memory.go` and
+`signal_proxy_memory_test.go`. Synthetic cases preserve the 19-process/ten-unit
+OOM, live unsafe overlap, steady Fireside headroom deficit, Crisp-sized healthy
+headroom, and a configured non-proxy host that must be skipped.
+
 ---
 
 ## 15. E2E encryption (post-quantum) signals — E2EPQ1
