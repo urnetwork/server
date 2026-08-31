@@ -380,6 +380,18 @@ existing exponential backoff capped at one minute. The synthetic child exits
 2 and proves that failure reaches the backoff branch. Tailer restart findings
 remain visible, but the monitor no longer amplifies their cause.
 
+The 06:57Z watcher then exposed a service-discovery framing defect. `warpctl
+ls services` logs `Found repo names ...` and follows it with a human-readable
+service table; the monitor parsed everything after the marker in its combined
+stdout/stderr buffer. The table was therefore appended to the final repository
+name, and a transient nonzero exit could append warpctl's own JSON panic as
+well. The resulting multiline string became a bogus Grafana tailer target and
+eventually a malformed `tailer-silent` alert. Discovery now honors the command
+exit status, isolates exactly the repository log line, and falls back to the
+core service set rather than trusting partial output. Synthetic tests retain
+both the normal production-shaped table and the exact partial-output panic
+boundary, so local helper diagnostics cannot become remote service identity.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)
