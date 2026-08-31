@@ -172,7 +172,10 @@ func readTaskworkerJournal(
 	command := fmt.Sprintf(
 		"journalctl --no-pager -o json --since '%d minutes ago' -n %d "+
 			"-t 'warp|%s|taskworker|g1' -t 'warp|%s|taskworker|g2' "+
-			"--grep='%s' 2>/dev/null",
+			"--grep='%s' 2>/dev/null; "+
+			"journal_status=$?; "+
+			"if [ \"$journal_status\" -eq 1 ]; then exit 0; fi; "+
+			"exit \"$journal_status\"",
 		lookbackMinutes,
 		limit,
 		environment,

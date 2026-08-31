@@ -64,3 +64,59 @@ func TestReadTaskLifecycleLogBoundsGatewayBeforeJournalFallback(t *testing.T) {
 		t.Fatalf("gateway context error = %v, want deadline exceeded", gatewayErr)
 	}
 }
+
+func TestReadTaskLifecycleLogTreatsJournalNoMatchAsEmptyHost(t *testing.T) {
+	now := time.Date(2026, 8, 31, 5, 46, 0, 0, time.UTC)
+	journal := fmt.Sprintf(
+		`{"SYSLOG_TIMESTAMP":%q,"MESSAGE":%q,"CONTAINER_TAG":"warp|synthetic|taskworker|g1","CONTAINER_ID":"hot","_HOSTNAME":"metrics-1"}`,
+		now.Add(-5*time.Second).Format(time.RFC3339Nano),
+		"I0831 05:45:55.000000 1 task.go:1938] [01a05616-2af9-07af-9ce6-8ba1bc304862]eval active(4450.00s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})",
+	)
+	calls := make(chan string, 2)
+	source := &syntheticSource{
+		hostTimeoutFn: func(host HostSettings, command string, _ time.Duration) (string, error) {
+			calls <- host.Name + "\n" + command
+			if host.Name == "metrics-1" {
+				return journal, nil
+			}
+			// The rendered remote command converts journalctl --grep's status 1
+			// into this successful empty observation on a host with no matches.
+			return "", nil
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "", errors.New("synthetic fleet gateway unavailable")
+		},
+	}
+	settings := workerMemorySyntheticSettings(source, now)
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "metrics-empty", Roles: []string{"services"}})
+	env, err := newProbeEnv(settings.withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, logSource, err := readTaskLifecycleLog(
+		context.Background(),
+		env,
+		"eval",
+		2*time.Minute,
+		5000,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logSource != "host-journal-fallback" || !strings.Contains(output, "UpdateClientScores") {
+		t.Fatalf("fallback source/output = %q %q", logSource, output)
+	}
+	for range 2 {
+		call := <-calls
+		for _, want := range []string{
+			"journal_status=$?",
+			`if [ "$journal_status" -eq 1 ]; then exit 0; fi`,
+			`exit "$journal_status"`,
+		} {
+			if !strings.Contains(call, want) {
+				t.Fatalf("journal command did not preserve no-match semantics %q:\n%s", want, call)
+			}
+		}
+	}
+}

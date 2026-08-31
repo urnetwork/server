@@ -1850,6 +1850,16 @@ target-oriented/alias fix; a co-resident close task adds the process-budget
 impact and close/backlog verification. A deterministic synthetic regression
 forces the gateway failure, normalizes a timestamped journal heartbeat, and
 requires both the exact task id and `host-journal-fallback` source in Markdown.
+The first v114 live result attached four fresh task IDs, including the
+4,357-second score export and 747-second close checkpoint, but also labeled
+`crisp` and `fireside` as partial-read failures. Direct checks showed zero
+running taskworker units on both hosts and an exact `journalctl --grep` status
+of 1, while an active edge returned status 0. Status 1 is journald's normal
+no-match result, not a transport failure. The bounded command now converts
+only that status to an empty successful host observation and preserves every
+other nonzero status as an error. A mixed active/empty-host synthetic test
+locks the shell-status guard and requires the active host's normalized task to
+survive without false degradation.
 
 ### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
 Probe: `worker-churn`
