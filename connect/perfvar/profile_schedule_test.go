@@ -725,6 +725,13 @@ func TestMeasurePerfvarUnderlayReplaysLiveProfileSchedule(t *testing.T) {
 	)
 	initialDirection.BurstByteCount = 1400
 	initialDirection.OuterMtu = 1400
+	// This regression verifies schedule replay, not TCP loss recovery. A queue
+	// sized from each transient rate contracts at the 15 ms event and turns
+	// scheduler timing into burst loss; under the race runtime, an unlucky loss
+	// position can enter a multi-minute TCP retransmission backoff. Keep one
+	// lossless queue across the rate changes so only the requested axis changes.
+	initialDirection.QueueByteCount = 256 * 1024
+	initialDirection.AllowQueueDrops = false
 	profile := networkProfile{
 		Name:       "short-live-underlay",
 		Seed:       9251,
@@ -735,7 +742,6 @@ func TestMeasurePerfvarUnderlayReplaysLiveProfileSchedule(t *testing.T) {
 	}
 	slow := initialDirection
 	slow.RateBitsPerSecond = 250_000
-	slow.QueueByteCount = bandwidthDelayQueue(slow.RateBitsPerSecond, 100*time.Millisecond)
 	forwardSlow := slow
 	reverseSlow := slow
 	forwardRestore := initialDirection
@@ -772,10 +778,9 @@ func TestMeasurePerfvarUnderlayReplaysLiveProfileSchedule(t *testing.T) {
 	if err := validatePerfvarProfileScheduleScenario(scenario); err != nil {
 		t.Fatal(err)
 	}
-	// The schedule can contract a live queue and induce valid TCP
-	// retransmission backoff. Keep the outer liveness bound aligned with the
-	// workload's modeled, race-aware deadline instead of overriding it with a
-	// shorter wall-clock limit.
+	// Keep the outer liveness bound aligned with the workload's modeled,
+	// race-aware deadline instead of overriding it with a shorter wall-clock
+	// limit.
 	ctx, cancel := context.WithTimeout(
 		t.Context(),
 		calibrationWorkloadTimeout(perfvarCalibrationProfile(scenario), scenario.PayloadByteCount),
@@ -793,6 +798,9 @@ func TestMeasurePerfvarUnderlayReplaysLiveProfileSchedule(t *testing.T) {
 	if result.ForwardLink.ProfileUpdateCount != 2 || result.ReverseLink.ProfileUpdateCount != 2 ||
 		len(result.ProfileEvents) != 2 {
 		t.Fatalf("scheduled underlay events=%+v forward=%+v reverse=%+v", result.ProfileEvents, result.ForwardLink, result.ReverseLink)
+	}
+	if result.ForwardLink.QueueDropPacketCount != 0 || result.ReverseLink.QueueDropPacketCount != 0 {
+		t.Fatalf("rate-only schedule dropped packets forward=%+v reverse=%+v", result.ForwardLink, result.ReverseLink)
 	}
 	for _, observation := range result.ProfileEvents {
 		if !slices.Equal(observation.LinkNames, []string{"left->right", "right->left"}) {

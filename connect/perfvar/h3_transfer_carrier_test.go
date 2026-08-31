@@ -134,6 +134,13 @@ type h3TransferCarrierDrainStats struct {
 	DecodeErrorCount uint64
 }
 
+func (self *h3TransferCarrierDrainStats) add(other h3TransferCarrierDrainStats) {
+	self.MessageCount += other.MessageCount
+	self.PackCount += other.PackCount
+	self.AckCount += other.AckCount
+	self.DecodeErrorCount += other.DecodeErrorCount
+}
+
 // One endpoint owns one carrier sender and receiver. Send is allowed to block;
 // receive delivery is a zero-wait handoff and drops when the Client route is full.
 type h3TransferCarrierEndpoint struct {
@@ -599,6 +606,24 @@ func drainH3TransferCarrierRoute(route clientconnect.Route) h3TransferCarrierDra
 	}
 }
 
+// Drains messages only after carrier workers are joined. A later client join
+// can admit one final in-progress Transfer write to the now-ownerless route,
+// so callers repeat this boundary and aggregate both passes.
+func (self *h3TransferCarrierPair) drainRoutes() {
+	if self.clientEndpoint != nil {
+		self.clientEndpoint.discardedOutbound.add(
+			drainH3TransferCarrierRoute(self.clientEndpoint.outbound),
+		)
+		_ = drainH3TransferCarrierRoute(self.clientEndpoint.inbound)
+	}
+	if self.serverEndpoint != nil {
+		self.serverEndpoint.discardedOutbound.add(
+			drainH3TransferCarrierRoute(self.serverEndpoint.outbound),
+		)
+		_ = drainH3TransferCarrierRoute(self.serverEndpoint.inbound)
+	}
+}
+
 // Teardown first interrupts socket I/O, then joins workers, releases incomplete
 // reassemblies, and finally returns every unconsumed route buffer.
 func (self *h3TransferCarrierPair) Close() {
@@ -629,16 +654,7 @@ func (self *h3TransferCarrierPair) Close() {
 		if self.serverEndpoint != nil && self.serverEndpoint.reassembler != nil {
 			self.serverEndpoint.reassembler.Close()
 		}
-		if self.clientEndpoint != nil {
-			self.clientEndpoint.discardedOutbound =
-				drainH3TransferCarrierRoute(self.clientEndpoint.outbound)
-			_ = drainH3TransferCarrierRoute(self.clientEndpoint.inbound)
-		}
-		if self.serverEndpoint != nil {
-			self.serverEndpoint.discardedOutbound =
-				drainH3TransferCarrierRoute(self.serverEndpoint.outbound)
-			_ = drainH3TransferCarrierRoute(self.serverEndpoint.inbound)
-		}
+		self.drainRoutes()
 	})
 }
 
@@ -951,16 +967,23 @@ func measureH3TransferCarrier(
 		clientconnect.NewNoContractClientOob(),
 		clientSettings(nil, nil),
 	)
+	var closeClientsOnce sync.Once
+	var closeClientsErr error
+	closeClients := func() error {
+		closeClientsOnce.Do(func() {
+			closeClientsErr = errors.Join(
+				closeH3TransferCarrierClient(client),
+				closeH3TransferCarrierClient(server),
+			)
+		})
+		return closeClientsErr
+	}
 	defer func() {
 		pair.Close()
-		clientErr := closeH3TransferCarrierClient(client)
-		serverErr := closeH3TransferCarrierClient(server)
-		_ = drainH3TransferCarrierRoute(pair.clientEndpoint.outbound)
-		_ = drainH3TransferCarrierRoute(pair.clientEndpoint.inbound)
-		_ = drainH3TransferCarrierRoute(pair.serverEndpoint.outbound)
-		_ = drainH3TransferCarrierRoute(pair.serverEndpoint.inbound)
+		clientErr := closeClients()
+		pair.drainRoutes()
 		if resultErr == nil {
-			resultErr = errors.Join(clientErr, serverErr)
+			resultErr = clientErr
 		}
 	}()
 
@@ -1109,6 +1132,14 @@ func measureH3TransferCarrier(
 	// Stop the carrier before the end boundary so delayed QUIC acknowledgements
 	// and connection-close packets cannot escape the measured link interval.
 	pair.Close()
+	// The wire observer runs inside a resend write before recordSendRecovery.
+	// Joining only the carrier can therefore snapshot one in-progress resend
+	// between those two observations. Join both Client-owned SendSequences, then
+	// drain any final route admission that could not reach the stopped carrier.
+	if err := closeClients(); err != nil {
+		return result, fmt.Errorf("close H3 Transfer clients: %w", err)
+	}
+	pair.drainRoutes()
 	forwardLink, reverseLink, err := path.finishMeasurement(ctx, measurementStart)
 	if err != nil {
 		return result, fmt.Errorf("finish H3 Transfer carrier measurement: %w", err)
@@ -1185,16 +1216,23 @@ func requireH3TransferCarrierResult(
 			result.ClientRecoveryStats,
 		)
 	}
-	admittedRecoveryWriteCount := recoveryWriteCount -
+	// Repeated route frames cannot identify every recovery: a retry can be the
+	// first admitted copy after an initial route refusal, while a late internal
+	// initial Pack can fail during teardown without owning a recovery. Account
+	// every physical attempt by its route outcome instead. Client shutdown above
+	// joins both sides of this equality before either snapshot is taken.
+	accountedPackWriteCount := result.ClientRouteStats.PackCount +
+		result.ClientDiscardedRoute.PackCount +
+		result.FirstRouteWriteErrors +
 		result.ClientRecoveryStats.RecoveryWriteErrorCount
-	if admittedRecoveryWriteCount != result.ClientRouteStats.RepeatedPackCount+
-		result.ClientDiscardedRoute.PackCount+
-		result.FirstRouteWriteErrors {
+	if result.ClientWireStats.PackCount !=
+		result.ClientRecoveryStats.InitialWriteCount+recoveryWriteCount ||
+		result.ClientWireStats.PackCount != accountedPackWriteCount {
 		t.Fatalf(
-			"H3 Transfer carrier mode=%s recovery admissions=%d, repeated carrier Pack writes=%d, discarded queued Packs=%d, first-write errors=%d, recovery-write errors=%d: wire=%+v stats=%+v",
+			"H3 Transfer carrier mode=%s Pack attempt accounting differs: accounted=%d carrier=%d discarded=%d first-write-errors=%d recovery-write-errors=%d wire=%+v stats=%+v",
 			result.Mode,
-			admittedRecoveryWriteCount,
-			result.ClientRouteStats.RepeatedPackCount,
+			accountedPackWriteCount,
+			result.ClientRouteStats.PackCount,
 			result.ClientDiscardedRoute.PackCount,
 			result.FirstRouteWriteErrors,
 			result.ClientRecoveryStats.RecoveryWriteErrorCount,
