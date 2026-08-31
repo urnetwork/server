@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+const (
+	// Reaching every Redis maxmemory ceiling is not a healthy terminal state:
+	// the host still needs room for allocator/RSS variation, the kernel, and
+	// non-Redis services. Keep an absolute floor for ordinary hosts and scale
+	// it slightly on large-memory hosts.
+	redisHostCapacityReserveMinimum = float64(8 << 30)
+	redisHostCapacityReserveRatio   = 0.02
+)
+
 // redisMemoryProbe is SIGNALS.md 3.1/3.2/3.5: the per-node memory table (skew
 // detector), dataset-vs-clients attribution, and connected_clients. One ssh
 // round collects INFO from every node; findings are per-node so each sick node
@@ -205,8 +214,10 @@ done`, lo, hi)
 
 	findings := []finding{}
 	remainingConfiguredHeadroom := max(0.0, sumMaxmemoryBytes-sumUsedBytes)
-	if criticalNodeCount > 0 && hostMemoryAvailableBytes > 0 && hostMemoryAvailableBytes < remainingConfiguredHeadroom {
-		capacityDeficit := remainingConfiguredHeadroom - hostMemoryAvailableBytes
+	operationalReserve := max(redisHostCapacityReserveMinimum, redisHostCapacityReserveRatio*hostMemoryTotalBytes)
+	requiredAvailable := remainingConfiguredHeadroom + operationalReserve
+	if criticalNodeCount > 0 && hostMemoryAvailableBytes > 0 && hostMemoryAvailableBytes < requiredAvailable {
+		capacityDeficit := requiredAvailable - hostMemoryAvailableBytes
 		action := "Do not increase maxmemory on this host. Add physical memory or Redis masters, or reduce the retained dataset, before expanding aggregate ceilings; preserve enough reserve for Redis RSS overhead, the kernel, and non-Redis processes."
 		if impossibleTTLNodeCount > 0 {
 			action = "Do not increase maxmemory on this host. Create immediate capacity headroom with additional RAM, Redis masters on additional hosts, or a smaller retained key footprint, preserving reserve for Redis RSS overhead, the kernel, and non-Redis processes. With explicit maintenance authority, also run the independently attributed binary-safe `bringyourctl streams expire-leaked-ttls` cleanup: it clamps leaked keys to an 8-hour TTL and starts a bounded drain, but does not create immediate host capacity."
@@ -214,12 +225,12 @@ done`, lo, hi)
 		findings = append(findings, finding{
 			probeId: "redis/host-capacity", tier: tierPage,
 			class: "redis-host-capacity", target: h.name, frame: "aggregate-maxmemory", sustain: 1,
-			symptom:   fmt.Sprintf("Redis can grow %.1fGiB to its configured ceilings but %s has only %.1fGiB available", gib(remainingConfiguredHeadroom), h.name, gib(hostMemoryAvailableBytes)),
-			mechanism: "The sum of per-node maxmemory ceilings exceeds the RAM the host can still supply. Each Redis process can remain below its own limit while their combined RSS exhausts host memory first; swap or an OOM kill can then turn controlled per-node eviction into a fleet outage.",
+			symptom:   fmt.Sprintf("Redis can grow %.1fGiB to its configured ceilings and needs %.1fGiB reserve, but %s has only %.1fGiB available", gib(remainingConfiguredHeadroom), gib(operationalReserve), h.name, gib(hostMemoryAvailableBytes)),
+			mechanism: "The sum of per-node maxmemory ceilings plus the host's operational reserve exceeds the RAM the host can still supply. Each Redis process can remain below its own limit while their combined RSS exhausts host memory first; at the ceilings, a missing reserve can still turn controlled per-node eviction into host swapping or an OOM kill.",
 			baseline:  "Host-available RAM exceeds all remaining configured Redis growth plus an explicit reserve for RSS overhead, kernel memory, and non-Redis processes; no node is above 92%.",
-			observed: fmt.Sprintf("host_total_gib=%.1f host_available_gib=%.1f redis_used_gib=%.1f redis_rss_gib=%.1f aggregate_maxmemory_gib=%.1f remaining_configured_headroom_gib=%.1f capacity_deficit_gib=%.1f nodes=%d critical_nodes=%d total_keys=%.0f impossible_ttl_nodes=%d",
-				gib(hostMemoryTotalBytes), gib(hostMemoryAvailableBytes), gib(sumUsedBytes), gib(sumRSSBytes), gib(sumMaxmemoryBytes), gib(remainingConfiguredHeadroom), gib(capacityDeficit), len(nodeMems), criticalNodeCount, totalKeys, impossibleTTLNodeCount),
-			context:  "MemAvailable already includes reclaimable cache. The comparison is intentionally conservative because remaining maxmemory excludes RSS-over-used overhead and every non-Redis allocation; unused swap is not healthy Redis capacity.",
+			observed: fmt.Sprintf("host_total_gib=%.1f host_available_gib=%.1f redis_used_gib=%.1f redis_rss_gib=%.1f aggregate_maxmemory_gib=%.1f remaining_configured_headroom_gib=%.1f operational_reserve_gib=%.1f required_available_gib=%.1f capacity_deficit_gib=%.1f nodes=%d critical_nodes=%d total_keys=%.0f impossible_ttl_nodes=%d",
+				gib(hostMemoryTotalBytes), gib(hostMemoryAvailableBytes), gib(sumUsedBytes), gib(sumRSSBytes), gib(sumMaxmemoryBytes), gib(remainingConfiguredHeadroom), gib(operationalReserve), gib(requiredAvailable), gib(capacityDeficit), len(nodeMems), criticalNodeCount, totalKeys, impossibleTTLNodeCount),
+			context:  "MemAvailable already includes reclaimable cache. The operational reserve is the larger of 8GiB or 2% of physical RAM. The comparison is intentionally conservative because remaining maxmemory excludes future RSS-over-used variation and every non-Redis allocation; unused swap is not healthy Redis capacity.",
 			action:   action,
 			verify:   "Aggregate Redis ceilings plus measured overhead fit beneath physical RAM with operational reserve, host swap and memory pressure remain zero, every node returns below 85%, and current OOM/error rates remain zero on consecutive samples.",
 			playbook: "SIGNALS.md §3.1, §3.3a, and §5.4",

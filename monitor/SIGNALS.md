@@ -1877,9 +1877,14 @@ about 38, 104, and 138 keys/second. Writes are still surviving through
 emergency churn; that is not healthy headroom.
 
 The monitor emits `redis-host-capacity` when a critical node coincides with
-this aggregate deficit. Immediate capacity headroom requires more physical
-memory, Redis masters on additional hosts, or an immediately smaller retained
-footprint. The independently attributed, binary-safe stream cleanup
+this aggregate deficit. The required capacity is remaining aggregate
+`maxmemory` growth plus an operational reserve equal to the larger of 8GiB or
+2% of physical RAM. Including the reserve is important at the limiting case:
+remaining growth reaches zero when every node reaches its ceiling, but a host
+with no RSS/kernel/service reserve is still in danger and the page must not
+disappear. Immediate capacity headroom requires more physical memory, Redis
+masters on additional hosts, or an immediately smaller retained footprint.
+The independently attributed, binary-safe stream cleanup
 (`bringyourctl streams expire-leaked-ttls`) still requires explicit
 maintenance authority and is complementary: it clamps keys to an 8-hour TTL
 and begins a bounded drain, but cannot free all of that capacity immediately.

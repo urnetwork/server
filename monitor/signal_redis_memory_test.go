@@ -106,7 +106,9 @@ func TestRedisMemorySignalDetectsAggregateHostCapacityDeficit(t *testing.T) {
 	for _, want := range []string{
 		"host_available_gib=0.5",
 		"remaining_configured_headroom_gib=0.9",
-		"capacity_deficit_gib=0.4",
+		"operational_reserve_gib=8.0",
+		"required_available_gib=8.9",
+		"capacity_deficit_gib=8.4",
 		"critical_nodes=2",
 		"Do not increase maxmemory",
 		"explicit maintenance authority",
@@ -118,6 +120,36 @@ func TestRedisMemorySignalDetectsAggregateHostCapacityDeficit(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("aggregate host-capacity diagnosis missing %q: %s", want, markdown)
+		}
+	}
+}
+
+func TestRedisMemorySignalKeepsHostCapacityAlertAtNodeCeilingWithoutReserve(t *testing.T) {
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		if strings.Contains(command, "for p in") {
+			return strings.Join([]string{
+				"host_memory 549755813888 4294967296",
+				"6380 12884901888 12884901888 12400000000 0 100 volatile-ttl 5000000 4000000 0 1000 0 10 0 13200000000",
+			}, "\n"), nil
+		}
+		return "", nil
+	}}
+
+	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "redis-host-capacity")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"remaining_configured_headroom_gib=0.0",
+		"operational_reserve_gib=10.2",
+		"required_available_gib=10.2",
+		"capacity_deficit_gib=6.2",
+		"at the ceilings",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("ceiling-state host-capacity diagnosis missing %q: %s", want, markdown)
 		}
 	}
 }
