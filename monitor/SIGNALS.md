@@ -640,13 +640,15 @@ four minutes, making stream/query overlap and successive queries idempotent
 without retaining ordinary log volume. The first query remembers pre-start
 history but counts only source records at or after collector start, preventing
 a two-minute startup replay from becoming a one-minute rate. Reconciliation
-does not refresh WebSocket liveness. A failed, stale, or cap-sized query raises
-the separate `tailer-reconcile` visibility class; the live findings already in
+does not refresh WebSocket liveness. A failed or stale query, a cap boundary
+that cannot advance, or a partition still full after eight pages raises the
+separate `tailer-reconcile` visibility class; the live findings already in
 memory are still drained. Deterministic synthetic tests reproduce a stream
 that sees two of four same-second wallet attempts and misses a canonical 429,
 recover the absent records from the bounded query exactly once, exclude
-pre-start history, preserve a live finding on query failure, and reject a
-cap-sized result as incomplete.
+pre-start history, preserve a live finding on query failure, de-duplicate an
+inclusive page boundary, reject a non-advancing boundary, and stop an
+advancing hot partition after eight pages.
 
 The `20:39:59Z` Proxy synchronization on 2026-08-31 supplied the first live
 cap control. One block's full WireGuard synchronization emitted 12,866 peer
@@ -658,12 +660,32 @@ window for each active Proxy block left every individual partition below the
 cap. The tailer now takes its block inventory from the first (active)
 `services.yml` version: it uses the cheap aggregate query normally, and only
 on saturation retries the identical window once per block. Block labels make
-those batches disjoint. A failed or cap-sized block remains a visibility
-failure; do not shorten the late-ingestion overlap or raise Loki's global
-limit to hide it. Synthetic tests prove successful partition recovery uses
-one shared absolute timestamp and prove one saturated block is rejected.
+those batches disjoint. A cap-sized block continues from its inclusive final
+source timestamp; exact fingerprints remove the repeated boundary. A boundary
+that does not advance, or an eighth page that remains full, is still a
+visibility failure. Do not shorten the late-ingestion overlap or raise Loki's
+global limit to hide it. Synthetic tests prove block partitioning uses one
+shared initial timestamp and that continuation is both complete and bounded.
 This event is query-volume evidence, not 20,000 distinct Proxy failures; alert
 artifacts retain aggregates rather than peer keys or client addresses.
+
+The `21:09Z` full synchronization supplied the stricter live control after
+v155 was the sole watcher. Proxy block g1 alone filled its first page: 19,995
+of 20,000 returned records were default-info `peer installed` lines. In the
+same minute, Grafana emitted 19,470 lines, including 18,165 Loki
+`caller=tailer.go:<line> msg="tailer dropped streams is reset"` records, and
+its single g1 block also filled a page. Loki 3.7.3 emits that message only
+after a blocked tailer's bounded stream queue has dropped entries and its
+dropped-stream metadata list fills and resets. The still-connected WebSocket
+was therefore affirmatively incomplete; this was not a query-cap false
+positive. Server Proxy now keeps the aggregate sync summary and peer gauge at
+default verbosity but moves exact client address/key installation details to
+`V(1)`. The standing classifier reports any reset as
+`loki-tail-dropped-streams`, and reconciliation continues a cap-sized block
+from its inclusive boundary for at most eight pages. Do not raise Loki queues
+or suppress its reset line: remove the high-cardinality producer, retain the
+bounded recovery path, and require both signals to stay healthy through the
+next full peer sync.
 
 An independent audit of Grafana's own low-rate errors then found a second,
 concrete transport gap. With the v151 watcher and all eight external tails
@@ -2949,6 +2971,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` | Grafana has the provisioned datasource row but cannot load that datasource's plugin. `/api/health`, Mimir `/ready`, and the UI can all stay green while every affected dashboard query and alert rule fails. | Query through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13.2, bake the signed standalone Prometheus plugin into the image as in §11.15; do not recreate a datasource row that already exists. |
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The incident's exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline closing valid idle HTTP/2/gRPC streams, not the 256-session ceiling. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Deploy a Grafana image containing Warp `1e95aef` (no TCP read deadline, 30-second keepalive, bounded writes; UDP idle timeout retained). Require zero recurring `loki-tail-backend-eof` for ten minutes with stable tails and healthy bounded reconciliation. Do not raise tail/ring limits or restart the same image. See §1.5. |
+| `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | Loki's bounded live-tail stream queue overflowed while the consumer was blocked; filling and resetting its dropped-stream metadata proves the connected WebSocket omitted entries. The 2026-08-31 control paired 18,165 reset lines/min with 19,995 per-peer Proxy installation lines in one block. | Remove/verbosity-gate the high-cardinality producer while retaining aggregate health evidence; Proxy client installation details belong at `V(1)`. Keep block partitioning plus inclusive bounded continuation. Require zero `loki-tail-dropped-streams` and healthy reconciliation through the next full sync; do not hide loss by raising queues or suppressing the reset. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
@@ -4292,6 +4315,7 @@ Tier-1 (warn):
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
+| loki-tail-dropped-streams | logs | §1.5 exact Loki dropped-stream metadata reset | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by transactional-email templates through the public CDN and exact `main-web` origin Host on each enabled edge | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
@@ -6461,7 +6485,12 @@ return in the batch so HTTP/SOCKS are not held behind that wait. Watch
 `urnetwork_proxy_wireguard_return_backpressure_seconds` histogram. A rising
 count is bounded flow control, not loss; sustained or long waits identify a
 WireGuard reader that is not draining and require correlating the process
-lifecycle rather than increasing an unbounded queue.
+lifecycle rather than increasing an unbounded queue. A pre-fix metric wrapper
+passed `time.Since(start)` directly as a deferred argument, so Go evaluated it
+at defer registration and every histogram sample was near zero regardless of
+the real wait. Current code evaluates elapsed time inside the deferred closure;
+`TestObserveElapsedSecondsUsesCompletionTime` pins a synthetic 3.75-second
+completion and prevents the observability defect from returning.
 
 **Shared WireGuard socket-reader head-of-line stall:** this is below the hosted
 DeviceLocal return queue above. One proxy block can keep HTTP/SOCKS and its

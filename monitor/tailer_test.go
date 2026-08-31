@@ -616,6 +616,95 @@ func TestStandingReconciliationRejectsSaturatedBlockPartition(t *testing.T) {
 	}
 }
 
+func TestStandingReconciliationContinuesSaturatedBlockFromInclusiveBoundary(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	wantStart := fixedNow.Add(-logReconcileLookback)
+	boundaryAt := time.Date(2026, 8, 31, 18, 53, 30, 19999*1000, time.UTC)
+	boundaryLine := `[edge-0][proxy][g1][cid:test][E][2026-08-31T18:53:30.019999Z][synthetic.go:1]synthetic proxy error boundary`
+	laterLine := `[edge-0][proxy][g1][cid:test][E][2026-08-31T18:53:31Z][synthetic.go:1]synthetic proxy error later`
+
+	var saturated strings.Builder
+	for i := 0; i < logReconcileLimit-1; i++ {
+		fmt.Fprintf(&saturated, "[edge-0][proxy][g1][cid:test][I][2026-08-31T18:53:30.%06dZ][server.go:764]ordinary peer sync %d\n", i, i)
+	}
+	saturated.WriteString(boundaryLine + "\n")
+
+	tailer := newLogTailer("proxy", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = wantStart
+	tailer.blocks = []string{"g1", "g2"}
+	type queryCall struct {
+		start  time.Time
+		blocks []string
+	}
+	var calls []queryCall
+	tailer.reconcile = func(_ context.Context, start time.Time, blocks []string) (string, error) {
+		calls = append(calls, queryCall{start: start, blocks: append([]string(nil), blocks...)})
+		if len(blocks) == 0 || (blocks[0] == "g1" && start.Equal(wantStart)) {
+			return saturated.String(), nil
+		}
+		if blocks[0] == "g1" {
+			return boundaryLine + "\n" + laterLine + "\n", nil
+		}
+		return "", nil
+	}
+
+	tailer.reconcileOnce(context.Background())
+	if len(calls) != 4 {
+		t.Fatalf("reconciliation calls = %#v, want aggregate, g1 page 1, g1 continuation, g2", calls)
+	}
+	if !calls[2].start.Equal(boundaryAt) || !reflect.DeepEqual(calls[2].blocks, []string{"g1"}) {
+		t.Fatalf("continuation = %#v, want g1 at inclusive boundary %s", calls[2], boundaryAt)
+	}
+	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	if !lastSuccess.Equal(fixedNow) || lastError != "" {
+		t.Fatalf("continued block overlap not accepted: last_success=%s error=%q", lastSuccess, lastError)
+	}
+
+	tailer.stateLock.Lock()
+	novelCount := 0
+	for _, count := range tailer.novelCounts {
+		novelCount += count
+	}
+	tailer.stateLock.Unlock()
+	if novelCount != 2 {
+		t.Fatalf("continued novel records = %d, want boundary replay deduped plus one later record", novelCount)
+	}
+}
+
+func TestStandingReconciliationBoundsAdvancingContinuationPages(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	tailer := newLogTailer("grafana", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = fixedNow.Add(-logReconcileLookback)
+
+	calls := 0
+	tailer.reconcile = func(_ context.Context, _ time.Time, _ []string) (string, error) {
+		calls++
+		observedAt := fixedNow.Add(-time.Minute).Add(time.Duration(calls) * time.Second)
+		var output strings.Builder
+		for i := 0; i < logReconcileLimit; i++ {
+			fmt.Fprintf(
+				&output,
+				"[edge-0][grafana][g1][cid:test][%s]ordinary advancing page %d line %d\n",
+				observedAt.Format(time.RFC3339Nano),
+				calls,
+				i,
+			)
+		}
+		return output.String(), nil
+	}
+
+	tailer.reconcileOnce(context.Background())
+	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	if calls != logReconcileMaxPages {
+		t.Fatalf("continuation queries = %d, want bounded %d", calls, logReconcileMaxPages)
+	}
+	if !lastSuccess.IsZero() || !strings.Contains(lastError, "across 8 pages") {
+		t.Fatalf("unbounded hot partition was accepted: last_success=%s error=%q", lastSuccess, lastError)
+	}
+}
+
 // Minute volume is the liquidity/retry-amplification signal, but it is not a
 // synchronized microburst when canonical attempts occupy different seconds.
 // The subsequent empty window must also resolve a prior burst identity.

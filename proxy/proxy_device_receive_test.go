@@ -5,9 +5,23 @@ import (
 	"context"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
+
+func TestObserveElapsedSecondsUsesCompletionTime(t *testing.T) {
+	start := time.Date(2026, 8, 31, 21, 9, 0, 0, time.UTC)
+	var observed float64
+	observeElapsedSeconds(
+		start,
+		func() time.Time { return start.Add(3750 * time.Millisecond) },
+		func(seconds float64) { observed = seconds },
+	)
+	if observed != 3.75 {
+		t.Fatalf("observed elapsed seconds = %f, want 3.75", observed)
+	}
+}
 
 func ipv4PacketForDestination(destination netip.Addr) []byte {
 	packet := make([]byte, 20)

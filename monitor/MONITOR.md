@@ -516,9 +516,13 @@ probes; every other signal and host continues. Unknown host names fail closed.
    closes the late-ingestion timestamp-cursor gap and has independent
    visibility health. If the aggregate query reaches its 20,000-line cap, the
    monitor repeats the same absolute window for each block in the active
-   `services.yml` version; every partition must independently stay below the
-   cap. A live Proxy full-sync burst exercised this fallback boundary, and
-   deterministic tests cover both recovery and a saturated-block rejection.
+   `services.yml` version. A cap-sized block continues from its inclusive
+   final source timestamp, de-duplicates that boundary, and may consume at
+   most eight pages. A live Proxy full-sync burst exercised both levels; the
+   same burst made Loki reset its dropped-stream metadata 18,165 times/minute,
+   which is now an explicit `loki-tail-dropped-streams` finding. Deterministic
+   tests cover partition recovery, boundary recovery, non-advancement, and the
+   page bound.
    A later exact 60-second Loki backend-EOF cadence exposed
    Warp's ring TCP application read deadline; the classifier now distinguishes
    that internal EOF from expected client cancellation while reconciliation

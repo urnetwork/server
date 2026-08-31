@@ -133,6 +133,18 @@ var logClasses = []logClass{
 		action:    "Publish and deploy a Grafana image containing Warp commit 1e95aef, which removes TCP application read deadlines, enables 30-second TCP keepalives, retains bounded write deadlines, and leaves the UDP idle timeout intact. Do not raise Loki tail-request limits, raise the ring session cap, or restart the same image to hide EOFs.",
 		verify:    "Every Grafana block runs an image containing Warp commit 1e95aef; with stable standing tails, no loki-tail-backend-eof line recurs for 10 minutes, the external tails remain connected, and each bounded two-minute reconciliation completes below its result cap.",
 	},
+	// Loki records this only after a live-tail consumer has remained blocked
+	// long enough to overflow its bounded stream queue and then fill the
+	// dropped-stream metadata list. One line therefore proves omitted live
+	// entries; ordinary low-rate query traffic cannot produce it.
+	{name: "loki-tail-dropped-streams", re: regexp.MustCompile(`caller=tailer\.go:[0-9]+\b.*\bmsg="tailer dropped streams is reset"(?:\s|$)`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "a Loki live-tail consumer stayed blocked while its bounded queue overflowed; Loki filled and reset the dropped-stream metadata list, so records were omitted from the WebSocket stream",
+		mechanism: "Loki queues only a bounded number of streams per tailer. If the client cannot consume a burst, new streams are dropped and described in a bounded metadata list; filling that list emits this reset line. On 2026-08-31, one Proxy block emitted 19,995 per-peer WireGuard installation info lines in one minute, while Grafana emitted 18,165 reset lines in the same minute and the Proxy and Grafana reconciliation queries both reached 20,000 rows.",
+		context:   "This is affirmative loss of live-tail contents even when the external WebSocket process remains connected. The standing range reconciliation is the recovery path, but a capped query is not proof of complete recovery. The observed Proxy burst was default info-log amplification, not 19,995 distinct peer-installation failures; the terminal peer summary and gauge remained the fleet-level health evidence.",
+		action:    "Remove or verbosity-gate the high-cardinality producer while retaining its aggregate summary and metrics. For the observed Proxy shape, deploy the server change that moves per-client peer-installation details to V(1). Retain bounded reconciliation continuation for any partition that reaches the row cap. Do not raise Loki tail queues or suppress this reset line to hide loss.",
+		verify:    "During the next full Proxy peer synchronization, default logs contain one aggregate sync summary rather than one line per installed peer, every reconciliation partition completes through its bounded continuation, and loki-tail-dropped-streams remains zero for 10 minutes with all external tails connected.",
+	},
 	{name: "conn-reset", re: regexp.MustCompile(`connection reset by peer|unexpected EOF`),
 		rateThreshold: 50, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "server closed the conn (buffer-limit kill, maxmemory-clients eviction, restart); retried in-client"},
@@ -533,6 +545,11 @@ const (
 	logReconcileInterval  = 45 * time.Second
 	logReconcileRetention = logReconcileLookback + 2*time.Minute
 	logReconcileLimit     = 20000
+	// Eight pages bound one hot partition to 160,000 returned records per
+	// cadence. A partition whose source-time boundary keeps advancing can be
+	// recovered; one that cannot drain inside this budget remains an explicit
+	// visibility failure rather than an unbounded query loop.
+	logReconcileMaxPages = 8
 )
 
 // run tails and independently reconciles one service until ctx is done.
@@ -624,12 +641,90 @@ func parseReconcileLines(out string) []reconcileLine {
 	return lines
 }
 
+func reconcilePartitionLabel(service string, blocks []string) string {
+	if len(blocks) == 0 {
+		return service
+	}
+	return fmt.Sprintf("%s block %s", service, strings.Join(blocks, ","))
+}
+
+// completeReconcilePartition continues a cap-sized page from its inclusive
+// final source timestamp. Inclusive overlap is required because Loki's range
+// API has no cursor within one timestamp; exact-line fingerprints remove the
+// repeated boundary while preserving every later record. A boundary that does
+// not advance, or a partition still full after logReconcileMaxPages, fails
+// closed because completeness cannot be proven.
+func (self *logTailer) completeReconcilePartition(
+	ctx context.Context,
+	start time.Time,
+	blocks []string,
+	first []reconcileLine,
+) ([]reconcileLine, error) {
+	partition := reconcilePartitionLabel(self.service, blocks)
+	lines := make([]reconcileLine, 0, len(first))
+	seen := make(map[[sha256.Size]byte]struct{}, len(first))
+	appendUnique := func(page []reconcileLine) {
+		for _, entry := range page {
+			fingerprint := sha256.Sum256([]byte(entry.line))
+			if _, ok := seen[fingerprint]; ok {
+				continue
+			}
+			seen[fingerprint] = struct{}{}
+			lines = append(lines, entry)
+		}
+	}
+	appendUnique(first)
+
+	page := first
+	pageStart := start
+	pages := 1
+	for len(page) >= logReconcileLimit {
+		if pages >= logReconcileMaxPages {
+			return nil, fmt.Errorf(
+				"bounded overlap reached the %d-line limit for %s across %d pages; late-entry coverage is incomplete",
+				logReconcileLimit,
+				partition,
+				pages,
+			)
+		}
+
+		boundary := page[0].observedAt
+		for _, entry := range page[1:] {
+			if boundary.Before(entry.observedAt) {
+				boundary = entry.observedAt
+			}
+		}
+		if !boundary.After(pageStart) {
+			return nil, fmt.Errorf(
+				"bounded overlap reached the %d-line limit for %s and continuation did not advance beyond %s; late-entry coverage is incomplete",
+				logReconcileLimit,
+				partition,
+				pageStart.UTC().Format(time.RFC3339Nano),
+			)
+		}
+
+		pageStart = boundary
+		out, err := self.reconcile(ctx, pageStart, blocks)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s continuation: %w", partition, err)
+		}
+		page = parseReconcileLines(out)
+		pages++
+		appendUnique(page)
+	}
+	return lines, nil
+}
+
 // reconcileOnce folds entries absent from the live stream into the current
 // window. Failed and truncated queries are never treated as complete history;
 // their state is exposed by tailerReconcileFinding. A service-wide query is
 // cheapest during ordinary traffic. If it reaches Loki's result cap, retry
-// the exact same absolute source-time window once per configured block; the
-// partition key is already a Loki label, so the batches are disjoint.
+// the same absolute lower boundary once per configured block. A cap-sized
+// block (or a single-block service) then continues from its inclusive final
+// source timestamp under a fixed page budget.
 func (self *logTailer) reconcileOnce(ctx context.Context) {
 	if self.reconcile == nil {
 		return
@@ -645,36 +740,43 @@ func (self *logTailer) reconcileOnce(ctx context.Context) {
 	}
 
 	lines := parseReconcileLines(out)
-	if len(lines) >= logReconcileLimit && len(self.blocks) <= 1 {
-		self.recordReconcile(fmt.Errorf(
-			"bounded overlap reached the %d-line limit for %s; late-entry coverage is incomplete",
-			logReconcileLimit,
-			self.service,
-		))
-		return
-	}
 	if len(lines) >= logReconcileLimit {
-		lines = nil
-		for _, block := range self.blocks {
-			out, err := self.reconcile(ctx, start, []string{block})
+		if len(self.blocks) <= 1 {
+			lines, err = self.completeReconcilePartition(ctx, start, nil, lines)
 			if ctx.Err() != nil {
 				return
 			}
 			if err != nil {
-				self.recordReconcile(fmt.Errorf("block %s overlap: %w", block, err))
+				self.recordReconcile(err)
 				return
 			}
-			blockLines := parseReconcileLines(out)
-			if len(blockLines) >= logReconcileLimit {
-				self.recordReconcile(fmt.Errorf(
-					"bounded overlap reached the %d-line limit for %s block %s; late-entry coverage is incomplete",
-					logReconcileLimit,
-					self.service,
-					block,
-				))
-				return
+		} else {
+			lines = nil
+			for _, block := range self.blocks {
+				blockPartition := []string{block}
+				out, err := self.reconcile(ctx, start, blockPartition)
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					self.recordReconcile(fmt.Errorf("block %s overlap: %w", block, err))
+					return
+				}
+				blockLines, err := self.completeReconcilePartition(
+					ctx,
+					start,
+					blockPartition,
+					parseReconcileLines(out),
+				)
+				if ctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					self.recordReconcile(err)
+					return
+				}
+				lines = append(lines, blockLines...)
 			}
-			lines = append(lines, blockLines...)
 		}
 	}
 
@@ -1197,15 +1299,16 @@ func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, 
 			service,
 		),
 		baseline: fmt.Sprintf(
-			"a bounded %s overlap succeeds below %d lines per query every %s, partitioning the same absolute window by configured block when the aggregate reaches the cap",
+			"a bounded %s overlap completes every %s: aggregate below %d lines, or configured block partitions continued from inclusive source-time boundaries for at most %d pages each",
 			logReconcileLookback,
-			logReconcileLimit,
 			logReconcileInterval,
+			logReconcileLimit,
+			logReconcileMaxPages,
 		),
 		observed:  observed,
 		mechanism: "Loki accepts out-of-order records, but a WebSocket tail advances by source timestamp. Without a successful overlapping query, a late-ingested record older than that cursor can remain absent even while the tail process is connected and reading newer lines.",
-		action:    "Restore bounded warpctl/Loki query visibility. If only the aggregate reaches the cap, provide the active services.yml block inventory and retain per-block fallback; if one block alone reaches the cap, diagnose that block's log burst before changing query limits. Keep the live tail running; do not interpret missing reconciliation as a healthy error window.",
-		verify:    "Two consecutive overlap windows complete below the cap in aggregate or in every configured block partition, and the standing monitor remains free of tailer-reconcile visibility alerts.",
+		action:    "Restore bounded warpctl/Loki query visibility. Retain active services.yml block partitioning and inclusive boundary continuation. If one boundary cannot advance or a partition consumes the eight-page budget, diagnose and remove the high-cardinality log producer before changing query limits. Keep the live tail running; do not interpret missing reconciliation as a healthy error window.",
+		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation, and the standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
 		playbook:  "SIGNALS.md 1.5",
 	}
 }

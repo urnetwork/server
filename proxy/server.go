@@ -753,16 +753,27 @@ func (self *wgServer) logClientCounts(op string, applied int, removed int, count
 	)
 }
 
-// logAppliedClients logs one line per client whose wg peer config was just
-// applied to the device, keyed by client ipv4. This is the authoritative signal
-// that a peer is installed: if a client cannot connect and its ipv4 never
-// appears here, the problem is upstream (not delivered/validated/installed); if
-// it does appear, the peer exists and the problem is the transport (e.g. UDP
-// DNAT/SNAT to the wg port) or the handshake.
-func (self *wgServer) logAppliedClients(op string, applied map[netip.Addr]*proxy.WgClient) {
-	for addr, client := range applied {
-		glog.Infof("[wg]%s peer installed client_ipv4=%s public_key=%s\n", op, addr, client.PublicKey)
+// logAppliedClientDetails retains the per-client diagnostic at V(1) without
+// making a full peer-table synchronization emit tens of thousands of default
+// info lines. The terminal logClientCounts summary and wgPeersGauge remain the
+// default authoritative fleet signals; an operator can temporarily enable V(1)
+// when one client's installation path needs exact attribution.
+func logAppliedClientDetails(
+	op string,
+	applied map[netip.Addr]*proxy.WgClient,
+	enabled bool,
+	logf func(format string, args ...any),
+) {
+	if !enabled {
+		return
 	}
+	for addr, client := range applied {
+		logf("[wg]%s peer installed client_ipv4=%s public_key=%s\n", op, addr, client.PublicKey)
+	}
+}
+
+func (self *wgServer) logAppliedClients(op string, applied map[netip.Addr]*proxy.WgClient) {
+	logAppliedClientDetails(op, applied, bool(glog.V(1)), glog.Infof)
 }
 
 func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error {

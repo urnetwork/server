@@ -834,6 +834,10 @@ func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
 // dropped here. This callback belongs to one DeviceLocal, so waiting on the
 // fixed process queue propagates bounded backpressure only into that device;
 // cancellation or an attachment change still releases it immediately.
+func observeElapsedSeconds(start time.Time, now func() time.Time, observe func(float64)) {
+	observe(now().Sub(start).Seconds())
+}
+
 func (self *ProxyDevice) deliverWireGuardReturn(receive chan []byte, receiveNotify chan struct{}, packet []byte) bool {
 	sharedPacket := connect.MessagePoolShareReadOnly(packet)
 	select {
@@ -850,7 +854,9 @@ func (self *ProxyDevice) deliverWireGuardReturn(receive chan []byte, receiveNoti
 	}
 	backpressureStart := time.Now()
 	proxyWireGuardReturnBackpressureCounter.Inc()
-	defer proxyWireGuardReturnBackpressureDuration.Observe(time.Since(backpressureStart).Seconds())
+	defer func() {
+		observeElapsedSeconds(backpressureStart, time.Now, proxyWireGuardReturnBackpressureDuration.Observe)
+	}()
 	if self.receiveBackpressureForTest != nil {
 		self.receiveBackpressureForTest()
 	}

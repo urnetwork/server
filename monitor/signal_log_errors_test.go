@@ -33,6 +33,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"cluster down", "CLUSTERDOWN Hash slot not served", "clusterdown"},
 		{"oom writes", "OOM command not allowed when used memory > maxmemory", "oom-writes"},
 		{"Loki tail backend EOF", `level=error caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`, "loki-tail-backend-eof"},
+		{"Loki tail dropped streams", `level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`, "loki-tail-dropped-streams"},
 		{"connection reset", "read: connection reset by peer", "conn-reset"},
 		{"redis loading", "LOADING Redis is loading the dataset in memory", "redis-loading"},
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
@@ -74,6 +75,37 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
+	line := `[edge-0][grafana][g1][cid:test][2026-08-31T21:09:30.100000Z]level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-grafana", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "loki-tail-dropped-streams").Markdown()
+	for _, detail := range []string{
+		"bounded queue overflowed",
+		"records were omitted from the WebSocket stream",
+		"19,995 per-peer WireGuard installation info lines",
+		"18,165 reset lines",
+		"affirmative loss of live-tail contents",
+		"not 19,995 distinct peer-installation failures",
+		"moves per-client peer-installation details to V(1)",
+		"Do not raise Loki tail queues",
+		"one aggregate sync summary",
+		"loki-tail-dropped-streams remains zero for 10 minutes",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("Loki dropped-stream alert missing %q:\n%s", detail, markdown)
+		}
 	}
 }
 
