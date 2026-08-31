@@ -847,6 +847,19 @@ complete `http: response.WriteHeader ... from <source>` suffix, with a
 deterministic markdown assertion for
 `router.(*Router).ServeHTTP.func1.1 (router.go:104)`.
 
+The `2026.8.31-outerwerld+1033803620` Connect rollout then supplied the
+deployment boundary. At `23:02Z`, `warpctl ls versions --sample` reported that
+build on all 20 blocks in each of beta and g1-g4 (100 total). Fresh bounded
+30-minute Connect queries returned zero `[redis][ttl]` and zero
+`redis-ttl-suspect`, independently confirming the stream-TTL writer fix in
+that image. The same fleet still emitted eight canonical
+`http-hijack-write` lines in the latest ten minutes, including four between
+`23:00:50Z` and `23:01:39Z`, all from the known Router recovery frame. Commit
+`02f4d29a` was made after this image was built, so the result does not regress
+the TTL fix: it proves that one newer Connect image is still required for the
+separate post-Hijack recovery fix. Re-deploying `1033803620` cannot clear that
+class.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)
@@ -3075,6 +3088,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The incident's exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline closing valid idle HTTP/2/gRPC streams, not the 256-session ceiling. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Deploy a Grafana image containing Warp `1e95aef` (no TCP read deadline, 30-second keepalive, bounded writes; UDP idle timeout retained). Require zero recurring `loki-tail-backend-eof` for ten minutes with stable tails and healthy bounded reconciliation. Do not raise tail/ring limits or restart the same image. See §1.5. |
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail queue overflowed before its internal gRPC send. Loki 3.7.3 then discards the accompanying `resp.DroppedStreams` in the querier, so the Grafana log is an observation point, not affected-service attribution. The 2026-08-31 control paired 18,165 resets/min with 19,995 per-peer Proxy lines; resets also accompanied the recurring ring-deadline EOF. | Deploy Grafana with Warp `1e95aef` and verbosity-gate the Proxy producer. Reconcile every service window; do not raise queues, suppress the reset, or claim Grafana was the affected selector. Require zero `loki-tail-dropped-streams` through a full sync. See §1.5. |
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | The later querier-to-WebSocket response channel overflowed for the named standing tail. Warpctl received API `dropped_entries`; unlike the earlier ingester reset, this evidence is service-attributed. | Run Warpctl with Warp `26089b2`, retain bounded reconciliation for the named service, and remove its producer/consumer stall. Never print the dropped labels or timestamps. Require zero `loki-tail-dropped-entries` for ten minutes through the triggering load. See §1.5. |
+| `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 logs whenever a store-gateway's local bucket index is older than the querier's requested version. The live fleet's exact `diff=-873` was one normal generation of independent 15-minute phase skew, not a query failure. `mimir-bucket-index-lag` matches only magnitude >=1,800 seconds, where at least one additional sync interval is missing. | Use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
 | `http: response.WriteHeader on hijacked connection ... router.(*Router).ServeHTTP` | Router recovery attempted an HTTP 500 after the Connect handler transferred its H1 socket to Gorilla. In the 2026-08-31 control, 131 canonical warnings with zero `[h]unhandled` records proved the expected-Done branch fell through to `http.Error`; the rejected response is teardown log amplification, not proof of a failed active transport. | Deploy the router fix that returns immediately for `server.IsDoneError`, then require zero `http-hijack-write` lines for ten minutes of normal H1 teardown. Do not suppress net/http logging globally. A warning paired with `[h]unhandled error from route` instead requires fixing that unexpected route panic. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
@@ -4421,6 +4435,8 @@ Tier-1 (warn):
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; observation service is not selector attribution | any |
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe Warpctl summary from a non-empty HTTP tail `dropped_entries` response | any |
+| mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
+| mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by transactional-email templates through the public CDN and exact `main-web` origin Host on each enabled edge | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
@@ -5860,6 +5876,101 @@ add a DNAT target for an unready process and do not restart the same invalid
 image. Correct the alert interval, pass the scheduler-grid test, publish a new
 Grafana image, and require three pinned HTTP 200 responses on every edge plus a
 bounded `warpctl logs` query across multiple DNS rotations.
+
+### 11.18 Mimir bucket-index and store-gateway freshness
+
+Probe: `mimir-index`
+
+Grafana's parent, front proxy, and `/api/health` can all stay green while one
+bundled Mimir child has stopped discovering blocks. Query success through a
+sibling also cannot prove that every store-gateway owns a current view. This
+probe enumerates loopback listeners on every active services host, identifies
+Mimir through `/api/v1/status/buildinfo`, and reads the exact child's
+`/metrics`; it does not trust a parent PID or a rotating public route.
+
+The relevant Mimir loops are deliberately independent. Store-gateways refresh
+their block view every 15 minutes with 20% jitter. The compactor cleanup loop
+writes the per-tenant bucket index every 15 minutes with 10% jitter. A querier
+passes its most recently discovered index `updated_at` to a store-gateway in
+gRPC metadata, and Mimir 3.1.1 defers the comparison until that RPC returns.
+Therefore `ours < requested` is not itself a failed query. One process can
+legitimately be exactly one generation behind another while both loops are
+healthy.
+
+The metric probe applies Mimir's operational freshness bands rather than
+alerting on any difference:
+
+- `cortex_bucket_stores_blocks_last_successful_sync_timestamp_seconds` must
+  be no more than 30 minutes old on every established child.
+- `cortex_bucket_stores_tenants_discovered` must equal
+  `cortex_bucket_stores_tenants_synced` on every ready child.
+- the fleet maximum of
+  `cortex_bucket_index_last_successful_update_timestamp_seconds` for every
+  privacy-safe tenant identity must be no more than 35 minutes old. A newly
+  started child gets the matching startup grace, but an established fleet
+  with discovered tenants and no writer metric is broken.
+- a timestamp more than 30 seconds in the future is clock skew, not
+  freshness. Missing/unreadable child metrics are explicit observation
+  failures rather than zero values.
+
+The 30- and 35-minute bands cover two nominal 15-minute updates plus the
+documented buffer. They remain below the querier's default one-hour
+`max_stale_period`, after which Mimir fails a query rather than silently using
+an arbitrarily stale index. Do not increase that period to turn a stopped
+writer into a green dashboard.
+
+The 2026-08-31 production audit separated normal phase skew from a real
+incident. Grafana embeds Mimir 3.1.1. A bounded 30-minute query contained 410
+actual `bucket.go` warnings (plus four harmless Grafana query-echo records),
+and every actual warning had exactly `diff=-873`. Counts by observation host
+were edge-0 7, edge-1 187, edge-3 63, edge-4 56, Crisp 47, and Fireside 54.
+Every `ours`/`requested` pair was exactly one successive index generation, and
+the generations themselves advanced every 873 seconds.
+
+An independent direct-metrics control at `2026-08-31T22:55:26Z` excluded the
+known-offline edge-5 and checked all six active Grafana hosts. Every child
+reported Mimir 3.1.1, one discovered and one synced tenant, zero compactor
+cleanup failures, and a last successful gateway sync less than 14 minutes
+old. The current compactor owner's bucket index was about 803 seconds old.
+Gateway Series RPCs were succeeding across the fleet; a single cumulative
+historical `Unknown` on edge-1 among 9,138 successful calls had no matching
+current error. Separate two-hour queries contained zero `err-mimir-*` and
+zero Grafana `status_code=5` records. The `-873` warning is consequently
+healthy cache phase skew, not a stopped compactor or failed query.
+
+The implementation control exercised the embedded remote shell, not only its
+Go parser: a production-shaped fixture with unlabelled gateway gauges failed
+the draft `{label=...}`-only filter and now guards both labelled and
+unlabelled Prometheus forms. A focused production CLI run at `23:07:54Z`
+queried all six active services hosts, skipped operator-disabled edge-5, and
+returned no Mimir alert. Monitor v162 (binary SHA-256
+`515dc4182be11a088415ac6bf3f85593495b6a261ac751140181f7a075814855`)
+became the sole standing watcher at `23:10:56Z` after its first full cadence
+retained all service tails and emitted no `mimir-*`, `cannot-observe`,
+`tailer-silent`, `tailer-restarting`, or `tailer-reconcile` finding. The
+predecessor watcher then exited cleanly. Observation loss also has a dedicated
+synthetic invariant: it cannot invent or resolve the shared writer aggregate
+when the possible compactor owner is unreadable.
+
+The standing `mimir-bucket-index-lag` log class deliberately ignores that
+one-generation control. It alerts only when `diff <= -1800`, retains the exact
+host and generation as its frame, and preserves `ours`, `requested`, and
+`diff` in evidence. A warning at that distance means two nominal writer
+generations or one complete additional gateway-sync interval have separated
+the views. Correlate it with `mimir-store-gateway-stale`,
+`mimir-store-gateway-tenants`, `mimir-bucket-index-stale`, and
+`err-mimir-store-consistency-check-failed` before assigning cause.
+
+Mimir 3.2 replaces this 3.1 warning with a version-difference histogram; every
+3.1 patch release retains the warning. A feature upgrade may improve
+observability later, but it is not remediation for a healthy `-873` line.
+For a real alert, inspect only the framed replica first: object-store reads,
+ring ownership, bucket synchronization, and tenant loading. For a stale shared
+writer, find the current compactor owner and its cleanup/object-store errors.
+Never restart all replicas together, suppress all bucket warnings, or raise
+the staleness tolerance. Verification requires two successful 15-minute
+cadences, every gateway below 30 minutes, the writer below 35 minutes, complete
+tenant coverage, and zero multi-generation warning or consistency error.
 
 ---
 

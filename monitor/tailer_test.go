@@ -104,6 +104,42 @@ func TestGrafanaQueryEchoCannotCreateLogAlerts(t *testing.T) {
 	}
 }
 
+func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
+	const normal = `[by-us-fmt-5-edge-1][grafana][g1][cid:normal][2026-08-31T22:42:00Z]level=warn ts=2026-08-31T22:42:00Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T22:12:17Z requested=2026-08-31T22:26:50Z diff=-873 msg="bucket index version (updated_at) is older than requested"`
+	const belowThreshold = `[by-us-fmt-5-edge-1][grafana][g1][cid:below][2026-08-31T22:42:01Z]level=warn ts=2026-08-31T22:42:01Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T21:56:51Z requested=2026-08-31T22:26:50Z diff=-1799 msg="bucket index version (updated_at) is older than requested"`
+	tailer := newLogTailer("grafana", nil)
+	tailer.classify(normal)
+	tailer.classify(belowThreshold)
+	if finding := findingByClass(t, tailer.drainWindow(), "mimir-bucket-index-lag"); !finding.healthy {
+		t.Fatalf("sub-threshold Mimir phase skew alerted: %+v", finding)
+	}
+
+	const stale = `[by-us-fmt-5-edge-3][grafana][g4][cid:stale][2026-08-31T22:43:00Z]level=warn ts=2026-08-31T22:43:00Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T21:56:50Z requested=2026-08-31T22:26:50Z diff=-1800 msg="bucket index version (updated_at) is older than requested"`
+	tailer.classify(stale)
+	finding := findingByClass(t, tailer.drainWindow(), "mimir-bucket-index-lag")
+	if finding.healthy {
+		t.Fatal("multi-generation Mimir bucket-index lag did not alert")
+	}
+	for _, want := range []string{
+		"host=by-us-fmt-5-edge-3 generation=g4",
+		"ours=2026-08-31T21:56:50Z",
+		"requested=2026-08-31T22:26:50Z",
+		"diff=-1800",
+		"production control's exact -873-second gap",
+		"not by itself a failed query",
+		"Do not suppress every bucket warning",
+		"no >=1,800-second warning",
+	} {
+		alert := alertFromFinding(
+			SignalSettings{Environment: "synthetic", Now: time.Now},
+			"1.5", "log-errors", "Log error-class rates", finding,
+		)
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("Mimir lag alert lacks %q: %+v", want, finding)
+		}
+	}
+}
+
 func TestNetEscrowAlertRetainsSiteAndRedactsEntityIDs(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
 	tailer.classify("[netescrow]negative counter after settle: balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-21434368")

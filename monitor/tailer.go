@@ -160,6 +160,20 @@ var logClasses = []logClass{
 		action:    "Run the monitor with Warpctl containing Warp commit 26089b2, retain bounded reconciliation, and remove the producer or consumer stall that blocked the named service tail. Do not print dropped labels, raise response queues, or suppress the summary.",
 		verify:    "The named service tail stays connected, two consecutive overlap reconciliations complete, and no direct loki-tail-dropped-entries summary appears for 10 minutes through the workload that triggered the loss.",
 	},
+	// Mimir 3.1 logs any store-gateway bucket-index version behind the
+	// querier's requested version as a warning. The live fleet's independent
+	// jittered 15-minute loops produce an exact, harmless -873-second
+	// one-generation gap. Match only gaps of 30 minutes or more so the expected
+	// phase skew remains visible in metrics without becoming a log incident.
+	{name: "mimir-bucket-index-lag", re: regexp.MustCompile(`caller=bucket\.go:[0-9]+\b.*\bdiff=-(?:1[89][0-9]{2}|[2-9][0-9]{3}|[1-9][0-9]{4,})\b.*\bmsg="bucket index version \(updated_at\) is older than requested"`),
+		sample: mimirBucketIndexLagLogSample, groupBy: mimirBucketIndexLagLogGroup,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §11.18",
+		meaning:   "a Mimir store-gateway answered with a local bucket index at least 30 minutes older than the version requested by its querier",
+		mechanism: "The querier sends its most recently discovered bucket-index update time to each store-gateway. A gateway compares that request metadata with its local index. Independent jittered 15-minute discovery loops can leave one gateway one generation behind; the production control's exact -873-second gap was that normal phase skew. A gap of at least 1,800 seconds crosses two nominal generations or one full additional sync interval and can indicate a missed gateway sync.",
+		context:   "This warning is emitted after the gateway receives the RPC and is not by itself a failed query. Correlate the exact host with the mimir-index gateway freshness and tenant-coverage findings plus err-mimir-store-consistency-check-failed. Mimir 3.2 replaces this noisy 3.1 warning with a histogram, but a feature upgrade solely to hide the line is not a root-cause fix.",
+		action:    "Run the §11.18 mimir-index probe, then inspect the framed host/generation for store-gateway sync, object-store, and ring errors. Restore periodic sync or tenant coverage. Do not suppress every bucket warning, increase max_stale_period, or restart all replicas together.",
+		verify:    "For two 15-minute discovery cadences, every gateway's last successful sync remains under 30 minutes old, discovered tenants equal synced tenants, the shared bucket index remains under 35 minutes old, and no >=1,800-second warning or Mimir consistency error recurs.",
+	},
 	{name: "conn-reset", re: regexp.MustCompile(`connection reset by peer|unexpected EOF`),
 		rateThreshold: 50, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "server closed the conn (buffer-limit kill, maxmemory-clients eviction, restart); retried in-client"},
@@ -443,6 +457,34 @@ func httpHijackWriteLogSample(line string) string {
 		return truncateLine(line)
 	}
 	return truncateLinePreservingSuffix(line, line[markerIndex:])
+}
+
+var mimirBucketIndexLagSampleRe = regexp.MustCompile(`caller=bucket\.go:[0-9]+\b.*?\bours=[^[:space:]]+[[:space:]]+requested=[^[:space:]]+[[:space:]]+diff=-[0-9]+[[:space:]]+msg="bucket index version \(updated_at\) is older than requested"`)
+
+// mimirBucketIndexLagLogGroup retains the exact replica identity whose local
+// cache lagged. The raw tenant remains deliberately absent; this deployment
+// uses anonymous today, but the alert identity must stay privacy-safe if that
+// changes.
+func mimirBucketIndexLagLogGroup(line string) string {
+	identity := parseWarpLogIdentity(line)
+	parts := []string{}
+	if identity.host != "" {
+		parts = append(parts, "host="+identity.host)
+	}
+	if identity.generation != "" {
+		parts = append(parts, "generation="+identity.generation)
+	}
+	return strings.Join(parts, " ")
+}
+
+// mimirBucketIndexLagLogSample preserves the two versions and their exact
+// difference even when the warp identity and timestamps consume the generic
+// sample budget.
+func mimirBucketIndexLagLogSample(line string) string {
+	if sample := mimirBucketIndexLagSampleRe.FindString(line); sample != "" {
+		return truncateLine(sample)
+	}
+	return truncateLinePreservingSuffix(line, "bucket index version (updated_at) is older than requested")
 }
 
 // isGrafanaQueryEcho identifies query-engine metadata that repeats the query
