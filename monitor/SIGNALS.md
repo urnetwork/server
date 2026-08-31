@@ -6022,10 +6022,17 @@ restores clients and drains. Treat a deploy as an explicit host-memory budget:
   physical RAM. With a full-overlap guard this remains a hardware/operational
   warning rather than an incident prediction: serialized replacement can be
   safe even though a second complete fleet cannot fit.
+- WARN when adjacent same-boot samples show at least 100 new
+  `Udp.RcvbufErrors` per minute. PAGE immediately at 10,000/minute or when at
+  least 1% of delivered-plus-dropped UDP datagrams in the interval were lost
+  to full receive buffers. Record `InDatagrams` alongside the error counter so
+  the ratio is explicit. The first sample, boot-id change, counter regression,
+  and a sub-30-second manual rerun are warmups rather than zero-length rate
+  windows.
 - Record proxy process count, aggregate/largest RSS, block-unit count, swap,
-  cgroup `memory.max` coverage, and `UdpRcvbufErrors`. The UDP counter is
-  cumulative since boot: use its incident-window delta as corroboration, never
-  as proof of a current failure from one old nonzero value.
+  cgroup `memory.max` coverage, and the adjacent UDP counters. Both UDP
+  counters are cumulative since boot: only a same-boot delta proves live loss;
+  one old nonzero value is historical evidence, not a current incident.
 
 **Non-software remediation requirements by alert class:** a software release
 may prevent recurrence, but these classes must not be closed until the required
@@ -6061,6 +6068,16 @@ operator action or physical-capacity change has been completed and verified.
   Warp executable used by the units, install the full-overlap build if needed,
   and restart every worker until the probe observes `full-overlap`. Do not use
   a full proxy rollout as the discovery test.
+- `proxy-udp-receive-drops` proves live host-kernel loss but is host-wide, not
+  socket attribution. **Operator action required:** stop launching candidates,
+  preserve the exact interval, and map the loss to process overlap, memory,
+  CPU scheduling, and `ss -u -m -p` socket queues. **Software required when a
+  steady-capacity receive loop is slow:** fix the owning reader or its bounded
+  buffering. **Hardware required when a safe steady fleet is already at its
+  CPU/RAM/client ceiling:** add proxy instances and capable hosts. Enlarging a
+  buffer can absorb a burst but cannot create CPU or RAM; restarting WireGuard
+  or reinstalling peers cannot recover a datagram already discarded below
+  authentication.
 
 There is also a separate steady-state service ceiling: each proxy process can
 serve only a bounded number of active clients (including the WireGuard peer
@@ -6102,6 +6119,14 @@ advanced during a later five-second idle control. The large Fireside delta is
 consistent with receive starvation during the OOM window, while the exact
 kernel kill and 19/10 process overlap remain the causal evidence.
 
+A later sample found Fireside's boot counter at 177,762 and Crisp's at 34, but
+another paired ten-second control advanced neither counter. This demonstrates
+why magnitude alone is not a live signal: an unknown-length cumulative change
+cannot identify its interval, while an adjacent same-boot delta can. The probe
+therefore retains process-local prior counters keyed by host and boot id,
+normalizes the delta by elapsed time, and reports the whole-host drop ratio
+without claiming which UDP socket owned it.
+
 The immediate root-cause fix is host-aware bounded deployment concurrency.
 Warp commit `7e2075c` moves the existing service-scoped host lease before
 candidate start, holds it through synchronous old-container drain, and refuses
@@ -6134,8 +6159,9 @@ HTTP/SOCKS acceptance request must complete. Implementation convention:
 SIGNALS.md §14.7 (`proxy-memory`) maps to `signal_proxy_memory.go` and
 `signal_proxy_memory_test.go`. Synthetic cases preserve the 19-process/ten-unit
 OOM, live unsafe overlap, steady Fireside headroom deficit, Crisp-sized healthy
-headroom, legacy/disabled/unverified rollout guards, and a configured non-proxy
-host that must be skipped.
+headroom, legacy/disabled/unverified rollout guards, live UDP receive drops,
+first-sample/reboot/small-delta warmups, and a configured non-proxy host that
+must be skipped.
 
 ---
 

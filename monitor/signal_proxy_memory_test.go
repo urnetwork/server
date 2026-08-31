@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProxyMemorySignalSyntheticGlobalOOM(t *testing.T) {
@@ -119,6 +120,105 @@ func TestProxyMemorySignalSyntheticHealthyHost(t *testing.T) {
 	}
 	if len(alerts) != 0 {
 		t.Fatalf("healthy proxy host alerted: %+v", alerts)
+	}
+}
+
+func TestProxyMemorySignalSyntheticLiveUDPReceiveDrops(t *testing.T) {
+	now := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	call := 0
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		if !strings.Contains(command, proxyMemoryMarker) {
+			return "", errors.New("unexpected synthetic host command")
+		}
+		call++
+		sample := proxyMemoryDeltaFixtureSample()
+		sample.udpInDatagrams = 1_000_000
+		sample.udpRcvbufErrors = 25
+		if call > 1 {
+			sample.udpInDatagrams += 10_000
+			sample.udpRcvbufErrors += 250
+		}
+		return proxyMemoryFixture(sample), nil
+	}}
+	settings := proxyMemorySyntheticSettings(source)
+	settings.Now = func() time.Time { return now }
+	signal := NewProxyMemorySignal()
+
+	alerts, err := signal.Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("first cumulative UDP sample alerted: %+v", alerts)
+	}
+
+	now = now.Add(time.Minute)
+	alerts, err = signal.Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("live UDP delta alerts = %d, want 1: %+v", len(alerts), alerts)
+	}
+	drops := requireAlertClass(t, alerts, "proxy-udp-receive-drops")
+	if drops.Severity != SeverityPage {
+		t.Fatalf("material UDP drop severity = %q, want page", drops.Severity)
+	}
+	for _, want := range []string{
+		"dropped 250 UDP datagrams",
+		"udp_in_datagrams_delta=10000",
+		"udp_rcvbuf_errors_delta=250",
+		"udp_rcvbuf_errors_rate_per_min=250.00",
+		"udp_receive_drop_ratio_pct=",
+		"host-wide loss below WireGuard authentication",
+		"Do not restart WireGuard",
+		"additional proxy hardware",
+		"at least ten minutes",
+	} {
+		if !strings.Contains(drops.Markdown(), want) {
+			t.Fatalf("UDP receive-drop alert missing %q:\n%s", want, drops.Markdown())
+		}
+	}
+}
+
+func TestProxyMemorySignalSyntheticUDPRebootAndSmallDeltaAreWarm(t *testing.T) {
+	now := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	call := 0
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		if !strings.Contains(command, proxyMemoryMarker) {
+			return "", errors.New("unexpected synthetic host command")
+		}
+		call++
+		sample := proxyMemoryDeltaFixtureSample()
+		switch call {
+		case 1:
+			sample.bootID = "boot-before-reboot"
+			sample.udpInDatagrams = 5_000_000
+			sample.udpRcvbufErrors = 120_000
+		case 2:
+			sample.bootID = "boot-after-reboot"
+			sample.udpInDatagrams = 1_000
+			sample.udpRcvbufErrors = 0
+		default:
+			sample.bootID = "boot-after-reboot"
+			sample.udpInDatagrams = 101_000
+			sample.udpRcvbufErrors = 9
+		}
+		return proxyMemoryFixture(sample), nil
+	}}
+	settings := proxyMemorySyntheticSettings(source)
+	settings.Now = func() time.Time { return now }
+	signal := NewProxyMemorySignal()
+
+	for i := 0; i < 3; i++ {
+		alerts, err := signal.Run(context.Background(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(alerts) != 0 {
+			t.Fatalf("sample %d produced reboot/small-delta false positive: %+v", i+1, alerts)
+		}
+		now = now.Add(time.Minute)
 	}
 }
 
@@ -245,11 +345,31 @@ func proxyMemorySyntheticSettings(source SignalSource) SignalSettings {
 	return settings
 }
 
+func proxyMemoryDeltaFixtureSample() proxyMemorySample {
+	return proxyMemorySample{
+		bootID:               "same-boot",
+		warpctlRolloutGuard:  proxyRolloutGuardFull,
+		memTotalKiB:          128 * 1024 * 1024,
+		memAvailableKiB:      80 * 1024 * 1024,
+		swapTotalKiB:         8 * 1024 * 1024,
+		swapFreeKiB:          8 * 1024 * 1024,
+		runningUnits:         10,
+		proxyProcesses:       10,
+		proxyRSSKiB:          50 * 1024 * 1024,
+		proxyMaxRSSKiB:       5 * 1024 * 1024,
+		proxyMemoryUnbounded: 10,
+	}
+}
+
 func proxyMemoryFixture(sample proxyMemorySample) string {
+	if sample.bootID == "" {
+		sample.bootID = "synthetic-boot"
+	}
 	if sample.warpctlRolloutGuard == "" {
 		sample.warpctlRolloutGuard = proxyRolloutGuardFull
 	}
 	return fmt.Sprintf(`proxy_host 1
+boot_id %s
 warpctl_rollout_guard %s
 mem_total_kib %d
 mem_available_kib %d
@@ -262,14 +382,15 @@ proxy_max_rss_kib %d
 proxy_memory_bounded %d
 proxy_memory_unbounded %d
 proxy_memory_unknown %d
+udp_in_datagrams %d
 udp_rcvbuf_errors %d
 kernel_journal_status %d
 recent_proxy_oom_kills %d
 oom_proxy_processes %d
 oom_line %s
-`, sample.warpctlRolloutGuard, sample.memTotalKiB, sample.memAvailableKiB, sample.swapTotalKiB, sample.swapFreeKiB,
+`, sample.bootID, sample.warpctlRolloutGuard, sample.memTotalKiB, sample.memAvailableKiB, sample.swapTotalKiB, sample.swapFreeKiB,
 		sample.runningUnits, sample.proxyProcesses, sample.proxyRSSKiB, sample.proxyMaxRSSKiB,
 		sample.proxyMemoryBounded, sample.proxyMemoryUnbounded, sample.proxyMemoryUnknown,
-		sample.udpRcvbufErrors, sample.kernelJournalStatus, sample.recentProxyOOMKills,
+		sample.udpInDatagrams, sample.udpRcvbufErrors, sample.kernelJournalStatus, sample.recentProxyOOMKills,
 		sample.oomProxyProcesses, sample.oomLine)
 }
