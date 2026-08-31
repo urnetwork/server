@@ -7907,6 +7907,14 @@ showed nginx `open()` failures for current email-template paths. The files were
 present in the source/build asset tree and current image contents, ruling out a
 missing-artifact build as the immediate cause.
 
+The focused signal's first live run at 2026-08-31 20:13:31Z completed 54
+application checks: six public-CDN requests plus four enabled edges × two exact
+IPv6 interfaces × six origin requests. Every check connected, returned HTTP
+404 `text/html`, and downloaded the same 146-byte body; none was a §18.1
+transport exclusion. This proves the failure is fleet-wide at the shared
+Host/path contract rather than DNS rotation, one stale edge, IPv6 routing, or
+the deliberately absent edge-5.
+
 Root cause: CloudFront deliberately sends origin requests with
 `Host: main-web.bringyour.com`, as recorded in the generated LB/CDN
 configuration. Web commit `dc8fd20c` retired legacy domains by narrowing the
@@ -7924,6 +7932,14 @@ asset through both the public and origin identities, requires a missing asset
 to remain 404, and confirms legacy page redirects. Deploy a web image containing
 that commit or later; API, Connect, taskworker, database, and Grafana deployments
 cannot repair this boundary.
+
+The standing watcher was promoted at 2026-08-31 20:13:29Z to binary v154,
+built from server commit `651d22b4` (SHA-256
+`da10b98233228e645d98f4f70ffa3d68bc47efff21f564e5f7f49608ea3d4148`).
+All eight configured Loki tails remained alive, the initial catalog pass
+emitted the 54/54 aggregate above, and the first one-minute log cadence emitted
+a current Grafana EOF finding without a visibility error. Only after those
+gates did v153 receive SIGTERM; v154 remained the sole standing watcher.
 
 This alert can cross from software into operations: exact-origin failures need
 the web image/config repair and full edge rollout; if every exact origin is
