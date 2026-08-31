@@ -119,6 +119,18 @@ var logClasses = []logClass{
 	{name: "pubsub-drops", re: regexp.MustCompile(`channel is full for .* \(message is dropped\)`),
 		rateThreshold: 10, tier: tierWarn, playbook: "SIGNALS.md 5.5",
 		meaning: "in-process consumer stall: the app is not draining go-redis's channel"},
+	// Loki's tail querier uses the same message for an expected client-driven
+	// context cancellation and for an internal backend transport loss. Match
+	// only the unquoted EOF form: a watcher shutdown can produce a large burst
+	// of quoted Canceled/context-canceled errors without losing a live stream.
+	{name: "loki-tail-backend-eof", re: regexp.MustCompile(`caller=tail\.go:[0-9]+\s+component=tail-querier\b.*\bmsg="Error receiving response from grpc tail client"\s+err=EOF(?:\s|$)`),
+		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "Loki's external WebSocket tail remained available while its querier lost an internal gRPC tail backend with EOF; entries assigned to that backend can be absent from the live stream",
+		mechanism: "The incident's exact 59-61-second recurrence came from Warp's Grafana ring TCP proxy applying a 60-second application read deadline to long-lived HTTP/2 and gRPC connections. A valid idle stream can carry no application bytes for longer than that, so the proxy closed a healthy backend connection and Loki reported EOF. Ring connection counts remained far below the independent 256-session ceiling.",
+		context:   "A quoted rpc Canceled/context-canceled error during explicit watcher retirement is a separate client lifecycle and this class deliberately excludes it. If EOF recurs on an image already containing the fix, preserve its cadence and exact route before attributing it to the old deadline. Bounded log reconciliation remains required for late source timestamps and the Search-to-LiveTail handoff even after this transport fix.",
+		action:    "Publish and deploy a Grafana image containing Warp commit 1e95aef, which removes TCP application read deadlines, enables 30-second TCP keepalives, retains bounded write deadlines, and leaves the UDP idle timeout intact. Do not raise Loki tail-request limits, raise the ring session cap, or restart the same image to hide EOFs.",
+		verify:    "Every Grafana block runs an image containing Warp commit 1e95aef; with stable standing tails, no loki-tail-backend-eof line recurs for 10 minutes, the external tails remain connected, and each bounded two-minute reconciliation completes below its result cap.",
+	},
 	{name: "conn-reset", re: regexp.MustCompile(`connection reset by peer|unexpected EOF`),
 		rateThreshold: 50, tier: tierWarn, playbook: "SIGNALS.md §4",
 		meaning: "server closed the conn (buffer-limit kill, maxmemory-clients eviction, restart); retried in-client"},

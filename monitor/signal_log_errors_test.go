@@ -32,6 +32,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"pool timeout", "redis: connection pool timeout", "pool-timeout"},
 		{"cluster down", "CLUSTERDOWN Hash slot not served", "clusterdown"},
 		{"oom writes", "OOM command not allowed when used memory > maxmemory", "oom-writes"},
+		{"Loki tail backend EOF", `level=error caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`, "loki-tail-backend-eof"},
 		{"connection reset", "read: connection reset by peer", "conn-reset"},
 		{"redis loading", "LOADING Redis is loading the dataset in memory", "redis-loading"},
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
@@ -73,6 +74,57 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
+	eofLine := `[edge-0][grafana][g1][cid:test][2026-08-31T19:20:51.247763Z]level=error ts=2026-08-31T19:20:51.244318653Z caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`
+	canceledLine := `[edge-1][grafana][g1][cid:test][2026-08-31T19:17:37.333774Z]level=error ts=2026-08-31T19:17:37.270771087Z caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err="rpc error: code = Canceled desc = context canceled"`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-grafana", nil
+		}
+		// Four EOFs are below the threshold. The expected watcher-retirement
+		// variant must not be counted as the fifth internal backend loss.
+		return strings.Repeat(eofLine+"\n", 4) + strings.Repeat(canceledLine+"\n", 20), nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "loki-tail-backend-eof" {
+			t.Fatalf("four EOFs plus client cancellations crossed the EOF threshold:\n%s", alert.Markdown())
+		}
+	}
+
+	source.localFn = func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-grafana", nil
+		}
+		return strings.Repeat(eofLine+"\n", 5), nil
+	}
+	alerts, err = NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "loki-tail-backend-eof").Markdown()
+	for _, detail := range []string{
+		"internal gRPC tail backend",
+		"59-61-second recurrence",
+		"60-second application read deadline",
+		"long-lived HTTP/2 and gRPC connections",
+		"far below the independent 256-session ceiling",
+		"Canceled/context-canceled",
+		"Bounded log reconciliation remains required",
+		"Warp commit 1e95aef",
+		"30-second TCP keepalives",
+		"Do not raise Loki tail-request limits",
+		"no loki-tail-backend-eof line recurs for 10 minutes",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("Loki tail backend EOF alert missing %q:\n%s", detail, markdown)
+		}
 	}
 }
 

@@ -308,10 +308,12 @@ Logs are a first-class signal (SIGNALS.md 1.5): the monitor tails ALL
 services AT ALL TIMES looking for error signatures. Unlike cadence probes,
 a tailer is a standing collector: one long-running `warpctl logs <env>
 <service> -f` per service, each line classified against the SIGNALS.md §4
-taxonomy as it arrives. Because Loki can ingest an older source timestamp
-behind an already-advanced WebSocket cursor, each tailer also runs a bounded
-two-minute range reconciliation every 45 seconds. Exact fingerprints make
-alert-relevant overlap idempotent; ordinary lines are not retained. Per
+taxonomy as it arrives. A connected external WebSocket is not a completeness
+proof: Loki can ingest an older source timestamp behind an already-advanced
+cursor, and an internal gRPC tail backend can fail while the external stream
+stays open. Each tailer therefore also runs a bounded two-minute range
+reconciliation every 45 seconds. Exact fingerprints make alert-relevant
+overlap idempotent; ordinary lines are not retained. Per
 minute, each tailer folds its counts into
 findings — (class, target ip:port, innermost frame) identity, rate, one
 sample line — through the same evaluator/ticket path as every other probe.
@@ -321,8 +323,11 @@ misses). Tailer self-health: a tailer that exits or goes silent while its
 service is running restarts with backoff and raises `monitor/visibility`
 if it cannot stay up. Failed, stale, or truncated reconciliation raises the
 independent `tailer-reconcile` visibility class, because a connected process
-does not prove complete contents. Escalation batteries pull incident windows
-non-interactively with `--since=<duration>` instead of tailing.
+does not prove complete contents. The separate `loki-tail-backend-eof` class
+matches only the internal tail-querier's unquoted EOF; client-driven
+`context canceled` during deliberate watcher retirement is excluded.
+Escalation batteries pull incident windows non-interactively with
+`--since=<duration>` instead of tailing.
 
 ## 4. Scheduler and load budget
 
@@ -509,8 +514,11 @@ probes; every other signal and host continues. Unknown host names fail closed.
    + novel-class detection, per-minute drain through a probe into the same
    ticket path; restart-with-backoff. A bounded two-minute reconciliation
    closes the late-ingestion timestamp-cursor gap and has independent
-   visibility health. Loop mode only (--no-tail to disable); not exercised by
-   --once.
+   visibility health. A later exact 60-second Loki backend-EOF cadence exposed
+   Warp's ring TCP application read deadline; the classifier now distinguishes
+   that internal EOF from expected client cancellation while reconciliation
+   continues to cover the independent cursor boundary. Loop mode only
+   (--no-tail to disable); not exercised by --once.
 7. **Deployment**: provision `monitor` user + vault/main/monitor.yml,
    deploy as a warp service in-LAN; webhook emitter for the diagnosing
    system.

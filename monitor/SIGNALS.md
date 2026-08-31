@@ -593,19 +593,22 @@ Grafana lines containing `[redis][ttl]`; after a full standing-tailer drain
 window, no Grafana TTL finding appeared. Real Redis residue and unrelated task
 and proxy findings remained visible in that same window.
 
-The 18:53Z payout recurrence then exposed a timestamp-cursor completeness gap
+The 18:53Z payout recurrence then exposed a standing-stream completeness gap
 that process health could not detect. An authoritative bounded query found the
 fifth canonical Circle 429 at `18:53:30.571865Z` by the following minute, but
 the standing taskworker stream never emitted either that event or its matching
 five-attempt wallet peak through repeated drains. The same stream consumed a
 newer `18:55:06Z` peak, and its `warpctl` child had remained alive without a
 restart since 13:35:48 local time. The process was healthy; its contents were
-incomplete. Warpctl first runs `Search`, then `LiveTail` initializes a new
-Loki `/tail` cursor at `time.Now()` and advances it to each emitted source
-timestamp. Loki accepts an entry ingested later with an older source timestamp,
-but that record is now behind the connected cursor and need not appear in the
-WebSocket stream. A reconnect from the last source timestamp has the same
-blind spot.
+incomplete. That missing event alone does not distinguish the late-timestamp
+cursor mechanism below from the internal tail-backend EOF mechanism found
+later. Both can leave a connected external WebSocket with incomplete contents.
+Warpctl first runs `Search`, then `LiveTail` initializes a new Loki `/tail`
+cursor at `time.Now()` and advances it to each emitted source timestamp. Loki
+accepts an entry ingested later with an older source timestamp, but that record
+is now behind the connected cursor and need not appear in the WebSocket stream.
+A reconnect from the last source timestamp has the same blind spot, so this
+remains an independent completeness risk after the transport fix.
 
 The standing collector now keeps the low-latency WebSocket and independently
 runs a bounded two-minute `warpctl logs` reconciliation every 45 seconds,
@@ -623,6 +626,46 @@ that sees two of four same-second wallet attempts and misses a canonical 429,
 recover the absent records from the bounded query exactly once, exclude
 pre-start history, preserve a live finding on query failure, and reject a
 cap-sized result as incomplete.
+
+An independent audit of Grafana's own low-rate errors then found a second,
+concrete transport gap. With the v151 watcher and all eight external tails
+stable, Loki repeatedly emitted
+`caller=tail.go:230 component=tail-querier ... msg="Error receiving response
+from grpc tail client" err=EOF`. Initial steady samples were 2–14/minute.
+Individual backend failures recurred on the proxy's exact idle grid: edge-1
+at `19:15:35.929Z` and `19:16:35.928Z`, edge-0 at `19:16:57.348Z` and
+`19:17:57.348Z`, another pair at `19:17:14.848Z` and `19:18:15.947Z`, and
+`19:20:51.247Z` to `19:21:51.847Z`. The 59–61-second cadence is not ordinary
+Loki query jitter.
+
+The root was Warp's Grafana ring TCP proxy. `warp/grafana/main.go` applied
+`ringIdleTimeout = 60s` through `SetReadDeadline(now+60s)` before every TCP
+read. Loki and Mimir use long-lived HTTP/2/gRPC connections that can validly
+carry no application bytes for longer than a minute, so the front closed a
+healthy backend stream and Loki surfaced EOF. This was not ring admission:
+the live Loki/Mimir established-session counts were only 74/24 on edge-0,
+61/24 on edge-1, 61/24 on edge-3, and 62/24 on edge-4, all well below
+`maxRingTcpSessions=256` even with both connection directions counted.
+
+Warp commit `1e95aef` removes the TCP application read deadline, enables TCP
+keepalive with a 30-second period on both accepted and backend sockets, retains
+the bounded write deadline, and keeps the independent UDP idle timeout. The
+deterministic `TestCopyRingTcpDoesNotExpireIdleGrpcStream` proves a valid idle
+stream receives no read deadline and still forwards its next payload;
+`TestEnableRingTcpKeepAliveDetectsDeadIdlePeers` proves keepalive is enabled.
+Focused race tests, the complete `grafana` package, and `go vet ./grafana`
+pass. A Grafana image containing this commit still must be deployed.
+
+The standing classifier reports only the unquoted internal EOF form as
+`loki-tail-backend-eof` at 5/minute. It deliberately excludes quoted gRPC
+`Canceled ... context canceled` lines: explicitly retiring the old v150
+watchers at `19:17:37Z` produced a large expected cancellation burst without
+proving a backend fault. After deployment, require every Grafana block to run
+the fixed image and ten minutes of stable external tails with zero recurring
+backend EOF. Do not raise Loki tail-request limits or the ring-session cap, and
+do not restart the same image. The bounded two-minute reconciliation remains
+required after this fix because late source timestamps and the Search-to-tail
+handoff are independent completeness boundaries.
 
 The first live reconciled watcher rejected the initial five-minute window
 rather than silently trusting it: both proxy and Grafana reached the
@@ -2848,6 +2891,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` | Grafana has the provisioned datasource row but cannot load that datasource's plugin. `/api/health`, Mimir `/ready`, and the UI can all stay green while every affected dashboard query and alert rule fails. | Query through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13.2, bake the signed standalone Prometheus plugin into the image as in §11.15; do not recreate a datasource row that already exists. |
+| `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The incident's exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline closing valid idle HTTP/2/gRPC streams, not the 256-session ceiling. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Deploy a Grafana image containing Warp `1e95aef` (no TCP read deadline, 30-second keepalive, bounded writes; UDP idle timeout retained). Require zero recurring `loki-tail-backend-eof` for ten minutes with stable tails and healthy bounded reconciliation. Do not raise tail/ring limits or restart the same image. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
@@ -4190,6 +4234,7 @@ Tier-1 (warn):
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
+| loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
