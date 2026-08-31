@@ -7852,6 +7852,16 @@ two files). Every check connected to its exact address and returned HTTP 404
 edge-5 was absent by construction. This rules out DNS rotation, CDN selection,
 one-edge skew, and IPv6 ingress as the cause of the missing documents.
 
+The standing watcher was promoted at 2026-08-31 19:53:43Z to binary v153,
+built from server commit `13158a8e` (SHA-256
+`a8fda17ecd18c1e8d62ce7b1bd04dc18a2b9a422de4a16dc5b9bf6074b578958`).
+It started all eight configured Loki tails, emitted the same 16/16 association
+finding on its first pass, and completed its first one-minute log drain with
+all tails still alive. That drain also caught the independently current
+Grafana backend-EOF and taskworker payout classes, proving the new static-site
+probe did not disrupt standing-log coverage. Only after this gate did v152
+receive SIGTERM; v153 remained the sole watcher.
+
 The software fix is mmm/ur.io commit `72190198`: a reusable staging script
 enumerates every `dist` directory entry, including dot directories, refuses to
 merge into stale output, and is exercised by a deterministic synthetic test
