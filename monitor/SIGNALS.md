@@ -372,6 +372,22 @@ WHERE function_name LIKE '%UpdateClient%'
   throttling even though several earlier four/five-per-second peaks did not;
   deploy `70b0d269` rather than treating the empirical burst threshold as a
   deterministic provider quota.
+
+  The unchanged deployment produced another independently bounded recurrence
+  from `20:29:56Z` through `20:35:31Z`. Across the eight active
+  host/generation allocations, 143 exact-replay-deduplicated task-evaluator
+  records represented wallet-insufficient attempts. Seven source seconds held
+  at least four attempts; the peak was five at `20:31:57Z`, and one canonical
+  processor 429 landed in that same second. The standing monitor independently
+  rendered that exact five-attempt UTC peak, one logical rate-limit event from
+  its two diagnostic lines, and the surrounding wallet retry rate. The durable
+  family stayed at 824 rows while its latest-error breakdown became 810
+  wallet-insufficient, eight processor-rate-limit, and six invalid-destination
+  rows. This is further direct evidence that
+  `2026.8.31-outerwerld+1033655820` still preserves the pre-fix retry wave; it
+  does not justify a different retry algorithm or treating the 429 as a broad
+  processor outage. Deploy a Taskworker artifact containing `70b0d269`, then
+  use the complete 90-minute observation gate already specified above.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains
