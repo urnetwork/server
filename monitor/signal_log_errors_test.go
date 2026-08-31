@@ -34,7 +34,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"oom writes", "OOM command not allowed when used memory > maxmemory", "oom-writes"},
 		{"Loki tail backend EOF", `level=error caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`, "loki-tail-backend-eof"},
 		{"Loki tail dropped streams", `level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`, "loki-tail-dropped-streams"},
-		{"Warpctl direct Loki tail loss", `[warpctl][loki-tail-dropped-entries] service=proxy count=2`, "loki-tail-dropped-streams"},
+		{"Warpctl direct Loki tail loss", `[warpctl][loki-tail-dropped-entries] service=proxy count=2`, "loki-tail-dropped-entries"},
 		{"connection reset", "read: connection reset by peer", "conn-reset"},
 		{"redis loading", "LOADING Redis is loading the dataset in memory", "redis-loading"},
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
@@ -93,22 +93,54 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "loki-tail-dropped-streams").Markdown()
 	for _, detail := range []string{
-		"bounded queue overflowed",
-		"records were omitted from the WebSocket stream",
-		"19,995 per-peer WireGuard installation info lines",
-		"18,165 reset lines",
-		"affirmative loss of live-tail contents",
+		"ingester-side Loki live tail",
+		"100-stream processing queue",
+		"five-stream send queue",
+		"omitted records before they reached the querier",
+		"19,995 per-peer installation lines",
+		"18,165 resets",
+		"affirmative internal live-tail loss",
+		"pushTailResponseFromIngester",
+		"discards resp.DroppedStreams",
+		"Grafana is the observation service",
 		"not 19,995 distinct peer-installation failures",
-		"decoded dropped_entries but silently discarded it",
-		"privacy-safe service/count summary",
-		"Warp commit 26089b2",
-		"moves per-client peer-installation details to V(1)",
-		"Do not raise Loki tail queues",
-		"one aggregate sync summary",
+		"Warp commit 1e95aef",
+		"Proxy verbosity gate",
+		"Do not raise Loki's fixed queues",
+		"one aggregate summary",
 		"loki-tail-dropped-streams remains zero for 10 minutes",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("Loki dropped-stream alert missing %q:\n%s", detail, markdown)
+		}
+	}
+}
+
+func TestLogErrorsSignalExplainsDirectLokiTailDroppedEntries(t *testing.T) {
+	line := `[warpctl][loki-tail-dropped-entries] service=proxy count=2`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-proxy", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "loki-tail-dropped-entries").Markdown()
+	for _, detail := range []string{
+		"querier-to-WebSocket response channel overflowed",
+		"buffers ten tail responses",
+		"decoded dropped_entries but silently discarded it",
+		"Warp commit 26089b2",
+		"exact affected-service attribution",
+		"privacy-safe",
+		"independent of the earlier ingester",
+		"two consecutive overlap reconciliations complete",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("direct Loki dropped-entry alert missing %q:\n%s", detail, markdown)
 		}
 	}
 }

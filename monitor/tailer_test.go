@@ -709,7 +709,7 @@ func TestStandingTailAttributesDirectDroppedEntriesToAffectedService(t *testing.
 	tailer := newLogTailer("proxy", nil)
 	tailer.classify(`[warpctl][loki-tail-dropped-entries] service=proxy count=2`)
 
-	finding := findingByClass(t, tailer.drainWindow(), "loki-tail-dropped-streams")
+	finding := findingByClass(t, tailer.drainWindow(), "loki-tail-dropped-entries")
 	if finding.healthy {
 		t.Fatal("direct dropped_entries response was classified healthy")
 	}

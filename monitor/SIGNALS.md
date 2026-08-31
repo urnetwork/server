@@ -698,22 +698,34 @@ the loss classifier and recovery path; it does not validate the producer fix,
 because the deployed Proxy image still predates the verbosity gate. That gate
 must be verified on a later full synchronization after a Proxy deployment.
 
-The same control exposed a second observability defect in Warpctl. Loki tail
-responses already carry `dropped_entries` with the affected stream labels and
-timestamps, and Warpctl decoded the field, but `LiveTail` ignored it and printed
-only `streams`. Losses smaller than Loki's ten-entry reset list were therefore
-silent, and a reset log in the Grafana service could not identify which of the
-eight standing service tails had dropped data. Warp commit `26089b2` fixes the
-client by emitting one local
+The v157 control then separated two independent Loki loss boundaries that must
+not share attribution. In Loki 3.7.3, `pkg/ingester/tailer.go` retains ten
+`DroppedStreams` descriptors and emits the reset above when that list fills.
+But `pkg/querier/tail/tail.go`'s `pushTailResponseFromIngester` forwards only
+`resp.Stream` and discards `resp.DroppedStreams`. Consequently the reset is
+affirmative ingester-to-querier loss, but the Grafana log is only its
+observation point: it cannot identify which external service selector lost
+records, and no Warpctl client change can reconstruct that discarded field.
+At `21:56Z`, Loki emitted 1,634 resets in a bounded two-minute query while the
+sole v157 watcher's eight fixed Warpctl tails reported zero direct
+`dropped_entries`, proving these were different layers rather than a failed
+client patch. The monitor retains the internal reset as
+`loki-tail-dropped-streams` and recovers all service windows through bounded
+reconciliation without claiming Grafana was the affected application tail.
+
+Separately, the querier has its own ten-response channel to the WebSocket. If
+that later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors
+to a successful HTTP tail response. Warpctl decoded that API field but
+`LiveTail` ignored it and printed only `streams`. Warp commit `26089b2` fixes
+this downstream defect by emitting one local
 `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` summary for
 each non-empty response. It deliberately omits labels and timestamps, which
-may be sensitive or high-cardinality. The monitor maps that direct summary to
-`loki-tail-dropped-streams`; the owning standing tail supplies exact service
-attribution, while the same bounded range reconciliation recovers contents.
-Deterministic Warpctl tests decode synthetic dropped metadata, require the
-summary, and prove no label or timestamp reaches output. A server synthetic
-test requires the direct summary to open the existing class against the
-affected service.
+may be sensitive or high-cardinality. The monitor maps the summary to the
+separate `loki-tail-dropped-entries` class; the owning standing tail supplies
+exact service attribution. Deterministic Warpctl tests exercise the same
+response-processing function as `LiveTail`, require the summary, and prove no
+label or timestamp reaches output. A server synthetic test requires that
+direct summary to open the downstream class against the affected service.
 
 An independent audit of Grafana's own low-rate errors then found a second,
 concrete transport gap. With the v151 watcher and all eight external tails
@@ -2999,7 +3011,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` | Grafana has the provisioned datasource row but cannot load that datasource's plugin. `/api/health`, Mimir `/ready`, and the UI can all stay green while every affected dashboard query and alert rule fails. | Query through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13.2, bake the signed standalone Prometheus plugin into the image as in §11.15; do not recreate a datasource row that already exists. |
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The incident's exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline closing valid idle HTTP/2/gRPC streams, not the 256-session ceiling. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Deploy a Grafana image containing Warp `1e95aef` (no TCP read deadline, 30-second keepalive, bounded writes; UDP idle timeout retained). Require zero recurring `loki-tail-backend-eof` for ten minutes with stable tails and healthy bounded reconciliation. Do not raise tail/ring limits or restart the same image. See §1.5. |
-| `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | Loki's bounded live-tail stream queue overflowed while the consumer was blocked; filling and resetting its dropped-stream metadata proves the connected WebSocket omitted entries. The 2026-08-31 control paired 18,165 reset lines/min with 19,995 per-peer Proxy installation lines in one block. | Remove/verbosity-gate the high-cardinality producer while retaining aggregate health evidence; Proxy client installation details belong at `V(1)`. Keep block partitioning plus inclusive bounded continuation. Require zero `loki-tail-dropped-streams` and healthy reconciliation through the next full sync; do not hide loss by raising queues or suppressing the reset. See §1.5. |
+| `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail queue overflowed before its internal gRPC send. Loki 3.7.3 then discards the accompanying `resp.DroppedStreams` in the querier, so the Grafana log is an observation point, not affected-service attribution. The 2026-08-31 control paired 18,165 resets/min with 19,995 per-peer Proxy lines; resets also accompanied the recurring ring-deadline EOF. | Deploy Grafana with Warp `1e95aef` and verbosity-gate the Proxy producer. Reconcile every service window; do not raise queues, suppress the reset, or claim Grafana was the affected selector. Require zero `loki-tail-dropped-streams` through a full sync. See §1.5. |
+| `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | The later querier-to-WebSocket response channel overflowed for the named standing tail. Warpctl received API `dropped_entries`; unlike the earlier ingester reset, this evidence is service-attributed. | Run Warpctl with Warp `26089b2`, retain bounded reconciliation for the named service, and remove its producer/consumer stall. Never print the dropped labels or timestamps. Require zero `loki-tail-dropped-entries` for ten minutes through the triggering load. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
@@ -4343,7 +4356,8 @@ Tier-1 (warn):
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
-| loki-tail-dropped-streams | logs | §1.5 exact Loki dropped-stream metadata reset | any |
+| loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; observation service is not selector attribution | any |
+| loki-tail-dropped-entries | logs | §1.5 exact privacy-safe Warpctl summary from a non-empty HTTP tail `dropped_entries` response | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by transactional-email templates through the public CDN and exact `main-web` origin Host on each enabled edge | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
