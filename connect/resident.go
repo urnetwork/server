@@ -608,6 +608,9 @@ type Exchange struct {
 	// Nil in production; ownership tests replace protocol handling after the
 	// real accept-loop admission boundary.
 	handleExchangeConnectionForTest func(net.Conn)
+	// Nil in production; generation tests observe the exact point at which an
+	// accepted header has found no local resident and is about to wait.
+	afterResidentMissingForTest func()
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
@@ -622,6 +625,10 @@ type Exchange struct {
 	stateLock sync.Mutex
 	// client id -> resident
 	residents map[server.Id]*Resident
+	// client id -> closed and removed whenever that client's resident map entry
+	// changes. Accepted exchange handshakes use it to avoid sleeping through a
+	// resident installation while retaining the poll timeout as a backstop.
+	residentChanges map[server.Id]chan struct{}
 
 	// client id -> connection id -> cancel func
 	connections map[server.Id]map[server.Id]context.CancelFunc
@@ -707,6 +714,7 @@ func newExchange(
 		settings:             settings,
 		servicePortListeners: servicePortListeners,
 		residents:            map[server.Id]*Resident{},
+		residentChanges:      map[server.Id]chan struct{}{},
 		connections:          map[server.Id]map[server.Id]context.CancelFunc{},
 		drainedClients:       map[server.Id]struct{}{},
 	}
@@ -1003,6 +1011,7 @@ func (self *Exchange) NominateLocalResident(
 		defer self.stateLock.Unlock()
 		replacedResident = self.residents[clientId]
 		self.residents[clientId] = resident
+		self.notifyResidentChangedLocked(clientId)
 		residentClientsGauge.Set(float64(len(self.residents)))
 	}()
 	if replacedResident != nil {
@@ -1023,6 +1032,7 @@ func (self *Exchange) closeResidentAndWait(resident *Resident) {
 		defer self.stateLock.Unlock()
 		if currentResident := self.residents[resident.clientId]; resident == currentResident {
 			delete(self.residents, resident.clientId)
+			self.notifyResidentChangedLocked(resident.clientId)
 		}
 		residentClientsGauge.Set(float64(len(self.residents)))
 	}()
@@ -1115,6 +1125,50 @@ func (self *Exchange) handleAcceptedExchangeConnection(conn net.Conn) {
 	self.handleExchangeConnection(conn)
 }
 
+type exchangeResidentGeneration int
+
+const (
+	exchangeResidentGenerationMissing exchangeResidentGeneration = iota
+	exchangeResidentGenerationCurrent
+	exchangeResidentGenerationChanged
+)
+
+// Resolves one requested generation against the only resident generation that
+// can currently accept exchange traffic for the client.
+func (self *Exchange) matchResidentGeneration(
+	clientId server.Id,
+	residentId server.Id,
+) (*Resident, exchangeResidentGeneration, <-chan struct{}) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	resident := self.residents[clientId]
+	if resident == nil {
+		if self.residentChanges == nil {
+			self.residentChanges = map[server.Id]chan struct{}{}
+		}
+		residentChanged := self.residentChanges[clientId]
+		if residentChanged == nil {
+			residentChanged = make(chan struct{})
+			self.residentChanges[clientId] = residentChanged
+		}
+		return nil, exchangeResidentGenerationMissing, residentChanged
+	}
+	if resident.residentId == residentId {
+		return resident, exchangeResidentGenerationCurrent, nil
+	}
+	return resident, exchangeResidentGenerationChanged, nil
+}
+
+// Wakes every accepted handshake waiting for this client's resident map entry.
+// The caller holds stateLock while publishing the corresponding map change.
+func (self *Exchange) notifyResidentChangedLocked(clientId server.Id) {
+	if residentChanged := self.residentChanges[clientId]; residentChanged != nil {
+		close(residentChanged)
+		delete(self.residentChanges, clientId)
+	}
+}
+
 func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -1143,16 +1197,31 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 	c := func() *Resident {
 		endTime := time.Now().Add(self.settings.ExchangeResidentWaitTimeout)
 		for {
-			var resident *Resident
-			var ok bool
-			func() {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				resident, ok = self.residents[header.ClientId]
-			}()
-
-			if ok && resident.residentId == header.ResidentId {
+			resident, generation, residentChanged := self.matchResidentGeneration(
+				header.ClientId,
+				header.ResidentId,
+			)
+			switch generation {
+			case exchangeResidentGenerationCurrent:
 				return resident
+			case exchangeResidentGenerationChanged:
+				// The model can briefly advertise a replacement before the local
+				// resident map installs it. Rejecting either a stale or an early
+				// generation makes the caller refresh after its bounded reconnect
+				// delay. Waiting here is unsafe: a stale generation can never
+				// become current again, so it otherwise occupies the socket until
+				// the full header deadline and blocks forward recovery behind it.
+				glog.V(1).Infof(
+					"[ecr]resident generation changed client=%s requested=%s current=%s\n",
+					header.ClientId,
+					header.ResidentId,
+					resident.residentId,
+				)
+				return nil
+			case exchangeResidentGenerationMissing:
+				if afterMissing := self.afterResidentMissingForTest; afterMissing != nil {
+					afterMissing()
+				}
 			}
 
 			if glog.V(1) {
@@ -1164,10 +1233,19 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				return nil
 			}
 			timeout = min(timeout, self.settings.ExchangeResidentPollTimeout)
+			pollTimer := time.NewTimer(timeout)
 			select {
 			case <-handleCtx.Done():
+				pollTimer.Stop()
 				return nil
-			case <-time.After(timeout):
+			case <-residentChanged:
+			case <-pollTimer.C:
+			}
+			if !pollTimer.Stop() {
+				select {
+				case <-pollTimer.C:
+				default:
+				}
 			}
 		}
 	}
@@ -1502,6 +1580,10 @@ func (self *Exchange) unregisterConnection(clientId server.Id, connectionId serv
 		delete(handleCancels, connectionId)
 		if len(handleCancels) == 0 {
 			delete(self.connections, clientId)
+			// matchResidentGeneration only creates a change channel for an
+			// accepted connection. Once the last connection is gone, no waiter
+			// remains and an unchanged missing client must not retain map state.
+			delete(self.residentChanges, clientId)
 		}
 	}
 }
