@@ -796,6 +796,18 @@ Probe: `task-health`
 - pending_task rows with reschedule_error_count ≥ 20 = something failed for
   hours (observed 23-28 during the day). Every such row is an incident.
 
+The post-migration 2026-08-31 sample adds a bounded-backlog discriminator.
+The first two successful `RemoveCompletedContracts` runs averaged 306.2s
+against a 6.3s trailing p95 after migration 595 made the durable retention
+cursor available. Current source gives each completed-payment assignment,
+straggler assignment, and due-delete phase a five-minute wall-clock budget, so
+a normally completed run near 300s is consistent with one phase draining its
+budget; it is not by itself a stuck transaction or recurrence of the former
+missing-column failure. Keep one recurring reaper, correlate
+`contract_retention_pending` and cursor progress with §2.10, and require the
+queue plus durations to fall on consecutive 30-minute runs. Do not add
+concurrent reapers or raise the task deadline to hide durable backlog.
+
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
 

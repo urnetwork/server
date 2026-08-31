@@ -648,14 +648,30 @@ func (self taskDurationProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	for _, r := range rows {
 		task := r.str(0)
 		seenTasks[task] = true
+		mechanism := ""
+		context := ""
+		action := ""
+		verify := ""
+		playbook := "SIGNALS.md 2.5"
+		if task == "RemoveCompletedContracts" {
+			mechanism = "The migration-gated retention worker is returning normally after consuming a bounded backlog phase. Current source gives each completed-payment assignment, straggler assignment, and due-delete phase a five-minute wall-clock budget; a run near 300 seconds is consistent with one phase using that budget, not by itself a stuck transaction or the former missing-column retry."
+			context = "Correlate contract_retention_pending and cursor progress with the retention-fanout signal before attributing the phase. Multiple consecutive budget-sized completions mean durable debt is still draining; a completed finished_task row distinguishes this from a deadline, process exit, or schema failure."
+			action = "Keep one recurring reaper and let its committed cursor advance. Deploy the bounded retention implementation on every taskworker, then investigate the active phase and PostgreSQL waits if the queue or duration does not fall. Do not add concurrent reapers, raise the 30-minute task deadline, or reset pending rows to make the metric disappear."
+			verify = "Each run finishes before the task deadline, contract_retention_pending and duration fall on consecutive 30-minute runs, the legacy multi-million-row payment update stays absent, and no RemoveCompletedContracts reschedule error returns."
+			playbook = "SIGNALS.md §2.5, §2.10, and §8.9"
+		}
 		findings = append(findings, finding{
 			probeId: "pg/task-duration-regression", tier: tierWarn,
 			class: "task-duration-regression", target: target, frame: task, sustain: 1,
 			symptom: fmt.Sprintf("task %s last-hour mean %ss is > 2x its 7-day p95 %ss (%s runs)",
 				task, r.str(1), r.str(2), r.str(3)),
-			baseline: fmt.Sprintf("7-day p95 %ss (from finished_task history)", r.str(2)),
-			observed: fmt.Sprintf("mean_1h=%ss p95_7d=%ss runs_1h=%s", r.str(1), r.str(2), r.str(3)),
-			playbook: "SIGNALS.md 2.5",
+			mechanism: mechanism,
+			baseline:  fmt.Sprintf("7-day p95 %ss (from finished_task history)", r.str(2)),
+			observed:  fmt.Sprintf("mean_1h=%ss p95_7d=%ss runs_1h=%s", r.str(1), r.str(2), r.str(3)),
+			context:   context,
+			action:    action,
+			verify:    verify,
+			playbook:  playbook,
 		})
 	}
 	if len(findings) == 0 {
