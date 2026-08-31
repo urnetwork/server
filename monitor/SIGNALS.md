@@ -1859,7 +1859,10 @@ no-match result, not a transport failure. The bounded command now converts
 only that status to an empty successful host observation and preserves every
 other nonzero status as an error. A mixed active/empty-host synthetic test
 locks the shell-status guard and requires the active host's normalized task to
-survive without false degradation.
+survive without false degradation. The v115 live result at 05:49Z then
+attached the 4,668-second score export and its 185-second successor close
+checkpoint from `host-journal-fallback` with no degraded-read evidence,
+validating the production no-match path.
 
 ### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
 Probe: `worker-churn`
