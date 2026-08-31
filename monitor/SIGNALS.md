@@ -469,15 +469,20 @@ The bounded application-service searches correctly returned zero
 `[redis][ttl]` result lines, but Loki and Mimir log each query at info level in
 the `grafana` service. Their `engine.go:274` and `roundtrip.go:412`
 `msg=\"executing query\"` metadata repeated the searched signature inside the
-quoted query. The standing Grafana tailer then reported six and 20
+quoted query. Completed queries also emit `metrics.go:285` lines carrying the
+same literal plus `query_hash` and `status`. The standing Grafana tailer first
+reported six and 20
 `redis-ttl-suspect` lines/minute even though Grafana cannot be the application
-Redis writer. This can affect any class whose literal appears in a query, not
-only TTL warnings. Classification now ignores only info-level Grafana
-`executing query` metadata from those two query-engine callers, after updating
-tailer liveness. A real Grafana warning and the same text from another service
-remain classifiable. The deterministic regression feeds both production
-shapes (including a `panic:` query), proves they cannot create known or novel
-alerts, and proves the exclusion does not hide real log lines.
+Redis writer. A first filter for the two start-query callers passed its unit
+test, but an exact live replay still produced two/minute from the completion
+shape; that failed control is why all three shapes are retained. This can
+affect any class whose literal appears in a query, not only TTL warnings.
+Classification now ignores only info-level Grafana query metadata with those
+proven caller/field combinations, after updating tailer liveness. A real
+Grafana warning and the same text from another service remain classifiable.
+The deterministic regression feeds all three production shapes (including a
+`panic:` query), proves they cannot create known or novel alerts, and proves
+the exclusion does not hide real log lines.
 
 ---
 

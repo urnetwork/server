@@ -268,13 +268,22 @@ func isGrafanaQueryEcho(service string, line string) bool {
 	if service != "grafana" || !strings.Contains(line, "level=info ") {
 		return false
 	}
+	if !strings.Contains(line, " query=") {
+		return false
+	}
+	if strings.Contains(line, "caller=metrics.go:") {
+		// Loki's completed-query metrics line carries the same literal plus
+		// bounded execution metadata. Requiring both fields keeps an unrelated
+		// metrics.go info line visible.
+		return strings.Contains(line, " query_hash=") &&
+			strings.Contains(line, " status=")
+	}
 	if !strings.Contains(line, "caller=engine.go:") &&
 		!strings.Contains(line, "caller=roundtrip.go:") {
 		return false
 	}
-	return (strings.Contains(line, `msg=\"executing query\"`) ||
-		strings.Contains(line, `msg="executing query"`)) &&
-		strings.Contains(line, " query=")
+	return strings.Contains(line, `msg=\"executing query\"`) ||
+		strings.Contains(line, `msg="executing query"`)
 }
 
 // logTailer tails one service's logs and aggregates per-minute class counts.
