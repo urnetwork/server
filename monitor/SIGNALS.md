@@ -4415,6 +4415,19 @@ received connection refused at `172.18.0.1:7183` and returned 502. DNS rotation
 made `warpctl logs` alternate between success and three exhausted 502 retries,
 so a global visibility alert alone did not name the broken edge.
 
+The 2026-08-31T01:24Z live root-cause battery closed the remaining manual gap.
+Edge-4's Warp unit was active, but its `/status` continuously reported the
+Grafana child connection refused; the bounded child journal contained the
+exact rejected `interval (15s)` / scheduler `10` error followed by child
+restart. `grafana-ingress` now runs that unprivileged systemd/journal battery
+once per failed host and shares the result across its interface alerts. When
+the signature is present, Markdown records
+`root_cause=alert-interval-scheduler-grid`, the rejected and scheduler
+intervals, the parent-versus-child lifecycle, and the scheduler-grid test. A
+synthetic host with two 502 interfaces requires one battery call and two fully
+attributed alerts. A 502 still proves IPv6 reached the LB and must not be
+relabelled as an interface-routing failure.
+
 For an exact-edge 502/503/504, compare old/new Grafana containers, each front
 `/status`, the service-alias rule/socket, and the child provisioning log. Do not
 add a DNAT target for an unready process and do not restart the same invalid
