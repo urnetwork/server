@@ -40,6 +40,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
 		{"panic", "panic: synthetic crash frame", "panic"},
 		{"payout wallet", "asset amount owned by the wallet is insufficient", "payout-wallet-insufficient"},
+		{"payment processor rate limit", `Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`, "payment-processor-rate-limit"},
 		{"net escrow ttl", `[redis][ttl]"expireat" key="{escrow_019c640e-f467-4fa7-177f-d7ca43c33b6f}net" ttl 3139393191s-from-now exceeds 9600h0m0s`, "redis-netescrow-ttl"},
 		{"redis ttl", "[redis][ttl] suspicious ttl on key", "redis-ttl-suspect"},
 		{"taskworker drain", "[taskworker]drain gave up with 2 tasks", "taskworker-drain-gave-up"},
@@ -111,6 +112,43 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 	if strings.Contains(markdown, "The observed value is outside the SIGNALS.md healthy band") ||
 		strings.Contains(markdown, "Follow SIGNALS.md §4") {
 		t.Fatalf("payout-wallet alert retained generic guidance:\n%s", markdown)
+	}
+}
+
+func TestLogErrorsSignalExplainsPaymentProcessorRateLimit(t *testing.T) {
+	line := `[edge-3][taskworker][g2][cid:test][I][2026-08-31T15:46:23Z][task.go:1930][019f77ae-de17-db98-b22d-2642f6f67594]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "payment-processor-rate-limit").Markdown()
+	for _, detail := range []string{
+		"short-window request limit",
+		"diagnostic line rate is not a unique-submit rate",
+		"five distinct wallet-insufficient attempts landed in one second",
+		"second-scale microbursts",
+		"ambiguous submit outcome",
+		"idempotency key must be retained",
+		"not a general Circle outage",
+		"Do not manually retry",
+		"taskworker commit 70b0d269 or later",
+		"one full 90-minute drain window",
+		"account's authoritative quota",
+		"durable processor-rate-limit count does not increase",
+		"[<id>]eval error",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("payment-processor-rate-limit alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(markdown, "019f77ae-de17-db98-b22d-2642f6f67594") {
+		t.Fatalf("payment-processor-rate-limit alert leaked the payment id:\n%s", markdown)
 	}
 }
 
