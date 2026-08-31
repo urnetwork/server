@@ -1111,6 +1111,15 @@ The shared lifecycle comparator now checks exact ids before the age fallback,
 and the deterministic 131-second case prevents a completed run from
 resurfacing.
 
+The fleet log gateway is an observation path, not a prerequisite for close
+visibility. If `warpctl logs` fails, the probe concurrently reads a bounded
+45-minute `CloseExpiredContracts` window from the configured service hosts'
+g1/g2 taskworker journals, with a 12-second per-host deadline and journald-side
+filtering. The synthetic 502 case requires that fallback to retain the active
+task id, elapsed duration, and host/generation/container attribution. A partial
+fleet read remains an observation error unless its returned lifecycle already
+proves an incident; it must never silently become a healthy result.
+
 After the version-594–597 migration completed on 2026-08-31, the still-deployed
 100,000-contract generation supplied a clean schema-versus-algorithm control.
 One checkpoint completed in 855s at 01:16:52Z, followed by short scheduler

@@ -2,8 +2,10 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing.T) {
@@ -55,6 +57,69 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("active close alert lost %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestCloseDurationSignalFallsBackToBoundedHostJournalsWhenFleetLogsFail(t *testing.T) {
+	taskID := "01a05564-87a2-4f60-4188-df03664a1e24"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if !strings.Contains(query, "task_id = '"+taskID+"'") {
+				t.Fatalf("fallback heartbeat identity was not retained in the completion query: %s", query)
+			}
+			return nil, nil
+		},
+		localFn: func(name string, args ...string) (string, error) {
+			if name != "warpctl" {
+				t.Fatalf("unexpected local command %s %s", name, strings.Join(args, " "))
+			}
+			return "", errors.New("Loki query error (502)")
+		},
+		hostTimeoutFn: func(host HostSettings, command string, timeout time.Duration) (string, error) {
+			if timeout != taskworkerJournalTimeout {
+				t.Fatalf("journal fallback timeout = %s, want %s", timeout, taskworkerJournalTimeout)
+			}
+			for _, want := range []string{
+				"--since '45 minutes ago'",
+				"-n 5000",
+				"-t 'warp|synthetic|taskworker|g1'",
+				"-t 'warp|synthetic|taskworker|g2'",
+				"--grep='CloseExpiredContracts'",
+			} {
+				if !strings.Contains(command, want) {
+					t.Fatalf("journal fallback lost %q: %s", want, command)
+				}
+			}
+			if host.Name != "edge-2" {
+				return "", nil
+			}
+			return "[edge-2][taskworker][g2][cid:close][I][2026-08-31T01:31:55Z][task.go:1938][" + taskID + "]eval active(885.56s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = append(settings.Hosts,
+		HostSettings{Name: "edge-1", Roles: []string{"services"}},
+		HostSettings{Name: "edge-2", Roles: []string{"services"}},
+	)
+
+	alerts, err := NewCloseDurationSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "close-duration-overrun")
+	for _, want := range []string{
+		"phase=active duration_s=885",
+		"active_log_source=host-journal-fallback",
+		"task_id=" + taskID,
+		"active_host=edge-2",
+		"active_generation=g2",
+		"active_container=close",
+		"fleet log gateway was unavailable",
+		"bounded taskworker journals",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("journal fallback alert lost %q:\n%s", want, alert.Markdown())
 		}
 	}
 }

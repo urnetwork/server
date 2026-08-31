@@ -37,6 +37,24 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		fmt.Sprintf("--since=%dm", int(closeDurationIncidentLookback/time.Minute)),
 		"--limit=5000", "--query=CloseExpiredContracts", "--utc",
 	)
+	activeLogSource := "warpctl"
+	if activeLogErr != nil {
+		gatewayErr := activeLogErr
+		journalLog, journalErr := readTaskworkerJournal(
+			ctx,
+			env,
+			"CloseExpiredContracts",
+			closeDurationIncidentLookback,
+			5000,
+		)
+		if journalLog != "" || journalErr == nil {
+			activeLog = journalLog
+			activeLogErr = journalErr
+			activeLogSource = "host-journal-fallback"
+		} else {
+			activeLogErr = fmt.Errorf("fleet log gateway: %v; host journal fallback: %w", gatewayErr, journalErr)
+		}
+	}
 	active := parseTaskActiveRun(activeLog, "CloseExpiredContracts")
 	terminal := parseTaskTerminalRun(activeLog, "CloseExpiredContracts")
 	retryActive := parseTaskActiveRunForID(activeLog, "CloseExpiredContracts", terminal.taskID)
@@ -188,11 +206,12 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 
 	observed := fmt.Sprintf(
-		"phase=%s duration_s=%d threshold_s=%d lookback_s=%d",
+		"phase=%s duration_s=%d threshold_s=%d lookback_s=%d active_log_source=%s",
 		phase,
 		durationSeconds,
 		int(closeDurationLimit/time.Second),
 		int(closeDurationIncidentLookback/time.Second),
+		activeLogSource,
 	)
 	if taskID != "" {
 		observed += " task_id=" + taskID
@@ -287,6 +306,10 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		retryEvidence = " The retry fields preserve the same task id's next observed lifecycle and executor; a fast peer retry is an A/B control for load sensitivity, not permission to erase the failed precursor."
 		incidentContext += retryEvidence
 	}
+	logEvidence := "Taskworker eval-active is the live elapsed-time source; eval-error retains rescheduled deadline attempts that never become a finished duration; finished_task retains completed duration. The latest failed overrun remains visible for 45 minutes, including beside a newer active successor, so retry progress cannot erase the precursor."
+	if activeLogSource == "host-journal-fallback" {
+		logEvidence += " The fleet log gateway was unavailable, so the task lifecycle came from bounded taskworker journals on the configured service hosts."
+	}
 	return []finding{{
 		probeId: "pg/close-duration-overrun", tier: tierWarn,
 		class: "close-duration-overrun", target: target, frame: "CloseExpiredContracts", sustain: 1,
@@ -299,7 +322,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		mechanism: "The deployed 100,000-contract task checkpoint commits contracts individually but acknowledges scheduler progress only when the whole cohort returns. Legacy payment-retention writes and transfer_contract vacuum debt can stretch that boundary to the 1,800-second task deadline; a timeout preserves per-contract commits but repeats discovery and loses the task-level checkpoint.",
 		baseline:  "Healthy full legacy cohorts finish in roughly 20–30s; warn at 120s, and every checkpoint must finish well before the 1,800s deadline. Current source caps a checkpoint at 25,000 contracts.",
 		observed:  observed,
-		evidence:  "Taskworker eval-active is the live elapsed-time source; eval-error retains rescheduled deadline attempts that never become a finished duration; finished_task retains completed duration. The latest failed overrun remains visible for 45 minutes, including beside a newer active successor, so retry progress cannot erase the precursor." + retryEvidence,
+		evidence:  logEvidence + retryEvidence,
 		context:   incidentContext,
 		action:    "Roll out the bounded retention queue and the 25,000-contract checkpoint, then let scheduled closes and autovacuum drain the debt. Do not raise the deadline, increase closer concurrency, cancel vacuum, or restart a taskworker to hide the elapsed heartbeat.",
 		verify:    "Every active generation keeps close checkpoints below 120s, no exact-1,800s timeout recurs, and the older-than-five/30-minute open-contract buckets fall on consecutive samples.",

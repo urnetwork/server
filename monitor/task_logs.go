@@ -1,11 +1,13 @@
 package monitor
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +46,111 @@ type executorActiveTask struct {
 // a just-finished task. Four missed heartbeats is enough to stop calling the
 // old line active while tolerating ordinary ingestion jitter.
 const executorActiveHeartbeatFreshness = 45 * time.Second
+
+const taskworkerJournalTimeout = 12 * time.Second
+
+var taskworkerJournalTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// readTaskworkerJournal is the bounded, host-local fallback for task lifecycle
+// reads when the fleet log gateway is unavailable. It deliberately reads only
+// taskworker's two generation identifiers and lets journald apply the task
+// name filter before returning output, so a failed observability front cannot
+// turn recovery into an unbounded fleet log transfer.
+func readTaskworkerJournal(
+	ctx context.Context,
+	env *probeEnv,
+	taskName string,
+	lookback time.Duration,
+	limit int,
+) (string, error) {
+	if env == nil || env.cfg == nil || env.runner == nil {
+		return "", fmt.Errorf("taskworker journal: probe environment is unavailable")
+	}
+	environment := strings.TrimSpace(env.cfg.env)
+	if !taskworkerJournalTokenRe.MatchString(environment) {
+		return "", fmt.Errorf("taskworker journal: unsafe environment %q", environment)
+	}
+	if !taskworkerJournalTokenRe.MatchString(taskName) {
+		return "", fmt.Errorf("taskworker journal: unsafe task name %q", taskName)
+	}
+	if lookback <= 0 {
+		return "", fmt.Errorf("taskworker journal: lookback must be positive")
+	}
+	if limit <= 0 || 10000 < limit {
+		return "", fmt.Errorf("taskworker journal: limit %d is outside 1..10000", limit)
+	}
+	hosts := env.cfg.hostsWithRole("services")
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("taskworker journal: no services hosts in inventory")
+	}
+
+	lookbackMinutes := int((lookback + time.Minute - 1) / time.Minute)
+	command := fmt.Sprintf(
+		"journalctl --no-pager -o cat --since '%d minutes ago' -n %d "+
+			"-t 'warp|%s|taskworker|g1' -t 'warp|%s|taskworker|g2' "+
+			"--grep='%s' 2>/dev/null",
+		lookbackMinutes,
+		limit,
+		environment,
+		environment,
+		taskName,
+	)
+
+	type result struct {
+		host string
+		out  string
+		err  error
+	}
+	results := make(chan result, len(hosts))
+	semaphore := make(chan struct{}, 4)
+	var wait sync.WaitGroup
+	for _, configuredHost := range hosts {
+		target := configuredHost
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				results <- result{host: target.name, err: ctx.Err()}
+				return
+			}
+			out, err := env.runner.sshTimeout(ctx, target, command, "", taskworkerJournalTimeout)
+			results <- result{host: target.name, out: strings.TrimSpace(out), err: err}
+		}()
+	}
+	wait.Wait()
+	close(results)
+
+	ordered := make([]result, 0, len(hosts))
+	for observed := range results {
+		ordered = append(ordered, observed)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].host < ordered[j].host })
+
+	outputs := make([]string, 0, len(ordered))
+	errors := make([]string, 0, len(ordered))
+	successes := 0
+	for _, observed := range ordered {
+		if observed.err != nil {
+			errors = append(errors, observed.host+": "+observed.err.Error())
+			continue
+		}
+		successes++
+		if observed.out != "" {
+			outputs = append(outputs, observed.out)
+		}
+	}
+	output := strings.Join(outputs, "\n")
+	if successes == 0 {
+		return output, fmt.Errorf("taskworker journal: every host failed: %s", strings.Join(errors, "; "))
+	}
+	if len(errors) != 0 {
+		return output, fmt.Errorf("taskworker journal: partial fleet read: %s", strings.Join(errors, "; "))
+	}
+	return output, nil
+}
 
 // parseExecutorActiveTasks turns a fleet-wide eval-active window into the
 // newest heartbeat for each task on one exact host/block executor. Mimir's
