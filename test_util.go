@@ -757,9 +757,9 @@ func reapOrphanedTestPgDbs(ctx context.Context) {
 //     collision class instead of narrowing the window.
 //
 //  2. Probe the WILDCARD address the servers actually bind, not one loopback
-//     address. A 127.0.0.1:P probe can succeed while another local address
-//     already owns P, but the server's subsequent 0.0.0.0:P bind conflicts
-//     with that address. The reservation must cover the server's real scope.
+//     address. A loopback probe asks the kernel about only one local address;
+//     the server later asks for every IPv4 address. The reservation must ask
+//     about the same scope, independent of platform-specific socket reuse.
 //
 // The counter is pid-salted so concurrent test processes walk disjoint
 // sequences, and each returned port is held by a wildcard reservation socket
@@ -784,6 +784,12 @@ func testNextListenPortCandidate() int {
 	return testListenPortFloor +
 		int(atomic.LoadInt64(&testListenPortNext)-testListenPortFloor)%
 			(testListenPortCeiling-testListenPortFloor)
+}
+
+// Uses the same IPv4 wildcard scope as the servers that consume the returned
+// port numbers.
+func testListenPortAddress(port int) string {
+	return fmt.Sprintf("0.0.0.0:%d", port)
 }
 
 // ReserveTestListenPorts picks one free port per requested network ("tcp" or
@@ -820,12 +826,12 @@ func reserveTestListenPort(network string) (int, io.Closer, error) {
 			int(atomic.AddInt64(&testListenPortNext, 1)-1-testListenPortFloor)%span
 		switch network {
 		case "tcp":
-			listener, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
+			listener, err := net.Listen("tcp4", testListenPortAddress(port))
 			if err == nil {
 				return port, listener, nil
 			}
 		case "udp":
-			packetConn, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", port))
+			packetConn, err := net.ListenPacket("udp4", testListenPortAddress(port))
 			if err == nil {
 				return port, packetConn, nil
 			}

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -519,9 +520,9 @@ func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {
 // ---- test listen port allocator ------------------------------------------
 //
 // Deterministic pins for the two allocator rules from certification failure
-// c12-1 (see the allocator doc in test_util.go). Each test occupies or
-// inspects real sockets, so the properties are asserted against actual OS
-// bind semantics, not a simulation.
+// c12-1 (see the allocator doc in test_util.go). The scope test asserts the
+// address passed to the OS and then occupies that exact address, avoiding
+// platform-specific rules for overlapping wildcard and specific binds.
 
 // TestReserveTestListenPortsStayBelowEphemeralRange: every allocated port
 // must sit below the OS ephemeral range (macOS: 49152+, Linux default:
@@ -547,56 +548,51 @@ func TestReserveTestListenPortsStayBelowEphemeralRange(t *testing.T) {
 	}
 }
 
-// TestReserveTestListenPortsProbeWildcardScope: the probe must run on the
-// wildcard address the servers actually bind. The test occupies a second
-// loopback address, proves a 127.0.0.1-only probe still succeeds, rewinds the
-// allocator so the occupied port is next, and requires its wildcard probe to
-// skip it. A later wildcard server bind conflicts with every local address,
-// not only the one a loopback-only probe happened to inspect.
+// The probe must use the wildcard address the servers actually bind and skip
+// candidates already occupied at that scope. TCP and UDP have separate bind
+// implementations, so both paths are pinned.
 func TestReserveTestListenPortsProbeWildcardScope(t *testing.T) {
-	// a port the allocator itself proved wildcard-free
-	ports, release, err := ReserveTestListenPorts("tcp")
-	if err != nil {
-		t.Fatalf("reserve: %v", err)
-	}
-	occupiedPort := ports[0]
-	release()
+	for _, network := range []string{"tcp", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			// Start with a candidate the allocator proved wildcard-free.
+			ports, release, err := ReserveTestListenPorts(network)
+			if err != nil {
+				t.Fatalf("reserve: %v", err)
+			}
+			occupiedPort := ports[0]
+			release()
 
-	// Occupy a different address in the IPv4 loopback network. Binding does not
-	// require an interface alias on supported test hosts, and it models any
-	// other local interface already owning the server's eventual wildcard port.
-	occupier, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.2:%d", occupiedPort))
-	if err != nil {
-		t.Fatalf("occupy alternate loopback port %d: %v", occupiedPort, err)
-	}
-	defer occupier.Close()
+			expectedAddr := fmt.Sprintf("0.0.0.0:%d", occupiedPort)
+			if actualAddr := testListenPortAddress(occupiedPort); actualAddr != expectedAddr {
+				t.Fatalf("probe address = %q, want server wildcard %q", actualAddr, expectedAddr)
+			}
 
-	// The loopback-only probe sees the same port as free because it never checks
-	// the address already holding it.
-	loopback, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", occupiedPort))
-	if err != nil {
-		t.Fatalf(
-			"loopback-only probe on alternate-address-held port %d failed: %v",
-			occupiedPort, err,
-		)
-	}
-	loopback.Close()
+			var occupier io.Closer
+			switch network {
+			case "tcp":
+				occupier, err = net.Listen("tcp4", expectedAddr)
+			case "udp":
+				occupier, err = net.ListenPacket("udp4", expectedAddr)
+			}
+			if err != nil {
+				t.Fatalf("occupy wildcard port %d: %v", occupiedPort, err)
+			}
+			defer occupier.Close()
 
-	// rewind so the occupied port is the next candidate, then allocate: the
-	// wildcard probe must skip it
-	atomic.StoreInt64(&testListenPortNext, int64(occupiedPort))
-	if next := testNextListenPortCandidate(); next != occupiedPort {
-		t.Fatalf("rewind: next candidate = %d, want %d", next, occupiedPort)
-	}
-	ports, release, err = ReserveTestListenPorts("tcp")
-	if err != nil {
-		t.Fatalf("reserve with occupied candidate: %v", err)
-	}
-	defer release()
-	if ports[0] == occupiedPort {
-		t.Fatalf(
-			"allocator returned wildcard-occupied port %d: the probe is not checking the address the servers bind",
-			occupiedPort,
-		)
+			// Rewind so the occupied port is the next candidate. The matching
+			// wildcard probe must skip it.
+			atomic.StoreInt64(&testListenPortNext, int64(occupiedPort))
+			if next := testNextListenPortCandidate(); next != occupiedPort {
+				t.Fatalf("rewind: next candidate = %d, want %d", next, occupiedPort)
+			}
+			ports, release, err = ReserveTestListenPorts(network)
+			if err != nil {
+				t.Fatalf("reserve with occupied candidate: %v", err)
+			}
+			defer release()
+			if ports[0] == occupiedPort {
+				t.Fatalf("allocator returned wildcard-occupied port %d", occupiedPort)
+			}
+		})
 	}
 }
