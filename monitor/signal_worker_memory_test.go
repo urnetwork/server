@@ -172,13 +172,73 @@ func TestWorkerMemorySignalSyntheticLiveHeapSkew(t *testing.T) {
 		"gc_pause_seconds_per_s_5m=0.000040",
 		"active_task_count=2",
 		"active_tasks=UpdateClientScores:620s@01a0530b-0e6a-9c14-6694-11a165f3c27b,CloseExpiredContracts:130s@01a0530c-65aa-153e-19d8-82ad3698cf40",
+		"active_log_source=warpctl",
 		"process-local allocator/GC contention",
-		"unreachable objects not yet reclaimed",
-		"bounded or streaming working-set fixes",
+		"Production start/stop controls identify score export as the portable allocator",
+		"caller-oriented fanout still re-encodes caller-invariant target payloads hundreds of times",
+		"CloseExpiredContracts is active on the same host/block",
+		"target-oriented UpdateClientScores fanout and alias-aware cache",
+		"co-resident close checkpoint also returns below 120 seconds",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("worker-memory diagnosis missing %q:\n%s", want, markdown)
 		}
+	}
+}
+
+func TestWorkerMemorySignalSyntheticFallsBackToHostJournalForActiveTasks(t *testing.T) {
+	now := time.Date(2026, 8, 31, 5, 37, 50, 0, time.UTC)
+	const gib = float64(uint64(1) << 30)
+	workers := []workerMetricFixture{
+		{host: "edge-0", block: "g1", instance: "a", heap: 0.125 * gib, cpuRate: 0.02, allocRate: 1 << 20, gcRate: 0.01, gcPauseRate: 0.000001},
+		{host: "edge-1", block: "g1", instance: "b", heap: 0.1875 * gib, cpuRate: 0.03, allocRate: 2 << 20, gcRate: 0.02, gcPauseRate: 0.000002},
+		{host: "edge-3", block: "g1", instance: "hot", heap: 12 * gib, cpuRate: 4, allocRate: 640 << 20, gcRate: 0.12, gcPauseRate: 0.00003},
+	}
+	payload := workerMetricsFixtureJSON(t, now, workers...)
+	ratePayload := workerRatesFixtureJSON(t, now, workers...)
+	journal := fmt.Sprintf(
+		`{"SYSLOG_TIMESTAMP":%q,"MESSAGE":%q,"CONTAINER_TAG":"warp|synthetic|taskworker|g1","CONTAINER_ID":"hot","_HOSTNAME":"edge-3"}`,
+		now.Add(-5*time.Second).Format(time.RFC3339Nano),
+		"I0831 05:37:45.000000 1 task.go:1938] [01a05616-2af9-07af-9ce6-8ba1bc304862]eval active(3940.00s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})",
+	)
+	source := &syntheticSource{
+		hostFn: func(host HostSettings, command string) (string, error) {
+			if host.Name != "metrics-1" {
+				t.Fatalf("unexpected Mimir host %s", host.Name)
+			}
+			if strings.Contains(command, "monitor_rate") {
+				return ratePayload, nil
+			}
+			return payload, nil
+		},
+		hostTimeoutFn: func(host HostSettings, command string, timeout time.Duration) (string, error) {
+			if host.Name != "metrics-1" || timeout != taskworkerJournalTimeout || !strings.Contains(command, "--grep='eval'") {
+				t.Fatalf("unexpected journal fallback: host=%s timeout=%s command=%s", host.Name, timeout, command)
+			}
+			return journal, nil
+		},
+		localFn: func(name string, args ...string) (string, error) {
+			return "", fmt.Errorf("synthetic %s gateway unavailable", name)
+		},
+	}
+
+	alerts, err := NewWorkerMemorySignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "worker-memory-skew").Markdown()
+	for _, want := range []string{
+		"active_tasks=UpdateClientScores:3940s@01a05616-2af9-07af-9ce6-8ba1bc304862",
+		"active_log_source=host-journal-fallback",
+		"UpdateClientScores is active on the exact heap outlier",
+		"target-oriented UpdateClientScores fanout and alias-aware cache",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("worker-memory journal fallback missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "task-lifecycle lookup was degraded") {
+		t.Fatalf("complete host-journal fallback was reported as degraded:\n%s", markdown)
 	}
 }
 

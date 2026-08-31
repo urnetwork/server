@@ -1833,6 +1833,24 @@ streaming exporter: after rollout, a successful task alone is insufficient;
 live heap must remain bounded throughout the export while all 1,008 locations
 complete.
 
+The 2026-08-31 05:37Z watch exposed a correlation-path regression after the
+streaming exporter rollout. Edge-3/g1 held 9.61GiB of allocated heap, 91.0×
+the 0.11GiB fleet median, while consuming about four cores and allocating
+642MiB/s. The sibling §2.12a probe used the bounded host-journal fallback and
+attached fresh `UpdateClientScores` and `CloseExpiredContracts` heartbeats,
+but this heap alert called `warpctl logs` directly, waited for its full
+60-second command timeout, and then omitted `active_tasks` even though its
+evidence promised that join. The heap measurement remained valid; the missing
+task attribution was a monitor transport bug. `worker-memory` now uses the
+shared 12-second gateway boundary plus bounded taskworker-journal fallback,
+records `active_log_source`, and retains partial-read degradation separately
+from a complete fallback. When the exact executor carries `UpdateClientScores`,
+the alert names the already-proven caller-fanout allocator and the pending
+target-oriented/alias fix; a co-resident close task adds the process-budget
+impact and close/backlog verification. A deterministic synthetic regression
+forces the gateway failure, normalizes a timestamped journal heartbeat, and
+requires both the exact task id and `host-journal-fallback` source in Markdown.
+
 ### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
 Probe: `worker-churn`
 

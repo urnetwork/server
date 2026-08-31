@@ -234,6 +234,7 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 
 	findings := []finding{}
 	activeLog := ""
+	activeLogSource := ""
 	var activeLogErr error
 	activeLogLoaded := false
 	activeLogObservedAt := now
@@ -250,10 +251,12 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			continue
 		}
 		if !activeLogLoaded {
-			activeLog, activeLogErr = env.runner.warpctl(
+			activeLog, activeLogSource, activeLogErr = readTaskLifecycleLog(
 				ctx,
-				"logs", env.cfg.env, "taskworker",
-				"--since=2m", "--limit=5000", "--query=eval", "--utc",
+				env,
+				"eval",
+				2*time.Minute,
+				5000,
 			)
 			activeLogLoaded = true
 			// A degraded fleet gateway can spend tens of seconds before the
@@ -272,6 +275,16 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			processAge = max(int64(0), now.Unix()-int64(worker.startTime))
 		}
 		activeTasks := parseExecutorActiveTasks(activeLog, worker.host, worker.block, activeLogObservedAt)
+		scoreActive := false
+		closeActive := false
+		for _, task := range activeTasks {
+			switch task.name {
+			case "UpdateClientScores":
+				scoreActive = true
+			case "CloseExpiredContracts":
+				closeActive = true
+			}
+		}
 		observed := fmt.Sprintf(
 			"heap_alloc_bytes=%.0f heap_gib=%.2f fleet_samples=%d fleet_median_bytes=%.0f fleet_median_gib=%.2f fleet_ratio=%.1f heap_objects=%.0f rss_bytes=%.0f alloc_total_bytes=%.0f gc_cycles=%.0f process_age_s=%d block=%s instance=%s",
 			worker.heap, bytesToGiB(worker.heap), len(heaps), median, bytesToGiB(median), ratio,
@@ -286,7 +299,12 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			)
 		}
 		if summary := formatExecutorActiveTasks(activeTasks, 8); summary != "" {
-			observed += fmt.Sprintf(" active_task_count=%d active_tasks=%s", len(activeTasks), summary)
+			observed += fmt.Sprintf(
+				" active_task_count=%d active_tasks=%s active_log_source=%s",
+				len(activeTasks),
+				summary,
+				activeLogSource,
+			)
 		}
 		evidence := "The values come from the process's pushed Go runtime and process metrics in Mimir. Five-minute CPU/allocation/GC rates distinguish active allocation pressure from a completed task's heap awaiting collection. The active_tasks field joins the same host/block to authoritative taskworker eval-active heartbeats; compare those task families on other executors."
 		if rateErr != nil {
@@ -295,7 +313,21 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			evidence += " Mimir did not return every five-minute rate for this exact worker identity."
 		}
 		if activeLogErr != nil {
-			evidence += " The best-effort active-task log lookup failed: " + activeLogErr.Error()
+			evidence += " The task-lifecycle lookup was degraded: " + activeLogErr.Error()
+		} else if len(activeTasks) == 0 {
+			evidence += " No fresh active-task heartbeat was available for this executor, so the heap finding remains valid without task attribution."
+		}
+		mechanism := "HeapAlloc is process Go-heap allocation, not filesystem cache or RSS retained after scavenging. It includes reachable objects plus unreachable objects not yet reclaimed by the next GC; either shape makes an allocation-heavy taskworker scan and collect a much larger heap, so unrelated tasks assigned to that process can overrun while identical work completes normally on peer executors."
+		action := "Identify the co-resident task families, then roll out their bounded or streaming working-set fixes. Preserve task deadlines and durable evidence; do not restart the worker merely to erase the heap unless an explicitly authorized operational emergency requires it."
+		verify := "The affected process returns below both the absolute and fleet-skew guards, heap-object count contracts, and the same task families complete inside their historical bands on consecutive scheduled runs without an OOM or deadline increase."
+		if scoreActive {
+			mechanism = "UpdateClientScores is active on the exact heap outlier. Production start/stop controls identify score export as the portable allocator: deployed streaming batches reduced the former 28–45GiB peaks, but caller-oriented fanout still re-encodes caller-invariant target payloads hundreds of times. That sustained allocation can keep HeapAlloc above the guard between collections even though the stream bounds its retained command batch."
+			action = "Deploy the target-oriented UpdateClientScores fanout and alias-aware cache: encode one zero-caller baseline per target, write one-byte aliases for unchanged callers, and encode full overrides only for callers whose blocked networks remove a provider. Retain the bounded streaming batches and rolling legacy-reader pass; do not restart or raise the memory limit to erase the evidence."
+			verify = "A post-deploy UpdateClientScores run completes inside its historical band while this executor remains below the absolute and fleet-skew heap guards, heap-object count contracts, aliases preserve unfiltered selections, excluded callers retain overrides, and score bytes drain after the legacy TTL."
+			if closeActive {
+				mechanism += " CloseExpiredContracts is active on the same host/block, so allocator and CPU pressure share its process budget; close-duration and open-contract age buckets remain the authoritative impact measures."
+				verify += " The co-resident close checkpoint also returns below 120 seconds and its older-than-five/30-minute contract buckets fall on consecutive samples."
+			}
 		}
 		findings = append(findings, finding{
 			probeId: "runtime/worker-memory-skew", tier: tierWarn,
@@ -304,7 +336,7 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				"taskworker %s holds %.2fGiB of allocated Go heap, %.1fx the %.2fGiB fleet median",
 				target, bytesToGiB(worker.heap), ratio, bytesToGiB(median),
 			),
-			mechanism: "HeapAlloc is process Go-heap allocation, not filesystem cache or RSS retained after scavenging. It includes reachable objects plus unreachable objects not yet reclaimed by the next GC; either shape makes an allocation-heavy taskworker scan and collect a much larger heap, so unrelated tasks assigned to that process can overrun while identical work completes normally on peer executors.",
+			mechanism: mechanism,
 			baseline: fmt.Sprintf(
 				"Fresh taskworker heap remains below %.0fGiB or within %.0fx of the fleet median for two consecutive one-minute samples; a sparse fleet uses a %.0fGiB absolute guard.",
 				bytesToGiB(workerMemoryAbsoluteBytes), workerMemorySkewRatio, bytesToGiB(workerMemorySparseAbsoluteBytes),
@@ -312,8 +344,8 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			observed: observed,
 			evidence: evidence,
 			context:  "A healthy host and cgroup do not clear this alert: ample free RAM, no OOM event, and no CPU throttle can coexist with severe process-local allocator/GC contention. Executor correlation is evidence of co-residency, not proof that any one task owns the entire heap.",
-			action:   "Identify the co-resident task families, then roll out their bounded or streaming working-set fixes. Preserve task deadlines and durable evidence; do not restart the worker merely to erase the heap unless an explicitly authorized operational emergency requires it.",
-			verify:   "The affected process returns below both the absolute and fleet-skew guards, heap-object count contracts, and the same task families complete inside their historical bands on consecutive scheduled runs without an OOM or deadline increase.",
+			action:   action,
+			verify:   verify,
 			playbook: "SIGNALS.md 2.12",
 		})
 	}
