@@ -294,6 +294,42 @@ func TestPayoutRetryMicroburstSampleComesFromPeakSecond(t *testing.T) {
 	}
 }
 
+func TestPaymentProcessorRateLimitCountsOneLogicalEventPerDiagnosticPair(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	id := "019f77ae-de17-db98-b22d-2642f6f67594"
+	providerLine := "[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.578203Z][circle_client_controller.go:142][circlec]error sending payment: Bad status: 429 Too Many Requests {\"code\":5,\"message\":\"API rate limit error\",\"payment_id\":\"" + id + "\"}"
+	evaluatorLine := "[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.578638Z][task.go:1930][" + id + "]eval error = Bad status: 429 Too Many Requests {\"code\":5,\"message\":\"API rate limit error\"}"
+	tailer.classify(providerLine)
+	tailer.classify(evaluatorLine)
+	tailer.classify(evaluatorLine)
+
+	finding := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
+	for _, want := range []string{
+		"rate=3/min",
+		"processor_rate_limit_events=1",
+		"diagnostic_lines=3",
+		"canonical_source=exact-replay-deduplicated-task-evaluator",
+		"logical event count: 1 exact-replay-deduplicated task evaluator line(s) from 3 diagnostic line(s)",
+	} {
+		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
+			t.Fatalf("processor rate-limit finding missing %q: %+v", want, finding)
+		}
+	}
+	if logIDRe.MatchString(finding.evidence) {
+		t.Fatalf("processor rate-limit evidence leaked an entity id: %q", finding.evidence)
+	}
+
+	// A reconnect can replay the final evaluator line after the cadence drain.
+	// Preserve its diagnostic visibility but do not manufacture another logical
+	// provider event in the next window.
+	tailer.classify(evaluatorLine)
+	replay := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
+	if !strings.Contains(replay.observed, "processor_rate_limit_events=0") ||
+		!strings.Contains(replay.observed, "diagnostic_lines=1") {
+		t.Fatalf("cross-window replay manufactured a logical event: %+v", replay)
+	}
+}
+
 // Minute volume is the liquidity/retry-amplification signal, but it is not a
 // synchronized microburst when canonical attempts occupy different seconds.
 // The subsequent empty window must also resolve a prior burst identity.

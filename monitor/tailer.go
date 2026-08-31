@@ -43,6 +43,16 @@ type logBurst struct {
 	playbook  string
 }
 
+// logCanonical counts one canonical line per logical provider event while the
+// parent class still retains every diagnostic line. Some client failures are
+// logged once at the provider boundary and again by the task evaluator; the
+// distinction prevents a 2/min diagnostic rate from being read as two remote
+// rejections.
+type logCanonical struct {
+	eventRe *regexp.Regexp
+	name    string
+}
+
 // logClass is one row of the SIGNALS.md §4 taxonomy.
 type logClass struct {
 	name string
@@ -80,6 +90,10 @@ type logClass struct {
 	// alert so an operational cause (for example absent wallet liquidity) does
 	// not conceal or inherit a deployable retry-amplification defect.
 	burst *logBurst
+	// canonical optionally exposes a de-duplicated logical event count next to
+	// the raw class line rate. The line-rate threshold remains fail-safe when a
+	// canonical evaluator line is absent from the observation stream.
+	canonical *logCanonical
 }
 
 // the §4 taxonomy. Order matters: first match wins.
@@ -180,6 +194,10 @@ var logClasses = []logClass{
 		}},
 	{name: "payment-processor-rate-limit", re: regexp.MustCompile(`Bad status: 429 Too Many Requests.*API rate limit error`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
+		canonical: &logCanonical{
+			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			name:    "processor_rate_limit_events",
+		},
 		meaning:   "Circle refused a payment API request because the shared processor identity crossed a short-window request limit",
 		mechanism: "One failed AdvancePayment attempt is normally logged once by the Circle client and again by the task evaluator, so this diagnostic line rate is not a unique-submit rate. In the 2026-08-31 pre-fix retry cohort, five distinct wallet-insufficient attempts landed in one second before a sixth request received 429; ten seconds later, four attempts preceded another 429. The one-hour capped backoff's old 0–2-second jitter preserved these second-scale microbursts across taskworkers even though the minute average looked modest.",
 		context:   "A 429 is an ambiguous submit outcome: it is not safe evidence that Circle created no transaction, so the existing payment idempotency key must be retained. Co-residency with the synchronized wallet-insufficient cohort demonstrates application-side amplification for this incident, not a general Circle outage or proof that every future 429 has the same cause.",
@@ -378,13 +396,16 @@ type logTailer struct {
 	// log second. Exact-line hashes make a one-second stream replay idempotent.
 	// Retaining the immediately previous drain window covers a reconnect that
 	// straddles the cadence boundary without making this state grow forever.
-	burstSecondCounts map[string]int
-	burstPeaks        map[string]int
-	burstPeakSeconds  map[string]string
-	burstEventTotals  map[string]int
-	burstSamples      map[string]string
-	burstSeen         map[[sha256.Size]byte]struct{}
-	burstSeenPrevious map[[sha256.Size]byte]struct{}
+	burstSecondCounts     map[string]int
+	burstPeaks            map[string]int
+	burstPeakSeconds      map[string]string
+	burstEventTotals      map[string]int
+	burstSamples          map[string]string
+	burstSeen             map[[sha256.Size]byte]struct{}
+	burstSeenPrevious     map[[sha256.Size]byte]struct{}
+	canonicalCounts       map[string]int
+	canonicalSeen         map[[sha256.Size]byte]struct{}
+	canonicalSeenPrevious map[[sha256.Size]byte]struct{}
 	// normalized novel shape -> count
 	novelCounts map[string]int
 	novelSample string
@@ -399,19 +420,22 @@ type logTailer struct {
 
 func newLogTailer(service string, env *probeEnv) *logTailer {
 	return &logTailer{
-		service:           service,
-		env:               env,
-		classCounts:       map[string]int{},
-		classSamples:      map[string]string{},
-		classTargets:      map[string]string{},
-		burstSecondCounts: map[string]int{},
-		burstPeaks:        map[string]int{},
-		burstPeakSeconds:  map[string]string{},
-		burstEventTotals:  map[string]int{},
-		burstSamples:      map[string]string{},
-		burstSeen:         map[[sha256.Size]byte]struct{}{},
-		burstSeenPrevious: map[[sha256.Size]byte]struct{}{},
-		novelCounts:       map[string]int{},
+		service:               service,
+		env:                   env,
+		classCounts:           map[string]int{},
+		classSamples:          map[string]string{},
+		classTargets:          map[string]string{},
+		burstSecondCounts:     map[string]int{},
+		burstPeaks:            map[string]int{},
+		burstPeakSeconds:      map[string]string{},
+		burstEventTotals:      map[string]int{},
+		burstSamples:          map[string]string{},
+		burstSeen:             map[[sha256.Size]byte]struct{}{},
+		burstSeenPrevious:     map[[sha256.Size]byte]struct{}{},
+		canonicalCounts:       map[string]int{},
+		canonicalSeen:         map[[sha256.Size]byte]struct{}{},
+		canonicalSeenPrevious: map[[sha256.Size]byte]struct{}{},
+		novelCounts:           map[string]int{},
 		// silence is measured from tailer start until the first line arrives
 		lastLineTime: time.Now(),
 	}
@@ -544,6 +568,15 @@ func (self *logTailer) classify(line string) {
 					self.classTargets[key] = target
 				}
 			}
+			if c.canonical != nil && c.canonical.eventRe.MatchString(line) {
+				fingerprint := sha256.Sum256([]byte("canonical\x00" + key + "\x00" + line))
+				_, replayedCurrent := self.canonicalSeen[fingerprint]
+				_, replayedPrevious := self.canonicalSeenPrevious[fingerprint]
+				if !replayedCurrent && !replayedPrevious {
+					self.canonicalSeen[fingerprint] = struct{}{}
+					self.canonicalCounts[key] += 1
+				}
+			}
 			if c.burst != nil && c.burst.eventRe.MatchString(line) {
 				if second := logTimestampSecond(line); second != "" {
 					fingerprint := sha256.Sum256([]byte(key + "\x00" + line))
@@ -635,6 +668,20 @@ func (self *logTailer) drainWindow() []finding {
 				attributionLabel = "frame"
 			}
 			observed += fmt.Sprintf(" %s=%s", attributionLabel, attribution)
+			canonicalEvidence := ""
+			if c.canonical != nil {
+				observed += fmt.Sprintf(
+					" %s=%d diagnostic_lines=%d canonical_source=exact-replay-deduplicated-task-evaluator",
+					c.canonical.name,
+					self.canonicalCounts[key],
+					count,
+				)
+				canonicalEvidence = fmt.Sprintf(
+					"\nlogical event count: %d exact-replay-deduplicated task evaluator line(s) from %d diagnostic line(s)",
+					self.canonicalCounts[key],
+					count,
+				)
+			}
 			findings = append(findings, finding{
 				probeId: "logs/" + c.name, tier: tier,
 				class: c.name, target: self.service, frame: attribution, sustain: 1,
@@ -642,7 +689,7 @@ func (self *logTailer) drainWindow() []finding {
 				baseline:  baseline,
 				observed:  observed,
 				mechanism: c.mechanism,
-				evidence:  "meaning: " + c.meaning + "\nsample: " + self.classSamples[key],
+				evidence:  "meaning: " + c.meaning + canonicalEvidence + "\nsample: " + self.classSamples[key],
 				context:   c.context,
 				action:    c.action,
 				verify:    c.verify,
@@ -742,6 +789,9 @@ func (self *logTailer) drainWindow() []finding {
 	self.burstSamples = map[string]string{}
 	self.burstSeenPrevious = self.burstSeen
 	self.burstSeen = map[[sha256.Size]byte]struct{}{}
+	self.canonicalCounts = map[string]int{}
+	self.canonicalSeenPrevious = self.canonicalSeen
+	self.canonicalSeen = map[[sha256.Size]byte]struct{}{}
 	self.novelCounts = map[string]int{}
 	self.novelSample = ""
 

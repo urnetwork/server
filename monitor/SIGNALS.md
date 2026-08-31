@@ -281,6 +281,15 @@ WHERE function_name LIKE '%UpdateClient%'
   finance/ops must still fund the exact network/token wallet or pause payouts.
   Never accelerate retries, delete pending rows, or rotate idempotency keys to
   silence this class.
+  One logical Circle rejection normally produces two diagnostic lines: the
+  provider-boundary client record and the task evaluator record. The standing
+  alert now reports both raw `diagnostic_lines` and
+  `processor_rate_limit_events`, counting only exact-replay-deduplicated task
+  evaluator records for the latter. A lone provider line still alerts
+  fail-safe, but it renders a zero canonical count instead of being silently
+  divided by two. This matters during the live stale-build drain, where a
+  4/min line rate represented two logical 429 events and the durable current
+  row class advanced independently.
 - The standing tail derives a separate `payout-retry-microburst` finding from
   that wallet class. It counts only the canonical `[task.go:<line>]` evaluator
   record (one per logical attempt), groups the embedded source timestamp by
