@@ -156,10 +156,13 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		activeTasks := parseExecutorActiveTasks(activeLog, worker.host, worker.block, activeLogObservedAt)
 		activeSummary := formatExecutorActiveTasks(activeTasks, 8)
 		scoreActive := false
+		closeActive := false
 		for _, task := range activeTasks {
-			if task.name == "UpdateClientScores" {
+			switch task.name {
+			case "UpdateClientScores":
 				scoreActive = true
-				break
+			case "CloseExpiredContracts":
+				closeActive = true
 			}
 		}
 
@@ -197,6 +200,10 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism = "UpdateClientScores is active on the exact hot executor. A target's exported score payload is caller-invariant unless that caller blocks a network present in the target; encoding the unchanged target separately for every caller multiplies gob work by the caller-location count and produces the observed CPU/allocation churn even when streaming keeps live heap bounded."
 			action = "Deploy the target-oriented UpdateClientScores fanout and alias-aware cache: encode one zero-caller baseline per target, write one-byte aliases for unchanged callers, and independently encode full overrides only for callers whose blocked networks actually remove a provider. Retain the bounded streaming batches and rolling legacy-reader pass; do not raise the cgroup limit or restart to erase the evidence."
 			verify = "A post-deploy UpdateClientScores run completes inside its historical band while its exact executor remains below the CPU/allocation guards for two consecutive probes; aliases preserve unfiltered selections, excluded callers still use overrides, and the score-byte signal drains after the legacy TTL."
+			if closeActive {
+				mechanism += " CloseExpiredContracts is active on the same host/block, so this process-local saturation can delay its Go work between otherwise short PostgreSQL statements; close-duration and open-contract age buckets remain the authoritative impact measures."
+				verify += " The co-resident close checkpoint also returns below 120 seconds and its older-than-five/30-minute contract buckets fall on consecutive samples."
+			}
 		}
 
 		evidence := "One-minute rates come from the taskworker process metrics pushed to Mimir, grouped by exact host/block/runtime instance and compared with the fresh paired fleet median. Two consecutive probe failures provide a two-minute sustain guard. Recent eval-active heartbeats are joined on host/block."
@@ -204,6 +211,11 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			evidence += " The task-lifecycle lookup was degraded: " + activeLogErr.Error()
 		} else if activeSummary == "" {
 			evidence += " No fresh active-task heartbeat was available for this executor, so the rate finding remains valid without task attribution."
+		}
+
+		findingContext := "CPU saturation alone can be useful work, and allocation alone can be a short burst. Requiring both absolute guards and both fleet-skew guards avoids treating an ordinary busy worker as pathological churn; this signal complements the live-heap guard in §2.12."
+		if closeActive {
+			findingContext += " Exact co-residency proves a shared process budget, not that every slow close has this cause; retain database wait/vacuum and adjacent fast-executor controls from §2.6a."
 		}
 
 		findings = append(findings, finding{
@@ -224,7 +236,7 @@ func (workerChurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			),
 			observed: observed,
 			evidence: evidence,
-			context:  "CPU saturation alone can be useful work, and allocation alone can be a short burst. Requiring both absolute guards and both fleet-skew guards avoids treating an ordinary busy worker as pathological churn; this signal complements the live-heap guard in §2.12.",
+			context:  findingContext,
 			action:   action,
 			verify:   verify,
 			playbook: "SIGNALS.md 2.12a",

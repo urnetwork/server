@@ -1183,6 +1183,22 @@ open until consecutive samples continue that aged-bucket decline and close
 durations return below 120 seconds, but do not interrupt the progressing
 vacuum or add closer concurrency while this path is converging.
 
+The 05:14:59Z autovacuum completion supplied the stronger post-vacuum control.
+It reduced `transfer_contract` dead tuples from 11.56M to 0.49M before the
+follow-up analyze and left zero blocking sessions. Nevertheless, open contracts
+rose from 1,234,192 at 05:15Z to 1,340,672 at 05:28Z; the latter contained
+1,294,787 older than five minutes and 1,074,628 older than 30 minutes. The
+retention queue remained bounded at four payments with one cursor, and sampled
+close updates were seconds-old or younger. During the same interval edge-3/g1
+ran `UpdateClientScores` and `CloseExpiredContracts` together while holding
+roughly four CPU cores and allocating 640–660MiB/s. Vacuum was no longer the
+active bottleneck in this control: the old score fanout's process-local churn
+was starving the co-resident closer while creation continued. Deploy the
+target-oriented score fanout/alias cache from §2.12a, then require both worker
+rates and aged open buckets to fall. Do not add closer concurrency; exact
+co-residency remains an incident-specific causal control, not a claim that all
+slow close cohorts share one owner.
+
 Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
 control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged
 `eval error(1800.88s) (reschedule) ... = Timeout`; the monitor immediately

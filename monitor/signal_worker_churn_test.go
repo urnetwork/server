@@ -55,7 +55,11 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 		"alloc_ratio_1m=216.7",
 		"active_tasks=UpdateClientScores:2875s@01a055c8-759e-406e-4061-603f0dc86869,CloseExpiredContracts:7s@01a055f4-ccee-406e-4061-603f0dc86869",
 		"target's exported score payload is caller-invariant",
+		"CloseExpiredContracts is active on the same host/block",
+		"delay its Go work between otherwise short PostgreSQL statements",
 		"target-oriented UpdateClientScores fanout",
+		"co-resident close checkpoint also returns below 120 seconds",
+		"Exact co-residency proves a shared process budget",
 		"SIGNALS.md 2.12a",
 	} {
 		if !strings.Contains(markdown, want) {
