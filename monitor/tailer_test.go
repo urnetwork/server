@@ -183,6 +183,108 @@ func TestRedisNetEscrowTTLAlertRedactsEntityIDs(t *testing.T) {
 	}
 }
 
+func payoutAttemptLogLines(second string, attempt int) (string, string) {
+	id := fmt.Sprintf("019f77ae-de17-db98-b22d-%012x", attempt)
+	processorLine := fmt.Sprintf(
+		`[edge-3][taskworker][g2][cid:test][I][%s.100000Z][circle_client_controller.go:142][circlec]error sending payment: wallet %s: asset amount owned by the wallet is insufficient`,
+		second,
+		id,
+	)
+	evaluatorLine := fmt.Sprintf(
+		`[edge-3][taskworker][g2][cid:test][I][%s.200000Z][task.go:1930][%s]eval error = asset amount owned by the wallet is insufficient`,
+		second,
+		id,
+	)
+	return processorLine, evaluatorLine
+}
+
+// Four canonical task attempts in one source second are the exact live shape
+// that immediately preceded a Circle 429. The Circle-client copy of each error
+// contributes to diagnostic volume but not attempt concurrency, and an exact
+// tail replay must not manufacture a fifth attempt.
+func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	var replay string
+	for attempt := 0; attempt < 4; attempt++ {
+		processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", attempt)
+		tailer.classify(processorLine)
+		tailer.classify(evaluatorLine)
+		if attempt == 0 {
+			replay = evaluatorLine
+		}
+	}
+	tailer.classify(replay)
+
+	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
+	if finding.healthy {
+		t.Fatal("four same-second payout attempts did not create a microburst finding")
+	}
+	for _, want := range []string{
+		"peak_task_attempts_per_second=4",
+		"threshold=4/s",
+		"task_attempts=4",
+		"diagnostic_lines=9",
+		"exact-replay-deduplicated task evaluator lines",
+		"separate from the operational liquidity alert",
+		"commit 70b0d269 or later only to older blocks",
+		"peak_task_attempts_per_second below 4",
+		"[<id>]eval error",
+	} {
+		if combined := finding.observed + "\n" + finding.evidence + "\n" + finding.context + "\n" + finding.action + "\n" + finding.verify; !strings.Contains(combined, want) {
+			t.Fatalf("microburst finding missing %q: %+v", want, finding)
+		}
+	}
+	if logIDRe.MatchString(finding.evidence) {
+		t.Fatalf("microburst evidence leaked a payment id: %q", finding.evidence)
+	}
+}
+
+// Minute volume is the liquidity/retry-amplification signal, but it is not a
+// synchronized microburst when canonical attempts occupy different seconds.
+// The subsequent empty window must also resolve a prior burst identity.
+func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for attempt := 0; attempt < 8; attempt++ {
+		second := fmt.Sprintf("2026-08-31T15:47:%02d", attempt)
+		processorLine, evaluatorLine := payoutAttemptLogLines(second, attempt)
+		tailer.classify(processorLine)
+		tailer.classify(evaluatorLine)
+	}
+	findings := tailer.drainWindow()
+	if payout := findingByClass(t, findings, "payout-wallet-insufficient"); payout.healthy {
+		t.Fatal("spread minute lost the parent liquidity finding")
+	}
+	if burst := findingByClass(t, findings, "payout-retry-microburst"); !burst.healthy {
+		t.Fatalf("spread minute became a synchronized burst: %+v", burst)
+	}
+	if burst := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); !burst.healthy {
+		t.Fatalf("empty window did not resolve burst identity: %+v", burst)
+	}
+}
+
+// A tail reconnect uses --since=1s and can replay the final source second of
+// the prior drain window. Preserve exactly one prior fingerprint window so a
+// cadence-boundary reconnect cannot open the same burst twice.
+func TestPayoutRetryMicroburstDeduplicatesReplayAcrossDrainBoundary(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	lines := make([]string, 0, 4)
+	for attempt := 0; attempt < 4; attempt++ {
+		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:33", attempt)
+		lines = append(lines, evaluatorLine)
+		tailer.classify(evaluatorLine)
+	}
+	if first := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); first.healthy {
+		t.Fatal("initial same-second burst was not detected")
+	}
+
+	for _, line := range lines {
+		tailer.classify(line)
+	}
+	if replay := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); !replay.healthy {
+		t.Fatalf("cross-window exact replay manufactured another burst: %+v", replay)
+	}
+}
+
 // a > 1MB line must cost one counted stream restart, not a dead tailer:
 // before the fix the scan loop exited on bufio.ErrTooLong but cmd.Wait()
 // blocked forever on the still-writing child and the full pipe.

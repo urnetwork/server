@@ -15,6 +15,7 @@ package monitor
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os/exec"
@@ -24,6 +25,23 @@ import (
 	"sync"
 	"time"
 )
+
+// logBurst derives a short-window software-amplification finding from one
+// existing log class. eventRe selects exactly one canonical line per logical
+// attempt; exact-line fingerprints prevent a tail-stream replay from inflating
+// the peak.
+type logBurst struct {
+	name      string
+	eventRe   *regexp.Regexp
+	threshold int
+	tier      string
+	meaning   string
+	mechanism string
+	context   string
+	action    string
+	verify    string
+	playbook  string
+}
 
 // logClass is one row of the SIGNALS.md §4 taxonomy.
 type logClass struct {
@@ -53,6 +71,11 @@ type logClass struct {
 	// exemplars do not become "novel" log errors, but alerting comes from a
 	// lossless counter rather than the sampled log volume.
 	metricOnly bool
+	// burst is an independently actionable per-second finding derived from
+	// this class's canonical event lines. It stays separate from the parent
+	// alert so an operational cause (for example absent wallet liquidity) does
+	// not conceal or inherit a deployable retry-amplification defect.
+	burst *logBurst
 }
 
 // the §4 taxonomy. Order matters: first match wins.
@@ -137,7 +160,19 @@ var logClasses = []logClass{
 		context:   "This is primarily an operational liquidity boundary, not an API or PostgreSQL defect. Proportional capped jitter contains synchronized processor bursts but cannot create wallet liquidity; accelerating retries only increases noise and load. A software release cannot fund the custodial wallet, and deleting task rows would discard owed payouts.",
 		action:    "Finance/ops must fund the exact network/token payout wallet identified in protected source logs, or pause payouts using the supported operational control until it is funded. Do not delete or manually replay pending_task rows, rotate payment idempotency keys, or loosen the retry cap.",
 		verify:    "First verify every taskworker block's embedded source revision. Deploy the proportional-jitter taskworker only to blocks older than commit 70b0d269; if all blocks are already current, do not redeploy from this alert and instead verify that a saturated cohort no longer repeats as a narrow hourly wave and processor-rate-limit remains bounded. After funding or an intentional resume, allow up to 90 minutes plus log-ingestion delay; AdvancePayment wallet-insufficient rows and this log rate converge to zero without manual row changes, while payment records show no duplicate Circle transfers.",
-		redactIDs: true},
+		redactIDs: true,
+		burst: &logBurst{
+			name:      "payout-retry-microburst",
+			eventRe:   regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			threshold: 4,
+			tier:      tierWarn,
+			meaning:   "four or more distinct AdvancePayment wallet-rejection attempts landed in one second, the exact short-window shape that preceded live Circle 429s",
+			mechanism: "The old capped task backoff added only 0–2 seconds of jitter, so outage-created rows retained second-scale cohorts across their hourly retries. The standing tailer counts only task evaluator lines (one canonical line per attempt), groups their embedded timestamps by second, and de-duplicates exact replayed lines before computing the peak. This separates attempt concurrency from the parent class's two diagnostic lines per failure.",
+			context:   "This is a deployable software-amplification alert, separate from the operational liquidity alert. The threshold is an empirical incident discriminator: four wallet failures in one second immediately preceded a 429 on 2026-08-31; it is not a claim about Circle's account-specific quota.",
+			action:    "Verify every taskworker block's embedded source revision and deploy commit 70b0d269 or later only to older blocks. Do not accelerate, manually replay, or delete payment tasks. If every block is already current, do not redeploy from this alert; correlate all Circle request sources and the account's authoritative quota after one 90-minute drain window.",
+			verify:    "After complete taskworker convergence, observe a full 90-minute window with peak_task_attempts_per_second below 4, no payment-processor-rate-limit event, and unchanged payment idempotency keys. Funding or pausing the wallet remains a separate operational verification.",
+			playbook:  "SIGNALS.md §1.2 and §5.7",
+		}},
 	{name: "payment-processor-rate-limit", re: regexp.MustCompile(`Bad status: 429 Too Many Requests.*API rate limit error`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
 		meaning:   "Circle refused a payment API request because the shared processor identity crossed a short-window request limit",
@@ -213,6 +248,20 @@ const netEscrowNegativePageRate = 100
 // targetRe extracts the ip:port a class line is about (the sick-node
 // attribution from §4: identity is class + target + frame).
 var targetRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+`)
+
+// warpctl wraps the authoritative source timestamp in brackets and preserves
+// either Z or an explicit offset. Keep only whole-second resolution: the
+// incident discriminator is concurrent task attempts inside the provider's
+// short admission window, not log arrival time.
+var logTimestampSecondRe = regexp.MustCompile(`\[(20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\]`)
+
+func logTimestampSecond(line string) string {
+	match := logTimestampSecondRe.FindStringSubmatch(line)
+	if len(match) < 2 {
+		return ""
+	}
+	return match[1]
+}
 
 var requiredVaultResourceRe = regexp.MustCompile(`Resource not found in vault \(([^\)]+\.yml)\)`)
 var requiredVaultRouteRe = regexp.MustCompile(`route ([A-Z]+) \^?([^$:\s]+)\$?:`)
@@ -306,6 +355,16 @@ type logTailer struct {
 	// class -> one sample line + one target from the window
 	classSamples map[string]string
 	classTargets map[string]string
+	// A configured burst counts canonical logical-event lines by their embedded
+	// log second. Exact-line hashes make a one-second stream replay idempotent.
+	// Retaining the immediately previous drain window covers a reconnect that
+	// straddles the cadence boundary without making this state grow forever.
+	burstSecondCounts map[string]int
+	burstPeaks        map[string]int
+	burstEventTotals  map[string]int
+	burstSamples      map[string]string
+	burstSeen         map[[sha256.Size]byte]struct{}
+	burstSeenPrevious map[[sha256.Size]byte]struct{}
 	// normalized novel shape -> count
 	novelCounts map[string]int
 	novelSample string
@@ -320,12 +379,18 @@ type logTailer struct {
 
 func newLogTailer(service string, env *probeEnv) *logTailer {
 	return &logTailer{
-		service:      service,
-		env:          env,
-		classCounts:  map[string]int{},
-		classSamples: map[string]string{},
-		classTargets: map[string]string{},
-		novelCounts:  map[string]int{},
+		service:           service,
+		env:               env,
+		classCounts:       map[string]int{},
+		classSamples:      map[string]string{},
+		classTargets:      map[string]string{},
+		burstSecondCounts: map[string]int{},
+		burstPeaks:        map[string]int{},
+		burstEventTotals:  map[string]int{},
+		burstSamples:      map[string]string{},
+		burstSeen:         map[[sha256.Size]byte]struct{}{},
+		burstSeenPrevious: map[[sha256.Size]byte]struct{}{},
+		novelCounts:       map[string]int{},
 		// silence is measured from tailer start until the first line arrives
 		lastLineTime: time.Now(),
 	}
@@ -462,6 +527,30 @@ func (self *logTailer) classify(line string) {
 					self.classTargets[key] = target
 				}
 			}
+			if c.burst != nil && c.burst.eventRe.MatchString(line) {
+				if second := logTimestampSecond(line); second != "" {
+					fingerprint := sha256.Sum256([]byte(key + "\x00" + line))
+					_, replayedCurrent := self.burstSeen[fingerprint]
+					_, replayedPrevious := self.burstSeenPrevious[fingerprint]
+					if !replayedCurrent && !replayedPrevious {
+						self.burstSeen[fingerprint] = struct{}{}
+						secondKey := key + "\x00" + second
+						self.burstSecondCounts[secondKey] += 1
+						self.burstEventTotals[key] += 1
+						self.burstPeaks[key] = max(
+							self.burstPeaks[key],
+							self.burstSecondCounts[secondKey],
+						)
+						if _, ok := self.burstSamples[key]; !ok {
+							sample := line
+							if c.redactIDs {
+								sample = logIDRe.ReplaceAllString(sample, "<id>")
+							}
+							self.burstSamples[key] = truncateLine(sample)
+						}
+					}
+				}
+			}
 			return
 		}
 	}
@@ -552,6 +641,50 @@ func (self *logTailer) drainWindow() []finding {
 		if !broken {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
 		}
+
+		if c.burst != nil {
+			burstBroken := false
+			for _, key := range keys {
+				peak := self.burstPeaks[key]
+				if peak < c.burst.threshold {
+					continue
+				}
+				burstBroken = true
+				attribution := self.classTargets[key]
+				observed := fmt.Sprintf(
+					"peak_task_attempts_per_second=%d threshold=%d/s task_attempts=%d diagnostic_lines=%d",
+					peak,
+					c.burst.threshold,
+					self.burstEventTotals[key],
+					self.classCounts[key],
+				)
+				if attribution != "" {
+					observed += " target=" + attribution
+				}
+				findings = append(findings, finding{
+					probeId: "logs/" + c.burst.name, tier: c.burst.tier,
+					class: c.burst.name, target: self.service, frame: attribution, sustain: 1,
+					symptom: fmt.Sprintf(
+						"service %s: %s peaked at %d distinct task attempts/s (threshold %d/s)",
+						self.service,
+						c.burst.name,
+						peak,
+						c.burst.threshold,
+					),
+					baseline:  fmt.Sprintf("peak distinct task evaluator attempts < %d/s; minute volume alone does not prove a synchronized retry wave", c.burst.threshold),
+					observed:  observed,
+					mechanism: c.burst.mechanism,
+					evidence:  "meaning: " + c.burst.meaning + "\npeak source: exact-replay-deduplicated task evaluator lines grouped by embedded source second\nsample: " + self.burstSamples[key],
+					context:   c.burst.context,
+					action:    c.burst.action,
+					verify:    c.burst.verify,
+					playbook:  c.burst.playbook,
+				})
+			}
+			if !burstBroken {
+				findings = append(findings, healthyFinding("logs/"+c.burst.name, c.burst.tier, c.burst.name, self.service))
+			}
+		}
 	}
 
 	// novel shapes at rate
@@ -590,6 +723,12 @@ func (self *logTailer) drainWindow() []finding {
 	self.classCounts = map[string]int{}
 	self.classSamples = map[string]string{}
 	self.classTargets = map[string]string{}
+	self.burstSecondCounts = map[string]int{}
+	self.burstPeaks = map[string]int{}
+	self.burstEventTotals = map[string]int{}
+	self.burstSamples = map[string]string{}
+	self.burstSeenPrevious = self.burstSeen
+	self.burstSeen = map[[sha256.Size]byte]struct{}{}
 	self.novelCounts = map[string]int{}
 	self.novelSample = ""
 
