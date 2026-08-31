@@ -145,6 +145,7 @@ func (self *host) redisNodePorts() []int {
 type monitorConfig struct {
 	env                 string   // WARP_ENV
 	publicDomain        string   // active services.yml domain
+	websiteDomain       string   // canonical managed product website, when present
 	logServices         []string // active services.yml service inventory
 	verificationEnabled bool
 

@@ -96,6 +96,11 @@ LAN NIC, so TCP-open probes disagreed with every application handshake. The
 same audit identified a payment-completion update whose indexed lookup still
 fans out to millions of contract rows per call. Sections 2.7, 2.10-2.11,
 4, 8.6-8.7, and 14.5 record the discriminators.
+Updated 2026-08-31 after live web logs showed repeated exact-path ENOENTs for
+Android and Apple association metadata. The files existed in the tracked Astro
+public tree and passed the SEO gate in `dist`, but `mv dist/*` silently omitted
+the root `.well-known` directory while staging the deployable tree. Section 19
+adds exact-edge semantic probes and records the dotfile-safe staging fix.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -4246,6 +4251,7 @@ Tier-1 (warn):
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
+| web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
@@ -7805,3 +7811,56 @@ A connected request with a non-200 response is instead a TLS/SNI, LB generation,
 or application-readiness fault. Verification for every repair is three pinned
 HTTP/1.1 IPv6 200 responses per configured address plus advancing counters at
 the repaired layer.
+
+## 19. Web platform association metadata
+
+### 19.1 Android App Links and Apple association files
+
+Probe: `association-files`
+
+The product clients declare `ur.io` as a platform-verified web origin. Android's
+release manifest uses an `android:autoVerify="true"` HTTPS intent filter for
+that host, so `/.well-known/assetlinks.json` is a functional ownership contract,
+not crawler traffic. The site also carries
+`/.well-known/apple-app-site-association` for app links and web credentials.
+Ordinary homepage, nginx, and web-process health can all remain green while
+both contracts return 404.
+
+For every enabled exact edge IPv6 address, retain `ur.io` TLS SNI and request
+both paths directly so DNS or CDN health selection cannot hide one stale web
+generation. Healthy requires HTTP 200 with a JSON media type and semantic
+decoding: assetlinks must authorize package `com.bringyour.network` for
+`delegate_permission/common.handle_all_urls` with at least one well-formed
+SHA-256 signing fingerprint; the Apple document must authorize
+`6BGU69Q742.network.ur` for both app links and web credentials. Aggregate
+application failures into one `web-association-files` alert. Curl exit 7/28 on
+an exact edge remains owned by §18.1 so one transport incident does not open a
+second static-file ticket.
+
+2026-08-31 root cause: the authoritative files were tracked under
+`mmm/ur.io/astro/public/.well-known` and present in `astro/dist/.well-known`.
+The SEO build gate therefore passed. Both `build-main` and `build-canary` then
+ran `mv dist/* build/<environment>/`; POSIX shell `*` excludes dot-prefixed
+root entries, leaving `.well-known` in `dist` while the web image copied only
+the staged tree. Production consequently returned an nginx ENOENT/404 for
+both exact files on an otherwise healthy site.
+
+The first live run of the focused probe at 2026-08-31 19:51:55Z completed all
+16 application checks (four enabled edges × two configured IPv6 interfaces ×
+two files). Every check connected to its exact address and returned HTTP 404
+`text/html`; there were no transport-only exclusions. The disabled/offline
+edge-5 was absent by construction. This rules out DNS rotation, CDN selection,
+one-edge skew, and IPv6 ingress as the cause of the missing documents.
+
+The software fix is mmm/ur.io commit `72190198`: a reusable staging script
+enumerates every `dist` directory entry, including dot directories, refuses to
+merge into stale output, and is exercised by a deterministic synthetic test
+containing both platform files. Build and deploy the web service from that
+commit or later. Do not edit live containers, fabricate nginx fallback JSON,
+or treat the requests as scanner noise.
+
+Verification requires both paths to return HTTP 200 `application/json` and
+pass semantic validation on every enabled exact edge and through the canonical
+CDN hostname. Then require zero new nginx ENOENT lines for those exact paths
+for ten minutes. A web deployment is required; server, API, Connect, or
+taskworker deployments cannot change these static image contents.

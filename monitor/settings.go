@@ -126,6 +126,10 @@ type SignalSettings struct {
 	// environment-scoped public health hostnames without duplicating them in
 	// monitor.yml.
 	PublicDomain string
+	// WebsiteDomain is the canonical product site present in services.yml's
+	// managed domains. It arms focused static-site contract probes without
+	// hard-coding a production hostname into alternate environments.
+	WebsiteDomain string
 	// LogServices is the active services.yml service inventory used to start
 	// standing log streams without querying the remote artifact registry.
 	// Alternate callers may leave it empty to use warpctl discovery.
@@ -284,6 +288,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
 		env:                 settings.Environment,
 		publicDomain:        settings.PublicDomain,
+		websiteDomain:       settings.WebsiteDomain,
 		logServices:         append([]string(nil), settings.LogServices...),
 		verificationEnabled: settings.VerificationEnabled,
 		sshUser:             settings.SSHUser,

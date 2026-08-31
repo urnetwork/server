@@ -61,6 +61,7 @@ type monitorYaml struct {
 // intentionally ignored because they retain historical interface identities.
 type servicesYaml struct {
 	Domain   string                `yaml:"domain"`
+	Domains  map[string]string     `yaml:"domains"`
 	Versions []servicesVersionYaml `yaml:"versions"`
 }
 
@@ -127,6 +128,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 	settings := SignalSettings{
 		Environment:         env,
 		PublicDomain:        strings.TrimSpace(services.Domain),
+		WebsiteDomain:       activeWebsiteDomainFromServices(services),
 		LogServices:         logServices,
 		VerificationEnabled: controller.StEnabled(),
 		SSHUser:             y.Ssh.User,
@@ -189,6 +191,16 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+func activeWebsiteDomainFromServices(services servicesYaml) string {
+	// ur.io is the product website whose Android and Apple association
+	// contracts are committed with the site. Alternate environments that do
+	// not manage it leave the focused probe deliberately unarmed.
+	if _, ok := services.Domains["ur.io"]; ok {
+		return "ur.io"
+	}
+	return ""
 }
 
 func activeLogServicesFromServices(services servicesYaml) ([]string, error) {
