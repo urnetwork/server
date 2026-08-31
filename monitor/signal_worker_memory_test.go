@@ -120,29 +120,38 @@ func TestWorkerMemorySignalSyntheticLiveHeapSkew(t *testing.T) {
 	}
 	payload := workerMetricsFixtureJSON(t, now, workers...)
 	ratePayload := workerRatesFixtureJSON(t, now, workers...)
-	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
-		if host.Name != "metrics-1" || !strings.Contains(command, "/prometheus/api/v1/query?query=") ||
-			!strings.Contains(command, "%22synthetic%22") {
-			t.Fatalf("unexpected Mimir command on %s: %s", host.Name, command)
-		}
-		if strings.Contains(command, "monitor_rate") {
-			return ratePayload, nil
-		}
-		return payload, nil
-	}, localFn: func(name string, args ...string) (string, error) {
-		joined := strings.Join(args, " ")
-		if name != "warpctl" || !strings.Contains(joined, "--since=2m") ||
-			!strings.Contains(joined, "--limit=5000") || !strings.Contains(joined, "--query=eval") {
-			t.Fatalf("unexpected active-task command: %s %s", name, joined)
-		}
-		return "[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:40Z][task.go:1938][01a0530b-0e6a-9c14-6694-11a165f3c27b]eval active(620.50s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})\n" +
-			"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:41Z][task.go:1938][01a0530c-65aa-153e-19d8-82ad3698cf40]eval active(130.25s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})\n" +
-			"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:16:40Z][task.go:1938][01a0530f-65aa-153e-19d8-82ad3698cf40]eval active(500.00s) github.com/urnetwork/server/taskworker/work.UpdateClientLocations({})\n" +
-			"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:19:00Z][task.go:1938][01a05310-65aa-153e-19d8-82ad3698cf40]eval active(700.00s) github.com/urnetwork/server/taskworker/work.ExportStats({})\n" +
-			"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:39Z][task.go:1938][01a0530e-65aa-153e-19d8-82ad3698cf40]eval active(90.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})\n" +
-			"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:42Z][task.go:1927][01a0530e-65aa-153e-19d8-82ad3698cf40]eval done(93.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({}) = {}\n" +
-			"[edge-3][taskworker][g1][cid:cold][I][2026-08-30T15:17:42Z][task.go:1938][01a0530d-65aa-153e-19d8-82ad3698cf40]eval active(999.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
-	}}
+	source := &syntheticSource{
+		hostFn: func(host HostSettings, command string) (string, error) {
+			if host.Name != "metrics-1" || !strings.Contains(command, "/prometheus/api/v1/query?query=") ||
+				!strings.Contains(command, "%22synthetic%22") {
+				t.Fatalf("unexpected Mimir command on %s: %s", host.Name, command)
+			}
+			if strings.Contains(command, "monitor_rate") {
+				return ratePayload, nil
+			}
+			return payload, nil
+		},
+		redisFn: func(host HostSettings, port int, args ...string) (string, error) {
+			if host.Name != "redis-1" || port != 6379 || strings.Join(args, " ") != "-c --raw GET "+redisScoreAliasReadyKey {
+				t.Fatalf("unexpected score-alias lookup: host=%s port=%d args=%v", host.Name, port, args)
+			}
+			return redisScoreAliasReadyValue, nil
+		},
+		localFn: func(name string, args ...string) (string, error) {
+			joined := strings.Join(args, " ")
+			if name != "warpctl" || !strings.Contains(joined, "--since=2m") ||
+				!strings.Contains(joined, "--limit=5000") || !strings.Contains(joined, "--query=eval") {
+				t.Fatalf("unexpected active-task command: %s %s", name, joined)
+			}
+			return "[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:40Z][task.go:1938][01a0530b-0e6a-9c14-6694-11a165f3c27b]eval active(620.50s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})\n" +
+				"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:41Z][task.go:1938][01a0530c-65aa-153e-19d8-82ad3698cf40]eval active(130.25s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})\n" +
+				"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:16:40Z][task.go:1938][01a0530f-65aa-153e-19d8-82ad3698cf40]eval active(500.00s) github.com/urnetwork/server/taskworker/work.UpdateClientLocations({})\n" +
+				"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:19:00Z][task.go:1938][01a05310-65aa-153e-19d8-82ad3698cf40]eval active(700.00s) github.com/urnetwork/server/taskworker/work.ExportStats({})\n" +
+				"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:39Z][task.go:1938][01a0530e-65aa-153e-19d8-82ad3698cf40]eval active(90.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})\n" +
+				"[edge-3][taskworker][g2][cid:hot][I][2026-08-30T15:17:42Z][task.go:1927][01a0530e-65aa-153e-19d8-82ad3698cf40]eval done(93.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({}) = {}\n" +
+				"[edge-3][taskworker][g1][cid:cold][I][2026-08-30T15:17:42Z][task.go:1938][01a0530d-65aa-153e-19d8-82ad3698cf40]eval active(999.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
+		},
+	}
 
 	alerts, err := NewWorkerMemorySignal().Run(context.Background(), workerMemorySyntheticSettings(source, now))
 	if err != nil {
@@ -174,15 +183,19 @@ func TestWorkerMemorySignalSyntheticLiveHeapSkew(t *testing.T) {
 		"active_tasks=UpdateClientScores:620s@01a0530b-0e6a-9c14-6694-11a165f3c27b,CloseExpiredContracts:130s@01a0530c-65aa-153e-19d8-82ad3698cf40",
 		"active_log_source=warpctl",
 		"process-local allocator/GC contention",
-		"Production start/stop controls identify score export as the portable allocator",
-		"caller-oriented fanout still re-encodes caller-invariant target payloads hundreds of times",
+		"score_alias_schema_ready=true",
+		"durable alias-schema marker proves the target-oriented fanout and alias-aware cache completed a compatibility pass",
+		"residual allocation in the deployed sparse exporter",
 		"CloseExpiredContracts is active on the same host/block",
-		"target-oriented UpdateClientScores fanout and alias-aware cache",
+		"target-oriented fanout and alias-aware cache are already active; do not redeploy them",
 		"co-resident close checkpoint also returns below 120 seconds",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("worker-memory diagnosis missing %q:\n%s", want, markdown)
 		}
+	}
+	if strings.Contains(markdown, "Deploy the target-oriented UpdateClientScores fanout") {
+		t.Fatalf("deployed alias marker retained the pre-deploy action:\n%s", markdown)
 	}
 }
 

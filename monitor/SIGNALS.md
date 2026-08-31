@@ -1933,9 +1933,10 @@ task attribution was a monitor transport bug. `worker-memory` now uses the
 shared 12-second gateway boundary plus bounded taskworker-journal fallback,
 records `active_log_source`, and retains partial-read degradation separately
 from a complete fallback. When the exact executor carries `UpdateClientScores`,
-the alert names the already-proven caller-fanout allocator and the pending
-target-oriented/alias fix; a co-resident close task adds the process-budget
-impact and close/backlog verification. A deterministic synthetic regression
+the alert names the already-proven caller-fanout allocator and uses the durable
+alias marker to distinguish a pending target-oriented fix from residual
+post-deploy allocation; a co-resident close task adds the process-budget impact
+and close/backlog verification. A deterministic synthetic regression
 forces the gateway failure, normalizes a timestamped journal heartbeat, and
 requires both the exact task id and `host-journal-fallback` source in Markdown.
 The first v114 live result attached four fresh task IDs, including the
@@ -1964,6 +1965,32 @@ other identity-checked row from that host, and never passes partial raw JSON to
 the lifecycle parsers. A synthetic mixed valid/null journal requires the
 active score row and host-journal source to survive while the returned partial
 error names the unavailable message.
+
+The alias rollout supplied the next production boundary. The writer published
+`client_score_alias_v1_ready=1` at 08:33:49Z on 2026-08-31. On the formerly
+fullest Redis node, used memory then fell from 12.35GB (95.8%) to 6.13GB
+(47.6%) before the five-hour compatibility TTL ended; sampled score values
+fell from 91.3% to 3.0% of bytes. Immediately after the final legacy expiry at
+13:33:49Z, the marker was still present, the fullest node was 5.66GB (44.0%),
+and the deployed API and Connect readers emitted no selection-empty, Redis
+timeout, exchange-failure, panic, or fatal evidence. This closes the
+caller-fanout storage/read-path fix without a production delete.
+
+The sparse writer also changed the executor shape without eliminating every
+large transient. A post-marker score pass finished in approximately 417
+seconds rather than the pre-fix 3,785-second baseline. Its exact executor
+peaked at 9.31GiB allocated heap, fell to 4.30GiB as the pass ended, and then
+to 2.87GiB at the next collection. A cold successor on another executor
+peaked at 4.05GiB in its first three minutes. A repeated threshold crossing is
+still actionable, but it is no longer evidence that target-oriented fanout is
+missing: live maps and encodings from the current pass can overlap objects
+from a prior pass awaiting collection. `worker-memory` now reads the durable
+marker when it attributes an outlier to `UpdateClientScores`. Marker absent
+keeps the deployment action; marker present says not to redeploy, retains the
+heap alert, and requires a terminal/post-collection observation before
+profiling and bounding the remaining provider-map or encoding concurrency. A
+synthetic marker-ready outlier locks that distinction and rejects the stale
+pre-deploy action.
 
 ### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
 Probe: `worker-churn`
