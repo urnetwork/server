@@ -4593,6 +4593,18 @@ synthetic host with two 502 interfaces requires one battery call and two fully
 attributed alerts. A 502 still proves IPv6 reached the LB and must not be
 relabelled as an interface-routing failure.
 
+At 03:29Z the fleet also exposed a two-generation recovery trap. Edge-0 and
+edge-4 still returned exact-address 502s because the new generation rejected
+the 15-second rule, while the older serving edge-1 generation emitted
+17–54 `plugin.notRegistered` rule-evaluation lines/minute because it lacked
+Grafana 13's standalone Prometheus plugin. A direct Mimir read or green
+Grafana health endpoint cannot clear that older generation. The replacement
+image must contain both fixes: a pinned, checksum-verified Prometheus plugin
+for each architecture and provisioned intervals on the 10-second scheduler
+grid. Run both Warp Grafana regressions, then verify `vector(1)` through
+Grafana `/api/ds/query` and exact-edge health before draining either failure
+mode's predecessor.
+
 For an exact-edge 502/503/504, compare old/new Grafana containers, each front
 `/status`, the service-alias rule/socket, and the child provisioning log. Do not
 add a DNAT target for an unready process and do not restart the same invalid

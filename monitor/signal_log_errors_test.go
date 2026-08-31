@@ -104,6 +104,40 @@ func TestLogErrorsSignalExplainsLongLivedNetEscrowMirror(t *testing.T) {
 	}
 }
 
+func TestLogErrorsSignalExplainsGrafanaPrometheusPluginFailure(t *testing.T) {
+	line := `logger=ngalert.scheduler rule_uid=redis-node-down error="the result-set has errors that can be retried: [plugin.notRegistered] plugin not registered"`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-grafana", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "grafana-plugin-unregistered").Markdown()
+	for _, detail := range []string{
+		"Grafana 13 extracted the formerly core Prometheus datasource",
+		"provisioned warp-mimir row",
+		"direct Mimir query",
+		"exact Grafana generation and image",
+		"pinned Prometheus plugin and catalog SHA-256",
+		"Prometheus plugin and provisioned-alert interval tests",
+		"Do not recreate the datasource",
+		"vector(1) through Grafana /api/ds/query",
+		"every active exact-edge generation",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("Grafana plugin alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(markdown, "The observed value is outside the SIGNALS.md healthy band") ||
+		strings.Contains(markdown, "Follow SIGNALS.md 11.15") {
+		t.Fatalf("Grafana plugin alert retained generic guidance:\n%s", markdown)
+	}
+}
+
 func TestLogErrorsSignalExplainsNegativeNetEscrowAftermath(t *testing.T) {
 	line := "[netescrow]negative counter after release: site=release balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-21434368"
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
