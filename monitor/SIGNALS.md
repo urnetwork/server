@@ -434,6 +434,29 @@ that must be attributed. The rebuilt watcher validated the negative branch:
 a direct production sample again found seven distinct ClientRead PIDs with a
 4ms oldest command, while the wait-events probe emitted no alert.
 
+At 06:03Z on 2026-08-31, a read-only one-shot observation found one
+`IO:DataFileRead` waiter at 71s. It cleared before the immediate attribution
+query, leaving only sub-second protocol handoffs and a one-second B-tree page
+wait; there was no DDL lock or persistent I/O cluster. This also exposed an
+alert-detail defect: the probe selected a representative SQL sample but did
+not put it into the structured alert, and its rendered baseline named only the
+five-backend branch even though the query deliberately also selects one
+waiter older than a minute. The alert now carries the sample query, both
+thresholds, and `DataFileRead`-specific attribution guidance. The query also
+selects the PID, query ID, application, client address, and sample from the
+same oldest waiter, retaining an attribution snapshot when a transient command
+finishes before the follow-up query. A one-shot aged singleton remains
+evidence to validate, while the standing monitor's
+two-observation gate distinguishes recurrence before opening a ticket.
+
+At 06:05Z the next one-shot found a different singleton,
+`Client:ClientWrite` at 96s. It too completed before the immediate PID query,
+so it was not the earlier data-file read persisting under another label and
+did not establish a migration stall. This class means PostgreSQL cannot send
+more result bytes until its client resumes reading. The structured alert now
+directs attribution to the exact SQL/client result-consumption path and
+requires recurrence before changing PostgreSQL or canceling the backend.
+
 `Lock:virtualxid` usually means concurrent index maintenance is waiting for an
 older transaction. Apply the same two-hour `REINDEX ... CONCURRENTLY` grace as
 §2.1: at 07:08Z on 2026-08-30, the daily reindex of `pending_task` had waited
