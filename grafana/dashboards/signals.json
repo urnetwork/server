@@ -1038,8 +1038,18 @@
           "expr": "sum(urnetwork_proxy_wg_peers{env=\"$env\"})",
           "refId": "U",
           "legendFormat": "wg peers"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max_over_time(urnetwork_proxy_wg_receive_routine_failures{env=\"$env\"}[$__rate_interval]))",
+          "refId": "V",
+          "legendFormat": "wg receiver failures"
         }
-      ]
+      ],
+      "description": "Live proxy devices, prewarmed capacity, registered WireGuard peers, and unexpected WireGuard socket-reader exits. Receiver failures are retained over the rate window so a sampled failure remains visible while the owning process recovers; any nonzero value requires correlating the process restart and peer recovery."
     },
     {
       "type": "table",
@@ -2855,8 +2865,8 @@
     },
     {
       "type": "timeseries",
-      "title": "proxy WireGuard return backpressure / s",
-      "description": "Returned WireGuard packets that had to wait for the fixed receive queue. A rising count means bounded flow control was applied rather than dropping the packet; correlate sustained events with wait duration and process lifecycle.",
+      "title": "proxy WireGuard queue pressure / s",
+      "description": "Returned WireGuard packets that waited for the fixed receive queue, inbound encrypted packets refused at one peer's full bounded queue, and packets refused at the device-global decryption queue. Return backpressure is lossless bounded flow control; peer-queue drops rely on WireGuard retransmission and must remain isolated from unrelated peers, while decryption-queue drops indicate shared CPU saturation. Correlate any sustained rate with wait duration, kernel socket queues, CPU, and process lifecycle.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2904,6 +2914,24 @@
           "expr": "sum(rate(urnetwork_proxy_wireguard_return_backpressure_total{env=\"$env\"}[$__rate_interval]))",
           "refId": "A",
           "legendFormat": "packets waiting / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_wg_inbound_peer_queue_drop_packets{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "peer queue drops / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_wg_inbound_decryption_queue_drop_packets{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "decryption queue drops / s"
         }
       ]
     },

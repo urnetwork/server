@@ -1,0 +1,208 @@
+{
+  "uid": "urnetwork-backup-archives",
+  "title": "urnetwork / backup archives",
+  "description": "Planetoid archive health for PostgreSQL, Redis, and the urnetwork/urfoundation GitHub organization tarballs. A missing archive signal or newest stored archive older than five days is an error.",
+  "tags": ["urnetwork", "backups", "planetoid"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-30d", "to": "now"},
+  "templating": {"list": []},
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "backup status",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "overall archive status",
+      "description": "ERROR when any of the four expected archive signals is missing or its newest complete archive is more than 5 days (432000 seconds) old.",
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "ERROR — missing telemetry",
+          "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}],
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "clamp_max(max((time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})) > bool 432000) + (count(max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})) < bool 4), 1) or on() vector(1)",
+          "instant": true,
+          "range": false,
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"}
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "current backup activity",
+      "description": "One card per archive. BACKING UP identifies the archive currently running; the database and code jobs can overlap without hiding each other.",
+      "gridPos": {"h": 5, "w": 18, "x": 6, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "NO SIGNAL",
+          "mappings": [{"type": "value", "options": {"0": {"text": "IDLE", "color": "green"}, "1": {"text": "BACKING UP", "color": "blue"}}}],
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "blue", "value": 1}]}
+        },
+        "overrides": []
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (archive) (urnetwork_backup_archive_in_progress{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})",
+          "legendFormat": "{{archive}}",
+          "instant": true,
+          "range": false,
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"}
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "five-day freshness boundary",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6},
+      "panels": []
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "PostgreSQL freshness",
+      "description": "Fail-closed: missing telemetry and archives older than five days are ERROR.",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
+      "targets": [{"refId": "A", "expr": "((time() - max(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"pg\"})) > bool 432000) or on() vector(1)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Redis freshness",
+      "description": "Fail-closed: missing telemetry and archives older than five days are ERROR.",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
+      "targets": [{"refId": "A", "expr": "((time() - max(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"redis\"})) > bool 432000) or on() vector(1)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "urnetwork code freshness",
+      "description": "Fail-closed: missing telemetry and urnetwork.tar.xz older than five days are ERROR.",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
+      "targets": [{"refId": "A", "expr": "((time() - max(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urnetwork\"})) > bool 432000) or on() vector(1)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "urfoundation code freshness",
+      "description": "Fail-closed: missing telemetry and urfoundation.tar.xz older than five days are ERROR.",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
+      "targets": [{"refId": "A", "expr": "((time() - max(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urfoundation\"})) > bool 432000) or on() vector(1)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "latest PostgreSQL archive",
+      "description": "Newest complete PostgreSQL generation currently stored in planetoid/latest/pg.",
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 11},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
+      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"pg\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "latest Redis archive",
+      "description": "Newest complete Redis generation currently stored in planetoid/latest/redis.",
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 11},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
+      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"redis\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "latest urnetwork code archive",
+      "description": "Atomic tarball containing mirror clones of every repository returned by the urnetwork organization API.",
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 11},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
+      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urnetwork\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "latest urfoundation code archive",
+      "description": "Atomic tarball containing mirror clones of every repository returned by the urfoundation organization API.",
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 11},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "dateTimeAsIso", "noValue": "NO ARCHIVE", "color": {"mode": "fixed", "fixedColor": "green"}}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "value", "graphMode": "none", "justifyMode": "center", "textMode": "value_and_name"},
+      "targets": [{"refId": "A", "expr": "topk(1, urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"github-urfoundation\"}) * 1000", "legendFormat": "{{generation}}", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "archive age",
+      "description": "Age of each newest complete archive in days. Orange begins at 4 days; red is the 5-day alert boundary.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 17},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "min": 0,
+          "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 4}, {"color": "red", "value": 5}]}
+        },
+        "overrides": []
+      },
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})) / 86400",
+          "legendFormat": "{{archive}}",
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"}
+        }
+      ]
+    }
+  ],
+  "links": [],
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "weekStart": ""
+}

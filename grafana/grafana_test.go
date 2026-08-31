@@ -139,6 +139,71 @@ func TestCompetitionDashboardOperationalSignals(t *testing.T) {
 	}
 }
 
+func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
+	dashboard := readTestDashboard(t, "backup-archives.json")
+	joined := strings.Join(dashboardExpressions(dashboard), "\n")
+	for _, required := range []string{
+		"urnetwork_backup_archive_latest_timestamp_seconds",
+		"urnetwork_backup_archive_in_progress",
+		`host="planetoid"`,
+		`archive="pg"`,
+		`archive="redis"`,
+		`archive="github-urnetwork"`,
+		`archive="github-urfoundation"`,
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("backup archive dashboard is missing %q", required)
+		}
+	}
+
+	activity := dashboardPanelById(dashboard, 3)
+	if activity == nil || activity.Title != "current backup activity" || len(activity.Targets) != 1 {
+		t.Fatal("backup archive activity panel is missing")
+	}
+	if !strings.Contains(activity.Targets[0].Expr, "max by (archive)") ||
+		!strings.Contains(activity.Targets[0].Expr, "urnetwork_backup_archive_in_progress") {
+		t.Errorf("backup activity does not identify the running archive: %s", activity.Targets[0].Expr)
+	}
+
+	archives := map[int]string{
+		5: `archive="pg"`,
+		6: `archive="redis"`,
+		7: `archive="github-urnetwork"`,
+		8: `archive="github-urfoundation"`,
+	}
+	for panelID, archiveSelector := range archives {
+		panel := dashboardPanelById(dashboard, panelID)
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Errorf("backup freshness panel %d is missing", panelID)
+			continue
+		}
+		expression := panel.Targets[0].Expr
+		for _, required := range []string{archiveSelector, "time()", "432000", "vector(1)"} {
+			if !strings.Contains(expression, required) {
+				t.Errorf("backup freshness panel %d is missing %q: %s", panelID, required, expression)
+			}
+		}
+		foundErrorThreshold := false
+		for _, step := range panel.FieldConfig.Defaults.Thresholds.Steps {
+			if step.Color == "red" && step.Value != nil && *step.Value == 1 {
+				foundErrorThreshold = true
+			}
+		}
+		if !foundErrorThreshold {
+			t.Errorf("backup freshness panel %d must render ERROR in red", panelID)
+		}
+	}
+
+	for _, panelID := range []int{9, 10, 11, 12} {
+		panel := dashboardPanelById(dashboard, panelID)
+		if panel == nil || len(panel.Targets) != 1 ||
+			!strings.Contains(panel.Targets[0].Expr, "topk(1") ||
+			!strings.Contains(panel.Targets[0].Expr, "* 1000") {
+			t.Errorf("latest stored archive panel %d is missing or does not select the newest generation", panelID)
+		}
+	}
+}
+
 type testTarget struct {
 	Expr    string `json:"expr"`
 	Instant bool   `json:"instant"`
@@ -759,6 +824,57 @@ func TestInternalDashboardsCoverEveryApplicationMetric(t *testing.T) {
 	for _, metric := range metrics {
 		if !strings.Contains(queries, metric) {
 			t.Errorf("custom application metric %s is absent from the internal dashboards", metric)
+		}
+	}
+}
+
+func TestProxyWireGuardRuntimeFailuresHaveActionableDashboardQueries(t *testing.T) {
+	expressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
+	tests := []struct {
+		metric   string
+		required []string
+	}{
+		{
+			metric: "urnetwork_proxy_wg_inbound_peer_queue_drop_packets",
+			required: []string{
+				"rate(",
+				`{env="$env"}`,
+				"[$__rate_interval]",
+			},
+		},
+		{
+			metric: "urnetwork_proxy_wg_inbound_decryption_queue_drop_packets",
+			required: []string{
+				"rate(",
+				`{env="$env"}`,
+				"[$__rate_interval]",
+			},
+		},
+		{
+			metric: "urnetwork_proxy_wg_receive_routine_failures",
+			required: []string{
+				"max_over_time(",
+				`{env="$env"}`,
+				"[$__rate_interval]",
+			},
+		},
+	}
+	for _, test := range tests {
+		var query string
+		for _, expression := range expressions {
+			if strings.Contains(expression, test.metric) {
+				query = expression
+				break
+			}
+		}
+		if query == "" {
+			t.Errorf("signals dashboard is missing %s", test.metric)
+			continue
+		}
+		for _, required := range test.required {
+			if !strings.Contains(query, required) {
+				t.Errorf("%s query is missing %q: %s", test.metric, required, query)
+			}
 		}
 	}
 }
