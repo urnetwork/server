@@ -554,8 +554,36 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 
 // openEscrowReservedForBalances returns the current reserved (open-contract)
 // escrow bytes for exactly one bounded balance page. The balance_id index is a
-// required part of this algorithm: it prevents every page from scanning the
-// complete transfer_escrow history.
+// required part of this algorithm.
+//
+// Keep the requested balances as the outer relation and OFFSET 0 as an
+// optimization boundary. On the billion-row production table PostgreSQL 18.4
+// estimates a 10,000-value ANY predicate broadly enough to choose a parallel
+// sequential scan of all transfer_escrow history for every page, even though
+// most active balances have no historical escrow rows. The lateral lookup
+// makes the intended bound structural: each requested balance gets one range
+// scan of transfer_escrow_balance_contract, and no page can become a whole
+// transfer_escrow scan merely because statistics or table size change.
+const netEscrowReservationPageSQL = `
+    SELECT
+        selected_escrow.balance_id,
+        SUM(selected_escrow.balance_byte_count)
+    FROM unnest($1::uuid[]) AS requested_balance(balance_id)
+    CROSS JOIN LATERAL (
+        SELECT
+            transfer_escrow.balance_id,
+            transfer_escrow.contract_id,
+            transfer_escrow.balance_byte_count
+        FROM transfer_escrow
+        WHERE transfer_escrow.balance_id = requested_balance.balance_id
+        OFFSET 0
+    ) AS selected_escrow
+    INNER JOIN transfer_contract ON
+        transfer_contract.contract_id = selected_escrow.contract_id
+    WHERE transfer_contract.outcome IS NULL
+    GROUP BY selected_escrow.balance_id
+`
+
 func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) map[server.Id]ByteCount {
 	pending := map[server.Id]ByteCount{}
 	if len(balanceIds) == 0 {
@@ -564,18 +592,7 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-                SELECT
-                    transfer_escrow.balance_id,
-                    SUM(transfer_escrow.balance_byte_count)
-                FROM transfer_escrow
-                INNER JOIN transfer_contract ON
-                    transfer_contract.contract_id = transfer_escrow.contract_id
-                WHERE
-                    transfer_escrow.balance_id = ANY($1::uuid[]) AND
-                    transfer_contract.outcome IS NULL
-                GROUP BY transfer_escrow.balance_id
-            `,
+			netEscrowReservationPageSQL,
 			balanceIds,
 		)
 		server.WithPgResult(result, err, func() {

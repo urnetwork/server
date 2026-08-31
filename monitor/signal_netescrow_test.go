@@ -46,7 +46,12 @@ func TestNetEscrowSignalAttributesReservationPageAmplification(t *testing.T) {
 	source := &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM pg_stat_statements") {
-				return []Row{{"2128", "16758829.6", "74031.3", "968502", "4456375.4", "12251.5"}}, nil
+				for _, want := range []string{"legacy_reservation_page", "bounded_reservation_page", "CROSS JOIN LATERAL"} {
+					if !strings.Contains(query, want) {
+						t.Fatalf("statement classifier is missing %q:\n%s", want, query)
+					}
+				}
+				return []Row{{"2128", "16758829.6", "74031.3", "968502", "4456375.4", "12251.5", "2128", "0"}}, nil
 			}
 			return []Row{{"completed", "177", "30"}}, nil
 		},
@@ -60,13 +65,17 @@ func TestNetEscrowSignalAttributesReservationPageAmplification(t *testing.T) {
 	for _, detail := range []string{
 		"reservation_page_lifetime_mean_ms=7875.4",
 		"reservation_page_max_ms=74031.3",
+		"reservation_page_legacy_any_calls=2128",
+		"reservation_page_bounded_lateral_calls=0",
 		"balance_page_lifetime_mean_ms=4.6",
-		"pg_stat_statements attributes its database cost to the bounded open-reservation join",
-		"SUM(balance_byte_count) still requires heap data",
-		"page-walk amplification, not evidence of the old absolute writer",
-		"covering transfer_escrow index that includes balance_byte_count",
-		"without recreating a fleet-wide stale snapshot",
-		"reservation-page adjacent-sample mean stays below 1s",
+		"10,000-ID ANY predicate",
+		"parallel sequential scan",
+		"roughly one-billion-row transfer_escrow",
+		"not merely a missing INCLUDE payload",
+		"bounded-lateral reservation page",
+		"OFFSET 0 optimization boundary",
+		"needs no new index or migration",
+		"zero new legacy-ANY calls",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("net-escrow page attribution missing %q:\n%s", detail, markdown)
@@ -74,24 +83,61 @@ func TestNetEscrowSignalAttributesReservationPageAmplification(t *testing.T) {
 	}
 }
 
+func TestNetEscrowSignalDoesNotMisdiagnoseBoundedLateralAsLegacyPlan(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM pg_stat_statements") {
+				return []Row{{"91", "182000", "9000", "900", "3600", "25", "0", "91"}}, nil
+			}
+			return []Row{{"completed", "210", "30"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "netescrow-reconcile-overrun").Markdown()
+	for _, detail := range []string{
+		"reservation_page_legacy_any_calls=0",
+		"reservation_page_bounded_lateral_calls=91",
+		"bounded-lateral reservation page is present",
+		"whole-table ANY-plan regression is excluded",
+		"isolated production-shaped benchmark",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("bounded-lateral attribution missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(markdown, "Deploy the bounded-lateral reservation page") {
+		t.Fatalf("bounded-lateral profile prescribed its already-present fix:\n%s", markdown)
+	}
+}
+
 func TestNetEscrowStatementProfileUsesAdjacentCounterDelta(t *testing.T) {
 	probe := &netEscrowProbe{}
 	first := probe.observeStatementProfile(netEscrowStatementCounters{
-		reservationCalls:   100,
-		reservationTotalMs: 1000,
-		balanceCalls:       200,
-		balanceTotalMs:     400,
+		reservationCalls:        100,
+		reservationTotalMs:      1000,
+		legacyReservationCalls:  100,
+		boundedReservationCalls: 0,
+		balanceCalls:            200,
+		balanceTotalMs:          400,
 	})
-	if first.reservationDeltaCalls != 0 || first.balanceDeltaCalls != 0 {
+	if first.reservationDeltaCalls != 0 || first.legacyReservationDeltaCalls != 0 ||
+		first.boundedReservationDeltaCalls != 0 || first.balanceDeltaCalls != 0 {
 		t.Fatalf("first profile fabricated a delta: %+v", first)
 	}
 	second := probe.observeStatementProfile(netEscrowStatementCounters{
-		reservationCalls:   104,
-		reservationTotalMs: 5000,
-		balanceCalls:       220,
-		balanceTotalMs:     500,
+		reservationCalls:        104,
+		reservationTotalMs:      5000,
+		legacyReservationCalls:  100,
+		boundedReservationCalls: 4,
+		balanceCalls:            220,
+		balanceTotalMs:          500,
 	})
 	if second.reservationDeltaCalls != 4 || second.reservationDeltaMeanMs != 1000 ||
+		second.legacyReservationDeltaCalls != 0 || second.boundedReservationDeltaCalls != 4 ||
 		second.balanceDeltaCalls != 20 || second.balanceDeltaMeanMs != 5 {
 		t.Fatalf("adjacent profile delta = %+v", second)
 	}

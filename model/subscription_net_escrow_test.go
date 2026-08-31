@@ -10,6 +10,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,27 @@ import (
 
 	"github.com/urnetwork/server"
 )
+
+// A large scalar-array predicate is not a durable access-path boundary: at
+// production cardinality PostgreSQL planned every 10,000-balance page as a
+// parallel scan of the complete transfer_escrow table. Pin the relational
+// shape that makes the existing balance index lookup structural.
+func TestNetEscrowReservationPageForcesPerBalanceIndexBoundary(t *testing.T) {
+	for _, want := range []string{
+		"FROM unnest($1::uuid[])",
+		"CROSS JOIN LATERAL",
+		"transfer_escrow.balance_id = requested_balance.balance_id",
+		"OFFSET 0",
+		"transfer_contract.outcome IS NULL",
+	} {
+		if !strings.Contains(netEscrowReservationPageSQL, want) {
+			t.Fatalf("net-escrow reservation page lost planner boundary %q:\n%s", want, netEscrowReservationPageSQL)
+		}
+	}
+	if strings.Contains(netEscrowReservationPageSQL, "balance_id = ANY") {
+		t.Fatalf("net-escrow reservation page restored the full-scan-prone ANY shape:\n%s", netEscrowReservationPageSQL)
+	}
+}
 
 // TestNetEscrowMirrorSurvivesCallerCancel requires the mirror to match the
 // committed reservation once the create call returns, even though the caller's

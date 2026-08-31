@@ -3358,9 +3358,12 @@ Diagnosis and recovery:
    the positive 60-byte value plus the original short TTL; it then releases
    100, requires the diagnostic return value `-40`, and proves the key is
    absent in the same command. The page query requires the online
-   `transfer_escrow(balance_id, contract_id)` index;
-   apply that migration before rolling taskworker, or every bounded page can
-   regress into a history scan. After rollout, require recurring runs to return
+   `transfer_escrow(balance_id, contract_id)` index and must keep requested
+   balances as the outer side of a lateral range lookup; the index's presence
+   alone does not prevent PostgreSQL from choosing a whole-table scan for a
+   large scalar-array predicate. Apply the index migration before rolling
+   taskworker and retain the lateral optimization boundary. After rollout,
+   require recurring runs to return
    to their short band, aggregate drift to converge, `netescrow-negative` to
    reach zero, and the lossless insufficient-balance counter to remain below
    its incident band. Monitor alert samples retain the non-sensitive `site` but
@@ -3391,29 +3394,52 @@ prove present. Persistent residual rate requires tracing the commit/post
 ordering; a missing clamp or renewed >=256GiB reversal reopens the old-writer
 or regression branch.
 
-Repeated post-migration 177–195-second passes exposed a separate read-path
-cost without reopening the integrity incident. `pg_stat_statements` attributed
-2,128 calls and 16,758,829.6ms total execution time to the bounded
+Repeated post-migration 177–449-second passes exposed a separate read-path cost
+without reopening the integrity incident. `pg_stat_statements` initially
+attributed 2,128 calls and 16,758,829.6ms total execution time to the bounded
 open-reservation join: 7,875.4ms/call lifetime mean and 74,031.3ms maximum.
 The balance-id keyset page, by contrast, averaged 4.601ms across 968,502 calls.
-The published `transfer_escrow(balance_id, contract_id)` index is present, but
-the plan uses it for a parallel bitmap heap scan and must still fetch
-`balance_byte_count` from the 153GiB heap before probing the
-`transfer_contract_outcome_null` index; the index itself was 50GiB. A bounded
-1,000-ID production diagnostic still reached the 30-second read-only statement
-timeout and was confirmed absent afterward, so blindly shrinking the page is
-not a demonstrated fix.
+A bounded 1,000-ID production diagnostic reached the 30-second read-only
+statement timeout and was confirmed absent afterward. That diagnostic used a
+parallel bitmap heap plan and showed that merely shrinking a page was not a
+demonstrated fix, but it did not reproduce the deployed 10,000-ID plan.
 
-`netescrow` now records the reservation and keyset statements' lifetime
-mean/max plus adjacent-monitor counter deltas and names page-walk amplification
-only when the reservation mean is at least one second and ten times the keyset
-mean. Preserve the page-local additive semantics. Benchmark a covering
-`transfer_escrow` index that includes `balance_byte_count`, or an equivalent
-bounded open-reservation projection, against production-shaped history in an
-isolated environment before publishing another migration. Verification is a
-reservation-page adjacent mean below one second, full passes below 120 seconds,
-small aggregates, and a full quiet negative-counter interval—not merely a
-cheaper planner estimate.
+The exact 10,000-ID read-only `EXPLAIN` on 2026-08-31 supplied the missing
+discriminator. At 1,081,742,992 estimated `transfer_escrow` rows (153.5GiB heap,
+257.8GiB including indexes), PostgreSQL 18.4 rejected the published 50.4GiB
+`transfer_escrow(balance_id, contract_id)` index and selected a four-worker
+`Parallel Seq Scan` for every reservation page, estimating 22,390,004 matching
+rows per worker. The 5,000-ID control still selected the balance index, while
+10,000 crossed into the sequential plan. A subsequent 210-second reconcile
+made 91 reservation calls, exactly the roughly 898k active-balance page count;
+the scalar-array query therefore asked PostgreSQL to walk the billion-row
+history about 91 times in one task. Index presence was not the access-path
+guarantee the first remediation assumed.
+
+The no-migration root fix keeps the 10,000-balance freshness/correction page but
+expresses requested balances as `unnest($1::uuid[])` on the outer side of a
+`CROSS JOIN LATERAL`. An `OFFSET 0` optimization boundary prevents the planner
+from flattening it back into the scalar-array join. The same production
+`EXPLAIN` then has a 10,000-row function scan feeding a nested loop and one
+`transfer_escrow_balance_contract` range scan per requested balance; because
+each active balance is visited once, a reconcile can no longer multiply a
+whole-table scan by its page count. PostgreSQL's estimate remains pessimistic
+because historical escrow ownership and the mostly-empty active-balance set
+are not correlated in single-column statistics, but the physical scan bound is
+now structural. The query returns the same grouped bytes and keeps the fresh
+page-local additive correction window.
+
+`netescrow` classifies legacy 10,000-ID `ANY` calls separately from bounded
+lateral calls while retaining combined lifetime/adjacent timing. A deterministic
+query-shape regression requires `unnest`, `CROSS JOIN LATERAL`, the per-balance
+equality, and `OFFSET 0`, and forbids restoring `balance_id = ANY`; synthetic
+signal coverage prevents an already-deployed lateral plan from being
+misdiagnosed as the legacy scan. Verification is new bounded-lateral delta
+calls with zero new legacy-`ANY` calls, reservation-page adjacent mean below one
+second, full passes below 120 seconds, small aggregates, and a full quiet
+negative-counter interval. A covering index remains a separate option only if
+the bounded-lateral profile is still slow in an isolated production-shaped
+benchmark; it is not required for this root fix and no migration was added.
 
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on

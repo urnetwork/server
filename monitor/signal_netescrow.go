@@ -23,20 +23,24 @@ func NewNetEscrowSignal() Signal {
 }
 
 type netEscrowStatementCounters struct {
-	reservationCalls   int64
-	reservationTotalMs float64
-	reservationMaxMs   float64
-	balanceCalls       int64
-	balanceTotalMs     float64
-	balanceMaxMs       float64
+	reservationCalls        int64
+	reservationTotalMs      float64
+	reservationMaxMs        float64
+	legacyReservationCalls  int64
+	boundedReservationCalls int64
+	balanceCalls            int64
+	balanceTotalMs          float64
+	balanceMaxMs            float64
 }
 
 type netEscrowStatementProfile struct {
 	netEscrowStatementCounters
-	reservationDeltaCalls  int64
-	reservationDeltaMeanMs float64
-	balanceDeltaCalls      int64
-	balanceDeltaMeanMs     float64
+	reservationDeltaCalls        int64
+	reservationDeltaMeanMs       float64
+	legacyReservationDeltaCalls  int64
+	boundedReservationDeltaCalls int64
+	balanceDeltaCalls            int64
+	balanceDeltaMeanMs           float64
 }
 
 type netEscrowProbe struct {
@@ -99,6 +103,12 @@ func (self *netEscrowProbe) observeStatementProfile(current netEscrowStatementCo
 				float64(profile.balanceDeltaCalls)
 		}
 	}
+	if self.profileInitialized && self.lastProfile.legacyReservationCalls <= current.legacyReservationCalls {
+		profile.legacyReservationDeltaCalls = current.legacyReservationCalls - self.lastProfile.legacyReservationCalls
+	}
+	if self.profileInitialized && self.lastProfile.boundedReservationCalls <= current.boundedReservationCalls {
+		profile.boundedReservationDeltaCalls = current.boundedReservationCalls - self.lastProfile.boundedReservationCalls
+	}
 	self.lastProfile = current
 	self.profileInitialized = true
 	return profile
@@ -109,20 +119,27 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 		WITH statements AS (
 			SELECT calls, total_exec_time, max_exec_time,
 			       query ILIKE '%transfer_escrow.balance_id = ANY%'
-			         AND query ILIKE '%transfer_contract.outcome IS NULL%' AS reservation_page,
+			         AND query ILIKE '%transfer_contract.outcome IS NULL%' AS legacy_reservation_page,
+			       query ILIKE '%FROM unnest(%'
+			         AND query ILIKE '%CROSS JOIN LATERAL%'
+			         AND query ILIKE '%requested_balance.balance_id%'
+			         AND query ILIKE '%transfer_contract.outcome IS NULL%' AS bounded_reservation_page,
 			       query ILIKE '%FROM transfer_balance%'
 			         AND query ILIKE '%balance_id >%'
 			         AND query ILIKE '%ORDER BY balance_id%'
 			         AND query ILIKE '%LIMIT%' AS balance_page
 			FROM pg_stat_statements
 			WHERE query NOT ILIKE '%FROM pg_stat_statements%'
+			  AND query NOT ILIKE 'EXPLAIN%'
 		)
-		SELECT coalesce(sum(calls) FILTER (WHERE reservation_page),0),
-		       coalesce(sum(total_exec_time) FILTER (WHERE reservation_page),0),
-		       coalesce(max(max_exec_time) FILTER (WHERE reservation_page),0),
+		SELECT coalesce(sum(calls) FILTER (WHERE legacy_reservation_page OR bounded_reservation_page),0),
+		       coalesce(sum(total_exec_time) FILTER (WHERE legacy_reservation_page OR bounded_reservation_page),0),
+		       coalesce(max(max_exec_time) FILTER (WHERE legacy_reservation_page OR bounded_reservation_page),0),
 		       coalesce(sum(calls) FILTER (WHERE balance_page),0),
 		       coalesce(sum(total_exec_time) FILTER (WHERE balance_page),0),
-		       coalesce(max(max_exec_time) FILTER (WHERE balance_page),0)
+		       coalesce(max(max_exec_time) FILTER (WHERE balance_page),0),
+		       coalesce(sum(calls) FILTER (WHERE legacy_reservation_page),0),
+		       coalesce(sum(calls) FILTER (WHERE bounded_reservation_page),0)
 		FROM statements;
 	`)
 	if err != nil {
@@ -132,12 +149,14 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 		return netEscrowStatementProfile{}, fmt.Errorf("net-escrow statement profile returned %d rows, want 1", len(rows))
 	}
 	return self.observeStatementProfile(netEscrowStatementCounters{
-		reservationCalls:   netEscrowProfileInt64(rows[0], 0),
-		reservationTotalMs: atof(rows[0].str(1)),
-		reservationMaxMs:   atof(rows[0].str(2)),
-		balanceCalls:       netEscrowProfileInt64(rows[0], 3),
-		balanceTotalMs:     atof(rows[0].str(4)),
-		balanceMaxMs:       atof(rows[0].str(5)),
+		reservationCalls:        netEscrowProfileInt64(rows[0], 0),
+		reservationTotalMs:      atof(rows[0].str(1)),
+		reservationMaxMs:        atof(rows[0].str(2)),
+		balanceCalls:            netEscrowProfileInt64(rows[0], 3),
+		balanceTotalMs:          atof(rows[0].str(4)),
+		balanceMaxMs:            atof(rows[0].str(5)),
+		legacyReservationCalls:  netEscrowProfileInt64(rows[0], 6),
+		boundedReservationCalls: netEscrowProfileInt64(rows[0], 7),
 	}), nil
 }
 
@@ -326,10 +345,12 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			balanceLifetimeMeanMs = profile.balanceTotalMs / float64(profile.balanceCalls)
 		}
 		observed += fmt.Sprintf(
-			" reservation_page_calls=%d reservation_page_lifetime_mean_ms=%.1f reservation_page_max_ms=%.1f balance_page_calls=%d balance_page_lifetime_mean_ms=%.1f balance_page_max_ms=%.1f",
+			" reservation_page_calls=%d reservation_page_lifetime_mean_ms=%.1f reservation_page_max_ms=%.1f reservation_page_legacy_any_calls=%d reservation_page_bounded_lateral_calls=%d balance_page_calls=%d balance_page_lifetime_mean_ms=%.1f balance_page_max_ms=%.1f",
 			profile.reservationCalls,
 			reservationLifetimeMeanMs,
 			profile.reservationMaxMs,
+			profile.legacyReservationCalls,
+			profile.boundedReservationCalls,
 			profile.balanceCalls,
 			balanceLifetimeMeanMs,
 			profile.balanceMaxMs,
@@ -354,11 +375,32 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				profile.balanceDeltaMeanMs,
 			)
 		}
+		if 0 < profile.legacyReservationDeltaCalls {
+			observed += fmt.Sprintf(" reservation_page_legacy_any_delta_calls=%d", profile.legacyReservationDeltaCalls)
+		}
+		if 0 < profile.boundedReservationDeltaCalls {
+			observed += fmt.Sprintf(" reservation_page_bounded_lateral_delta_calls=%d", profile.boundedReservationDeltaCalls)
+		}
 		if 1000 <= reservationMeanMs && (balanceMeanMs == 0 || 10*balanceMeanMs < reservationMeanMs) {
-			mechanism = fmt.Sprintf("The current page-local additive algorithm is present, and pg_stat_statements attributes its database cost to the bounded open-reservation join: the %s mean is %.1fms/page versus %.1fms for the balance-id keyset page. The published (balance_id, contract_id) index finds candidate escrow rows, but SUM(balance_byte_count) still requires heap data before the open-contract partial-index probe. This is page-walk amplification, not evidence of the old absolute writer.", profileWindow, reservationMeanMs, balanceMeanMs)
 			evidence += " The statement comparison separates the reservation join from the cheap keyset scan; cumulative maxima retain tail risk, while adjacent-sample deltas describe only calls since the preceding monitor pass."
-			action = "Keep the page-local additive semantics and task deadline. Benchmark the exact reservation query with production-shaped history in an isolated environment, comparing a covering transfer_escrow index that includes balance_byte_count or an equivalent bounded open-reservation projection. Deploy only a plan that removes heap amplification without recreating a fleet-wide stale snapshot. Do not shrink pages blindly from one production EXPLAIN or manually re-run reconciliation."
-			verify = "The reservation-page adjacent-sample mean stays below 1s with bounded tail latency, scheduled reconciliations finish below 120s, aggregate drift remains below 256GiB, already-correct mirrors receive no rewrite, and all negative-counter emitters remain quiet for a full interval."
+			legacyShape := 0 < profile.legacyReservationDeltaCalls ||
+				(profile.reservationDeltaCalls == 0 && 0 < profile.legacyReservationCalls && profile.boundedReservationCalls == 0)
+			boundedShape := 0 < profile.boundedReservationDeltaCalls ||
+				(profile.reservationDeltaCalls == 0 && 0 < profile.boundedReservationCalls && profile.legacyReservationCalls == 0)
+			switch {
+			case legacyShape:
+				mechanism = fmt.Sprintf("The page-local additive algorithm is present, but the deployed reservation statement still uses one 10,000-ID ANY predicate. A read-only production EXPLAIN at schema head 597 selected a parallel sequential scan of the roughly one-billion-row transfer_escrow table for every page instead of transfer_escrow_balance_contract; pg_stat_statements reports a %s mean of %.1fms/page versus %.1fms for the balance keyset. This repeated whole-history plan is the overrun, not the old absolute writer and not merely a missing INCLUDE payload.", profileWindow, reservationMeanMs, balanceMeanMs)
+				action = "Deploy the bounded-lateral reservation page: unnest the requested balances as the outer relation and retain the OFFSET 0 optimization boundary so each balance performs one transfer_escrow_balance_contract range scan. This needs no new index or migration. Keep page-local additive corrections and the task deadline; do not force a global planner setting or manually re-run reconciliation."
+				verify = "Post-deploy pg_stat_statements shows bounded-lateral delta calls and zero new legacy-ANY calls; the reservation-page adjacent mean stays below 1s, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
+			case boundedShape:
+				mechanism = fmt.Sprintf("The bounded-lateral reservation page is present, but pg_stat_statements still attributes a %s mean of %.1fms/page versus %.1fms for the balance keyset. The whole-table ANY-plan regression is excluded; remaining cost is inside the per-balance index ranges, contract-open probes, or heap fetches.", profileWindow, reservationMeanMs, balanceMeanMs)
+				action = "Keep the bounded-lateral and page-local additive boundaries. Use an isolated production-shaped benchmark to distinguish transfer_escrow heap fetches from contract-open probes before publishing a covering index or changing page size; do not remove the optimization boundary from one slow sample."
+				verify = "The bounded-lateral adjacent mean stays below 1s with bounded tail latency, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
+			default:
+				mechanism = fmt.Sprintf("The current page-local additive algorithm is present, and pg_stat_statements attributes its database cost to the open-reservation join: the %s mean is %.1fms/page versus %.1fms for the balance-id keyset page. Statement counters do not yet identify whether the latest run used the legacy ANY shape or the bounded-lateral shape.", profileWindow, reservationMeanMs, balanceMeanMs)
+				action = "Keep the page-local additive semantics and task deadline. Wait for an adjacent statement sample that identifies legacy-ANY versus bounded-lateral calls before changing the access path; do not manually re-run reconciliation."
+				verify = "A fresh adjacent sample identifies the deployed reservation shape, then its mean stays below 1s and scheduled runs finish below 120s without large drift or negative-counter aftermath."
+			}
 		}
 	}
 
