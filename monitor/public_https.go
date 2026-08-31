@@ -33,7 +33,7 @@ func runExactHTTPS(
 		"--connect-timeout", "3", "--max-time", "5", "--noproxy", "*",
 		"--resolve", resolve,
 		"--output", "/dev/null",
-		"--write-out", "\nmonitor_http_code=%{http_code}\nmonitor_exitcode=%{exitcode}\nmonitor_remote_ip=%{remote_ip}\nmonitor_time_total=%{time_total}\n",
+		"--write-out", httpsWriteOut,
 		"https://" + hostname + path,
 	}
 	output, err := runner.local(ctx, "curl", args...)
@@ -43,6 +43,41 @@ func runExactHTTPS(
 		err:    err,
 	}
 }
+
+// runPublicHTTPS observes the user-facing DNS/CDN path. It deliberately does
+// not follow redirects: a redirect or CDN-generated error is not a successful
+// response for callers embedding the requested object.
+func runPublicHTTPS(
+	ctx context.Context,
+	runner probeRunner,
+	hostname string,
+	path string,
+) exactHTTPSResult {
+	hostname = strings.TrimSpace(hostname)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	args := []string{
+		"--http1.1", "--silent", "--show-error",
+		"--connect-timeout", "3", "--max-time", "5", "--noproxy", "*",
+		"--output", "/dev/null",
+		"--write-out", httpsWriteOut,
+		"https://" + hostname + path,
+	}
+	output, err := runner.local(ctx, "curl", args...)
+	return exactHTTPSResult{
+		values: parseKeyValueLines(output),
+		output: output,
+		err:    err,
+	}
+}
+
+const httpsWriteOut = "\nmonitor_http_code=%{http_code}\n" +
+	"monitor_exitcode=%{exitcode}\n" +
+	"monitor_remote_ip=%{remote_ip}\n" +
+	"monitor_content_type=%{content_type}\n" +
+	"monitor_size_download=%{size_download}\n" +
+	"monitor_time_total=%{time_total}\n"
 
 func exactHTTPSHealthy(result exactHTTPSResult) bool {
 	return result.err == nil &&

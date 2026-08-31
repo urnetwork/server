@@ -4252,6 +4252,7 @@ Tier-1 (warn):
 | grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
+| web-email-assets | synthetic HTTPS | §19.2 every image embedded by transactional-email templates through the public CDN and exact `main-web` origin Host on each enabled edge | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
@@ -7874,3 +7875,65 @@ pass semantic validation on every enabled exact edge and through the canonical
 CDN hostname. Then require zero new nginx ENOENT lines for those exact paths
 for ten minutes. A web deployment is required; server, API, Connect, or
 taskworker deployments cannot change these static image contents.
+
+### 19.2 Transactional email assets
+
+Probe: `email-assets`
+
+Server templates embed absolute `https://bringyour.com/res/emails/...` image
+URLs. These are live product dependencies even though the legacy BringYour HTML
+site redirects to `ur.io`. Keep the probe's dependency list equal to the
+distinct URLs in `controller/email_templates`:
+
+- `bringyour-wordmark-bg-240.jpg`
+- `ur-wordmark-bg-240.jpg`
+- `ur-welcome-header-1080.jpg`
+- `welcome-header-1080.jpg`
+- `urnetwork-goodbye-vpn.gif`
+- `urnetwork-spin.gif`
+
+Healthy means every path returns HTTP 200, an `image/*` media type, and a
+non-empty body at both relevant layers. First request the recipient-facing
+`bringyour.com` URL through DNS/CloudFront. Then retain
+`main-web.bringyour.com` TLS SNI and Host while pinning the same paths to every
+enabled edge IPv6 address. The second check detects one stale web generation
+and distinguishes an origin fault from CDN configuration or a cached error.
+Curl exit 7/28 on an exact edge remains owned by §18.1; failure of the public
+CDN path remains user-facing and is never suppressed.
+
+At 2026-08-31 20:10Z all six recipient-facing URLs returned HTTP 404
+`text/html` with the same 146-byte error body. Bounded web logs independently
+showed nginx `open()` failures for current email-template paths. The files were
+present in the source/build asset tree and current image contents, ruling out a
+missing-artifact build as the immediate cause.
+
+Root cause: CloudFront deliberately sends origin requests with
+`Host: main-web.bringyour.com`, as recorded in the generated LB/CDN
+configuration. Web commit `dc8fd20c` retired legacy domains by narrowing the
+old wildcard static server to the `bringyour.com` apex redirect. The CDN origin
+Host no longer matched that server and therefore fell into nginx's empty
+default `/etc/nginx/html` root, returning 404 even though the asset files were
+inside the image. Apex page and `/status` checks did not exercise this Host/path
+combination and stayed misleadingly healthy.
+
+The software fix is web commit `2b410faa`. It explicitly serves only
+`/res/emails/` from the BringYour asset tree for the apex and both expected
+`main-web` origin identities, while retaining the `ur.io` redirect for every
+other legacy path. Its deterministic nginx smoke gate requests every embedded
+asset through both the public and origin identities, requires a missing asset
+to remain 404, and confirms legacy page redirects. Deploy a web image containing
+that commit or later; API, Connect, taskworker, database, and Grafana deployments
+cannot repair this boundary.
+
+This alert can cross from software into operations: exact-origin failures need
+the web image/config repair and full edge rollout; if every exact origin is
+healthy while only the public URL fails, ownership moves to CDN origin settings
+or stale negative-cache invalidation. It does not require hardware. Do not copy
+assets into live containers, broaden the default nginx server, or invalidate
+CDN objects before the exact origins are proven healthy.
+
+Verification requires all six public paths and every enabled exact-origin
+path to return HTTP 200 `image/*` with nonzero bytes, the public and
+`main-web` legacy page roots to retain their 301 redirect to `ur.io`, a missing
+asset to remain 404, and zero new nginx ENOENT lines for these exact paths for
+ten minutes.

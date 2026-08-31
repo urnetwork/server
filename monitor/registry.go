@@ -84,6 +84,7 @@ func NewSignals() []Signal {
 		NewEdgeIPv6Signal(),
 		NewGrafanaIngressSignal(),
 		NewAssociationFilesSignal(),
+		NewEmailAssetsSignal(),
 	}
 }
 
