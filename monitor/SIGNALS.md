@@ -667,6 +667,17 @@ do not restart the same image. The bounded two-minute reconciliation remains
 required after this fix because late source timestamps and the Search-to-tail
 handoff are independent completeness boundaries.
 
+The first production run of that classifier supplied its end-to-end control.
+Monitor v152 was built from clean server commit `45d832aa` (binary SHA-256
+`72f9b929691d43f27b8ed43603a14573972eb914f945be53b8409662b142a1a4`),
+started all eight configured standing tails, and completed a healthy bounded
+reconciliation. Its first full log cadence at `19:36:13Z` rendered
+`loki-tail-backend-eof` at 6/minute with the commit-specific action above.
+The old v151 watcher was then terminated normally; its client-cancellation
+burst did not enter the EOF class, and v152 retained the same eight tail
+children as the sole watcher. This proves the detector against the live
+failure without treating watcher retirement as a backend incident.
+
 The first live reconciled watcher rejected the initial five-minute window
 rather than silently trusting it: both proxy and Grafana reached the
 20,000-line cap. A simultaneous volume matrix measured proxy at 771 and

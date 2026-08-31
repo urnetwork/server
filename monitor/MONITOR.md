@@ -517,8 +517,10 @@ probes; every other signal and host continues. Unknown host names fail closed.
    visibility health. A later exact 60-second Loki backend-EOF cadence exposed
    Warp's ring TCP application read deadline; the classifier now distinguishes
    that internal EOF from expected client cancellation while reconciliation
-   continues to cover the independent cursor boundary. Loop mode only
-   (--no-tail to disable); not exercised by --once.
+   continues to cover the independent cursor boundary. The first v152 live
+   minute classified six EOFs while all eight tails and reconciliation stayed
+   healthy; gracefully retiring v151 did not misclassify its cancellation
+   burst. Loop mode only (--no-tail to disable); not exercised by --once.
 7. **Deployment**: provision `monitor` user + vault/main/monitor.yml,
    deploy as a warp service in-LAN; webhook emitter for the diagnosing
    system.
