@@ -742,7 +742,7 @@ func testPerfvarApplicationWorkloads(
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("latency under load: %w", err)
+		return fmt.Errorf("latency under load result=%+v: %w", loaded.Result, err)
 	}
 	if loaded.Result.UsefulByteCount != loadedByteCount ||
 		loaded.Result.ContentHash != deterministicPayloadHash(loadedByteCount) ||
@@ -761,7 +761,11 @@ func testPerfvarApplicationWorkloads(
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("download latency under load: %w", err)
+		return fmt.Errorf(
+			"download latency under load result=%+v: %w",
+			loadedDownload.Result,
+			err,
+		)
 	}
 	if loadedDownload.Result.UsefulByteCount != loadedByteCount ||
 		loadedDownload.Result.ContentHash != deterministicPayloadHash(loadedByteCount) ||

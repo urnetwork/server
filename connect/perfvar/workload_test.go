@@ -2288,6 +2288,13 @@ type loadedLatencyProbeResponse struct {
 	err         error
 }
 
+// Optional barriers expose the response handoff without changing measurements.
+type loadedLatencyProbeTestSettings struct {
+	afterAttemptHook          func(int)
+	afterResponseReadHook     func()
+	unbufferedResponseHandoff bool
+}
+
 // Offers probes at a fixed rate until the bulk goroutine exits. Multiple UDP
 // requests may be outstanding, so a timeout never suppresses later demand.
 func runLoadedLatencyProbes(
@@ -2297,7 +2304,7 @@ func runLoadedLatencyProbes(
 	timeout time.Duration,
 	interval time.Duration,
 	workloadDone <-chan struct{},
-	afterAttempt func(int),
+	testSettings *loadedLatencyProbeTestSettings,
 ) latencyProbeSamples {
 	select {
 	case <-ctx.Done():
@@ -2308,20 +2315,30 @@ func runLoadedLatencyProbes(
 	}
 
 	probeCtx, probeCancel := context.WithCancel(ctx)
-	responses := make(chan loadedLatencyProbeResponse, 64)
+	responseBufferCount := 64
+	if testSettings != nil && testSettings.unbufferedResponseHandoff {
+		responseBufferCount = 0
+	}
+	responses := make(chan loadedLatencyProbeResponse, responseBufferCount)
 	responseInput := (<-chan loadedLatencyProbeResponse)(responses)
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
 		defer close(responses)
+		publishError := func(err error) {
+			if probeCtx.Err() != nil {
+				return
+			}
+			responses <- loadedLatencyProbeResponse{
+				receiveTime: time.Now(),
+				err:         err,
+			}
+		}
 		for {
 			if err := connection.SetReadDeadline(
 				time.Now().Add(loadedLatencyProbeReadInterval),
 			); err != nil {
-				select {
-				case responses <- loadedLatencyProbeResponse{err: err}:
-				case <-probeCtx.Done():
-				}
+				publishError(err)
 				return
 			}
 			var packet [32]byte
@@ -2334,21 +2351,19 @@ func runLoadedLatencyProbes(
 				if errors.As(err, &netErr) && netErr.Timeout() {
 					continue
 				}
-				select {
-				case responses <- loadedLatencyProbeResponse{err: err}:
-				case <-probeCtx.Done():
-				}
+				publishError(err)
 				return
 			}
 			response := loadedLatencyProbeResponse{
 				packet:      packet,
 				receiveTime: time.Now(),
 			}
-			select {
-			case responses <- response:
-			case <-probeCtx.Done():
-				return
+			if testSettings != nil && testSettings.afterResponseReadHook != nil {
+				testSettings.afterResponseReadHook()
 			}
+			// A complete read belongs to the measurement until the owner applies
+			// its receive-time boundary. Cancellation cannot discard the handoff.
+			responses <- response
 		}
 	}()
 
@@ -2369,8 +2384,8 @@ func runLoadedLatencyProbes(
 			}
 		}
 		state.attempt(sequence, sendTime, err)
-		if afterAttempt != nil {
-			afterAttempt(state.samples.attemptCount)
+		if testSettings != nil && testSettings.afterAttemptHook != nil {
+			testSettings.afterAttemptHook(state.samples.attemptCount)
 		}
 	}
 	writeProbe()
@@ -2405,16 +2420,22 @@ func runLoadedLatencyProbes(
 		}
 	}
 
+	receiveBoundary := time.Now()
 	probeCancel()
 	_ = connection.SetReadDeadline(time.Now())
-	<-readerDone
 	for response := range responses {
-		if response.err == nil {
-			state.receive(response.packet, response.receiveTime)
-		} else if state.samples.firstFailure == nil {
-			state.samples.firstFailure = response.err
+		if receiveBoundary.Before(response.receiveTime) {
+			continue
 		}
+		if response.err != nil {
+			if state.samples.firstFailure == nil {
+				state.samples.firstFailure = response.err
+			}
+			continue
+		}
+		state.receive(response.packet, response.receiveTime)
 	}
+	<-readerDone
 	state.expire(time.Now())
 	state.finish()
 	_ = connection.SetDeadline(time.Time{})
@@ -2750,9 +2771,11 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 		})
 	}
 	defer joinBulkSender(true)
-	var afterLoadedProbeAttempt func(int)
+	var loadedProbeTestSettings *loadedLatencyProbeTestSettings
 	if testSettings != nil {
-		afterLoadedProbeAttempt = testSettings.afterLoadedProbeAttemptHook
+		loadedProbeTestSettings = &loadedLatencyProbeTestSettings{
+			afterAttemptHook: testSettings.afterLoadedProbeAttemptHook,
+		}
 	}
 	loadedSamples := runLoadedLatencyProbes(
 		ctx,
@@ -2764,7 +2787,7 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 			bulkRateBitsPerSecond,
 		),
 		bulkLoadedFinished,
-		afterLoadedProbeAttempt,
+		loadedProbeTestSettings,
 	)
 	var bulkErr error
 	select {

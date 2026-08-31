@@ -23,21 +23,32 @@ type latencyProbeScriptRead struct {
 // A deterministic datagram-shaped connection records writes and returns the
 // exact scripted read sequence without scheduler or timer dependencies.
 type latencyProbeScriptConn struct {
-	stateLock sync.Mutex
-	reads     []latencyProbeScriptRead
-	writes    [][]byte
+	stateLock           sync.Mutex
+	reads               []latencyProbeScriptRead
+	writes              [][]byte
+	beforeReadHook      func()
+	afterWriteHook      func()
+	setReadDeadlineHook func(time.Time)
 }
 
 // Records one complete probe datagram.
 func (self *latencyProbeScriptConn) Write(packet []byte) (int, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.writes = append(self.writes, append([]byte(nil), packet...))
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.writes = append(self.writes, append([]byte(nil), packet...))
+	}()
+	if self.afterWriteHook != nil {
+		self.afterWriteHook()
+	}
 	return len(packet), nil
 }
 
 // Returns one complete scripted datagram or error.
 func (self *latencyProbeScriptConn) Read(packet []byte) (int, error) {
+	if self.beforeReadHook != nil {
+		self.beforeReadHook()
+	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if len(self.reads) == 0 {
@@ -64,7 +75,12 @@ func (self *latencyProbeScriptConn) RemoteAddr() net.Addr { return nil }
 func (self *latencyProbeScriptConn) SetDeadline(time.Time) error { return nil }
 
 // Scripted reads carry their own terminal result.
-func (self *latencyProbeScriptConn) SetReadDeadline(time.Time) error { return nil }
+func (self *latencyProbeScriptConn) SetReadDeadline(deadline time.Time) error {
+	if self.setReadDeadlineHook != nil {
+		self.setReadDeadlineHook(deadline)
+	}
+	return nil
+}
 
 // Scripted writes complete synchronously.
 func (self *latencyProbeScriptConn) SetWriteDeadline(time.Time) error { return nil }
@@ -137,6 +153,164 @@ func TestLoadedLatencyProbeStateAccountsFixedOfferedTrain(t *testing.T) {
 	if state.samples.latencies[0] != 300*time.Millisecond ||
 		state.samples.latencies[1] != 1500*time.Millisecond {
 		t.Fatalf("out-of-order latencies=%v", state.samples.latencies)
+	}
+}
+
+// Bulk completion cannot discard a response whose complete read already owns
+// the handoff, even when cancellation wins before an unbuffered publication.
+func TestLoadedLatencyProbeCompletionJoinsReadResponseHandoff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	const sequence = latencyProbeLoadedStartSequence
+	responseRead := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	readerInterrupted := make(chan struct{})
+	writeObserved := make(chan struct{})
+	var responseReadOnce sync.Once
+	var readerInterruptedOnce sync.Once
+	var writeObservedOnce sync.Once
+	var deadlineStateLock sync.Mutex
+	readDeadlineCount := 0
+	connection := &latencyProbeScriptConn{
+		reads: []latencyProbeScriptRead{{packet: latencyProbeTestPacket(sequence)}},
+		beforeReadHook: func() {
+			<-writeObserved
+		},
+		afterWriteHook: func() {
+			writeObservedOnce.Do(func() { close(writeObserved) })
+		},
+		setReadDeadlineHook: func(time.Time) {
+			deadlineStateLock.Lock()
+			defer deadlineStateLock.Unlock()
+			readDeadlineCount += 1
+			if readDeadlineCount == 2 {
+				readerInterruptedOnce.Do(func() { close(readerInterrupted) })
+			}
+		},
+	}
+	workloadDone := make(chan struct{})
+	completion := make(chan latencyProbeSamples, 1)
+	go func() {
+		completion <- runLoadedLatencyProbes(
+			ctx,
+			connection,
+			sequence,
+			time.Second,
+			time.Hour,
+			workloadDone,
+			&loadedLatencyProbeTestSettings{
+				afterResponseReadHook: func() {
+					responseReadOnce.Do(func() { close(responseRead) })
+					select {
+					case <-releaseResponse:
+					case <-ctx.Done():
+					}
+				},
+				unbufferedResponseHandoff: true,
+			},
+		)
+	}()
+	select {
+	case <-responseRead:
+	case <-ctx.Done():
+		t.Fatalf("wait for complete response read: %v", ctx.Err())
+	}
+	close(workloadDone)
+	select {
+	case <-readerInterrupted:
+	case <-ctx.Done():
+		t.Fatalf("wait for reader interruption: %v", ctx.Err())
+	}
+	close(releaseResponse)
+	select {
+	case samples := <-completion:
+		if samples.attemptCount != 1 || len(samples.latencies) != 1 ||
+			samples.failureCount != 0 {
+			t.Fatalf("joined response samples=%+v", samples)
+		}
+	case <-ctx.Done():
+		t.Fatalf("wait for joined response: %v", ctx.Err())
+	}
+}
+
+// A response first read after the bulk boundary is drained for ownership but
+// remains an incomplete loaded probe rather than a post-load latency sample.
+func TestLoadedLatencyProbeCompletionExcludesPostBoundaryRead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	const sequence = latencyProbeLoadedStartSequence
+	readEntered := make(chan struct{})
+	releaseRead := make(chan struct{})
+	readerInterrupted := make(chan struct{})
+	writeObserved := make(chan struct{})
+	var readEnteredOnce sync.Once
+	var readerInterruptedOnce sync.Once
+	var writeObservedOnce sync.Once
+	var deadlineStateLock sync.Mutex
+	readDeadlineCount := 0
+	connection := &latencyProbeScriptConn{
+		reads: []latencyProbeScriptRead{{packet: latencyProbeTestPacket(sequence)}},
+		beforeReadHook: func() {
+			readEnteredOnce.Do(func() { close(readEntered) })
+			select {
+			case <-releaseRead:
+			case <-ctx.Done():
+			}
+		},
+		afterWriteHook: func() {
+			writeObservedOnce.Do(func() { close(writeObserved) })
+		},
+		setReadDeadlineHook: func(time.Time) {
+			deadlineStateLock.Lock()
+			defer deadlineStateLock.Unlock()
+			readDeadlineCount += 1
+			if readDeadlineCount == 2 {
+				readerInterruptedOnce.Do(func() { close(readerInterrupted) })
+			}
+		},
+	}
+	workloadDone := make(chan struct{})
+	completion := make(chan latencyProbeSamples, 1)
+	go func() {
+		completion <- runLoadedLatencyProbes(
+			ctx,
+			connection,
+			sequence,
+			time.Second,
+			time.Hour,
+			workloadDone,
+			&loadedLatencyProbeTestSettings{unbufferedResponseHandoff: true},
+		)
+	}()
+	for _, barrier := range []struct {
+		name string
+		done <-chan struct{}
+	}{
+		{name: "reader entry", done: readEntered},
+		{name: "probe write", done: writeObserved},
+	} {
+		select {
+		case <-barrier.done:
+		case <-ctx.Done():
+			t.Fatalf("wait for %s: %v", barrier.name, ctx.Err())
+		}
+	}
+	close(workloadDone)
+	select {
+	case <-readerInterrupted:
+	case <-ctx.Done():
+		t.Fatalf("wait for reader interruption: %v", ctx.Err())
+	}
+	close(releaseRead)
+	select {
+	case samples := <-completion:
+		if samples.attemptCount != 1 || len(samples.latencies) != 0 ||
+			samples.failureCount != 1 ||
+			!errors.Is(samples.firstFailure, errLoadedLatencyProbeIncomplete) {
+			t.Fatalf("post-boundary response samples=%+v", samples)
+		}
+	case <-ctx.Done():
+		t.Fatalf("wait for drained response: %v", ctx.Err())
 	}
 }
 

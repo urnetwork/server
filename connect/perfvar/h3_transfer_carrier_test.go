@@ -1311,6 +1311,7 @@ func runH3TransferCarrierComparison(
 		h3TransferCarrierDatagram,
 		h3TransferCarrierHybrid,
 	} {
+		poolSnapshotBefore := captureRouteMessagePoolSnapshot(nil)
 		ctx, cancel := context.WithTimeout(
 			context.Background(),
 			h3TransferCarrierTestMaximumRunDuration,
@@ -1334,6 +1335,18 @@ func runH3TransferCarrierComparison(
 			payloadByteCount,
 			result,
 		)
+		poolSnapshotAfter, poolBalanced := routeMessagePoolBalance(poolSnapshotBefore.outstanding)
+		if !poolBalanced {
+			t.Fatalf(
+				"H3 Transfer carrier workload=%s mode=%s message-pool ownership did not reconcile: %d -> %d classes=%v -> %v",
+				workload,
+				mode,
+				poolSnapshotBefore.outstanding,
+				poolSnapshotAfter.outstanding,
+				poolSnapshotBefore.classes,
+				poolSnapshotAfter.classes,
+			)
+		}
 	}
 }
 

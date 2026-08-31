@@ -36,13 +36,14 @@ type perfvarResourceHelperObservation struct {
 // A point-in-time lifecycle view distinguishes checked-out pooled buffers from
 // the bounded free lists that the pools deliberately retain for reuse.
 type perfvarResourceLifecycleSnapshot struct {
-	GoroutineCount       int
-	HeapAndStackInuse    uint64
-	PoolTakenCount       uint64
-	PoolReturnedCount    uint64
-	PoolOutstandingCount int64
-	PoolRetainedCount    int
-	PoolCapacity         int
+	GoroutineCount            int
+	HeapAndStackInuse         uint64
+	PoolTakenCount            uint64
+	PoolReturnedCount         uint64
+	PoolOutstandingCount      int64
+	PoolOutstandingSizeCounts map[int]int64
+	PoolRetainedCount         int
+	PoolCapacity              int
 }
 
 // The ordinary profile leaves production socket buffers unchanged and only
@@ -335,18 +336,24 @@ func capturePerfvarResourceLifecycle() perfvarResourceLifecycleSnapshot {
 	takenCount, returnedCount, _ := clientconnect.MessagePoolCounts()
 	retainedCount := 0
 	capacity := 0
+	outstandingSizeCounts := map[int]int64{}
 	for _, stats := range clientconnect.GetMessagePoolClassStats() {
 		retainedCount += stats.Retained
 		capacity += stats.Capacity
+		outstandingCount := int64(stats.Taken) - int64(stats.Returned)
+		if outstandingCount != 0 {
+			outstandingSizeCounts[stats.Size] = outstandingCount
+		}
 	}
 	return perfvarResourceLifecycleSnapshot{
-		GoroutineCount:       runtime.NumGoroutine(),
-		HeapAndStackInuse:    memory.HeapInuse + memory.StackInuse,
-		PoolTakenCount:       takenCount,
-		PoolReturnedCount:    returnedCount,
-		PoolOutstandingCount: int64(takenCount) - int64(returnedCount),
-		PoolRetainedCount:    retainedCount,
-		PoolCapacity:         capacity,
+		GoroutineCount:            runtime.NumGoroutine(),
+		HeapAndStackInuse:         memory.HeapInuse + memory.StackInuse,
+		PoolTakenCount:            takenCount,
+		PoolReturnedCount:         returnedCount,
+		PoolOutstandingCount:      int64(takenCount) - int64(returnedCount),
+		PoolOutstandingSizeCounts: outstandingSizeCounts,
+		PoolRetainedCount:         retainedCount,
+		PoolCapacity:              capacity,
 	}
 }
 
@@ -366,9 +373,11 @@ func perfvarResourceLifecycleFailures(
 	}
 	if before.PoolOutstandingCount != 0 || after.PoolOutstandingCount != 0 {
 		failures = append(failures, fmt.Sprintf(
-			"pool ownership did not reconcile to zero: %d -> %d",
+			"pool ownership did not reconcile to zero: %d -> %d classes=%v -> %v",
 			before.PoolOutstandingCount,
 			after.PoolOutstandingCount,
+			before.PoolOutstandingSizeCounts,
+			after.PoolOutstandingSizeCounts,
 		))
 	}
 	if after.PoolTakenCount <= before.PoolTakenCount {
@@ -465,7 +474,7 @@ func validatePerfvarResourceLifecycle(t *testing.T, resource perfvarResource) {
 		t.Errorf("resource=%s %s", resource, failure)
 	}
 	t.Logf(
-		"resource=%s synthetic lifecycle goroutines=%d->%d heap+stack=%d->%d pool_outstanding=%d->%d pool_taken_delta=%d",
+		"resource=%s synthetic lifecycle goroutines=%d->%d heap+stack=%d->%d pool_outstanding=%d->%d pool_classes=%v->%v pool_taken_delta=%d",
 		resource,
 		before.GoroutineCount,
 		after.GoroutineCount,
@@ -473,6 +482,8 @@ func validatePerfvarResourceLifecycle(t *testing.T, resource perfvarResource) {
 		after.HeapAndStackInuse,
 		before.PoolOutstandingCount,
 		after.PoolOutstandingCount,
+		before.PoolOutstandingSizeCounts,
+		after.PoolOutstandingSizeCounts,
 		after.PoolTakenCount-before.PoolTakenCount,
 	)
 }

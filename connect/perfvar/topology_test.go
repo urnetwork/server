@@ -4515,7 +4515,7 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 	if self.apiGenerator != nil {
 		complete(
 			fullTunConstructionResourceApiGenerator,
-			self.apiGenerator.CloseTransportCreationAndWait(ctx),
+			self.apiGenerator.CloseAndWait(ctx),
 		)
 	}
 	if self.deviceTransports != nil {
