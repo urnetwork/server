@@ -101,6 +101,10 @@ Android and Apple association metadata. The files existed in the tracked Astro
 public tree and passed the SEO gate in `dist`, but `mv dist/*` silently omitted
 the root `.well-known` directory while staging the deployable tree. Section 19
 adds exact-edge semantic probes and records the dotfile-safe staging fix.
+Updated again after the standing log-tail handover exposed impossible negative
+Loki active-tail gauges. Section 11.19 adds the `loki-tailers` direct-child
+probe, separates invalid accounting from actual live-tail loss, and records
+Loki 3.7.3's non-idempotent double-close root cause.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -4437,6 +4441,7 @@ Tier-1 (warn):
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe Warpctl summary from a non-empty HTTP tail `dropped_entries` response | any |
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
+| loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by transactional-email templates through the public CDN and exact `main-web` origin Host on each enabled edge | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
@@ -5971,6 +5976,60 @@ Never restart all replicas together, suppress all bucket warnings, or raise
 the staleness tolerance. Verification requires two successful 15-minute
 cadences, every gateway below 30 minutes, the writer below 35 minutes, complete
 tenant coverage, and zero multi-generation warning or consistency error.
+
+### 11.19 Loki live-tail accounting integrity
+
+Probe: `loki-tailers`
+
+The live-tail data path has three different boundaries: the external
+WebSocket, each querier's fan-out to the ingesters, and the querier's own
+accounting. A connected external `warpctl logs -f` process proves only the
+first. The `loki-tailers` probe enumerates loopback listeners on every active
+services host, identifies exact Loki children from their Prometheus metric
+family, and records `process_start_time_seconds`, version,
+`loki_querier_tail_active`, and `loki_querier_tail_active_streams`. Process
+start keeps two valid rollout generations separate.
+
+Both active gauges are cardinalities. They must be present, finite, and
+non-negative. A negative value is an instrumentation invariant violation; it
+does not mean there are negative real tails and does not itself prove that a
+log entry was lost. Once either gauge is invalid, it cannot be summed across
+the fleet to prove how many collectors or selectors are active. Use
+`tailer-silent`/`tailer-restarting` for the external stream and
+`loki-tail-backend-eof`, `loki-tail-dropped-streams`, and
+`loki-tail-dropped-entries` for affirmative data-path loss.
+
+The 2026-08-31 `23:18Z` production read found the exact impossible shape after
+a standing-monitor handover. The six enabled Grafana hosts exported active
+tail/active-stream pairs of `8/8`, `-16/-16`, `0/0`, `-16/-20`, `0/0`, and
+`0/0`; edge-5 remained operator-disabled and was not contacted. The fleet sums
+were therefore `-24/-28`, so they could not prove whether the 81-second
+two-monitor overlap doubled Loki fan-out. The positive `8/8` process did
+independently match one standing tail for each of the monitor's eight service
+selectors after the predecessor exited.
+
+The root cause is deterministic in Loki 3.7.3 (`82cdcdc0`). `newTailer`
+increments both accounting families for a new tail. The loop calls
+`Tailer.close()` when the configured one-hour `tail_max_duration` expires or
+when all ingester clients have closed. `TailHandler` also unconditionally
+defers `tailer.close()`. The close function has no once/compare-and-swap guard
+and decrements on every invocation, so the internal close followed by the HTTP
+defer subtracts the same lifecycle twice. The official Loki `main` source at
+`95d8e7f5` on the same date retained the same non-idempotent path; upgrading to
+an unverified newer binary is not a fix.
+
+This is software-owned. Warp commit `ba01c98` builds the checksum-pinned Loki
+3.7.3 source in the Grafana image and makes the metric decrement and iterator
+close idempotent with `sync.Once`; its image build runs an upstream-package
+regression that closes one two-stream tail twice and requires both gauges to
+finish at exactly zero. Deploy a Grafana image containing `ba01c98` or later
+(and therefore the earlier Loki idle-tail transport fix `1e95aef`). Preserve
+the one-hour lifecycle limit and HTTP cleanup. Do not clamp negative
+exposition, lengthen `tail_max_duration`, or restart a healthy process merely
+to reset a gauge; those actions erase evidence while leaving the next
+double-close intact. After every Grafana block converges, verify the gauges
+remain non-negative through two one-hour rotations and that the separate
+dropped-stream/EOF signals remain clear.
 
 ---
 
