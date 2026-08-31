@@ -1160,6 +1160,15 @@ drain the inherited debt, and require consecutive aged-bucket decline. Roll
 the cap only where a live selection log still exceeds 25,000; do not prescribe
 redeploying code that the executing version and journal already prove present.
 
+The adjacent 03:27Z sample confirmed recovery direction without declaring the
+backlog cleared. Open contracts fell to 1,021,961, including 982,373 older than
+five minutes and 791,335 older than 30 minutes. `transfer_contract` dead tuples
+fell from 10.16M to 5.28M; `pg_stat_progress_vacuum` showed a fresh heap scan at
+9,885,975 of 24,254,708 blocks rather than a blocked worker. Keep the incident
+open until consecutive samples continue that aged-bucket decline and close
+durations return below 120 seconds, but do not interrupt the progressing
+vacuum or add closer concurrency while this path is converging.
+
 Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
 control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged
 `eval error(1800.88s) (reschedule) ... = Timeout`; the monitor immediately
@@ -1373,8 +1382,8 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   4,096s heartbeat. Normal scheduler reclamation restarted that exact id at
   02:15:01Z; by 02:39 it had advanced another 1,458s while the completion gap
   crossed 98 minutes. This is not a stuck lease: the same-id heartbeat proves
-  recovery. It is lost in-process scan progress, because the old full-fleet
-  exporter restarted from its scheduler boundary. `selection-freshness` now
+  recovery. It is lost in-process scan progress, because the full-fleet export
+  still restarts from its scheduler boundary. `selection-freshness` now
   reads the bounded task lifecycle window (with host-journal fallback), emits
   task id/duration/executor with the gap, and tells the operator not to restart
   or duplicate a live rebuild. Retain the streaming bounded exporter wherever
@@ -1398,6 +1407,14 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   exceed the 60-minute freshness band despite bounded heap, profile and
   checkpoint those remaining phases rather than restarting the worker or
   redeploying the already-present writer.
+
+  That attempt completed at 03:06:35Z after roughly 3,094 seconds, inside the
+  60-minute freshness band. At 03:27Z the completion gap was 1,262 seconds and
+  the next scheduled score task carried a four-second-old fresh claim with no
+  reschedule error. This closes the interrupted attempt itself and validates
+  the bounded exporter under the production fleet. Keep the two-following-run
+  freshness verification open; profile the remaining maps/fan-out only if an
+  uninterrupted run now exceeds 60 minutes.
 
 ### 2.9 Provider-selection population — the fresh-but-empty cache canary
 Probe: `selection-population`
