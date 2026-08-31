@@ -4507,8 +4507,10 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 		}
 	}
 	if self.multiClient != nil {
-		self.multiClient.Close()
-		complete(fullTunConstructionResourceMultiClient, nil)
+		complete(
+			fullTunConstructionResourceMultiClient,
+			self.multiClient.CloseAndWait(ctx),
+		)
 	}
 	if self.apiGenerator != nil {
 		complete(
@@ -4527,8 +4529,10 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 		complete(fullTunConstructionResourceProviderRemoteNat, nil)
 	}
 	if self.providerLocalNat != nil {
-		self.providerLocalNat.Close()
-		complete(fullTunConstructionResourceProviderLocalNat, nil)
+		complete(
+			fullTunConstructionResourceProviderLocalNat,
+			self.providerLocalNat.CloseAndWait(ctx),
+		)
 	}
 	if self.providerClient != nil {
 		complete(
