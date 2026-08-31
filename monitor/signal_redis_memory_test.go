@@ -111,6 +111,8 @@ func TestRedisMemorySignalDetectsAggregateHostCapacityDeficit(t *testing.T) {
 		"Do not increase maxmemory",
 		"explicit maintenance authority",
 		"bringyourctl streams expire-leaked-ttls",
+		"clamps leaked keys to an 8-hour TTL",
+		"does not create immediate host capacity",
 		"unused swap is not healthy Redis capacity",
 		"SIGNALS.md §3.1, §3.3a, and §5.4",
 	} {

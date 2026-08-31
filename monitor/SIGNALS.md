@@ -1837,21 +1837,21 @@ attributed TTL cleanup with explicit maintenance authority; it does not
 recommend a blind maxmemory increase or arbitrary key deletion.
 
 The 2026-08-31T01:06Z host-capacity battery ruled out a safe ceiling increase.
-Across 32 masters, Redis held 354.5GiB used / 364.6GiB RSS beneath 384GiB of
-aggregate maxmemory, with 186.6M keys; 18 nodes were above 92% and another 13
-were above 85%. The 472GiB host had only 17GiB available and 8GiB of unused
-swap. Redis could therefore still consume 29.5GiB before reaching its
-per-process ceilings—12.5GiB more than physical RAM could supply even before
-RSS overhead, the kernel, or other processes. Raising maxmemory would exchange
-controlled per-node eviction for host swapping or OOM risk. The monitor now
-emits `redis-host-capacity` when a critical node coincides with this aggregate
-deficit. Immediate relief is the independently attributed, binary-safe stream
-TTL cleanup (`bringyourctl streams expire-leaked-ttls`) and still requires
-explicit maintenance authority; the durable fix is more physical memory,
-Redis masters on additional hosts, or a smaller retained key footprint. A
-rebuilt focused probe at 01:16Z rendered the page with a live 12.8GiB definite
-deficit (30.6GiB remaining configured growth versus 17.8GiB available), 15
-critical nodes, and no cumulative Redis OOM replies.
+The latest focused sample at 02:31Z found 355.8GiB used / 366.8GiB RSS beneath
+384GiB of aggregate maxmemory, with 184.9M keys and 18 of 32 nodes above 92%.
+The 472.2GiB host had only 15.6GiB available, while Redis could still consume
+28.2GiB before reaching its per-process ceilings—a definite 12.6GiB physical
+capacity deficit even before additional RSS overhead, the kernel, or other
+processes. Raising maxmemory would exchange controlled per-node eviction for
+host swapping or OOM risk. The monitor emits `redis-host-capacity` when a
+critical node coincides with this aggregate deficit. Immediate capacity
+headroom requires more physical memory, Redis masters on additional hosts, or
+an immediately smaller retained footprint. The independently attributed,
+binary-safe stream cleanup (`bringyourctl streams expire-leaked-ttls`) still
+requires explicit maintenance authority and is complementary: it clamps keys
+to an 8-hour TTL and begins a bounded drain, but cannot free all of that
+capacity immediately. The 02:31Z sample still had no cumulative Redis OOM
+replies or current eviction-exceeded interval.
 
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing

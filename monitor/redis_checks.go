@@ -209,7 +209,7 @@ done`, lo, hi)
 		capacityDeficit := remainingConfiguredHeadroom - hostMemoryAvailableBytes
 		action := "Do not increase maxmemory on this host. Add physical memory or Redis masters, or reduce the retained dataset, before expanding aggregate ceilings; preserve enough reserve for Redis RSS overhead, the kernel, and non-Redis processes."
 		if impossibleTTLNodeCount > 0 {
-			action = "Do not increase maxmemory on this host. With explicit maintenance authority, run the independently attributed binary-safe `bringyourctl streams expire-leaked-ttls` cleanup for immediate drain; the durable fix is additional RAM, Redis masters on additional hosts, or a smaller retained key footprint, with reserve for Redis RSS overhead, the kernel, and non-Redis processes."
+			action = "Do not increase maxmemory on this host. Create immediate capacity headroom with additional RAM, Redis masters on additional hosts, or a smaller retained key footprint, preserving reserve for Redis RSS overhead, the kernel, and non-Redis processes. With explicit maintenance authority, also run the independently attributed binary-safe `bringyourctl streams expire-leaked-ttls` cleanup: it clamps leaked keys to an 8-hour TTL and starts a bounded drain, but does not create immediate host capacity."
 		}
 		findings = append(findings, finding{
 			probeId: "redis/host-capacity", tier: tierPage,
