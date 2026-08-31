@@ -52,6 +52,7 @@ func NewSignals() []Signal {
 		NewTaskHealthSignal(),
 		NewOpenContractsSignal(),
 		NewCloseDurationSignal(),
+		NewRebootCollisionSignal(),
 		NewConnectionRateSignal(),
 		NewSelectionFreshnessSignal(),
 		NewSelectionPopulationSignal(),

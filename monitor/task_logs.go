@@ -63,6 +63,18 @@ type taskworkerJournalEntry struct {
 	Hostname          string `json:"_HOSTNAME"`
 }
 
+func taskworkerJournalObservedAt(entry taskworkerJournalEntry) (time.Time, error) {
+	observedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.Timestamp))
+	if err == nil {
+		return observedAt, nil
+	}
+	micros, parseErr := strconv.ParseInt(strings.TrimSpace(entry.RealtimeTimestamp), 10, 64)
+	if parseErr != nil {
+		return time.Time{}, fmt.Errorf("no parseable timestamp")
+	}
+	return time.UnixMicro(micros), nil
+}
+
 // normalizeTaskworkerJournal restores the fleet-log envelope that task
 // lifecycle parsers consume. journalctl's cat format discards both the
 // timestamp and the container tag; in a multi-run lookback that makes an older
@@ -80,13 +92,9 @@ func normalizeTaskworkerJournal(raw, fallbackHost string) (string, error) {
 			return "", fmt.Errorf("taskworker journal line %d: decode JSON: %w", lineNumber+1, err)
 		}
 
-		observedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.Timestamp))
+		observedAt, err := taskworkerJournalObservedAt(entry)
 		if err != nil {
-			micros, parseErr := strconv.ParseInt(strings.TrimSpace(entry.RealtimeTimestamp), 10, 64)
-			if parseErr != nil {
-				return "", fmt.Errorf("taskworker journal line %d: no parseable timestamp", lineNumber+1)
-			}
-			observedAt = time.UnixMicro(micros)
+			return "", fmt.Errorf("taskworker journal line %d: %w", lineNumber+1, err)
 		}
 
 		tag := strings.TrimSpace(entry.ContainerTag)

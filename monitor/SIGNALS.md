@@ -1703,6 +1703,46 @@ streaming exporter: after rollout, a successful task alone is insufficient;
 live heap must remain bounded throughout the export while all 1,008 locations
 complete.
 
+### 2.13 Maintenance reboot collision — process exit is not task completion
+Probe: `reboot-collision`
+
+An orderly host reboot can still interrupt scheduler-level work. For 20 minutes
+after each services-host boot, read the previous boot's final journal boundary,
+the `by-restart.service` evidence, and bounded g1/g2 taskworker lifecycle logs.
+Treat a task as colliding only when its newest `eval active` heartbeat was
+within 45 seconds of shutdown, had already reached 120 seconds, and no newer
+terminal line exists. Cross-check its exact task id against `finished_task`
+through the previous-boot boundary so a task that completed between its last
+informational heartbeat and shutdown is not mislabeled.
+
+- HEALTHY: no task above 120 seconds is still active at a boot boundary, or its
+  exact attempt reached `finished_task` before shutdown.
+- WARN: one or more fresh non-terminal tasks above 120 seconds cross the boot
+  boundary. Include boot/end timestamps, reboot source, task name/id/duration,
+  and host/generation/container.
+- ACTION: deploy bounded/checkpointed task implementations and coordinate a
+  taskworker drain with future maintenance windows. Do not disable the fleet
+  reboot policy ad hoc, delete pending task rows, or raise deadlines to hide
+  the collision. Verify scheduler reclamation and the affected backlog.
+
+Production supplied the discriminator on edge-0 at 2026-08-31 02:09:48Z.
+`by-restart.timer` started its scheduled reboot after the configured Monday
+01:00Z window plus randomized delay. At the previous-boot boundary,
+`CloseExpiredContracts` task `01a0558c-3405-5671-1f3d-7429f4dd08f7` still had
+a fresh 541-second heartbeat and `UpdateClientScores` task
+`01a05555-97e8-e794-e009-04721c586db9` had run for roughly 59 minutes. The host
+shut down cleanly, came back on the same old binary, and neither attempt had a
+terminal line. That is a maintenance collision, not an OOM or crash. The
+existing 25,000-contract checkpoint and streaming score exporter remain the
+root fixes; a later retry is recovery, not evidence that the interrupted
+attempt completed.
+
+Implementation convention: SIGNALS.md §2.13 (`reboot-collision`) maps to
+`signal_reboot_collision.go` and `signal_reboot_collision_test.go`. The
+synthetic scheduled-reboot case includes two long active heartbeats and makes
+one exact id complete before the previous-boot boundary; only the genuinely
+interrupted task may alert.
+
 ---
 
 ## 3. redis signal catalog
@@ -3170,6 +3210,7 @@ Tier-1 (warn):
 | replica-cover | redis | CLUSTER NODES slave count | < expected |
 | open-set-size | pg | 2.6 open-contract count | > 150k sustained 10 min |
 | close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
+| reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
 | stats-landmine | pg | pg_stats n_distinct=1 on transfer_contract.open, or any open-partial index reltuples=0 after analyze | daily check |
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
