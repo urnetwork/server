@@ -1111,6 +1111,18 @@ The shared lifecycle comparator now checks exact ids before the age fallback,
 and the deterministic 131-second case prevents a completed run from
 resurfacing.
 
+After the version-594–597 migration completed on 2026-08-31, the still-deployed
+100,000-contract generation supplied a clean schema-versus-algorithm control.
+One checkpoint completed in 855s at 01:16:52Z, followed by short scheduler
+successors, but the open set still rose from 717,709 to 730,751; the later
+sample contained 689,561 contracts older than five minutes and 471,886 older
+than 30 minutes. PostgreSQL showed the next block-size-one close task actively
+refreshing its lease while the fleet still reported binary
+`2026.8.30+1033129380`. The migration removed its schema blocker; it did not
+bound the old close algorithm. Deploy the 25,000-contract checkpoint and
+bounded retention queue, then require consecutive aged-bucket decline rather
+than treating migration completion or the short successors as recovery.
+
 Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
 control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged
 `eval error(1800.88s) (reschedule) ... = Timeout`; the monitor immediately
@@ -3531,6 +3543,21 @@ seven reschedule errors observed by 21:26:22Z. These are direct schema-lag
 failures, not stale rollout telemetry. A successful binary/config rollout
 therefore does not satisfy the release gate. Require the migration phase and
 artifact probe to finish before accepting service-version convergence.
+
+The controlled migration then completed normally: audit versions 594 and 595
+committed at 00:52:40Z, 596 at 00:52:58Z, and 597 at 00:57:22Z; a read-only
+00:57:48Z check required head 597, every success bit, and every required
+artifact before declaring the schema coherent. Recovery distinguished schema
+repair from deployment repair. `RemoveCompletedContracts` cleared its missing-
+column error and completed at 01:13:06Z, although its first backlog pass took
+308s. Schema-object-missing `AdvancePayment` rows drained from 18 to 10 under
+normal retry while their much larger wallet-insufficient cohort remained an
+independent external condition. The new escrow index reduced successive
+`ReconcileNetEscrow` runs from 1,136s to 138s and 137s, but the old absolute-
+write generation stretched back to 313s beside close load. Thus head 597 is a
+necessary release gate, not the application root fix: deploy the page-local
+additive reconciler, bounded close/retention paths, and startup gates, then
+verify their task durations and error cohorts rather than editing task rows.
 
 This is the version-to-artifact contract checked by the probe:
 
