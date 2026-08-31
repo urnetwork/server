@@ -62,10 +62,11 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 }
 
 func TestCloseDurationSignalFallsBackToBoundedHostJournalsWhenFleetLogsFail(t *testing.T) {
-	taskID := "01a05564-87a2-4f60-4188-df03664a1e24"
+	oldTaskID := "01a0557f-45e7-ce6e-f2af-605d3167c06e"
+	currentTaskID := "01a0558c-3405-5671-1f3d-7429f4dd08f7"
 	source := &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {
-			if !strings.Contains(query, "task_id = '"+taskID+"'") {
+			if !strings.Contains(query, "task_id = '"+currentTaskID+"'") {
 				t.Fatalf("fallback heartbeat identity was not retained in the completion query: %s", query)
 			}
 			return nil, nil
@@ -81,6 +82,7 @@ func TestCloseDurationSignalFallsBackToBoundedHostJournalsWhenFleetLogsFail(t *t
 				t.Fatalf("journal fallback timeout = %s, want %s", timeout, taskworkerJournalTimeout)
 			}
 			for _, want := range []string{
+				"-o json",
 				"--since '45 minutes ago'",
 				"-n 5000",
 				"-t 'warp|synthetic|taskworker|g1'",
@@ -94,7 +96,11 @@ func TestCloseDurationSignalFallsBackToBoundedHostJournalsWhenFleetLogsFail(t *t
 			if host.Name != "edge-2" {
 				return "", nil
 			}
-			return "[edge-2][taskworker][g2][cid:close][I][2026-08-31T01:31:55Z][task.go:1938][" + taskID + "]eval active(885.56s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
+			// Production journald JSON contains an older run with a larger
+			// elapsed value in the same lookback. The journal timestamp, not
+			// duration, must make the smaller current run authoritative.
+			return `{"SYSLOG_TIMESTAMP":"2026-08-31T02:00:39.935675Z","MESSAGE":"I0831 02:00:39.935675 1 task.go:1938] [` + oldTaskID + `]eval active(837.55s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})","CONTAINER_TAG":"warp|synthetic|taskworker|g2","CONTAINER_ID":"oldclose0001","_HOSTNAME":"edge-2"}` + "\n" +
+				`{"SYSLOG_TIMESTAMP":"2026-08-31T02:08:02.643296Z","MESSAGE":"I0831 02:08:02.643296 1 task.go:1938] [` + currentTaskID + `]eval active(432.06s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})","CONTAINER_TAG":"warp|synthetic|taskworker|g2","CONTAINER_ID":"newclose0002","_HOSTNAME":"edge-2"}`, nil
 		},
 	}
 	settings := syntheticSettings(source)
@@ -109,12 +115,12 @@ func TestCloseDurationSignalFallsBackToBoundedHostJournalsWhenFleetLogsFail(t *t
 	}
 	alert := requireAlertClass(t, alerts, "close-duration-overrun")
 	for _, want := range []string{
-		"phase=active duration_s=885",
+		"phase=active duration_s=432",
 		"active_log_source=host-journal-fallback",
-		"task_id=" + taskID,
+		"task_id=" + currentTaskID,
 		"active_host=edge-2",
 		"active_generation=g2",
-		"active_container=close",
+		"active_container=newclose0002",
 		"fleet log gateway was unavailable",
 		"bounded taskworker journals",
 	} {

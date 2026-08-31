@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -51,6 +52,80 @@ const taskworkerJournalTimeout = 12 * time.Second
 
 var taskworkerJournalTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+type taskworkerJournalEntry struct {
+	Message           string `json:"MESSAGE"`
+	Timestamp         string `json:"SYSLOG_TIMESTAMP"`
+	RealtimeTimestamp string `json:"__REALTIME_TIMESTAMP"`
+	ContainerTag      string `json:"CONTAINER_TAG"`
+	SyslogIdentifier  string `json:"SYSLOG_IDENTIFIER"`
+	ContainerID       string `json:"CONTAINER_ID"`
+	ContainerIDFull   string `json:"CONTAINER_ID_FULL"`
+	Hostname          string `json:"_HOSTNAME"`
+}
+
+// normalizeTaskworkerJournal restores the fleet-log envelope that task
+// lifecycle parsers consume. journalctl's cat format discards both the
+// timestamp and the container tag; in a multi-run lookback that makes an older
+// larger elapsed value look newer than the current task. JSON output preserves
+// the authoritative journal timestamp and Docker metadata.
+func normalizeTaskworkerJournal(raw, fallbackHost string) (string, error) {
+	normalized := []string{}
+	for lineNumber, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		entry := taskworkerJournalEntry{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			return "", fmt.Errorf("taskworker journal line %d: decode JSON: %w", lineNumber+1, err)
+		}
+
+		observedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.Timestamp))
+		if err != nil {
+			micros, parseErr := strconv.ParseInt(strings.TrimSpace(entry.RealtimeTimestamp), 10, 64)
+			if parseErr != nil {
+				return "", fmt.Errorf("taskworker journal line %d: no parseable timestamp", lineNumber+1)
+			}
+			observedAt = time.UnixMicro(micros)
+		}
+
+		tag := strings.TrimSpace(entry.ContainerTag)
+		if tag == "" {
+			tag = strings.TrimSpace(entry.SyslogIdentifier)
+		}
+		tagParts := strings.Split(tag, "|")
+		if len(tagParts) != 4 || tagParts[2] != "taskworker" ||
+			(tagParts[3] != "g1" && tagParts[3] != "g2") {
+			return "", fmt.Errorf("taskworker journal line %d: unexpected container tag %q", lineNumber+1, tag)
+		}
+
+		hostname := strings.TrimSpace(entry.Hostname)
+		if hostname == "" {
+			hostname = fallbackHost
+		}
+		containerID := strings.TrimSpace(entry.ContainerID)
+		if containerID == "" {
+			containerID = strings.TrimSpace(entry.ContainerIDFull)
+			if 12 < len(containerID) {
+				containerID = containerID[:12]
+			}
+		}
+		if hostname == "" || containerID == "" || strings.TrimSpace(entry.Message) == "" {
+			return "", fmt.Errorf("taskworker journal line %d: incomplete host/container/message identity", lineNumber+1)
+		}
+
+		normalized = append(normalized, fmt.Sprintf(
+			"[%s][taskworker][%s][cid:%s][I][%s]%s",
+			hostname,
+			tagParts[3],
+			containerID,
+			observedAt.UTC().Format(time.RFC3339Nano),
+			strings.TrimSpace(entry.Message),
+		))
+	}
+	return strings.Join(normalized, "\n"), nil
+}
+
 // readTaskworkerJournal is the bounded, host-local fallback for task lifecycle
 // reads when the fleet log gateway is unavailable. It deliberately reads only
 // taskworker's two generation identifiers and lets journald apply the task
@@ -86,7 +161,7 @@ func readTaskworkerJournal(
 
 	lookbackMinutes := int((lookback + time.Minute - 1) / time.Minute)
 	command := fmt.Sprintf(
-		"journalctl --no-pager -o cat --since '%d minutes ago' -n %d "+
+		"journalctl --no-pager -o json --since '%d minutes ago' -n %d "+
 			"-t 'warp|%s|taskworker|g1' -t 'warp|%s|taskworker|g2' "+
 			"--grep='%s' 2>/dev/null",
 		lookbackMinutes,
@@ -117,6 +192,9 @@ func readTaskworkerJournal(
 				return
 			}
 			out, err := env.runner.sshTimeout(ctx, target, command, "", taskworkerJournalTimeout)
+			if err == nil {
+				out, err = normalizeTaskworkerJournal(out, target.name)
+			}
 			results <- result{host: target.name, out: strings.TrimSpace(out), err: err}
 		}()
 	}
