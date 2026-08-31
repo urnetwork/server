@@ -49,6 +49,7 @@ type executorActiveTask struct {
 const executorActiveHeartbeatFreshness = 45 * time.Second
 
 const taskworkerJournalTimeout = 12 * time.Second
+const taskLifecycleGatewayTimeout = 12 * time.Second
 
 var taskworkerJournalTokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
@@ -249,20 +250,47 @@ func readTaskLifecycleLog(
 	lookback time.Duration,
 	limit int,
 ) (output string, source string, returnErr error) {
+	return readTaskLifecycleLogWithGatewayTimeout(
+		ctx,
+		env,
+		taskName,
+		lookback,
+		limit,
+		taskLifecycleGatewayTimeout,
+	)
+}
+
+func readTaskLifecycleLogWithGatewayTimeout(
+	ctx context.Context,
+	env *probeEnv,
+	taskName string,
+	lookback time.Duration,
+	limit int,
+	gatewayTimeout time.Duration,
+) (output string, source string, returnErr error) {
 	if lookback <= 0 {
 		return "", "", fmt.Errorf("task lifecycle log: lookback must be positive")
 	}
+	if gatewayTimeout <= 0 {
+		return "", "", fmt.Errorf("task lifecycle log: gateway timeout must be positive")
+	}
 	lookbackMinutes := int((lookback + time.Minute - 1) / time.Minute)
+	gatewayCtx, cancelGateway := context.WithTimeout(ctx, gatewayTimeout)
 	output, gatewayErr := env.runner.warpctl(
-		ctx,
+		gatewayCtx,
 		"logs", env.cfg.env, "taskworker",
 		fmt.Sprintf("--since=%dm", lookbackMinutes),
 		fmt.Sprintf("--limit=%d", limit),
 		"--query="+taskName,
 		"--utc",
 	)
-	if gatewayErr == nil {
+	gatewayContextErr := gatewayCtx.Err()
+	cancelGateway()
+	if gatewayErr == nil && gatewayContextErr == nil {
 		return output, "warpctl", nil
+	}
+	if gatewayContextErr != nil {
+		gatewayErr = fmt.Errorf("bounded %s lookup: %w", gatewayTimeout, gatewayContextErr)
 	}
 
 	journalOutput, journalErr := readTaskworkerJournal(ctx, env, taskName, lookback, limit)

@@ -59,6 +59,7 @@ func NewSignals() []Signal {
 		NewRetentionFanoutSignal(),
 		NewPgBouncerStallsSignal(),
 		NewWorkerMemorySignal(),
+		NewWorkerChurnSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),

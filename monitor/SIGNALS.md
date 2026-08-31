@@ -1100,6 +1100,20 @@ chronology, not causal proof: the same task remained slow after the overlapping
 net-escrow writer ended, while a legacy retention writer and
 `transfer_contract` vacuum debt were active.
 
+The post-migration 03:24Z and 03:39Z cohorts added a database-versus-executor
+discriminator. Each selected exactly 25,000 contracts and took 879s and 871s,
+then immediate full successors completed in roughly 5–10s and drained about
+175,000 contracts in bursts. During a slow cohort, the closer's sampled
+`UPDATE transfer_contract` calls averaged about 0.6ms, PostgreSQL showed no
+lock wait, and sessions spent their gaps in `ClientRead`; the application was
+not waiting on a database lock or slow statement. The exact edge-3/g2 process
+was simultaneously pinned at four cores by the allocation-heavy score export
+described in §2.12a. That establishes process-local CPU/allocation contention
+as an amplifier for the slow-close cohort. The fast successors while the score
+task was still active also show that co-residency alone is not a sufficient
+cause, so retain the 25,000-row close checkpoint and its duration alert rather
+than increasing the deadline or attributing every long cohort to one sibling.
+
 Implementation convention: SIGNALS.md §2.6a (`close-duration`) maps to
 `signal_close_duration.go` and `signal_close_duration_test.go`. The synthetic
 lifecycle tests require the newest timestamped heartbeat to supersede an older
@@ -1415,6 +1429,33 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   the bounded exporter under the production fleet. Keep the two-following-run
   freshness verification open; profile the remaining maps/fan-out only if an
   uninterrupted run now exceeds 60 minutes.
+
+  The next uninterrupted run isolated that remaining fan-out before reaching
+  the freshness cliff. Task `01a055c8-759e-406e-4061-603f0dc86869` began on
+  edge-3/g2 at 03:07:07Z and was still active after 2,875 seconds at 03:55Z.
+  The deployed streaming fix kept allocated heap near 3.7GiB and RSS near
+  4.1GiB, but the process stayed at its four-core quota and allocated about
+  653,329,681 bytes/s (623MiB/s). Its progress denominator was 1,008: two
+  ForceMinimum modes times two rank modes times 252 caller locations. For each
+  caller, the exporter re-encoded every target even though a caller's blocked
+  networks alter only targets that actually contain one of those networks.
+  The live database had 252 caller locations and only 2,766 block rows across
+  138 of them; 114 callers had no exclusions at all.
+
+  The source fix now partitions work by target. It encodes one baseline target
+  payload and fans the same immutable bytes out under every caller-specific
+  key whose exclusions do not intersect that target; only a caller that
+  genuinely removes a provider receives a separately filtered encoding. This
+  preserves every Redis key and filtered value. Sharing a sample's shuffled
+  byte payload is safe because readers randomize the sample-key order and
+  `FindProviders2` performs the final weighted selection. The bounded
+  512-command/8MiB stream remains in place and accounts for every fan-out copy
+  in its byte budget. A deterministic regression proves two equivalent
+  callers share one two-provider encoding, while a caller blocking a present
+  network receives its own one-provider encoding and all caller-specific keys
+  are still emitted. Deploy this target-fanout change after the schema-head
+  migration, then verify a complete run with §2.12a rather than treating a
+  bounded heap alone as success.
 
 ### 2.9 Provider-selection population — the fresh-but-empty cache canary
 Probe: `selection-population`
@@ -1773,6 +1814,86 @@ tail. The terminal duration and instance-local peak are the baseline for the
 streaming exporter: after rollout, a successful task alone is insufficient;
 live heap must remain bounded throughout the export while all 1,008 locations
 complete.
+
+### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
+Probe: `worker-churn`
+
+Query paired one-minute process rates through a services host's loopback
+Mimir front, retaining exact host, block, and runtime instance identity:
+
+```promql
+label_replace(
+  rate(process_cpu_seconds_total{env="main",job="taskworker"}[1m]),
+  "monitor_rate", "cpu", "job", ".*"
+)
+or
+label_replace(
+  rate(go_memstats_alloc_bytes_total{env="main",job="taskworker"}[1m]),
+  "monitor_rate", "alloc", "job", ".*"
+)
+```
+
+- HEALTHY: a worker is below 3.8 CPU cores, below 256MiB/s allocation, or
+  within 8× of either fresh fleet median.
+- BROKEN: the same fresh process exceeds all four guards for two consecutive
+  one-minute probes. Ignore samples older than 90 seconds. CPU saturation by
+  itself can be useful work and a short allocation burst is not a leak; the
+  absolute-plus-fleet conjunction identifies exceptional object churn.
+- Join recent `eval active` heartbeats on exact host/block and include task id,
+  duration, runtime instance, fleet sample count, both rates, medians, and
+  ratios. A missing heartbeat prevents task attribution but does not clear the
+  process-rate finding. A large quiescent heap belongs to §2.12; this signal
+  catches sustained encoding/allocation even after streaming bounds live heap.
+- ACTION: remove repeated encoding, copying, or materialization in the exact
+  active task family. Preserve bounded writers and task deadlines. Do not
+  raise the CPU quota or restart the worker merely to make the evidence vanish.
+
+The production discriminator appeared on edge-3/g2 after the bounded score
+writer was deployed. From about 03:07Z through at least 04:19Z on 2026-08-31,
+that process repeatedly consumed about four cores and allocated 623–640MiB/s,
+while peers used roughly 0.005–0.11 cores and at most 13.4MB/s. The live
+one-minute alert at 04:19Z measured 3.996 cores and 639.51MiB/s, 363.6× and
+6,421.9× its fleet medians. Heap stayed near 3.7GiB and RSS near 4.1GiB, so
+§2.12 correctly no longer fired even though the process was still doing
+pathological work. The exact task beginning at the rate transition was
+`UpdateClientScores` id `01a055c8-759e-406e-4061-603f0dc86869`; it remained
+active beyond 4,322 seconds. PostgreSQL statements sampled during colocated
+close work were fast and had no lock waits, separating database blocking from
+application CPU starvation.
+
+Source and live-data inspection identified the multiplier. The old loop was
+two ForceMinimum modes × two rank modes × 252 caller locations, and for every
+caller it gob-encoded every location and location-group target. A blocked
+network changes only a target containing a provider from that network. There
+were 2,766 block rows across 138 caller locations, while 114 callers had no
+blocks; most caller/target pairs therefore repeated identical encoding. The
+root fix partitions by target, encodes its baseline once, and fans immutable
+bytes out under each unchanged caller's keys. Only callers whose blocked
+network intersects that target get independently filtered encodings. It keeps
+the 512-command/8MiB streaming budget, every caller-specific Redis key, and
+the final provider-selection semantics.
+
+The synthetic source regression supplies four fresh workers, makes one consume
+4.003 cores and 650MiB/s, and proves the structured alert identifies its exact
+executor and active score task with both fleet ratios. Negative cases prove a
+CPU-only worker, an allocation-only worker, and a stale former generation do
+not alert. The model regression independently proves equivalent callers share
+one encoding while a genuinely affected caller gets a filtered encoding.
+
+The first live probe run also exposed a chronology failure in degraded task
+attribution. Loki's 502 path delayed `warpctl logs` for more than a minute
+before the host-journal fallback returned. The probe had captured its clock
+before that wait, so current journal heartbeats appeared more than 30 seconds
+in the future and the alert omitted the still-active score task. Task-lifecycle
+reads now bound the fleet gateway to 12 seconds and compare fallback lines with
+a clock refreshed after collection; §2.12 uses the same corrected chronology.
+A deterministic delayed-collection test advances the clock by 65 seconds and
+proves the fresh score heartbeat and target-specific remediation survive, and
+a separate context-aware source proves gateway timeout falls through to the
+bounded journal read.
+
+Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
+`signal_worker_churn.go` and `signal_worker_churn_test.go`.
 
 ### 2.13 Maintenance reboot collision — process exit is not task completion
 Probe: `reboot-collision`
@@ -3350,6 +3471,7 @@ Tier-1 (warn):
 | grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
+| worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
 | missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` 5-minute rate vs its ~90/min background | > 500/min for 5 min |

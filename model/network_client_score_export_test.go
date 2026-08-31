@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/urnetwork/server"
 )
 
 type syntheticTimeoutError struct{}
@@ -106,6 +108,79 @@ func TestClientScoreExportStreamsBeforeProducingWholeOperationList(t *testing.T)
 	}
 	if got, want := batchSizes[len(batchSizes)-1], setCount%batchSize; got != want {
 		t.Fatalf("tail batch=%d, want %d", got, want)
+	}
+}
+
+// A caller's blocked-network set changes only targets that actually contain a
+// provider from that network. The production pass has hundreds of caller
+// locations, so re-gob-encoding an unchanged target for every caller consumed
+// four cores and allocated hundreds of MiB/s. Prove equivalent callers share
+// one encoded payload while a genuinely filtered caller gets its own value.
+func TestClientScoreTargetFanoutEncodesSharedPayloadOnce(t *testing.T) {
+	callerUnfiltered := server.NewId()
+	callerIrrelevantBlock := server.NewId()
+	callerFiltered := server.NewId()
+	networkA := server.NewId()
+	networkB := server.NewId()
+	networkAbsent := server.NewId()
+	clientScores := map[server.Id]*ClientScore{
+		server.NewId(): {NetworkId: networkA},
+		server.NewId(): {NetworkId: networkB},
+	}
+	excludes := map[server.Id]map[server.Id]bool{
+		callerIrrelevantBlock: {networkAbsent: true},
+		callerFiltered:        {networkB: true},
+	}
+
+	encodeSizes := []int{}
+	sampleEncodeSizes := []int{}
+	valuesByKey := map[string]string{}
+	err := emitClientScoreTargetFanout(
+		[]server.Id{callerUnfiltered, callerIrrelevantBlock, callerFiltered},
+		clientScores,
+		excludes,
+		clientScoreTargetKeys{
+			counts: func(callerId server.Id) string { return "counts/" + callerId.String() },
+			filter: func(callerId server.Id) string { return "filter/" + callerId.String() },
+			sample: func(callerId server.Id, sampleIndex int) string {
+				return fmt.Sprintf("sample/%s/%d", callerId, sampleIndex)
+			},
+		},
+		func(scores map[server.Id]*ClientScore) ([]byte, []byte, []int, func(int) []byte) {
+			size := len(scores)
+			encodeSizes = append(encodeSizes, size)
+			return []byte(fmt.Sprintf("counts=%d", size)),
+				[]byte(fmt.Sprintf("filter=%d", size)),
+				[]int{size},
+				func(int) []byte {
+					sampleEncodeSizes = append(sampleEncodeSizes, size)
+					return []byte(fmt.Sprintf("sample=%d", size))
+				}
+		},
+		func(set clientScoreRedisSet) error {
+			valuesByKey[set.key] = string(set.value)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(encodeSizes), "[2 1]"; got != want {
+		t.Fatalf("encoded provider-set sizes = %s, want %s (one shared baseline and one real filter)", got, want)
+	}
+	if got, want := fmt.Sprint(sampleEncodeSizes), "[2 1]"; got != want {
+		t.Fatalf("sample encoded provider-set sizes = %s, want %s", got, want)
+	}
+	for _, callerId := range []server.Id{callerUnfiltered, callerIrrelevantBlock} {
+		if got := valuesByKey[fmt.Sprintf("sample/%s/0", callerId)]; got != "sample=2" {
+			t.Fatalf("unchanged caller %s sample = %q, want shared two-provider payload", callerId, got)
+		}
+	}
+	if got := valuesByKey[fmt.Sprintf("sample/%s/0", callerFiltered)]; got != "sample=1" {
+		t.Fatalf("filtered caller sample = %q, want one-provider payload", got)
+	}
+	if got, want := len(valuesByKey), 9; got != want {
+		t.Fatalf("emitted key count = %d, want %d (counts/filter/sample for every caller)", got, want)
 	}
 }
 

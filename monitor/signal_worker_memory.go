@@ -236,6 +236,7 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	activeLog := ""
 	var activeLogErr error
 	activeLogLoaded := false
+	activeLogObservedAt := now
 	for _, worker := range workers {
 		if worker.heap <= 0 {
 			continue
@@ -255,6 +256,11 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				"--since=2m", "--limit=5000", "--query=eval", "--utc",
 			)
 			activeLogLoaded = true
+			// A degraded fleet gateway can spend tens of seconds before the
+			// host-journal fallback returns. Compare those returned heartbeat
+			// timestamps with the clock after collection, not the older metric
+			// query clock, or genuinely fresh lines appear to be in the future.
+			activeLogObservedAt = env.now().UTC()
 		}
 
 		target := worker.host
@@ -265,7 +271,7 @@ func (workerMemoryProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		if worker.startTime > 0 {
 			processAge = max(int64(0), now.Unix()-int64(worker.startTime))
 		}
-		activeTasks := parseExecutorActiveTasks(activeLog, worker.host, worker.block, now)
+		activeTasks := parseExecutorActiveTasks(activeLog, worker.host, worker.block, activeLogObservedAt)
 		observed := fmt.Sprintf(
 			"heap_alloc_bytes=%.0f heap_gib=%.2f fleet_samples=%d fleet_median_bytes=%.0f fleet_median_gib=%.2f fleet_ratio=%.1f heap_objects=%.0f rss_bytes=%.0f alloc_total_bytes=%.0f gc_cycles=%.0f process_age_s=%d block=%s instance=%s",
 			worker.heap, bytesToGiB(worker.heap), len(heaps), median, bytesToGiB(median), ratio,
