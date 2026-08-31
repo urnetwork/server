@@ -5790,6 +5790,48 @@ restores clients and drains. Treat a deploy as an explicit host-memory budget:
   cumulative since boot: use its incident-window delta as corroboration, never
   as proof of a current failure from one old nonzero value.
 
+**Non-software remediation requirements by alert class:** a software release
+may prevent recurrence, but these classes must not be closed until the required
+operator action or physical-capacity change has been completed and verified.
+
+- `proxy-host-oom` requires an immediate operational stop or reduction of new
+  candidates on the affected host. Host-aware rollout serialization prevents
+  accidental old/candidate fleet overlap, but that code fix is insufficient if
+  a steady fleet plus one serialized candidate and reserve still cannot fit.
+  **Operator action required:** stop or serialize the live rollout and preserve
+  incident evidence. **Hardware required when serialized capacity still does
+  not fit:** add RAM/proxy-host capacity before restoring that load or
+  increasing rollout concurrency.
+- `proxy-rollout-overlap` requires the operator to pause the rollout until old
+  processes drain, then resume at a host-safe concurrency. The deploy lock and
+  memory preflight make that operating constraint durable. **Operator action
+  required:** pause/drain the unsafe live overlap. **Hardware required when one
+  replacement pair does not fit:** add capacity when even one candidate cannot
+  coexist with its old process plus reserve, or when parallel replacement is an
+  operational requirement.
+- `proxy-rollout-headroom` is an operational capacity warning, not by itself a
+  steady-state leak. **Operator action required:** constrain deployment to the
+  concurrency the existing host can hold. **Hardware required for greater
+  concurrency:** add RAM/hosts if a full-fleet parallel rollout must remain
+  supported. Do not close this class merely because an idle snapshot is green.
+
+There is also a separate steady-state service ceiling: each proxy process can
+serve only a bounded number of active clients (including the WireGuard peer
+table's hard per-process maximum). Memory optimization can lower the cost per
+client, but it does not by itself raise that per-proxy ceiling. When projected
+or observed active clients approach the aggregate ceiling, the capacity fix is
+to add proxy instances and the hardware/hosts to carry them, while preserving
+memory reserve and failure headroom. A rollout-serialization fix prevents a
+transient duplicate fleet from exhausting RAM; it must not be represented as
+increasing the fleet's total supported-client capacity.
+
+Software cannot create RAM, host slots, or additional per-process client slots.
+Therefore any alert whose observed steady client demand reaches the aggregate
+proxy ceiling is a **hardware-capacity alert**: it requires additional proxy
+instances on additional capable hardware (or an explicit operational load
+reduction), even when all known memory-efficiency and rollout-control code fixes
+have shipped.
+
 **Fireside global-OOM signature (2026-08-31):** at
 07:17:09.432994Z journald entered memory pressure. At 07:17:16.675993Z the
 kernel killed PID 2515221 (`bringyour-proxy`) with 5,014,876 KiB anonymous RSS.
