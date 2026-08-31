@@ -2528,6 +2528,12 @@ the evidence proves the sampled legacy stream keys are stale residue rather
 than a currently repeating writer defect. It satisfies the read-only
 precondition for cleanup, but not the authority gate: changing production TTLs
 still requires an explicit maintenance decision.
+The gate repeated cleanly at 19:17Z after API
+`2026.8.31-outerwerld+1033800390` and Connect
+`2026.8.31-outerwerld+1033803620` had fully converged: independent bounded
+30-minute pulls returned zero `[redis][ttl]` lines from API, Connect, and
+taskworker. The persistent 30-of-32-node alert is therefore old metadata, not
+a reason to deploy those services again.
 
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
