@@ -2896,11 +2896,13 @@ limit:
 
   Post-deployment validation on 2026-08-31 separated code convergence from
   configuration convergence. All taskworker blocks reported
-  `2026.8.31-outerwerld+1033655820`, which contains the typed-reset path, but
-  the same six invalid-destination payments retried once in the
-  12:34–12:51Z hour and again in the 13:34–13:51Z hour. That exact spacing
-  matches the one-hour consecutive-error cap. Clearing the typed attempt does
-  not invent a replacement payout wallet: without an account-owner/operator
+  `2026.8.31-outerwerld+1033655820`. Its embedded source revision `1d8f01e5`
+  contains typed-reset commit `b8af229f0` but predates proportional-jitter
+  commit `70b0d269`; this ancestry distinction must come from the artifact,
+  not the current checkout. The same six invalid-destination payments retried
+  once in the 12:34–12:51Z hour and again in the 13:34–13:51Z hour. That exact
+  spacing matches the one-hour consecutive-error cap. Clearing the typed
+  attempt does not invent a replacement payout wallet: without an account-owner/operator
   correction, `UpdatePaymentWallet` selects the same invalid configured wallet
   and Circle rejects it again. Correct the wallet through the supported account
   API and let the next retry converge. Do not manually clear payment rows,
@@ -2919,6 +2921,16 @@ limit:
   task-evaluator lines separately from the duplicate Circle-client diagnostic,
   redacts entity ids, and pages as an operational wallet-correction alert on
   the first current occurrence.
+
+  A subsequent bounded audit through 17:52:00Z extended the discriminator by
+  another complete recurrence. The two-hour source window contained 24
+  diagnostic lines but only 12 exact-replay-deduplicated task-evaluator
+  attempts: exactly six in 16:35–16:51Z and the same six payment IDs again in
+  17:35–17:52Z. Five attempts ran on g1 and seven on g2, ruling out one stale
+  taskworker generation as the owner. Combined with the embedded-revision
+  ancestry above, this is continued invalid wallet selection after the safe
+  typed reset, not evidence that the reset code is missing. It does not weaken
+  the separate requirement to deploy `70b0d269` for retry dispersion.
 - `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
   2026-08-31 UTC production row reached 153 failures on PostgreSQL 18.4 while
   `effective_io_concurrency=200` and `temp_buffers=8MB`. Its stack ended in
