@@ -2632,6 +2632,17 @@ limit:
   deterministic regression records both exact `SET LOCAL` statements and
   verifies that both transaction settings return to their session baselines
   after commit.
+  A later live retry supplied the deployment discriminator. Exact task
+  `01a0088a-327f-ed06-0c69-9b994a1e70fe` began on edge-1/g2 at
+  05:51:51Z, kept authoritative ten-second heartbeats through planner work,
+  and failed at 06:10:31Z after 1,120.91s with the same SQLSTATE 53000 in
+  `PaymentPlanner.finalizePayments`, advancing the row from 157 to 158
+  failures. PostgreSQL still reported 18.4, while every sampled g1/g2 worker
+  reported `2026.8.30+1033129380`; that tag predates the transaction-local
+  containment. The row then returned to its normal backoff about 59 minutes
+  ahead. This is a pre-fix recurrence, not evidence against the containment:
+  do not pull the row forward, and require a post-rollout retry to observe 32
+  inside the transaction and reach a terminal success.
 - `Payout`, `pgconn.connLockError=conn closed`, repeatedly after roughly
   16 minutes: production's database-level
   `idle_in_transaction_session_timeout=5min` closed the outer payment-plan
