@@ -33,6 +33,12 @@ var byJwtTlsKeyPaths = sync.OnceValue(func() []string {
 	return jwt.RequireStringList("tls_key_paths")
 })
 
+// Successful key discovery is operational context, not an error signal.
+// Keep every supported private-key encoding on the same severity path.
+func logLoadedPrivateKey(keyType string, path string) {
+	glog.Infof("[jwt]loaded %s key %q\n", keyType, path)
+}
+
 const (
 	// Reverted from 24h to 30 days by team decision.
 	//
@@ -85,16 +91,16 @@ var byPrivateKeys = sync.OnceValue(func() []crypto.PrivateKey {
 
 				keyPathErrs := []error{}
 				if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
-					glog.Errorf("[jwt]loaded ec key \"%s\"\n", path)
+					logLoadedPrivateKey("ec", path)
 					keys = append(keys, key)
 				} else {
 					if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
-						glog.Errorf("[jwt]loaded pkcs8 key \"%s\"\n", path)
+						logLoadedPrivateKey("pkcs8", path)
 						keys = append(keys, key)
 					} else {
 						keyPathErrs = append(keyPathErrs, err)
 						if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-							glog.Errorf("[jwt]loaded pkcs1 key \"%s\"\n", path)
+							logLoadedPrivateKey("pkcs1", path)
 							keys = append(keys, key)
 						} else {
 							keyPathErrs = append(keyPathErrs, err)

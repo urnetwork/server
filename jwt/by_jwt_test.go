@@ -13,9 +13,26 @@ import (
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
+
+func TestPrivateKeyLoadSuccessIsInformational(t *testing.T) {
+	infoBefore := glog.Stats.Info.Lines()
+	errorBefore := glog.Stats.Error.Lines()
+
+	for _, keyType := range []string{"ec", "pkcs8", "pkcs1"} {
+		logLoadedPrivateKey(keyType, "/test/private-key.pem")
+	}
+
+	if infoAfter := glog.Stats.Info.Lines(); infoAfter != infoBefore+3 {
+		t.Fatalf("successful private-key loads emitted %d informational lines, want 3", infoAfter-infoBefore)
+	}
+	if errorAfter := glog.Stats.Error.Lines(); errorAfter != errorBefore {
+		t.Fatalf("successful private-key loads emitted %d error lines, want 0", errorAfter-errorBefore)
+	}
+}
 
 func TestByJwtLegacy(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

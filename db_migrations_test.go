@@ -80,6 +80,37 @@ func TestPublishedMigrationVersionsRemainStable(t *testing.T) {
 	}
 }
 
+// The release-1.0 testnet durably published this exact numeric prefix. New
+// migrations append after it; moving a suffix to make room changes the SQL
+// named by every shifted migration_audit version.
+func TestPublishedMigrationPrefixIsImmutable(t *testing.T) {
+	markers := []string{
+		"CREATE TABLE competition_round",
+		"competition_append_only_guard",
+		"competition_workload_backfill_guard",
+		"competition_epoch_lifecycle_guard",
+		"competition_image_identity_backfill_guard",
+		"competition_candidate_review_gate",
+	}
+	firstCompetitionIndex := publishedMigrationPrefixCount - len(markers)
+	if len(migrations) <= publishedMigrationPrefixCount {
+		t.Fatalf("migration count = %d, want appended history after published prefix %d", len(migrations), publishedMigrationPrefixCount)
+	}
+	for i, marker := range markers {
+		if index := sqlMigrationIndex(t, marker); index != firstCompetitionIndex+i {
+			t.Fatalf("published competition migration %q index = %d, want immutable index %d", marker, index, firstCompetitionIndex+i)
+		}
+	}
+	identity, err := migrationPrefixIdentity(publishedMigrationPrefixCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expectedIdentity = "6b18ebd7cadd8413ef4c90385486c7516c272ed93105dfcfd7300228712a6aba"
+	if identity != expectedIdentity {
+		t.Fatalf("published migration prefix identity = %s, want %s", identity, expectedIdentity)
+	}
+}
+
 // A pending migration can race ahead of the runtime fix that stopped blank
 // location names from being written. In that state a later blank region/city
 // can coexist with an older canonical row, and normalizing both full names to

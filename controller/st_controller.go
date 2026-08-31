@@ -1562,6 +1562,9 @@ func (self *CoreStClient) stEventDecoders() []stEventDecoder {
 			stEvent("EmissionDeferred", v.UnpackEmissionDeferredEvent, func(e *stabi.STSettlementVaultEmissionDeferred) map[string]any {
 				return map[string]any{"e": e.Epoch.String(), "no_id": e.NoId.String()}
 			}),
+			stEvent("EmissionDustDeferred", v.UnpackEmissionDustDeferredEvent, func(e *stabi.STSettlementVaultEmissionDustDeferred) map[string]any {
+				return map[string]any{"e": e.Epoch.String(), "no_id": e.NoId.String(), "pool_hotkey": fmt.Sprintf("0x%x", e.PoolHotkey), "observed_alpha_rao": e.ObservedAlphaRao.String(), "tao_equivalent_rao": e.TaoEquivalentRao.String(), "minimum_transfer_tao_rao": fmt.Sprintf("%d", e.MinimumTransferTaoRao)}
+			}),
 			stEvent("EntitlementFinalized", v.UnpackEntitlementFinalizedEvent, func(e *stabi.STSettlementVaultEntitlementFinalized) map[string]any {
 				return map[string]any{"e": e.Epoch.String(), "no_id": e.NoId.String(), "payout_root": fmt.Sprintf("0x%x", e.PayoutRoot), "artifact_hash": fmt.Sprintf("0x%x", e.ArtifactHash), "pool_total": e.Total.String(), "expiry_block": e.ExpiryBlock}
 			}),
@@ -1570,6 +1573,12 @@ func (self *CoreStClient) stEventDecoders() []stEventDecoder {
 			}),
 			stEvent("MinerClaimed", v.UnpackClaimedEvent, func(e *stabi.STSettlementVaultClaimed) map[string]any {
 				return map[string]any{"e": e.Epoch.String(), "no_id": e.NoId.String(), "coldkey": fmt.Sprintf("0x%x", e.Coldkey), "share_bps": e.ShareBps.String(), "amount": e.Amount.String(), "caller": e.Relayer.Hex()}
+			}),
+			stEvent("ClaimPaymentDeferred", v.UnpackClaimPaymentDeferredEvent, func(e *stabi.STSettlementVaultClaimPaymentDeferred) map[string]any {
+				return map[string]any{"coldkey": fmt.Sprintf("0x%x", e.Coldkey), "credit_alpha_rao": e.CreditAlphaRao.String(), "tao_equivalent_rao": e.TaoEquivalentRao.String(), "minimum_transfer_tao_rao": fmt.Sprintf("%d", e.MinimumTransferTaoRao), "reason": fmt.Sprintf("%d", e.Reason)}
+			}),
+			stEvent("ClaimPaid", v.UnpackClaimPaidEvent, func(e *stabi.STSettlementVaultClaimPaid) map[string]any {
+				return map[string]any{"coldkey": fmt.Sprintf("0x%x", e.Coldkey), "amount": e.Amount.String(), "caller": e.Relayer.Hex()}
 			}),
 			stEvent("BuybackReserved", r.UnpackReservePrincipalAddedEvent, func(e *stabi.STReserveSinkReservePrincipalAdded) map[string]any {
 				return map[string]any{"e": e.Epoch.String(), "no_id": e.NoId.String(), "amount": e.Amount.String(), "buyback_total": e.TotalPrincipal.String(), "live_stake": e.LiveStake.String()}
