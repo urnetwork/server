@@ -5417,6 +5417,38 @@ are pushed by the standard stats pusher {env, service=proxy, block, host}.
   active peers` on a busy block = wrong: check PeerStatuses/last-handshake
   plumbing.
 
+**Host-memory collapse while drains look correctly staggered:** the rollout
+lease must cover candidate start through old-container drain. Serializing only
+the drain is too late: every independent block worker can first start and
+prewarm its memory-heavy candidate, nearly doubling the resident service fleet,
+then queue behind one correctly serialized old drain. The old generation can
+remain resident for roughly `blocks * DrainGraceTimeout`, so this is sustained
+memory pressure rather than a harmless startup spike.
+
+The 2026-08-31 fireside proxy rollout supplied the decisive signature. The
+100.64 GB host had about 37.1 GB available and 7.99 GB swap free before the
+rollout. Nine candidates started beside ten old containers within one minute;
+each proxy process reported roughly 3.6--6.1 GB RSS. Available memory fell to
+1.95 GB, swap free fell to 106 MB, node metrics stopped shipping, SSH became
+unresponsive, and candidate IPv4 WireGuard sockets accumulated UDP drops while
+the host scheduler thrashed. Crisp had 134.47 GB total RAM and retained about
+37.6 GB available during the same overlap, explaining the host-specific split.
+Once fireside recovered scheduling time, its candidate passed isolated and
+overlapping HTTP/SOCKS/WireGuard traffic with draining socket queues and no new
+WireGuard admission or receiver-failure counters; that separates rollout host
+pressure from the shared WireGuard-reader defect in §14.6.
+
+Current Warp takes the per-env, per-service host rollout lock before allocating
+or starting the candidate, drains the old container synchronously while holding
+it, waits for conntrack/LB settlement, and only then admits the next block. A
+replacement that cannot obtain the lease must defer instead of falling back to
+an unsafe unleased start. Startup reconciliation may still drain orphaned old
+containers because doing so reduces memory and starts no replacement. The
+deterministic boundaries are
+`TestHostDrainLockCoversReplacementOverlap` and
+`TestHostDrainLockTimeoutRefusesReplacement` in
+`warpctl/host_drain_lock_test.go`.
+
 ### 14.3 Post-flip convergence (the replacement container)
 - wg re-establishment is SERVER-initiated: `[wg]handoff apply: N/M
   endpoints seeded` then per-peer `[wg]handoff re-established <ip> in Xms`
