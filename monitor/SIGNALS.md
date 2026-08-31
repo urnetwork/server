@@ -3559,11 +3559,13 @@ committed at 00:52:40Z, 596 at 00:52:58Z, and 597 at 00:57:22Z; a read-only
 artifact before declaring the schema coherent. Recovery distinguished schema
 repair from deployment repair. `RemoveCompletedContracts` cleared its missing-
 column error and completed at 01:13:06Z, although its first backlog pass took
-308s. Schema-object-missing `AdvancePayment` rows drained from 18 to 10 under
-normal retry while their much larger wallet-insufficient cohort remained an
-independent external condition. The new escrow index reduced successive
-`ReconcileNetEscrow` runs from 1,136s to 138s and 137s, but the old absolute-
-write generation stretched back to 313s beside close load. Thus head 597 is a
+308s. Schema-object-missing `AdvancePayment` rows drained from 18 to zero under
+normal retry by 01:51:59Z; the remaining 683 rows were only wallet-insufficient
+(673), processor-invalid-destination (6), and processor-rate-limit (4), proving
+those external outcomes were independent of migration coherence. The new
+escrow index reduced successive `ReconcileNetEscrow` runs from 1,136s to 138s
+and 137s, but the old absolute-write generation stretched back to 313s beside
+close load. Thus head 597 is a
 necessary release gate, not the application root fix: deploy the page-local
 additive reconciler, bounded close/retention paths, and startup gates, then
 verify their task durations and error cohorts rather than editing task rows.
