@@ -1757,6 +1757,19 @@ classification through `EVAL_RO` on the node with the largest average, so a
 future unrelated TTL family receives attribution rather than stream-specific
 cleanup advice.
 
+By 2026-08-31T00:46Z the residue had exhausted the former headroom: seven
+nodes were at 94–100% of their 12GiB maxmemory, with port 6406 at 12.00GiB and
+`volatile-ttl`. A 12-second read-only counter sample on 6406 observed 5,429
+evictions and 533 ordinary expirations while `total_error_replies` and every
+error class stayed flat; `current_eviction_exceeded_time` was zero at both
+ends. Writes were therefore still surviving through roughly 452 evictions/s,
+not currently returning OOM, but this is emergency churn rather than healthy
+headroom. The memory alert now carries policy, total/expiring/non-expiring key
+counts, average TTL, cumulative evictions, current exceeded time, and OOM/error
+counters. When its average TTL is impossible, it points to the independently
+attributed TTL cleanup with explicit maintenance authority; it does not
+recommend a blind maxmemory increase or arbitrary key deletion.
+
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
   `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each

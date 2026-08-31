@@ -47,12 +47,20 @@ func (self *redisMemoryProbe) cadence() time.Duration { return 5 * time.Minute }
 
 // redisNodeMem is one node's parsed INFO memory/clients numbers.
 type redisNodeMem struct {
-	port             int
-	usedBytes        float64
-	maxmemoryBytes   float64
-	datasetBytes     float64
-	clientsBytes     float64
-	connectedClients float64
+	port                        int
+	usedBytes                   float64
+	maxmemoryBytes              float64
+	datasetBytes                float64
+	clientsBytes                float64
+	connectedClients            float64
+	maxmemoryPolicy             string
+	keys                        float64
+	expiringKeys                float64
+	averageTTLMillis            float64
+	evictedKeys                 float64
+	currentEvictionExceededTime float64
+	totalErrorReplies           float64
+	oomErrors                   float64
 }
 
 type redisConnectionDiagnosis struct {
@@ -100,11 +108,16 @@ func (self *redisMemoryProbe) check(ctx context.Context, env *probeEnv) ([]findi
   m=$(timeout 3 redis-cli -p $p INFO 2>/dev/null | tr -d '\r')
   [ -z "$m" ] && { echo "$p unreachable"; continue; }
   echo "$p $(echo "$m" | awk -F: '
-    BEGIN{u=0;x=0;d=0;c=0;n=0}
+    BEGIN{u=0;x=0;d=0;c=0;n=0;policy="unknown";keys=0;expires=0;avg=0;evicted=0;exceeded=0;errors=0;oom=0}
     /^used_memory:/{u=$2} /^maxmemory:/{x=$2} /^used_memory_dataset:/{d=$2}
     /^mem_clients_normal:/{c+=$2} /^mem_clients_slaves:/{c+=$2}
     /^connected_clients:/{n=$2}
-    END{print u" "x" "d" "c" "n}')"
+    /^maxmemory_policy:/{policy=$2}
+    /^evicted_keys:/{evicted=$2} /^current_eviction_exceeded_time:/{exceeded=$2}
+    /^total_error_replies:/{errors=$2}
+    /^errorstat_OOM:/{split($2,a,"=");oom=a[2]+0}
+    /^db0:/{split($2,a,",");for(i in a){split(a[i],v,"=");if(v[1]=="keys")keys=v[2];else if(v[1]=="expires")expires=v[2];else if(v[1]=="avg_ttl")avg=v[2]}}
+    END{print u" "x" "d" "c" "n" "policy" "keys" "expires" "avg" "evicted" "exceeded" "errors" "oom}')"
 done`, lo, hi)
 	out, err := env.runner.shell(ctx, h, script)
 	if err != nil {
@@ -122,14 +135,25 @@ done`, lo, hi)
 		if len(fields) < 6 {
 			continue
 		}
-		nodeMems = append(nodeMems, redisNodeMem{
+		node := redisNodeMem{
 			port:             atoi(fields[0]),
 			usedBytes:        atof(fields[1]),
 			maxmemoryBytes:   atof(fields[2]),
 			datasetBytes:     atof(fields[3]),
 			clientsBytes:     atof(fields[4]),
 			connectedClients: atof(fields[5]),
-		})
+		}
+		if len(fields) >= 14 {
+			node.maxmemoryPolicy = fields[6]
+			node.keys = atof(fields[7])
+			node.expiringKeys = atof(fields[8])
+			node.averageTTLMillis = atof(fields[9])
+			node.evictedKeys = atof(fields[10])
+			node.currentEvictionExceededTime = atof(fields[11])
+			node.totalErrorReplies = atof(fields[12])
+			node.oomErrors = atof(fields[13])
+		}
+		nodeMems = append(nodeMems, node)
 	}
 	if len(nodeMems) == 0 {
 		return nil, fmt.Errorf("no node INFO parsed (unreachable: %v)", unreachablePorts)
@@ -162,16 +186,35 @@ done`, lo, hi)
 		switch {
 		case usedPct > 92:
 			self.rearmBattery("redis/node-mem-high", "node-mem-high/"+target)
+			mechanism := "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom. At the volatile-ttl wall Redis can evict only keys carrying TTLs; if that candidate set cannot keep pace, writes fail while reads can remain healthy."
+			context := "Evicted-key and error counters are cumulative boot totals, so a single sample does not prove a current error rate. current_eviction_exceeded_time distinguishes a node presently unable to stay below maxmemory; task/log signals remain authoritative for a current OOM response."
+			action := "Use the key-family and TTL probes to identify the growing dataset before changing capacity. If writes are currently failing and host RAM permits, a documented temporary maxmemory increase can create drain headroom; otherwise do not raise maxmemory to conceal a live leak."
+			verify := "Used memory returns below 85%, current_eviction_exceeded_time is zero, current OOM/error rates remain zero, and the attributed key family either drains or stays bounded on consecutive samples."
+			playbook := "SIGNALS.md §5.4"
+			if n.averageTTLMillis > float64(redisImpossibleAverageTTL.Milliseconds()) {
+				mechanism = "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom, and its impossible average TTL proves stale expiry residue is preventing natural drain. The known duration-as-nanoseconds stream keys carry effectively immortal TTLs; volatile-ttl may evict some under pressure, but ordinary expiry cannot reclaim them on an operational timescale."
+				context += " Correlate the fleet-wide ttl-leaks signal's binary-safe family sample before applying its family-specific cleanup; an impossible average alone does not authorize changing arbitrary keys."
+				action = "Confirm current writers emit no stream-family TTL warnings and the ttl-leaks sample attributes the residue to legacy/current stream keys. With explicit maintenance authority, run the binary-safe `expire-leaked-ttls` cleanup; do not delete keys through shell text, raise maxmemory to hide the residue, or run a family-specific cleanup against unknown keys."
+				verify = "The cleanup clamps only attributed stream keys, average TTL returns below two years, used memory falls below 85%, eviction pressure decays, and no new stream-family TTL warnings or OOM replies appear."
+				playbook = "SIGNALS.md §3.3a and §5.4"
+			}
+			nonExpiringKeys := max(0, int(n.keys-n.expiringKeys))
 			findings = append(findings, finding{
 				probeId: "redis/node-mem-critical", tier: tierPage,
 				class: "node-mem-critical", target: target, sustain: 1,
-				symptom:  fmt.Sprintf("redis node %d at %.0f%% of maxmemory (page > 92%%)", n.port, usedPct),
-				baseline: "fleet baseline 3–8G used; volatile-ttl means a full node of no-ttl keys rejects all writes while reads work (3.1)",
-				observed: fmt.Sprintf("used=%.2fG max=%.2fG dataset=%.2fG clients=%.2fG connected=%.0f", gb(n.usedBytes), gb(n.maxmemoryBytes), gb(n.datasetBytes), gb(n.clientsBytes), n.connectedClients),
+				symptom:   fmt.Sprintf("redis node %d at %.0f%% of maxmemory (page > 92%%)", n.port, usedPct),
+				mechanism: mechanism,
+				baseline:  "fleet baseline 3–8G used and below 85%; average TTL below two years; no current maxmemory-exceeded interval or OOM replies",
+				observed: fmt.Sprintf("used=%.2fG max=%.2fG dataset=%.2fG clients=%.2fG connected=%.0f policy=%s keys=%.0f expiring_keys=%.0f non_expiring_keys=%d avg_ttl_days=%.0f evicted_keys_total=%.0f current_eviction_exceeded_time=%.0f total_error_replies=%.0f oom_errors_total=%.0f",
+					gb(n.usedBytes), gb(n.maxmemoryBytes), gb(n.datasetBytes), gb(n.clientsBytes), n.connectedClients,
+					n.maxmemoryPolicy, n.keys, n.expiringKeys, nonExpiringKeys, n.averageTTLMillis/float64((24*time.Hour).Milliseconds()), n.evictedKeys, n.currentEvictionExceededTime, n.totalErrorReplies, n.oomErrors),
 				evidence: self.batteryEvidence("redis/node-mem-critical", "node-mem-critical/"+target, func() string {
 					return redisNodeBattery(ctx, env, n.port)
 				}),
-				playbook: "SIGNALS.md 5.4",
+				context:  context,
+				action:   action,
+				verify:   verify,
+				playbook: playbook,
 			})
 		case usedPct > 85:
 			self.rearmBattery("redis/node-mem-critical", "node-mem-critical/"+target)

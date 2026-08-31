@@ -53,3 +53,34 @@ func TestRedisMemorySignalSyntheticCriticalAndSkewedNodes(t *testing.T) {
 		})
 	}
 }
+
+func TestRedisMemorySignalExplainsImpossibleTTLAtCriticalWall(t *testing.T) {
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		if strings.Contains(command, "for p in") {
+			return "6406 12884738624 12884901888 12493731078 0 1504 volatile-ttl 5793319 4012927 863380622381372 2016434 0 1043857 0", nil
+		}
+		return "", nil
+	}}
+
+	alerts, err := NewRedisMemorySignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "node-mem-critical")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"policy=volatile-ttl",
+		"keys=5793319",
+		"expiring_keys=4012927",
+		"avg_ttl_days=",
+		"duration-as-nanoseconds stream keys",
+		"explicit maintenance authority",
+		"expire-leaked-ttls",
+		"average TTL returns below two years",
+		"SIGNALS.md §3.3a and §5.4",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("critical impossible-TTL diagnosis missing %q: %s", want, markdown)
+		}
+	}
+}
