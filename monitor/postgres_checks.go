@@ -275,7 +275,7 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 				evidence += " The fleet log gateway was unavailable, so the heartbeat came from bounded host-local taskworker journals."
 			}
 			context = "If reboot-collision names this same task id, the active heartbeat proves lease reclamation while its reset duration proves lost in-process progress. The cache still serves its last snapshot until the five-hour TTL cliff; a live retry is not permission to erase the interrupted-attempt evidence."
-			action = "Let the live attempt finish and roll out the streaming, bounded-batch score exporter on every taskworker generation. Do not restart this worker, schedule a duplicate export, or raise its deadline merely to reset the freshness alert."
+			action = "Let the live attempt finish. Retain the streaming, bounded-batch score exporter on generations that already have it and roll it out only where version or code evidence says it is absent. If an uninterrupted bounded-export run still exceeds 60 minutes, profile and checkpoint the remaining full-map load and caller-location fan-out. Do not restart this worker, schedule a duplicate export, or raise its deadline merely to reset the freshness alert."
 			verify = "This exact task id reaches a real finished_task result, the completion gap resets below 60 minutes, and the next two scheduled exports finish without a reboot collision, memory-skew alert, or five-hour cache expiry."
 		} else if activeLogErr != nil {
 			evidence += " Task lifecycle lookup failed: " + activeLogErr.Error()

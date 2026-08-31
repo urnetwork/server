@@ -28,10 +28,14 @@ func TestNetEscrowSignalSyntheticReconcileOverrun(t *testing.T) {
 	}
 	alert := requireAlertClass(t, alerts, "netescrow-reconcile-overrun")
 	if !strings.Contains(alert.Observed, "duration_s=1182") ||
-		!strings.Contains(alert.Mechanism, "SET or DEL for every balance") ||
-		!strings.Contains(alert.Action, "page-local additive reconciler that skips in-band mirrors") ||
+		!strings.Contains(alert.Mechanism, "Duration alone cannot identify which algorithm ran") ||
+		!strings.Contains(alert.Action, "Confirm the exact executor has the balance_id index and page-local additive reconciler") ||
+		!strings.Contains(alert.Action, "roll them out only where version or code evidence says they are absent") ||
 		!strings.Contains(alert.Verify, "already-correct mirrors receive no rewrite") {
 		t.Fatalf("overrun alert lost its discriminating evidence or remediation: %+v", alert)
+	}
+	if strings.Contains(alert.Markdown(), "Roll out the balance_id index and the page-local additive reconciler") {
+		t.Fatalf("overrun alert retained a stale unconditional rollout diagnosis: %s", alert.Markdown())
 	}
 }
 
@@ -88,8 +92,8 @@ func TestNetEscrowSignalSyntheticActiveHeartbeat(t *testing.T) {
 		"active_container=old123",
 		"fleet alternates fast and long runs",
 		"one executor's fast pass does not prove the deployed algorithm is fixed",
-		"every active taskworker generation",
-		"one fast run does not prove the deployed algorithm fixed",
+		"one fast run does not prove fleet convergence",
+		"treat repeated overruns as a page-walk or storage regression",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("active alert lost rollout identity %q:\n%s", want, alert.Markdown())
@@ -142,7 +146,9 @@ func TestNetEscrowSignalSyntheticShortMatchedLargeDrift(t *testing.T) {
 		"within the nominal 120s duration band",
 		"Negative counters can remain zero",
 		"page-local additive reconciler",
-		"every active taskworker generation",
+		"Confirm the exact source executor",
+		"roll them out only where version or code evidence says they are absent",
+		"treat it as a regression",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("large-drift alert missing %q:\n%s", detail, markdown)

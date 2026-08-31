@@ -168,7 +168,7 @@ func (netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			observed:  observed,
 			evidence:  evidence,
 			context:   "This is reservation-mirror integrity, not Redis capacity. A short task and zero negative-counter lines do not clear a large aggregate correction; the adjacent pass determines whether it is a matched reversal. Source host/generation/container identify the exact executor, so a fast pass elsewhere cannot erase this pass's evidence.",
-			action:    "Do not manually re-run the deployed apply path. Roll out the page-local additive reconciler that skips already-correct mirrors to every active taskworker generation; let scheduled passes supply the convergence evidence.",
+			action:    "Do not manually re-run reconciliation. Confirm the exact source executor has the page-local additive reconciler and atomic release clamp. Retain them where present and roll them out only where version or code evidence says they are absent; if a matched reversal comes from a current executor, treat it as a regression in the bounded delta or release ordering. Let scheduled passes supply convergence evidence.",
 			verify:    "Every active taskworker generation produces recurring aggregates below 256GiB in the tens-of-GiB band, already-correct mirrors receive no rewrite, and all negative-counter emitters remain at zero for a full interval.",
 			playbook:  "SIGNALS.md §5.11",
 		})
@@ -230,12 +230,12 @@ func (netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			durationSeconds,
 			int(netEscrowReconcileRunLimit/time.Second),
 		),
-		mechanism: "The pre-fix reconciler snapshots every reservation before walking the fleet, then issues an absolute SET or DEL for every balance even when its mirror is already correct. That full-fleet write amplification makes long runs more likely, and a long run makes the snapshot stale enough to clobber live reservations across unrelated balances.",
+		mechanism: "Reconciliation has exceeded its freshness band. On the current page-local additive path, migration catch-up, index warmup, storage contention, or a large dirty page set can lengthen the bounded walk. On an older absolute-snapshot path, the same duration also expands stale-snapshot exposure and rewrites every mirror. Duration alone cannot identify which algorithm ran; correlate the exact executor version with the matching aggregate and negative-counter evidence.",
 		baseline:  "Recurring reconciliation finishes in under 120s; production's normal band was approximately 15-55s.",
 		observed:  observed,
 		evidence:  evidence,
 		context:   incidentContext + " pending_task.run_at is only the due time, so it is deliberately not misreported as live execution duration.",
-		action:    "Do not manually re-run the pre-fix apply path. Roll out the balance_id index and the page-local additive reconciler that skips in-band mirrors across every active taskworker generation, then observe recurring scheduled runs; one fast run does not prove the deployed algorithm fixed.",
+		action:    "Do not manually re-run reconciliation. Confirm the exact executor has the balance_id index and page-local additive reconciler. Retain those fixes where present and roll them out only where version or code evidence says they are absent; if they are present, treat repeated overruns as a page-walk or storage regression and profile that phase. Observe recurring scheduled runs because one fast run does not prove fleet convergence.",
 		verify:    "Every active taskworker generation keeps scheduled reconciliations below 120s, already-correct mirrors receive no rewrite, aggregate drift converges, and no new netescrow-negative lines appear for a full reconciliation interval.",
 		playbook:  "SIGNALS.md §5.11",
 	})

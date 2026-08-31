@@ -139,7 +139,8 @@ func TestTaskCanariesSignalDiagnosesLiveNetEscrowOverrun(t *testing.T) {
 	for _, want := range []string{
 		"has run for 1517s",
 		"balance_id lookup index",
-		"1,800-second safety boundary",
+		"Duration alone does not identify which algorithm is running",
+		"Retain them where present",
 		"dedicated §5.11 aggregate and negative-counter discriminator",
 		"Do not raise MaxTime, manually kick the live claim",
 		"SIGNALS.md §5.11 and §8.9",
@@ -632,8 +633,10 @@ func TestTaskCanariesSignalTreatsNetEscrowDeadlineAsContainment(t *testing.T) {
 	for _, want := range []string{
 		"ReconcileNetEscrow reached its configured safety boundary",
 		"not evidence that MaxTime is undersized",
-		"balance_id index",
+		"balance_id lookup index",
 		"page-local additive reconciler",
+		"Retain them where present",
+		"roll them out only where version or code evidence says they are absent",
 		"Do not raise MaxTime or manually kick",
 		"SIGNALS.md §5.11 and §8.9",
 	} {
@@ -643,6 +646,9 @@ func TestTaskCanariesSignalTreatsNetEscrowDeadlineAsContainment(t *testing.T) {
 	}
 	if strings.Contains(markdown, "undersized task-specific MaxTime") {
 		t.Fatalf("net-escrow containment was rendered as an undersized deadline:\n%s", markdown)
+	}
+	if strings.Contains(markdown, "roll out the page-local additive reconciler plus atomic negative clamp across every taskworker generation") {
+		t.Fatalf("net-escrow containment retained a stale unconditional rollout diagnosis:\n%s", markdown)
 	}
 }
 
@@ -728,15 +734,21 @@ func TestTaskCanariesSignalExplainsCloseCohortDeadline(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
 	for _, want := range []string{
-		"100,000-contract cohort",
+		"task row does not contain the selected cohort size",
+		"matching live selection log",
+		"older 100,000-contract generation from the current 25,000 cap",
 		"per-contract commits made durable progress",
-		"25,000-contract close cohort",
-		"existing 92-worker inner pool",
+		"If n exceeds 25,000",
+		"if n is already at or below 25,000",
+		"92-worker inner pool",
 		"older-than-five-minute open set falls",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("close cohort diagnosis missing %q: %s", want, markdown)
 		}
+	}
+	if strings.Contains(markdown, "The deployed closer selected one 100,000-contract cohort") {
+		t.Fatalf("close timeout diagnosis invented an unobserved deployed cohort size: %s", markdown)
 	}
 }
 

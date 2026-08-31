@@ -40,12 +40,17 @@ func TestSelectionFreshnessSignalExplainsLiveReclaimedExport(t *testing.T) {
 		"active_duration_s=1458",
 		"active_task_id=" + taskID,
 		"active_host=edge-0 active_generation=g1 active_container=scoreworker",
-		"streaming, bounded-batch score exporter",
+		"Retain the streaming, bounded-batch score exporter",
+		"roll it out only where version or code evidence says it is absent",
+		"full-map load and caller-location fan-out",
 		"Do not restart this worker",
 		"SIGNALS.md §2.8, §2.12, and §2.13",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("live score-recovery diagnosis lost %q:\n%s", want, markdown)
 		}
+	}
+	if strings.Contains(markdown, "roll out the streaming, bounded-batch score exporter on every taskworker generation") {
+		t.Fatalf("live score-recovery diagnosis retained a stale rollout prescription:\n%s", markdown)
 	}
 }

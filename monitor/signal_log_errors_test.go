@@ -125,9 +125,12 @@ func TestLogErrorsSignalExplainsNegativeNetEscrowAftermath(t *testing.T) {
 		"log-ingestion delay",
 		"page-local additive reconciler",
 		"transfer_escrow(balance_id, contract_id) index",
+		"Retain them where present",
+		"roll them out only where version or code evidence says they are absent",
 		"PostgreSQL settlement commits before its Redis release",
 		"atomic release Lua",
 		"clamped_to=0",
+		"contained commit/post ordering window",
 		"below 120 seconds",
 		"below 256GiB",
 		"taskworker, API, and Connect",
@@ -143,6 +146,9 @@ func TestLogErrorsSignalExplainsNegativeNetEscrowAftermath(t *testing.T) {
 	}
 	if strings.Contains(markdown, "The observed value is outside the SIGNALS.md healthy band") {
 		t.Fatalf("negative net-escrow alert fell back to the generic mechanism:\n%s", markdown)
+	}
+	if strings.Contains(markdown, "Install the transfer_escrow(balance_id, contract_id) index first, then roll out") {
+		t.Fatalf("negative net-escrow alert retained a stale unconditional rollout diagnosis:\n%s", markdown)
 	}
 }
 

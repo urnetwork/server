@@ -1137,17 +1137,28 @@ attribution. A partial fleet read remains an observation error unless its
 returned lifecycle already proves an incident; it must never silently become a
 healthy result.
 
-After the version-594–597 migration completed on 2026-08-31, the still-deployed
-100,000-contract generation supplied a clean schema-versus-algorithm control.
+After the version-594–597 migration completed on 2026-08-31, the generation
+that had begun its checkpoint before the edge-0 reboot supplied a clean
+schema-versus-algorithm control.
 One checkpoint completed in 855s at 01:16:52Z, followed by short scheduler
 successors, but the open set still rose from 717,709 to 730,751; the later
 sample contained 689,561 contracts older than five minutes and 471,886 older
 than 30 minutes. PostgreSQL showed the next block-size-one close task actively
-refreshing its lease while the fleet still reported binary
-`2026.8.30+1033129380`. The migration removed its schema blocker; it did not
-bound the old close algorithm. Deploy the 25,000-contract checkpoint and
-bounded retention queue, then require consecutive aged-bucket decline rather
-than treating migration completion or the short successors as recovery.
+refreshing its lease. The migration removed its schema blocker; it did not
+erase the accumulated close and vacuum debt.
+
+After edge-0 rebooted into fleet version `2026.8.30+1033129380`, its live
+journal made the current boundary explicit: at 03:06:21Z it logged `found
+25000 contracts to close`. The version tag independently contains
+`closeExpiredContractsMaxCount = 25_000`, the cursor-backed retention queue,
+and their deterministic tests. The 25k cap is therefore deployed, not a
+pending remediation. Even so, the preceding checkpoints completed in roughly
+760–777 seconds while the open set reached 1,175,304 (1,139,992 older than five
+minutes) and a progressing `transfer_contract` autovacuum crossed 10.16M dead
+tuples. Retain the cap and bounded queue, let vacuum and scheduled cohorts
+drain the inherited debt, and require consecutive aged-bucket decline. Roll
+the cap only where a live selection log still exceeds 25,000; do not prescribe
+redeploying code that the executing version and journal already prove present.
 
 Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
 control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged
@@ -1366,10 +1377,27 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   exporter restarted from its scheduler boundary. `selection-freshness` now
   reads the bounded task lifecycle window (with host-journal fallback), emits
   task id/duration/executor with the gap, and tells the operator not to restart
-  or duplicate a live rebuild. Deploy the streaming bounded exporter, then
-  require the exact task to finish and two following runs to remain fresh;
-  correlate the interrupted predecessor through §2.13 rather than treating a
-  later retry as evidence that it completed.
+  or duplicate a live rebuild. Retain the streaming bounded exporter wherever
+  version/code evidence proves it present and deploy it only on older
+  generations, then require the exact task to finish and two following runs to
+  remain fresh; correlate the interrupted predecessor through §2.13 rather
+  than treating a later retry as evidence that it completed.
+
+  The rebooted edge-0/g1 attempt supplied the post-rollout discriminator.
+  Fleet version `2026.8.30+1033129380` contains
+  `runClientScoreExportStream`, its 512-item/8MiB limits, lazy sample encoding,
+  cleared batch slots, and deterministic tests. The same-id task restarted at
+  02:15:01Z and retained fresh heartbeats through at least 03:06:31Z
+  (`active(3089.61s)`). During that run its allocated heap stayed near 3.1GiB
+  and RSS near 3.6GiB instead of the pre-fix 28–45GiB peaks, while allocation
+  rate could still approach 0.8GiB/s. That validates the bounded live heap and
+  proves the exporter is deployed; prescribing its rollout again is stale.
+  Wall-clock duration can remain high because the task still loads the full
+  location/group maps and repeats caller-location fan-out before one durable
+  task boundary. Let the active attempt finish. If two uninterrupted runs
+  exceed the 60-minute freshness band despite bounded heap, profile and
+  checkpoint those remaining phases rather than restarting the worker or
+  redeploying the already-present writer.
 
 ### 2.9 Provider-selection population — the fresh-but-empty cache canary
 Probe: `selection-population`
@@ -3148,6 +3176,27 @@ Diagnosis and recovery:
    an overwritten-byte count, and recovery requires a sub-120-second scheduled
    pass below the 256GiB aggregate threshold plus a full quiet interval across
    taskworker, API, and Connect after allowing for log-ingestion delay.
+
+The first migration-complete pass supplied the post-fix discriminator on
+2026-08-31. Schema head 597 included the version-594
+`transfer_escrow(balance_id, contract_id)` artifact, and running fleet version
+`2026.8.30+1033129380` contains the page-local additive reconciler plus atomic
+release clamp. Its 295-second run ended at 03:00:14Z after scanning 903,527
+balances, but corrected only 4.96GiB over-reserved and 4.04GiB under-reserved
+across 131 networks. That is a freshness overrun and possible catch-up/storage
+cost, not the old TiB-scale matched-reversal signature; duration alone must not
+label the executing algorithm pre-fix.
+
+The following 20-minute bounded host-journal read found 27 negative settlement
+diagnostics, all on edge-3 taskworker g2 and all carrying `clamped_to=0`; the
+per-minute counts were 5, 5, 1, 14, and 2, with zero on the other service
+hosts. This proves the current atomic containment deleted each bad mirror while
+retaining evidence of the smaller PostgreSQL-commit/Redis-post ordering window.
+It is still a warning until a full interval is quiet, but it is not a reason to
+redeploy fixes that the schema, version tag, aggregate, and clamp field already
+prove present. Persistent residual rate requires tracing the commit/post
+ordering; a missing clamp or renewed >=256GiB reversal reopens the old-writer
+or regression branch.
 
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on

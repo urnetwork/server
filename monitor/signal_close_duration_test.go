@@ -51,12 +51,23 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 		"active_host=edge-3",
 		"active_generation=g2",
 		"active_container=new",
-		"25,000-contract checkpoint",
+		"Current 25,000-contract checkpoints",
+		"observed main generation cap a checkpoint at 25,000 contracts",
+		"Retain the 25,000-contract cap",
+		"roll it out only where live selection logs still show a larger cohort",
 		"executor overlap alone is not causal proof",
 		"Do not raise the deadline",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("active close alert lost %q:\n%s", want, alert.Markdown())
+		}
+	}
+	for _, stale := range []string{
+		"The deployed 100,000-contract task checkpoint",
+		"Roll out the bounded retention queue and the 25,000-contract checkpoint",
+	} {
+		if strings.Contains(alert.Markdown(), stale) {
+			t.Fatalf("active close alert retained stale deployment diagnosis %q:\n%s", stale, alert.Markdown())
 		}
 	}
 }
