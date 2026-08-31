@@ -733,6 +733,21 @@ also leaves both producer/transport gates open: the deployed Proxy still emits
 one default-info line per peer, and the deployed Grafana still predates Warp
 `1e95aef`.
 
+The v163 watcher supplied an independent recurrence at `23:53Z`, more than
+three minutes after its predecessor had exited and with no collector overlap.
+Fireside Proxy g10 emitted 9,891 default-info `sync peer installed` lines in
+about 111 milliseconds; three ordinary add lines brought the fleet's
+wall-minute peer-install count to 9,894. A matching exact Grafana query found
+5,470 dropped-stream resets in that wall minute, versus 119 and 226 in the
+adjacent minutes, while the standing rolling window reported 5,535/min. The
+discrete producer/reset shape rules out watcher handover as the spike source
+and independently confirms the high-cardinality full-sync amplification.
+The nonzero adjacent-minute reset baseline remains a separate reason to deploy
+the Grafana transport fix. Deploy server Proxy `e055c98c` or later and Grafana
+with Warp `1e95aef` or later; verify the next full sync has one aggregate
+summary and zero dropped-stream resets rather than treating either fix as a
+substitute for the other.
+
 Separately, the querier has its own ten-response channel to the WebSocket. If
 that later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors
 to a successful HTTP tail response. Warpctl decoded that API field but
