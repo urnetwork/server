@@ -17,12 +17,13 @@ func (r *recordingPaymentPlanTransaction) Exec(_ context.Context, sql string, _ 
 	return server.PgTag{}, nil
 }
 
-// TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards is the regression for
-// Payout repeatedly failing after the nested reliability work either exceeded
-// production's idle-in-transaction timeout or triggered PostgreSQL 18.4's
-// high-concurrency temporary-relation local-buffer bug. Both overrides must be
-// observable inside this transaction and must use SET LOCAL so they cannot
-// weaken or throttle later sessions.
+// TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards is the deterministic
+// regression for Payout repeatedly failing after the nested reliability work
+// either exceeded production's idle-in-transaction timeout or triggered
+// PostgreSQL 18.4's high-concurrency temporary-relation local-buffer bug. Both
+// overrides must use SET LOCAL so they cannot weaken or throttle later
+// sessions. Keep this assertion independent of the optional local database
+// integration environment.
 func TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards(t *testing.T) {
 	ctx := context.Background()
 	recorder := &recordingPaymentPlanTransaction{}
@@ -39,7 +40,13 @@ func TestPaymentPlanConfiguresOnlyItsLocalTransactionGuards(t *testing.T) {
 			t.Fatalf("payment-plan transaction statement %d = %q, want %q", i, recorder.statements[i], want)
 		}
 	}
+}
 
+// TestPaymentPlanTransactionGuardsAreLocal verifies the same statements
+// against PostgreSQL when the repository's isolated local integration
+// environment is configured.
+func TestPaymentPlanTransactionGuardsAreLocal(t *testing.T) {
+	ctx := context.Background()
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		server.Db(ctx, func(conn server.PgConn) {
 			readSetting := func(queryer interface {
