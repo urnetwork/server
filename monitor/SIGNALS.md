@@ -4299,7 +4299,8 @@ Grafana 13 schedules provisioned rules on a 10-second grid, rejected the file
 during provisioning, and shut down every dependent module. The parent
 `warp-grafana` process and Docker container stayed running, while `/status`
 reported the Grafana child connection refused until the 120-second deployment
-attempt failed. The old generation continued serving.
+attempt failed. An old generation continued serving only on hosts where one
+still existed.
 
 Inspect both layers; `docker ps` alone is a false green:
 ```bash
@@ -4315,6 +4316,33 @@ multiple of 10 seconds. Run `go test ./grafana` before building the image. A
 restart cannot repair the current artifact; publish a corrected Grafana image
 and require the new container's `/status` to become ready before draining the
 old generation.
+
+### 11.17 Exact-edge Grafana ingress and rotating-DNS blindness
+
+Probe: `grafana-ingress`
+
+Pin `https://<env>-grafana.<domain>/api/health` to every enabled edge IPv6
+address from the active `services.yml` version. HTTP 200 is the only healthy
+response. Transport refusal/timeout remains owned by `edge-ipv6` (§18.1); this
+signal starts after TLS reaches the edge and therefore identifies a
+service-specific response without duplicating the interface ticket.
+
+The `2026.8.30+1033129380` rollout exposed why a single ordinary DNS request is
+not enough. Edge-0 and edge-1 returned 200 while both edge-4 interfaces returned
+502. Edge-4 had no old Grafana generation, the new container stayed `Up` while
+its child repeatedly rejected the 15-second alert interval, its front `/status`
+returned 503, and `WARP-MAIN-GRAFANA-G1` had no port-7183 DNAT target because
+Warp correctly refused to activate the unready generation. The edge-4 LB then
+received connection refused at `172.18.0.1:7183` and returned 502. DNS rotation
+made `warpctl logs` alternate between success and three exhausted 502 retries,
+so a global visibility alert alone did not name the broken edge.
+
+For an exact-edge 502/503/504, compare old/new Grafana containers, each front
+`/status`, the service-alias rule/socket, and the child provisioning log. Do not
+add a DNAT target for an unready process and do not restart the same invalid
+image. Correct the alert interval, pass the scheduler-grid test, publish a new
+Grafana image, and require three pinned HTTP 200 responses on every edge plus a
+bounded `warpctl logs` query across multiple DNS rotations.
 
 ---
 

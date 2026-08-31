@@ -105,23 +105,16 @@ func runEdgeIPv6Task(ctx context.Context, env *probeEnv, result edgeIPv6Result) 
 	if hostname == "" {
 		hostname = "api-v6.bringyour.com"
 	}
-	resolve := fmt.Sprintf("%s:443:[%s]", hostname, configured.Address)
-	args := []string{
-		"--ipv6", "--http1.1", "--silent", "--show-error",
-		"--connect-timeout", "3", "--max-time", "5", "--noproxy", "*",
-		"--resolve", resolve,
-		"--output", "/dev/null",
-		"--write-out", "\nmonitor_http_code=%{http_code}\nmonitor_exitcode=%{exitcode}\nmonitor_remote_ip=%{remote_ip}\nmonitor_time_total=%{time_total}\n",
-		"https://" + hostname + "/hello",
-	}
-	result.httpOutput, result.httpErr = env.runner.local(ctx, "curl", args...)
-	result.http = parseKeyValueLines(result.httpOutput)
+	public := runExactHTTPS(ctx, env.runner, hostname, configured.Address, "/hello")
+	result.httpOutput = public.output
+	result.httpErr = public.err
+	result.http = public.values
 
 	identityCommand := edgeIPv6IdentityCommand(configured)
 	result.identityRaw, result.identityErr = env.runner.shell(ctx, result.host, identityCommand)
 	result.identity = parseKeyValueLines(result.identityRaw)
 
-	if edgeIPv6HTTPHealthy(result.http, result.httpErr) {
+	if exactHTTPSHealthy(public) {
 		return result
 	}
 	egressCommand := edgeIPv6EgressCommand(configured)
@@ -163,10 +156,6 @@ printf '%%s\nself_probe_status=%%s\nsource_egress=%%s\nsource_egress_status=%%s\
 		edgeIPv6EgressMarker, address, probeHostname)
 }
 
-func edgeIPv6HTTPHealthy(values map[string]string, err error) bool {
-	return err == nil && values["monitor_exitcode"] == "0" && values["monitor_http_code"] == "200"
-}
-
 func edgeIPv6Findings(result edgeIPv6Result) []finding {
 	target := result.host.name
 	frame := result.configured.Interface + "/" + result.configured.Address
@@ -190,7 +179,7 @@ func edgeIPv6Findings(result edgeIPv6Result) []finding {
 		})
 	}
 
-	if edgeIPv6HTTPHealthy(result.http, result.httpErr) {
+	if exactHTTPSHealthy(exactHTTPSResult{values: result.http, output: result.httpOutput, err: result.httpErr}) {
 		return findings
 	}
 	if result.egressErr != nil {

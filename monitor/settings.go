@@ -122,6 +122,10 @@ type StreamingSignalSource interface {
 // option. Source can be supplied by tests to keep every probe synthetic.
 type SignalSettings struct {
 	Environment string
+	// PublicDomain is the active services.yml domain used to construct
+	// environment-scoped public health hostnames without duplicating them in
+	// monitor.yml.
+	PublicDomain string
 	// VerificationEnabled is the canonical st-subsystem feature state. It lets
 	// task probes distinguish a legitimately slow enabled verification job
 	// from a stale recurring chain that must not exist while the subsystem is
@@ -234,6 +238,7 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
 		env:                 settings.Environment,
+		publicDomain:        settings.PublicDomain,
 		verificationEnabled: settings.VerificationEnabled,
 		sshUser:             settings.SSHUser,
 		sshDevUser:          settings.SSHDevUser,

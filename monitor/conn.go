@@ -85,6 +85,7 @@ func (self *host) redisNodePorts() []int {
 // (from monitor.yml + pg.yml + config settings.yml).
 type monitorConfig struct {
 	env                 string // WARP_ENV
+	publicDomain        string // active services.yml domain
 	verificationEnabled bool
 
 	sshUser     string // deployed login user

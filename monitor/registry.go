@@ -74,6 +74,7 @@ func NewSignals() []Signal {
 		NewProxyPathSignal(),
 		NewKeyPublicationSignal(),
 		NewEdgeIPv6Signal(),
+		NewGrafanaIngressSignal(),
 	}
 }
 

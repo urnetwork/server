@@ -121,6 +121,7 @@ func LoadSignalSettings() (SignalSettings, error) {
 	}
 	settings := SignalSettings{
 		Environment:         env,
+		PublicDomain:        strings.TrimSpace(services.Domain),
 		VerificationEnabled: controller.StEnabled(),
 		SSHUser:             y.Ssh.User,
 		SSHDevUser:          y.Ssh.DevUser,
