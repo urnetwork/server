@@ -1863,21 +1863,26 @@ attributed TTL cleanup with explicit maintenance authority; it does not
 recommend a blind maxmemory increase or arbitrary key deletion.
 
 The 2026-08-31T01:06Z host-capacity battery ruled out a safe ceiling increase.
-The latest focused sample at 02:31Z found 355.8GiB used / 366.8GiB RSS beneath
-384GiB of aggregate maxmemory, with 184.9M keys and 18 of 32 nodes above 92%.
-The 472.2GiB host had only 15.6GiB available, while Redis could still consume
-28.2GiB before reaching its per-process ceilings—a definite 12.6GiB physical
-capacity deficit even before additional RSS overhead, the kernel, or other
-processes. Raising maxmemory would exchange controlled per-node eviction for
-host swapping or OOM risk. The monitor emits `redis-host-capacity` when a
-critical node coincides with this aggregate deficit. Immediate capacity
-headroom requires more physical memory, Redis masters on additional hosts, or
-an immediately smaller retained footprint. The independently attributed,
-binary-safe stream cleanup (`bringyourctl streams expire-leaked-ttls`) still
-requires explicit maintenance authority and is complementary: it clamps keys
-to an 8-hour TTL and begins a bounded drain, but cannot free all of that
-capacity immediately. The 02:31Z sample still had no cumulative Redis OOM
-replies or current eviction-exceeded interval.
+The focused samples show the deficit being consumed. At 02:31Z Redis held
+355.8GiB used / 366.8GiB RSS; by 02:46Z that had risen to 362.2GiB used /
+372.3GiB RSS beneath 384GiB of aggregate maxmemory. The fleet had 184.6M keys
+and 22 of 32 nodes above 92%. The 472.2GiB host had 16.3GiB available while
+Redis could still consume 21.8GiB before reaching its per-process ceilings—a
+definite 5.6GiB physical capacity deficit even before additional RSS overhead,
+the kernel, or other processes. Raising maxmemory would exchange controlled
+per-node eviction for host swapping or OOM risk. A subsequent 12-second sample
+on four 100%-class nodes kept total error replies and
+`current_eviction_exceeded_time` flat, but ports 6388, 6397, and 6406 evicted
+about 38, 104, and 138 keys/second. Writes are still surviving through
+emergency churn; that is not healthy headroom.
+
+The monitor emits `redis-host-capacity` when a critical node coincides with
+this aggregate deficit. Immediate capacity headroom requires more physical
+memory, Redis masters on additional hosts, or an immediately smaller retained
+footprint. The independently attributed, binary-safe stream cleanup
+(`bringyourctl streams expire-leaked-ttls`) still requires explicit
+maintenance authority and is complementary: it clamps keys to an 8-hour TTL
+and begins a bounded drain, but cannot free all of that capacity immediately.
 
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
