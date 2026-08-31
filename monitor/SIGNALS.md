@@ -260,6 +260,17 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
 - KEY INSIGHT: pgadmin-style "connection utilization" is NOT query load.
   Real active backends were ~6 even during the worst incidents. Always split
   by state before concluding anything about load.
+- The 2026-08-31 05:55Z migration watch supplied the young-count
+  discriminator. A sustained sample reached 181 idle-in-transaction clients,
+  but the oldest transaction and every grouped shape had only 0–1 seconds of
+  continuous idle time. The trip-time battery was dominated by brief
+  repeatable-read `BEGIN`, close-contract selection, and provide-key update
+  shapes; the next direct `pg-state` read was healthy. Migration coherence,
+  active-query, wait-event, and PostgreSQL-state companions stayed clean.
+  This was bounded application concurrency while the close backlog drained,
+  not a migration lock, Redis-stalled transaction, or xmin-pinning leak. Keep
+  the count warning for capacity attribution, but require the explicit
+  continuous-idle age before terminating any session or assigning a leak.
 
 ### 1.4 redis cluster state + per-node liveness
 Probe: `redis-cluster`
