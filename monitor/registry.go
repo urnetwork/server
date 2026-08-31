@@ -78,6 +78,38 @@ func NewSignals() []Signal {
 	}
 }
 
+// ExcludeSignals returns the registered signals except those named by short
+// key, SIGNALS.md number, or probe ID. Unknown names fail closed so a typo
+// cannot silently re-enable a signal an operator intended to pause.
+func ExcludeSignals(signals []Signal, identifiers ...string) ([]Signal, error) {
+	requested := map[string]bool{}
+	for _, identifier := range identifiers {
+		requested[identifier] = false
+	}
+	selected := make([]Signal, 0, len(signals))
+	for _, signal := range signals {
+		excluded := false
+		for identifier := range requested {
+			if identifier == signal.Key() || identifier == signal.Number() || identifier == signal.ID() {
+				requested[identifier] = true
+				excluded = true
+			}
+		}
+		if !excluded {
+			selected = append(selected, signal)
+		}
+	}
+	for identifier, found := range requested {
+		if !found {
+			return nil, fmt.Errorf("monitor: excluded signal %q is not registered", identifier)
+		}
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("monitor: every registered signal was excluded")
+	}
+	return selected, nil
+}
+
 // Signals returns a copy of the registered slice.
 func (m *Monitor) Signals() []Signal {
 	return append([]Signal(nil), m.signals...)

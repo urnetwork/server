@@ -156,6 +156,32 @@ type signalRuntime struct {
 	baselineErr error
 }
 
+// ExcludeEdgeIPv6Hosts returns settings with exact public IPv6 probes disabled
+// only for the named hosts. Other probes and other hosts remain enabled.
+// Unknown names fail closed so an operational pause cannot silently miss its
+// intended target.
+func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSettings, error) {
+	requested := map[string]bool{}
+	for _, name := range names {
+		requested[name] = false
+	}
+	filtered := settings
+	filtered.Hosts = append([]HostSettings(nil), settings.Hosts...)
+	for i := range filtered.Hosts {
+		if _, ok := requested[filtered.Hosts[i].Name]; !ok {
+			continue
+		}
+		requested[filtered.Hosts[i].Name] = true
+		filtered.Hosts[i].EdgeIPv6 = nil
+	}
+	for name, found := range requested {
+		if !found {
+			return SignalSettings{}, fmt.Errorf("monitor: excluded IPv6 host %q is not configured", name)
+		}
+	}
+	return filtered, nil
+}
+
 func (s SignalSettings) withDefaults() SignalSettings {
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay

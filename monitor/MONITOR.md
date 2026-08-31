@@ -441,6 +441,11 @@ WARP_HOME=/Users/brien/urnetwork WARP_ENV=main WARP_VERSION=0.0.0 \
 WARP_HOME=... WARP_ENV=main ... go run ./cli/monitor   # cadence loop
 ```
 
+During an explicit per-host routing maintenance window, add
+`-exclude-edge-ipv6-host <configured-host-name>`. This removes only that
+host's exact public IPv6 targets from both edge IPv6 and Grafana ingress
+probes; every other signal and host continues. Unknown host names fail closed.
+
 1. **Skeleton + tier-0 — DONE (2026-07-17).** main loop + `--once`, sshExec
    connector (conn/), four tier-0 probes (contract rate 1.1, pg state split
    1.3, task canary + parked 1.2, redis cluster + per-node PING 1.4), static

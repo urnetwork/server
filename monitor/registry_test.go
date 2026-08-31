@@ -106,3 +106,25 @@ func TestMonitorSignalsReturnsCopy(t *testing.T) {
 		t.Fatalf("mutating returned slice changed registry: got %d, want %d", got, want)
 	}
 }
+
+func TestExcludeSignalsExcludesOnlyNamedSignal(t *testing.T) {
+	all := NewSignals()
+	selected, err := ExcludeSignals(all, "edge-ipv6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != len(all)-1 {
+		t.Fatalf("selected %d signals from %d, want exactly one exclusion", len(selected), len(all))
+	}
+	for _, signal := range selected {
+		if signal.Key() == "edge-ipv6" {
+			t.Fatal("edge-ipv6 remained selected")
+		}
+	}
+}
+
+func TestExcludeSignalsRejectsUnknownIdentifier(t *testing.T) {
+	if _, err := ExcludeSignals(NewSignals(), "not-a-signal"); err == nil {
+		t.Fatal("unknown excluded signal was accepted")
+	}
+}
