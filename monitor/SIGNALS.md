@@ -358,7 +358,12 @@ WHERE function_name LIKE '%UpdateClient%'
   `wallet-insufficient=817,processor-invalid-destination=6,processor-rate-limit=1`
   to `814,6,4` while the total stayed 824. Exactly three rows changing class
   matches the three canonical events and rules out a growing payment backlog
-  or a duplicate-log illusion. The stale cohort caused real provider
+  or a duplicate-log illusion. A fourth canonical 429 followed at
+  `18:48:04.608126Z`, and a fifth followed five wallet-insufficient attempts
+  at `18:53:30Z` before landing at `18:53:30.571865Z`. The durable breakdown
+  remained `814,6,4`: it is the current last error of each row, not a
+  cumulative event counter, so a row returning to wallet-insufficient can
+  conceal a different row's new 429. The stale cohort caused real provider
   throttling even though several earlier four/five-per-second peaks did not;
   deploy `70b0d269` rather than treating the empirical burst threshold as a
   deterministic provider quota.
@@ -587,6 +592,37 @@ same bounded API search generated two start-query and two completed-query
 Grafana lines containing `[redis][ttl]`; after a full standing-tailer drain
 window, no Grafana TTL finding appeared. Real Redis residue and unrelated task
 and proxy findings remained visible in that same window.
+
+The 18:53Z payout recurrence then exposed a timestamp-cursor completeness gap
+that process health could not detect. An authoritative bounded query found the
+fifth canonical Circle 429 at `18:53:30.571865Z` by the following minute, but
+the standing taskworker stream never emitted either that event or its matching
+five-attempt wallet peak through repeated drains. The same stream consumed a
+newer `18:55:06Z` peak, and its `warpctl` child had remained alive without a
+restart since 13:35:48 local time. The process was healthy; its contents were
+incomplete. Warpctl first runs `Search`, then `LiveTail` initializes a new
+Loki `/tail` cursor at `time.Now()` and advances it to each emitted source
+timestamp. Loki accepts an entry ingested later with an older source timestamp,
+but that record is now behind the connected cursor and need not appear in the
+WebSocket stream. A reconnect from the last source timestamp has the same
+blind spot.
+
+The standing collector now keeps the low-latency WebSocket and independently
+runs a bounded five-minute `warpctl logs` reconciliation every 45 seconds,
+with a 20,000-line cap. Only timestamp-framed remote records enter the
+classifier, so local retry diagnostics remain monitor evidence rather than
+service errors. Exact fingerprints for alert-relevant lines are retained for
+seven minutes, making stream/query overlap and successive queries idempotent
+without retaining ordinary log volume. The first query remembers pre-start
+history but counts only source records at or after collector start, preventing
+a five-minute startup replay from becoming a one-minute rate. Reconciliation
+does not refresh WebSocket liveness. A failed, stale, or cap-sized query raises
+the separate `tailer-reconcile` visibility class; the live findings already in
+memory are still drained. Deterministic synthetic tests reproduce a stream
+that sees two of four same-second wallet attempts and misses a canonical 429,
+recover the absent records from the bounded query exactly once, exclude
+pre-start history, preserve a live finding on query failure, and reject a
+cap-sized result as incomplete.
 
 ---
 

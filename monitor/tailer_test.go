@@ -368,6 +368,164 @@ func TestPaymentProcessorRateLimitCountsOneLogicalEventPerDiagnosticPair(t *test
 	}
 }
 
+func TestStandingReconciliationUsesBoundedFiveMinuteOverlap(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	var got string
+	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
+		got = name + " " + strings.Join(args, " ")
+		return "", nil
+	}}
+	env := &probeEnv{
+		cfg:    &monitorConfig{env: "main"},
+		runner: &sourceRunner{source: source},
+		now:    func() time.Time { return fixedNow },
+	}
+	tailer := newLogTailer("taskworker", env)
+	if _, err := tailer.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := "warpctl logs main taskworker --since=5m0s --limit=20000"
+	if got != want {
+		t.Fatalf("reconciliation command = %q, want %q", got, want)
+	}
+}
+
+// A connected Loki tail can miss a record ingested behind its source-time
+// cursor. The bounded overlap must add only the absent records, including the
+// canonical 429 and the two missing members of a same-second payout burst;
+// replaying the same overlap on the next cadence must add nothing.
+func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	tailer := newLogTailer("taskworker", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = fixedNow.Add(-time.Minute)
+	tailer.lastLineTime = tailer.startedAt
+
+	walletLines := make([]string, 0, 4)
+	for attempt := 0; attempt < 4; attempt++ {
+		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T18:53:30", attempt)
+		walletLines = append(walletLines, evaluatorLine)
+	}
+	rateLimitLine := `[edge-0][taskworker][g1][cid:test][I][2026-08-31T18:53:31.100000Z][task.go:1930][019f77ae-de17-db98-b22d-2642f6f67594]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+
+	// The stable stream delivered newer traffic but omitted attempts one and
+	// three plus the 429.
+	tailer.ingestStanding(walletLines[0], true, true)
+	tailer.ingestStanding(walletLines[2], true, true)
+	reconciled := strings.Join(append(append([]string{}, walletLines...), rateLimitLine), "\n")
+	tailer.reconcile = func(context.Context) (string, error) { return reconciled, nil }
+	tailer.reconcileOnce(context.Background())
+
+	findings := tailer.drainWindow()
+	burst := findingByClass(t, findings, "payout-retry-microburst")
+	for _, want := range []string{
+		"peak_task_attempts_per_second=4",
+		"task_attempts=4",
+		"diagnostic_lines=4",
+	} {
+		if !strings.Contains(burst.observed, want) {
+			t.Fatalf("reconciled burst missing %q: %+v", want, burst)
+		}
+	}
+	rateLimit := findingByClass(t, findings, "payment-processor-rate-limit")
+	for _, want := range []string{
+		"rate=1/min",
+		"processor_rate_limit_events=1",
+		"diagnostic_lines=1",
+	} {
+		if !strings.Contains(rateLimit.observed, want) {
+			t.Fatalf("reconciled rate limit missing %q: %+v", want, rateLimit)
+		}
+	}
+
+	// The next five-minute query necessarily contains the same records.
+	tailer.reconcileOnce(context.Background())
+	replayed := tailer.drainWindow()
+	if finding := findingByClass(t, replayed, "payout-retry-microburst"); !finding.healthy {
+		t.Fatalf("overlap replay manufactured a second burst: %+v", finding)
+	}
+	if finding := findingByClass(t, replayed, "payment-processor-rate-limit"); !finding.healthy {
+		t.Fatalf("overlap replay manufactured a second 429: %+v", finding)
+	}
+}
+
+func TestFirstStandingReconciliationDoesNotCountPreStartHistory(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	tailer := newLogTailer("taskworker", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = fixedNow.Add(-time.Minute)
+	tailer.lastLineTime = tailer.startedAt
+	oldLine := `[edge-0][taskworker][g1][cid:old][I][2026-08-31T18:52:30.100000Z][task.go:1930][019f77ae-de17-db98-b22d-111111111111]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	currentLine := `[edge-0][taskworker][g1][cid:new][I][2026-08-31T18:53:30.100000Z][task.go:1930][019f77ae-de17-db98-b22d-222222222222]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	tailer.reconcile = func(context.Context) (string, error) {
+		return oldLine + "\n" + currentLine, nil
+	}
+	tailer.reconcileOnce(context.Background())
+
+	finding := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
+	if !strings.Contains(finding.observed, "rate=1/min") ||
+		!strings.Contains(finding.observed, "processor_rate_limit_events=1") {
+		t.Fatalf("first reconciliation counted pre-start history: %+v", finding)
+	}
+
+	// Remembering the old line is also important: the next overlap must not
+	// introduce it after the startup boundary has passed.
+	tailer.reconcileOnce(context.Background())
+	if replay := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit"); !replay.healthy {
+		t.Fatalf("pre-start history entered a later window: %+v", replay)
+	}
+}
+
+func TestStandingReconciliationFailurePreservesStreamAndRaisesVisibility(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	tailer := newLogTailer("taskworker", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = fixedNow.Add(time.Minute * -2)
+	tailer.lastLineTime = tailer.startedAt
+	streamLine := `[edge-0][taskworker][g1][cid:live][I][2026-08-31T18:53:31.100000Z][task.go:1930][019f77ae-de17-db98-b22d-333333333333]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	tailer.ingestStanding(streamLine, true, true)
+	tailer.reconcile = func(context.Context) (string, error) {
+		return "", fmt.Errorf("Loki query error (502): Bad Gateway")
+	}
+	tailer.reconcileOnce(context.Background())
+
+	probe := &logTailProbe{tailers: []*logTailer{tailer}}
+	findings, err := probe.check(context.Background(), &probeEnv{now: func() time.Time { return fixedNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live := findingByClass(t, findings, "payment-processor-rate-limit"); live.healthy {
+		t.Fatalf("failed reconciliation discarded the live-stream finding: %+v", live)
+	}
+	visibility := findingByClass(t, findings, "tailer-reconcile")
+	if visibility.healthy || !strings.Contains(visibility.observed, "Loki query error (502)") {
+		t.Fatalf("reconciliation failure was not visible: %+v", visibility)
+	}
+}
+
+func TestStandingReconciliationLimitIsVisibilityFailure(t *testing.T) {
+	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
+	tailer := newLogTailer("grafana", nil)
+	tailer.clock = func() time.Time { return fixedNow }
+	tailer.startedAt = fixedNow.Add(-time.Minute)
+
+	var output strings.Builder
+	for i := 0; i < logReconcileLimit; i++ {
+		fmt.Fprintf(&output, "[edge-0][grafana][g1][cid:test][2026-08-31T18:53:30.100000Z]ordinary line %d\n", i)
+	}
+	tailer.reconcile = func(context.Context) (string, error) { return output.String(), nil }
+	tailer.reconcileOnce(context.Background())
+
+	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	if !lastSuccess.IsZero() || !strings.Contains(lastError, "20000-line limit") {
+		t.Fatalf("truncated overlap was accepted: last_success=%s error=%q", lastSuccess, lastError)
+	}
+	visibility := tailerReconcileFinding("grafana", fixedNow, tailer.startedAt, lastSuccess, lastError)
+	if visibility.healthy {
+		t.Fatalf("truncated overlap did not raise visibility: %+v", visibility)
+	}
+}
+
 // Minute volume is the liquidity/retry-amplification signal, but it is not a
 // synchronized microburst when canonical attempts occupy different seconds.
 // The subsequent empty window must also resolve a prior burst identity.

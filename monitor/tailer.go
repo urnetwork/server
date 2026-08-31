@@ -292,13 +292,21 @@ var targetRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+`)
 // attempts inside the provider's short admission window, not log arrival time.
 var logTimestampSecondRe = regexp.MustCompile(`\[(20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2}))\]`)
 
-func logTimestampSecond(line string) string {
+func parseLogTimestamp(line string) (time.Time, bool) {
 	match := logTimestampSecondRe.FindStringSubmatch(line)
 	if len(match) < 2 {
-		return ""
+		return time.Time{}, false
 	}
 	observedAt, err := time.Parse(time.RFC3339Nano, match[1])
 	if err != nil {
+		return time.Time{}, false
+	}
+	return observedAt, true
+}
+
+func logTimestampSecond(line string) string {
+	observedAt, ok := parseLogTimestamp(line)
+	if !ok {
 		return ""
 	}
 	return observedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
@@ -403,6 +411,11 @@ func isGrafanaQueryEcho(service string, line string) bool {
 type logTailer struct {
 	service string
 	env     *probeEnv
+	clock   func() time.Time
+	// startedAt separates history that predates this collector from records
+	// eligible for its first complete rate window. The first reconciliation
+	// remembers older records without counting them.
+	startedAt time.Time
 
 	stateLock sync.Mutex
 	// class -> count in the current minute window
@@ -424,6 +437,11 @@ type logTailer struct {
 	canonicalCounts       map[string]int
 	canonicalSeen         map[[sha256.Size]byte]struct{}
 	canonicalSeenPrevious map[[sha256.Size]byte]struct{}
+	// The WebSocket tail is an arrival stream, while the reconciliation query
+	// replays an overlapping source-time window. Retain fingerprints only for
+	// alert-relevant records long enough to make the two transports and
+	// successive overlap queries idempotent without retaining ordinary logs.
+	standingSeen map[[sha256.Size]byte]time.Time
 	// normalized novel shape -> count
 	novelCounts map[string]int
 	novelSample string
@@ -431,15 +449,31 @@ type logTailer struct {
 	lastLineTime   time.Time
 	restartCount   int
 	scanErrorCount int
+	// A successful bounded query closes the Search -> LiveTail gap and catches
+	// Loki records ingested behind the WebSocket timestamp cursor. Its health
+	// is independent from the still-connected stream health above.
+	reconcileInitialized bool
+	lastReconcileTime    time.Time
+	lastReconcileError   string
 
 	// stream is a test seam over runner.warpctlStream; nil = the real stream
 	stream func(ctx context.Context) (*exec.Cmd, io.ReadCloser, error)
+	// reconcile is a test seam over a bounded runner.warpctl query. It is nil
+	// for isolated classifier tests and configured for every production tailer.
+	reconcile func(ctx context.Context) (string, error)
 }
 
 func newLogTailer(service string, env *probeEnv) *logTailer {
-	return &logTailer{
+	clock := time.Now
+	if env != nil && env.now != nil {
+		clock = env.now
+	}
+	startedAt := clock()
+	tailer := &logTailer{
 		service:               service,
 		env:                   env,
+		clock:                 clock,
+		startedAt:             startedAt,
 		classCounts:           map[string]int{},
 		classSamples:          map[string]string{},
 		classTargets:          map[string]string{},
@@ -453,15 +487,54 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 		canonicalCounts:       map[string]int{},
 		canonicalSeen:         map[[sha256.Size]byte]struct{}{},
 		canonicalSeenPrevious: map[[sha256.Size]byte]struct{}{},
+		standingSeen:          map[[sha256.Size]byte]time.Time{},
 		novelCounts:           map[string]int{},
 		// silence is measured from tailer start until the first line arrives
-		lastLineTime: time.Now(),
+		lastLineTime: startedAt,
 	}
+	if env != nil && env.runner != nil && env.cfg != nil {
+		tailer.reconcile = func(ctx context.Context) (string, error) {
+			return env.runner.warpctl(
+				ctx,
+				"logs",
+				env.cfg.env,
+				service,
+				"--since="+logReconcileLookback.String(),
+				fmt.Sprintf("--limit=%d", logReconcileLimit),
+			)
+		}
+	}
+	return tailer
 }
 
-// run tails the service's logs until ctx is done, restarting the stream with
-// backoff on exit. Started by the scheduler in main.
+const (
+	// Loki accepts out-of-order writes, but its tail cursor advances by source
+	// timestamp. A record ingested after that cursor has passed is recoverable
+	// only through an overlapping range query. Five minutes covers the observed
+	// production delay while keeping the all-line query comfortably bounded.
+	logReconcileLookback  = 5 * time.Minute
+	logReconcileInterval  = 45 * time.Second
+	logReconcileRetention = logReconcileLookback + 2*time.Minute
+	logReconcileLimit     = 20000
+)
+
+// run tails and independently reconciles one service until ctx is done.
+// Reconciliation cannot block or distort the in-memory one-minute drain.
 func (self *logTailer) run(ctx context.Context) {
+	var reconcileGroup sync.WaitGroup
+	if self.reconcile != nil {
+		reconcileGroup.Add(1)
+		go func() {
+			defer reconcileGroup.Done()
+			self.runReconcile(ctx)
+		}()
+	}
+	self.runStream(ctx)
+	reconcileGroup.Wait()
+}
+
+// runStream owns the standing warpctl child and its restart lifecycle.
+func (self *logTailer) runStream(ctx context.Context) {
 	backoff := time.Second
 	for {
 		select {
@@ -494,6 +567,88 @@ func (self *logTailer) run(ctx context.Context) {
 	}
 }
 
+// runReconcile periodically re-queries a bounded overlap. It runs immediately
+// so the stream/search handoff is covered from collector startup, then on an
+// independent cadence shorter than the alert drain cadence.
+func (self *logTailer) runReconcile(ctx context.Context) {
+	self.reconcileOnce(ctx)
+	ticker := time.NewTicker(logReconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			self.reconcileOnce(ctx)
+		}
+	}
+}
+
+// reconcileOnce folds entries absent from the live stream into the current
+// window. Failed and truncated queries are never treated as complete history;
+// their state is exposed by tailerReconcileFinding.
+func (self *logTailer) reconcileOnce(ctx context.Context) {
+	if self.reconcile == nil {
+		return
+	}
+	out, err := self.reconcile(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		self.recordReconcile(err)
+		return
+	}
+
+	type reconcileLine struct {
+		line       string
+		observedAt time.Time
+	}
+	lines := []reconcileLine{}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		observedAt, ok := parseLogTimestamp(line)
+		if !ok {
+			// runner.warpctl retains local retry diagnostics on stderr. Only
+			// warpctl's timestamp-framed remote records may enter a service
+			// classifier.
+			continue
+		}
+		lines = append(lines, reconcileLine{line: line, observedAt: observedAt})
+	}
+	if len(lines) >= logReconcileLimit {
+		self.recordReconcile(fmt.Errorf(
+			"bounded overlap reached the %d-line limit for %s; late-entry coverage is incomplete",
+			logReconcileLimit,
+			self.service,
+		))
+		return
+	}
+
+	self.stateLock.Lock()
+	initial := !self.reconcileInitialized
+	self.reconcileInitialized = true
+	self.stateLock.Unlock()
+	for _, entry := range lines {
+		count := !initial || !entry.observedAt.Before(self.startedAt)
+		self.ingestStanding(entry.line, false, count)
+	}
+	self.recordReconcile(nil)
+}
+
+func (self *logTailer) recordReconcile(err error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if err != nil {
+		self.lastReconcileError = err.Error()
+		return
+	}
+	self.lastReconcileTime = self.clock()
+	self.lastReconcileError = ""
+}
+
 // tailOnce runs one log stream to completion: start, scan lines, reap the
 // child. On a scanner error (a > 1MB line overflows the buffer as
 // bufio.ErrTooLong) the child is killed and the read end closed BEFORE Wait —
@@ -515,7 +670,7 @@ func (self *logTailer) tailOnce(ctx context.Context) error {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		self.classify(scanner.Text())
+		self.ingestStanding(scanner.Text(), true, true)
 	}
 	scanErr := scanner.Err()
 	if scanErr != nil {
@@ -558,17 +713,46 @@ func (self *logTailer) healthSnapshot() (lastLine time.Time, restarts int, scanE
 	return self.lastLineTime, self.restartCount, self.scanErrorCount
 }
 
+func (self *logTailer) reconcileSnapshot() (enabled bool, startedAt time.Time, lastSuccess time.Time, lastError string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.reconcile != nil, self.startedAt, self.lastReconcileTime, self.lastReconcileError
+}
+
 // classify folds one log line into the current window.
 func (self *logTailer) classify(line string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	self.lastLineTime = time.Now()
+	self.lastLineTime = self.clock()
+	self.classifyLocked(line, false, true, self.clock())
+}
+
+// ingestStanding is used by both standing transports. Exact replay
+// suppression applies only to alert-relevant records, and a reconciliation
+// record never refreshes WebSocket liveness.
+func (self *logTailer) ingestStanding(line string, updateLiveness bool, count bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	now := self.clock()
+	if updateLiveness {
+		self.lastLineTime = now
+	}
+	self.classifyLocked(line, true, count, now)
+}
+
+func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool, now time.Time) {
 	if isGrafanaQueryEcho(self.service, line) {
 		return
 	}
 
 	for _, c := range logClasses {
 		if c.re.MatchString(line) {
+			if deduplicate && self.standingReplayLocked(line, now) {
+				return
+			}
+			if !count {
+				return
+			}
 			key := c.name
 			attribution := ""
 			if c.groupBy != nil {
@@ -617,6 +801,12 @@ func (self *logTailer) classify(line string) {
 		}
 	}
 	if errorShapedRe.MatchString(line) {
+		if deduplicate && self.standingReplayLocked(line, now) {
+			return
+		}
+		if !count {
+			return
+		}
 		shape := line
 		for _, re := range novelNormalizeRes {
 			shape = re.ReplaceAllString(shape, "#")
@@ -627,6 +817,23 @@ func (self *logTailer) classify(line string) {
 		self.novelCounts[shape] += 1
 		if self.novelSample == "" {
 			self.novelSample = truncateLine(line)
+		}
+	}
+}
+
+func (self *logTailer) standingReplayLocked(line string, now time.Time) bool {
+	fingerprint := sha256.Sum256([]byte(line))
+	if seenAt, ok := self.standingSeen[fingerprint]; ok && now.Before(seenAt.Add(logReconcileRetention)) {
+		return true
+	}
+	self.standingSeen[fingerprint] = now
+	return false
+}
+
+func (self *logTailer) pruneStandingSeenLocked(now time.Time) {
+	for fingerprint, seenAt := range self.standingSeen {
+		if !now.Before(seenAt.Add(logReconcileRetention)) {
+			delete(self.standingSeen, fingerprint)
 		}
 	}
 }
@@ -812,6 +1019,7 @@ func (self *logTailer) drainWindow() []finding {
 	self.canonicalSeen = map[[sha256.Size]byte]struct{}{}
 	self.novelCounts = map[string]int{}
 	self.novelSample = ""
+	self.pruneStandingSeenLocked(self.clock())
 
 	return findings
 }
@@ -893,6 +1101,9 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	findings := []finding{}
 	now := time.Now()
+	if env != nil && env.now != nil {
+		now = env.now()
+	}
 	for i, tailer := range self.tailers {
 		findings = append(findings, tailer.drainWindow()...)
 
@@ -900,8 +1111,52 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		restartDelta := restarts - self.lastRestartCounts[i]
 		self.lastRestartCounts[i] = restarts
 		findings = append(findings, tailerHealthFindings(tailer.service, now, lastLine, restartDelta, scanErrors)...)
+		enabled, startedAt, lastSuccess, lastError := tailer.reconcileSnapshot()
+		if enabled {
+			findings = append(findings, tailerReconcileFinding(tailer.service, now, startedAt, lastSuccess, lastError))
+		}
 	}
 	return findings, nil
+}
+
+func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, lastSuccess time.Time, lastError string) finding {
+	target := "logs/" + service
+	stale := !lastSuccess.IsZero() && now.Sub(lastSuccess) >= 2*logReconcileInterval
+	neverCompleted := lastSuccess.IsZero() && now.Sub(startedAt) >= 2*logReconcileInterval
+	if lastError == "" && !stale && !neverCompleted {
+		return healthyFinding("monitor/visibility", tierWarn, "tailer-reconcile", target)
+	}
+
+	observed := "last_success=never"
+	if !lastSuccess.IsZero() {
+		observed = "last_success=" + lastSuccess.UTC().Format(time.RFC3339)
+	}
+	if lastError != "" {
+		observed += " error=" + lastError
+	} else if stale {
+		observed += " error=reconciliation has not completed on cadence"
+	} else {
+		observed += " error=initial reconciliation has not completed"
+	}
+	return finding{
+		probeId: "monitor/visibility", tier: tierWarn,
+		class: "tailer-reconcile", target: target, sustain: 2,
+		symptom: fmt.Sprintf(
+			"log tailer for %s cannot reconcile records ingested behind its live timestamp cursor",
+			service,
+		),
+		baseline: fmt.Sprintf(
+			"a bounded %s overlap query succeeds below %d lines every %s",
+			logReconcileLookback,
+			logReconcileLimit,
+			logReconcileInterval,
+		),
+		observed:  observed,
+		mechanism: "Loki accepts out-of-order records, but a WebSocket tail advances by source timestamp. Without a successful overlapping query, a late-ingested record older than that cursor can remain absent even while the tail process is connected and reading newer lines.",
+		action:    "Restore bounded warpctl/Loki query visibility or reduce the queried service volume below the cap. Keep the live tail running; do not interpret the missing reconciliation as a healthy error window.",
+		verify:    "Two consecutive overlap queries complete below the cap and the standing monitor remains free of tailer-reconcile visibility alerts.",
+		playbook:  "SIGNALS.md 1.5",
+	}
 }
 
 // tailerHealthFindings evaluates one tailer's self-health: silent beyond the

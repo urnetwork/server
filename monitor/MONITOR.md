@@ -308,14 +308,20 @@ Logs are a first-class signal (SIGNALS.md 1.5): the monitor tails ALL
 services AT ALL TIMES looking for error signatures. Unlike cadence probes,
 a tailer is a standing collector: one long-running `warpctl logs <env>
 <service> -f` per service, each line classified against the SIGNALS.md §4
-taxonomy as it arrives. Per minute, each tailer folds its counts into
+taxonomy as it arrives. Because Loki can ingest an older source timestamp
+behind an already-advanced WebSocket cursor, each tailer also runs a bounded
+five-minute range reconciliation every 45 seconds. Exact fingerprints make
+alert-relevant overlap idempotent; ordinary lines are not retained. Per
+minute, each tailer folds its counts into
 findings — (class, target ip:port, innermost frame) identity, rate, one
 sample line — through the same evaluator/ticket path as every other probe.
 Unmatched error-shaped lines at rate are reported as class `novel` (new
 panic frames and unseen failure modes are exactly what a fixed taxonomy
 misses). Tailer self-health: a tailer that exits or goes silent while its
 service is running restarts with backoff and raises `monitor/visibility`
-if it cannot stay up. Escalation batteries pull incident windows
+if it cannot stay up. Failed, stale, or truncated reconciliation raises the
+independent `tailer-reconcile` visibility class, because a connected process
+does not prove complete contents. Escalation batteries pull incident windows
 non-interactively with `--since=<duration>` instead of tailing.
 
 ## 4. Scheduler and load budget
@@ -343,7 +349,7 @@ non-interactively with `--since=<duration>` instead of tailing.
 |---|---|
 | 60s | contract rate 1.1; canary completions + failing tasks 1.2; idle-in-tx/active split 1.3; cluster_state + per-node PING 1.4; taskworker allocated-heap skew 2.12 |
 | 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
-| continuous | log tailers §3.7: one `warpctl logs <service> -f` per service, §4 classification per line, per-minute rate findings |
+| continuous | log tailers §3.7: one `warpctl logs <service> -f` per service plus a 45s bounded overlap reconciliation, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
 | 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica topology 3.6; zombie-tx 1.3 |
 | 24h | stats-landmine check (pg_stats n_distinct on transfer_contract.open + open-partial reltuples) §7; keyspace family histogram on fullest node 3.3; dmesg OOM scan 3.4 |
@@ -498,11 +504,13 @@ probes; every other signal and host continues. Unknown host names fail closed.
    exemplars; the lossless bounded counter and file-provisioned Grafana rules
    own their rate alerts (SIGNALS.md §4). The same pass found a real Grafana
    panic-loop (stale CloudWatch datasource, log group missing).
-6. **Log tailers — DONE (2026-07-17)** (§3.7): standing `warpctl logs -f`
-   per service (service list from `warpctl ls services`), §4 taxonomy
-   classifier + novel-class detection, per-minute drain through a probe
-   into the same ticket path; restart-with-backoff. Loop mode only
-   (--no-tail to disable); not exercised by --once.
+6. **Log tailers — DONE (2026-07-17; reconciled 2026-08-31)** (§3.7):
+   standing `warpctl logs -f` per configured service, §4 taxonomy classifier
+   + novel-class detection, per-minute drain through a probe into the same
+   ticket path; restart-with-backoff. A bounded five-minute reconciliation
+   closes the late-ingestion timestamp-cursor gap and has independent
+   visibility health. Loop mode only (--no-tail to disable); not exercised by
+   --once.
 7. **Deployment**: provision `monitor` user + vault/main/monitor.yml,
    deploy as a warp service in-LAN; webhook emitter for the diagnosing
    system.
