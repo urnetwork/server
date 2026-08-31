@@ -2594,6 +2594,14 @@ The gate repeated cleanly at 19:17Z after API
 taskworker. The persistent 30-of-32-node alert is therefore old metadata, not
 a reason to deploy those services again.
 
+The 20:28Z post-deploy probe made the residue boundary semantic rather than
+log-only. Its binary-safe sample on port 6393 found 106 impossible-TTL keys:
+53 legacy stream-contract names, 53 legacy stream-id names, zero current
+stream names, and zero other families. A separate bounded 30-minute Connect
+query returned zero `redis-ttl-suspect` and zero `[redis][ttl]` lines. Connect
+`1033803620` is therefore verified fixed for this defect; only the explicitly
+authorized legacy-key cleanup can resolve the remaining TTL alert.
+
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
   `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each
