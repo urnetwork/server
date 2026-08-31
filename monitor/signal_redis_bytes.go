@@ -31,6 +31,11 @@ const (
 	redisByteMinimumMeasured   = 500
 	redisByteDominanceFraction = 0.50
 	redisByteDominanceMinimum  = int64(128 << 10)
+	// This mirrors model.clientScoreAliasReadyKey/value without importing the
+	// model package into monitoring. The key is a durable rollout boundary:
+	// writers publish it only after the compatibility export completes.
+	redisScoreAliasReadyKey   = "client_score_alias_v1_ready"
+	redisScoreAliasReadyValue = "1"
 )
 
 var redisByteFamilyOrder = []string{"score", "provide", "client-key", "connect", "stream", "other"}
@@ -152,6 +157,23 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	if 0.85 <= usedFraction &&
 		redisByteDominanceFraction <= scoreByteFraction &&
 		redisByteDominanceMinimum <= score.bytes {
+		aliasesReady, aliasesReadyErr := redisScoreAliasesReady(ctx, env, h)
+		action := "Deploy the alias-aware score cache: write one zero-caller baseline per target, one-byte aliases for unchanged callers, and full overrides only for callers whose exclusions intersect the target. Let the first compatibility pass refresh legacy payloads and publish its ready marker; then let duplicates expire naturally. Do not delete cache keys or raise maxmemory to mask the amplification."
+		mechanism := "The client-score cache is keyed by both caller location and target, but most callers do not exclude a network present in a given target. Materializing the same gob counts, filter, and provider samples under every unchanged caller multiplies large values across hundreds of keys; key-count histograms understate this because score keys are fewer but much larger."
+		context := "This is sampled byte attribution, not a full key census. Pair it with node-memory pressure and the five-hour score-cache TTL. Impossible-TTL stream residue is a separate, real defect and must not be assumed to own capacity without its own measured bytes."
+		switch {
+		case aliasesReadyErr != nil:
+			observedParts = append(observedParts, "alias_schema_ready=unknown")
+			context += " The ready marker could not be read: " + aliasesReadyErr.Error()
+			action = "Verify the client_score_alias_v1_ready marker before changing the deployment. If absent, deploy the alias-aware writer and let its compatibility pass publish the marker; if present, do not redeploy or delete keys—allow one full five-hour legacy TTL after publication. Do not raise maxmemory to mask the amplification."
+		case aliasesReady:
+			observedParts = append(observedParts, "alias_schema_ready=true")
+			mechanism += " The durable alias-schema ready marker proves the compatibility export completed; continuing dominance now measures legacy duplicate payloads inside their normal five-hour TTL, not an absent software fix."
+			context += " Marker publication has no Redis creation timestamp, so use the taskworker `client score alias schema ready` log as the drain clock."
+			action = "The alias-aware software fix is already active. Do not redeploy it, delete legacy score keys, or raise maxmemory. Allow one full five-hour TTL after the ready-marker log, then resample; intervene only if duplicates survive that boundary or Redis reaches an immediate capacity limit before expiry."
+		default:
+			observedParts = append(observedParts, "alias_schema_ready=false")
+		}
 		return []finding{{
 			probeId: "redis/byte-families", tier: tierWarn,
 			class: "score-byte-dominance", target: target, frame: "score", sustain: 1,
@@ -159,18 +181,31 @@ func (redisBytesProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 				"score-cache keys account for %.1f%% of sampled Redis bytes on %s, which is %.1f%% full",
 				100*scoreByteFraction, target, 100*usedFraction,
 			),
-			mechanism: "The client-score cache is keyed by both caller location and target, but most callers do not exclude a network present in a given target. Materializing the same gob counts, filter, and provider samples under every unchanged caller multiplies large values across hundreds of keys; key-count histograms understate this because score keys are fewer but much larger.",
+			mechanism: mechanism,
 			baseline:  "A Redis node above 85% has no single avoidably duplicated family owning at least 50% and 128KiB of a 1,000-key MEMORY USAGE sample.",
 			observed:  strings.Join(observedParts, " "),
 			evidence:  "The probe selected the node closest to maxmemory, then classified keys and summed MEMORY USAGE SAMPLES 1 entirely inside a bounded EVAL_RO. Only aggregate family counts and bytes left Redis.",
-			context:   "This is sampled byte attribution, not a full key census. Pair it with node-memory pressure and the five-hour score-cache TTL. Impossible-TTL stream residue is a separate, real defect and must not be assumed to own capacity without its own measured bytes.",
-			action:    "Deploy the alias-aware score cache: write one zero-caller baseline per target, one-byte aliases for unchanged callers, and full overrides only for callers whose exclusions intersect the target. Let the first compatibility pass refresh legacy payloads and publish its ready marker; then let duplicates expire naturally. Do not delete cache keys or raise maxmemory to mask the amplification.",
+			context:   context,
+			action:    action,
 			verify:    "After one complete alias-aware export plus the five-hour legacy TTL, sampled score bytes fall below 50% or the node falls below 85%; aliases resolve to the same provider sets, excluded callers still use overrides, and OOM/error counters remain flat.",
 			playbook:  "SIGNALS.md §3.3b and §5.4",
 		}}, nil
 	}
 
 	return []finding{healthyFinding("redis/byte-families", tierWarn, "score-byte-dominance", target)}, nil
+}
+
+func redisScoreAliasesReady(ctx context.Context, env *probeEnv, h *host) (bool, error) {
+	value, err := env.runner.redis(
+		ctx,
+		h,
+		h.redisEntryPort,
+		"-c", "--raw", "GET", redisScoreAliasReadyKey,
+	)
+	if err != nil {
+		return false, err
+	}
+	return value == redisScoreAliasReadyValue, nil
 }
 
 func sampleRedisByteFamilies(ctx context.Context, env *probeEnv, h *host, port int) (redisByteSample, error) {

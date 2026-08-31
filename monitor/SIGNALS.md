@@ -2327,6 +2327,18 @@ duplicates. Every legacy key receives its normal five-hour TTL when written;
 the task's 120-minute deadline leaves at least three hours after marker
 publication even for the earliest key. Legacy blobs then expire naturally
 without a production delete.
+
+Production published `client_score_alias_v1_ready` at 08:33:49Z on
+2026-08-31 after the first complete compatibility export. A 08:46:35Z bounded
+sample still found score keys owning 91.3% of sampled bytes on a 98.3%-full
+node. That sample is only 13 minutes into the documented five-hour drain: it
+does not mean the alias-aware software is absent or should be redeployed. The
+probe now reads the durable ready marker. When present, the alert reports
+`alias_schema_ready=true`, directs operators to use the taskworker ready log as
+the expiry clock, and forbids redeploying, deleting legacy keys, or raising
+maxmemory merely to accelerate the expected drain. For this publication, the
+first terminal memory sample is due after 13:33:49Z.
+
 Verify after one complete export plus five hours: the sampled score byte share
 falls below 50% or every node falls below 85%, provider selections remain
 equivalent, excluded callers still select overrides, and OOM/error counters
@@ -3708,6 +3720,19 @@ aggregates in the ordinary tens-of-GiB band, and a full quiet three-emitter
 interval. If matched reversals persist on fast unsettled-partial pages, the
 remaining correctness fix is durable per-balance fencing/versioning shared by
 live mirror posts and reconciliation; do not mask it with manual reruns.
+
+Deployment `2026.8.31-outerwerld+1033655820` supplied the access-path proof.
+Its first unequivocally post-rollout task,
+`01a056fc-6076-682e-f24d-56133eacdd9a`, ran on edge-3/g1 container
+`3e5e8253a54e` and completed in about 15 seconds at 08:48:13Z. It scanned
+907,015 balances but corrected only 499.65MiB over-reserved and 10.19GiB
+under-reserved across 165 networks. The adjacent `pg_stat_statements` sample
+recorded 91 new unsettled-partial calls at 61.7ms/page, versus the measured
+7,216.1ms historical bounded-lateral mean that triggered migration 601. This
+proves the schema artifact and matching taskworker query are active together;
+rollout percentage or a fast duration alone would not have proved that. Keep
+recovery open until a later scheduled aggregate remains in band and all three
+negative-counter emitters stay quiet for the full following interval.
 
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
