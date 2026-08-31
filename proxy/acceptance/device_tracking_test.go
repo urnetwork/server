@@ -158,6 +158,109 @@ func TestHostedDeviceDiagnosticRetainsAggregateStateBeforeTruncation(t *testing.
 	}
 }
 
+// The failed target can be one of several API LB addresses while a hosted
+// device also carries control traffic. Its route and busiest exit must survive
+// truncation, or the next live failure cannot be joined to provider state.
+func TestHostedDeviceDiagnosticRetainsTargetRouteAndBusyExitBeforeTruncation(t *testing.T) {
+	providerBusy := sdk.RequireIdFromBytes(bytes.Repeat([]byte{0x44}, 16))
+	providerIdle := sdk.RequireIdFromBytes(bytes.Repeat([]byte{0x55}, 16))
+	exits := sdk.NewExitList()
+	exits.Add(&sdk.Exit{
+		ClientId:             providerIdle,
+		FlowCount:            1,
+		ProviderBuildVersion: strings.Repeat("idle-build-", 16),
+	})
+	exits.Add(&sdk.Exit{
+		ClientId:                        providerBusy,
+		FlowCount:                       17,
+		Warning:                         true,
+		Quarantined:                     true,
+		WarningCause:                    "no receive ack",
+		Proven:                          true,
+		ProviderBlockIngressPacketCount: 11,
+		ProviderBlockEgressPacketCount:  13,
+		ProviderDiagnosticsSequence:     19,
+		ProviderBuildVersion:            "2026.8.30-main",
+	})
+	destinations := sdk.NewDestinationExitList()
+	destinations.Add(&sdk.DestinationExit{DestinationIp: "208.67.222.222", ClientId: providerIdle, FlowCount: 1})
+	destinations.Add(&sdk.DestinationExit{DestinationIp: "65.49.70.82", ClientId: providerBusy, FlowCount: 17})
+
+	tracker := &sdkHostedDeviceTracker{}
+	tracker.record(time.Date(2026, 8, 30, 23, 46, 34, 0, time.UTC), formatHostedDeviceState(
+		&sdk.WindowStatus{TargetSize: 8, ProviderStateAdded: 7, MinSatisfied: true},
+		&sdk.ReliabilityMetrics{FlowsOpened: 164, ExitLossEvents: 12, FlowsLostToExit: 16, RecoveryPending: 1},
+		"out=3214/461805B in=4175/1053563B last_in=23:46:34.000Z(+7/280B)",
+		exits,
+		destinations,
+		map[string]string{},
+	))
+
+	diagnostic := tracker.Diagnostic()
+	for _, evidence := range []string{
+		"65.49.70.82->p1(17)",
+		"p1(flow=17",
+		"warn=true quarantine=true",
+		"cause=no_receive_ack",
+		"blocks=11/13 seq=19 build=2026.8.30-main",
+	} {
+		if !strings.Contains(diagnostic, evidence) {
+			t.Errorf("truncated diagnostic %q does not contain %q", diagnostic, evidence)
+		}
+	}
+}
+
+// Production packet totals and several active exits can fill the root result
+// budget. The failed destination and its busy exit must precede that suffix;
+// otherwise an established-flow loss is indistinguishable from a device-wide
+// outage even though the tracker observed the exact provider join.
+func TestHostedDeviceDiagnosticPrioritizesTargetRouteOverPacketSuffix(t *testing.T) {
+	provider := sdk.RequireIdFromBytes(bytes.Repeat([]byte{0x66}, 16))
+	exits := sdk.NewExitList()
+	exits.Add(&sdk.Exit{
+		ClientId:             provider,
+		FlowCount:            353,
+		Warning:              true,
+		Quarantined:          true,
+		WarningCause:         "provider return stopped for established flow",
+		ProviderBuildVersion: "2026.8.30-1033129380",
+	})
+	for i := 0; i < 7; i++ {
+		exits.Add(&sdk.Exit{
+			ClientId:             sdk.RequireIdFromBytes(bytes.Repeat([]byte{byte(0x70 + i)}, 16)),
+			FlowCount:            int32(100 - i),
+			ProviderBuildVersion: strings.Repeat("secondary-build-", 4),
+		})
+	}
+	destinations := sdk.NewDestinationExitList()
+	destinations.Add(&sdk.DestinationExit{
+		DestinationIp: "65.49.70.84",
+		ClientId:      provider,
+		FlowCount:     1,
+	})
+
+	tracker := &sdkHostedDeviceTracker{}
+	tracker.record(time.Date(2026, 8, 31, 0, 49, 48, 0, time.UTC), formatHostedDeviceState(
+		&sdk.WindowStatus{TargetSize: 8, ProviderStateAdded: 8, MinSatisfied: true, StallReason: "evaluating"},
+		&sdk.ReliabilityMetrics{FlowsOpened: 353, ExitLossEvents: 37, FlowsLostToExit: 32, RecoveryCount: 2, RemovalsDeferred: 9},
+		"out=7365/1089192B in=14605/2843528B last_in=00:49:46.981Z(+12/5974B)",
+		exits,
+		destinations,
+		map[string]string{},
+	))
+
+	diagnostic := tracker.Diagnostic()
+	for _, evidence := range []string{
+		"65.49.70.84->p1(1)",
+		"p1(flow=353",
+		"cause=provider_return_stopped_for_established_flow",
+	} {
+		if !strings.Contains(diagnostic, evidence) {
+			t.Errorf("bounded diagnostic %q does not contain %q", diagnostic, evidence)
+		}
+	}
+}
+
 type staticHostedDeviceTracker struct {
 	diagnostic string
 }

@@ -16,7 +16,7 @@ import (
 const (
 	hostedDevicePollInterval      = time.Second
 	hostedDeviceHistorySize       = 64
-	hostedDeviceDiagnosticMaxSize = 420
+	hostedDeviceDiagnosticMaxSize = 768
 )
 
 // hostedDeviceTracker retains a credential-free timeline around a data-plane
@@ -232,12 +232,19 @@ func formatHostedDeviceState(
 			))
 		}
 	}
-	sort.Strings(destinationSummaries)
+	// Public API targets sort ahead of resolver traffic in descending textual
+	// order. That keeps the destination/provider mapping which carried the
+	// failed acceptance request ahead of the bounded diagnostic suffix.
+	sort.Sort(sort.Reverse(sort.StringSlice(destinationSummaries)))
 	if 8 < len(destinationSummaries) {
 		destinationSummaries = destinationSummaries[:8]
 	}
 
-	activeExitSummaries := []string{}
+	type activeExitSummary struct {
+		flowCount int32
+		value     string
+	}
+	activeExits := []activeExitSummary{}
 	totalExits := 0
 	if exits != nil {
 		totalExits = exits.Len()
@@ -246,42 +253,55 @@ func formatHostedDeviceState(
 			if exit == nil || (exit.FlowCount == 0 && exit.DialFailureCount == 0 && !exit.Warning && !exit.Quarantined && !exit.Done) {
 				continue
 			}
-			activeExitSummaries = append(activeExitSummaries, fmt.Sprintf(
-				"%s(flow=%d dial=%d tier=%d/%d warn=%t quarantine=%t done=%t cause=%s proven=%t blocks=%d/%d seq=%d build=%s)",
-				providerAlias(exit.ClientId),
-				exit.FlowCount,
-				exit.DialFailureCount,
-				exit.Tier,
-				exit.EffectiveTier,
-				exit.Warning,
-				exit.Quarantined,
-				exit.Done,
-				compactDiagnosticToken(exit.WarningCause),
-				exit.Proven,
-				exit.ProviderBlockIngressPacketCount,
-				exit.ProviderBlockEgressPacketCount,
-				exit.ProviderDiagnosticsSequence,
-				compactDiagnosticToken(exit.ProviderBuildVersion),
-			))
+			activeExits = append(activeExits, activeExitSummary{
+				flowCount: exit.FlowCount,
+				value: fmt.Sprintf(
+					"%s(flow=%d dial=%d tier=%d/%d warn=%t quarantine=%t done=%t cause=%s proven=%t blocks=%d/%d seq=%d build=%s)",
+					providerAlias(exit.ClientId),
+					exit.FlowCount,
+					exit.DialFailureCount,
+					exit.Tier,
+					exit.EffectiveTier,
+					exit.Warning,
+					exit.Quarantined,
+					exit.Done,
+					compactDiagnosticToken(exit.WarningCause),
+					exit.Proven,
+					exit.ProviderBlockIngressPacketCount,
+					exit.ProviderBlockEgressPacketCount,
+					exit.ProviderDiagnosticsSequence,
+					compactDiagnosticToken(exit.ProviderBuildVersion),
+				),
+			})
 		}
 	}
-	sort.Strings(activeExitSummaries)
+	sort.Slice(activeExits, func(i int, j int) bool {
+		if activeExits[i].flowCount != activeExits[j].flowCount {
+			return activeExits[j].flowCount < activeExits[i].flowCount
+		}
+		return activeExits[i].value < activeExits[j].value
+	})
+	activeExitSummaries := make([]string, 0, len(activeExits))
+	for _, exit := range activeExits {
+		activeExitSummaries = append(activeExitSummaries, exit.value)
+	}
 	if 8 < len(activeExitSummaries) {
 		activeExitSummaries = activeExitSummaries[:8]
 	}
-	// Put the bounded aggregate state first. Provider detail can be long under
-	// churn, and Diagnostic deliberately truncates its result so packet traces
-	// retain room in the root matrix. A prefix must therefore still answer
-	// whether the window was satisfied, carriers were recovering, or flows were
-	// being lost when the request failed.
+	// Keep the destination-to-provider join immediately after the compact
+	// aggregate state. Packet totals and the number of exits are useful, but they
+	// cannot identify the carrier that lost one already-established flow. In a
+	// busy production device those fields previously consumed the bounded
+	// diagnostic before `destinations` and `active`, erasing the exact evidence
+	// the tracker exists to retain.
 	return fmt.Sprintf(
-		"remote=connected window={%s} reliability={%s} packets={%s} exits=%d destinations=[%s] active=[%s]",
+		"remote=connected window={%s} reliability={%s} destinations=[%s] active=[%s] packets={%s} exits=%d",
 		windowSummary,
 		metricsSummary,
-		packetSummary,
-		totalExits,
 		strings.Join(destinationSummaries, ","),
 		strings.Join(activeExitSummaries, ","),
+		packetSummary,
+		totalExits,
 	)
 }
 

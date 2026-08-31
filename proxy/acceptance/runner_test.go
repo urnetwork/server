@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -511,6 +512,34 @@ func TestHTTPSRequestTraceIdentifiesTunnelConnectFailure(t *testing.T) {
 	}
 	if !strings.Contains(detail, "connection not_established") {
 		t.Errorf("trace detail %q incorrectly claims an established connection", detail)
+	}
+	if !strings.Contains(detail, "dial example.test:443") {
+		t.Errorf("trace detail %q lost the dial endpoint needed to correlate a failed LB path", detail)
+	}
+}
+
+// A resolved address and the actual connected peer distinguish a bad target
+// block from the proxy listener itself. Keep both in the bounded failure text;
+// relying on the URL hostname erased this boundary in the main proxy incident.
+func TestHTTPSRequestTraceRetainsResolvedAndConnectedEndpoints(t *testing.T) {
+	started := time.Date(2026, time.August, 30, 23, 46, 21, 0, time.UTC)
+	requestTrace := &httpsRequestTrace{started: started, phase: "starting_request"}
+	clientTrace := requestTrace.clientTrace()
+	clientTrace.DNSDone(httptrace.DNSDoneInfo{Addrs: []net.IPAddr{
+		{IP: net.ParseIP("65.49.70.82")},
+		{IP: net.ParseIP("2001:db8::82")},
+	}})
+	clientTrace.ConnectStart("tcp", "api.bringyour.com:443")
+	clientTrace.ConnectDone("tcp", "api.bringyour.com:443", errors.New("dial failed"))
+
+	detail := requestTrace.wrap(errors.New("dial failed"), started.Add(time.Second)).Error()
+	for _, evidence := range []string{
+		"dial api.bringyour.com:443",
+		"resolved 65.49.70.82,2001:db8::82",
+	} {
+		if !strings.Contains(detail, evidence) {
+			t.Errorf("trace detail %q does not contain %q", detail, evidence)
+		}
 	}
 }
 

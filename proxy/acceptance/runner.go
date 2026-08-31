@@ -154,11 +154,14 @@ type protocolProbeFactory func(*proxyConfigResult) map[string]protocolProbe
 // can arrive from transport goroutines, so snapshots are safe for concurrent
 // use while an HTTP request is being canceled.
 type httpsRequestTrace struct {
-	stateLock sync.Mutex
-	started   time.Time
-	phase     string
-	gotConn   bool
-	reused    bool
+	stateLock         sync.Mutex
+	started           time.Time
+	phase             string
+	dialAddress       string
+	resolvedAddresses string
+	peerAddress       string
+	gotConn           bool
+	reused            bool
 }
 
 // Builds the net/http trace that advances one request's diagnostic phase.
@@ -171,18 +174,36 @@ func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 	return &httptrace.ClientTrace{
 		DNSStart: func(httptrace.DNSStartInfo) { setPhase("resolving_target") },
 		DNSDone: func(info httptrace.DNSDoneInfo) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
 			if info.Err != nil {
-				setPhase("resolving_target_failed")
-			} else {
-				setPhase("target_resolved")
+				self.phase = "resolving_target_failed"
+				return
 			}
+			self.phase = "target_resolved"
+			addresses := make([]string, 0, min(len(info.Addrs), 4))
+			for _, address := range info.Addrs {
+				if len(addresses) == cap(addresses) {
+					break
+				}
+				addresses = append(addresses, compactDiagnosticToken(address.IP.String()))
+			}
+			self.resolvedAddresses = strings.Join(addresses, ",")
 		},
-		ConnectStart: func(_, _ string) { setPhase("connecting_tunnel") },
-		ConnectDone: func(_, _ string, err error) {
+		ConnectStart: func(_, address string) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.phase = "connecting_tunnel"
+			self.dialAddress = compactDiagnosticToken(address)
+		},
+		ConnectDone: func(_, address string, err error) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.dialAddress = compactDiagnosticToken(address)
 			if err != nil {
-				setPhase("connecting_tunnel_failed")
+				self.phase = "connecting_tunnel_failed"
 			} else {
-				setPhase("tunnel_connected")
+				self.phase = "tunnel_connected"
 			}
 		},
 		TLSHandshakeStart: func() { setPhase("tls_handshake") },
@@ -197,6 +218,9 @@ func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 			self.phase = "sending_request"
+			if info.Conn != nil && info.Conn.RemoteAddr() != nil {
+				self.peerAddress = compactDiagnosticToken(info.Conn.RemoteAddr().String())
+			}
 			self.gotConn = true
 			self.reused = info.Reused
 		},
@@ -222,12 +246,23 @@ func (self *httpsRequestTrace) wrap(err error, finished time.Time) error {
 			connection = "reused"
 		}
 	}
+	path := ""
+	if self.dialAddress != "" {
+		path += "; dial " + self.dialAddress
+	}
+	if self.peerAddress != "" && self.peerAddress != self.dialAddress {
+		path += "; peer " + self.peerAddress
+	}
+	if self.resolvedAddresses != "" {
+		path += "; resolved " + self.resolvedAddresses
+	}
 	return fmt.Errorf(
-		"request started %s; elapsed %s; phase %s; connection %s: %w",
+		"request started %s; elapsed %s; phase %s; connection %s%s: %w",
 		self.started.UTC().Format(time.RFC3339Nano),
 		finished.Sub(self.started).Round(time.Millisecond),
 		self.phase,
 		connection,
+		path,
 		err,
 	)
 }
