@@ -236,21 +236,63 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 	gapS := atoiRow(rows[0], 0)
 
 	if gapS < 0 || gapS > 90*60 {
+		activeLog, activeLogSource, activeLogErr := readTaskLifecycleLog(
+			ctx,
+			env,
+			"UpdateClientScores",
+			5*time.Minute,
+			1000,
+		)
+		active := parseTaskActiveRun(activeLog, "UpdateClientScores")
 		tier := tierWarn
 		if gapS > 3*60*60 || gapS < 0 {
 			// past 3h the 5h ttl cliff is near: selection goes from stale to
 			// EMPTY when the last run's keys expire
 			tier = tierPage
 		}
+		mechanism := "No fresh UpdateClientScores heartbeat could be confirmed. The completion gap can therefore be a queued or unreclaimed attempt, a worker failure, or an active rebuild hidden by unavailable task logs; discriminate those states before scheduling duplicate work."
+		observed := fmt.Sprintf("completion_gap_s=%d ttl_cliff_in_s=%d active_log_source=%s", gapS, 5*3600-gapS, activeLogSource)
+		evidence := "finished_task supplies the last completed publication boundary."
+		context := "Check the exact pending task claim and the reboot-collision signal. A later retry is recovery from an interrupted attempt, not proof that its in-process export progress survived."
+		action := "Restore task-log visibility, then let the existing claimed attempt run or allow normal lease reclamation. Do not schedule a duplicate score export or restart a progressing taskworker while the cache still has TTL headroom."
+		verify := "A fresh heartbeat or finished_task row identifies the exact lifecycle; the completion gap returns below 60 minutes and remains there for two consecutive runs before the five-hour cache TTL expires."
+		if active.seconds > 0 {
+			mechanism = "A fresh eval-active heartbeat proves the scheduler has a live UpdateClientScores attempt, so the stale completion boundary is an actively rebuilding full-fleet export rather than a parked lease. A reboot or worker exit discards that attempt's in-process scan and the same task id must restart from its durable scheduler boundary."
+			observed += fmt.Sprintf(" active_duration_s=%d", active.seconds)
+			if active.taskID != "" {
+				observed += " active_task_id=" + active.taskID
+			}
+			if active.identity.host != "" {
+				observed += fmt.Sprintf(
+					" active_host=%s active_generation=%s active_container=%s",
+					active.identity.host,
+					active.identity.generation,
+					active.identity.container,
+				)
+			}
+			evidence += " The taskworker heartbeat is authoritative execution-time evidence; its host/generation/container identifies the live executor."
+			if activeLogSource == "host-journal-fallback" {
+				evidence += " The fleet log gateway was unavailable, so the heartbeat came from bounded host-local taskworker journals."
+			}
+			context = "If reboot-collision names this same task id, the active heartbeat proves lease reclamation while its reset duration proves lost in-process progress. The cache still serves its last snapshot until the five-hour TTL cliff; a live retry is not permission to erase the interrupted-attempt evidence."
+			action = "Let the live attempt finish and roll out the streaming, bounded-batch score exporter on every taskworker generation. Do not restart this worker, schedule a duplicate export, or raise its deadline merely to reset the freshness alert."
+			verify = "This exact task id reaches a real finished_task result, the completion gap resets below 60 minutes, and the next two scheduled exports finish without a reboot collision, memory-skew alert, or five-hour cache expiry."
+		} else if activeLogErr != nil {
+			evidence += " Task lifecycle lookup failed: " + activeLogErr.Error()
+		}
 		return []finding{{
 			probeId: "pg/selection-stale", tier: tier,
 			class: "selection-stale", target: target, sustain: 1,
 			symptom: fmt.Sprintf("UpdateClientScores last completed %dm ago (healthy: back-to-back runs, gap < ~60m)",
 				gapS/60),
-			baseline: "runs complete every 12–50 min; the {cs_} score cache it writes carries a 5h ttl — apps serve a stale provider snapshot during any gap and an EMPTY one past the ttl",
-			observed: fmt.Sprintf("completion_gap_s=%d ttl_cliff_in_s=%d", gapS, 5*3600-gapS),
-			context:  "check pg/task-overdue for the grinding rebuild; recovery is automatic when a run completes (5.9)",
-			playbook: "SIGNALS.md 2.8 / 5.9",
+			baseline:  "runs complete every 12–50 min; the {cs_} score cache it writes carries a 5h ttl — apps serve a stale provider snapshot during any gap and an EMPTY one past the ttl",
+			mechanism: mechanism,
+			observed:  observed,
+			evidence:  evidence,
+			context:   context,
+			action:    action,
+			verify:    verify,
+			playbook:  "SIGNALS.md §2.8, §2.12, and §2.13",
 		}}, nil
 	}
 	return []finding{healthyFinding("pg/selection-stale", tierWarn, "selection-stale", target)}, nil

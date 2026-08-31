@@ -238,6 +238,44 @@ func readTaskworkerJournal(
 	return output, nil
 }
 
+// readTaskLifecycleLog prefers the fleet log gateway and falls back to the
+// same bounded host-local journals when observability is degraded. Keeping
+// this transport decision here lets task probes share identical chronology,
+// limits, and error semantics.
+func readTaskLifecycleLog(
+	ctx context.Context,
+	env *probeEnv,
+	taskName string,
+	lookback time.Duration,
+	limit int,
+) (output string, source string, returnErr error) {
+	if lookback <= 0 {
+		return "", "", fmt.Errorf("task lifecycle log: lookback must be positive")
+	}
+	lookbackMinutes := int((lookback + time.Minute - 1) / time.Minute)
+	output, gatewayErr := env.runner.warpctl(
+		ctx,
+		"logs", env.cfg.env, "taskworker",
+		fmt.Sprintf("--since=%dm", lookbackMinutes),
+		fmt.Sprintf("--limit=%d", limit),
+		"--query="+taskName,
+		"--utc",
+	)
+	if gatewayErr == nil {
+		return output, "warpctl", nil
+	}
+
+	journalOutput, journalErr := readTaskworkerJournal(ctx, env, taskName, lookback, limit)
+	if journalOutput != "" || journalErr == nil {
+		return journalOutput, "host-journal-fallback", journalErr
+	}
+	return "", "unavailable", fmt.Errorf(
+		"fleet log gateway: %v; host journal fallback: %w",
+		gatewayErr,
+		journalErr,
+	)
+}
+
 // parseExecutorActiveTasks turns a fleet-wide eval-active window into the
 // newest heartbeat for each task on one exact host/block executor. Mimir's
 // runtime instance is a process metric id rather than warp's container id;

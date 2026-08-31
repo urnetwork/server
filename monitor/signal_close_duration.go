@@ -31,30 +31,13 @@ func (closeDurationProbe) cadence() time.Duration { return time.Minute }
 
 func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := pgTarget(env)
-	activeLog, activeLogErr := env.runner.warpctl(
+	activeLog, activeLogSource, activeLogErr := readTaskLifecycleLog(
 		ctx,
-		"logs", env.cfg.env, "taskworker",
-		fmt.Sprintf("--since=%dm", int(closeDurationIncidentLookback/time.Minute)),
-		"--limit=5000", "--query=CloseExpiredContracts", "--utc",
+		env,
+		"CloseExpiredContracts",
+		closeDurationIncidentLookback,
+		5000,
 	)
-	activeLogSource := "warpctl"
-	if activeLogErr != nil {
-		gatewayErr := activeLogErr
-		journalLog, journalErr := readTaskworkerJournal(
-			ctx,
-			env,
-			"CloseExpiredContracts",
-			closeDurationIncidentLookback,
-			5000,
-		)
-		if journalLog != "" || journalErr == nil {
-			activeLog = journalLog
-			activeLogErr = journalErr
-			activeLogSource = "host-journal-fallback"
-		} else {
-			activeLogErr = fmt.Errorf("fleet log gateway: %v; host journal fallback: %w", gatewayErr, journalErr)
-		}
-	}
 	active := parseTaskActiveRun(activeLog, "CloseExpiredContracts")
 	terminal := parseTaskTerminalRun(activeLog, "CloseExpiredContracts")
 	retryActive := parseTaskActiveRunForID(activeLog, "CloseExpiredContracts", terminal.taskID)

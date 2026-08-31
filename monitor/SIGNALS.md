@@ -1357,6 +1357,20 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   including an isolated oversized value, prove flushed slots release their
   payloads, and retain the exact failed-batch retry checks above.
 
+  The edge-0 scheduled reboot at 02:09:48Z supplied the process-exit variant.
+  It interrupted task `01a05555-97e8-e794-e009-04721c586db9` after a fresh
+  4,096s heartbeat. Normal scheduler reclamation restarted that exact id at
+  02:15:01Z; by 02:39 it had advanced another 1,458s while the completion gap
+  crossed 98 minutes. This is not a stuck lease: the same-id heartbeat proves
+  recovery. It is lost in-process scan progress, because the old full-fleet
+  exporter restarted from its scheduler boundary. `selection-freshness` now
+  reads the bounded task lifecycle window (with host-journal fallback), emits
+  task id/duration/executor with the gap, and tells the operator not to restart
+  or duplicate a live rebuild. Deploy the streaming bounded exporter, then
+  require the exact task to finish and two following runs to remain fresh;
+  correlate the interrupted predecessor through §2.13 rather than treating a
+  later retry as evidence that it completed.
+
 ### 2.9 Provider-selection population — the fresh-but-empty cache canary
 Probe: `selection-population`
 
