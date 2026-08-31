@@ -256,11 +256,20 @@ WHERE function_name LIKE '%UpdateClient%'
   79/minute (69 rows also had a fresh claim heartbeat), and the processor
   returned one 429 amid 817 wallet-insufficient rows. Ordinary 400
   wallet-insufficient responses continued immediately afterward, separating
-  the bounded burst from a fleet-wide processor outage. The scheduler now
-  jitters saturated retries across 30–90 minutes with the same one-hour mean;
-  its deterministic 824-row synthetic cohort covers all 60 minute buckets with
-  at most 14 rows in one bucket. Deploy that taskworker and verify the narrow
-  hourly wave disappears. This containment cannot create liquidity:
+  the bounded burst from a fleet-wide processor outage. The pre-fix cohort
+  recurred later the same day: wallet-insufficient output reached 86/minute at
+  15:40Z, Circle returned a second 429 at 15:40:52Z, and the next durable
+  snapshot changed from 817 wallet-insufficient plus one rate-limit row to 816
+  plus two while the family total remained 824. Both taskworker groups were
+  still entirely on `2026.8.31-outerwerld+1033655820`; its embedded source
+  revision `1d8f01e5` predates the proportional-jitter fix. This exact temporal
+  and row-class conversion is evidence of cohort amplification, not a claim
+  that every 429 has that cause. The scheduler now jitters saturated retries
+  across 30–90 minutes with the same one-hour mean; its deterministic 824-row
+  synthetic cohort covers all 60 minute buckets with at most 14 rows in one
+  bucket. Deploy taskworker commit `70b0d269` or later and verify the narrow
+  hourly wave disappears and no new rate-limit row is created during the next
+  recurrence. This containment cannot create liquidity:
   finance/ops must still fund the exact network/token wallet or pause payouts.
   Never accelerate retries, delete pending rows, or rotate idempotency keys to
   silence this class.
