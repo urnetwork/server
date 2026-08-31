@@ -713,6 +713,19 @@ client patch. The monitor retains the internal reset as
 `loki-tail-dropped-streams` and recovers all service windows through bounded
 reconciliation without claiming Grafana was the affected application tail.
 
+The next full synchronization at `22:09Z` supplied the saturated control with
+the corrected v158 classifier as the sole watcher. Of the first 10,000 Proxy
+records, 9,628 were per-peer installation lines; of the first 10,000 Grafana
+records, 7,407 were ingester reset logs. v158 classified 14,282/min internal
+`loki-tail-dropped-streams`, but all eight fixed Warpctl tails returned zero
+direct `loki-tail-dropped-entries`. Its block-partitioned inclusive
+reconciliation drained the saturated window without `tailer-reconcile` or a
+tail restart. This proves the external consumer and downstream response queue
+kept up while loss occurred earlier at the ingester-to-querier boundary. It
+also leaves both producer/transport gates open: the deployed Proxy still emits
+one default-info line per peer, and the deployed Grafana still predates Warp
+`1e95aef`.
+
 Separately, the querier has its own ten-response channel to the WebSocket. If
 that later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors
 to a successful HTTP tail response. Warpctl decoded that API field but
