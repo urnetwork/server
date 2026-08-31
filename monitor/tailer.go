@@ -132,7 +132,12 @@ var logClasses = []logClass{
 	// out of funds — a finance action, not an api bug
 	{name: "payout-wallet-insufficient", re: regexp.MustCompile(`asset amount owned by the wallet is insufficient|insufficient token balance .* in wallet`),
 		rateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §4",
-		meaning: "the payout wallet balance cannot cover pending payouts (usdc) — fund the wallet or pause payouts; retries park AdvancePayment tasks until funded"},
+		meaning:   "the payout wallet balance cannot cover pending payouts (USDC); AdvancePayment remains pending until finance/ops restores liquidity or pauses payouts",
+		mechanism: "The payment processor rejected a submit because the configured source wallet lacks enough token balance. Each affected AdvancePayment row remains pending and retries on the task system's consecutive-error backoff, capped at one hour. At that cap, N parked rows produce roughly N retry lines per hour, so this rate measures retry amplification rather than unique payouts or transfer attempts that reached chain submission.",
+		context:   "This is an operational liquidity boundary, not an API, PostgreSQL, or task-scheduler defect. The capped backoff already protects the database and processor; accelerating retries only increases noise and load. A software release cannot fund the custodial wallet, and deleting task rows would discard owed payouts.",
+		action:    "Finance/ops must fund the exact network/token payout wallet identified in protected source logs, or pause payouts using the supported operational control until it is funded. Do not delete or manually replay pending_task rows, rotate payment idempotency keys, or loosen the retry cap.",
+		verify:    "After funding or an intentional resume, allow up to the one-hour backoff cap plus log-ingestion delay. AdvancePayment wallet-insufficient rows and this log rate converge to zero without manual row changes, while payment records show no duplicate Circle transfers.",
+		redactIDs: true},
 	// A durable transfer balance can intentionally span decades, but its Redis
 	// escrow counter is a derived, reconciled mirror. The old creation path
 	// copied the durable end time into EXPIREAT and therefore retained a cache

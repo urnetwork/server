@@ -74,6 +74,43 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 	}
 }
 
+func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
+	line := `[edge-3][taskworker][g2][cid:test][I][2026-08-31T09:00:48-05:00][circle_client_controller.go:142][circlec]error sending payment: wallet 019f77ae-de17-db98-b22d-2642f6f67594: asset amount owned by the wallet is insufficient`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return strings.Repeat(line+"\n", 5), nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "payout-wallet-insufficient").Markdown()
+	for _, detail := range []string{
+		"source wallet lacks enough token balance",
+		"capped at one hour",
+		"N parked rows produce roughly N retry lines per hour",
+		"operational liquidity boundary",
+		"software release cannot fund",
+		"Do not delete or manually replay pending_task rows",
+		"one-hour backoff cap plus log-ingestion delay",
+		"no duplicate Circle transfers",
+		"wallet <id>",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("payout-wallet alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(markdown, "019f77ae-de17-db98-b22d-2642f6f67594") {
+		t.Fatalf("payout-wallet alert leaked the wallet id:\n%s", markdown)
+	}
+	if strings.Contains(markdown, "The observed value is outside the SIGNALS.md healthy band") ||
+		strings.Contains(markdown, "Follow SIGNALS.md §4") {
+		t.Fatalf("payout-wallet alert retained generic guidance:\n%s", markdown)
+	}
+}
+
 func TestLogErrorsSignalExplainsLongLivedNetEscrowMirror(t *testing.T) {
 	line := `[redis][ttl]"expireat" key="{escrow_019c640e-f467-4fa7-177f-d7ca43c33b6f}net" ttl 3139393191s-from-now exceeds 9600h0m0s`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
