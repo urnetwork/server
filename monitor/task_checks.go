@@ -128,7 +128,7 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
 		"processor-bad-request rows reach a definitive safe outcome")
 	add("processor-rate-limit",
-		"do not accelerate processor-rate-limit rows; when they overlap a narrow saturated wallet-insufficient cohort, deploy the proportional-jitter taskworker before attributing the burst to processor health",
+		"do not accelerate processor-rate-limit rows; when they overlap a narrow saturated wallet-insufficient cohort, verify every taskworker source revision and deploy the proportional-jitter taskworker only to blocks older than commit 70b0d269 before attributing the burst to processor health; do not redeploy already-current blocks from this alert",
 		"processor-rate-limit remains bounded and a saturated cohort disperses across 30–90 minutes instead of repeating one narrow hourly wave")
 	add("deadline-timeout",
 		"correlate deadline-timeout rows with their exact evaluator boundary before changing batch size or MaxTime",

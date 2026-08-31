@@ -487,7 +487,9 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"persistence after another retry means the invalid configured wallet is still selected",
 		"never clear payment rows or keys manually",
 		"do not accelerate processor-rate-limit rows",
-		"deploy the proportional-jitter taskworker before attributing the burst to processor health",
+		"verify every taskworker source revision",
+		"deploy the proportional-jitter taskworker only to blocks older than commit 70b0d269",
+		"do not redeploy already-current blocks from this alert",
 		"a saturated cohort disperses across 30–90 minutes instead of repeating one narrow hourly wave",
 		"Do not delete or manually replay the mixed family",
 	} {
