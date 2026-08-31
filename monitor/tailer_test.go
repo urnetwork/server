@@ -116,8 +116,34 @@ func TestNetEscrowAlertRetainsSiteAndRedactsEntityIDs(t *testing.T) {
 	if logIDRe.MatchString(finding.evidence) {
 		t.Fatalf("net-escrow alert leaked an entity id: %q", finding.evidence)
 	}
+	if !strings.Contains(finding.evidence, "clamp_marker=absent") {
+		t.Fatalf("net-escrow alert did not distinguish an absent clamp marker from truncation: %q", finding.evidence)
+	}
 	if finding.frame != "site=settle" || !strings.Contains(finding.observed, "frame=site=settle") {
 		t.Fatalf("net-escrow alert lost its structured mutation site: frame=%q observed=%q", finding.frame, finding.observed)
+	}
+}
+
+// The production line's clamp marker follows enough metadata and identifiers
+// to fall outside the generic sample limit. Preserve it because it separates
+// an atomically contained current-binary aftermath from legacy behavior.
+func TestNetEscrowAlertPreservesClampMarkerBeyondSampleLimit(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	line := "[by-us-fmt-5-edge-4][taskworker][g1][cid:16a73fdaca8f][E][2026-08-31T11:30:52.458075-05:00][subscription_model.go:748][netescrow]negative counter after settle: balance=01a04ff7-83b0-1970-2353-4b9ccf6e461d contract=01a05086-db24-dde0-dd4b-cbd20ace42ca result=-10066 clamped_to=0"
+	if strings.Index(line, "clamped_to=0") <= 200 {
+		t.Fatal("fixture no longer places the clamp marker beyond the generic sample limit")
+	}
+	tailer.classify(line)
+
+	finding := findingByClass(t, tailer.drainWindow(), "netescrow-negative")
+	if !strings.Contains(finding.evidence, "clamped_to=0") {
+		t.Fatalf("net-escrow evidence lost the clamp marker: %q", finding.evidence)
+	}
+	if strings.Contains(finding.evidence, "clamp_marker=absent") {
+		t.Fatalf("present clamp marker was classified absent: %q", finding.evidence)
+	}
+	if logIDRe.MatchString(finding.evidence) {
+		t.Fatalf("net-escrow clamp evidence leaked an entity id: %q", finding.evidence)
 	}
 }
 
@@ -236,6 +262,35 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 	}
 	if logIDRe.MatchString(finding.evidence) {
 		t.Fatalf("microburst evidence leaked a payment id: %q", finding.evidence)
+	}
+}
+
+// A minute can begin with a sparse attempt and peak later. The alert must
+// retain a representative line from the actual peak second, not the first
+// canonical line seen in the window (the live 16:31 window peaked at five at
+// 16:31:47 but previously rendered a 16:31:33 sample).
+func TestPayoutRetryMicroburstSampleComesFromPeakSecond(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	_, first := payoutAttemptLogLines("2026-08-31T16:31:33", 1)
+	tailer.classify(first)
+	for attempt := 10; attempt < 15; attempt++ {
+		_, peak := payoutAttemptLogLines("2026-08-31T16:31:47", attempt)
+		tailer.classify(peak)
+	}
+
+	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
+	for _, want := range []string{
+		"peak_task_attempts_per_second=5",
+		"peak_source_second=2026-08-31T16:31:47",
+		"peak source second: 2026-08-31T16:31:47",
+		"sample from peak second: [edge-3][taskworker][g2][cid:test][I][2026-08-31T16:31:47",
+	} {
+		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
+			t.Fatalf("peak finding missing %q: %+v", want, finding)
+		}
+	}
+	if strings.Contains(finding.evidence, "2026-08-31T16:31:33") {
+		t.Fatalf("peak evidence retained the first sparse second: %q", finding.evidence)
 	}
 }
 

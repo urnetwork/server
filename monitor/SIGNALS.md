@@ -299,6 +299,23 @@ WHERE function_name LIKE '%UpdateClient%'
   remaining 429 after every block is current requires measurement across all
   Circle clients against the account's authoritative quota, not another blind
   redeploy.
+
+  The standing implementation then caught the next recurrence live at
+  16:30–16:38Z. A bounded independent pull found 164 canonical
+  wallet-insufficient task attempts across all eight active taskworker
+  host/generation allocations. The peak was five attempts in
+  `2026-08-31T16:31:47Z`; the one logical 429 occurred in that same second and
+  appeared as the expected Circle-client plus task-evaluator diagnostic pair.
+  The standing windows independently alerted at four, five, four, and four
+  attempts/second. Both taskworker generations were still uniformly on
+  `2026.8.31-outerwerld+1033655820`, so this is direct post-probe validation of
+  the old-jitter diagnosis, not inferred recurrence from durable row counts.
+  The live alert also found an evidence bug: its stored sample came from the
+  first canonical attempt in the minute (16:31:33), not the actual five-event
+  peak second (16:31:47). The tailer now updates both `peak_source_second` and
+  its redacted sample whenever a later second exceeds the prior peak; a
+  deterministic sparse-first/peak-later regression prevents the alert from
+  presenting unrelated evidence again.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains
@@ -3786,6 +3803,15 @@ prove present. Persistent residual rate requires tracing the commit/post
 ordering; a missing clamp or renewed >=256GiB reversal reopens the old-writer
 or regression branch.
 
+A later single settlement diagnostic at 16:30:52Z supplied a small but
+important alert-artifact regression. The bounded protected-log pull proved the
+line carried `clamped_to=0`, but the monitor's generic 200-byte left truncation
+ended immediately after the negative result and hid that suffix. The rendered
+alert therefore told the operator to retain the clamp discriminator while
+withholding it. Net-escrow samples now preserve an explicit trailing
+`clamped_to=<value>` after ID redaction; a genuinely legacy line renders
+`clamp_marker=absent`, so absence cannot be confused with truncation.
+
 Repeated post-migration 177–449-second passes exposed a separate read-path cost
 without reopening the integrity incident. `pg_stat_statements` initially
 attributed 2,128 calls and 16,758,829.6ms total execution time to the bounded
@@ -4029,6 +4055,7 @@ Tier-1 (warn):
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
 | migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every published schema artifact | page when any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
+| reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
@@ -4460,6 +4487,62 @@ checks the version-599 catalog table and version-600 complete identity range,
 and has a synthetic regression where 597/600 must alert. Apply versions
 598–600 from that exact binary commit, then require both taskworker generations
 to become ready before testing their task fixes.
+
+### 8.10 Client-reliability covering-index drift after partition cutover
+Probe: `reliability-index`
+
+The partitioned `client_reliability` table has a physical optimization step
+that is intentionally separate from ordinary schema migrations. Production's
+partition cutover created
+`client_reliability_valid_block_number_client_address_hash` before the score
+query's covering payload was added. Changing the builder to
+`INCLUDE (network_id, client_id)` did not change the already-created index:
+`CREATE INDEX IF NOT EXISTS` checks identity, not definition, and cannot
+reshape a parent index or its partition children.
+
+The live 2026-08-31 signature was 29 identical `[crp]secondary index drift`
+warnings in a bounded 30-minute taskworker window. They moved among every
+active g1/g2 block because the recurring partition-maintenance task moves
+between workers; they are repeated observations of one PostgreSQL catalog
+state, not 29 independent defects. The old shape remains usable, so this is a
+performance warning rather than data loss or a reason to stop taskworkers.
+Without the INCLUDE payload, wide reliability score scans must fetch
+`network_id` and `client_id` from the heap instead of remaining index-only.
+
+The focused probe reads only `pg_catalog`; it never scans
+`client_reliability` rows. Require all of these as one physical contract:
+
+- `client_reliability` is partitioned;
+- the old parent index is absent;
+- `client_reliability_valid_bnch_net_client` exists, is valid, and has exact
+  keys `(valid, block_number, client_address_hash)` with
+  `INCLUDE (network_id, client_id)`;
+- the desired parent has one valid attached child index for every table
+  partition.
+
+This alert requires an operational database-maintenance action that cannot be
+completed by deploying application software. The safe implementation already
+exists as `bringyourctl model upgrade-client-reliability-index`: it creates an
+instant parent shell, builds each partition with `CREATE INDEX CONCURRENTLY`,
+attaches the children, and drops the old parent only after PostgreSQL marks the
+replacement valid. It is idempotent and resumable, but each child build still
+scans and sorts a large partition and can perturb I/O, replication lag, and
+free-space consumption. Do not start it while another protected measurement
+must remain undisturbed. Wait for explicit maintenance authorization, choose
+bounded parallelism, and observe those database resources throughout.
+
+Do not run `CREATE INDEX` directly on the partitioned parent, drop the old
+index before its valid replacement is complete, edit catalog state, or
+deploy/restart taskworkers merely to silence the warning. If an interrupted
+run leaves an invalid child or incomplete parent, rerun the supported command;
+completed partitions are skipped. If the desired-name index exists with a
+different definition, stop for DBA inspection before dropping anything.
+
+Recovery requires the command's final-state check and the independent probe
+to agree: the desired parent has the exact shape, its attached-child count
+equals the table-partition count, every index is valid, the old parent is
+absent, and no new `[crp]secondary index drift` warning appears for five
+minutes after log-ingestion delay.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 

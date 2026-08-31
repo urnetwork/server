@@ -47,6 +47,10 @@ type logBurst struct {
 type logClass struct {
 	name string
 	re   *regexp.Regexp
+	// sample optionally preserves a class-specific discriminator that generic
+	// left truncation would hide. It receives an already-redacted line and must
+	// return a bounded human-readable sample.
+	sample func(string) string
 	// groupBy splits one class into independently actionable frames. Most log
 	// classes intentionally aggregate retry volume by service; route-bound
 	// configuration defects must retain their resource, route, and generation.
@@ -130,6 +134,7 @@ var logClasses = []logClass{
 	{name: "netescrow-negative", re: regexp.MustCompile(`\[netescrow\]negative counter after`),
 		rateThreshold: 1, pageRateThreshold: netEscrowNegativePageRate, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
 		groupBy:   netEscrowNegativeLogGroup,
+		sample:    netEscrowNegativeLogSample,
 		meaning:   "a settlement/release found fewer bytes in a Redis reservation mirror than PostgreSQL durably released; old binaries leave that negative value available until reconciliation, while a clamped_to=0 line means the current atomic release retained the diagnostic result and deleted the bad mirror in the same command",
 		mechanism: "Two reconciliation paths can create this aftermath. A legacy full-fleet reconciler overwrites live mirror traffic with an old absolute SET or DEL snapshot. On the current page-local additive path, a PostgreSQL statement fixes its page snapshot before the reservation query runs; a live settlement can commit and update Redis while a slow page is still executing, so the later Redis GET sees the newer mirror and the correction re-adds bytes from the stale PostgreSQL snapshot. A separate smaller commit/post race occurs when reconciliation observes a committed settlement before its delayed Redis release. Current release Lua clamps a resulting negative atomically. This line is mutation-site aftermath, not evidence that the site independently created fleet-wide drift.",
 		context:   "Correlate the line with the nearest ReconcileNetEscrow duration and aggregate correction, query taskworker, API, and Connect for the complete interval after allowing for log-ingestion delay, and retain whether clamped_to=0 was present. The rate is observed settlement/release exposure, not overwritten bytes or necessarily unique balances. Samples retain the non-sensitive site while redacting balance and contract ids.",
@@ -266,6 +271,7 @@ func logTimestampSecond(line string) string {
 var requiredVaultResourceRe = regexp.MustCompile(`Resource not found in vault \(([^\)]+\.yml)\)`)
 var requiredVaultRouteRe = regexp.MustCompile(`route ([A-Z]+) \^?([^$:\s]+)\$?:`)
 var netEscrowNegativeSiteRe = regexp.MustCompile(`\[netescrow\]negative counter after ([a-z][a-z -]{0,40}):`)
+var netEscrowClampMarkerRe = regexp.MustCompile(`\bclamped_to=[^\s]+`)
 var warpLogIdentityRe = regexp.MustCompile(`^\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[cid:([^\]]+)\]`)
 
 type warpLogIdentity struct {
@@ -315,6 +321,19 @@ func netEscrowNegativeLogGroup(line string) string {
 	return "site=" + strings.TrimSpace(match[1])
 }
 
+// netEscrowNegativeLogSample makes the atomic-clamp discriminator explicit.
+// The live line puts clamped_to=0 after two identifiers and the negative
+// result, beyond the generic 200-byte sample boundary even after ID redaction.
+// An absent marker is also explicit so an operator can distinguish legacy
+// behavior from truncation without reopening protected raw logs.
+func netEscrowNegativeLogSample(line string) string {
+	marker := netEscrowClampMarkerRe.FindString(line)
+	if marker == "" {
+		marker = "clamp_marker=absent"
+	}
+	return truncateLinePreservingSuffix(line, marker)
+}
+
 // isGrafanaQueryEcho identifies query-engine metadata that repeats the query
 // text verbatim. A standing search for an error signature therefore causes
 // Grafana to log that same signature in an innocuous `executing query` line;
@@ -361,6 +380,7 @@ type logTailer struct {
 	// straddles the cadence boundary without making this state grow forever.
 	burstSecondCounts map[string]int
 	burstPeaks        map[string]int
+	burstPeakSeconds  map[string]string
 	burstEventTotals  map[string]int
 	burstSamples      map[string]string
 	burstSeen         map[[sha256.Size]byte]struct{}
@@ -386,6 +406,7 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 		classTargets:      map[string]string{},
 		burstSecondCounts: map[string]int{},
 		burstPeaks:        map[string]int{},
+		burstPeakSeconds:  map[string]string{},
 		burstEventTotals:  map[string]int{},
 		burstSamples:      map[string]string{},
 		burstSeen:         map[[sha256.Size]byte]struct{}{},
@@ -516,11 +537,7 @@ func (self *logTailer) classify(line string) {
 			}
 			self.classCounts[key] += 1
 			if _, ok := self.classSamples[key]; !ok {
-				sample := line
-				if c.redactIDs {
-					sample = logIDRe.ReplaceAllString(sample, "<id>")
-				}
-				self.classSamples[key] = truncateLine(sample)
+				self.classSamples[key] = logClassSample(c, line)
 				if attribution != "" {
 					self.classTargets[key] = attribution
 				} else if target := targetRe.FindString(line); target != "" {
@@ -537,16 +554,10 @@ func (self *logTailer) classify(line string) {
 						secondKey := key + "\x00" + second
 						self.burstSecondCounts[secondKey] += 1
 						self.burstEventTotals[key] += 1
-						self.burstPeaks[key] = max(
-							self.burstPeaks[key],
-							self.burstSecondCounts[secondKey],
-						)
-						if _, ok := self.burstSamples[key]; !ok {
-							sample := line
-							if c.redactIDs {
-								sample = logIDRe.ReplaceAllString(sample, "<id>")
-							}
-							self.burstSamples[key] = truncateLine(sample)
+						if self.burstPeaks[key] < self.burstSecondCounts[secondKey] {
+							self.burstPeaks[key] = self.burstSecondCounts[secondKey]
+							self.burstPeakSeconds[key] = second
+							self.burstSamples[key] = logClassSample(c, line)
 						}
 					}
 				}
@@ -652,8 +663,9 @@ func (self *logTailer) drainWindow() []finding {
 				burstBroken = true
 				attribution := self.classTargets[key]
 				observed := fmt.Sprintf(
-					"peak_task_attempts_per_second=%d threshold=%d/s task_attempts=%d diagnostic_lines=%d",
+					"peak_task_attempts_per_second=%d peak_source_second=%s threshold=%d/s task_attempts=%d diagnostic_lines=%d",
 					peak,
+					self.burstPeakSeconds[key],
 					c.burst.threshold,
 					self.burstEventTotals[key],
 					self.classCounts[key],
@@ -674,7 +686,7 @@ func (self *logTailer) drainWindow() []finding {
 					baseline:  fmt.Sprintf("peak distinct task evaluator attempts < %d/s; minute volume alone does not prove a synchronized retry wave", c.burst.threshold),
 					observed:  observed,
 					mechanism: c.burst.mechanism,
-					evidence:  "meaning: " + c.burst.meaning + "\npeak source: exact-replay-deduplicated task evaluator lines grouped by embedded source second\nsample: " + self.burstSamples[key],
+					evidence:  "meaning: " + c.burst.meaning + "\npeak source second: " + self.burstPeakSeconds[key] + " (exact-replay-deduplicated task evaluator lines grouped by embedded source second)\nsample from peak second: " + self.burstSamples[key],
 					context:   c.burst.context,
 					action:    c.burst.action,
 					verify:    c.burst.verify,
@@ -725,6 +737,7 @@ func (self *logTailer) drainWindow() []finding {
 	self.classTargets = map[string]string{}
 	self.burstSecondCounts = map[string]int{}
 	self.burstPeaks = map[string]int{}
+	self.burstPeakSeconds = map[string]string{}
 	self.burstEventTotals = map[string]int{}
 	self.burstSamples = map[string]string{}
 	self.burstSeenPrevious = self.burstSeen
@@ -740,6 +753,37 @@ func truncateLine(line string) string {
 		return line[:200]
 	}
 	return line
+}
+
+func truncateLinePreservingSuffix(line string, suffix string) string {
+	if suffix == "" {
+		return truncateLine(line)
+	}
+	truncated := truncateLine(line)
+	if strings.Contains(truncated, suffix) {
+		return truncated
+	}
+	const limit = 200
+	separator := " "
+	budget := limit - len(separator) - len(suffix)
+	if budget <= 0 {
+		return truncateLine(suffix)
+	}
+	prefix := line
+	if budget < len(prefix) {
+		prefix = prefix[:budget]
+	}
+	return strings.TrimSpace(prefix) + separator + suffix
+}
+
+func logClassSample(class logClass, line string) string {
+	if class.redactIDs {
+		line = logIDRe.ReplaceAllString(line, "<id>")
+	}
+	if class.sample != nil {
+		return class.sample(line)
+	}
+	return truncateLine(line)
 }
 
 // logTailProbe adapts a set of tailers to the probe interface: each check
