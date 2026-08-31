@@ -285,17 +285,23 @@ const netEscrowNegativePageRate = 100
 var targetRe = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+`)
 
 // warpctl wraps the authoritative source timestamp in brackets and preserves
-// either Z or an explicit offset. Keep only whole-second resolution: the
-// incident discriminator is concurrent task attempts inside the provider's
-// short admission window, not log arrival time.
-var logTimestampSecondRe = regexp.MustCompile(`\[(20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})\]`)
+// either Z or an explicit offset. Normalize equivalent instants to one UTC
+// second before grouping and rendering: an offset-free peak cannot be joined
+// safely to processor, database, or kernel evidence. Whole-second resolution
+// remains intentional because the incident discriminator is concurrent task
+// attempts inside the provider's short admission window, not log arrival time.
+var logTimestampSecondRe = regexp.MustCompile(`\[(20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2}))\]`)
 
 func logTimestampSecond(line string) string {
 	match := logTimestampSecondRe.FindStringSubmatch(line)
 	if len(match) < 2 {
 		return ""
 	}
-	return match[1]
+	observedAt, err := time.Parse(time.RFC3339Nano, match[1])
+	if err != nil {
+		return ""
+	}
+	return observedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
 }
 
 var requiredVaultResourceRe = regexp.MustCompile(`Resource not found in vault \(([^\)]+\.yml)\)`)
@@ -745,7 +751,7 @@ func (self *logTailer) drainWindow() []finding {
 					baseline:  fmt.Sprintf("peak distinct task evaluator attempts < %d/s; minute volume alone does not prove a synchronized retry wave", c.burst.threshold),
 					observed:  observed,
 					mechanism: c.burst.mechanism,
-					evidence:  "meaning: " + c.burst.meaning + "\npeak source second: " + self.burstPeakSeconds[key] + " (exact-replay-deduplicated task evaluator lines grouped by embedded source second)\nsample from peak second: " + self.burstSamples[key],
+					evidence:  "meaning: " + c.burst.meaning + "\npeak source second: " + self.burstPeakSeconds[key] + " (normalized UTC; exact-replay-deduplicated task evaluator lines grouped by embedded source second)\nsample from peak second: " + self.burstSamples[key],
 					context:   c.burst.context,
 					action:    c.burst.action,
 					verify:    c.burst.verify,

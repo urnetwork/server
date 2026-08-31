@@ -325,6 +325,20 @@ WHERE function_name LIKE '%UpdateClient%'
   its redacted sample whenever a later second exceeds the prior peak; a
   deterministic sparse-first/peak-later regression prevents the alert from
   presenting unrelated evidence again.
+
+  The next old-build recurrence exposed a second timestamp-evidence defect.
+  As the parked subset fell from 801 to 691, the independent canonical audit
+  found 39 attempts in three minutes and a four-attempt peak at
+  `2026-08-31T18:31:16Z`; the standing monitor independently opened
+  `payout-retry-microburst` with 28 canonical attempts from 56 diagnostic
+  lines. Its peak field rendered `2026-08-31T13:31:16` with no offset because
+  the parser stripped `-05:00` before storing the grouping key. Interpreting
+  that wall clock as UTC would shift correlation with Circle, PostgreSQL, and
+  kernel evidence by five hours. Burst timestamps now parse the complete
+  RFC3339 offset, normalize the instant to a whole UTC second, and render the
+  trailing `Z`; the redacted sample retains the original envelope. A
+  deterministic non-UTC-offset regression requires
+  `13:31:16-05:00` to render and group as `18:31:16Z`.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains

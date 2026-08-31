@@ -281,8 +281,8 @@ func TestPayoutRetryMicroburstSampleComesFromPeakSecond(t *testing.T) {
 	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
 	for _, want := range []string{
 		"peak_task_attempts_per_second=5",
-		"peak_source_second=2026-08-31T16:31:47",
-		"peak source second: 2026-08-31T16:31:47",
+		"peak_source_second=2026-08-31T16:31:47Z",
+		"peak source second: 2026-08-31T16:31:47Z",
 		"sample from peak second: [edge-3][taskworker][g2][cid:test][I][2026-08-31T16:31:47",
 	} {
 		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
@@ -291,6 +291,44 @@ func TestPayoutRetryMicroburstSampleComesFromPeakSecond(t *testing.T) {
 	}
 	if strings.Contains(finding.evidence, "2026-08-31T16:31:33") {
 		t.Fatalf("peak evidence retained the first sparse second: %q", finding.evidence)
+	}
+}
+
+// Production taskworker envelopes use the host's explicit local offset. The
+// burst instant must render in UTC, with a zone, so an operator can join it to
+// Circle, PostgreSQL, and kernel evidence without silently shifting five
+// hours or treating an offset-free wall clock as UTC.
+func TestPayoutRetryMicroburstNormalizesPeakSourceSecondToUTC(t *testing.T) {
+	tailer := newLogTailer("taskworker", nil)
+	for attempt := 0; attempt < 4; attempt++ {
+		id := fmt.Sprintf("019f77ae-de17-db98-b22d-%012x", attempt)
+		timestamp := fmt.Sprintf("2026-08-31T18:31:16.%06dZ", attempt)
+		if attempt >= 2 {
+			timestamp = fmt.Sprintf("2026-08-31T13:31:16.%06d-05:00", attempt)
+		}
+		line := fmt.Sprintf(
+			`[edge-1][taskworker][g2][cid:test][I][%s][task.go:1930][%s]eval error = asset amount owned by the wallet is insufficient`,
+			timestamp,
+			id,
+		)
+		tailer.classify(line)
+	}
+
+	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
+	combined := finding.observed + "\n" + finding.evidence
+	for _, want := range []string{
+		"peak_source_second=2026-08-31T18:31:16Z",
+		"peak source second: 2026-08-31T18:31:16Z",
+		"normalized UTC",
+		"sample from peak second: [edge-1][taskworker][g2][cid:test][I][2026-08-31T13:31:16",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("UTC-normalized peak finding missing %q: %+v", want, finding)
+		}
+	}
+	if strings.Contains(combined, "peak_source_second=2026-08-31T13:31:16 ") ||
+		strings.Contains(combined, "peak source second: 2026-08-31T13:31:16 (") {
+		t.Fatalf("peak finding retained an offset-free local wall clock: %+v", finding)
 	}
 }
 
