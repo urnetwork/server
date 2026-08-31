@@ -2853,7 +2853,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
-| `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create/double release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting it while retaining the negative diagnostic result. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, duration, reservation statement profile, and aggregate drift. Retain the page-local additive reconciler and atomic release clamp; for slow historical bounded pages apply migration 601 and deploy the unsettled-partial query. After rollout verify any residual line says `clamped_to=0`, its key is absent, pages stay below one second, and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
+| `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create/double release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, duration, reservation statement profile, and aggregate drift. Retain the page-local additive reconciler and atomic release clamp; for slow historical bounded pages apply migration 601 and deploy the unsettled-partial query. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
 Extract (class, target ip:port, innermost app frame) as the alert identity;
@@ -4050,6 +4050,24 @@ proves the schema artifact and matching taskworker query are active together;
 rollout percentage or a fast duration alone would not have proved that. Keep
 recovery open until a later scheduled aggregate remains in band and all three
 negative-counter emitters stay quiet for the full following interval.
+
+A later residual line at `19:04:04.427997Z` supplied the key-lifecycle
+discriminator. The matching scheduled task ran from `19:03:53.330931Z` to
+`19:04:07.730924Z` (14.400 seconds) and reported only 583.86MiB over-reserved
+plus 628.14MiB under-reserved across 53 networks. Exactly one redacted
+taskworker settlement emitted a -1MiB result with `clamped_to=0`; API and
+Connect emitted none in the same 20-minute window. A later read found the
+balance's Redis key present, but this was not a failed clamp: Redis held
+1,233,055,744 bytes, exactly equal to the PostgreSQL sum across 64 current open
+reservations, and every one of those reservations was created after
+`19:04:41Z`, later than the negative line. The atomic script deleted the
+nonpositive result at mutation time; subsequent legitimate traffic recreated
+the mirror. Verification must therefore compare a present key with current
+durable reservations. Requiring it to remain absent would misdiagnose healthy
+recreation as containment failure. The single fast-pass line remains evidence
+of the irreducible commit/post ordering window and keeps the quiet-interval
+observation open; it is not a reason to redeploy the already-present access
+path or clamp fixes.
 
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on

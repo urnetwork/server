@@ -142,6 +142,15 @@ func TestNetEscrowAlertPreservesClampMarkerBeyondSampleLimit(t *testing.T) {
 	if strings.Contains(finding.evidence, "clamp_marker=absent") {
 		t.Fatalf("present clamp marker was classified absent: %q", finding.evidence)
 	}
+	for _, want := range []string{
+		"absent when there are no new reservations",
+		"exactly equal the current PostgreSQL open-reservation sum",
+		"key presence alone does not disprove the atomic clamp",
+	} {
+		if !strings.Contains(finding.verify, want) {
+			t.Fatalf("net-escrow verification cannot distinguish legitimate key recreation; missing %q: %q", want, finding.verify)
+		}
+	}
 	if logIDRe.MatchString(finding.evidence) {
 		t.Fatalf("net-escrow clamp evidence leaked an entity id: %q", finding.evidence)
 	}
