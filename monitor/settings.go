@@ -156,8 +156,9 @@ type SignalSettings struct {
 }
 
 type signalRuntime struct {
-	baseline    *baselineStore
-	baselineErr error
+	baseline       *baselineStore
+	baselineErr    error
+	remoteCommands *hostCommandLimiter
 }
 
 // ExcludeEdgeIPv6Hosts returns settings with exact public IPv6 probes disabled
@@ -215,11 +216,15 @@ func (s SignalSettings) withDefaults() SignalSettings {
 }
 
 func (s SignalSettings) withRuntime() SignalSettings {
-	if s.runtime != nil || s.StateDir == "" {
+	if s.runtime != nil {
 		return s
 	}
-	baseline, err := newBaselineStore(filepath.Join(s.StateDir, "baseline"))
-	s.runtime = &signalRuntime{baseline: baseline, baselineErr: err}
+	s.runtime = &signalRuntime{
+		remoteCommands: newHostCommandLimiter(maxConcurrentRemoteCommandsPerHost),
+	}
+	if s.StateDir != "" {
+		s.runtime.baseline, s.runtime.baselineErr = newBaselineStore(filepath.Join(s.StateDir, "baseline"))
+	}
 	return s
 }
 
@@ -297,6 +302,9 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		stateDir:            settings.StateDir,
 		sshConnectTimeout:   settings.SSHConnectTimeout,
 		commandTimeout:      settings.CommandTimeout,
+	}
+	if settings.runtime != nil {
+		cfg.remoteCommands = settings.runtime.remoteCommands
 	}
 	for _, configured := range settings.Hosts {
 		h := &host{

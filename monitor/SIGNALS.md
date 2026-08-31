@@ -113,11 +113,30 @@ probe executions. Most probes reach the production boundary through SSH; an
 unbounded 29-probe startup wave caused a real SSH connection rejection on
 2026-08-29 and a false visibility alert while the same target remained healthy
 when sampled alone. Keep this bound when adding probes, including probes whose
-cadences collide after startup. Likewise, a probe interrupted by an intentional
-monitor shutdown is a lifecycle event, not loss of production visibility, and
-must not emit a `monitor/visibility` alert. Cadence mode enforces each alert's
-consecutive-tick `Sustain` value and resets that identity after a healthy tick;
-`--once` deliberately reports current violations immediately for diagnosis.
+cadences collide after startup.
+
+The 2026-08-31 recurrence proved that the top-level bound alone is not enough.
+Probe-local batteries can fan out to four or eight hosts, so four admitted
+signals briefly opened at least ten SSH handshakes to the same database host.
+Edge-2's stock OpenSSH `MaxStartups` began throttling at connection `#10`,
+dropped 16 connections over 2m01s, and produced four unrelated
+`monitor/visibility` alerts even though PostgreSQL and the next standalone
+canary read were healthy. The sshd journal attributed every dropped connection
+to the monitor host; occasional unrelated public pre-auth scans were not the
+sustained source. Every real SSH execution now also passes through one shared
+four-command semaphore keyed by destination address. The semaphore lives in
+the monitor runtime, not a fresh probe runner, so internal fan-out and cadence
+collisions share the same budget while different hosts remain parallel. The
+deterministic transport test fills the budget through separate probe
+environments, proves a fifth same-host command cannot invoke SSH, proves its
+canceled wait releases no slot, and proves another host still runs. Do not
+raise `MaxStartups` to conceal monitor-generated admission pressure.
+
+Likewise, a probe interrupted by an intentional monitor shutdown is a
+lifecycle event, not loss of production visibility, and must not emit a
+`monitor/visibility` alert. Cadence mode enforces each alert's consecutive-tick
+`Sustain` value and resets that identity after a healthy tick; `--once`
+deliberately reports current violations immediately for diagnosis.
 
 Related docs: FOLLOWUP.md (open items ledger), redis conf overrides in
 xops .../redis/redis.conf.j2, grafana redis-cluster dashboard + alert rules.

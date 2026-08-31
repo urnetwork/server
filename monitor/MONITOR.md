@@ -320,13 +320,17 @@ non-interactively with `--since=<duration>` instead of tailing.
 
 ## 4. Scheduler and load budget
 
-- Per-probe tickers with jitter; a probe never overlaps itself.
+- Per-probe cadence timers; a probe never overlaps itself.
 - Each probe starts a fresh cadence timer after its observation and alert
   handler complete. Time spent queued or running therefore cannot create a
   buffered or wall-aligned back-to-back catch-up query against an already-slow
   dependency.
-- Per-host semaphore (1 concurrent battery, small cap for probes) so the
-  monitor cannot pile onto a struggling host.
+- One runtime-shared semaphore per destination host, capped at four actual SSH
+  commands across every probe and probe-local battery. A limiter created per
+  probe is not sufficient: four admitted signals can each fan out internally
+  and cross OpenSSH's default `MaxStartups=10` before authentication. Different
+  hosts retain independent budgets, and the command timeout begins only after
+  a host slot is admitted, so queue time cannot masquerade as host failure.
 - Global kill: SIGTERM drains in-flight commands (same quitEvent pattern as
   the other services).
 - Budget at steady state (all tier-0 + tier-1): a handful of

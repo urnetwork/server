@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,7 +32,65 @@ const (
 	// address modes select which host address the monitor dials
 	addressModeLan     = "lan"     // deployed in-environment
 	addressModeOverlay = "overlay" // local dev over the vpn
+
+	// Keep the monitor below OpenSSH's default MaxStartups=10 even when one
+	// signal fans out internally and other signal cadences collide. The budget
+	// is per destination host, so unrelated hosts remain observable in
+	// parallel. It is shared by every probe through signalRuntime.
+	maxConcurrentRemoteCommandsPerHost = 4
 )
+
+// hostCommandLimiter is the monitor-wide SSH admission budget. Probe-local
+// semaphores bound their own fan-out but cannot account for other probes; this
+// transport-level limiter is therefore the final authority before a new SSH
+// handshake starts.
+type hostCommandLimiter struct {
+	limit int
+
+	mu    sync.Mutex
+	slots map[string]chan struct{}
+}
+
+func newHostCommandLimiter(limit int) *hostCommandLimiter {
+	if limit <= 0 {
+		limit = maxConcurrentRemoteCommandsPerHost
+	}
+	return &hostCommandLimiter{
+		limit: limit,
+		slots: map[string]chan struct{}{},
+	}
+}
+
+func (l *hostCommandLimiter) hostSlots(host string) chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.slots == nil {
+		l.slots = map[string]chan struct{}{}
+	}
+	slots := l.slots[host]
+	if slots == nil {
+		limit := l.limit
+		if limit <= 0 {
+			limit = maxConcurrentRemoteCommandsPerHost
+		}
+		slots = make(chan struct{}, limit)
+		l.slots[host] = slots
+	}
+	return slots
+}
+
+func (l *hostCommandLimiter) acquire(ctx context.Context, host string) (func(), error) {
+	slots := l.hostSlots(host)
+	select {
+	case slots <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() { <-slots })
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
 
 // host is one monitored host from the inventory (vault/<env>/monitor.yml).
 type host struct {
@@ -113,6 +172,10 @@ type monitorConfig struct {
 	// hard timeouts; a command exceeding these is recorded as unreachable
 	sshConnectTimeout time.Duration
 	commandTimeout    time.Duration
+
+	// Shared across the fresh probe environments created by Signal.Run. It
+	// bounds actual SSH handshakes rather than just top-level signal calls.
+	remoteCommands *hostCommandLimiter
 }
 
 func (self *monitorConfig) activeSshUser() string {
@@ -143,11 +206,35 @@ func (self *monitorConfig) hostByRole(role string) *host {
 
 // runner executes commands on hosts over ssh, and warpctl locally.
 type runner struct {
-	cfg *monitorConfig
+	cfg            *monitorConfig
+	remoteCommands *hostCommandLimiter
+	runSSH         sshCommandRunner
 }
 
 func newRunner(cfg *monitorConfig) *runner {
-	return &runner{cfg: cfg}
+	remoteCommands := cfg.remoteCommands
+	if remoteCommands == nil {
+		remoteCommands = newHostCommandLimiter(maxConcurrentRemoteCommandsPerHost)
+	}
+	return &runner{
+		cfg:            cfg,
+		remoteCommands: remoteCommands,
+		runSSH:         runSSHCommand,
+	}
+}
+
+type sshCommandRunner func(ctx context.Context, args []string, stdin string) (stdout string, stderr string, err error)
+
+func runSSHCommand(ctx context.Context, args []string, stdin string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err := cmd.Run()
+	return out.String(), errOut.String(), err
 }
 
 // unreachableError wraps an error where the command could not be run or timed
@@ -185,31 +272,28 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 	if connectTimeout <= 0 {
 		connectTimeout = 10 * time.Second
 	}
+	release, err := self.remoteCommands.acquire(ctx, addr)
+	if err != nil {
+		return "", &unreachableError{host: h.name, err: fmt.Errorf("waiting for remote command slot: %w", err)}
+	}
+	defer release()
 
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	target := fmt.Sprintf("%s@%s", self.cfg.activeSshUser(), addr)
 	sshArgs := self.sshArgs(target, remoteCmd, connectTimeout)
-	cmd := exec.CommandContext(cmdCtx, "ssh", sshArgs...)
-	if stdin != "" {
-		cmd.Stdin = strings.NewReader(stdin)
-	}
-	var out, errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	err := cmd.Run()
+	out, errOut, err := self.runSSH(cmdCtx, sshArgs, stdin)
 	if cmdCtx.Err() == context.DeadlineExceeded {
-		return out.String(), &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)}
+		return out, &unreachableError{host: h.name, err: fmt.Errorf("timeout after %s", timeout)}
 	}
 	if err != nil {
 		// ssh dial failures (exit 255) mean the host itself is unobservable;
 		// a nonzero exit from the remote command is a command error. Both
 		// surface with the stderr text.
-		return out.String(), fmt.Errorf("%s: %w: %s", h.name, err, strings.TrimSpace(errOut.String()))
+		return out, fmt.Errorf("%s: %w: %s", h.name, err, strings.TrimSpace(errOut))
 	}
-	return out.String(), nil
+	return out, nil
 }
 
 func (self *runner) sshArgs(target, remoteCmd string, connectTimeout time.Duration) []string {
