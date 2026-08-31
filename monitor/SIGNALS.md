@@ -3215,6 +3215,30 @@ prove present. Persistent residual rate requires tracing the commit/post
 ordering; a missing clamp or renewed >=256GiB reversal reopens the old-writer
 or regression branch.
 
+Repeated post-migration 177–195-second passes exposed a separate read-path
+cost without reopening the integrity incident. `pg_stat_statements` attributed
+2,128 calls and 16,758,829.6ms total execution time to the bounded
+open-reservation join: 7,875.4ms/call lifetime mean and 74,031.3ms maximum.
+The balance-id keyset page, by contrast, averaged 4.601ms across 968,502 calls.
+The published `transfer_escrow(balance_id, contract_id)` index is present, but
+the plan uses it for a parallel bitmap heap scan and must still fetch
+`balance_byte_count` from the 153GiB heap before probing the
+`transfer_contract_outcome_null` index; the index itself was 50GiB. A bounded
+1,000-ID production diagnostic still reached the 30-second read-only statement
+timeout and was confirmed absent afterward, so blindly shrinking the page is
+not a demonstrated fix.
+
+`netescrow` now records the reservation and keyset statements' lifetime
+mean/max plus adjacent-monitor counter deltas and names page-walk amplification
+only when the reservation mean is at least one second and ten times the keyset
+mean. Preserve the page-local additive semantics. Benchmark a covering
+`transfer_escrow` index that includes `balance_byte_count`, or an equivalent
+bounded open-reservation projection, against production-shaped history in an
+isolated environment before publishing another migration. Verification is a
+reservation-page adjacent mean below one second, full passes below 120 seconds,
+small aggregates, and a full quiet negative-counter interval—not merely a
+cheaper planner estimate.
+
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
 `{escrow_<id>}net`, with roughly 36,306 days remaining. PostgreSQL showed this

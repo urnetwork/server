@@ -9,6 +9,9 @@ import (
 func TestNetEscrowSignalSyntheticReconcileOverrun(t *testing.T) {
 	source := &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM pg_stat_statements") {
+				return []Row{{"0", "0", "0", "0", "0", "0"}}, nil
+			}
 			if !strings.Contains(query, "run_end_time > now() - interval '45 minutes'") {
 				t.Fatalf("query does not retain a completed overrun through its aftermath: %s", query)
 			}
@@ -36,6 +39,61 @@ func TestNetEscrowSignalSyntheticReconcileOverrun(t *testing.T) {
 	}
 	if strings.Contains(alert.Markdown(), "Roll out the balance_id index and the page-local additive reconciler") {
 		t.Fatalf("overrun alert retained a stale unconditional rollout diagnosis: %s", alert.Markdown())
+	}
+}
+
+func TestNetEscrowSignalAttributesReservationPageAmplification(t *testing.T) {
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM pg_stat_statements") {
+				return []Row{{"2128", "16758829.6", "74031.3", "968502", "4456375.4", "12251.5"}}, nil
+			}
+			return []Row{{"completed", "177", "30"}}, nil
+		},
+		localFn: func(string, ...string) (string, error) { return "", nil },
+	}
+	alerts, err := NewNetEscrowSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "netescrow-reconcile-overrun").Markdown()
+	for _, detail := range []string{
+		"reservation_page_lifetime_mean_ms=7875.4",
+		"reservation_page_max_ms=74031.3",
+		"balance_page_lifetime_mean_ms=4.6",
+		"pg_stat_statements attributes its database cost to the bounded open-reservation join",
+		"SUM(balance_byte_count) still requires heap data",
+		"page-walk amplification, not evidence of the old absolute writer",
+		"covering transfer_escrow index that includes balance_byte_count",
+		"without recreating a fleet-wide stale snapshot",
+		"reservation-page adjacent-sample mean stays below 1s",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("net-escrow page attribution missing %q:\n%s", detail, markdown)
+		}
+	}
+}
+
+func TestNetEscrowStatementProfileUsesAdjacentCounterDelta(t *testing.T) {
+	probe := &netEscrowProbe{}
+	first := probe.observeStatementProfile(netEscrowStatementCounters{
+		reservationCalls:   100,
+		reservationTotalMs: 1000,
+		balanceCalls:       200,
+		balanceTotalMs:     400,
+	})
+	if first.reservationDeltaCalls != 0 || first.balanceDeltaCalls != 0 {
+		t.Fatalf("first profile fabricated a delta: %+v", first)
+	}
+	second := probe.observeStatementProfile(netEscrowStatementCounters{
+		reservationCalls:   104,
+		reservationTotalMs: 5000,
+		balanceCalls:       220,
+		balanceTotalMs:     500,
+	})
+	if second.reservationDeltaCalls != 4 || second.reservationDeltaMeanMs != 1000 ||
+		second.balanceDeltaCalls != 20 || second.balanceDeltaMeanMs != 5 {
+		t.Fatalf("adjacent profile delta = %+v", second)
 	}
 }
 

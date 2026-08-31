@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,11 +18,32 @@ func NewNetEscrowSignal() Signal {
 		number: "5.11",
 		key:    "netescrow",
 		name:   "Net-escrow reconciliation freshness",
-		probe:  netEscrowProbe{},
+		probe:  &netEscrowProbe{},
 	}
 }
 
-type netEscrowProbe struct{}
+type netEscrowStatementCounters struct {
+	reservationCalls   int64
+	reservationTotalMs float64
+	reservationMaxMs   float64
+	balanceCalls       int64
+	balanceTotalMs     float64
+	balanceMaxMs       float64
+}
+
+type netEscrowStatementProfile struct {
+	netEscrowStatementCounters
+	reservationDeltaCalls  int64
+	reservationDeltaMeanMs float64
+	balanceDeltaCalls      int64
+	balanceDeltaMeanMs     float64
+}
+
+type netEscrowProbe struct {
+	profileMu          sync.Mutex
+	profileInitialized bool
+	lastProfile        netEscrowStatementCounters
+}
 
 var netEscrowAggregateRe = regexp.MustCompile(
 	`(?i)\[sm\]reconcile net escrow: ([0-9]+) balances, ([0-9]+) networks drifted, over-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b), under-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b)`,
@@ -45,11 +67,81 @@ type netEscrowAggregate struct {
 	identity   warpLogIdentity
 }
 
-func (netEscrowProbe) id() string             { return "pg/netescrow-reconcile-overrun" }
-func (netEscrowProbe) tier() string           { return tierWarn }
-func (netEscrowProbe) cadence() time.Duration { return time.Minute }
+func (*netEscrowProbe) id() string             { return "pg/netescrow-reconcile-overrun" }
+func (*netEscrowProbe) tier() string           { return tierWarn }
+func (*netEscrowProbe) cadence() time.Duration { return time.Minute }
 
-func (netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func netEscrowProfileInt64(row pgRow, column int) int64 {
+	value, _ := strconv.ParseInt(row.str(column), 10, 64)
+	return value
+}
+
+func (self *netEscrowProbe) observeStatementProfile(current netEscrowStatementCounters) netEscrowStatementProfile {
+	self.profileMu.Lock()
+	defer self.profileMu.Unlock()
+
+	profile := netEscrowStatementProfile{netEscrowStatementCounters: current}
+	if self.profileInitialized &&
+		self.lastProfile.reservationCalls <= current.reservationCalls &&
+		self.lastProfile.reservationTotalMs <= current.reservationTotalMs {
+		profile.reservationDeltaCalls = current.reservationCalls - self.lastProfile.reservationCalls
+		if 0 < profile.reservationDeltaCalls {
+			profile.reservationDeltaMeanMs = (current.reservationTotalMs - self.lastProfile.reservationTotalMs) /
+				float64(profile.reservationDeltaCalls)
+		}
+	}
+	if self.profileInitialized &&
+		self.lastProfile.balanceCalls <= current.balanceCalls &&
+		self.lastProfile.balanceTotalMs <= current.balanceTotalMs {
+		profile.balanceDeltaCalls = current.balanceCalls - self.lastProfile.balanceCalls
+		if 0 < profile.balanceDeltaCalls {
+			profile.balanceDeltaMeanMs = (current.balanceTotalMs - self.lastProfile.balanceTotalMs) /
+				float64(profile.balanceDeltaCalls)
+		}
+	}
+	self.lastProfile = current
+	self.profileInitialized = true
+	return profile
+}
+
+func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv) (netEscrowStatementProfile, error) {
+	rows, err := env.runner.pg(ctx, `
+		WITH statements AS (
+			SELECT calls, total_exec_time, max_exec_time,
+			       query ILIKE '%transfer_escrow.balance_id = ANY%'
+			         AND query ILIKE '%transfer_contract.outcome IS NULL%' AS reservation_page,
+			       query ILIKE '%FROM transfer_balance%'
+			         AND query ILIKE '%balance_id >%'
+			         AND query ILIKE '%ORDER BY balance_id%'
+			         AND query ILIKE '%LIMIT%' AS balance_page
+			FROM pg_stat_statements
+			WHERE query NOT ILIKE '%FROM pg_stat_statements%'
+		)
+		SELECT coalesce(sum(calls) FILTER (WHERE reservation_page),0),
+		       coalesce(sum(total_exec_time) FILTER (WHERE reservation_page),0),
+		       coalesce(max(max_exec_time) FILTER (WHERE reservation_page),0),
+		       coalesce(sum(calls) FILTER (WHERE balance_page),0),
+		       coalesce(sum(total_exec_time) FILTER (WHERE balance_page),0),
+		       coalesce(max(max_exec_time) FILTER (WHERE balance_page),0)
+		FROM statements;
+	`)
+	if err != nil {
+		return netEscrowStatementProfile{}, err
+	}
+	if len(rows) != 1 {
+		return netEscrowStatementProfile{}, fmt.Errorf("net-escrow statement profile returned %d rows, want 1", len(rows))
+	}
+	return self.observeStatementProfile(netEscrowStatementCounters{
+		reservationCalls:   netEscrowProfileInt64(rows[0], 0),
+		reservationTotalMs: atof(rows[0].str(1)),
+		reservationMaxMs:   atof(rows[0].str(2)),
+		balanceCalls:       netEscrowProfileInt64(rows[0], 3),
+		balanceTotalMs:     atof(rows[0].str(4)),
+		balanceMaxMs:       atof(rows[0].str(5)),
+	}), nil
+}
+
+func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	target := pgTarget(env)
 	rows, err := env.runner.pg(ctx, `
 		SELECT 'completed'::text,
@@ -221,6 +313,55 @@ func (netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		observed += fmt.Sprintf(" completed_age_s=%d", ageSeconds)
 	}
 
+	mechanism := "Reconciliation has exceeded its freshness band. On the current page-local additive path, migration catch-up, index warmup, storage contention, or a large dirty page set can lengthen the bounded walk. On an older absolute-snapshot path, the same duration also expands stale-snapshot exposure and rewrites every mirror. Duration alone cannot identify which algorithm ran; correlate the exact executor version with the matching aggregate and negative-counter evidence."
+	action := "Do not manually re-run reconciliation. Confirm the exact executor has the balance_id index and page-local additive reconciler. Retain those fixes where present and roll them out only where version or code evidence says they are absent; if they are present, treat repeated overruns as a page-walk or storage regression and profile that phase. Observe recurring scheduled runs because one fast run does not prove fleet convergence."
+	verify := "Every active taskworker generation keeps scheduled reconciliations below 120s, already-correct mirrors receive no rewrite, aggregate drift converges, and no new netescrow-negative lines appear for a full reconciliation interval."
+	profile, profileErr := self.statementProfile(ctx, env)
+	if profileErr != nil {
+		evidence += " PostgreSQL statement attribution was unavailable: " + profileErr.Error()
+	} else if 0 < profile.reservationCalls {
+		reservationLifetimeMeanMs := profile.reservationTotalMs / float64(profile.reservationCalls)
+		balanceLifetimeMeanMs := 0.0
+		if 0 < profile.balanceCalls {
+			balanceLifetimeMeanMs = profile.balanceTotalMs / float64(profile.balanceCalls)
+		}
+		observed += fmt.Sprintf(
+			" reservation_page_calls=%d reservation_page_lifetime_mean_ms=%.1f reservation_page_max_ms=%.1f balance_page_calls=%d balance_page_lifetime_mean_ms=%.1f balance_page_max_ms=%.1f",
+			profile.reservationCalls,
+			reservationLifetimeMeanMs,
+			profile.reservationMaxMs,
+			profile.balanceCalls,
+			balanceLifetimeMeanMs,
+			profile.balanceMaxMs,
+		)
+		reservationMeanMs := reservationLifetimeMeanMs
+		balanceMeanMs := balanceLifetimeMeanMs
+		profileWindow := "lifetime"
+		if 0 < profile.reservationDeltaCalls {
+			reservationMeanMs = profile.reservationDeltaMeanMs
+			profileWindow = "adjacent-sample"
+			observed += fmt.Sprintf(
+				" reservation_page_delta_calls=%d reservation_page_delta_mean_ms=%.1f",
+				profile.reservationDeltaCalls,
+				profile.reservationDeltaMeanMs,
+			)
+		}
+		if 0 < profile.balanceDeltaCalls {
+			balanceMeanMs = profile.balanceDeltaMeanMs
+			observed += fmt.Sprintf(
+				" balance_page_delta_calls=%d balance_page_delta_mean_ms=%.1f",
+				profile.balanceDeltaCalls,
+				profile.balanceDeltaMeanMs,
+			)
+		}
+		if 1000 <= reservationMeanMs && (balanceMeanMs == 0 || 10*balanceMeanMs < reservationMeanMs) {
+			mechanism = fmt.Sprintf("The current page-local additive algorithm is present, and pg_stat_statements attributes its database cost to the bounded open-reservation join: the %s mean is %.1fms/page versus %.1fms for the balance-id keyset page. The published (balance_id, contract_id) index finds candidate escrow rows, but SUM(balance_byte_count) still requires heap data before the open-contract partial-index probe. This is page-walk amplification, not evidence of the old absolute writer.", profileWindow, reservationMeanMs, balanceMeanMs)
+			evidence += " The statement comparison separates the reservation join from the cheap keyset scan; cumulative maxima retain tail risk, while adjacent-sample deltas describe only calls since the preceding monitor pass."
+			action = "Keep the page-local additive semantics and task deadline. Benchmark the exact reservation query with production-shaped history in an isolated environment, comparing a covering transfer_escrow index that includes balance_byte_count or an equivalent bounded open-reservation projection. Deploy only a plan that removes heap amplification without recreating a fleet-wide stale snapshot. Do not shrink pages blindly from one production EXPLAIN or manually re-run reconciliation."
+			verify = "The reservation-page adjacent-sample mean stays below 1s with bounded tail latency, scheduled reconciliations finish below 120s, aggregate drift remains below 256GiB, already-correct mirrors receive no rewrite, and all negative-counter emitters remain quiet for a full interval."
+		}
+	}
+
 	findings = append(findings, finding{
 		probeId: "pg/netescrow-reconcile-overrun", tier: tierWarn,
 		class: "netescrow-reconcile-overrun", target: target, frame: "ReconcileNetEscrow", sustain: 1,
@@ -230,13 +371,13 @@ func (netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			durationSeconds,
 			int(netEscrowReconcileRunLimit/time.Second),
 		),
-		mechanism: "Reconciliation has exceeded its freshness band. On the current page-local additive path, migration catch-up, index warmup, storage contention, or a large dirty page set can lengthen the bounded walk. On an older absolute-snapshot path, the same duration also expands stale-snapshot exposure and rewrites every mirror. Duration alone cannot identify which algorithm ran; correlate the exact executor version with the matching aggregate and negative-counter evidence.",
+		mechanism: mechanism,
 		baseline:  "Recurring reconciliation finishes in under 120s; production's normal band was approximately 15-55s.",
 		observed:  observed,
 		evidence:  evidence,
 		context:   incidentContext + " pending_task.run_at is only the due time, so it is deliberately not misreported as live execution duration.",
-		action:    "Do not manually re-run reconciliation. Confirm the exact executor has the balance_id index and page-local additive reconciler. Retain those fixes where present and roll them out only where version or code evidence says they are absent; if they are present, treat repeated overruns as a page-walk or storage regression and profile that phase. Observe recurring scheduled runs because one fast run does not prove fleet convergence.",
-		verify:    "Every active taskworker generation keeps scheduled reconciliations below 120s, already-correct mirrors receive no rewrite, aggregate drift converges, and no new netescrow-negative lines appear for a full reconciliation interval.",
+		action:    action,
+		verify:    verify,
 		playbook:  "SIGNALS.md §5.11",
 	})
 	return findings, nil
