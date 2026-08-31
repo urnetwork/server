@@ -574,11 +574,12 @@ func TestTaskCanariesSignalExplainsInvalidDestinationRecovery(t *testing.T) {
 		"definitively rejects the destination before creating a transfer",
 		"current taskworker clears only that typed pre-chain attempt automatically",
 		"same invalid wallet on the next retry",
-		"one-hour backoff",
+		"one-hour-mean backoff",
+		"dispersed across 30–90 minutes",
 		"through the supported account API",
 		"Do not manually release the attempt",
 		"preserving keys for transport errors",
-		"at most one backoff cap plus ingestion delay",
+		"at most 90 minutes plus ingestion delay",
 		"without a duplicate transfer",
 	} {
 		if !strings.Contains(markdown, want) {

@@ -89,12 +89,15 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 	markdown := requireAlertClass(t, alerts, "payout-wallet-insufficient").Markdown()
 	for _, detail := range []string{
 		"source wallet lacks enough token balance",
-		"capped at one hour",
-		"N parked rows produce roughly N retry lines per hour",
+		"one-hour nominal cap",
+		"disperses saturated retries across 30–90 minutes",
+		"older code used only two seconds of jitter",
+		"N parked rows still produce roughly N retry lines per hour on average",
 		"operational liquidity boundary",
 		"software release cannot fund",
 		"Do not delete or manually replay pending_task rows",
-		"one-hour backoff cap plus log-ingestion delay",
+		"Deploy the proportional-jitter taskworker",
+		"allow up to 90 minutes plus log-ingestion delay",
 		"no duplicate Circle transfers",
 		"wallet <id>",
 	} {
