@@ -339,6 +339,14 @@ WHERE function_name LIKE '%UpdateClient%'
   trailing `Z`; the redacted sample retains the original envelope. A
   deterministic non-UTC-offset regression requires
   `13:31:16-05:00` to render and group as `18:31:16Z`.
+
+  Post-roll validation on the clean `5c91a3c4` monitor captured the same live
+  wave without an inference step. Three consecutive windows rendered peaks of
+  five attempts at `18:36:58Z`, four at `18:38:48Z`, and four at
+  `18:40:08Z`; each peak retained its original `-05:00` sample envelope. No
+  `payment-processor-rate-limit` event appeared through that last window. This
+  proves the UTC evidence fix is active while independently reaffirming that
+  the still-deployed pre-`70b0d269` taskworker preserves narrow retry cohorts.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains
@@ -2933,7 +2941,7 @@ limit:
   payout-wallet selection is still returning the invalid configuration. The
   `payout-invalid-destination` log class now counts exact-replay-deduplicated
   task-evaluator lines separately from the duplicate Circle-client diagnostic,
-  redacts entity ids, and pages as an operational wallet-correction alert on
+  redacts entity ids, and warns as an operational wallet-correction alert on
   the first current occurrence.
 
   A subsequent bounded audit through 17:52:00Z extended the discriminator by
