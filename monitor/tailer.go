@@ -192,6 +192,18 @@ var logClasses = []logClass{
 			verify:    "After complete taskworker convergence, observe a full 90-minute window with peak_task_attempts_per_second below 4, no payment-processor-rate-limit event, and unchanged payment idempotency keys. Funding or pausing the wallet remains a separate operational verification.",
 			playbook:  "SIGNALS.md §1.2 and §5.7",
 		}},
+	{name: "payout-invalid-destination", re: regexp.MustCompile(`(?i)Bad status: 400 Bad Request.*invalid destination address`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
+		canonical: &logCanonical{
+			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
+			name:    "invalid_destination_events",
+		},
+		meaning:   "Circle definitively rejected a payout destination before creating a transfer because the configured wallet address is invalid for its declared chain",
+		mechanism: "A pre-fix chain-blind validator allowed cross-chain wallet shapes such as a Solana base58 key declared as MATIC. Current taskworker code recognizes Circle's typed invalid-destination response and safely releases only that pre-chain submit attempt, but the next retry selects the same invalid payout_wallet configuration until the account owner or operator corrects it.",
+		context:   "One failure is normally logged at the Circle client and again by the task evaluator, so diagnostic lines are not unique attempts. On 2026-08-31, six distinct payments continued as exactly six canonical evaluator events per UTC hour across both taskworker blocks after the typed-reset code was deployed. That persistence is operational wallet-configuration evidence, not a reason to accelerate retries or clear payment state.",
+		action:    "Correct the affected network's payout wallet through the supported account API so its address matches its declared payout chain. Do not edit account_payment or pending_task rows, manually release attempts, rotate processor idempotency keys, or invent a replacement wallet without account-owner or operator authority.",
+		verify:    "After the payout wallet is corrected, the next natural retry selects it with a fresh key released only by the prior definitive rejection, completes without a duplicate transfer, invalid_destination_events remains zero, and the durable processor-invalid-destination count converges to zero within 90 minutes plus log-ingestion delay.",
+		redactIDs: true},
 	{name: "payment-processor-rate-limit", re: regexp.MustCompile(`Bad status: 429 Too Many Requests.*API rate limit error`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2 and §5.7",
 		canonical: &logCanonical{

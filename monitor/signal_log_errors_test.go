@@ -40,6 +40,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
 		{"panic", "panic: synthetic crash frame", "panic"},
 		{"payout wallet", "asset amount owned by the wallet is insufficient", "payout-wallet-insufficient"},
+		{"invalid payout destination", `Bad status: 400 Bad Request {"code":155219,"message":"Invalid destination address."}`, "payout-invalid-destination"},
 		{"payment processor rate limit", `Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`, "payment-processor-rate-limit"},
 		{"net escrow ttl", `[redis][ttl]"expireat" key="{escrow_019c640e-f467-4fa7-177f-d7ca43c33b6f}net" ttl 3139393191s-from-now exceeds 9600h0m0s`, "redis-netescrow-ttl"},
 		{"redis ttl", "[redis][ttl] suspicious ttl on key", "redis-ttl-suspect"},
@@ -72,6 +73,50 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
+	paymentID := "019f77ae-de17-db98-b22d-2642f6f67594"
+	taskID := "01a0088a-3260-06db-9376-227cbd7c4691"
+	response := `Bad status: 400 Bad Request {"code":155219,"message":"Invalid destination address."}`
+	providerLine := `[edge-3][taskworker][g2][cid:test][I][2026-08-31T16:51:58.100000Z][circle_client_controller.go:142][circlec]error sending payment ` + paymentID + `: ` + response
+	evaluatorLine := `[edge-3][taskworker][g2][cid:test][I][2026-08-31T16:51:58.200000Z][task.go:1930][` + taskID + `]eval error = AdvancePayment({"payment_id":"` + paymentID + `"}) = ` + response
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		// Exact replay of the evaluator line remains diagnostically visible but
+		// must not manufacture a second logical processor event.
+		return providerLine + "\n" + evaluatorLine + "\n" + evaluatorLine + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "payout-invalid-destination").Markdown()
+	for _, detail := range []string{
+		"invalid for its declared chain",
+		"safely releases only that pre-chain submit attempt",
+		"selects the same invalid payout_wallet configuration",
+		"six canonical evaluator events per UTC hour",
+		"operational wallet-configuration evidence",
+		"supported account API",
+		"Do not edit account_payment or pending_task rows",
+		"invalid_destination_events=1",
+		"diagnostic_lines=3",
+		"canonical_source=exact-replay-deduplicated-task-evaluator",
+		"logical event count: 1 exact-replay-deduplicated task evaluator line(s) from 3 diagnostic line(s)",
+		"within 90 minutes plus log-ingestion delay",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("invalid-destination alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	for _, id := range []string{paymentID, taskID} {
+		if strings.Contains(markdown, id) {
+			t.Fatalf("invalid-destination alert leaked id %s:\n%s", id, markdown)
+		}
 	}
 }
 
