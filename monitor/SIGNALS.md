@@ -484,6 +484,12 @@ The deterministic regression feeds all three production shapes (including a
 `panic:` query), proves they cannot create known or novel alerts, and proves
 the exclusion does not hide real log lines.
 
+The exact v137 live replay at 15:27:43Z exercised the completed filter. The
+same bounded API search generated two start-query and two completed-query
+Grafana lines containing `[redis][ttl]`; after a full standing-tailer drain
+window, no Grafana TTL finding appeared. Real Redis residue and unrelated task
+and proxy findings remained visible in that same window.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)
