@@ -83,6 +83,14 @@ func taskworkerJournalObservedAt(entry taskworkerJournalEntry) (time.Time, error
 // the authoritative journal timestamp and Docker metadata.
 func normalizeTaskworkerJournal(raw, fallbackHost string) (string, error) {
 	normalized := []string{}
+	issues := []string{}
+	issueCount := 0
+	addIssue := func(detail string) {
+		issueCount++
+		if len(issues) < 3 {
+			issues = append(issues, detail)
+		}
+	}
 	for lineNumber, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -90,12 +98,14 @@ func normalizeTaskworkerJournal(raw, fallbackHost string) (string, error) {
 		}
 		entry := taskworkerJournalEntry{}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			return "", fmt.Errorf("taskworker journal line %d: decode JSON: %w", lineNumber+1, err)
+			addIssue(fmt.Sprintf("line %d: decode JSON: %v", lineNumber+1, err))
+			continue
 		}
 
 		observedAt, err := taskworkerJournalObservedAt(entry)
 		if err != nil {
-			return "", fmt.Errorf("taskworker journal line %d: %w", lineNumber+1, err)
+			addIssue(fmt.Sprintf("line %d: %v", lineNumber+1, err))
+			continue
 		}
 
 		tag := strings.TrimSpace(entry.ContainerTag)
@@ -105,7 +115,8 @@ func normalizeTaskworkerJournal(raw, fallbackHost string) (string, error) {
 		tagParts := strings.Split(tag, "|")
 		if len(tagParts) != 4 || tagParts[2] != "taskworker" ||
 			(tagParts[3] != "g1" && tagParts[3] != "g2") {
-			return "", fmt.Errorf("taskworker journal line %d: unexpected container tag %q", lineNumber+1, tag)
+			addIssue(fmt.Sprintf("line %d: unexpected container tag %q", lineNumber+1, tag))
+			continue
 		}
 
 		hostname := strings.TrimSpace(entry.Hostname)
@@ -119,8 +130,17 @@ func normalizeTaskworkerJournal(raw, fallbackHost string) (string, error) {
 				containerID = containerID[:12]
 			}
 		}
-		if hostname == "" || containerID == "" || strings.TrimSpace(entry.Message) == "" {
-			return "", fmt.Errorf("taskworker journal line %d: incomplete host/container/message identity", lineNumber+1)
+		if hostname == "" || containerID == "" {
+			addIssue(fmt.Sprintf("line %d: incomplete host/container identity", lineNumber+1))
+			continue
+		}
+		if strings.TrimSpace(entry.Message) == "" {
+			// Without journalctl --all, systemd renders an oversized or
+			// unprintable MESSAGE as JSON null. Requesting every full field would
+			// remove the byte bound from this fleet fallback, so retain the other
+			// normalized lifecycle rows and surface this one as partial evidence.
+			addIssue(fmt.Sprintf("line %d: message unavailable (oversized or unprintable journal field)", lineNumber+1))
+			continue
 		}
 
 		normalized = append(normalized, fmt.Sprintf(
@@ -132,7 +152,15 @@ func normalizeTaskworkerJournal(raw, fallbackHost string) (string, error) {
 			strings.TrimSpace(entry.Message),
 		))
 	}
-	return strings.Join(normalized, "\n"), nil
+	output := strings.Join(normalized, "\n")
+	if issueCount != 0 {
+		detail := strings.Join(issues, "; ")
+		if len(issues) < issueCount {
+			detail += fmt.Sprintf("; and %d more", issueCount-len(issues))
+		}
+		return output, fmt.Errorf("skipped %d unnormalizable record(s): %s", issueCount, detail)
+	}
+	return output, nil
 }
 
 // readTaskworkerJournal is the bounded, host-local fallback for task lifecycle
@@ -184,9 +212,10 @@ func readTaskworkerJournal(
 	)
 
 	type result struct {
-		host string
-		out  string
-		err  error
+		host       string
+		out        string
+		normalized bool
+		err        error
 	}
 	results := make(chan result, len(hosts))
 	semaphore := make(chan struct{}, 4)
@@ -204,10 +233,12 @@ func readTaskworkerJournal(
 				return
 			}
 			out, err := env.runner.sshTimeout(ctx, target, command, "", taskworkerJournalTimeout)
+			normalized := false
 			if err == nil {
 				out, err = normalizeTaskworkerJournal(out, target.name)
+				normalized = true
 			}
-			results <- result{host: target.name, out: strings.TrimSpace(out), err: err}
+			results <- result{host: target.name, out: strings.TrimSpace(out), normalized: normalized, err: err}
 		}()
 	}
 	wait.Wait()
@@ -223,14 +254,17 @@ func readTaskworkerJournal(
 	errors := make([]string, 0, len(ordered))
 	successes := 0
 	for _, observed := range ordered {
+		if observed.normalized && observed.out != "" {
+			outputs = append(outputs, observed.out)
+		}
 		if observed.err != nil {
 			errors = append(errors, observed.host+": "+observed.err.Error())
+			if observed.normalized {
+				successes++
+			}
 			continue
 		}
 		successes++
-		if observed.out != "" {
-			outputs = append(outputs, observed.out)
-		}
 	}
 	output := strings.Join(outputs, "\n")
 	if successes == 0 {

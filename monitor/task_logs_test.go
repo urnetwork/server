@@ -120,3 +120,76 @@ func TestReadTaskLifecycleLogTreatsJournalNoMatchAsEmptyHost(t *testing.T) {
 		}
 	}
 }
+
+func TestReadTaskLifecycleLogRetainsRowsBesideOmittedJournalMessage(t *testing.T) {
+	now := time.Date(2026, 8, 31, 6, 12, 30, 0, time.UTC)
+	active := fmt.Sprintf(
+		`{"SYSLOG_TIMESTAMP":%q,"MESSAGE":%q,"CONTAINER_TAG":"warp|synthetic|taskworker|g1","CONTAINER_ID":"hot","_HOSTNAME":"metrics-1"}`,
+		now.Add(-5*time.Second).Format(time.RFC3339Nano),
+		"I0831 06:12:25.000000 1 task.go:1938] [01a05660-8743-e181-2a6c-be423b1089bd]eval active(1149.00s) github.com/urnetwork/server/taskworker/work.UpdateClientScores({})",
+	)
+	omitted := fmt.Sprintf(
+		`{"SYSLOG_TIMESTAMP":%q,"MESSAGE":null,"CONTAINER_TAG":"warp|synthetic|taskworker|g2","CONTAINER_ID":"payout","_HOSTNAME":"metrics-1"}`,
+		now.Add(-4*time.Second).Format(time.RFC3339Nano),
+	)
+	source := &syntheticSource{
+		hostTimeoutFn: func(_ HostSettings, _ string, _ time.Duration) (string, error) {
+			return active + "\n" + omitted, nil
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "", errors.New("synthetic fleet gateway unavailable")
+		},
+	}
+	env, err := newProbeEnv(workerMemorySyntheticSettings(source, now).withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, logSource, readErr := readTaskLifecycleLog(
+		context.Background(),
+		env,
+		"eval",
+		2*time.Minute,
+		5000,
+	)
+	if logSource != "host-journal-fallback" {
+		t.Fatalf("log source = %q", logSource)
+	}
+	if !strings.Contains(output, "UpdateClientScores") {
+		t.Fatalf("valid lifecycle row was discarded:\n%s", output)
+	}
+	if readErr == nil || !strings.Contains(readErr.Error(), "message unavailable") {
+		t.Fatalf("partial journal error = %v, want omitted-message evidence", readErr)
+	}
+}
+
+func TestReadTaskLifecycleLogDoesNotExposeUnnormalizedSSHOutput(t *testing.T) {
+	now := time.Date(2026, 8, 31, 6, 12, 30, 0, time.UTC)
+	source := &syntheticSource{
+		hostTimeoutFn: func(_ HostSettings, _ string, _ time.Duration) (string, error) {
+			return `{"MESSAGE":"partial raw record"`, errors.New("synthetic SSH stream failure")
+		},
+		localFn: func(string, ...string) (string, error) {
+			return "", errors.New("synthetic fleet gateway unavailable")
+		},
+	}
+	env, err := newProbeEnv(workerMemorySyntheticSettings(source, now).withDefaults())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, logSource, readErr := readTaskLifecycleLog(
+		context.Background(),
+		env,
+		"eval",
+		2*time.Minute,
+		5000,
+	)
+	if output != "" {
+		t.Fatalf("unnormalized SSH output escaped into lifecycle parser: %q", output)
+	}
+	if logSource != "unavailable" || readErr == nil ||
+		!strings.Contains(readErr.Error(), "synthetic SSH stream failure") {
+		t.Fatalf("source/error = %q, %v", logSource, readErr)
+	}
+}

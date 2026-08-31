@@ -1898,6 +1898,19 @@ attached the 4,668-second score export and its 185-second successor close
 checkpoint from `host-journal-fallback` with no degraded-read evidence,
 validating the production no-match path.
 
+The 06:12Z recurrence exposed a different partial-record boundary. Both worker
+alerts attached the exact edge-3/g1 score, close, net-escrow, and reliability
+tasks, but marked edge-1 degraded because one JSON journal record had no
+`MESSAGE`. The raw record was the 1,120-second Payout terminal error: its host,
+container, tag, and timestamp were intact, while `journalctl -o json` rendered
+the oversized message as null unless `--all` was requested. Enabling `--all`
+would remove the fallback's byte bound when stack traces are large. Journal
+normalization now skips and reports only the unavailable record, retains every
+other identity-checked row from that host, and never passes partial raw JSON to
+the lifecycle parsers. A synthetic mixed valid/null journal requires the
+active score row and host-journal source to survive while the returned partial
+error names the unavailable message.
+
 ### 2.12a Taskworker CPU/allocation churn — the bounded-heap blind spot
 Probe: `worker-churn`
 
