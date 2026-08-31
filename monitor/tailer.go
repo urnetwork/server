@@ -191,6 +191,7 @@ var logClasses = []logClass{
 	// the alert rate remains one logical recovery boundary per occurrence.
 	{name: "http-hijack-write", re: regexp.MustCompile(`http: response\.WriteHeader on hijacked connection`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		sample:    httpHijackWriteLogSample,
 		meaning:   "router recovery attempted to synthesize an HTTP response after a handler transferred ownership of the H1 connection through Hijack",
 		mechanism: "Connect's GET / route hands its socket to Gorilla. The router correctly recognized a later Done panic as expected cancellation and suppressed its error accounting, but then fell through to http.Error. net/http rejected both the 500 header and body because it no longer owned the connection. A two-hour production control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors, isolating the expected-Done fallthrough rather than an application panic.",
 		context:   "The rejected 500 does not itself prove a failed handshake or active transport; it is recovery-path log amplification during connection teardown. A warning paired with [h]unhandled error from route is a different case: preserve and fix that underlying panic rather than hiding all net/http diagnostics.",
@@ -428,6 +429,20 @@ func netEscrowNegativeLogSample(line string) string {
 		marker = "clamp_marker=absent"
 	}
 	return truncateLinePreservingSuffix(line, marker)
+}
+
+// httpHijackWriteLogSample retains the complete net/http source frame. The
+// warp identity and its duplicate timestamps consume most of the generic
+// 200-byte prefix, while the final ServeHTTP frame is the discriminator that
+// separates the known router recovery fallthrough from another post-hijack
+// writer with a different root cause.
+func httpHijackWriteLogSample(line string) string {
+	const marker = "http: response.WriteHeader on hijacked connection"
+	markerIndex := strings.Index(line, marker)
+	if markerIndex < 0 {
+		return truncateLine(line)
+	}
+	return truncateLinePreservingSuffix(line, line[markerIndex:])
 }
 
 // isGrafanaQueryEcho identifies query-engine metadata that repeats the query

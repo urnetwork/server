@@ -833,6 +833,20 @@ minutes of ordinary H1 teardown with zero class lines. Do not silence
 net/http's logger globally: any post-fix warning accompanied by an `[h]`
 record is a real route panic with a separate root cause.
 
+Monitor v160 supplied the live detector control. It was built from server
+commit `02f4d29a` (binary SHA-256
+`1e7a5c234072ce8aea16a4b0cd4708aacdbbe00542403645c4ad5737a6b91950`),
+ran as the sole watcher with all eight standing service tails and healthy
+bounded reconciliation, and classified the first natural post-start Connect
+warning at `22:38:58Z` as `http-hijack-write` at one/minute. The same alert
+retained the mechanism, action, and verification contract above. Its generic
+200-byte evidence sample cut the final source at `router.(*Rou`, however,
+which would conceal whether a future line came from the known Router recovery
+or another post-hijack writer. The class-specific sample now preserves the
+complete `http: response.WriteHeader ... from <source>` suffix, with a
+deterministic markdown assertion for
+`router.(*Router).ServeHTTP.func1.1 (router.go:104)`.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)

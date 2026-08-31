@@ -104,6 +104,7 @@ func TestLogErrorsSignalExplainsHTTPHijackWrite(t *testing.T) {
 		"Do not suppress net/http's error logger globally",
 		"zero http-hijack-write lines for 10 minutes",
 		"Done panic performs no write after Hijack",
+		"router.(*Router).ServeHTTP.func1.1 (router.go:104)",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("HTTP hijack-write alert missing %q:\n%s", detail, markdown)
