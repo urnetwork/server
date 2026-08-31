@@ -44,3 +44,33 @@ func TestTaskHealthSignalExplainsBoundedRetentionCatchup(t *testing.T) {
 		t.Fatalf("bounded retention diagnosis retained a stale fleet rollout prescription:\n%s", markdown)
 	}
 }
+
+func TestTaskHealthSignalAttributesExportStatsToKnownOverruns(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "WITH latest_export AS") {
+			return []Row{
+				{"CloseExpiredContracts", "870", "187"},
+				{"ReconcileNetEscrow", "317", "121"},
+			}, nil
+		}
+		return []Row{{"ExportStats", "187.0", "87.6", "1"}}, nil
+	}}
+	alerts, err := NewTaskHealthSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-duration-regression").Markdown()
+	for _, want := range []string{
+		"four read-heavy 90-day aggregates",
+		"shared primary load",
+		"Temporal overlap is attribution evidence",
+		"CloseExpiredContracts duration=870s overlap=187s",
+		"ReconcileNetEscrow duration=317s overlap=121s",
+		"Keep ExportStats on its hourly cadence",
+		"bounded-lateral NetEscrow calls",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("ExportStats attribution lost %q:\n%s", want, markdown)
+		}
+	}
+}

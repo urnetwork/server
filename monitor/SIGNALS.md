@@ -867,6 +867,20 @@ missing-column failure. Keep one recurring reaper, correlate
 queue plus durations to fall on consecutive 30-minute runs. Do not add
 concurrent reapers or raise the task deadline to hide durable backlog.
 
+At 06:16Z, one `ExportStats` run completed in 187s versus its 87.6s trailing
+p95. The exact finished interval overlapped an 870-second
+`CloseExpiredContracts` checkpoint for all 187 seconds and a 317-second
+legacy-ANY `ReconcileNetEscrow` run for 121 seconds; ordinary adjacent exports
+completed in 71–88s, with one earlier 201s shared-load outlier. ExportStats
+performs four read-heavy 90-day aggregates through ReplicaDb, which still
+resolves to the primary. The overlap makes the already-proven close/NetEscrow
+work the leading load owner, but it does not prove a SQL wait edge. The alert
+now retains a bounded finished-task overlap snapshot, preserves the hourly
+cadence and ten-minute export bound, and directs remediation to the dedicated
+owner signals. Require consecutive exports to return toward baseline after
+those taskworker fixes; do not rewrite or disable a successful public-stats
+export from one correlated duration.
+
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
 
