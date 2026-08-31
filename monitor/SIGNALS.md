@@ -810,6 +810,29 @@ watcher repeated that result after the corrected net-escrow alert text was
 loaded. Neither emitted `tailer-reconcile`, `tailer-silent`,
 `tailer-restarting`, or `cannot-observe`.
 
+The 22:23Z Connect audit found a previously unclassified recovery defect. A
+bounded two-hour query returned 131 canonical
+`http: response.WriteHeader on hijacked connection` lines across several
+blocks, each paired in the standard library with a rejected body write. The
+same window contained zero `[h]unhandled error from route` lines. Router
+recovery always logs that marker for an unexpected panic before attempting its
+500 response, so its complete absence isolates the other branch: Connect's
+`GET /` route had handed the H1 socket to Gorilla, a later expected
+`server.IsDoneError` panic was deliberately suppressed, but control then fell
+through to `http.Error` after net/http no longer owned the connection.
+
+Router recovery now returns immediately for that expected cancellation branch
+while retaining error accounting, the stack record, and the ordinary 500 for
+unexpected pre-hijack panics. The deterministic reproduction crosses a fake
+Hijack boundary, raises the same Done panic, and failed on the old code with
+two post-hijack writes including status 500; it now requires zero. A companion
+test preserves the unexpected-panic response. The `http-hijack-write` log
+class counts only the canonical WriteHeader line so one recovery does not look
+like two incidents. Deploy this server revision to Connect, then require ten
+minutes of ordinary H1 teardown with zero class lines. Do not silence
+net/http's logger globally: any post-fix warning accompanied by an `[h]`
+record is a real route panic with a separate root cause.
+
 ---
 
 ## 2. pg signal catalog (beyond tier-0)
@@ -3038,6 +3061,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The incident's exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline closing valid idle HTTP/2/gRPC streams, not the 256-session ceiling. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Deploy a Grafana image containing Warp `1e95aef` (no TCP read deadline, 30-second keepalive, bounded writes; UDP idle timeout retained). Require zero recurring `loki-tail-backend-eof` for ten minutes with stable tails and healthy bounded reconciliation. Do not raise tail/ring limits or restart the same image. See §1.5. |
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail queue overflowed before its internal gRPC send. Loki 3.7.3 then discards the accompanying `resp.DroppedStreams` in the querier, so the Grafana log is an observation point, not affected-service attribution. The 2026-08-31 control paired 18,165 resets/min with 19,995 per-peer Proxy lines; resets also accompanied the recurring ring-deadline EOF. | Deploy Grafana with Warp `1e95aef` and verbosity-gate the Proxy producer. Reconcile every service window; do not raise queues, suppress the reset, or claim Grafana was the affected selector. Require zero `loki-tail-dropped-streams` through a full sync. See §1.5. |
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | The later querier-to-WebSocket response channel overflowed for the named standing tail. Warpctl received API `dropped_entries`; unlike the earlier ingester reset, this evidence is service-attributed. | Run Warpctl with Warp `26089b2`, retain bounded reconciliation for the named service, and remove its producer/consumer stall. Never print the dropped labels or timestamps. Require zero `loki-tail-dropped-entries` for ten minutes through the triggering load. See §1.5. |
+| `http: response.WriteHeader on hijacked connection ... router.(*Router).ServeHTTP` | Router recovery attempted an HTTP 500 after the Connect handler transferred its H1 socket to Gorilla. In the 2026-08-31 control, 131 canonical warnings with zero `[h]unhandled` records proved the expected-Done branch fell through to `http.Error`; the rejected response is teardown log amplification, not proof of a failed active transport. | Deploy the router fix that returns immediately for `server.IsDoneError`, then require zero `http-hijack-write` lines for ten minutes of normal H1 teardown. Do not suppress net/http logging globally. A warning paired with `[h]unhandled error from route` instead requires fixing that unexpected route panic. See §1.5. |
 | `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
@@ -4383,6 +4407,7 @@ Tier-1 (warn):
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; observation service is not selector attribution | any |
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe Warpctl summary from a non-empty HTTP tail `dropped_entries` response | any |
+| http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
 | web-email-assets | synthetic HTTPS | §19.2 every image embedded by transactional-email templates through the public CDN and exact `main-web` origin Host on each enabled edge | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |

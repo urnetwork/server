@@ -87,17 +87,20 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		if err := recover(); err != nil {
-			// suppress the error
 			if server.IsDoneError(err) {
-				// standard pattern to raise on context done. ignore
-			} else {
-				self.stats.Error(route.id)
-				glog.Infof(
-					"[h]unhandled error from route %s: %s\n",
-					route.id,
-					server.ErrorJson(err, debug.Stack()),
-				)
+				// A Done panic is the standard cancellation path. In particular,
+				// Connect can observe it after Gorilla has hijacked the H1 socket;
+				// net/http no longer owns that connection and any attempted error
+				// response produces a write-after-hijack warning. Consume the
+				// lifecycle signal without falling through to http.Error.
+				return
 			}
+			self.stats.Error(route.id)
+			glog.Infof(
+				"[h]unhandled error from route %s: %s\n",
+				route.id,
+				server.ErrorJson(err, debug.Stack()),
+			)
 			func() {
 				// note the connection might be hijacked in this case
 				defer recover()

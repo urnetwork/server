@@ -186,6 +186,17 @@ var logClasses = []logClass{
 	{name: "source-attribution", re: regexp.MustCompile(`X-UR-Forwarded-For .*was not one ip:port value|X-UR-Forwarded-For from untrusted peer`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
 		meaning: "the service rejected the trusted ingress source tuple and fell back to the proxy peer, collapsing unrelated users onto one rate-limit identity"},
+	// net/http emits one WriteHeader diagnostic per invalid recovery attempt;
+	// match that canonical first line rather than its paired body-write line so
+	// the alert rate remains one logical recovery boundary per occurrence.
+	{name: "http-hijack-write", re: regexp.MustCompile(`http: response\.WriteHeader on hijacked connection`),
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §4",
+		meaning:   "router recovery attempted to synthesize an HTTP response after a handler transferred ownership of the H1 connection through Hijack",
+		mechanism: "Connect's GET / route hands its socket to Gorilla. The router correctly recognized a later Done panic as expected cancellation and suppressed its error accounting, but then fell through to http.Error. net/http rejected both the 500 header and body because it no longer owned the connection. A two-hour production control found 131 canonical WriteHeader warnings and zero paired [h]unhandled route errors, isolating the expected-Done fallthrough rather than an application panic.",
+		context:   "The rejected 500 does not itself prove a failed handshake or active transport; it is recovery-path log amplification during connection teardown. A warning paired with [h]unhandled error from route is a different case: preserve and fix that underlying panic rather than hiding all net/http diagnostics.",
+		action:    "Deploy the router recovery fix that returns immediately for server.IsDoneError before http.Error. Do not suppress net/http's error logger globally. If any post-fix occurrence has a paired [h]unhandled route error, diagnose that route panic and its hijack ownership boundary independently.",
+		verify:    "Every Connect block runs the fixed router; normal H1 connection teardown produces zero http-hijack-write lines for 10 minutes, while deterministic recovery tests prove a Done panic performs no write after Hijack and an unexpected pre-hijack panic retains the ordinary 500 path.",
+	},
 	{name: "netescrow-negative", re: regexp.MustCompile(`\[netescrow\]negative counter after`),
 		rateThreshold: 1, pageRateThreshold: netEscrowNegativePageRate, tier: tierWarn, playbook: "SIGNALS.md 5.11", redactIDs: true,
 		groupBy:   netEscrowNegativeLogGroup,

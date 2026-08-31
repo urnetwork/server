@@ -40,6 +40,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
 		{"grafana plugin", "error=\"the result-set has errors: [plugin.notRegistered] plugin not registered\"", "grafana-plugin-unregistered"},
 		{"source attribution", "[session]X-UR-Forwarded-For from untrusted peer", "source-attribution"},
+		{"HTTP write after hijack", "http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)", "http-hijack-write"},
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
 		{"panic", "panic: synthetic crash frame", "panic"},
 		{"payout wallet", "asset amount owned by the wallet is insufficient", "payout-wallet-insufficient"},
@@ -76,6 +77,37 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalExplainsHTTPHijackWrite(t *testing.T) {
+	line := `[edge-3][connect][g4][cid:test][2026-08-31T22:23:26.584101Z]2026/08/31 22:23:26 http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-connect", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "http-hijack-write").Markdown()
+	for _, detail := range []string{
+		"transferred ownership of the H1 connection through Hijack",
+		"Connect's GET / route hands its socket to Gorilla",
+		"fell through to http.Error",
+		"131 canonical WriteHeader warnings",
+		"zero paired [h]unhandled route errors",
+		"does not itself prove a failed handshake or active transport",
+		"returns immediately for server.IsDoneError",
+		"Do not suppress net/http's error logger globally",
+		"zero http-hijack-write lines for 10 minutes",
+		"Done panic performs no write after Hijack",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("HTTP hijack-write alert missing %q:\n%s", detail, markdown)
+		}
 	}
 }
 
