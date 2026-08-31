@@ -14,12 +14,12 @@ const (
 	proxyMemoryReserveKiB    = int64(8 * 1024 * 1024)
 	proxyMemoryReserveFactor = 0.05
 
-	proxyRolloutGuardFull      = "full-overlap"
-	proxyRolloutGuardDrainOnly = "drain-only"
-	proxyRolloutGuardDisabled  = "disabled"
-	proxyRolloutGuardMissing   = "missing"
-	proxyRolloutGuardUnknown   = "unknown"
-	proxyRolloutGuardCommit    = "7e2075c"
+	proxyRolloutGuardFull      = rolloutGuardFull
+	proxyRolloutGuardDrainOnly = rolloutGuardDrainOnly
+	proxyRolloutGuardDisabled  = rolloutGuardDisabled
+	proxyRolloutGuardMissing   = rolloutGuardMissing
+	proxyRolloutGuardUnknown   = rolloutGuardUnknown
+	proxyRolloutGuardCommit    = rolloutGuardCommit
 
 	proxyUDPReceiveDropWarnPerMinute = 100.0
 	proxyUDPReceiveDropPagePerMinute = 10_000.0
@@ -398,41 +398,6 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 	fullRolloutRequiredKiB := sample.proxyRSSKiB + reserveKiB
 	fullRolloutDeficitKiB := max(int64(0), fullRolloutRequiredKiB-sample.memAvailableKiB)
 	guardObservation := fmt.Sprintf("warpctl_rollout_guard=%s", sample.warpctlRolloutGuard)
-
-	switch sample.warpctlRolloutGuard {
-	case proxyRolloutGuardDrainOnly, proxyRolloutGuardDisabled:
-		mechanism := "The deployed Warp binary acquires its host lock only after every service worker can start a candidate. That drain-only scope permits a nearly complete duplicate proxy fleet before old processes leave."
-		if sample.warpctlRolloutGuard == proxyRolloutGuardDisabled {
-			mechanism = "At least one proxy service explicitly sets WARPCTL_STAGGER_HOST_DRAIN=0, disabling the host rollout lease. Service workers can therefore start candidates concurrently and create a nearly complete duplicate proxy fleet."
-		}
-		findings = append(findings, finding{
-			probeId: "proxy/host-memory", tier: tierWarn,
-			class: "proxy-rollout-guard-stale", target: host, frame: sample.warpctlRolloutGuard, sustain: 1,
-			symptom:   fmt.Sprintf("%s does not have the full-overlap proxy rollout guard enabled", host),
-			mechanism: mechanism,
-			baseline:  "Every proxy host runs Warp with a host lease that begins before candidate start, remains held through synchronous old-container drain, and refuses the replacement if the lease times out.",
-			observed: fmt.Sprintf("%s running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_available_gib=%.2f full_fleet_capacity_deficit_gib=%.2f",
-				guardObservation, sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB),
-				kiBToGiB(sample.memAvailableKiB), kiBToGiB(fullRolloutDeficitKiB)),
-			context:  "This is a deployable software guard, separate from the hardware headroom boundary. Installing it prevents all-block overlap; it does not create enough RAM for one old/candidate pair or raise the fleet's active-client ceiling.",
-			action:   fmt.Sprintf("Deploy Warp commit %s or later to this host and restart every Warp service worker before any proxy release. Remove WARPCTL_STAGGER_HOST_DRAIN=0 if present. Do not test the fix by starting a full proxy rollout while the drain-only or disabled guard is active.", proxyRolloutGuardCommit),
-			verify:   "The probe reports warpctl_rollout_guard=full-overlap after every worker restart. During a controlled proxy rollout, process count stays at or below running blocks plus one, memory reserve and swap remain available, and no OOM or UDP receive-drop delta occurs.",
-			playbook: "SIGNALS.md §14.7",
-		})
-	case proxyRolloutGuardMissing, proxyRolloutGuardUnknown:
-		findings = append(findings, finding{
-			probeId: "proxy/host-memory", tier: tierWarn,
-			class: "proxy-rollout-guard-unverified", target: host, frame: sample.warpctlRolloutGuard, sustain: 1,
-			symptom:   fmt.Sprintf("%s proxy rollout serialization cannot be verified", host),
-			mechanism: "The running proxy host either has no readable /usr/local/sbin/warpctl or its binary has neither the full-overlap nor known drain-only signature. A release could duplicate the fleet before the monitor can prove that candidate starts are serialized.",
-			baseline:  "The installed Warp binary exposes the full-overlap host-lease signature and no proxy service disables it.",
-			observed:  fmt.Sprintf("%s running_block_units=%d proxy_processes=%d", guardObservation, sample.runningUnits, sample.proxyProcesses),
-			context:   "Treat an unverified guard as unsafe for a memory-heavy fleet. This alert does not itself prove that a rollout or memory incident is active.",
-			action:    fmt.Sprintf("Resolve the Warp executable used by the proxy units, deploy commit %s or later if needed, and restart every Warp service worker. Do not begin a proxy rollout until this probe reports full-overlap.", proxyRolloutGuardCommit),
-			verify:    "The probe reports warpctl_rollout_guard=full-overlap for the host and a controlled single-overlap rollout completes without excess processes, reserve loss, OOM, or UDP receive-drop delta.",
-			playbook:  "SIGNALS.md §14.7",
-		})
-	}
 
 	if sample.kernelJournalStatus != 0 {
 		findings = append(findings, cannotObserveFinding(host+"/proxy-kernel-oom", fmt.Errorf("kernel journal exited with status %d", sample.kernelJournalStatus)))

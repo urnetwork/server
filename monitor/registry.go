@@ -73,6 +73,7 @@ func NewSignals() []Signal {
 		NewSourceAttributionSignal(),
 		NewMigrationsSignal(),
 		NewReliabilityIndexSignal(),
+		NewRolloutGuardSignal(),
 		NewRedisKeyEventsSignal(),
 		NewStuckLeasesSignal(),
 		NewTaskConvergenceSignal(),

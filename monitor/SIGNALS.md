@@ -4575,6 +4575,69 @@ equals the table-partition count, every index is valid, the old parent is
 absent, and no new `[crp]secondary index drift` warning appears for five
 minutes after log-ingestion delay.
 
+### 8.11 Fleet rollout serialization and worker freshness
+Probe: `rollout-guard`
+
+The host rollout lock is executed by every long-running Warp service worker,
+not by proxy alone. Installing a corrected `/usr/local/sbin/warpctl` does not
+change code already mapped by API, Connect, taskworker, proxy, or another
+running worker. Probe every enabled host with the `services` role and require
+both the executable capability and the worker lifecycle to agree:
+
+- `rollout_guard=full-overlap`: the installed binary contains the host-lock
+  timeout path introduced by Warp commit `7e2075c`; the lease begins before
+  candidate start, remains held through synchronous old-container drain, and
+  refuses a replacement when acquisition times out.
+- `rollout_guard=drain-only`: the binary contains the legacy
+  `Draining %d overlapping container(s) (staggered=%t)` path. That lease covers
+  only drain, so independent workers can start almost a complete duplicate
+  fleet before any drain serializes. WARN `rollout-guard-stale`.
+- `rollout_guard=disabled`: at least one managed unit sets
+  `WARPCTL_STAGGER_HOST_DRAIN=0`. WARN `rollout-guard-disabled` even if the
+  executable contains the fix, and name every disabling unit.
+- A missing or unrecognized executable is `missing` or `unknown`. WARN
+  `rollout-guard-unverified`; do not discover its behavior by launching a
+  production rollout.
+- For every running managed unit, compare its systemd
+  `ExecMainStartTimestamp` with `/usr/local/sbin/warpctl`'s inode-change time.
+  WARN `rollout-guard-workers-stale` when a worker started before the installed
+  binary changed or either timestamp cannot be verified. A new on-disk binary
+  with old resident workers is not a deployed fix.
+
+This signal intentionally owns rollout-guard classification for the whole
+services fleet. Proxy memory §14.7 still records the guard in incident evidence
+because it changes the safe OOM/UDP response, but it does not emit duplicate
+guard alerts. Hosts without any enabled or running environment-scoped Warp
+unit are not managed by this signal; availability and inventory probes own the
+absence. Disabled inventory entries are never contacted.
+
+**Live deployment audit (2026-08-31):** edge-0, edge-1, edge-3, edge-4, Crisp,
+and Fireside were the six enabled managed-services hosts. Every installed
+binary exposed only `drain-only`. Edge-5 was explicitly disabled/offline and
+was not contacted. Edge-6 had no managed Warp service units, while edge-2 and
+Snow did not carry the managed-services role, so none belongs in this probe's
+target set. Repository HEAD `a85a277` contains root fix `7e2075c`; its focused
+race-enabled host-lock/config-validation tests and full `go test ./...` passed,
+but that source result is not evidence that any installed worker runs it.
+
+This is a software deployment and operational-restart gate, not a hardware
+capacity alert. Deploy validated Warp commit `a85a277` or later, remove every
+disabling override, and restart every running Warp service worker. Adding RAM
+does not close any of these guard classes. Conversely, serialization cannot
+create RAM, CPU, host slots, or proxy active-client capacity; §14.7 hardware
+alerts remain open when a serialized old/candidate pair or the steady client
+load does not fit.
+
+Verify without creating the unsafe condition: every managed services host
+reports `full-overlap`, zero stale workers, and zero unverifiable workers. Then
+use one controlled ordinary service replacement to show overlap remains within
+the configured host bound. Do not validate by launching a full proxy-fleet
+rollout. Implementation convention: SIGNALS.md §8.11 (`rollout-guard`) maps to
+`signal_rollout_guard.go` and `signal_rollout_guard_test.go`. Synthetic cases
+cover legacy, disabled, missing, unknown, healthy full-overlap, an on-disk fix
+with stale/unverifiable workers, partial host failure, a managed host with no
+units, and exclusion of non-services hosts.
+
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
 Signals for the redis keyspace-notification transport for peers + stream hops
@@ -6251,11 +6314,10 @@ restores clients and drains. Treat a deploy as an explicit host-memory budget:
 - PAGE while process count exceeds running proxy block units and
   `MemAvailable` is below the largest current proxy RSS plus operational
   reserve. Another candidate cannot start safely at that boundary.
-- WARN when the installed Warp binary has the legacy drain-only rollout lock,
-  a proxy unit sets `WARPCTL_STAGGER_HOST_DRAIN=0`, or the executable's guard
-  cannot be verified. A safe guard takes the host lease before candidate start,
-  holds it through synchronous old-process drain, and refuses a candidate when
-  the lease times out.
+- Join the fleet-wide rollout state from §8.11. Proxy-memory retains that state
+  in OOM, overlap, headroom, and UDP evidence so its action is safe, while
+  `rollout-guard` owns the alert and checks every managed service host rather
+  than only hosts currently running proxy processes.
 - WARN for the all-block parallel-capacity boundary when `MemAvailable` is
   below the current fleet's aggregate RSS plus the larger of 8 GiB or 5% of
   physical RAM. With a full-overlap guard this remains a hardware/operational
@@ -6314,16 +6376,15 @@ operator action or physical-capacity change has been completed and verified.
   concurrency the existing host can hold. **Hardware required for greater
   concurrency:** add RAM/hosts if a full-fleet parallel rollout must remain
   supported. Do not close this class merely because an idle snapshot is green.
-- `proxy-rollout-guard-stale` is a software deployment gate, not a hardware
-  alert. **Operator action required:** install Warp commit `7e2075c` or later,
-  remove a disabling `WARPCTL_STAGGER_HOST_DRAIN=0`, restart every Warp service
-  worker, and verify the running executable before any proxy release. Adding
-  RAM does not close a stale-guard alert.
-- `proxy-rollout-guard-unverified` is an operational verification gate. It
-  cannot be closed by a server application release alone: resolve the actual
-  Warp executable used by the units, install the full-overlap build if needed,
-  and restart every worker until the probe observes `full-overlap`. Do not use
-  a full proxy rollout as the discovery test.
+- `rollout-guard-stale`, `rollout-guard-disabled`,
+  `rollout-guard-unverified`, and `rollout-guard-workers-stale` are the
+  fleet-wide §8.11 software/operational gates, not hardware alerts. **Operator
+  action required:** install validated Warp commit `a85a277` (containing root
+  fix `7e2075c`) or later, remove any disabling
+  `WARPCTL_STAGGER_HOST_DRAIN=0`, restart every running Warp service worker,
+  and verify worker start times before any service release. Adding RAM does not
+  close a guard alert; a server application release alone does not restart the
+  resident Warp workers. Do not use a full proxy rollout as the discovery test.
 - `proxy-udp-receive-drops` proves live host-kernel loss but is host-wide, not
   socket attribution. **Operator action required:** stop launching candidates,
   preserve the exact interval, and map the loss to process overlap, memory,
@@ -6405,7 +6466,8 @@ was 07:11:52Z, while the root fix was committed at 13:00:33Z. Other enabled
 hosts either carried the same legacy binary or could not expose a recognizable
 guard. Therefore the earlier Warp rollout did not deploy this root fix. Deploy
 `7e2075c` or later and restart every Warp service worker before starting any
-proxy release; then require this probe to report `full-overlap` on each host.
+proxy release; then require the fleet-wide §8.11 probe to report
+`full-overlap` with fresh workers on each managed services host.
 
 Verify a complete rollout, not an idle snapshot: proxy process count must stay
 at or below running blocks plus configured host concurrency; `MemAvailable`
@@ -6415,9 +6477,10 @@ HTTP/SOCKS acceptance request must complete. Implementation convention:
 SIGNALS.md §14.7 (`proxy-memory`) maps to `signal_proxy_memory.go` and
 `signal_proxy_memory_test.go`. Synthetic cases preserve the 19-process/ten-unit
 OOM, live unsafe overlap, steady Fireside headroom deficit, Crisp-sized healthy
-headroom, legacy/disabled/unverified rollout guards, live UDP receive drops,
+headroom, guard-aware incident actions, live UDP receive drops,
 first-sample/reboot/small-delta warmups, and a configured non-proxy host that
-must be skipped.
+must be skipped. Canonical legacy/disabled/unverified guard cases belong to
+§8.11.
 
 ### 14.7a Proxy message-pool capacity and ownership visibility
 Probe: `proxy-pool`
