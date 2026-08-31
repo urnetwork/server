@@ -687,6 +687,17 @@ or suppress its reset line: remove the high-cardinality producer, retain the
 bounded recovery path, and require both signals to stay healthy through the
 next full peer sync.
 
+The replacement v156 watcher supplied the end-to-end monitor control during
+the next full synchronization at `21:39Z`. It was the sole watcher with all
+eight service tails attached. A separate bounded two-minute query returned
+10,000 Proxy records, including 8,447 per-peer installation lines, while the
+matching Grafana query found 1,584 dropped-stream resets. The standing monitor
+classified the reset burst at 4,219/min and completed its partitioned,
+inclusive continuation without a `tailer-reconcile` finding. This validates
+the loss classifier and recovery path; it does not validate the producer fix,
+because the deployed Proxy image still predates the verbosity gate. That gate
+must be verified on a later full synchronization after a Proxy deployment.
+
 An independent audit of Grafana's own low-rate errors then found a second,
 concrete transport gap. With the v151 watcher and all eight external tails
 stable, Loki repeatedly emitted
