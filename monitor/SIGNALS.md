@@ -1943,6 +1943,23 @@ proves the fresh score heartbeat and target-specific remediation survive, and
 a separate context-aware source proves gateway timeout falls through to the
 bounded journal read.
 
+The next exact terminal boundary tied the churn to close latency without a
+restart or database wait. Score task
+`01a05616-2af9-07af-9ce6-8ba1bc304862` ran from 04:32:00Z to 05:52:41Z for
+4,841 seconds. Its same-process close task
+`01a0565a-f183-d81f-b09e-f5f58be0e29a` ran from 05:46:38Z to 05:52:44Z for
+365 seconds and ended only three seconds after the score export. The score
+log had printed `export client location[1008/1008]` at 05:49:12Z, but source
+inspection shows that atomic counter advances before a caller export begins;
+it counts started units and is not a completion boundary. The scheduler
+created the next score task about 39 seconds after the finished row, and at
+05:54Z the same executor was again near four cores and 644MiB/s with a new
+close task beside it. This is nearly continuous caller-fanout pressure, not a
+quiescent post-completion heap. Require the target-oriented/alias deployment
+to break both the per-run duration and the repeated close overlap; do not use
+the start counter, a brief task-row handoff, or the absence of a restart as a
+recovery claim.
+
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
 
