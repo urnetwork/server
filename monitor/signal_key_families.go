@@ -48,18 +48,10 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	if len(ports) == 0 {
 		return nil, fmt.Errorf("no redis node ports configured")
 	}
-	lo, hi := ports[0], ports[len(ports)-1]
 
-	// pick the fullest node (used_memory sweep is cheap)
-	out, err := env.runner.shell(ctx, h, fmt.Sprintf(
-		`for p in $(seq %d %d); do echo "$p $(timeout 3 redis-cli -p $p INFO memory 2>/dev/null | tr -d '\r' | awk -F: '/^used_memory:/{print $2}')"; done | sort -k2 -rn | head -1`,
-		lo, hi))
+	fullest, err := fullestRedisNodeUsage(ctx, env, h)
 	if err != nil {
 		return nil, err
-	}
-	fullestPort := atoi(strings.Fields(out + " 0")[0])
-	if fullestPort == 0 {
-		return nil, fmt.Errorf("could not determine fullest node from %q", strings.TrimSpace(out))
 	}
 
 	// sampled scan, ids normalized to <id>, counted by shape. LC_ALL=C per
@@ -69,13 +61,13 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		`LC_ALL=C timeout 170 redis-cli -p %d --scan --count 5000 2>/dev/null | head -%d `+
 			`| sed -E 's/[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/<id>/g; s/[0-9]{6,}/<n>/g' `+
 			`| sort | uniq -c | sort -rn | head -20`,
-		fullestPort, familyScanKeyLimit)
-	out, err = env.runner.sshTimeout(ctx, h, scan, "", 200*time.Second)
+		fullest.port, familyScanKeyLimit)
+	out, err := env.runner.sshTimeout(ctx, h, scan, "", 200*time.Second)
 	if err != nil {
 		return nil, err
 	}
 
-	target := fmt.Sprintf("%s:%d", h.name, fullestPort)
+	target := fmt.Sprintf("%s:%d", h.name, fullest.port)
 	findings := []finding{}
 	histogramLines := []string{}
 	alerted := false
@@ -103,7 +95,7 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 				symptom: fmt.Sprintf("key family %q at %d keys in the sample, > 3x its 7-day median %.0f — missing-ttl signature",
 					family, count, median),
 				baseline: fmt.Sprintf("trailing 7-day median %.0f keys in a %d-key sample (learned)", median, familyScanKeyLimit),
-				observed: fmt.Sprintf("count=%d median=%.0f node=%d", count, median, fullestPort),
+				observed: fmt.Sprintf("count=%d median=%.0f node=%d", count, median, fullest.port),
 				context:  "a family growing without bound = missing ttl (3.3); pair with --memkeys for byte attribution",
 				playbook: "SIGNALS.md 3.3",
 			})

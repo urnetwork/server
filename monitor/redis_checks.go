@@ -73,6 +73,61 @@ type redisNodeMem struct {
 	rssBytes                    float64
 }
 
+// redisNodeUsage is the small shared preflight used by probes that need one
+// representative node for a bounded keyspace sample. Selecting by percentage
+// keeps the sample on the node closest to its own configured ceiling even if
+// Redis nodes do not all have the same maxmemory.
+type redisNodeUsage struct {
+	port           int
+	usedBytes      int64
+	maxmemoryBytes int64
+}
+
+func fullestRedisNodeUsage(ctx context.Context, env *probeEnv, h *host) (redisNodeUsage, error) {
+	ports := h.redisNodePorts()
+	if len(ports) == 0 {
+		return redisNodeUsage{}, fmt.Errorf("no redis node ports configured")
+	}
+	portNames := make([]string, len(ports))
+	for i, port := range ports {
+		portNames[i] = fmt.Sprint(port)
+	}
+	out, err := env.runner.shell(ctx, h, fmt.Sprintf(`for p in %s; do
+  m=$(timeout 3 redis-cli -p $p INFO memory 2>/dev/null | tr -d '\r')
+  [ -z "$m" ] && continue
+  echo "$p $(echo "$m" | awk -F: 'BEGIN{u=0;x=0}/^used_memory:/{u=$2}/^maxmemory:/{x=$2}END{print u" "x}')"
+done`, strings.Join(portNames, " ")))
+	if err != nil {
+		return redisNodeUsage{}, err
+	}
+
+	fullest := redisNodeUsage{}
+	fullestRatio := -1.0
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		candidate := redisNodeUsage{
+			port:           atoi(fields[0]),
+			usedBytes:      atoi64(fields[1]),
+			maxmemoryBytes: atoi64(fields[2]),
+		}
+		if candidate.port == 0 || candidate.usedBytes <= 0 || candidate.maxmemoryBytes <= 0 {
+			continue
+		}
+		ratio := float64(candidate.usedBytes) / float64(candidate.maxmemoryBytes)
+		if fullest.port == 0 || fullestRatio < ratio {
+			fullest = candidate
+			fullestRatio = ratio
+		}
+	}
+	if fullest.port == 0 {
+		return redisNodeUsage{}, fmt.Errorf("could not determine fullest Redis node from %q", strings.TrimSpace(out))
+	}
+	return fullest, nil
+}
+
 type redisConnectionDiagnosis struct {
 	mechanism string
 	context   string
@@ -220,7 +275,7 @@ done`, lo, hi)
 		capacityDeficit := requiredAvailable - hostMemoryAvailableBytes
 		action := "Do not increase maxmemory on this host. Add physical memory or Redis masters, or reduce the retained dataset, before expanding aggregate ceilings; preserve enough reserve for Redis RSS overhead, the kernel, and non-Redis processes."
 		if impossibleTTLNodeCount > 0 {
-			action = "Do not increase maxmemory on this host. Create immediate capacity headroom with additional RAM, Redis masters on additional hosts, or a smaller retained key footprint, preserving reserve for Redis RSS overhead, the kernel, and non-Redis processes. With explicit maintenance authority, also run the independently attributed binary-safe `bringyourctl streams expire-leaked-ttls` cleanup: it clamps leaked keys to an 8-hour TTL and starts a bounded drain, but does not create immediate host capacity."
+			action = "Do not increase maxmemory on this host. Create immediate capacity headroom with additional RAM, Redis masters on additional hosts, or a smaller retained key footprint, preserving reserve for Redis RSS overhead, the kernel, and non-Redis processes. Treat the independently attributed impossible-TTL residue as a separate correctness cleanup: measure its bytes before counting it as capacity relief, and do not assume that clamping a small residue resolves this deficit."
 		}
 		findings = append(findings, finding{
 			probeId: "redis/host-capacity", tier: tierPage,
@@ -233,7 +288,7 @@ done`, lo, hi)
 			context:  "MemAvailable already includes reclaimable cache. The operational reserve is the larger of 8GiB or 2% of physical RAM. The comparison is intentionally conservative because remaining maxmemory excludes future RSS-over-used variation and every non-Redis allocation; unused swap is not healthy Redis capacity.",
 			action:   action,
 			verify:   "Aggregate Redis ceilings plus measured overhead fit beneath physical RAM with operational reserve, host swap and memory pressure remain zero, every node returns below 85%, and current OOM/error rates remain zero on consecutive samples.",
-			playbook: "SIGNALS.md §3.1, §3.3a, and §5.4",
+			playbook: "SIGNALS.md §3.1, §3.3a, §3.3b, and §5.4",
 		})
 	} else {
 		findings = append(findings, healthyFinding("redis/host-capacity", tierPage, "redis-host-capacity", h.name))
@@ -252,13 +307,13 @@ done`, lo, hi)
 			context := "Evicted-key and error counters are cumulative boot totals, so a single sample does not prove a current error rate. current_eviction_exceeded_time distinguishes a node presently unable to stay below maxmemory; task/log signals remain authoritative for a current OOM response."
 			action := "Use the key-family and TTL probes to identify the growing dataset before changing capacity. If writes are currently failing and host RAM permits, a documented temporary maxmemory increase can create drain headroom; otherwise do not raise maxmemory to conceal a live leak."
 			verify := "Used memory returns below 85%, current_eviction_exceeded_time is zero, current OOM/error rates remain zero, and the attributed key family either drains or stays bounded on consecutive samples."
-			playbook := "SIGNALS.md §5.4"
+			playbook := "SIGNALS.md §3.3b and §5.4"
 			if n.averageTTLMillis > float64(redisImpossibleAverageTTL.Milliseconds()) {
-				mechanism = "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom, and its impossible average TTL proves stale expiry residue is preventing natural drain. The known duration-as-nanoseconds stream keys carry effectively immortal TTLs; volatile-ttl may evict some under pressure, but ordinary expiry cannot reclaim them on an operational timescale."
-				context += " Correlate the fleet-wide ttl-leaks signal's binary-safe family sample before applying its family-specific cleanup; an impossible average alone does not authorize changing arbitrary keys."
-				action = "Confirm current writers emit no stream-family TTL warnings and the ttl-leaks sample attributes the residue to legacy/current stream keys. With explicit maintenance authority, run the binary-safe `expire-leaked-ttls` cleanup; do not delete keys through shell text, raise maxmemory to hide the residue, or run a family-specific cleanup against unknown keys."
-				verify = "The cleanup clamps only attributed stream keys, average TTL returns below two years, used memory falls below 85%, eviction pressure decays, and no new stream-family TTL warnings or OOM replies appear."
-				playbook = "SIGNALS.md §3.3a and §5.4"
+				mechanism = "Redis dataset memory, rather than client output buffers, is consuming the node's maxmemory headroom. Its impossible average TTL independently proves stale expiry metadata exists, but an average TTL does not measure the residue's bytes and therefore cannot identify it as the capacity root cause."
+				context += " Correlate ttl-leaks for expiry correctness and redis-bytes for memory ownership. A bounded production sample found the known stream residue real but tiny while caller-scoped score blobs owned nearly all sampled bytes; keep those diagnoses separate."
+				action = "Use redis-bytes to remove the measured dominant footprint and restore headroom. Handle an independently attributed stream TTL cleanup only with explicit maintenance authority; do not count it as material capacity relief without MEMORY USAGE evidence, delete keys through shell text, or raise maxmemory to hide either defect."
+				verify = "The measured dominant byte family drains, used memory falls below 85%, eviction pressure decays, and OOM/error rates stay flat; separately, any authorized TTL cleanup clamps only attributed stream keys and returns average TTL below two years."
+				playbook = "SIGNALS.md §3.3a, §3.3b, and §5.4"
 			}
 			nonExpiringKeys := max(0, int(n.keys-n.expiringKeys))
 			findings = append(findings, finding{

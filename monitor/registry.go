@@ -64,6 +64,7 @@ func NewSignals() []Signal {
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),
 		NewTTLLeaksSignal(),
+		NewRedisBytesSignal(),
 		NewRedisProcessSignal(),
 		NewRedisConnectionsSignal(),
 		NewRedisTopologySignal(),

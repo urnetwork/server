@@ -1442,19 +1442,21 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   The live database had 252 caller locations and only 2,766 block rows across
   138 of them; 114 callers had no exclusions at all.
 
-  The source fix now partitions work by target. It encodes one baseline target
-  payload and fans the same immutable bytes out under every caller-specific
-  key whose exclusions do not intersect that target; only a caller that
-  genuinely removes a provider receives a separately filtered encoding. This
-  preserves every Redis key and filtered value. Sharing a sample's shuffled
-  byte payload is safe because readers randomize the sample-key order and
-  `FindProviders2` performs the final weighted selection. The bounded
-  512-command/8MiB stream remains in place and accounts for every fan-out copy
-  in its byte budget. A deterministic regression proves two equivalent
-  callers share one two-provider encoding, while a caller blocking a present
-  network receives its own one-provider encoding and all caller-specific keys
-  are still emitted. Deploy this target-fanout change after the schema-head
-  migration, then verify a complete run with §2.12a rather than treating a
+  The source fix now partitions work by target and encodes one baseline target
+  payload. Its first compatibility pass fans the same immutable bytes out
+  under legacy unchanged-caller keys; after publishing a ready marker, later
+  passes replace those duplicate values with one-byte baseline aliases. Only a
+  caller that genuinely removes a provider receives a separately filtered
+  encoding and caller alias. Sharing a sample's shuffled byte payload is safe
+  because readers randomize the sample-key order and `FindProviders2` performs
+  the final weighted selection. Missing aliases retain legacy-reader behavior,
+  and old payloads expire through the ordinary five-hour TTL. The bounded
+  512-command/8MiB stream remains in place. Deterministic regressions prove
+  equivalent callers share one two-provider encoding, affected callers retain
+  their one-provider override, the compatibility pass retains old-reader
+  values, and the sparse pass omits duplicate payloads. Deploy this
+  target-fanout/alias change after the schema-head migration, then verify a
+  complete run with §2.12a and byte recovery with §3.3b rather than treating a
   bounded heap alone as success.
 
 ### 2.9 Provider-selection population — the fresh-but-empty cache canary
@@ -1867,11 +1869,13 @@ caller it gob-encoded every location and location-group target. A blocked
 network changes only a target containing a provider from that network. There
 were 2,766 block rows across 138 caller locations, while 114 callers had no
 blocks; most caller/target pairs therefore repeated identical encoding. The
-root fix partitions by target, encodes its baseline once, and fans immutable
-bytes out under each unchanged caller's keys. Only callers whose blocked
-network intersects that target get independently filtered encodings. It keeps
-the 512-command/8MiB streaming budget, every caller-specific Redis key, and
-the final provider-selection semantics.
+root fix partitions by target and encodes its baseline once. The rolling
+compatibility pass refreshes legacy unchanged-caller payloads; subsequent
+passes store only one-byte baseline aliases. Only callers whose blocked network
+intersects that target get independently filtered encodings and caller aliases.
+It keeps the 512-command/8MiB streaming budget, treats missing aliases as legacy
+payloads, and preserves final provider-selection semantics while §3.3b verifies
+the duplicate bytes expire.
 
 The synthetic source regression supplies four fresh workers, makes one consume
 4.003 cores and 650MiB/s, and proves the structured alert identifies its exact
@@ -2061,6 +2065,15 @@ host had 15.8GiB available. The old comparison would have cleared because its
 15.5GiB remaining configured growth was just below `MemAvailable`; including
 the 9.4GiB reserve correctly retained a 9.2GiB capacity-deficit page.
 
+A byte-sized TTL sample at 2026-08-31T04:27Z separated correctness from
+capacity: 98 impossible-TTL keys among 4,975 examined occupied only 12,694
+bytes in total, with the largest key at 185 bytes. The duration-as-seconds
+residue is real and should be repaired, but it cannot explain roughly 372GiB
+of Redis data. The probe now returns aggregate `MEMORY USAGE SAMPLES 1` for
+suspect keys and explicitly sends capacity attribution to §3.3b; an
+impossible average TTL alone no longer labels the residue as the memory root
+cause.
+
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
   `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each
@@ -2092,8 +2105,50 @@ the 9.4GiB reserve correctly retained a 9.2GiB capacity-deficit page.
   non-action in its Markdown. The first complete fixed-cadence production
   stream later measured 20/min on old API g4, followed by 12/min and 15/min;
   this is a rollout target, not evidence to shorten the durable balance.
-- Verify with a binary-safe sample, `avg_ttl` below two years, falling dataset
-  memory, and no new TTL warnings. Raising maxmemory does not repair the leak.
+- Verify TTL repair with a binary-safe sample, `avg_ttl` below two years, and
+  no new TTL warnings. Verify dataset-memory recovery independently through
+  §3.3b; raising maxmemory repairs neither defect.
+
+### 3.3b Sampled byte-family attribution
+Probe: `redis-bytes`
+
+Key counts do not attribute memory: a small family of large serialized values
+can dominate millions of tiny keys. Every 15 minutes, select the Redis node
+closest to its configured maxmemory and run a bounded `EVAL_RO` that scans at
+most 1,000 keys. Classify binary keys inside Redis as score, provide-mode,
+client-key, connect, stream, or other; sum `MEMORY USAGE SAMPLES 1`; return
+only aggregate family counts and bytes. Never pass raw keys through a shell
+variable. Alert when the node is at least 85% full and score data owns at
+least 50% and 128KiB of sampled bytes.
+
+The 2026-08-31T04:27Z sample on port 6380 measured 1,001 keys. Only 73 were
+`{cs_}` score keys, but they occupied 1,318,490 sampled bytes (about 93.6%);
+508 `{pm_}` keys occupied 48,456 bytes, 240 `ckey_` keys 24,480 bytes, 54
+connect keys 7,774 bytes, 123 stream keys 10,442 bytes, and the remaining
+keys 324 bytes. This identifies the capacity root independently of the tiny
+impossible-TTL residue.
+
+The score writer historically materialized counts, filter, and gob provider
+samples under every `(caller location, target)` key. Production had roughly
+252 caller locations, but only 138 callers had any excluded networks and 114
+had none; for most caller-target pairs the payload was byte-identical. The
+alias-aware schema writes one full zero-caller baseline per target, a one-byte
+baseline alias for an unchanged caller, and a full override plus caller alias
+only when the caller's exclusions intersect a network present in that target.
+Readers treat a missing alias as the legacy caller payload and fall back to it
+if an aliased baseline is absent.
+
+Rolling compatibility is deliberate. The first successful alias-aware export
+still refreshes all legacy caller payloads and publishes a durable ready marker
+only after every bounded write completes. Later exports omit unchanged
+duplicates. Every legacy key receives its normal five-hour TTL when written;
+the task's 120-minute deadline leaves at least three hours after marker
+publication even for the earliest key. Legacy blobs then expire naturally
+without a production delete.
+Verify after one complete export plus five hours: the sampled score byte share
+falls below 50% or every node falls below 85%, provider selections remain
+equivalent, excluded callers still select overrides, and OOM/error counters
+stay flat. Do not delete cache keys or increase maxmemory to hide amplification.
 
 ### 3.4 Node process signals (host-level)
 Probe: `redis-process`
@@ -3450,6 +3505,7 @@ Tier-1 (warn):
 | node-mem-high | redis | used/maxmemory | > 85% for 5 min |
 | mem-skew | redis | max/median used across nodes | > 3× |
 | ttl-leaks | redis | 3.3a `INFO keyspace` average TTL | > 2 years; longest intentional family exception is 395 days |
+| score-byte-dominance | redis | 3.3b bounded `MEMORY USAGE SAMPLES 1` family share on fullest node | node ≥85% AND score ≥50% / ≥128KiB sampled bytes |
 | client-buffers | redis | used_memory_clients | > 25% of used or > 2G |
 | clients-spike | redis | connected_clients own-node step and fleet shape; trip battery groups `CLIENT LIST` cohorts | +50% in 10 min or >3× fleet median for 2 probes |
 | pubsub-drops | logs | channel-is-full rate | > 10/min/service |

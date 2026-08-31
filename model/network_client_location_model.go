@@ -43,6 +43,14 @@ const (
 	clientScoreExportBatchSize   = 512
 	clientScoreExportBatchBytes  = 8 << 20
 	clientScoreExportMaxAttempts = 3
+
+	// A caller-target alias is intentionally tiny. "1" selects the shared
+	// zero-caller baseline and "0" selects the caller-specific override. A
+	// missing alias means the cache was written by a legacy process and must
+	// continue to select the caller-specific payload.
+	clientScoreAliasBaselineValue = "1"
+	clientScoreAliasCallerValue   = "0"
+	clientScoreAliasReadyKey      = "client_score_alias_v1_ready"
 )
 
 type clientScoreRedisSet struct {
@@ -50,15 +58,15 @@ type clientScoreRedisSet struct {
 	value []byte
 }
 
-// clientScoreTargetKeys builds the three cache-key families for one target
-// location or location group. The caller location stays in the key, but many
-// callers receive identical values: a blocked-network rule only changes a
-// target when that target actually contains a provider from the blocked
-// network.
+// clientScoreTargetKeys builds the payload and alias key families for one
+// target location or location group. The caller location stays in each hash
+// tag to preserve cluster distribution; aliases let equivalent callers share
+// the zero-caller payload instead of duplicating it.
 type clientScoreTargetKeys struct {
 	counts func(server.Id) string
 	filter func(server.Id) string
 	sample func(server.Id, int) string
+	alias  func(server.Id) string
 }
 
 type clientScoreTargetEncode func(map[server.Id]*ClientScore) (
@@ -105,13 +113,18 @@ func filterClientScoresByNetwork(
 	return activeClientScores
 }
 
-// emitClientScoreTargetFanout encodes one target once for every caller whose
-// blocked-network set leaves that target unchanged. Callers that really remove
-// a provider are encoded independently. The same immutable []byte value can be
-// queued under many caller-specific Redis keys; runClientScoreExportStream
-// still flushes by wire bytes and clears every reference after Exec.
+// emitClientScoreTargetFanout stores one complete zero-caller baseline for a
+// target. Callers whose blocked-network set leaves the target unchanged get a
+// one-byte baseline alias; callers that really remove a provider get a complete
+// override and a caller alias. A missing alias remains the legacy-reader
+// sentinel, so a rolling deployment can read cache entries from either writer.
 //
-// This changes work sharing, not cache contents. loadClientScores already
+// The first alias-aware export can additionally refresh the legacy duplicate
+// payloads for unchanged callers. Once that complete export publishes the
+// schema-ready marker, later exports omit those duplicates and let their normal
+// TTL reclaim the memory without a production delete.
+//
+// This changes storage sharing, not score contents. loadClientScores already
 // randomizes the sample-key order and FindProviders2 performs a final weighted
 // selection, so equivalent callers do not require independently shuffled gob
 // payloads.
@@ -121,12 +134,16 @@ func emitClientScoreTargetFanout(
 	excludeLocationNetworkIds map[server.Id]map[server.Id]bool,
 	keys clientScoreTargetKeys,
 	encode clientScoreTargetEncode,
+	writeLegacyUnchanged bool,
 	emit func(clientScoreRedisSet) error,
 ) error {
 	targetNetworkIds := clientScoreNetworkIds(clientScores)
 	unchangedClientLocationIds := make([]server.Id, 0, len(clientLocationIds))
 	changedClientLocationIds := make([]server.Id, 0)
 	for _, clientLocationId := range clientLocationIds {
+		if clientLocationId == (server.Id{}) {
+			continue
+		}
 		if networkSetsIntersect(targetNetworkIds, excludeLocationNetworkIds[clientLocationId]) {
 			changedClientLocationIds = append(changedClientLocationIds, clientLocationId)
 		} else {
@@ -134,7 +151,7 @@ func emitClientScoreTargetFanout(
 		}
 	}
 
-	emitEncoded := func(
+	emitPayload := func(
 		callerIds []server.Id,
 		countsBytes []byte,
 		filterBytes []byte,
@@ -167,9 +184,22 @@ func emitClientScoreTargetFanout(
 		return nil
 	}
 
-	if len(unchangedClientLocationIds) != 0 {
-		countsBytes, filterBytes, counts, encodeSample := encode(clientScores)
-		if err := emitEncoded(unchangedClientLocationIds, countsBytes, filterBytes, counts, encodeSample); err != nil {
+	// The zero caller is the canonical baseline even when the caller list does
+	// not explicitly contain it. During the one-time compatibility pass, the
+	// same immutable bytes also refresh every legacy unchanged-caller key.
+	countsBytes, filterBytes, counts, encodeSample := encode(clientScores)
+	baselineAndLegacyCallers := []server.Id{{}}
+	if writeLegacyUnchanged {
+		baselineAndLegacyCallers = append(baselineAndLegacyCallers, unchangedClientLocationIds...)
+	}
+	if err := emitPayload(baselineAndLegacyCallers, countsBytes, filterBytes, counts, encodeSample); err != nil {
+		return err
+	}
+	for _, clientLocationId := range unchangedClientLocationIds {
+		if err := emit(clientScoreRedisSet{
+			key:   keys.alias(clientLocationId),
+			value: []byte(clientScoreAliasBaselineValue),
+		}); err != nil {
 			return err
 		}
 	}
@@ -179,7 +209,7 @@ func emitClientScoreTargetFanout(
 			excludeLocationNetworkIds[clientLocationId],
 		)
 		countsBytes, filterBytes, counts, encodeSample := encode(activeClientScores)
-		if err := emitEncoded(
+		if err := emitPayload(
 			[]server.Id{clientLocationId},
 			countsBytes,
 			filterBytes,
@@ -188,8 +218,40 @@ func emitClientScoreTargetFanout(
 		); err != nil {
 			return err
 		}
+		if err := emit(clientScoreRedisSet{
+			key:   keys.alias(clientLocationId),
+			value: []byte(clientScoreAliasCallerValue),
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// selectClientScorePayload resolves one alias-aware read. Missing/unknown
+// aliases deliberately preserve the legacy caller-key behavior. If a baseline
+// alias races a missing/evicted baseline value, the caller payload is the safe
+// fallback because it preserves exclusions.
+func selectClientScorePayload(
+	clientLocationId server.Id,
+	aliasBytes []byte,
+	callerBytes []byte,
+	baselineBytes []byte,
+) (effectiveClientLocationId server.Id, payload []byte) {
+	if clientLocationId != (server.Id{}) &&
+		string(aliasBytes) == clientScoreAliasBaselineValue &&
+		0 < len(baselineBytes) {
+		return server.Id{}, baselineBytes
+	}
+	return clientLocationId, callerBytes
+}
+
+func clientScoreCommandBytes(cmd *redis.StringCmd) []byte {
+	if cmd == nil {
+		return nil
+	}
+	value, _ := cmd.Bytes()
+	return value
 }
 
 func transientClientScoreExportError(err error) bool {
@@ -355,6 +417,28 @@ func writeClientScoreRedisStream(ctx context.Context, r server.RedisClient, ttl 
 			}
 		},
 	)
+}
+
+func clientScoreAliasReady(ctx context.Context) (ready bool, returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		value, err := r.Get(ctx, clientScoreAliasReadyKey).Result()
+		if err == redis.Nil {
+			return
+		}
+		if err != nil {
+			returnErr = err
+			return
+		}
+		ready = value == clientScoreAliasBaselineValue
+	})
+	return
+}
+
+func markClientScoreAliasReady(ctx context.Context) (returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		returnErr = r.Set(ctx, clientScoreAliasReadyKey, clientScoreAliasBaselineValue, 0).Err()
+	})
+	return
 }
 
 func init() {
@@ -2934,21 +3018,35 @@ func loadLocationStables(
 	locationStables = map[server.Id]bool{}
 
 	server.Redis(ctx, func(r server.RedisClient) {
-		locationFilterCmds := map[server.Id]*redis.StringCmd{}
+		type filterRead struct {
+			alias    *redis.StringCmd
+			caller   *redis.StringCmd
+			baseline *redis.StringCmd
+		}
+		locationFilterCmds := map[server.Id]filterRead{}
 
 		// plain pipeline instead of tx: independent gets across cluster slots
 		pipe := r.Pipeline()
 		for _, locationId := range locationIds {
-			locationFilterCmds[locationId] = pipe.Get(
-				ctx,
-				clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId),
-			)
+			read := filterRead{
+				caller: pipe.Get(ctx, clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, clientLocationId)),
+			}
+			if clientLocationId != (server.Id{}) {
+				read.alias = pipe.Get(ctx, clientScoreLocationAliasKey(forceMinimum, rankMode, locationId, clientLocationId))
+				read.baseline = pipe.Get(ctx, clientScoreLocationFilterKey(forceMinimum, rankMode, locationId, server.Id{}))
+			}
+			locationFilterCmds[locationId] = read
 		}
 		// note ignore the error for GET since it will include missing key
 		pipe.Exec(ctx)
 
-		for locationId, filterCmd := range locationFilterCmds {
-			filterBytes, _ := filterCmd.Bytes()
+		for locationId, read := range locationFilterCmds {
+			_, filterBytes := selectClientScorePayload(
+				clientLocationId,
+				clientScoreCommandBytes(read.alias),
+				clientScoreCommandBytes(read.caller),
+				clientScoreCommandBytes(read.baseline),
+			)
 			if len(filterBytes) == 0 {
 				// there are no providers
 				continue
@@ -3376,6 +3474,24 @@ func clientScoreLocationGroupCountsKey(forceMinimum bool, rankMode RankMode, loc
 	return fmt.Sprintf("{cs_%d_%c_%s_%s}c_g", fm, rm, callerLocationId, locationGroupId)
 }
 
+func clientScoreLocationAliasKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
+	fm := 0
+	if forceMinimum {
+		fm = 1
+	}
+	rm, _ := utf8.DecodeRuneInString(rankMode)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}a_l", fm, rm, callerLocationId, locationId)
+}
+
+func clientScoreLocationGroupAliasKey(forceMinimum bool, rankMode RankMode, locationGroupId server.Id, callerLocationId server.Id) string {
+	fm := 0
+	if forceMinimum {
+		fm = 1
+	}
+	rm, _ := utf8.DecodeRuneInString(rankMode)
+	return fmt.Sprintf("{cs_%d_%c_%s_%s}a_g", fm, rm, callerLocationId, locationGroupId)
+}
+
 func clientScoreLocationFilterKey(forceMinimum bool, rankMode RankMode, locationId server.Id, callerLocationId server.Id) string {
 	fm := 0
 	if forceMinimum {
@@ -3413,6 +3529,12 @@ func clientScoreLocationGroupSampleKey(forceMinimum bool, rankMode RankMode, loc
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
+	aliasesReady, err := clientScoreAliasReady(ctx)
+	if err != nil {
+		return fmt.Errorf("read client score alias migration state: %w", err)
+	}
+	writeLegacyUnchanged := !aliasesReady
+
 	addClientScore := func(lookbackClientScore *ClientScore, reputationFailedNames string, m map[server.Id]*ClientScore) *ClientScore {
 		clientScore, ok := m[lookbackClientScore.ClientId]
 		if !ok {
@@ -4055,99 +4177,110 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		blockTargets := targets[i:min(len(targets), i+targetBlockSize)]
 
 		wg.Add(1)
-		go connect.HandleError(func() {
+		go func() {
 			defer wg.Done()
-
-			server.Redis(ctx, func(r server.RedisClient) {
-				for _, forceMinimum := range []bool{false, true} {
-					for rankMode, _ := range performanceTargets {
-						// The sets are independent and hash to different cluster slots, so
-						// multi/exec cannot span them. Encode directly into the bounded
-						// writer. Partitioning by target, rather than caller, lets one gob
-						// payload fan out to every caller whose blocked-network set leaves
-						// that target unchanged.
-						err := writeClientScoreRedisStream(ctx, r, ttl, func(emit func(clientScoreRedisSet) error) error {
-							for _, target := range blockTargets {
-								exportIndex := exportCount.Add(1)
-								kind := "location"
-								keys := clientScoreTargetKeys{}
-								if target.locationGroup {
-									kind = "location_group"
-									keys = clientScoreTargetKeys{
-										counts: func(callerId server.Id) string {
-											return clientScoreLocationGroupCountsKey(forceMinimum, rankMode, target.id, callerId)
-										},
-										filter: func(callerId server.Id) string {
-											return clientScoreLocationGroupFilterKey(forceMinimum, rankMode, target.id, callerId)
-										},
-										sample: func(callerId server.Id, sampleIndex int) string {
-											return clientScoreLocationGroupSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
-										},
+			connect.HandleError(func() {
+				server.Redis(ctx, func(r server.RedisClient) {
+					for _, forceMinimum := range []bool{false, true} {
+						for rankMode, _ := range performanceTargets {
+							// The sets are independent and hash to different cluster slots, so
+							// multi/exec cannot span them. Encode directly into the bounded
+							// writer. Partitioning by target, rather than caller, lets one gob
+							// payload fan out to every caller whose blocked-network set leaves
+							// that target unchanged.
+							err := writeClientScoreRedisStream(ctx, r, ttl, func(emit func(clientScoreRedisSet) error) error {
+								for _, target := range blockTargets {
+									exportIndex := exportCount.Add(1)
+									kind := "location"
+									keys := clientScoreTargetKeys{}
+									if target.locationGroup {
+										kind = "location_group"
+										keys = clientScoreTargetKeys{
+											counts: func(callerId server.Id) string {
+												return clientScoreLocationGroupCountsKey(forceMinimum, rankMode, target.id, callerId)
+											},
+											filter: func(callerId server.Id) string {
+												return clientScoreLocationGroupFilterKey(forceMinimum, rankMode, target.id, callerId)
+											},
+											sample: func(callerId server.Id, sampleIndex int) string {
+												return clientScoreLocationGroupSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
+											},
+											alias: func(callerId server.Id) string {
+												return clientScoreLocationGroupAliasKey(forceMinimum, rankMode, target.id, callerId)
+											},
+										}
+									} else {
+										keys = clientScoreTargetKeys{
+											counts: func(callerId server.Id) string {
+												return clientScoreLocationCountsKey(forceMinimum, rankMode, target.id, callerId)
+											},
+											filter: func(callerId server.Id) string {
+												return clientScoreLocationFilterKey(forceMinimum, rankMode, target.id, callerId)
+											},
+											sample: func(callerId server.Id, sampleIndex int) string {
+												return clientScoreLocationSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
+											},
+											alias: func(callerId server.Id) string {
+												return clientScoreLocationAliasKey(forceMinimum, rankMode, target.id, callerId)
+											},
+										}
 									}
-								} else {
-									keys = clientScoreTargetKeys{
-										counts: func(callerId server.Id) string {
-											return clientScoreLocationCountsKey(forceMinimum, rankMode, target.id, callerId)
-										},
-										filter: func(callerId server.Id) string {
-											return clientScoreLocationFilterKey(forceMinimum, rankMode, target.id, callerId)
-										},
-										sample: func(callerId server.Id, sampleIndex int) string {
-											return clientScoreLocationSampleKey(forceMinimum, rankMode, target.id, callerId, sampleIndex)
-										},
+									// Target-oriented export has thousands more progress units than
+									// the old caller-oriented loop. Keep production progress useful
+									// without turning the root CPU fix into a log-volume regression.
+									if exportIndex == 1 || exportIndex%100 == 0 || int(exportIndex) == targetExportTotal {
+										glog.Infof(
+											"[nclm]export client score target[%d/%d] %s=%s callers=%d\n",
+											exportIndex,
+											targetExportTotal,
+											kind,
+											target.id,
+											len(clientLocationIds),
+										)
 									}
-								}
-								// Target-oriented export has thousands more progress units than
-								// the old caller-oriented loop. Keep production progress useful
-								// without turning the root CPU fix into a log-volume regression.
-								if exportIndex == 1 || exportIndex%100 == 0 || int(exportIndex) == targetExportTotal {
-									glog.Infof(
-										"[nclm]export client score target[%d/%d] %s=%s callers=%d\n",
-										exportIndex,
-										targetExportTotal,
+									if err := emitClientScoreTargetFanout(
+										clientLocationIds,
+										target.clientScores,
+										excludeLocationNetworkIds,
+										keys,
+										func(clientScores map[server.Id]*ClientScore) ([]byte, []byte, []int, func(int) []byte) {
+											return exportClientScores(forceMinimum, rankMode, clientScores)
+										},
+										writeLegacyUnchanged,
+										emit,
+									); err != nil {
+										return err
+									}
+									glog.V(2).Infof(
+										"[nclm]updated client score target %s=%s for %d callers\n",
 										kind,
 										target.id,
 										len(clientLocationIds),
 									)
 								}
-								if err := emitClientScoreTargetFanout(
-									clientLocationIds,
-									target.clientScores,
-									excludeLocationNetworkIds,
-									keys,
-									func(clientScores map[server.Id]*ClientScore) ([]byte, []byte, []int, func(int) []byte) {
-										return exportClientScores(forceMinimum, rankMode, clientScores)
-									},
-									emit,
-								); err != nil {
-									return err
+								return nil
+							})
+							if err != nil {
+								select {
+								case <-ctx.Done():
+									return
+								case returnErrs <- err:
+									return
 								}
-								glog.V(2).Infof(
-									"[nclm]updated client score target %s=%s for %d callers\n",
-									kind,
-									target.id,
-									len(clientLocationIds),
-								)
-							}
-							return nil
-						})
-						if err != nil {
-							select {
-							case <-ctx.Done():
-								return
-							case returnErrs <- err:
-								return
 							}
 						}
 					}
+				})
+			}, func(err error) {
+				// A recovered worker panic must prevent publication of the alias
+				// migration marker. Keep wg.Done outside HandleError so the error
+				// reaches this bounded channel before the waiter can close it.
+				select {
+				case <-ctx.Done():
+				case returnErrs <- fmt.Errorf("client score export worker panic: %w", err):
 				}
 			})
-			// the deferred wg.Done above covers both return and panic (the
-			// closure's defers run before HandleError's recover), so wg.Done
-			// must not also be a rescue handler — the pair double-counted on
-			// the panic path and crashed the process with a negative
-			// WaitGroup counter inside the recovery (2026-08-02).
-		})
+		}()
 	}
 
 	wg.Wait()
@@ -4168,6 +4301,12 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	}()
 
 	if returnErr == nil {
+		if writeLegacyUnchanged {
+			if err := markClientScoreAliasReady(ctx); err != nil {
+				return fmt.Errorf("publish client score alias migration state: %w", err)
+			}
+			glog.Infof("[nclm]client score alias schema ready; legacy duplicate payloads will expire naturally\n")
+		}
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores\n",
 			len(clientLocationIds),
@@ -4191,26 +4330,48 @@ func loadClientScores(
 	n int,
 ) (clientScores map[server.Id]*ClientScore, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		locationCounts := map[server.Id]*redis.StringCmd{}
-		locationGroupCounts := map[server.Id]*redis.StringCmd{}
+		type countsRead struct {
+			alias    *redis.StringCmd
+			caller   *redis.StringCmd
+			baseline *redis.StringCmd
+		}
+		locationCounts := map[server.Id]countsRead{}
+		locationGroupCounts := map[server.Id]countsRead{}
 
 		// plain pipeline instead of tx: independent gets across cluster slots
 		pipe := r.Pipeline()
 		for locationId, _ := range locationIds {
-			v := pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId))
-			locationCounts[locationId] = v
+			read := countsRead{
+				caller: pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, clientLocationId)),
+			}
+			if clientLocationId != (server.Id{}) {
+				read.alias = pipe.Get(ctx, clientScoreLocationAliasKey(forceMinimum, rankMode, locationId, clientLocationId))
+				read.baseline = pipe.Get(ctx, clientScoreLocationCountsKey(forceMinimum, rankMode, locationId, server.Id{}))
+			}
+			locationCounts[locationId] = read
 		}
 		for locationGroupId, _ := range locationGroupIds {
-			v := pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId))
-			locationGroupCounts[locationGroupId] = v
+			read := countsRead{
+				caller: pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, clientLocationId)),
+			}
+			if clientLocationId != (server.Id{}) {
+				read.alias = pipe.Get(ctx, clientScoreLocationGroupAliasKey(forceMinimum, rankMode, locationGroupId, clientLocationId))
+				read.baseline = pipe.Get(ctx, clientScoreLocationGroupCountsKey(forceMinimum, rankMode, locationGroupId, server.Id{}))
+			}
+			locationGroupCounts[locationGroupId] = read
 		}
 		// note ignore the error for GET since it will include missing key
 		pipe.Exec(ctx)
 
 		sampleKeyCounts := map[string]int{}
 
-		for locationId, countsCmd := range locationCounts {
-			countsBytes, _ := countsCmd.Bytes()
+		for locationId, read := range locationCounts {
+			effectiveClientLocationId, countsBytes := selectClientScorePayload(
+				clientLocationId,
+				clientScoreCommandBytes(read.alias),
+				clientScoreCommandBytes(read.caller),
+				clientScoreCommandBytes(read.baseline),
+			)
 			if len(countsBytes) == 0 {
 				continue
 			}
@@ -4222,11 +4383,16 @@ func loadClientScores(
 				return
 			}
 			for i, count := range counts {
-				sampleKeyCounts[clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, clientLocationId, i)] = count
+				sampleKeyCounts[clientScoreLocationSampleKey(forceMinimum, rankMode, locationId, effectiveClientLocationId, i)] = count
 			}
 		}
-		for locationGroupId, countsCmd := range locationGroupCounts {
-			countsBytes, _ := countsCmd.Bytes()
+		for locationGroupId, read := range locationGroupCounts {
+			effectiveClientLocationId, countsBytes := selectClientScorePayload(
+				clientLocationId,
+				clientScoreCommandBytes(read.alias),
+				clientScoreCommandBytes(read.caller),
+				clientScoreCommandBytes(read.baseline),
+			)
 			if len(countsBytes) == 0 {
 				continue
 			}
@@ -4238,7 +4404,7 @@ func loadClientScores(
 				return
 			}
 			for i, count := range counts {
-				sampleKeyCounts[clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, clientLocationId, i)] = count
+				sampleKeyCounts[clientScoreLocationGroupSampleKey(forceMinimum, rankMode, locationGroupId, effectiveClientLocationId, i)] = count
 			}
 		}
 

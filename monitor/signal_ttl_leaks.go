@@ -36,6 +36,8 @@ local legacy_ids = 0
 local current_contracts = 0
 local current_ids = 0
 local other = 0
+local suspect_bytes = 0
+local max_suspect_bytes = 0
 local max_pttl = -1
 local max_family = 'none'
 local batches = 0
@@ -65,6 +67,11 @@ repeat
     end
     if pttl > suspect_limit then
       suspect = suspect + 1
+	  local usage = redis.call('MEMORY', 'USAGE', key, 'SAMPLES', 1)
+	  if usage then
+	    suspect_bytes = suspect_bytes + usage
+	    if usage > max_suspect_bytes then max_suspect_bytes = usage end
+	  end
       if key_family == 'legacy-contracts' then
         legacy_contracts = legacy_contracts + 1
       elseif key_family == 'legacy-ids' then
@@ -81,7 +88,8 @@ repeat
 until cursor == '0' or batches >= batch_limit
 
 return {seen, suspect, legacy_contracts, legacy_ids, current_contracts,
-        current_ids, other, max_pttl, max_family}`
+        current_ids, other, suspect_bytes, max_suspect_bytes, max_pttl,
+        max_family}`
 
 type redisTTLAttribution struct {
 	seen             int64
@@ -91,6 +99,8 @@ type redisTTLAttribution struct {
 	currentContracts int64
 	currentIDs       int64
 	other            int64
+	suspectBytes     int64
+	maxSuspectBytes  int64
 	maxPTTLMillis    int64
 	maxFamily        string
 }
@@ -195,12 +205,12 @@ done`, ports[0], ports[len(ports)-1]))
 			context += " The bounded sample was unavailable during this tick: " + attributionErr.Error()
 		} else {
 			observed += fmt.Sprintf(
-				" sample_port=%d sample_examined=%d sample_suspect=%d sample_legacy_contracts=%d sample_legacy_ids=%d sample_current_contracts=%d sample_current_ids=%d sample_other=%d sample_max_pttl_ms=%d sample_max_family=%s",
-				maxTTLNode.port, attribution.seen, attribution.suspect, attribution.legacyContracts, attribution.legacyIDs, attribution.currentContracts, attribution.currentIDs, attribution.other, attribution.maxPTTLMillis, attribution.maxFamily,
+				" sample_port=%d sample_examined=%d sample_suspect=%d sample_legacy_contracts=%d sample_legacy_ids=%d sample_current_contracts=%d sample_current_ids=%d sample_other=%d sample_suspect_bytes=%d sample_max_suspect_bytes=%d sample_max_pttl_ms=%d sample_max_family=%s",
+				maxTTLNode.port, attribution.seen, attribution.suspect, attribution.legacyContracts, attribution.legacyIDs, attribution.currentContracts, attribution.currentIDs, attribution.other, attribution.suspectBytes, attribution.maxSuspectBytes, attribution.maxPTTLMillis, attribution.maxFamily,
 			)
 			evidence = fmt.Sprintf(
-				"A bounded Redis-side sample on port %d examined %d binary-safe keys and found %d over 120 days; legacy_contracts=%d legacy_ids=%d current_contracts=%d current_ids=%d other=%d. The maximum PTTL was %dms in family %s.",
-				maxTTLNode.port, attribution.seen, attribution.suspect, attribution.legacyContracts, attribution.legacyIDs, attribution.currentContracts, attribution.currentIDs, attribution.other, attribution.maxPTTLMillis, attribution.maxFamily,
+				"A bounded Redis-side sample on port %d examined %d binary-safe keys and found %d over 120 days; legacy_contracts=%d legacy_ids=%d current_contracts=%d current_ids=%d other=%d. Those suspect keys occupied %d sampled bytes (largest %d bytes); the maximum PTTL was %dms in family %s.",
+				maxTTLNode.port, attribution.seen, attribution.suspect, attribution.legacyContracts, attribution.legacyIDs, attribution.currentContracts, attribution.currentIDs, attribution.other, attribution.suspectBytes, attribution.maxSuspectBytes, attribution.maxPTTLMillis, attribution.maxFamily,
 			)
 			streamSuspect := attribution.legacyContracts + attribution.legacyIDs + attribution.currentContracts + attribution.currentIDs
 			if 0 < streamSuspect && attribution.other == 0 {
@@ -208,7 +218,8 @@ done`, ports[0], ports[len(ports)-1]))
 				if 0 < attribution.legacyContracts+attribution.legacyIDs {
 					mechanism += " The first cleanup matched only current s2 stream names, while production residue uses legacy s_sk suffixes."
 				}
-				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. Deploy the corrected cleanup that covers legacy s_sk and current s2_sk names; with explicit maintenance authority, run the binary-safe expire-leaked-ttls command. Do not raise maxmemory to conceal immortal residue."
+				mechanism += fmt.Sprintf(" The bounded sample measured %d bytes across those suspect keys; this proves the expiry defect but does not make it the capacity root cause.", attribution.suspectBytes)
+				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. With explicit maintenance authority, run the corrected binary-safe expire-leaked-ttls cleanup that covers legacy s_sk and current s2_sk names. Use redis-bytes for capacity ownership; do not assume this residue creates material headroom, or raise maxmemory to conceal either defect."
 			}
 		}
 		findings = append(findings, finding{
@@ -222,10 +233,10 @@ done`, ports[0], ports[len(ports)-1]))
 			baseline:  "Every node's average TTL stays below two years; the longest intentional Redis exception is an annual net-escrow balance plus 30 days.",
 			observed:  observed,
 			evidence:  evidence,
-			context:   context,
+			context:   context + " TTL and MEMORY USAGE answer different questions: this signal proves invalid expiry metadata; redis-bytes attributes capacity.",
 			action:    action,
-			verify:    "No sampled key exceeds its family TTL, every node's avg_ttl returns below two years, and dataset memory falls without new TTL warnings.",
-			playbook:  "SIGNALS.md §3.3a and §4",
+			verify:    "No sampled key exceeds its family TTL, every node's avg_ttl returns below two years, and no new TTL warning appears; verify capacity recovery independently with redis-bytes and redis-memory.",
+			playbook:  "SIGNALS.md §3.3a, §3.3b, and §4",
 		})
 	}
 	if len(unreachable) > 0 {
@@ -256,8 +267,8 @@ func sampleRedisTTLAttribution(ctx context.Context, env *probeEnv, h *host, port
 		return redisTTLAttribution{}, err
 	}
 	fields := strings.Fields(out)
-	if len(fields) != 9 {
-		return redisTTLAttribution{}, fmt.Errorf("expected 9 attribution fields, got %d", len(fields))
+	if len(fields) != 11 {
+		return redisTTLAttribution{}, fmt.Errorf("expected 11 attribution fields, got %d", len(fields))
 	}
 	attribution := redisTTLAttribution{
 		seen:             atoi64(fields[0]),
@@ -267,8 +278,10 @@ func sampleRedisTTLAttribution(ctx context.Context, env *probeEnv, h *host, port
 		currentContracts: atoi64(fields[4]),
 		currentIDs:       atoi64(fields[5]),
 		other:            atoi64(fields[6]),
-		maxPTTLMillis:    atoi64(fields[7]),
-		maxFamily:        fields[8],
+		suspectBytes:     atoi64(fields[7]),
+		maxSuspectBytes:  atoi64(fields[8]),
+		maxPTTLMillis:    atoi64(fields[9]),
+		maxFamily:        fields[10],
 	}
 	if attribution.seen <= 0 {
 		return redisTTLAttribution{}, fmt.Errorf("attribution sample examined no keys")

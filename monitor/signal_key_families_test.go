@@ -12,8 +12,8 @@ func TestKeyFamiliesSignalSyntheticKeyFamilyGrowth(t *testing.T) {
 	populateMetric(t, stateDir, "redis/family/foo:<id>", 1000, 1000, 1000)
 	source := &syntheticSource{
 		hostFn: func(_ HostSettings, command string) (string, error) {
-			if strings.Contains(command, "sort -k2") {
-				return "6380 9000000", nil
+			if strings.Contains(command, "INFO memory") {
+				return "6380 9000000 10000000\n6381 4000000 10000000", nil
 			}
 			return "", nil
 		},

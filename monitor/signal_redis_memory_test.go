@@ -54,7 +54,7 @@ func TestRedisMemorySignalSyntheticCriticalAndSkewedNodes(t *testing.T) {
 	}
 }
 
-func TestRedisMemorySignalExplainsImpossibleTTLAtCriticalWall(t *testing.T) {
+func TestRedisMemorySignalSeparatesImpossibleTTLFromCapacityRoot(t *testing.T) {
 	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
 		if strings.Contains(command, "for p in") {
 			return "6406 12884738624 12884901888 12493731078 0 1504 volatile-ttl 5793319 4012927 863380622381372 2016434 0 1043857 0", nil
@@ -73,11 +73,12 @@ func TestRedisMemorySignalExplainsImpossibleTTLAtCriticalWall(t *testing.T) {
 		"keys=5793319",
 		"expiring_keys=4012927",
 		"avg_ttl_days=",
-		"duration-as-nanoseconds stream keys",
+		"does not measure the residue's bytes",
+		"redis-bytes for memory ownership",
 		"explicit maintenance authority",
-		"expire-leaked-ttls",
-		"average TTL returns below two years",
-		"SIGNALS.md §3.3a and §5.4",
+		"MEMORY USAGE evidence",
+		"returns average TTL below two years",
+		"SIGNALS.md §3.3a, §3.3b, and §5.4",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("critical impossible-TTL diagnosis missing %q: %s", want, markdown)
@@ -111,12 +112,10 @@ func TestRedisMemorySignalDetectsAggregateHostCapacityDeficit(t *testing.T) {
 		"capacity_deficit_gib=8.4",
 		"critical_nodes=2",
 		"Do not increase maxmemory",
-		"explicit maintenance authority",
-		"bringyourctl streams expire-leaked-ttls",
-		"clamps leaked keys to an 8-hour TTL",
-		"does not create immediate host capacity",
+		"measure its bytes before counting it as capacity relief",
+		"do not assume that clamping a small residue resolves this deficit",
 		"unused swap is not healthy Redis capacity",
-		"SIGNALS.md §3.1, §3.3a, and §5.4",
+		"SIGNALS.md §3.1, §3.3a, §3.3b, and §5.4",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("aggregate host-capacity diagnosis missing %q: %s", want, markdown)

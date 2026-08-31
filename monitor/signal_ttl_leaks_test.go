@@ -12,7 +12,7 @@ func TestTTLLeaksSignalSyntheticDurationAsSecondsResidue(t *testing.T) {
 			return "6380 6574864 4938147 508792685310180\n6381 6450000 4820000 908000000000000\n6382 100 90 86400000", nil
 		}
 		if strings.Contains(command, "EVAL_RO") && strings.Contains(command, "base64 -d") && strings.Contains(command, "-p 6381") {
-			return "4914\n99\n47\n52\n0\n0\n0\n28799985310940036\nlegacy-contracts", nil
+			return "4914\n99\n47\n52\n0\n0\n0\n12694\n185\n28799985310940036\nlegacy-contracts", nil
 		}
 		t.Fatalf("unexpected TTL command: %s", command)
 		return "", nil
@@ -29,7 +29,9 @@ func TestTTLLeaksSignalSyntheticDurationAsSecondsResidue(t *testing.T) {
 		!strings.Contains(alert.Observed, "max_avg_ttl_ms=908000000000000") ||
 		!strings.Contains(alert.Observed, "sample_legacy_contracts=47") ||
 		!strings.Contains(alert.Observed, "sample_legacy_ids=52") ||
+		!strings.Contains(alert.Observed, "sample_suspect_bytes=12694") ||
 		!strings.Contains(alert.Mechanism, "legacy s_sk suffixes") ||
+		!strings.Contains(alert.Mechanism, "does not make it the capacity root cause") ||
 		!strings.Contains(alert.Action, "binary-safe expire-leaked-ttls") {
 		t.Fatalf("fleet TTL residue alert lost aggregation, attribution, or remediation: %+v", alert)
 	}
@@ -41,7 +43,7 @@ func TestTTLLeaksSignalSyntheticUnknownFamilyDoesNotPrescribeStreamCleanup(t *te
 			return "6380 10000 9000 508792685310180", nil
 		}
 		if strings.Contains(command, "EVAL_RO") {
-			return "5000 10 0 0 0 0 10 28799985312000000 other", nil
+			return "5000 10 0 0 0 0 10 2000 300 28799985312000000 other", nil
 		}
 		t.Fatalf("unexpected TTL command: %s", command)
 		return "", nil

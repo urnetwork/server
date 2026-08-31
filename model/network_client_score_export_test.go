@@ -145,6 +145,7 @@ func TestClientScoreTargetFanoutEncodesSharedPayloadOnce(t *testing.T) {
 			sample: func(callerId server.Id, sampleIndex int) string {
 				return fmt.Sprintf("sample/%s/%d", callerId, sampleIndex)
 			},
+			alias: func(callerId server.Id) string { return "alias/" + callerId.String() },
 		},
 		func(scores map[server.Id]*ClientScore) ([]byte, []byte, []int, func(int) []byte) {
 			size := len(scores)
@@ -157,6 +158,7 @@ func TestClientScoreTargetFanoutEncodesSharedPayloadOnce(t *testing.T) {
 					return []byte(fmt.Sprintf("sample=%d", size))
 				}
 		},
+		false,
 		func(set clientScoreRedisSet) error {
 			valuesByKey[set.key] = string(set.value)
 			return nil
@@ -171,16 +173,113 @@ func TestClientScoreTargetFanoutEncodesSharedPayloadOnce(t *testing.T) {
 	if got, want := fmt.Sprint(sampleEncodeSizes), "[2 1]"; got != want {
 		t.Fatalf("sample encoded provider-set sizes = %s, want %s", got, want)
 	}
+	if got := valuesByKey[fmt.Sprintf("sample/%s/0", server.Id{})]; got != "sample=2" {
+		t.Fatalf("canonical baseline sample = %q, want shared two-provider payload", got)
+	}
 	for _, callerId := range []server.Id{callerUnfiltered, callerIrrelevantBlock} {
-		if got := valuesByKey[fmt.Sprintf("sample/%s/0", callerId)]; got != "sample=2" {
-			t.Fatalf("unchanged caller %s sample = %q, want shared two-provider payload", callerId, got)
+		if _, ok := valuesByKey[fmt.Sprintf("sample/%s/0", callerId)]; ok {
+			t.Fatalf("unchanged caller %s retained a duplicate sample payload", callerId)
+		}
+		if got := valuesByKey["alias/"+callerId.String()]; got != clientScoreAliasBaselineValue {
+			t.Fatalf("unchanged caller %s alias = %q, want baseline alias", callerId, got)
 		}
 	}
 	if got := valuesByKey[fmt.Sprintf("sample/%s/0", callerFiltered)]; got != "sample=1" {
 		t.Fatalf("filtered caller sample = %q, want one-provider payload", got)
 	}
+	if got := valuesByKey["alias/"+callerFiltered.String()]; got != clientScoreAliasCallerValue {
+		t.Fatalf("filtered caller alias = %q, want caller-specific alias", got)
+	}
 	if got, want := len(valuesByKey), 9; got != want {
-		t.Fatalf("emitted key count = %d, want %d (counts/filter/sample for every caller)", got, want)
+		t.Fatalf("emitted key count = %d, want %d (two payloads plus three aliases)", got, want)
+	}
+}
+
+// The first alias-aware pass refreshes caller-keyed values before publishing
+// the schema-ready marker. This leaves the normal key TTL as a rolling-reader
+// grace window; later passes use the sparse form above.
+func TestClientScoreTargetFanoutCompatibilityPassKeepsLegacyPayloads(t *testing.T) {
+	callerA := server.NewId()
+	callerB := server.NewId()
+	networkId := server.NewId()
+	clientScores := map[server.Id]*ClientScore{
+		server.NewId(): {NetworkId: networkId},
+	}
+	valuesByKey := map[string]string{}
+	encodeCalls := 0
+	sampleEncodeCalls := 0
+	err := emitClientScoreTargetFanout(
+		[]server.Id{{}, callerA, callerB},
+		clientScores,
+		nil,
+		clientScoreTargetKeys{
+			counts: func(callerId server.Id) string { return "counts/" + callerId.String() },
+			filter: func(callerId server.Id) string { return "filter/" + callerId.String() },
+			sample: func(callerId server.Id, sampleIndex int) string {
+				return fmt.Sprintf("sample/%s/%d", callerId, sampleIndex)
+			},
+			alias: func(callerId server.Id) string { return "alias/" + callerId.String() },
+		},
+		func(map[server.Id]*ClientScore) ([]byte, []byte, []int, func(int) []byte) {
+			encodeCalls++
+			return []byte("counts"), []byte("filter"), []int{1}, func(int) []byte {
+				sampleEncodeCalls++
+				return []byte("sample")
+			}
+		},
+		true,
+		func(set clientScoreRedisSet) error {
+			valuesByKey[set.key] = string(set.value)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encodeCalls != 1 || sampleEncodeCalls != 1 {
+		t.Fatalf("encode calls=%d sample calls=%d, want one shared encoding", encodeCalls, sampleEncodeCalls)
+	}
+	for _, callerId := range []server.Id{{}, callerA, callerB} {
+		if got := valuesByKey[fmt.Sprintf("sample/%s/0", callerId)]; got != "sample" {
+			t.Fatalf("compatibility payload for caller %s = %q, want sample", callerId, got)
+		}
+	}
+	for _, callerId := range []server.Id{callerA, callerB} {
+		if got := valuesByKey["alias/"+callerId.String()]; got != clientScoreAliasBaselineValue {
+			t.Fatalf("compatibility alias for caller %s = %q, want baseline", callerId, got)
+		}
+	}
+	if got, want := len(valuesByKey), 11; got != want {
+		t.Fatalf("compatibility key count=%d, want %d", got, want)
+	}
+}
+
+func TestSelectClientScorePayloadPreservesLegacyAndOverrides(t *testing.T) {
+	callerId := server.NewId()
+	for _, test := range []struct {
+		name        string
+		alias       string
+		caller      string
+		baseline    string
+		wantCaller  server.Id
+		wantPayload string
+	}{
+		{name: "legacy missing alias", caller: "legacy", baseline: "shared", wantCaller: callerId, wantPayload: "legacy"},
+		{name: "explicit override", alias: clientScoreAliasCallerValue, caller: "override", baseline: "shared", wantCaller: callerId, wantPayload: "override"},
+		{name: "shared baseline", alias: clientScoreAliasBaselineValue, caller: "legacy", baseline: "shared", wantCaller: server.Id{}, wantPayload: "shared"},
+		{name: "evicted baseline falls back safely", alias: clientScoreAliasBaselineValue, caller: "legacy", wantCaller: callerId, wantPayload: "legacy"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gotCaller, gotPayload := selectClientScorePayload(
+				callerId,
+				[]byte(test.alias),
+				[]byte(test.caller),
+				[]byte(test.baseline),
+			)
+			if gotCaller != test.wantCaller || string(gotPayload) != test.wantPayload {
+				t.Fatalf("caller=%s payload=%q, want caller=%s payload=%q", gotCaller, gotPayload, test.wantCaller, test.wantPayload)
+			}
+		})
 	}
 }
 
