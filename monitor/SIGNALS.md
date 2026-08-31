@@ -6095,6 +6095,16 @@ That is a probe-method mismatch, not evidence that all blocks are down. Use the
 host-side deploy worker's readiness result or resolve each block's live
 allocation and query it directly.
 
+The exact-address control was repeated at 20:39Z on 2026-08-31 after a sample
+again returned uniform Proxy 404s through an edge IPv6 address. On edge-1,
+Vault's configured `eno2` IPv6 exactly matched the global address on the live
+interface. Through both that IPv6 address and the corresponding routed public
+IPv4 address, the same LB returned HTTP 200 for the hidden API `g1` status
+route and HTTP 404 for the Proxy `g1` status route. Address-family reachability,
+TLS, and the LB status mechanism were therefore healthy; only the unsupported
+Proxy route was absent. Do not change edge IPv6 or router state in response to
+this uniform Proxy-only 404 signature.
+
 **Public-identity drift signature (fireside, 2026-08-28):** a proxy host may be
 healthy at its current address while a future deploy is configured from a
 stale address. Compare all five sources before changing routing: the live
