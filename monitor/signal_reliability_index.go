@@ -135,6 +135,8 @@ func (state reliabilityIndexState) driftReason() string {
 	switch {
 	case !state.partitioned:
 		return ""
+	case state.finalizationOnly():
+		return "the covering replacement is complete, but the old non-covering parent index still needs finalization"
 	case state.oldExists:
 		return "the old non-covering parent index is still present"
 	case !state.desiredExists:
@@ -150,6 +152,16 @@ func (state reliabilityIndexState) driftReason() string {
 	default:
 		return ""
 	}
+}
+
+func (state reliabilityIndexState) finalizationOnly() bool {
+	return state.partitioned &&
+		state.oldExists &&
+		state.desiredExists &&
+		state.desiredValid &&
+		state.desiredShapeMatches() &&
+		state.attachedCount == state.partitionCount &&
+		state.invalidChildren == 0
 }
 
 func (reliabilityIndexProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -176,11 +188,19 @@ func (reliabilityIndexProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	if state.desiredExists {
 		evidence += " desired_definition=" + state.desiredDefinition
 	}
+	mechanism := "Production was partitioned before the covering index gained INCLUDE (network_id, client_id). CREATE INDEX IF NOT EXISTS cannot reshape the existing parent or its partition children, so score-window scans retain heap fetches until the explicit per-partition online upgrade finishes."
+	alertContext := "This is an operational database-maintenance alert, not a deploy-only repair. A service release cannot create the physical index, and the monitor deliberately does not start it. Each partition build scans and sorts one large partition, so beginning it during a protected measurement can disturb I/O even though CREATE INDEX CONCURRENTLY keeps writes available. Repeated taskworker warnings are repeated observations of this one catalog state, not independent defects."
+	action := "Do not start the upgrade while the current measurement must remain undisturbed. After explicit maintenance authorization, run `bringyourctl model upgrade-client-reliability-index` from the current server source with bounded parallelism, monitor database I/O, locks, replication lag, and free space, and rerun the same command if interrupted. Do not CREATE INDEX on the partitioned parent inline, drop the old index first, or deploy/restart taskworkers to silence this alert. If the desired-name index has the wrong shape, stop for DBA inspection before dropping anything."
+	if state.finalizationOnly() {
+		mechanism = "The covering replacement already has the exact INCLUDE shape, every partition child is attached and valid, and PostgreSQL has marked the parent valid. Only the supported upgrade's final old-parent DROP remains; an earlier run may have stopped before that step or exhausted its bounded lock retries."
+		alertContext = fmt.Sprintf("This is finalization-only operational maintenance, not a service deployment or another partition build. The supported command will skip every completed child rather than scan or sort the %d partitions again, then attempt the old partitioned-index DROP under a 15-second lock timeout with bounded retries. The drop still takes a metadata lock, so wait until the protected measurement permits that lock even though the expensive build phase is complete.", state.partitionCount)
+		action = "Do not finalize while the current measurement must remain undisturbed. After explicit maintenance authorization, rerun `bringyourctl model upgrade-client-reliability-index`; require it to skip all completed partition children and finish the supported old-parent drop. If the lock is busy, let the command's bounded retries fail and rerun later. Do not manually drop either index, rebuild the already-valid children, or deploy/restart taskworkers to silence this alert."
+	}
 	return []finding{{
 		probeId: "pg/reliability-index", tier: tierWarn,
 		class: "reliability-index-drift", target: target, frame: "table=client_reliability",
 		symptom:   "client_reliability index drift: " + reason,
-		mechanism: "Production was partitioned before the covering index gained INCLUDE (network_id, client_id). CREATE INDEX IF NOT EXISTS cannot reshape the existing parent or its partition children, so score-window scans retain heap fetches until the explicit per-partition online upgrade finishes.",
+		mechanism: mechanism,
 		baseline:  "The old parent index is absent; client_reliability_valid_bnch_net_client has the exact covering shape, is valid, and has one valid attached child index per table partition.",
 		observed: fmt.Sprintf(
 			"partitioned=%t old_index_present=%t desired_index_present=%t desired_index_valid=%t desired_shape_matches=%t table_partitions=%d attached_child_indexes=%d invalid_child_indexes=%d",
@@ -194,8 +214,8 @@ func (reliabilityIndexProbe) check(ctx context.Context, env *probeEnv) ([]findin
 			state.invalidChildren,
 		),
 		evidence: evidence,
-		context:  "This is an operational database-maintenance alert, not a deploy-only repair. A service release cannot create the physical index, and the monitor deliberately does not start it. Each partition build scans and sorts one large partition, so beginning it during a protected measurement can disturb I/O even though CREATE INDEX CONCURRENTLY keeps writes available. Repeated taskworker warnings are repeated observations of this one catalog state, not independent defects.",
-		action:   "Do not start the upgrade while the current measurement must remain undisturbed. After explicit maintenance authorization, run `bringyourctl model upgrade-client-reliability-index` from the current server source with bounded parallelism, monitor database I/O, locks, replication lag, and free space, and rerun the same command if interrupted. Do not CREATE INDEX on the partitioned parent inline, drop the old index first, or deploy/restart taskworkers to silence this alert. If the desired-name index has the wrong shape, stop for DBA inspection before dropping anything.",
+		context:  alertContext,
+		action:   action,
 		verify:   "The command reports that client_reliability_valid_bnch_net_client matches the desired shape across every partition; this probe then returns healthy, the old parent is absent, the desired parent and every attached child are valid, and no new [crp] secondary-index-drift warning appears for five minutes after log-ingestion delay.",
 		playbook: "SIGNALS.md §8.10",
 	}}, nil

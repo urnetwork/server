@@ -4509,6 +4509,16 @@ performance warning rather than data loss or a reason to stop taskworkers.
 Without the INCLUDE payload, wide reliability score scans must fetch
 `network_id` and `client_id` from the heap instead of remaining index-only.
 
+The first live catalog probe then refined that warning at 16:42:34Z:
+`client_reliability_valid_bnch_net_client` already had the exact covering
+shape, PostgreSQL marked it valid, and all 34 table partitions had one valid
+attached child. Only the old parent remained. That is finalization-only drift,
+not evidence that the expensive partition builds still need to run. In this
+state the supported command skips every child and attempts only its final old
+partitioned-index drop under the existing 15-second lock timeout and bounded
+retry policy. It still needs an operational window because the metadata drop
+takes a lock, but it does not rescan or sort the 34 large partitions.
+
 The focused probe reads only `pg_catalog`; it never scans
 `client_reliability` rows. Require all of these as one physical contract:
 

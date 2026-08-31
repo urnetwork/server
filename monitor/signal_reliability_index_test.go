@@ -75,6 +75,36 @@ func TestReliabilityIndexSignalReportsInterruptedUpgrade(t *testing.T) {
 	}
 }
 
+func TestReliabilityIndexSignalReportsFinalizationOnlyWithoutRebuild(t *testing.T) {
+	definition := "CREATE INDEX client_reliability_valid_bnch_net_client ON ONLY public.client_reliability" + reliabilityIndexDesiredDefinitionSuffix
+	settings := reliabilityIndexSyntheticSettings(t, Row{
+		"t", "t", "t", "t", definition, "34", "34", "0",
+	})
+	alerts, err := NewReliabilityIndexSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "reliability-index-drift").Markdown()
+	for _, want := range []string{
+		"covering replacement is complete",
+		"Only the supported upgrade's final old-parent DROP remains",
+		"finalization-only operational maintenance",
+		"skip every completed child",
+		"rather than scan or sort the 34 partitions again",
+		"15-second lock timeout",
+		"wait until the protected measurement permits that lock",
+		"require it to skip all completed partition children",
+		"Do not manually drop either index",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("finalization-only alert missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "Each partition build scans and sorts one large partition") {
+		t.Fatalf("finalization-only alert incorrectly prescribed another build:\n%s", markdown)
+	}
+}
+
 func TestReliabilityIndexSignalHealthyAtExactPhysicalContract(t *testing.T) {
 	definition := "CREATE INDEX client_reliability_valid_bnch_net_client ON ONLY public.client_reliability" + reliabilityIndexDesiredDefinitionSuffix
 	settings := reliabilityIndexSyntheticSettings(t, Row{
