@@ -634,6 +634,11 @@ observation-side memory. The production window is therefore two minutes every
 45 seconds: it covers more than two reconciliations and the observed
 sub-minute late-ingestion event while retaining measured cap headroom. A
 future two-minute cap still fails visibly; it is never shortened silently.
+The clean `c843c192` watcher completed a full cadence with all eight streams
+stable and every two-minute query below the cap; the succeeding `c1ab149b`
+watcher repeated that result after the corrected net-escrow alert text was
+loaded. Neither emitted `tailer-reconcile`, `tailer-silent`,
+`tailer-restarting`, or `cannot-observe`.
 
 ---
 
