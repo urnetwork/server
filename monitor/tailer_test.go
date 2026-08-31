@@ -705,6 +705,22 @@ func TestStandingReconciliationBoundsAdvancingContinuationPages(t *testing.T) {
 	}
 }
 
+func TestStandingTailAttributesDirectDroppedEntriesToAffectedService(t *testing.T) {
+	tailer := newLogTailer("proxy", nil)
+	tailer.classify(`[warpctl][loki-tail-dropped-entries] service=proxy count=2`)
+
+	finding := findingByClass(t, tailer.drainWindow(), "loki-tail-dropped-streams")
+	if finding.healthy {
+		t.Fatal("direct dropped_entries response was classified healthy")
+	}
+	if finding.target != "proxy" {
+		t.Fatalf("direct dropped_entries target = %q, want proxy", finding.target)
+	}
+	if !strings.Contains(finding.observed, "rate=1/min") {
+		t.Fatalf("direct dropped_entries observation = %q, want one loss response", finding.observed)
+	}
+}
+
 // Minute volume is the liquidity/retry-amplification signal, but it is not a
 // synchronized microburst when canonical attempts occupy different seconds.
 // The subsequent empty window must also resolve a prior burst identity.

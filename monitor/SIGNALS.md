@@ -698,6 +698,23 @@ the loss classifier and recovery path; it does not validate the producer fix,
 because the deployed Proxy image still predates the verbosity gate. That gate
 must be verified on a later full synchronization after a Proxy deployment.
 
+The same control exposed a second observability defect in Warpctl. Loki tail
+responses already carry `dropped_entries` with the affected stream labels and
+timestamps, and Warpctl decoded the field, but `LiveTail` ignored it and printed
+only `streams`. Losses smaller than Loki's ten-entry reset list were therefore
+silent, and a reset log in the Grafana service could not identify which of the
+eight standing service tails had dropped data. Warp commit `26089b2` fixes the
+client by emitting one local
+`[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` summary for
+each non-empty response. It deliberately omits labels and timestamps, which
+may be sensitive or high-cardinality. The monitor maps that direct summary to
+`loki-tail-dropped-streams`; the owning standing tail supplies exact service
+attribution, while the same bounded range reconciliation recovers contents.
+Deterministic Warpctl tests decode synthetic dropped metadata, require the
+summary, and prove no label or timestamp reaches output. A server synthetic
+test requires the direct summary to open the existing class against the
+affected service.
+
 An independent audit of Grafana's own low-rate errors then found a second,
 concrete transport gap. With the v151 watcher and all eight external tails
 stable, Loki repeatedly emitted

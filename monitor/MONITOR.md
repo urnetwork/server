@@ -522,7 +522,10 @@ probes; every other signal and host continues. Unknown host names fail closed.
    same burst made Loki reset its dropped-stream metadata 18,165 times/minute,
    which is now an explicit `loki-tail-dropped-streams` finding. Deterministic
    tests cover partition recovery, boundary recovery, non-advancement, and the
-   page bound.
+   page bound. Warpctl at Warp commit `26089b2` also surfaces every non-empty
+   `dropped_entries` tail response as one privacy-safe service/count summary;
+   the monitor maps that direct, service-attributed evidence to the same class
+   instead of waiting for Loki's coarser reset log.
    A later exact 60-second Loki backend-EOF cadence exposed
    Warp's ring TCP application read deadline; the classifier now distinguishes
    that internal EOF from expected client cancellation while reconciliation
