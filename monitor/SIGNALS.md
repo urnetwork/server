@@ -7650,6 +7650,102 @@ unrecoverable from Mimir and clear only when they age out of the seven-day
 dashboard range; their continued presence is not evidence that a successfully
 verified rollout regressed.
 
+### 11.22 Planetoid backup archive completeness and freshness
+
+Probe: `backup-archives`
+
+Planetoid is the offsite recovery boundary for four independently completed
+archives: `pg`, `redis`, `github-urnetwork`, and `github-urfoundation`. Their
+writers atomically replace final artifacts and publish two Prometheus textfile
+families: `urnetwork_backup_archive_latest_timestamp_seconds` carries the
+completed file timestamp plus generation, while
+`urnetwork_backup_archive_in_progress` carries one Boolean per archive. Fluent
+Bit reads those files and remote-writes them with `env`, `host`, and `job`
+labels. Grafana is only a renderer; a blank panel is not enough to distinguish
+no completed backup from a missing collector.
+
+The `backup-archives` probe queries raw Mimir through a reachable loopback
+Grafana service gateway for every monitor-inventory host with the `backup`
+role. It expects exactly the four archive names above. Samples older than 90
+seconds are observation loss even when their archive timestamp value is old.
+The newest valid generation is selected during the short Mimir staleness
+overlap after a label change. Metric values must be finite, generations must
+be non-empty, archive timestamps may not be more than five minutes in the
+future, and each in-progress gauge must be uniquely present and equal to zero
+or one. The query carries no credentials, repository names, paths, or backup
+contents.
+
+HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
+at least one complete generation; and each newest completion is no more than
+five days old. BROKEN:
+
+- `backup-archive-metrics-missing` after two one-minute probes means the
+  producer, textfile collector, authenticated remote-write path, or Mimir
+  ingestion is absent. A fresh `node_uname_info` control does not clear this
+  class because it comes from a different collector.
+- `backup-archive-metrics-invalid` is immediate for an ambiguous progress
+  series, a value outside `{0,1}`, an empty generation, or an impossible
+  timestamp. Do not coerce these values in Grafana.
+- `backup-archive-missing` after two probes means no atomic completed artifact
+  exists. `in_progress=1` makes a first run operationally pending; it does not
+  create a recovery point.
+- `backup-archive-stale` is immediate once the newest real completion is more
+  than five days old. A current scrape of an old value proves the telemetry
+  path while reporting an expired recovery-point objective.
+
+The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
+ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both
+root-owned `.prom` files were readable by the `fluent-bit` user, and a bounded
+stdout-only Fluent Bit 5.1.1 run parsed and emitted all six current archive
+series. The long-running unit emitted none. An exact synthetic discriminator
+preserving the classic-config value's outer quotes enabled only the middle
+`uname` collector from `"cpu,uname,textfile"`: Fluent Bit retained the quote
+bytes and interpreted the boundary names as `"cpu` and `textfile"`. Removing
+the wrapping quotes enabled `textfile` immediately. Xops commit `19f8123`
+contains the unquoted config and a boundary-token regression. After
+`run-planetoid.sh` applied it, the process started at `2026-09-01T22:29:55Z`;
+both Fireside and Crisp then returned four current progress series and two
+completed-generation series directly from Mimir. This fixed observation and
+dashboard input, not the underlying backup age.
+
+The newly visible state showed real operational failures. The PostgreSQL and
+Redis values still named August 20 generations, outside the five-day band.
+The data unit's direct journal showed that its September 1 04:00 run waited the
+full 900 seconds for `/run/media/by/archive1`, then exited because the udisks
+mount was absent. The timer remains scheduled for 04:00, while that session
+mount is not guaranteed at boot. The first GitHub job began at
+`2026-09-01T21:30:55Z`; it mirrored all 47 urnetwork repositories (about 69.9
+GB) and remained in its atomic compression phase with no final organization
+tarball at the observation boundary. Preserve that job rather than restarting
+it merely to make the panel change.
+
+An additional metrics-writer race can falsely show an active GitHub job as
+idle: the standalone `--refresh-metrics` process initializes both shell-local
+in-progress values to zero. An unconditional Ansible refresh invoked alongside
+the oneshot therefore overwrote its live `1`. The durable playbook contract is
+to read `github-backup-archive.service` state and skip the standalone refresh
+while it is active, activating, or reloading. The running writer remains the
+sole owner; its exit path publishes zero. This is a visibility fix and must not
+be treated as completing either tarball.
+
+Ownership is deliberately split. The quote bug, refresh race, atomic writers,
+and monitor detector are software/configuration work. Making the archive disk
+available before unattended timers and authorizing a catch-up run are operator
+work. A persistent mount may require an approved fstab/systemd-mount design;
+replacement media and additional free capacity are hardware work. Software
+cannot attach an absent disk or create archive capacity. Never fabricate a
+timestamp, rename a partial artifact, refresh a stale value, or raise the
+five-day threshold to clear these classes.
+
+Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
+as the Fluent Bit identity; reproduce the textfile input with a bounded
+stdout-only process; inspect the deployed unquoted metrics list; then read the
+owning systemd unit, mountpoint, free space, and bounded journal. Verify a
+repair only after the real unit exits successfully, the completed artifact and
+manifest validate on mounted media, and two consecutive direct Mimir reads
+show the same new generation inside the five-day band. The Grafana dashboard
+must agree with those raw inputs, but it is never the proof source.
+
 ---
 
 ## 12. Taskworker drain (deploy) — TASKDRAIN1

@@ -1,0 +1,340 @@
+package monitor
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	backupArchiveMetricFreshness = 90 * time.Second
+	backupArchiveMaximumAge      = 5 * 24 * time.Hour
+	backupArchiveFutureTolerance = 5 * time.Minute
+)
+
+var backupArchiveNames = []string{
+	"pg",
+	"redis",
+	"github-urnetwork",
+	"github-urfoundation",
+}
+
+// Signal backup-archives implements SIGNALS.md §11.22. It reads the exact
+// Planetoid textfile series through Mimir so a healthy node exporter collector
+// or Grafana frontend cannot hide missing or stale completed backup archives.
+func NewBackupArchivesSignal() Signal {
+	return &signalAdapter{
+		number: "11.22", key: "backup-archives", name: "Planetoid backup archive freshness",
+		probe: backupArchivesProbe{},
+	}
+}
+
+type backupArchivesProbe struct{}
+
+func (backupArchivesProbe) id() string             { return "observability/backup-archives" }
+func (backupArchivesProbe) tier() string           { return tierPage }
+func (backupArchivesProbe) cadence() time.Duration { return time.Minute }
+
+type backupArchiveLatestSample struct {
+	generation string
+	createdAt  time.Time
+}
+
+type backupArchiveObservation struct {
+	host            string
+	archive         string
+	latest          []backupArchiveLatestSample
+	progress        []float64
+	invalidLatest   []string
+	invalidProgress []string
+	staleScrapes    int
+}
+
+func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	backupHosts := env.cfg.hostsWithRole("backup")
+	if len(backupHosts) == 0 {
+		return nil, fmt.Errorf("backup archives: no backup host in monitor inventory")
+	}
+	metricHosts := env.cfg.hostsWithRole("services")
+	if len(metricHosts) == 0 {
+		return nil, fmt.Errorf("backup archives: no services host in inventory for the loopback Mimir query")
+	}
+
+	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
+		url.QueryEscape(backupArchivesQuery(env.cfg.env, backupHosts))
+	out, metricHost, err := shellFirstServiceGateway(
+		ctx,
+		env.runner,
+		metricHosts,
+		nil,
+		"curl -fsS --max-time 15 '"+queryURL+"'",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("backup archives: query Mimir through service gateways: %w", err)
+	}
+
+	var response mimirInstantResponse
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return nil, fmt.Errorf("backup archives: decode Mimir response: %w", err)
+	}
+	if response.Status != "success" || response.Data.ResultType != "vector" {
+		return nil, fmt.Errorf(
+			"backup archives: Mimir status=%q result_type=%q error=%q",
+			response.Status,
+			response.Data.ResultType,
+			response.Error,
+		)
+	}
+
+	expectedHosts := make(map[string]bool, len(backupHosts))
+	observations := map[string]*backupArchiveObservation{}
+	for _, host := range backupHosts {
+		expectedHosts[host.name] = true
+		for _, archive := range backupArchiveNames {
+			key := backupArchiveKey(host.name, archive)
+			observations[key] = &backupArchiveObservation{host: host.name, archive: archive}
+		}
+	}
+
+	now := env.now().UTC()
+	for _, series := range response.Data.Result {
+		hostName := series.Metric["host"]
+		archive := series.Metric["archive"]
+		if !expectedHosts[hostName] || !isBackupArchiveName(archive) {
+			continue
+		}
+		observation := observations[backupArchiveKey(hostName, archive)]
+		observedAt, value, err := mimirInstantValue(series.Value)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"backup archives: parse %s sample for %s/%s: %w",
+				series.Metric["__name__"], hostName, archive, err,
+			)
+		}
+		scrapeAge := now.Sub(observedAt)
+		if scrapeAge > backupArchiveMetricFreshness {
+			observation.staleScrapes++
+			continue
+		}
+		if scrapeAge < -30*time.Second {
+			observation.invalidLatest = append(
+				observation.invalidLatest,
+				fmt.Sprintf("future_scrape=%s", observedAt.Format(time.RFC3339)),
+			)
+			continue
+		}
+
+		switch series.Metric["__name__"] {
+		case "urnetwork_backup_archive_latest_timestamp_seconds":
+			generation := strings.TrimSpace(series.Metric["generation"])
+			if generation == "" || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+				observation.invalidLatest = append(
+					observation.invalidLatest,
+					fmt.Sprintf("generation=%q value=%v", generation, value),
+				)
+				continue
+			}
+			createdAt := unixFloatTime(value)
+			if createdAt.After(now.Add(backupArchiveFutureTolerance)) {
+				observation.invalidLatest = append(
+					observation.invalidLatest,
+					fmt.Sprintf("generation=%q future_timestamp=%s", generation, createdAt.Format(time.RFC3339)),
+				)
+				continue
+			}
+			observation.latest = append(observation.latest, backupArchiveLatestSample{
+				generation: generation,
+				createdAt:  createdAt,
+			})
+		case "urnetwork_backup_archive_in_progress":
+			if math.IsNaN(value) || math.IsInf(value, 0) || (value != 0 && value != 1) {
+				observation.invalidProgress = append(
+					observation.invalidProgress,
+					fmt.Sprintf("value=%v", value),
+				)
+				continue
+			}
+			observation.progress = append(observation.progress, value)
+		}
+	}
+
+	keys := make([]string, 0, len(observations))
+	for key := range observations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	findings := make([]finding, 0, len(keys)*2)
+	for _, key := range keys {
+		findings = append(findings, evaluateBackupArchive(now, observations[key], metricHost.name)...)
+	}
+	return findings, nil
+}
+
+func backupArchivesQuery(environment string, hosts []*host) string {
+	hostNames := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		hostNames = append(hostNames, regexp.QuoteMeta(host.name))
+	}
+	sort.Strings(hostNames)
+	return fmt.Sprintf(
+		`{__name__=~%s,env=%s,host=~%s}`,
+		strconv.Quote(`urnetwork_backup_archive_(latest_timestamp_seconds|in_progress)`),
+		strconv.Quote(environment),
+		strconv.Quote(strings.Join(hostNames, "|")),
+	)
+}
+
+func backupArchiveKey(host, archive string) string { return host + "\x00" + archive }
+
+func isBackupArchiveName(name string) bool {
+	for _, expected := range backupArchiveNames {
+		if name == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluateBackupArchive(now time.Time, observation *backupArchiveObservation, gateway string) []finding {
+	target := observation.host + "/" + observation.archive
+	findings := []finding{}
+
+	if len(observation.invalidLatest) > 0 || len(observation.invalidProgress) > 0 || len(observation.progress) > 1 {
+		invalid := append([]string(nil), observation.invalidLatest...)
+		invalid = append(invalid, observation.invalidProgress...)
+		if len(observation.progress) > 1 {
+			invalid = append(invalid, fmt.Sprintf("progress_series=%d", len(observation.progress)))
+		}
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: "backup-archive-metrics-invalid", target: target, sustain: 1,
+			symptom:   fmt.Sprintf("%s publishes an invalid or ambiguous backup archive metric", target),
+			mechanism: "The textfile collector accepted a sample whose timestamp, generation, Boolean domain, or label cardinality cannot describe one completed archive and one active-state gauge. Treating it as fresh could conceal clock skew, a partial writer, or concurrent metric producers.",
+			baseline:  "Each expected archive has exactly one fresh in-progress gauge in {0,1}; every completed-archive sample has a non-empty generation and a finite positive timestamp no more than five minutes in the future.",
+			observed: fmt.Sprintf(
+				"invalid=%s fresh_latest_samples=%d fresh_progress_samples=%d stale_scrape_samples=%d metrics_gateway=%s",
+				strings.Join(invalid, ";"), len(observation.latest), len(observation.progress), observation.staleScrapes, gateway,
+			),
+			evidence: "Raw Mimir samples were source-timestamp filtered before their archive timestamp and Boolean value were validated.",
+			context:  "This is a producer or collector contract failure, not proof that the archive media itself is corrupt.",
+			action:   "Inspect the exact Planetoid .prom file and the writer that owns this archive. Restore atomic single-writer exposition and the host clock; do not coerce an invalid value in Grafana or add a second textfile producer.",
+			verify:   "Two consecutive direct Mimir reads return one fresh in-progress series in {0,1}, one unambiguous newest completed generation when present, and no future or malformed value.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-metrics-invalid", target,
+		))
+	}
+
+	if len(observation.progress) == 0 && len(observation.invalidProgress) == 0 {
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: "backup-archive-metrics-missing", target: target, frame: "textfile", sustain: 2,
+			symptom:   fmt.Sprintf("%s has no fresh backup in-progress metric in Mimir", target),
+			mechanism: "The archive writer, Fluent Bit textfile collector, authenticated remote-write route, or Mimir ingestion path is absent. In the 2026-09-01 incident, classic-config quotes made the boundary token `textfile\"`, so middle node metrics such as uname remained healthy while every archive series was silently omitted.",
+			baseline:  "Every expected archive exports one in-progress gauge at least every 15 seconds, and Mimir returns a sample no more than 90 seconds old.",
+			observed: fmt.Sprintf(
+				"fresh_progress_samples=0 fresh_latest_samples=%d stale_scrape_samples=%d metrics_gateway=%s",
+				len(observation.latest), observation.staleScrapes, gateway,
+			),
+			evidence: "The query reads raw Mimir rather than Grafana. A healthy node_uname_info series is only a transport control and does not prove the separately enabled textfile collector.",
+			context:  "This is observation loss until the source .prom file and an isolated collector read are checked; it must not be interpreted as a successful backup or as an empty archive.",
+			action:   "On the configured backup host, verify the .prom files as the fluent-bit user and run a bounded stdout-only textfile collector. Compare the deployed comma list's first and last tokens without printing credentials; wrapping quotes must not be present. If source collection is healthy, trace authenticated remote write and Mimir ingestion before changing dashboard queries.",
+			verify:   "Both Grafana service gateways return fresh in-progress samples for all four archives on two consecutive probes, and the dashboard query sees the same labeled series.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-metrics-missing", target,
+		))
+	}
+
+	if len(observation.latest) == 0 {
+		if len(observation.invalidLatest) == 0 {
+			progress := "unknown"
+			if len(observation.progress) == 1 {
+				progress = strconv.FormatFloat(observation.progress[0], 'f', 0, 64)
+			}
+			findings = append(findings, finding{
+				probeId: "observability/backup-archives", tier: tierPage,
+				class: "backup-archive-missing", target: target, sustain: 2,
+				symptom:   fmt.Sprintf("%s has no completed archive generation", target),
+				mechanism: "No fresh latest-timestamp series exists for this archive. A first backup may still be running, but until its atomic final rename completes there is no recoverable generation for this source.",
+				baseline:  "Each of pg, redis, github-urnetwork, and github-urfoundation has at least one complete generation on the mounted Planetoid archive.",
+				observed: fmt.Sprintf(
+					"completed_generations=0 in_progress=%s stale_scrape_samples=%d metrics_gateway=%s",
+					progress, observation.staleScrapes, gateway,
+				),
+				evidence: "The latest metric is written only after a complete artifact exists; temporary and partial files never produce it.",
+				context:  "An active first run is operationally pending, not fixed. Software cannot create archive capacity or attach unavailable physical media.",
+				action:   "Inspect the owning systemd unit, mounted archive filesystem, free capacity, and bounded job journal. Restore the mount or failing source and allow one atomic run to finish; do not manufacture a latest timestamp or rename a partial archive.",
+				verify:   "A non-empty completed artifact and its manifest are present, the writer exits successfully, and two fresh Mimir samples expose its real generation timestamp.",
+				playbook: "SIGNALS.md §11.22",
+			})
+		}
+		return findings
+	}
+
+	latest := observation.latest[0]
+	for _, candidate := range observation.latest[1:] {
+		if candidate.createdAt.After(latest.createdAt) {
+			latest = candidate
+		}
+	}
+	age := now.Sub(latest.createdAt)
+	ageText := backupArchiveAge(age)
+	if age > backupArchiveMaximumAge {
+		progress := "unknown"
+		if len(observation.progress) == 1 {
+			progress = strconv.FormatFloat(observation.progress[0], 'f', 0, 64)
+		}
+		findings = append(findings, finding{
+			probeId: "observability/backup-archives", tier: tierPage,
+			class: "backup-archive-stale", target: target, sustain: 1,
+			symptom: fmt.Sprintf(
+				"%s newest completed generation is %s old",
+				target, ageText,
+			),
+			mechanism: "The source textfile is current, but its archive timestamp has not advanced inside the five-day recovery-point objective. The scheduled pull may have failed before its atomic final rename; on 2026-09-01 the data job waited 15 minutes for an absent udisks mount and exited without replacing the August 20 generation.",
+			baseline:  "Every completed archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale.",
+			observed: fmt.Sprintf(
+				"generation=%s completed_at=%s age=%s in_progress=%s fresh_latest_samples=%d metrics_gateway=%s",
+				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, len(observation.latest), gateway,
+			),
+			evidence: "Archive age comes from the producer's completed-file timestamp carried as the metric value, not from the fresh Mimir scrape timestamp.",
+			context:  "This alert is operational and may require persistent mount configuration, replacement media, or more archive capacity. A collector, Grafana, or code deploy alone cannot create a new recovery point.",
+			action:   "Read the owning unit result and journal, verify the configured archive path is a real mounted filesystem with enough free space, then repair the first failed prerequisite. Start a catch-up run only with operator authorization; never refresh the metric without producing and validating a new archive.",
+			verify:   "The exact unit exits successfully, the completed generation and manifest validate on mounted media, its timestamp is within five days, and two consecutive direct Mimir reads show the same new generation.",
+			playbook: "SIGNALS.md §11.22",
+		})
+	} else {
+		findings = append(findings, healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-stale", target,
+		))
+	}
+	findings = append(findings, healthyFinding(
+		"observability/backup-archives", tierPage, "backup-archive-missing", target,
+	))
+	return findings
+}
+
+func backupArchiveAge(age time.Duration) string {
+	age = age.Round(time.Minute)
+	if age < 24*time.Hour {
+		return age.String()
+	}
+	days := age / (24 * time.Hour)
+	remainder := age % (24 * time.Hour)
+	if remainder == 0 {
+		return fmt.Sprintf("%d days", days)
+	}
+	return fmt.Sprintf("%d days %s", days, remainder)
+}

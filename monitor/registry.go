@@ -95,9 +95,10 @@ func NewSignals() []Signal {
 		NewGrafanaIngressSignal(),
 		NewGrafanaNodeSignal(),
 		NewMimirIndexSignal(),
+		NewLokiTailersSignal(),
 		NewMimirContinuitySignal(),
 		NewMimirShutdownSignal(),
-		NewLokiTailersSignal(),
+		NewBackupArchivesSignal(),
 		NewAssociationFilesSignal(),
 		NewEmailAssetsSignal(),
 	}
