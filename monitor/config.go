@@ -66,8 +66,9 @@ type servicesYaml struct {
 }
 
 type servicesVersionYaml struct {
-	LB       servicesLBYaml                 `yaml:"lb"`
-	Services map[string]servicesServiceYaml `yaml:"services"`
+	LB           servicesLBYaml                 `yaml:"lb"`
+	HostServices map[string][]string            `yaml:"host_services"`
+	Services     map[string]servicesServiceYaml `yaml:"services"`
 }
 
 type servicesServiceYaml struct {
@@ -128,6 +129,10 @@ func LoadSignalSettings() (SignalSettings, error) {
 	if err != nil {
 		return SignalSettings{}, err
 	}
+	grafanaHosts, err := activeServiceHostsFromServices(services, "grafana")
+	if err != nil {
+		return SignalSettings{}, err
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -174,6 +179,9 @@ func LoadSignalSettings() (SignalSettings, error) {
 			Roles:          append([]string(nil), configured.Roles...),
 			EdgeIPv6:       cloneEdgeIPv6Settings(edgeIPv6ByHost[configured.Name]),
 		}
+		if grafanaHosts[configured.Name] {
+			h.Roles = appendRole(h.Roles, "grafana")
+		}
 		if configured.Redis != nil {
 			h.RedisEntryPort = configured.Redis.EntryPort
 			h.RedisExpectedReplicas = configured.Redis.ExpectedReplicas
@@ -200,6 +208,43 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+// activeServiceHostsFromServices returns the active host-service placement
+// without duplicating it in monitor.yml. Host keys in services.yml carry the
+// environment domain while monitor inventory uses the short host name.
+func activeServiceHostsFromServices(services servicesYaml, service string) (map[string]bool, error) {
+	if len(services.Versions) == 0 {
+		return nil, fmt.Errorf("services.yml: no active version")
+	}
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return nil, fmt.Errorf("services.yml: active host service is required")
+	}
+	domainSuffix := "." + strings.TrimSpace(services.Domain)
+	hosts := map[string]bool{}
+	for configuredHost, configuredServices := range services.Versions[0].HostServices {
+		host := strings.TrimSpace(configuredHost)
+		if domainSuffix != "." {
+			host = strings.TrimSuffix(host, domainSuffix)
+		}
+		for _, configuredService := range configuredServices {
+			if strings.TrimSpace(configuredService) == service {
+				hosts[host] = true
+				break
+			}
+		}
+	}
+	return hosts, nil
+}
+
+func appendRole(roles []string, role string) []string {
+	for _, existing := range roles {
+		if existing == role {
+			return roles
+		}
+	}
+	return append(roles, role)
 }
 
 func activeWebsiteDomainFromServices(services servicesYaml) string {

@@ -31,7 +31,11 @@ func TestWarpServicesParsesOnlyRepositoryLogLine(t *testing.T) {
 
 func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 	services := servicesYaml{Versions: []servicesVersionYaml{
-		{Services: map[string]servicesServiceYaml{
+		{HostServices: map[string][]string{
+			"fireside.example.com": {"grafana", "proxy"},
+			"crisp.example.com":    {"grafana", "proxy"},
+			"edge-1.example.com":   {"api", "connect"},
+		}, Services: map[string]servicesServiceYaml{
 			"taskworker": {Blocks: []map[string]int{{"g2": 25}, {"g1": 74}, {"g1": 1}}},
 			"api":        {Blocks: []map[string]int{{"g1": 99}, {"beta": 1}}},
 			"grafana":    {Blocks: []map[string]int{{"g1": 100}}},
@@ -40,7 +44,7 @@ func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 		{Services: map[string]servicesServiceYaml{
 			"historical": {Blocks: []map[string]int{{"old": 100}}},
 		}},
-	}}
+	}, Domain: "example.com"}
 	got, err := activeLogServicesFromServices(services)
 	if err != nil {
 		t.Fatal(err)
@@ -61,6 +65,22 @@ func TestActiveLogServicesUsesOnlyCurrentServicesVersion(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotBlocks, wantBlocks) {
 		t.Fatalf("active log blocks = %#v, want %#v", gotBlocks, wantBlocks)
+	}
+
+	gotGrafanaHosts, err := activeServiceHostsFromServices(services, "grafana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantGrafanaHosts := map[string]bool{"fireside": true, "crisp": true}
+	if !reflect.DeepEqual(gotGrafanaHosts, wantGrafanaHosts) {
+		t.Fatalf("active Grafana hosts = %#v, want %#v", gotGrafanaHosts, wantGrafanaHosts)
+	}
+}
+
+func TestAppendRoleDoesNotDuplicateConfiguredRole(t *testing.T) {
+	roles := appendRole([]string{"services", "grafana"}, "grafana")
+	if !reflect.DeepEqual(roles, []string{"services", "grafana"}) {
+		t.Fatalf("roles = %#v, want one grafana role", roles)
 	}
 }
 

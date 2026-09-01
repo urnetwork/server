@@ -6099,6 +6099,73 @@ image. Correct the alert interval, pass the scheduler-grid test, publish a new
 Grafana image, and require three pinned HTTP 200 responses on every edge plus a
 bounded `warpctl logs` query across multiple DNS rotations.
 
+### 11.17a Host-local Grafana LAN and ring health
+
+Probe: `grafana-node`
+
+Public exact-edge health and a successful `warpctl logs` query can select a
+healthy Grafana replica. They do not prove that every host in the active
+`services.yml host_services` placement still owns the LAN identity advertised
+by its Grafana/Loki/Mimir children. Derive the Grafana host role from that
+active placement rather than duplicating it in `monitor.yml`, then check each
+host independently once per minute:
+
+- the exact LAN IPv4 from `config/<env>/settings.yml routes` is present on a
+  global-scope interface;
+- an interface-scoped `warp-<env>-grafana-*-g1.service` is active;
+- the Mimir scheduler accepts TCP on the exact LAN identity and port 6490;
+- the PostgreSQL LAN endpoint accepts TCP when a primary is configured; and
+- loopback Mimir answers the data-independent `vector(1)` with HTTP 200 in
+  under four seconds.
+
+PAGE `grafana-lan-identity` when the configured address is absent. A socket can
+remain bound with non-local/freebind semantics and the Warp unit can remain
+active, so neither listener output nor a prior `Deploy success` clears this
+class. PAGE focused `grafana-node-unit`, `grafana-ring-local`,
+`grafana-database-path`, or `grafana-node-query` for the later boundaries only
+when the preceding identity checks pass. `vector(1)` reads no customer series;
+its timeout is a query-control-plane failure, not an expensive workload query.
+
+The `2026.8.31+1034210530` Grafana verification exposed the missing-node case
+on 2026-09-01. Crisp answered `vector(1)` in about 1.6ms. Fireside accepted TCP
+on loopback 3100 but did not return even that query within six seconds. Its
+current Grafana, Loki, and Mimir children were all running and had started at
+02:29Z; the Warp unit recorded `Deploy success`, so another image rollout was
+not a discriminating action. Direct host state instead showed that Fireside's
+`eno3` had only IPv6: configured LAN IPv4 `192.168.51.196/24` and its connected
+LAN route were absent, while Mimir still listened on the missing address.
+Current logs repeatedly timed out dialing its own scheduler at that identity,
+and Grafana alert evaluation timed out reaching the LAN PostgreSQL endpoint.
+
+The retained journal pins the causal sequence to the earlier unsafe Proxy
+overlap rather than this Grafana image. During global host pressure,
+`systemd-journald` began repeatedly flushing caches. At 12:47:55Z,
+`systemd-networkd` failed `eno3` after
+`Could not set NDisc address: Connection timed out`; at 12:53:24Z the kernel's
+global OOM killed a roughly 5.5GiB Proxy. Networkd never restored the DHCP LAN
+address. The saved lease still named `.196` with a one-day lifetime, while the
+live link remained `routable (failed)`. This is a secondary host-network
+failure caused by the same memory-capacity event in §14.7, and it explains why
+Fireside metrics disappeared from Mimir while direct Proxy processes continued
+running.
+
+There are two required fixes. First, deploy Warp's serialized candidate-start
+guard (§8.11/§14.7) so a Proxy image or config-generation rollout cannot create
+the global-memory precursor. Second, restore Fireside's exact LAN address only
+after checking that no other MAC owns it, then deploy the xops netplan change
+that pins stable service-host LAN identities statically instead of depending on
+a renewable DHCP lease. This second step is an **operational host-network
+change**; redeploying Grafana cannot add the address. Do not restart Grafana as
+the first action. After address recovery, require local scheduler and database
+TCP success, three fast `vector(1)` responses on both Grafana hosts, fresh
+metrics from both host labels, and no address loss through a controlled Proxy
+rollout.
+
+SIGNALS.md §11.17a (`grafana-node`) maps to `signal_grafana_node.go` and
+`signal_grafana_node_test.go`. Synthetic cases preserve the OOM/networkd/LAN
+loss signature, inactive unit, missing local scheduler, missing database path,
+trivial-query timeout, a healthy node, and exclusion of non-Grafana hosts.
+
 ### 11.18 Mimir bucket-index and store-gateway freshness
 
 Probe: `mimir-index`
