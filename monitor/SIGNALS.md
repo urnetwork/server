@@ -983,6 +983,19 @@ that node's process, tailer, ring, and network state. Raising Loki's fixed queue
 or suppressing either record would hide correctness loss rather than remove the
 producer or blocked path.
 
+A direct post-deployment audit at 12:39Z on 2026-09-01 proved that boundary was
+still absent from the then-current `2026.8.31+1034210530` generation. Warpctl's
+deployed-status sample found the same generation on all 20 Grafana endpoints.
+On each of the six enabled ring hosts (edge-0, edge-1, edge-3, edge-4,
+Fireside, and Crisp), the running container's generated `mimir.yml` omitted
+`query_stats_enabled: false`, and `loki --version` reported
+`3.7.3-urnetwork.1` at revision `82cdcdc0+tail-close-once`, not the
+`urnetwork.2` / `+tail-backend-addr` build produced by `bca37cf`. The same live
+monitor cadence observed 556 dropped-stream resets/minute and ten backend
+EOFs/minute with an empty backend frame. This is immutable runtime evidence
+that another Grafana build/deploy is required; the later-looking version label
+does not satisfy either commit gate.
+
 Separately, the querier has its own ten-response channel to the WebSocket. If
 that later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors
 to a successful HTTP tail response. Warpctl decoded that API field but
