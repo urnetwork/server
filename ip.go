@@ -29,7 +29,7 @@ import (
 )
 
 func init() {
-	OnWarmup(func() {
+	OnWarmup(WarmupTargetIPDatabase, func() {
 		db, _ := ipDb()
 		glog.Infof("[ip]ip info database type: %s\n", db.Metadata.DatabaseType)
 

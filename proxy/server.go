@@ -659,6 +659,30 @@ type wgClientCounts struct {
 	notEntitled int
 }
 
+type wgProxyDeviceOpener interface {
+	OpenProxyDevice(server.Id) (*ProxyDevice, error)
+}
+
+// wgTunFactory retains only the immutable proxy id and manager. The full
+// model.ProxyClient includes every URL, auth token, and WireGuard config
+// string; capturing that object in one durable peer closure kept all of those
+// startup JSON allocations reachable for the peer's lifetime even though Tun
+// activation needs only ProxyId.
+func wgTunFactory(opener wgProxyDeviceOpener, proxyID server.Id) func() (tun proxy.WgTun, err error) {
+	return func() (tun proxy.WgTun, err error) {
+		if r := server.HandleError(func() {
+			tun, err = opener.OpenProxyDevice(proxyID)
+		}); r != nil {
+			if rErr, ok := r.(error); ok {
+				err = rErr
+			} else {
+				err = fmt.Errorf("open proxy device: %v", r)
+			}
+		}
+		return
+	}
+}
+
 // validWgClients converts proxy clients to wg clients, dropping clients that
 // fail validation. The drops are logged individually and tallied in the
 // returned counts.
@@ -708,18 +732,7 @@ func (self *wgServer) validWgClients(proxyClients []*model.ProxyClient) (map[net
 		// panics. Model calls raise on a canceled ctx (e.g. instance shutdown
 		// with in-flight client packets), so convert panics to an error - the
 		// device drops the packet instead of crashing the process.
-		tun := func() (tun proxy.WgTun, err error) {
-			if r := server.HandleError(func() {
-				tun, err = self.proxyDeviceManager.OpenProxyDevice(proxyClient.ProxyId)
-			}); r != nil {
-				if rErr, ok := r.(error); ok {
-					err = rErr
-				} else {
-					err = fmt.Errorf("open proxy device: %v", r)
-				}
-			}
-			return
-		}
+		tun := wgTunFactory(self.proxyDeviceManager, proxyClient.ProxyId)
 		client := &proxy.WgClient{
 			PublicKey:  proxyClient.WgConfig.ClientPublicKey,
 			ClientIpv4: proxyClient.WgConfig.ClientIpv4,

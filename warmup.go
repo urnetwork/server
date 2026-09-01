@@ -1,24 +1,68 @@
 package server
 
 import (
+	"fmt"
 	"sync"
 )
 
-var warmupLock sync.Mutex
-var warmupUnits []func()
-var resetUnits []func()
-var warmedUp = false
+// WarmupTarget names one independently selectable eager-initialization
+// feature. Keep every production target in this file so a service's warmup
+// list is an auditable declaration of the memory it chooses to make resident.
+type WarmupTarget string
 
-func OnWarmup(unit func()) {
+const (
+	WarmupTargetIPDatabase        WarmupTarget = "ip-database"
+	WarmupTargetNetworkNameSearch WarmupTarget = "network-name-search"
+	WarmupTargetLocationSearch    WarmupTarget = "location-search"
+	WarmupTargetCountryLocations  WarmupTarget = "country-locations"
+	WarmupTargetLocationDirectory WarmupTarget = "location-directory"
+)
+
+var allWarmupTargets = []WarmupTarget{
+	WarmupTargetIPDatabase,
+	WarmupTargetNetworkNameSearch,
+	WarmupTargetLocationSearch,
+	WarmupTargetCountryLocations,
+	WarmupTargetLocationDirectory,
+}
+
+var validWarmupTargets = func() map[WarmupTarget]struct{} {
+	targets := make(map[WarmupTarget]struct{}, len(allWarmupTargets))
+	for _, target := range allWarmupTargets {
+		targets[target] = struct{}{}
+	}
+	return targets
+}()
+
+// AllWarmupTargets returns a copy of the declared target list. It is intended
+// for comprehensive test fixtures and registry audits; production services
+// should enumerate only the targets they actually use.
+func AllWarmupTargets() []WarmupTarget {
+	return append([]WarmupTarget(nil), allWarmupTargets...)
+}
+
+var warmupLock sync.Mutex
+var warmupUnits = map[WarmupTarget][]func(){}
+var resetUnits []func()
+var warmedUpTargets = map[WarmupTarget]bool{}
+
+func requireWarmupTarget(target WarmupTarget) {
+	if _, ok := validWarmupTargets[target]; !ok {
+		panic(fmt.Errorf("unknown warmup target %q", target))
+	}
+}
+
+func OnWarmup(target WarmupTarget, unit func()) {
+	requireWarmupTarget(target)
 	runNow := false
 	func() {
 		warmupLock.Lock()
 		defer warmupLock.Unlock()
 
-		if warmedUp {
+		if warmedUpTargets[target] {
 			runNow = true
 		} else {
-			warmupUnits = append(warmupUnits, unit)
+			warmupUnits[target] = append(warmupUnits[target], unit)
 		}
 	}()
 	if runNow {
@@ -26,15 +70,28 @@ func OnWarmup(unit func()) {
 	}
 }
 
-func Warmup() {
+// Warmup eagerly initializes only the requested targets, in the supplied
+// order. A target runs at most once per process lifecycle. An empty list is an
+// explicit no-op, which lets a lightweight service document that it relies on
+// the underlying lazy initializers without loading unrelated feature indexes.
+func Warmup(targets ...WarmupTarget) {
+	for _, target := range targets {
+		requireWarmupTarget(target)
+	}
+
 	var runUnits []func()
 	func() {
 		warmupLock.Lock()
 		defer warmupLock.Unlock()
 
-		runUnits = warmupUnits
-		warmupUnits = nil
-		warmedUp = true
+		for _, target := range targets {
+			if warmedUpTargets[target] {
+				continue
+			}
+			runUnits = append(runUnits, warmupUnits[target]...)
+			delete(warmupUnits, target)
+			warmedUpTargets[target] = true
+		}
 	}()
 	for _, unit := range runUnits {
 		unit()
@@ -55,8 +112,8 @@ func Reset() {
 		defer warmupLock.Unlock()
 
 		runUnits = resetUnits
-		warmupUnits = nil
-		warmedUp = false
+		warmupUnits = map[WarmupTarget][]func(){}
+		warmedUpTargets = map[WarmupTarget]bool{}
 	}()
 	for _, unit := range runUnits {
 		unit()

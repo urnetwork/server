@@ -51,7 +51,7 @@ func TestIpInfo(t *testing.T) {
 }
 
 func TestIpInfoPerf(t *testing.T) {
-	Warmup()
+	Warmup(WarmupTargetIPDatabase)
 
 	n := 100000
 	startTime := time.Now()

@@ -24,6 +24,13 @@ var Version string
 
 const proxyMessagePoolByteCount connect.ByteCount = 8 << 30
 
+func proxyWarmupTargets() []server.WarmupTarget {
+	// Proxy does not query the API's search/location features or perform IP
+	// geolocation. The underlying Once values remain available if a future
+	// Proxy call path explicitly needs one.
+	return nil
+}
+
 // resizeProxyMessagePools applies one total free-list budget across every
 // message size class. ResizeMessagePools' historical one-argument form gives
 // the supplied byte count to the packet classes and to each large-object
@@ -100,7 +107,10 @@ Options:
 
 	port, _ := opts.Int("--port")
 
-	server.Warmup()
+	// Explicitly select no eager features. Importing model registers the API's
+	// SearchLocal indexes, but Proxy does not query them; warming those targets
+	// expands the full search tables into millions of alias/histogram objects.
+	server.Warmup(proxyWarmupTargets()...)
 
 	server.StartStatsPusher(ctx)
 

@@ -17,7 +17,7 @@ import (
 )
 
 func init() {
-	server.OnWarmup(func() {
+	server.OnWarmup(server.WarmupTargetLocationSearch, func() {
 		locationSearch()
 		//.WaitForInitialSync(context.Background())
 		locationGroupSearch()

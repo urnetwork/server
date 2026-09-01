@@ -602,7 +602,7 @@ cluster: %t`,
 	}
 
 	if self.Warmup {
-		Warmup()
+		Warmup(AllWarmupTargets()...)
 	}
 
 	// PEERSSTREAMS2: key-event delivery defaults on, so make the test redis

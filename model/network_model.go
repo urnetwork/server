@@ -23,7 +23,7 @@ import (
 )
 
 func init() {
-	server.OnWarmup(func() {
+	server.OnWarmup(server.WarmupTargetNetworkNameSearch, func() {
 		networkNameSearch()
 		//.WaitForInitialSync(context.Background())
 	})

@@ -2,8 +2,18 @@ package connect
 
 import (
 	"context"
+	"slices"
 	"testing"
+
+	"github.com/urnetwork/server"
 )
+
+func TestConnectWarmupTargetsOnlyIPDatabase(t *testing.T) {
+	want := []server.WarmupTarget{server.WarmupTargetIPDatabase}
+	if got := connectWarmupTargets(); !slices.Equal(got, want) {
+		t.Fatalf("connect warmup targets = %v, want %v", got, want)
+	}
+}
 
 func TestRunRejectsInvalidInputsBeforeEnvironmentAccess(t *testing.T) {
 	if err := Run(nil, RunOptions{Port: 1}); err == nil {

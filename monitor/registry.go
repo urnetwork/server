@@ -80,6 +80,8 @@ func NewSignals() []Signal {
 		NewProxyPathSignal(),
 		NewProxyMemorySignal(),
 		NewProxyPoolSignal(),
+		NewProxyRuntimeSignal(),
+		NewProxyCacheSignal(),
 		NewKeyPublicationSignal(),
 		NewEdgeIPv6Signal(),
 		NewGrafanaIngressSignal(),

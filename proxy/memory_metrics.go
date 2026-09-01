@@ -78,6 +78,60 @@ var proxyPlatformTransportPendingH1BytesGauge = prometheus.NewGauge(
 	},
 )
 
+var proxyLockCacheEntriesGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "lock_cache_entries",
+		Help:      "Proxy caller IP-lock cache entries retained by this process",
+	},
+)
+
+var proxyLockCacheCapacityGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "lock_cache_capacity",
+		Help:      "Hard maximum Proxy caller IP-lock cache entries retained by this process",
+	},
+)
+
+var proxyLockCacheHitsCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "lock_cache_hits_total",
+		Help:      "Fresh Proxy caller IP-lock cache lookups served without loading configuration",
+	},
+)
+
+var proxyLockCacheMissesCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "lock_cache_misses_total",
+		Help:      "Proxy caller IP-lock cache lookups that required configuration loading",
+	},
+)
+
+var proxyLockCacheExpirationsCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "lock_cache_expirations_total",
+		Help:      "Expired Proxy caller IP-lock entries removed from this process",
+	},
+)
+
+var proxyLockCacheEvictionsCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "lock_cache_evictions_total",
+		Help:      "Proxy caller IP-lock entries evicted by the hard LRU capacity",
+	},
+)
+
 var proxyWireGuardReturnBackpressureCounter = prometheus.NewCounter(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -120,8 +174,15 @@ func init() {
 	prometheus.MustRegister(proxyPlatformTransportUsedGauge)
 	prometheus.MustRegister(proxyPlatformTransportPendingH1Gauge)
 	prometheus.MustRegister(proxyPlatformTransportPendingH1BytesGauge)
+	prometheus.MustRegister(proxyLockCacheEntriesGauge)
+	prometheus.MustRegister(proxyLockCacheCapacityGauge)
+	prometheus.MustRegister(proxyLockCacheHitsCounter)
+	prometheus.MustRegister(proxyLockCacheMissesCounter)
+	prometheus.MustRegister(proxyLockCacheExpirationsCounter)
+	prometheus.MustRegister(proxyLockCacheEvictionsCounter)
 	prometheus.MustRegister(proxyWireGuardReturnBackpressureCounter)
 	prometheus.MustRegister(proxyWireGuardReturnBackpressureDuration)
+	proxyLockCacheCapacityGauge.Set(proxyLockCacheMaxEntries)
 }
 
 // aggregateProxyDeviceMemoryUsage reduces independently sampled DeviceLocals

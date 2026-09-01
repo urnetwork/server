@@ -3,8 +3,24 @@ package api
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
+
+	"github.com/urnetwork/server"
 )
+
+func TestAPIWarmupTargetsCoverCompleteFeatureSurface(t *testing.T) {
+	want := []server.WarmupTarget{
+		server.WarmupTargetIPDatabase,
+		server.WarmupTargetNetworkNameSearch,
+		server.WarmupTargetLocationSearch,
+		server.WarmupTargetCountryLocations,
+		server.WarmupTargetLocationDirectory,
+	}
+	if got := apiWarmupTargets(); !slices.Equal(got, want) {
+		t.Fatalf("api warmup targets = %v, want explicit feature targets %v", got, want)
+	}
+}
 
 func TestRunRejectsInvalidInputsBeforeEnvironmentAccess(t *testing.T) {
 	if err := Run(nil, RunOptions{Port: 1}); err == nil {

@@ -35,6 +35,19 @@ type RunOptions struct {
 	Port int
 }
 
+func apiWarmupTargets() []server.WarmupTarget {
+	// API serves the complete model/controller surface, including every search
+	// and location feature currently registered by the server. Keep this list
+	// explicit: a new target must not become resident merely because it exists.
+	return []server.WarmupTarget{
+		server.WarmupTargetIPDatabase,
+		server.WarmupTargetNetworkNameSearch,
+		server.WarmupTargetLocationSearch,
+		server.WarmupTargetCountryLocations,
+		server.WarmupTargetLocationDirectory,
+	}
+}
+
 func activateAfterReadiness(
 	ctx context.Context,
 	readiness func(context.Context) error,
@@ -100,7 +113,7 @@ func Run(ctx context.Context, options RunOptions) error {
 
 	var statsHandle *stats.Stats
 	if err := activateAfterReadiness(ctx, ReadinessCheck, func() {
-		server.Warmup()
+		server.Warmup(apiWarmupTargets()...)
 		controller.StartMetrics(processCtx)
 		statsHandle = stats.Enable(processCtx, nil)
 		if _, err := statsHandle.StartUpload(nil); err != nil {

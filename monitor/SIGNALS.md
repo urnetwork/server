@@ -7576,6 +7576,264 @@ controller-only blind spot, newest-generation selection during a rollout, the
 legacy ~24 GiB cap, a fixed healthy cap, stale series, and internally
 inconsistent snapshots.
 
+### 14.7b Proxy runtime live-set attribution
+Probe: `proxy-runtime`
+
+The host-capacity and message-pool probes answer different questions from the
+Go process itself. Query Mimir for the newest actual-scrape-fresh proxy
+generation in every `(host, block)` and join these metrics on exact `env`,
+`host`, `block`, and `instance` labels:
+
+- `process_resident_memory_bytes`
+- `process_start_time_seconds`
+- `urnetwork_build_info` (including its `version` label)
+- `go_memstats_heap_alloc_bytes`
+- `go_memstats_heap_objects`
+- `go_goroutines`
+- `urnetwork_proxy_wg_peers`
+- `urnetwork_proxy_devices_live`
+- `urnetwork_proxy_device_memory_tracked_used_bytes`
+- `urnetwork_message_pool_retained_bytes`
+- `go_memstats_next_gc_bytes`
+- `go_gc_gogc_percent`
+- `go_memstats_stack_inuse_bytes`
+- `go_memstats_last_gc_time_seconds`
+
+Filter each family with its own source timestamp no older than 90 seconds
+before selecting the newest process start. Prometheus's instant-query timestamp
+is the evaluation time even for a stopped series returned through lookback, so
+the JSON timestamp alone cannot identify a live process. WARN
+`proxy-runtime-unobservable` when a newest fresh identity lacks any member of
+the joined set; a missing owner gauge is unknown memory attribution, not zero.
+
+WARN `proxy-runtime-live-set` for two one-minute probes when all of the
+following hold on a newest identity:
+
+- `HeapAlloc` is at least 3 GiB;
+- the allocated object count is at least 20 million; and
+- at least 2 GiB remains after conservatively subtracting returned message-pool
+  buffers, tracked DeviceLocal ownership, and a 48 KiB allowance for every
+  registered WireGuard peer.
+
+The peer allowance deliberately rounds above the measured RSS slope and is
+subtracted from `HeapAlloc`, even though it includes peer stacks and other RSS
+that is not heap. The residual test therefore errs toward not alerting. It is
+an attribution guard, not a claim that the residual is one leak or that every
+allocated object is reachable: `HeapAlloc` includes objects that have not yet
+been reclaimed by the next GC, and owner gauges intentionally do not
+reconstruct the whole Go heap.
+
+Use `NextGC`, `GOGC`, stack-in-use roots, and last-GC time to distinguish a
+reachable floor from a transient wave of allocations waiting for the next
+collection. Go's collector derives its next heap goal from the live heap and
+GC roots marked by the previous cycle; the exact inverse also includes global
+roots not exported here, so report the values rather than pretending they are
+an exact heap profile. With the fleet's `GOGC=100`, a roughly 7.2 GB next-GC
+goal after recent collections is incompatible with a tiny live heap plus only
+momentary garbage.
+
+**Production-shaped control (2026-09-01):** the previous Proxy capacity harness
+registered peers on a down WireGuard device. It measured 23.9 KiB RSS per peer
+and 38 process goroutines at 20,000 peers, while production's up device starts a
+sequential sender and receiver for every peer. The corrected isolated ramp
+measured exactly two durable goroutines per peer and 36.7 KiB marginal RSS per
+peer: 2,000 peers used 104.6 MiB RSS/4,041 goroutines and 20,000 used 749.2 MiB
+RSS/40,041 goroutines. Extending the control through endpoint seeding and the
+server-initiated deployment-handoff handshake raised the slope to 44.6 KiB per
+peer; 20,000 handshaking peers used 904.2 MiB RSS and 557.5 MiB heap. Applying
+the server's 8 GiB logical Connect message-pool ceiling to an up device used
+757.8 MiB RSS and 544.1 MiB heap at 20,000 peers, proving the empty logical
+capacity remains lazy. The alert therefore rounds the peer allowance to 48
+KiB. At the live 12,500–13,000-peer scale this is less than about 0.6 GiB RSS,
+so peer startup, handoff state, and empty pool capacity cannot explain a
+3.6–3.9 GiB allocated heap or roughly 5 GiB RSS by itself. Do not shrink
+per-peer queues, remove ordering routines, or lazy-start peers merely because
+the old harness omitted them; packet ordering, shutdown, handshake recovery,
+and slow-peer isolation need their own proof.
+
+One smaller startup retention path was concrete: the durable `WgClient.Tun`
+closure captured the entire decoded `model.ProxyClient`, keeping its proxy
+URLs, auth token, and complete WireGuard config strings reachable for every
+peer even though activation needs only `ProxyId`. The factory now captures
+only the immutable 16-byte proxy ID and manager. A deterministic regression
+reassigns the caller's ID after construction and proves the peer factory owns
+the original value. This trims peer-owned startup state, but its bounded
+per-client payload is not presented as the multi-gigabyte root cause.
+
+The same production sample found all 20 current Proxy processes above the
+software attribution band: roughly 3.60–3.94 GiB `HeapAlloc`, 27.5–30.5 million
+objects, 4.89–5.24 GiB RSS, 12,524–13,008 registered peers, and 19–40 hosted
+devices. Returned message-pool buffers were only about 0.5–5.4 MiB per sampled
+process and aggregate DeviceLocal tracked use was about 28–40 MiB. Every process
+reported `GOGC=100`, a roughly 7.21–7.38 GB next-GC goal, 66–85 MiB of
+stack-in-use roots, and a recent completed collection while the allocated heap
+remained in the same band. This establishes a GC-accounted reachable floor,
+not mostly garbage that merely awaits the next ordinary collection. Thirty-minute
+heap/object deltas moved both up and down across the fleet, establishing a large
+floor but not monotonic growth; an unbounded cache remains a candidate only
+after its entry count or a heap allocation stack attributes the retained floor.
+
+The startup edge narrows the current owner further. On Proxy build
+`2026.8.31+1034210530`, Fireside g1 started at Unix time 1788236178; its first
+fresh sample 22 seconds later already had 12,857 peers, zero live DeviceLocals,
+zero tracked DeviceLocal bytes, 3,885,930,648 heap bytes, and 29,736,708 heap
+objects. Later ordinary collections repeatedly returned to roughly 3.6 GiB and
+27.5 million objects while peer count moved by only a few. The dominant current
+floor is therefore constructed at the initial peer-sync/process-start boundary,
+not by hours of caller-lock cache accumulation or by hosted DeviceLocals. The
+bounded caller-lock root fix in §14.7c remains required, but it must not be
+credited with closing this larger floor until a deployed entry gauge and
+old/candidate heap comparison prove that effect.
+
+The matching source path is the old unscoped process warmup. Importing `model`
+registers the network-name, location-prefix, and location-group
+`SearchLocal` constructors with `server.OnWarmup`. Proxy then called the global
+`server.Warmup()` even though no Proxy request path queries those API search
+features. Each `SearchLocal` reads its full `search_value` realm and expands
+values through `GenerateAliases` into nested length/value maps whose
+`aliasHisto` values each own a `map[rune]int`. That is exactly the shape needed
+to create tens of millions of small reachable objects immediately at startup,
+and it is independent of hosted devices, caller-lock traffic, and empty message
+pool capacity.
+
+The root fix makes warmup an explicit feature selection rather than a
+process-wide switch. `server/warmup.go` is the single registry of valid targets:
+`ip-database`, `network-name-search`, `location-search`, `country-locations`,
+and `location-directory`. Each `OnWarmup` registration names one target, and
+each service passes an explicit target list:
+
+- API opts into all five current targets because it serves the complete
+  controller/model feature surface. Its list is written explicitly rather
+  than inheriting future targets automatically.
+- Connect opts into only `ip-database`, which its connection latency and
+  verification paths use.
+- Proxy opts into an empty list. It does not query geolocation or API search
+  features; all underlying `sync.Once` values remain available for lazy
+  initialization if a future Proxy call path intentionally starts using one.
+
+This target contract prevents a newly registered warmup feature from silently
+becoming resident in every binary that imports its package. Synthetic tests
+prove that warming one target does not run another target, that a late
+registration for an already-warmed target runs immediately, and that the API,
+Connect, and Proxy target lists remain their declared sets. The Proxy-specific
+regression therefore tests the service selection, not a brittle source-string
+absence.
+
+The scoped warmup path is the first root-cause fix to verify. If a deployed
+Proxy build that selects no targets still retains the §14.7b floor, capture an
+aggregate heap allocation profile or add identity-free owner gauges on that
+exact generation, then separate WireGuard peer/client state, full-sync
+payloads, the shared `NetworkSpace`, each hosted DeviceLocal's structural
+state, and ordinary active HTTP/SOCKS flows. Preserve the existing memory-owner
+metrics as negative controls. Do not force a production GC, restart the process
+to erase the evidence, raise `GOGC`, lower a cgroup below the measured live set,
+or call the floor a leak from time correlation alone.
+
+This alert is software-owned for attribution and memory reduction, but its
+capacity closure is separate. If the optimized steady fleet or a serialized
+old/candidate pair still cannot fit with the §14.7 reserve, additional RAM or
+proxy hosts are required. If active clients approach the aggregate hard peer
+or device ceiling, additional proxy instances on capable hardware (or an
+explicit operational load reduction) are required even after the live set is
+smaller.
+
+Deploy the Proxy service artifact containing targeted warmup, the value-only
+WireGuard TUN factory, the bounded caller-lock cache, and the new owner gauges;
+no Warp/xops deployment is needed for this process-memory correction. Join
+`urnetwork_build_info{version=...}` to the exact newest process identity so an
+old process cannot be mistaken for proof. Every current identity must keep the
+same peer and active-device service boundary while its first post-sync sample
+and repeated post-GC floor are materially lower than the legacy 3.6–3.9 GiB
+heap/27.5–30.5-million-object band. Require the conservative residual below 2
+GiB for 15 minutes across multiple GC cycles, improved RSS and host
+`MemAvailable`, and simultaneous WireGuard plus HTTP/SOCKS acceptance with no
+new OOM or adjacent UDP receive drops. If only the closure/cache reductions are
+visible while the large startup floor remains, provenance-check the target
+list before profiling the next owner. SIGNALS.md §14.7b (`proxy-runtime`) maps
+to `signal_proxy_runtime.go` and `signal_proxy_runtime_test.go`; synthetic cases
+pin a complete versioned high live set, conservative owner accounting, missing
+metrics, and newest-generation selection during overlap.
+
+### 14.7c Proxy caller-lock cache boundedness
+Probe: `proxy-cache`
+
+`ProxyDeviceManager.ValidCaller` runs on every accepted Proxy connection and
+memoizes the caller-IP lock for the presented proxy ID. The historical
+`lockCache map[server.Id]proxyLockEntry` attached a 30-second expiry to each
+value, but expiry only caused a reload when that same ID returned. It never
+deleted a stale key. A long-lived process could therefore retain every
+distinct valid, formerly-valid, or unknown signed proxy ID it had observed,
+including its `LockSubnets` slice, until process exit. The value TTL bounded
+configuration staleness; it did not bound memory.
+
+The software root fix is a hard-capacity TTL/LRU cache. It copies only the live
+prefix slice, removes a key when that key is looked up at or after expiry,
+amortizes one bounded scan per TTL to release cold expired keys under traffic,
+preserves the first still-fresh result when concurrent miss loaders race, and
+evicts the least-recently-used key before cardinality can exceed 16,384. The
+capacity is intentionally explicit: changing it is a memory-budget decision,
+not a way to silence cache pressure. Deterministic tests insert 16,641 unique
+IDs and prove a final size of exactly 16,384 with 257 evictions; separate cases
+pin exact expiry, cold-key sweeping, hot-key LRU ordering, prefix ownership,
+and concurrent-loader winner semantics.
+
+Each Proxy process must export these identity-free metrics:
+
+- `urnetwork_proxy_lock_cache_entries`
+- `urnetwork_proxy_lock_cache_capacity`
+- `urnetwork_proxy_lock_cache_hits_total`
+- `urnetwork_proxy_lock_cache_misses_total`
+- `urnetwork_proxy_lock_cache_expirations_total`
+- `urnetwork_proxy_lock_cache_evictions_total`
+
+Join them with `process_resident_memory_bytes` and
+`process_start_time_seconds` on exact `env`, `host`, `block`, and `instance`
+labels. Filter every family by its own source timestamp no older than 90
+seconds before choosing the newest generation for each `(host, block)`. This
+prevents an old bounded candidate and a current legacy process from being
+combined into false proof.
+
+WARN `proxy-lock-cache-unobservable` immediately when a newest fresh identity
+lacks any cache gauge or activity counter. A legacy image without the gauges
+is unknown and must not be interpreted as an empty cache. WARN
+`proxy-lock-cache-bound` immediately when capacity is zero, capacity is above
+16,384, or entries exceed the published capacity. Stop promotion on this
+contract failure: do not raise the capacity or restart away retained entries.
+
+WARN `proxy-lock-cache-pressure` after five one-minute probes when entries are
+at least 90% of capacity. The hard bound still protects the heap, but sustained
+occupancy near the ceiling means distinct IDs are arriving faster than
+the amortized TTL sweep removes them. Use the hit, miss, expiration, and
+eviction deltas with authenticated acceptance and rejected-credential logs to
+distinguish a legitimate hot set from invalid-token churn. Operational
+rate-limiting or source blocking may be required for abusive traffic; do not
+expose proxy IDs in metrics or alert files. If a legitimate 30-second hot set
+is larger, measure per-entry heap cost and storage-load latency before changing
+the explicit capacity.
+
+This closes one software-owned unbounded retention path, but it is not evidence
+that the old map owns the entire §14.7b multi-gigabyte live set. Compare cache
+entries and activity with `HeapAlloc`, heap objects, and the conservative
+live-set residual after deployment. Continue attributing WireGuard
+peer/client state, full-sync payloads, shared `NetworkSpace`, DeviceLocal
+structure, and ordinary active flows until the residual closes. A bounded
+cache also cannot create RAM or raise the hard active-client ceiling: if the
+optimized steady process or serialized old/candidate pair cannot fit with the
+§14.7 reserve, additional capable Proxy hardware is required; if abusive ID
+churn is the source, an operational traffic control is required.
+
+Verify the root fix on the exact Proxy artifact: every current identity exports
+all eight joined metrics for two consecutive scrapes, capacity is positive and
+no greater than 16,384, entries never exceed capacity through more than 16,384
+distinct synthetic IDs and real acceptance traffic, and caller-IP locks still
+accept and reject correctly. Observe at least 15 minutes across multiple GC
+cycles: cache occupancy and miss/eviction rates settle, §14.7b heap residual
+and host reserve improve or identify the remaining owner, and there is no new
+OOM, UDP receive loss, or storage latency. SIGNALS.md §14.7c (`proxy-cache`)
+maps to `signal_proxy_cache.go` and `signal_proxy_cache_test.go`; synthetic
+cases pin legacy-image blindness, invalid capacity, sustained near-capacity
+pressure, and newest-generation selection during rollout.
+
 ---
 
 ## 15. E2E encryption (post-quantum) signals — E2EPQ1

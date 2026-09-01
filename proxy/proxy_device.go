@@ -100,9 +100,9 @@ type ProxyDeviceManager struct {
 
 	// The ip lock, memoized. ValidCaller runs on EVERY accepted connection, so reading
 	// the device config from redis each time would put a round-trip on the accept path.
-	// The ttl bounds how long a stale lock is enforced after the config changes.
-	lockCacheLock sync.Mutex
-	lockCache     map[server.Id]proxyLockEntry
+	// The bounded TTL+LRU cache keeps that fast path without retaining every proxy id
+	// observed during the whole process lifetime.
+	lockCache *proxyLockCache
 }
 
 // proxyLockCacheTtl bounds how long a stale ip lock can be enforced after the proxy
@@ -130,7 +130,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		settings:     settings,
 		networkSpace: settings.NetworkSpace,
 		proxyDevices: map[server.Id]*proxyDeviceState{},
-		lockCache:    map[server.Id]proxyLockEntry{},
+		lockCache:    newProxyLockCache(proxyLockCacheMaxEntries),
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
 	return manager
@@ -363,16 +363,20 @@ func (self *ProxyDeviceManager) ValidCaller(proxyId server.Id, addr netip.Addr) 
 func (self *ProxyDeviceManager) proxyLock(proxyId server.Id) proxyLockEntry {
 	now := time.Now()
 
-	self.lockCacheLock.Lock()
-	entry, ok := self.lockCache[proxyId]
-	self.lockCacheLock.Unlock()
-	if ok && now.Before(entry.expiry) {
-		return entry
+	result := self.lockCache.get(proxyId, now)
+	if result.expired > 0 {
+		proxyLockCacheExpirationsCounter.Add(float64(result.expired))
 	}
+	proxyLockCacheEntriesGauge.Set(float64(result.size))
+	if result.found {
+		proxyLockCacheHitsCounter.Inc()
+		return result.entry
+	}
+	proxyLockCacheMissesCounter.Inc()
 
 	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
 
-	entry = proxyLockEntry{
+	entry := proxyLockEntry{
 		found:  proxyDeviceConfig != nil,
 		expiry: now.Add(proxyLockCacheTtl),
 	}
@@ -380,11 +384,15 @@ func (self *ProxyDeviceManager) proxyLock(proxyId server.Id) proxyLockEntry {
 		entry.lockSubnets = proxyDeviceConfig.LockSubnets
 	}
 
-	self.lockCacheLock.Lock()
-	self.lockCache[proxyId] = entry
-	self.lockCacheLock.Unlock()
-
-	return entry
+	result = self.lockCache.put(proxyId, entry, now)
+	if result.expired > 0 {
+		proxyLockCacheExpirationsCounter.Add(float64(result.expired))
+	}
+	if result.evicted > 0 {
+		proxyLockCacheEvictionsCounter.Add(float64(result.evicted))
+	}
+	proxyLockCacheEntriesGauge.Set(float64(result.size))
+	return result.entry
 }
 
 // subnetContains reports whether addr falls inside subnet, normalizing v4-mapped-v6.

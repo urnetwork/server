@@ -23,6 +23,12 @@ type RunOptions struct {
 	DirectH3LoopbackMode bool
 }
 
+func connectWarmupTargets() []server.WarmupTarget {
+	// Connect derives expected latency and verification metadata from client
+	// addresses, but it does not serve API network/location search endpoints.
+	return []server.WarmupTarget{server.WarmupTargetIPDatabase}
+}
+
 func (self RunOptions) Validate() error {
 	if self.Port < 1 || self.Port > 65_535 {
 		return fmt.Errorf("connect port %d is outside [1,65535]", self.Port)
@@ -92,7 +98,7 @@ func Run(ctx context.Context, options RunOptions) error {
 		connectRouter := NewConnectRouterWithDefaults(runCtx, cancel, exchange)
 		statusHandler = connectRouter.Status
 		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
-		server.Warmup()
+		server.Warmup(connectWarmupTargets()...)
 	}
 	routes = append([]*router.Route{router.NewRoute("GET", "/status", statusHandler)}, routes...)
 

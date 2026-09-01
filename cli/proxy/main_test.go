@@ -6,6 +6,12 @@ import (
 	"github.com/urnetwork/connect"
 )
 
+func TestProxyMainDoesNotRunGlobalModelWarmups(t *testing.T) {
+	if targets := proxyWarmupTargets(); len(targets) != 0 {
+		t.Fatalf("proxy eagerly warms %v; Proxy uses no registered search, location, or IP target", targets)
+	}
+}
+
 func TestResizeProxyMessagePoolsCapsAllClassesAtEightGiB(t *testing.T) {
 	resizeProxyMessagePools()
 

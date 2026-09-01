@@ -446,14 +446,14 @@ func init() {
 	server.OnReset(func() {
 		resetCountryCodeLocationIds()
 	})
-	server.OnWarmup(func() {
+	server.OnWarmup(server.WarmupTargetCountryLocations, func() {
 		countryCodeLocationIds()
 	})
 
 	server.OnReset(func() {
 		resetLocationDirectory()
 	})
-	server.OnWarmup(func() {
+	server.OnWarmup(server.WarmupTargetLocationDirectory, func() {
 		loadLocationDirectory()
 	})
 }
