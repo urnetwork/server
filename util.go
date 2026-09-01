@@ -50,10 +50,16 @@ import (
 //  return min
 // }
 
+// Canonicalizes timestamps to the precision PostgreSQL preserves. Returning a
+// just-inserted value must not depend on its final three nanosecond digits.
+func databaseTime(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Microsecond)
+}
+
 func NowUtc() time.Time {
-	// data stores use utc time without time zone
-	// use the same time format locally to keep the local time in sync with the data store time
-	return time.Now().UTC()
+	// Data stores use UTC time without a time zone and PostgreSQL timestamps
+	// preserve microseconds. Keep generated model times in that exact domain.
+	return databaseTime(time.Now())
 }
 
 func CodecTime(t time.Time) time.Time {

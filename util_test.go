@@ -11,6 +11,21 @@ import (
 	"github.com/urnetwork/connect"
 )
 
+// PostgreSQL truncates sub-microsecond timestamp digits. Model timestamps are
+// canonical before insertion so a create result and its immediate DB read are
+// byte-for-byte equal instead of depending on the host clock's nanoseconds.
+func TestDatabaseTimeMatchesPostgresPrecision(t *testing.T) {
+	input := time.Date(2026, time.September, 1, 12, 34, 56, 123456789, time.FixedZone("test", 3*60*60))
+	got := databaseTime(input)
+	want := time.Date(2026, time.September, 1, 9, 34, 56, 123456000, time.UTC)
+	if !got.Equal(want) || got.Location() != time.UTC {
+		t.Fatalf("database time = %s (%s), want %s (UTC)", got.Format(time.RFC3339Nano), got.Location(), want.Format(time.RFC3339Nano))
+	}
+	if got.Nanosecond()%int(time.Microsecond) != 0 {
+		t.Fatalf("database time retained sub-microsecond digits: %d", got.Nanosecond())
+	}
+}
+
 func TestPorts(t *testing.T) {
 
 	connect.AssertEqual(t, CollapsePorts([]int{}), "")
