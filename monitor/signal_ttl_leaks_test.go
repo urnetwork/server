@@ -34,11 +34,14 @@ func TestTTLLeaksSignalSyntheticDurationAsSecondsResidue(t *testing.T) {
 		!strings.Contains(alert.Mechanism, "time.Duration") ||
 		!strings.Contains(alert.Mechanism, "overflow") ||
 		!strings.Contains(alert.Mechanism, "does not make it the capacity root cause") ||
-		!strings.Contains(alert.Action, "d9b2e291") ||
+		!strings.Contains(alert.Action, "d8e34003") ||
 		!strings.Contains(alert.Action, "raw integer milliseconds") ||
 		!strings.Contains(alert.Action, "do not run an older typed-duration cleanup artifact") ||
 		!strings.Contains(alert.Verify, "raw-integer PTTL") {
 		t.Fatalf("fleet TTL residue alert lost aggregation, attribution, or remediation: %+v", alert)
+	}
+	if strings.Contains(alert.Action+alert.Verify, "d9b2e291") {
+		t.Fatalf("fleet TTL residue alert retained former non-ancestor deployment guidance: %+v", alert)
 	}
 }
 

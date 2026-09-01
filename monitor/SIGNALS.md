@@ -498,9 +498,9 @@ WHERE function_name LIKE '%UpdateClient%'
   admitted member without consuming a slot, and reopens capacity only after the
   rolling second expires. §2.14 owns deployment and runtime verification; the
   existing source-second log join remains the provider-outcome control.
-  Follow-up commit `b8718420` converts the server Redis wrapper's connection
-  panic path into that same measured fail-closed error, so it is the minimum
-  deployable source for complete §2.14 telemetry.
+  Follow-up current-main commit `66525afc` converts the server Redis wrapper's
+  connection panic path into that same measured fail-closed error, so it is the
+  minimum deployable source for complete §2.14 telemetry.
 
   The release root fix belongs to Warp: `warpctl build` now fails before
   publication when the source tree is dirty, when a Linux binary lacks a full
@@ -3293,9 +3293,11 @@ rolling second, leaving two requests/second of headroom for other callers. A
 stable per-call member makes Redis command replay idempotent. A waiter retains
 the payment's durable Circle idempotency key, and a Redis/context error returns
 before HTTP rather than guessing that an ambiguous financial submit is safe.
-Descendant `b8718420` also converts the Redis wrapper's pre-command connection
-panic into the same error/counter/log path; use that descendant as the minimum
-observable deployment baseline.
+Current-main descendant `66525afc` also converts the Redis wrapper's
+pre-command connection panic into the same error/counter/log path; use that
+descendant as the minimum observable deployment baseline. Stable patch IDs
+prove it is patch-identical to the former `b8718420` hash after main was
+rewritten.
 
 The Taskworker exports these process metrics:
 
@@ -3313,7 +3315,7 @@ It evaluates five-minute counter increases per exact process.
   are zero; fleet and per-process mean completed wait are at most five seconds.
   Deferrals may be non-zero—they prove the gate prevented an unsafe burst.
 - WARN `circle-transfer-admission-unobservable`: a newest process lacks any
-  family. Deploy a clean Taskworker artifact containing `b8718420` only to the
+  family. Deploy a clean Taskworker artifact containing `66525afc` only to the
   missing blocks, using §8.12 source/digest provenance rather than a mutable
   config version.
 - WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
@@ -3326,7 +3328,7 @@ It evaluates five-minute counter increases per exact process.
   **operations/finance** boundary: fund or pause that wallet because software
   cannot create liquidity. For legitimate sustained payout growth, obtain the
   account's authoritative Circle quota before changing code or thresholds.
-- VERIFY: §8.12 proves every newest Taskworker contains `b8718420`; all metric
+- VERIFY: §8.12 proves every newest Taskworker contains `66525afc`; all metric
   families are present for two scrapes; admission errors and Circle 429s stay
   zero; canonical wallet attempts stay below four/second; and payment
   idempotency keys remain stable for one full 90-minute retry window.
@@ -3534,11 +3536,12 @@ remain above eight hours, but it is not a trustworthy ordering. A deterministic
 local Redis fixture sets `PTTL=18,446,744,073,710ms` (roughly 584 years), proves
 the typed result wraps below one millisecond and the old comparison would skip
 the key, then proves the corrected cleanup clamps the raw value to eight hours.
-Server commit `d9b2e291` pipelines generic `PTTL` commands and reads the signed
-64-bit millisecond result directly. No production TTL was changed during this
-audit. Any authorized cleanup artifact must be a clean descendant of that
-commit; an older typed-duration build is unsafe even if it contains the legacy
-suffix fix.
+Current-main server commit `d8e34003` pipelines generic `PTTL` commands and
+reads the signed 64-bit millisecond result directly. Stable patch IDs prove it
+is patch-identical to the former `d9b2e291` hash after main was rewritten. No
+production TTL was changed during this audit. Any authorized cleanup artifact
+must be a clean descendant of the current-main commit; an older typed-duration
+build is unsafe even if it contains the legacy suffix fix.
 
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
@@ -3554,7 +3557,7 @@ suffix fix.
   another family is an independent writer defect, not proof that stream writes
   resumed. Running `bringyourctl streams expire-leaked-ttls` changes production
   TTLs and therefore requires explicit maintenance authority. First prove the
-  binary is a clean `d9b2e291` descendant and does not use go-redis's typed
+  binary is a clean `d8e34003` descendant and does not use go-redis's typed
   duration result for `PTTL`. It clamps only legacy/current stream-id and
   stream-contract keys beyond 8h, allowing active streams to refresh and
   orphaned residue to expire.
@@ -3930,9 +3933,9 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
-| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N retry lines/hour on average. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; `eb7e79b6` separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean `b8718420` Taskworker only where §8.12/§2.14 proves it absent; another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
-| `payout-retry-microburst` (derived standing-tail finding; not a literal log line) | At least four exact-replay-deduplicated task evaluator attempts landed in one embedded source second. The post-jitter 2026-09-01 control proved independent random delays still reached five responses plus a sixth 429; four/second is therefore both the empirical precursor and the invariant below the new three/rolling-second gate. | **Software deployment action:** use §8.12 and §2.14 to deploy a clean Taskworker containing `b8718420` only where absent. Preserve backoff and idempotency keys. Verify all admission collectors, zero gate errors, a full 90-minute window below four attempts/second, and no new processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
-| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `b8718420` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
+| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N retry lines/hour on average. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; `eb7e79b6` separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean `66525afc` Taskworker only where §8.12/§2.14 proves it absent; another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
+| `payout-retry-microburst` (derived standing-tail finding; not a literal log line) | At least four exact-replay-deduplicated task evaluator attempts landed in one embedded source second. The post-jitter 2026-09-01 control proved independent random delays still reached five responses plus a sixth 429; four/second is therefore both the empirical precursor and the invariant below the new three/rolling-second gate. | **Software deployment action:** use §8.12 and §2.14 to deploy a clean Taskworker containing `66525afc` only where absent. Preserve backoff and idempotency keys. Verify all admission collectors, zero gate errors, a full 90-minute window below four attempts/second, and no new processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
+| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `66525afc` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The destination is invalid for its declared chain and Circle rejected it before creating a transfer. The pre-fix chain-blind validator admitted 44-character Solana base58 keys stored as active `MATIC` wallets. Current validation blocks that shape and the taskworker releases only this definitive pre-chain attempt, but six existing payments continued exactly once/hour because the configured payout wallets were still unchanged. | **Account-owner/operations action required:** correct the payout wallet through the supported account API. The current taskworker already releases the typed failed attempt so `UpdatePaymentWallet` can select the correction; another service deploy cannot invent or authorize replacement wallet data. Preserve keys for transport failures, 429s, and ambiguous submits; never edit/delete payment, task, or sweep rows. Verify the next natural retry uses the corrected chain-compatible wallet and the durable/logical counts clear within 90 minutes. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
@@ -4101,8 +4104,8 @@ limit:
   ancestry above, this is continued invalid wallet selection after the safe
   typed reset, not evidence that the reset code is missing. At that point it
   did not weaken the separate requirement to deploy `70b0d269` for retry
-  dispersion; the later `b8718420` baseline contains that jitter, the fleet
-  admission gate, and complete fail-closed telemetry required by the
+  dispersion; the later current-main `66525afc` baseline contains that jitter,
+  the fleet admission gate, and complete fail-closed telemetry required by the
   post-jitter control.
 
   An independent artifact/runtime control at the UTC day boundary removed the
@@ -4117,7 +4120,7 @@ limit:
   the still-invalid selected wallet, while the hour-locked cadence separately
   proves the old jitter. The incident therefore required both correcting the
   wallet through the supported account API and deploying retry dispersion;
-  current software convergence uses `b8718420`, which includes the independently
+  current software convergence uses `66525afc`, which includes the independently
   required fleet admission gate and its failure telemetry. Neither software
   fix can invent or authorize valid payout-wallet data.
 - `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
@@ -5252,7 +5255,7 @@ release. The live log's `subscription_model.go:760` call site and config
 generation match tagged source `a52392db`; immutable source metrics were still
 absent, so that is a source fingerprint rather than §8.12 proof. That source
 predates the single-attempt checked-mutation fix in `39f662d2`. Deploy a clean
-Taskworker descendant containing `b8718420` (which includes `39f662d2`) and
+Taskworker descendant containing `66525afc` (which includes `39f662d2`) and
 verify through a full expiry/close interval; do not manually reconcile or
 replay the mutation to erase this control.
 
@@ -8291,10 +8294,12 @@ unbounded-buffer fix.
 The v190 standing cadence at 2026-09-01T15:27Z observed a fresh Connect write
 rejection at `messageLen=4408`, `MaxMessageLen=4096`, and
 `maxFrameLen=4100`. That exact runtime cap directly proves the compatible pair
-is absent even while §8.12 source metadata is unavailable: Connect commit
-`7e0fcba` makes the shared minimum 8 KiB, and server commit `53780b3e`
-propagates it through the resident H1 path. After §8.13 is healthy, deploy
-clean artifacts containing both commits (or clean descendants) to Connect and
+is absent even while §8.12 source metadata is unavailable: current-main Connect
+commit `096414ac` makes the shared minimum 8 KiB, and current-main server commit
+`c1403f16` propagates it through the resident H1 path. Stable patch IDs prove
+they are patch-identical to the former `7e0fcba` and `53780b3e` hashes after
+both histories were rewritten. After §8.13 is healthy, deploy clean artifacts
+containing the current-main commit pair (or clean descendants) to Connect and
 Proxy; deploying only one endpoint leaves the other able to reject the same
 carrier. A mutable version label is not proof of either commit.
 

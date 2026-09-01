@@ -417,14 +417,19 @@ func TestFramerMessageTooLargeIsClassifiedAndRedacted(t *testing.T) {
 			"MaxMessageLen=4096",
 			"same immutable Pack",
 			"Connect and Proxy artifacts",
-			"53780b3e",
-			"7e0fcba",
+			"c1403f16",
+			"096414ac",
 			"§8.13",
 			"§8.12",
 			"three sustained HTTP/SOCKS/WireGuard overlap campaigns",
 		} {
 			if !strings.Contains(finding.evidence+finding.mechanism+finding.action+finding.verify, want) {
 				t.Fatalf("framer rejection finding lacks %q: %+v", want, finding)
+			}
+		}
+		for _, stale := range []string{"53780b3e", "7e0fcba"} {
+			if strings.Contains(finding.action+finding.verify, stale) {
+				t.Fatalf("framer rejection finding retained former non-ancestor hash %q: %+v", stale, finding)
 			}
 		}
 		for _, secret := range []string{"customer-one", "customer-two", "customer-three", "fireside", "edge-4"} {
@@ -640,7 +645,7 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 		"five wallet rejections completed and a sixth transfer request received 429",
 		"four of those five rejections came from blocks whose exact executable already contained proportional jitter",
 		"commit eb7e79b6",
-		"commit b8718420",
+		"commit 66525afc",
 		"atomic Redis-time rolling gate of three transfer submits/second",
 		"complete §2.14 admission metrics",
 		"peak_task_attempts_per_second stays below 4",

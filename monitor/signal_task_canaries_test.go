@@ -530,7 +530,7 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"every active taskworker contains typed-reset commit b8af229f",
 		"never clear payment rows or keys manually",
 		"do not accelerate processor-rate-limit rows",
-		"provenance-gate server commit b8718420 on every active taskworker",
+		"provenance-gate current-main server commit 66525afc on every active taskworker",
 		"shared Redis-time Circle transfer admission",
 		"keep the gate fail closed",
 		"canonical payout attempts stay below four per second for a full 90-minute retry window",
@@ -545,6 +545,9 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 	}
 	if strings.Contains(markdown, "processor-bad-request rows") {
 		t.Fatalf("mixed-family alert rendered guidance for an absent class:\n%s", markdown)
+	}
+	if strings.Contains(markdown, "b8718420") {
+		t.Fatalf("mixed-family alert retained former non-ancestor deployment guidance:\n%s", markdown)
 	}
 	for _, staleRuntimeClaim := range []string{
 		"2026.8.31-outerwerld+1033655820",

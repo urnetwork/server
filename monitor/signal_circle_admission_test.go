@@ -163,13 +163,16 @@ func TestCircleAdmissionSignalSyntheticMissingCollector(t *testing.T) {
 	for _, want := range []string{
 		"edge-3/g2#missing[deferrals,wait-sum]",
 		"at most three transfer submits",
-		"commit b8718420",
+		"commit 66525afc",
 		"mutable version string",
 		"SIGNALS.md §2.14",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("missing-collector alert lacks %q:\n%s", want, alert.Markdown())
 		}
+	}
+	if strings.Contains(alert.Markdown(), "b8718420") {
+		t.Fatalf("missing-collector alert retained former non-ancestor deployment guidance:\n%s", alert.Markdown())
 	}
 }
 
