@@ -483,8 +483,10 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"cannot describe every failing row",
 		"cause_breakdown=wallet-insufficient=368,connection-cleanup-deadline=10,processor-invalid-destination=5,processor-rate-limit=1",
 		"queued, cursor-batched CompletePayment retention path",
-		"current taskworker automatically releases only Circle's typed invalid-destination pre-chain attempt",
-		"persistence after another retry means the invalid configured wallet is still selected",
+		"active artifact contains typed-reset commit b8af229f",
+		"2026.8.31-outerwerld+1033655820/source 1d8f01e5 contains that reset",
+		"repeated hourly rejection means the invalid configured wallet is still selected",
+		"typed-reset provenance is present",
 		"never clear payment rows or keys manually",
 		"do not accelerate processor-rate-limit rows",
 		"verify every taskworker source revision",
@@ -532,7 +534,8 @@ func TestTaskCanariesSignalMixedGuidanceMatchesPresentMigrationCauses(t *testing
 		"Handle only the present AdvancePayment classes",
 		"restore migration coherence per §8.9",
 		"schema-object-missing clears",
-		"current taskworker automatically releases only Circle's typed invalid-destination pre-chain attempt",
+		"active artifact contains typed-reset commit b8af229f",
+		"2026.8.31-outerwerld+1033655820/source 1d8f01e5 contains that reset",
 		"SIGNALS.md §1.2, §5.7, and §8.9",
 	} {
 		if !strings.Contains(markdown, want) {

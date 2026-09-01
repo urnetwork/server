@@ -122,8 +122,8 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 		"deploy the queued, cursor-batched CompletePayment retention path for connection-cleanup-deadline rows",
 		"the legacy retention query and new 120-second cleanup failures disappear")
 	add("processor-invalid-destination",
-		"correct chain-mismatched payout wallets through the supported account API; the current taskworker automatically releases only Circle's typed invalid-destination pre-chain attempt, so persistence after another retry means the invalid configured wallet is still selected; never clear payment rows or keys manually",
-		"the next retry selects the corrected wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination clears")
+		"verify the active artifact contains typed-reset commit b8af229f, then correct chain-mismatched payout wallets through the supported account API; production taskworker 2026.8.31-outerwerld+1033655820/source 1d8f01e5 contains that reset, so its repeated hourly rejection means the invalid configured wallet is still selected; never clear payment rows or keys manually",
+		"typed-reset provenance is present, the next retry selects the corrected wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination clears")
 	add("processor-bad-request",
 		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
 		"processor-bad-request rows reach a definitive safe outcome")

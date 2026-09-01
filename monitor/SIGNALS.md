@@ -3311,6 +3311,20 @@ limit:
   ancestry above, this is continued invalid wallet selection after the safe
   typed reset, not evidence that the reset code is missing. It does not weaken
   the separate requirement to deploy `70b0d269` for retry dispersion.
+
+  An independent artifact/runtime control at the UTC day boundary removed the
+  remaining provenance assumption. The published OCI/SLSA build provenance for
+  taskworker `2026.8.31-outerwerld+1033655820` names source revision
+  `1d8f01e5` for both amd64 and arm64 and a build completion at 08:43Z. Git
+  ancestry proves that revision contains typed-reset `b8af229f0` and excludes
+  retry-dispersion `70b0d269`. A bounded three-hour taskworker query then found
+  36 diagnostic lines but only 18 exact-replay-deduplicated evaluator attempts:
+  the same six logical payments at the same minute in each of the 21Z, 22Z,
+  and 23Z hours. The deployed reset is therefore active and repeatedly exposes
+  the still-invalid selected wallet, while the hour-locked cadence separately
+  proves the old jitter. Correct the wallet through the supported account API
+  and deploy `70b0d269` for retry dispersion as two independent actions; the
+  latter cannot invent or authorize valid payout-wallet data.
 - `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
   2026-08-31 UTC production row reached 153 failures on PostgreSQL 18.4 while
   `effective_io_concurrency=200` and `temp_buffers=8MB`. Its stack ended in
