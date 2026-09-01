@@ -136,6 +136,9 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 	if alert.Frame != "table=contract_close" {
 		t.Fatalf("legacy maintenance frame = %q, want table=contract_close", alert.Frame)
 	}
+	if alert.Severity != SeverityPage {
+		t.Fatalf("legacy maintenance severity = %q, want PAGE", alert.Severity)
+	}
 	for _, detail := range []string{
 		"frame=table=contract_close",
 		"legacy full-table concurrent-reindex path",
@@ -144,6 +147,8 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		"patch-identical",
 		"pg_stat_progress_create_index",
 		"does not by itself prove that PostgreSQL began the statement",
+		"exhausted PostgreSQL admission",
+		"reclaimed the same durable task into a new retry",
 		"Do not let a rollout or manual cancellation implicitly interrupt a protected rebuild",
 		"cancellation is a database mutation and requires authorization",
 		"supported cleanup-only maintenance command",

@@ -1797,15 +1797,32 @@ the fleet total was 367 artifacts / 308,522,303,488 bytes (287.33 GiB). This
 is the positive production control for the phase/counter fields and another
 direct reproduction of the legacy artifact-creation loop.
 
+The 19:41Z recovery then tied the loop to its user-visible capacity cost a
+second time. `contract_close_pkey_ccnew36` began at 19:41:17Z. Within 76
+seconds direct PostgreSQL frames moved from 710 total / 5 active clients to
+806 total / 162 active and then 891 total / 666 active. The bounded database
+log window recorded 51 rejected logins, 682 statements over 30 seconds, 37
+over 60 seconds, 271 client-loss records, and 289 cancellations; the
+`UpdateClientLocations` canary fell from 6-8 completions/minute to 3 and then
+2. PostgreSQL canceled the reindex at 19:45:22Z after its maintenance client
+lost the pooled heartbeat path, and the catalog rose to 369 invalid artifacts
+/ 289.02 GiB, including a new 37th `contract_close` artifact. The row still
+had a 24-hour task maximum and no reschedule error, but its last successful
+claim refresh expired at 19:49:23Z. Another worker reclaimed the same row at
+19:49:34Z and started `contract_close_pkey_ccnew37` immediately. This
+same-window sequence proves both the database-capacity mechanism and the
+five-minute lease-retry mechanism without inferring either from a later idle
+snapshot.
+
 Standing class `db-maintenance-legacy-reindex` matches only the old-format
 start line for an exact table or daily reliability partition excluded by
-current policy, groups it by table, and warns on the first occurrence. It
+current policy, groups it by table, and pages on the first occurrence. It
 deliberately excludes the later `reindex took` completion line, ordinary
 old-format tables, and the fixed
 `maintenance table[...] <step> <table>` state-machine format. Old code writes
 the start line before it opens the maintenance connection, so this proves
 legacy selection and call-path entry but not that PostgreSQL began the
-statement. The class gives that legacy attempt an immediate operational gate
+statement. The page gives that legacy attempt an immediate operational gate
 while `pg_stat_progress_create_index` and `reindex-debris` remain the sources
 of truth for an active backend and for confirmed inactive/active-table
 candidate artifacts.
