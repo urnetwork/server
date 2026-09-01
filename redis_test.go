@@ -2,12 +2,78 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/connect"
 )
+
+// TestRedisDoOnceDisablesCommandAndCallbackRetries pins both retry layers that
+// can otherwise replay a non-idempotent pipeline after Redis applied it but its
+// response was lost. Source-of-truth reconciliation, not retransmission, owns
+// recovery for these calls.
+func TestRedisDoOnceDisablesCommandAndCallbackRetries(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		callbackAttempts := 0
+		func() {
+			defer func() {
+				if recovered := recover(); recovered == nil {
+					t.Fatal("RedisDoOnce swallowed the synthetic connection error")
+				}
+			}()
+			RedisDoOnce(ctx, func(client RedisClient) {
+				callbackAttempts++
+				switch typed := client.(type) {
+				case *redis.Client:
+					if typed.Options().MaxRetries != 0 {
+						t.Fatalf("standalone command retries = %d, want 0", typed.Options().MaxRetries)
+					}
+				case *redis.ClusterClient:
+					if typed.Options().MaxRedirects != 0 || typed.Options().MaxRetries > 0 {
+						t.Fatalf(
+							"cluster retries = redirects:%d node:%d, want both disabled",
+							typed.Options().MaxRedirects,
+							typed.Options().MaxRetries,
+						)
+					}
+				default:
+					t.Fatalf("unexpected RedisDoOnce client type %T", client)
+				}
+				panic(errors.New("synthetic i/o timeout"))
+			})
+		}()
+		connect.AssertEqual(t, callbackAttempts, 1)
+	})
+}
+
+func TestGoRedisNoRetrySentinelsDisableBothClientKinds(t *testing.T) {
+	standalone := redis.NewClient(&redis.Options{
+		Addr:       "127.0.0.1:1",
+		MaxRetries: -1,
+	})
+	defer standalone.Close()
+	if standalone.Options().MaxRetries != 0 {
+		t.Fatalf("standalone -1 normalized to %d retries, want 0", standalone.Options().MaxRetries)
+	}
+
+	cluster := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs:        []string{"127.0.0.1:1"},
+		MaxRetries:   -1,
+		MaxRedirects: -1,
+	})
+	defer cluster.Close()
+	if cluster.Options().MaxRetries > 0 || cluster.Options().MaxRedirects != 0 {
+		t.Fatalf(
+			"cluster -1 normalized to redirects:%d node:%d, want both disabled",
+			cluster.Options().MaxRedirects,
+			cluster.Options().MaxRetries,
+		)
+	}
+}
 
 // TestRedisGetSetPipeline exercises the basic command path through the `Redis`
 // wrapper: SET, GET (hit and miss), and a pipeline.

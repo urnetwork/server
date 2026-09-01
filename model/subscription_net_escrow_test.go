@@ -46,6 +46,29 @@ func TestNetEscrowReservationPageForcesPerBalanceIndexBoundary(t *testing.T) {
 	}
 }
 
+// The expiry-boundary repair must stay proportional to authoritative open
+// escrow. Scanning all historical balances would turn one five-minute repair
+// pass into a production-cardinality table walk.
+func TestNetEscrowNoncurrentOpenBalancePageStaysIndexBounded(t *testing.T) {
+	for _, want := range []string{
+		"transfer_escrow.settled = false",
+		"transfer_contract.outcome IS NULL",
+		"NOT (",
+		"transfer_balance.start_time <= $1 AND $1 < transfer_balance.end_time",
+		"transfer_escrow.balance_id > $2",
+		"GROUP BY transfer_escrow.balance_id",
+		"ORDER BY transfer_escrow.balance_id",
+		"LIMIT $3",
+	} {
+		if !strings.Contains(netEscrowNoncurrentOpenBalancePageSQL, want) {
+			t.Fatalf("non-current open-escrow page lost bounded predicate %q:\n%s", want, netEscrowNoncurrentOpenBalancePageSQL)
+		}
+	}
+	if strings.Contains(netEscrowNoncurrentOpenBalancePageSQL, "end_time +") {
+		t.Fatalf("non-current open-escrow page restored a fixed grace window:\n%s", netEscrowNoncurrentOpenBalancePageSQL)
+	}
+}
+
 // TestNetEscrowMirrorSurvivesCallerCancel requires the mirror to match the
 // committed reservation once the create call returns, even though the caller's
 // context is cancelled the moment it does.
@@ -121,6 +144,77 @@ func TestNetEscrowMirrorSurvivesCallerCancel(t *testing.T) {
 			case <-time.After(100 * time.Millisecond):
 			}
 		}
+	})
+}
+
+// TestNetEscrowReconcileRepairsExpiredBalanceWithOpenEscrow reproduces the
+// 2026-09-01 UTC activation boundary. A balance stopped being current while
+// contracts created in its final interval remained open for the close worker's
+// grace period. The old current-window-only reconcile skipped the balance, so
+// a lost reservation mirror could not be repaired before settlement released
+// it and drove the counter negative.
+func TestNetEscrowReconcileRepairsExpiredBalanceWithOpenEscrow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		sourceNetworkId := server.NewId()
+		sourceUserId := server.NewId()
+		sourceClientId := server.NewId()
+		destinationNetworkId := server.NewId()
+		destinationUserId := server.NewId()
+		destinationClientId := server.NewId()
+		Testing_CreateNetwork(ctx, sourceNetworkId, "expiry-source", sourceUserId)
+		Testing_CreateNetwork(ctx, destinationNetworkId, "expiry-destination", destinationUserId)
+
+		const balanceByteCount = ByteCount(1024 * 1024 * 1024)
+		const contractByteCount = ByteCount(32 * 1024 * 1024)
+		err := AddBasicTransferBalance(
+			ctx,
+			sourceNetworkId,
+			balanceByteCount,
+			now.Add(-2*time.Hour),
+			now.Add(time.Hour),
+		)
+		connect.AssertEqual(t, err, nil)
+
+		transferEscrow, err := CreateTransferEscrow(
+			ctx,
+			sourceNetworkId,
+			sourceClientId,
+			destinationNetworkId,
+			destinationClientId,
+			contractByteCount,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(transferEscrow.Balances), 1)
+		balanceId := transferEscrow.Balances[0].BalanceId
+
+		// Cross the balance boundary without closing the contract, then reproduce
+		// the lost create mirror exposed by the production close cohort.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE transfer_balance
+				SET end_time = $2
+				WHERE balance_id = $1
+			`, balanceId, now.Add(-time.Minute)))
+		}, server.TxReadCommitted)
+		Testing_DeleteNetEscrow(ctx, balanceId)
+		connect.AssertEqual(t, len(GetActiveTransferBalances(ctx, sourceNetworkId)), 0)
+
+		driftByNetworkId, reconciledBalanceCount := ReconcileNetEscrow(ctx, true)
+		connect.AssertEqual(t, reconciledBalanceCount, 1)
+		connect.AssertEqual(t, driftByNetworkId[sourceNetworkId], -contractByteCount)
+		connect.AssertEqual(t, Testing_NetEscrowByteCount(ctx, balanceId), contractByteCount)
+
+		// The operator-targeted form must cover the same lifecycle set; otherwise
+		// a directed repair would misleadingly report zero balances at the exact
+		// boundary where the fleet pass now succeeds.
+		Testing_DeleteNetEscrow(ctx, balanceId)
+		targetedDrift, targetedBalanceCount := ReconcileNetEscrowForNetwork(ctx, sourceNetworkId, true)
+		connect.AssertEqual(t, targetedBalanceCount, 1)
+		connect.AssertEqual(t, targetedDrift, -contractByteCount)
+		connect.AssertEqual(t, Testing_NetEscrowByteCount(ctx, balanceId), contractByteCount)
 	})
 }
 

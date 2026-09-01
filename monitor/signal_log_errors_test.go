@@ -42,6 +42,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"source attribution", "[session]X-UR-Forwarded-For from untrusted peer", "source-attribution"},
 		{"HTTP write after hijack", "http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)", "http-hijack-write"},
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
+		{"escrow mirror write", "[netescrow]mirror write failed after reservation: i/o timeout", "netescrow-mirror-write"},
 		{"panic", "panic: synthetic crash frame", "panic"},
 		{"payout wallet", "asset amount owned by the wallet is insufficient", "payout-wallet-insufficient"},
 		{"invalid payout destination", `Bad status: 400 Bad Request {"code":155219,"message":"Invalid destination address."}`, "payout-invalid-destination"},
@@ -488,30 +489,35 @@ func TestLogErrorsSignalExplainsNegativeNetEscrowAftermath(t *testing.T) {
 	for _, detail := range []string{
 		"legacy full-fleet reconciler",
 		"old absolute SET or DEL snapshot",
-		"current page-local additive path",
+		"page-local additive path",
 		"PostgreSQL statement fixes its page snapshot",
-		"later Redis GET sees the newer mirror",
+		"visible before the later Redis GET",
 		"not evidence that the site independently created",
 		"log-ingestion delay",
-		"isolated clamped taskworker lines",
-		"quiet API/Connect emitters",
-		"14-19 second passes",
-		"zero new legacy calls",
-		"roughly 26ms unsettled-partial pages",
-		"contained residual race",
-		"UTC activation boundary",
-		"executor and statement deltas",
+		"425 contracts on 20 balances",
+		"6,937,052,501 bytes",
+		"586,862,592 bytes",
+		"52 clamped negative results",
+		"No Redis restart, failover, eviction",
+		"wave-start shortfall",
+		"replayed release",
+		"expired-balance reconciliation blind spot",
+		"immutable artifact provenance",
 		"reservation statement shape and timing",
+		"checked mirror-pipeline results",
+		"single-attempt client",
 		"migration 601",
 		"unsettled-partial query",
+		"non-current-open reconciliation fix",
 		"durable per-balance fencing/versioning",
 		"committed settlement before its delayed Redis release",
 		"atomic release Lua",
 		"clamped_to=0",
-		"contained commit/post ordering window",
 		"unsettled-partial pages below 1 second",
+		"non-current balance with outcome-NULL escrow",
 		"below 120 seconds",
 		"below 256GiB",
+		"next balance-expiry and close interval",
 		"taskworker, API, and Connect",
 		"balance=<id> contract=<id>",
 	} {
@@ -531,6 +537,39 @@ func TestLogErrorsSignalExplainsNegativeNetEscrowAftermath(t *testing.T) {
 	}
 	if strings.Contains(markdown, "The dominant production cause is the pre-fix full-fleet reconciler") {
 		t.Fatalf("negative net-escrow alert overclaimed the retired writer after the current additive reproduction:\n%s", markdown)
+	}
+}
+
+func TestLogErrorsSignalExplainsNetEscrowMirrorWriteFailure(t *testing.T) {
+	line := "[netescrow]mirror write failed after reservation: i/o timeout"
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-connect", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "netescrow-mirror-write").Markdown()
+	for _, detail := range []string{
+		"PostgreSQL escrow state change committed",
+		"Redis mirror pipeline returned an error",
+		"old paths discarded some pipeline results",
+		"retry-capable client",
+		"stops after one command attempt",
+		"CloseExpiredContracts intentionally leaves",
+		"not proof that every command in the pipeline failed",
+		"Never replay INCRBY, DECRBY, or additive correction blindly",
+		"non-current balances with open escrow",
+		"do not manually change the key",
+		"outcome-NULL escrow",
+		"zero netescrow-negative lines",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("net-escrow mirror-write alert missing %q:\n%s", detail, markdown)
+		}
 	}
 }
 

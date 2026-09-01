@@ -28,8 +28,9 @@ const RedisNil = redis.Nil
 const NoTtl = time.Duration(0)
 
 type safeRedisClient struct {
-	mutex  sync.Mutex
-	client redis.UniversalClient
+	mutex               sync.Mutex
+	client              redis.UniversalClient
+	disableCommandRetry bool
 }
 
 func (self *safeRedisClient) open() redis.UniversalClient {
@@ -70,6 +71,20 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 			if connectionMaxIdleTimes := redisConfigKeys.String(service, "conn_max_idle_time"); 0 < len(connectionMaxIdleTimes) {
 				connectionMaxIdleTime = connectionMaxIdleTimes[0]
 			}
+		}
+		maxRedirects := 8
+		if self.disableCommandRetry {
+			// go-redis retries a failed pipeline as a whole. If the server
+			// applied a non-idempotent command before the response was lost,
+			// retransmission applies it twice. -1 normalizes to zero retries
+			// for both standalone clients and cluster redirects, leaving the
+			// caller's source-of-truth reconciliation to repair an ambiguous
+			// result instead of guessing whether to replay it.
+			maxRetries = -1
+			maxRedirects = -1
+			// This secondary pool is opened only by non-idempotent write paths;
+			// do not double every service's configured idle connection floor.
+			minConnections = 0
 		}
 
 		connectionMaxLifetimeDuration, err := time.ParseDuration(connectionMaxLifetime)
@@ -136,7 +151,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				DialTimeout:   dialTimeout,
 				DialerRetries: dialRetries,
 				// FailingTimeoutSeconds: 0,
-				MaxRedirects: 8,
+				MaxRedirects: maxRedirects,
 			}
 			self.client = redis.NewClusterClient(options)
 			self.client.AddHook(redisTtlWarnHook{})
@@ -197,6 +212,7 @@ func (self *safeRedisClient) reset() {
 }
 
 var safeClient = &safeRedisClient{}
+var safeNoCommandRetryClient = &safeRedisClient{disableCommandRetry: true}
 
 var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "urnetwork_redis_key_event_merge_drops_total",
@@ -209,11 +225,13 @@ var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
 func init() {
 	poolStat := func(f func(*redis.PoolStats) float64) func() float64 {
 		return func() float64 {
-			client := safeClient.current()
-			if client == nil {
-				return 0
+			value := float64(0)
+			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient} {
+				if client := pool.current(); client != nil {
+					value += f(client.PoolStats())
+				}
 			}
-			return f(client.PoolStats())
+			return value
 		}
 	}
 	prometheus.MustRegister(
@@ -245,6 +263,7 @@ func init() {
 // call this after changes to the env
 func RedisReset() {
 	safeClient.reset()
+	safeNoCommandRetryClient.reset()
 }
 
 // func client() redis.UniversalClient {
@@ -303,6 +322,28 @@ func Redis(ctx context.Context, callback func(RedisClient), options ...any) {
 		parts := strings.Split(filename, "/")
 		Trace(
 			fmt.Sprintf("[redis] %s %s:%d\n", pcName, parts[len(parts)-1], line),
+			c,
+		)
+	} else {
+		c()
+	}
+}
+
+// RedisDoOnce runs a callback through a client whose command-level retries and
+// the server wrapper's callback retries are both disabled. Use it for
+// non-idempotent writes whose response can be lost after Redis applied the
+// mutation. The caller must surface the error and use an authoritative repair
+// path; blindly replaying the write can apply it twice.
+func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
+	c := func() {
+		redisWithClient(ctx, safeNoCommandRetryClient, callback, OptNoRetry())
+	}
+	if glog.V(2) {
+		pc, filename, line, _ := runtime.Caller(1)
+		pcName := runtime.FuncForPC(pc).Name()
+		parts := strings.Split(filename, "/")
+		Trace(
+			fmt.Sprintf("[redis-once] %s %s:%d\n", pcName, parts[len(parts)-1], line),
 			c,
 		)
 	} else {

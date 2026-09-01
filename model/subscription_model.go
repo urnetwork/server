@@ -348,16 +348,24 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 		// the net escrow keys use per-balance hash tags (different slots), so
 		// use a plain pipeline, which auto-routes per slot on cluster; a tx
 		// pipeline would be cross-slot
-		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, transferBalance := range transferBalances {
 				netEscrowCmds[transferBalance.BalanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.BalanceId))
 			}
 			return nil
 		})
+		if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
+			server.Raise(pipelineErr)
+		}
 		for _, transferBalance := range transferBalances {
 			netEscrowCmd := netEscrowCmds[transferBalance.BalanceId]
-			netEscrowBalanceByteCount, _ := netEscrowCmd.Int()
-			netEscrowBalanceByteCount = max(0, netEscrowBalanceByteCount)
+			netEscrowBalanceByteCount, commandErr := netEscrowCmd.Int64()
+			if errors.Is(commandErr, redis.Nil) {
+				netEscrowBalanceByteCount = 0
+			} else {
+				server.Raise(commandErr)
+			}
+			netEscrowBalanceByteCount = max(int64(0), netEscrowBalanceByteCount)
 			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-ByteCount(netEscrowBalanceByteCount))
 		}
 	})
@@ -449,12 +457,12 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 	// than the former ~1,800 round trips while remaining a bounded Redis/SQL
 	// payload.
 	const batchSize = 10000
+	type balanceRow struct {
+		balanceId server.Id
+		networkId server.Id
+	}
 	var cursor server.Id
 	for {
-		type balanceRow struct {
-			balanceId server.Id
-			networkId server.Id
-		}
 		rows := []balanceRow{}
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
@@ -505,6 +513,56 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 		}
 	}
 
+	// A balance stops being available at end_time, but its contracts are closed
+	// only after a grace period and can remain open longer when the close worker
+	// is backlogged. The current-window scan above used to abandon those live
+	// reservations at the exact expiry boundary. A lost create mirror during the
+	// final interval could therefore never be repaired before the delayed
+	// settlement released it and drove the counter negative.
+	//
+	// Visit only non-current balances that still have authoritative open escrow.
+	// The settled=false predicate is the same safe partial-index prefilter used
+	// by the reservation query; outcome IS NULL remains authoritative. This keeps
+	// the second pass proportional to live stragglers rather than every expired
+	// balance, and it remains correct for arbitrarily delayed close work.
+	cursor = server.Id{}
+	for {
+		rows := []balanceRow{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				netEscrowNoncurrentOpenBalancePageSQL,
+				now,
+				cursor,
+				batchSize,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var row balanceRow
+					server.Raise(result.Scan(&row.balanceId, &row.networkId))
+					rows = append(rows, row)
+				}
+			})
+		})
+		if len(rows) == 0 {
+			break
+		}
+		balanceIds := make([]server.Id, len(rows))
+		for i, row := range rows {
+			balanceIds[i] = row.balanceId
+		}
+		pending := openEscrowReservedForBalances(ctx, balanceIds)
+		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
+		for _, row := range rows {
+			driftByNetworkId[row.networkId] += drift[row.balanceId]
+		}
+		balanceCount += len(rows)
+		cursor = rows[len(rows)-1].balanceId
+		if len(rows) < batchSize {
+			break
+		}
+	}
+
 	for networkId, drift := range driftByNetworkId {
 		if drift == 0 {
 			delete(driftByNetworkId, networkId)
@@ -514,11 +572,39 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 	return
 }
 
+// netEscrowNoncurrentOpenBalancePageSQL discovers balances that the ordinary
+// availability-window scan deliberately excludes but that still own a live
+// PostgreSQL reservation. transfer_escrow_unsettled_balance_contract makes the
+// balance-id keyset scan bounded; the outcome join excludes closed rows whose
+// best-effort settled post was missed.
+const netEscrowNoncurrentOpenBalancePageSQL = `
+    SELECT
+        transfer_escrow.balance_id,
+        transfer_balance.network_id
+    FROM transfer_escrow
+    INNER JOIN transfer_contract ON
+        transfer_contract.contract_id = transfer_escrow.contract_id
+    INNER JOIN transfer_balance ON
+        transfer_balance.balance_id = transfer_escrow.balance_id
+    WHERE
+        transfer_escrow.settled = false AND
+        transfer_contract.outcome IS NULL AND
+        NOT (
+            transfer_balance.active = true AND
+            transfer_balance.start_time <= $1 AND $1 < transfer_balance.end_time
+        ) AND
+        transfer_escrow.balance_id > $2
+    GROUP BY transfer_escrow.balance_id, transfer_balance.network_id
+    ORDER BY transfer_escrow.balance_id
+    LIMIT $3
+`
+
 // ReconcileNetEscrowForNetwork reconciles the redis net escrow counters for one
-// network's active balances. See [ReconcileNetEscrow]; this is the targeted form
-// used to immediately clear (or, with apply false, just measure) drift on a
-// single affected network. The returned drift is the signed total over the
-// network's balances (previous counters minus reconciled values).
+// network's current balances plus any non-current balance that still owns open
+// escrow. See [ReconcileNetEscrow]; this is the targeted form used to
+// immediately clear (or, with apply false, just measure) drift on a single
+// affected network. The returned drift is the signed total over the network's
+// balances (previous counters minus reconciled values).
 func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, apply bool) (driftByteCount ByteCount, balanceCount int) {
 	now := server.NowUtc()
 
@@ -533,6 +619,38 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
                     network_id = $1 AND
                     active = true AND
                     start_time <= $2 AND $2 < end_time
+            `,
+			networkId,
+			now,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var balanceId server.Id
+				server.Raise(result.Scan(&balanceId))
+				balanceIds = append(balanceIds, balanceId)
+			}
+		})
+	})
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT transfer_escrow.balance_id
+                FROM transfer_escrow
+                INNER JOIN transfer_contract ON
+                    transfer_contract.contract_id = transfer_escrow.contract_id
+                INNER JOIN transfer_balance ON
+                    transfer_balance.balance_id = transfer_escrow.balance_id
+                WHERE
+                    transfer_balance.network_id = $1 AND
+                    transfer_escrow.settled = false AND
+                    transfer_contract.outcome IS NULL AND
+                    NOT (
+                        transfer_balance.active = true AND
+                        transfer_balance.start_time <= $2 AND $2 < transfer_balance.end_time
+                    )
+                GROUP BY transfer_escrow.balance_id
+                ORDER BY transfer_escrow.balance_id
             `,
 			networkId,
 			now,
@@ -704,7 +822,7 @@ func reconcileNetEscrowBatch(
 	apply bool,
 ) (drift map[server.Id]ByteCount) {
 	drift = map[server.Id]ByteCount{}
-	server.Redis(ctx, func(r server.RedisClient) {
+	server.RedisDoOnce(ctx, func(r server.RedisClient) {
 		// the net escrow keys use per-balance hash tags (different slots), so
 		// use plain pipelines, which auto-route per slot on cluster
 		getCmds := map[server.Id]*redis.StringCmd{}
@@ -738,7 +856,7 @@ func reconcileNetEscrowBatch(
 			}
 			return nil
 		})
-		server.Raise(pipelineErr)
+		reportNetEscrowMirrorWriteFailure("reconciliation", pipelineErr)
 	})
 	return
 }
@@ -766,6 +884,17 @@ func reportNegativeNetEscrow(
 			)
 		}
 	}
+}
+
+// reportNetEscrowMirrorWriteFailure preserves the uncertain-outcome boundary
+// without retrying a non-idempotent mutation. The next source-of-truth
+// reconciliation repairs either a missing or partially applied write.
+func reportNetEscrowMirrorWriteFailure(site string, err error) {
+	if err == nil {
+		return
+	}
+	glog.Errorf("[netescrow]mirror write failed after %s: %v\n", site, err)
+	server.Raise(err)
 }
 
 // releaseNetEscrowForContract returns a quarantined contract's reserved bytes to
@@ -801,16 +930,17 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 	// caller has gone away (see netEscrowMirrorCtx)
 	mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
 	defer mirrorCancel()
-	server.Redis(mirrorCtx, func(r server.RedisClient) {
+	server.RedisDoOnce(mirrorCtx, func(r server.RedisClient) {
 		decrCmds := map[server.Id]*redis.Cmd{}
 		// per-balance hash tags (different slots): plain pipeline auto-routes
-		r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
+		_, pipelineErr := r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 			for balanceId, byteCount := range escrowed {
 				key := netEscrowKey(balanceId)
 				decrCmds[balanceId] = applyNetEscrowRelease(mirrorCtx, pipe, key, byteCount)
 			}
 			return nil
 		})
+		reportNetEscrowMirrorWriteFailure("quarantine release", pipelineErr)
 		reportNegativeNetEscrow(decrCmds, contractId, "quarantine release")
 	})
 }
@@ -1169,16 +1299,24 @@ func createTransferEscrowInTx(
 		netEscrowCmds := map[server.Id]*redis.StringCmd{}
 		// the net escrow keys use per-balance hash tags (different slots), so
 		// use a plain pipeline, which auto-routes per slot on cluster
-		r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, transferBalance := range orderedTransferBalances {
 				netEscrowCmds[transferBalance.balanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.balanceId))
 			}
 			return nil
 		})
+		if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
+			server.Raise(pipelineErr)
+		}
 		for _, transferBalance := range orderedTransferBalances {
 			netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
-			netEscrowBalanceByteCount, _ := netEscrowCmd.Int()
-			netEscrowBalanceByteCount = max(0, netEscrowBalanceByteCount)
+			netEscrowBalanceByteCount, commandErr := netEscrowCmd.Int64()
+			if errors.Is(commandErr, redis.Nil) {
+				netEscrowBalanceByteCount = 0
+			} else {
+				server.Raise(commandErr)
+			}
+			netEscrowBalanceByteCount = max(int64(0), netEscrowBalanceByteCount)
 			transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
 		}
 	})
@@ -1292,10 +1430,10 @@ func createTransferEscrowInTx(
 		// caller has gone away (see netEscrowMirrorCtx)
 		mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
 		defer mirrorCancel()
-		server.Redis(mirrorCtx, func(r server.RedisClient) {
+		server.RedisDoOnce(mirrorCtx, func(r server.RedisClient) {
 			mirrorTime := server.NowUtc()
 			// per-balance hash tags (different slots): plain pipeline auto-routes
-			r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
+			_, pipelineErr := r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 				for balanceId, escrow := range balanceEscrows {
 					key := netEscrowKey(balanceId)
 					pipe.IncrBy(mirrorCtx, key, escrow.balanceByteCount)
@@ -1307,6 +1445,7 @@ func createTransferEscrowInTx(
 				}
 				return nil
 			})
+			reportNetEscrowMirrorWriteFailure("reservation", pipelineErr)
 		})
 		return nil
 	})
@@ -2371,10 +2510,10 @@ func settleEscrowInTx(
 			// caller has gone away (see netEscrowMirrorCtx)
 			mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
 			defer mirrorCancel()
-			server.Redis(mirrorCtx, func(r server.RedisClient) {
+			server.RedisDoOnce(mirrorCtx, func(r server.RedisClient) {
 				decrCmds := map[server.Id]*redis.Cmd{}
 				// per-balance hash tags (different slots): plain pipeline auto-routes
-				r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
+				_, pipelineErr := r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
 					for balanceId, sweepPayout := range sweepPayouts {
 						key := netEscrowKey(balanceId)
 						decrCmds[balanceId] = applyNetEscrowRelease(
@@ -2386,6 +2525,7 @@ func settleEscrowInTx(
 					}
 					return nil
 				})
+				reportNetEscrowMirrorWriteFailure("settle", pipelineErr)
 				reportNegativeNetEscrow(decrCmds, contractId, "settle")
 			})
 			return nil

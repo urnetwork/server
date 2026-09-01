@@ -531,7 +531,9 @@ be one sick node × fleet retry loops. The monitor should report class + rate
 + distinct target (ip:port) set, and normally should not use raw volume as
 severity. The explicit exception is a class where each line is itself a
 mutation exposure: `netescrow-negative` warns on any line and pages at
->=100/minute for one service/site. A NEW
+>=100/minute for one service/site. A `netescrow-mirror-write` precursor also
+warns on any line because PostgreSQL has already committed while the Redis
+mirror mutation has an uncertain result. A NEW
 signature appearing at rate (an unseen error shape / panic frame) is a
 signal even when no known class matches — report it as class `novel` with
 the sample line. Apply the novelty threshold to the most frequent normalized
@@ -3197,7 +3199,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
-| `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create/double release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, duration, reservation statement profile, and aggregate drift. Retain the page-local additive reconciler and atomic release clamp; for slow historical bounded pages apply migration 601 and deploy the unsettled-partial query. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
+| `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create or replayed release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, immutable source, duration, reservation statement profile, aggregate drift, and Redis mutation errors. Retain the page-local additive reconciler and atomic release clamp; deploy single-attempt checked mirror mutations, migration 601, the unsettled-partial query, and the non-current-open pass. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
 Volume heuristics: identical lines exploding = one cause × retry loops.
 Extract (class, target ip:port, innermost app frame) as the alert identity;
@@ -4396,18 +4398,27 @@ interval. If matched reversals persist on fast unsettled-partial pages, the
 remaining correctness fix is durable per-balance fencing/versioning shared by
 live mirror posts and reconciliation; do not mask it with manual reruns.
 
-Deployment `2026.8.31-outerwerld+1033655820` supplied the access-path proof.
-Its first unequivocally post-rollout task,
+Deployment `2026.8.31-outerwerld+1033655820` initially appeared to supply the
+access-path proof. Its first unequivocally post-rollout task,
 `01a056fc-6076-682e-f24d-56133eacdd9a`, ran on edge-3/g1 container
 `3e5e8253a54e` and completed in about 15 seconds at 08:48:13Z. It scanned
 907,015 balances but corrected only 499.65MiB over-reserved and 10.19GiB
 under-reserved across 165 networks. The adjacent `pg_stat_statements` sample
 recorded 91 new unsettled-partial calls at 61.7ms/page, versus the measured
-7,216.1ms historical bounded-lateral mean that triggered migration 601. This
-proves the schema artifact and matching taskworker query are active together;
-rollout percentage or a fast duration alone would not have proved that. Keep
-recovery open until a later scheduled aggregate remains in band and all three
-negative-counter emitters stay quiet for the full following interval.
+7,216.1ms historical bounded-lateral mean that triggered migration 601.
+
+Immutable artifact provenance later invalidated the executor attribution,
+however. Both published architectures name server source revision `1d8f01e5`;
+Git ancestry and the exact source object prove that revision has the historical
+bounded-lateral query and excludes `93cbec80`, which added
+`transfer_escrow.settled=false`. `pg_stat_statements` is database-wide and does
+not carry container identity, so adjacent unsettled-partial calls can come from
+another binary or a diagnostic and cannot override immutable artifact source.
+The fast duration proves only that this particular historical pass completed
+quickly on the then-hot/small working set. Require both provenance containing
+`93cbec80` and new post-start statement calls before declaring the matching
+taskworker query active; rollout percentage, duration, and database-global
+counters alone are insufficient.
 
 A later residual line at `19:04:04.427997Z` supplied the key-lifecycle
 discriminator. The matching scheduled task ran from `19:03:53.330931Z` to
@@ -4427,25 +4438,90 @@ of the irreducible commit/post ordering window and keeps the quiet-interval
 observation open; it is not a reason to redeploy the already-present access
 path or clamp fixes.
 
-A second independent control at `23:58:27.918855Z` reproduced that contained
-shape. One taskworker settlement reported `clamped_to=0`; API and Connect
+A second independent control at `23:58:27.918855Z` reproduced the contained
+clamp shape. One taskworker settlement reported `clamped_to=0`; API and Connect
 reported zero negative-counter lines in the same 30-minute window. The
 matching pass completed in roughly 12 seconds and corrected only 196.8MiB
 over-reserved plus 1.15GiB under-reserved across 22 networks. Its successor
 completed in roughly 19 seconds and corrected 1.53GiB over-reserved plus
-196.8MiB under-reserved across 36 networks. Across that successor,
-`pg_stat_statements` added 183 unsettled-partial reservation calls, zero legacy
-`ANY` calls, and about 26.0ms of reservation-query time per page. The apparent
-balance-count jump from roughly 915,000 to 1.82 million was the UTC month
-boundary, not a duplicate walk: 906,710 durable balances became active since
-the UTC day boundary. This combination independently verifies the deployed
-access path and atomic clamp. The next scheduled pass reported after roughly
-20 seconds with 1,821,933 balances, 31 drifted networks, 501.24MiB
-over-reserved, and 475.62MiB under-reserved; taskworker, API, and Connect all
-remained free of negative-counter lines for that full following interval. This
-closes the residual observation without a taskworker redeploy or manual Redis
-mutation. Only recurring matched reversals on fast pages justify durable
-per-balance fencing/versioning.
+196.8MiB under-reserved across 36 networks. Across that successor, the
+database-wide `pg_stat_statements` counters added 183 unsettled-partial
+reservation calls, zero legacy `ANY` calls, and about 26.0ms of reservation
+query time per page. Those counters prove the fast query executed somewhere;
+the later immutable provenance check proves they do **not** identify the
+taskworker artifact that produced the aggregate. The apparent balance-count
+jump from roughly 915,000 to 1.82 million was the UTC month boundary, not a
+duplicate walk: 906,710 durable balances became active since the UTC day
+boundary. The next scheduled pass reported after roughly 20 seconds with
+1,821,933 balances, 31 drifted networks, 501.24MiB over-reserved, and 475.62MiB
+under-reserved; taskworker, API, and Connect all remained free of negative
+counter lines for that following interval. This verifies atomic containment
+and a temporary quiet interval, not the provenance-excluded access path.
+
+The same UTC boundary then exposed a separate, deterministic lifecycle gap at
+`01:06:16Z`. Taskworker emitted 52 settlement diagnostics over 10.21 seconds;
+every line carried `clamped_to=0`, API and Connect emitted none, and the 52
+negative results totaled 586,862,592 bytes. A bounded read-only reconstruction
+used those redacted-in-alert contract/balance pairs only inside the diagnostic
+query. It found 425 contracts on 20 balances, all 20 balances active by byte
+count but with the same `2026-09-01 01:00:00Z` end time. The contracts reserved
+6,937,052,501 bytes, were all created after the preceding reconcile completed
+at `00:57:40Z` (latest creation `00:59:59.674999Z`), and closed from
+`01:06:15.298149Z` through `01:06:26.333917Z`. The first 373 releases consumed
+6,216,738,133 bytes without going negative; the remaining 52 released
+720,314,368 bytes. If every Redis release applied exactly once, reversing those
+results gives a wave-start Redis total of 6,350,189,909 bytes, exactly
+586,862,592 bytes below PostgreSQL, with all 20 balances short.
+
+This kills the slow-page snapshot hypothesis for this cohort: no affected
+contract existed during the preceding page reads. It also rules out a second
+durable settlement claim, Redis eviction, Redis/node restart, cluster-role
+failover, and Connect/API process restart. It does **not** rule out replay of a
+Redis release: go-redis explicitly retries a failed pipeline as a whole, so a
+connection lost after Redis applied a command but before its response reached
+the client can execute the mutation twice. The old reservation and release
+paths discarded pipeline errors, leaving both a missed/partial create increment
+and a replayed release observationally possible. Therefore the reverse total
+above is a conditional reconstruction, not proof of the wave-start counter.
+The exact network transient and which of those two mechanisms occurred cannot
+be reconstructed after the error was discarded, and must not be invented.
+
+Current source uses a separate client with both go-redis command retries and
+the server callback retry disabled for every non-idempotent reservation,
+release, and additive reconcile mutation. It checks the pipeline result and
+emits `netescrow-mirror-write` before raising an error; the mutation is never
+blindly replayed. Read-only pipelines retain normal retries. PostgreSQL remains
+the source of truth and a later independently recomputed reconciliation repairs
+a missing or partially applied mutation.
+
+The reason any create-side shortfall survived until release is independently
+deterministic.
+`ReconcileNetEscrow` selected only balances satisfying
+`start_time <= now < end_time`, while `CloseExpiredContracts` intentionally
+waits at least five minutes after contract creation/expiry. The `01:02:55Z`
+pass therefore excluded all 20 ended balances even though all 425 PostgreSQL
+reservations were still open, and the delayed close exposed the full shortfall.
+The root fix adds a second keyset pass over non-current balances that still own
+`settled=false` escrow joined to authoritative `outcome IS NULL`. Production
+read-only `EXPLAIN ANALYZE` used
+`transfer_escrow_unsettled_balance_contract`, returned no current stragglers,
+and completed in about 2.09 seconds without a history-table sequential scan.
+The pass is proportional to the unsettled/open set, works for close
+backlogs longer than any fixed grace window, and is applied by both fleet and
+targeted network reconciliation.
+
+`TestNetEscrowReconcileRepairsExpiredBalanceWithOpenEscrow` creates a live
+contract, crosses only its balance end boundary, deletes the Redis mirror, and
+requires both fleet and targeted reconciliation to restore the exact durable
+reservation while ordinary active-balance selection returns zero rows. Keep
+the single-attempt client configuration test and atomic clamp test as separate
+guards. Verification requires a
+taskworker artifact whose immutable source contains migration-601 query
+`93cbec80` plus the non-current-open pass, observed statement calls for both
+paths after that process start, one sub-120-second run, and zero negative lines
+through the next balance-expiry/close boundary. Do not manually replay an
+`INCRBY`: a pipeline error can follow partial application and blind replay can
+double-reserve.
 
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
@@ -4581,6 +4657,7 @@ Tier-1 (warn):
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
+| netescrow-mirror-write | standing logs | `[netescrow]mirror write failed after` | any warns; never blindly replay the non-idempotent mutation |
 | proxy-public-handshake | synthetic+host | 14.5 protocol handshake vs internal readiness | any host/block with internal 200 but public SOCKS/HTTP/HTTPS handshake failure for 2 probes |
 | policy-route-drift | host | 14.5 networkd/LB start clocks plus Warp table/rules | networkd newer than the transparent LB and any owned public route or source/fwmark rule missing |
 | edge-auto-upgrades | host | 14.5 APT periodic config and unit masks | any edge with APT periodic enable nonzero or an apt-daily timer/service not masked |
