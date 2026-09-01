@@ -240,8 +240,8 @@ func (proxyCacheProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			),
 			evidence: fmt.Sprintf("Every family is source-timestamp filtered to no more than %.0f seconds old before the exact host/block/instance join; newest process start suppresses a draining generation.", proxyCacheFreshness.Seconds()),
 			context:  "This is software-owned memory observability. It does not establish that the old cache owns the whole multi-gigabyte live set, and reducing it cannot create host RAM or additional active-client slots required by §14.7.",
-			action:   "Provenance-check and deploy the Proxy artifact containing the bounded TTL/LRU cache and identity-free cache metrics through the ordinary host-serialized rollout. Do not restart solely to hide retained entries or infer zero entries from an absent gauge.",
-			verify:   "Every newest identity exports all eight joined metrics for two consecutive scrapes; capacity is positive and no greater than 16,384, and entries never exceed capacity.",
+			action:   "Provenance-check and deploy the Proxy artifact from a clean server descendant of current-main commit a11ae7b1, which contains the bounded TTL/LRU cache and identity-free cache metrics, through the ordinary host-serialized rollout. Do not restart solely to hide retained entries or infer zero entries from an absent gauge.",
+			verify:   "Every newest identity reports a clean source descendant of a11ae7b1 and exports all eight joined metrics for two consecutive scrapes; capacity is positive and no greater than 16,384, and entries never exceed capacity.",
 			playbook: "SIGNALS.md §14.7c",
 		})
 	}

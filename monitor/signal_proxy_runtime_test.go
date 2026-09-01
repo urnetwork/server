@@ -68,6 +68,8 @@ func TestProxyRuntimeSignalSyntheticHighLiveSet(t *testing.T) {
 		"exactly two durable goroutines",
 		"endpoint-seeded server-initiated handshaking peers",
 		"shared NetworkSpace",
+		"current-main server commit a11ae7b1",
+		"clean Go source descendant of a11ae7b1",
 		"additional hard client slots",
 		"SIGNALS.md §14.7b",
 	} {

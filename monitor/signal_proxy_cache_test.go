@@ -40,6 +40,7 @@ func TestProxyCacheSignalSyntheticLegacyMapUnobservable(t *testing.T) {
 		"fireside/g1#legacy[entries,capacity,evictions]",
 		"30-second value TTL without deleting expired keys",
 		"cannot prove the lifetime-retention path is closed",
+		"current-main commit a11ae7b1",
 		"additional active-client slots",
 		"SIGNALS.md §14.7c",
 	} {

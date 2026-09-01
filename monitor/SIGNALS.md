@@ -8860,10 +8860,11 @@ or device ceiling, additional proxy instances on capable hardware (or an
 explicit operational load reduction) are required even after the live set is
 smaller.
 
-Deploy the Proxy service artifact containing targeted warmup, the value-only
-WireGuard TUN factory, the bounded caller-lock cache, the new owner gauges, and
-the generic source/digest gauge; no xops deployment is needed for this
-process-memory correction. The release builder must use the Warp provenance
+Deploy the Proxy service artifact from a clean server descendant of
+`a11ae7b1`, containing targeted warmup, the value-only WireGuard TUN factory,
+the bounded caller-lock cache, the new owner gauges, and the generic
+source/digest gauge; no xops deployment is needed for this process-memory
+correction. The release builder must use the Warp provenance
 gate that rejects dirty source, requires every Linux binary's embedded
 revision and `modified=false` to match the starting clean HEAD, and rechecks
 that HEAD immediately before publishing. Require §8.12 to join both
@@ -8903,7 +8904,10 @@ capacity is intentionally explicit: changing it is a memory-budget decision,
 not a way to silence cache pressure. Deterministic tests insert 16,641 unique
 IDs and prove a final size of exactly 16,384 with 257 evictions; separate cases
 pin exact expiry, cold-key sweeping, hot-key LRU ordering, prefix ownership,
-and concurrent-loader winner semantics.
+and concurrent-loader winner semantics. Current-main server commit
+`a11ae7b1` owns this cache, its identity-free metrics, targeted service
+warmup, and the value-only WireGuard TUN factory; production ancestry and
+rollout gates use that exact commit rather than the mutable config version.
 
 Each Proxy process must export these identity-free metrics:
 
