@@ -4751,6 +4751,23 @@ blindly replayed. Read-only pipelines retain normal retries. PostgreSQL remains
 the source of truth and a later independently recomputed reconciliation repairs
 a missing or partially applied mutation.
 
+A bounded production check on 2026-09-01 supplied the pre-rollout control.
+Taskworker emitted exactly one 1MiB negative settlement at `10:45:58Z`, with
+`clamped_to=0`; API and Connect emitted none in the same ten-minute window.
+The adjacent scheduled aggregates remained fast and small compared with the
+old TiB incident, but the `10:30Z` pass corrected 781.89MiB over plus 11.83GiB
+under and the `10:35Z` successor corrected 11.81GiB over plus 783.89MiB under
+before the next two passes converged below 1GiB in each direction. This is a
+matched, sub-alert-threshold reversal: the atomic clamp contained the result,
+but it does not identify a lost reservation increment versus a replayed
+release. The live log's `subscription_model.go:760` call site and config
+generation match tagged source `a52392db`; immutable source metrics were still
+absent, so that is a source fingerprint rather than §8.12 proof. That source
+predates the single-attempt checked-mutation fix in `39f662d2`. Deploy a clean
+Taskworker descendant containing `b8718420` (which includes `39f662d2`) and
+verify through a full expiry/close interval; do not manually reconcile or
+replay the mutation to erase this control.
+
 The reason any create-side shortfall survived until release is independently
 deterministic.
 `ReconcileNetEscrow` selected only balances satisfying
