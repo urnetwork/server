@@ -468,7 +468,10 @@ func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
 		"requested=2026-08-31T22:26:50Z",
 		"diff=-1800",
 		"production control's exact -873-second gap",
+		"Warp 13fcd05 sets the single-tenant fleet's store-gateway discovery interval to one minute",
 		"not by itself a failed query",
+		"Provenance-gate Warp 13fcd05",
+		"last successful sync remains under two minutes old",
 		"Do not suppress every bucket warning",
 		"no >=1,800-second warning",
 	} {
