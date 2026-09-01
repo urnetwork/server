@@ -1,0 +1,105 @@
+package connect
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"runtime"
+	"strconv"
+	"time"
+
+	connectcore "github.com/urnetwork/connect/v2026"
+	"github.com/urnetwork/glog/v2026"
+
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/router"
+)
+
+type RunOptions struct {
+	Port int
+}
+
+func (self RunOptions) Validate() error {
+	if self.Port < 1 || self.Port > 65_535 {
+		return fmt.Errorf("connect port %d is outside [1,65535]", self.Port)
+	}
+	return nil
+}
+
+// Run serves the production connect module until ctx is canceled. The CLI and
+// simulator use the same exchange, router, readiness latch, and drain path.
+func Run(ctx context.Context, options RunOptions) error {
+	if ctx == nil {
+		return errors.New("connect run context is nil")
+	}
+	if err := options.Validate(); err != nil {
+		return err
+	}
+	connectcore.ResizeMessagePools(connectcore.Gib(16))
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	routes := []*router.Route{}
+	statusHandler := router.WarpStatus
+	var exchange *Exchange
+	if err := router.StartupReadiness(runCtx); err != nil {
+		glog.Infof("[connect]not ready (%s)\n", err)
+	} else {
+		exchange = NewExchangeFromEnvWithDefaults(runCtx)
+		defer exchange.Close()
+		connectRouter := NewConnectRouterWithDefaults(runCtx, cancel, exchange)
+		statusHandler = connectRouter.Status
+		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
+		server.Warmup()
+	}
+	routes = append([]*router.Route{router.NewRoute("GET", "/status", statusHandler)}, routes...)
+
+	draining := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			router.SetWarpStatusDrainingIfReady()
+			if exchange != nil {
+				exchange.Drain()
+			}
+			cancel()
+		case <-draining:
+		}
+	}()
+	defer close(draining)
+
+	go server.HandleError(func() {
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+			if glog.V(1) {
+				glog.Infof("[connect]goroutines=%d/%d\n", runtime.NumGoroutine(), runtime.GOMAXPROCS(0))
+			}
+		}
+	})
+
+	server.StartStatsPusher(runCtx)
+	glog.Infof("[connect]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
+	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
+	err := server.HttpListenAndServeWithReusePort(
+		runCtx,
+		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
+		router.NewRouter(runCtx, routes),
+		false,
+		server.HttpServerOptions{
+			ReadTimeout:     15 * time.Second,
+			WriteTimeout:    30 * time.Second,
+			IdleTimeout:     5 * time.Minute,
+			ShutdownTimeout: 30 * time.Second,
+		},
+	)
+	if err != nil && runCtx.Err() == nil {
+		return err
+	}
+	glog.Infof("[connect]close\n")
+	return nil
+}
