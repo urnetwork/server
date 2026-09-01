@@ -3270,6 +3270,27 @@ Probe: `redis-connections`
   reconnect storm. The marker-free writer/high-water rollup remains the
   source fix; existing pools contract only as old service processes restart
   normally.
+- A 2026-09-01 marker-free control identified a different, rotating shape.
+  At 10:45:47Z port 6394 had 1,051 clients against a 290 median (3.6x), then
+  1,220/348 and 1,040/309 on consecutive ticks. It did not own the retired
+  discovery marker. A same-incident host socket snapshot attributed 777
+  connections to edge-4's four Connect blocks (178, 257, 185, and 157; the
+  second block was at its configured 256-connection per-node ceiling), while
+  `CLIENT LIST` was dominated by 472 long-lived edge-4 connections ending in
+  `EXPIRE`. Port 6394 owned two current-minute sharded reliability hashes
+  (`client_reliability_stats.29804343.1` and `.5`) and no previous-minute
+  shard. The 32 keys hash independently across 32 masters, so random
+  balls-into-bins collisions concentrate reliability command load on some
+  masters and can expand their lazy pools. There were no Connect pool-timeout
+  logs and no Redis latency, output-buffer, accept-queue, or memory alert.
+  This is not the fixed-marker regression and does not justify killing
+  clients, lowering pool limits from the ratio alone, or rolling back the
+  marker-free writer. The trip battery now resolves current and previous
+  shard ownership and emits the collision diagnosis only with an `EXPIRE`
+  cohort. Let ownership rotate and idle pools age out while the health
+  controls remain green; if the collision causes measured pressure, use a
+  rolling-compatible wider fanout or deliberate slot placement, with a
+  dual-schema rollup during transition.
 - `CLIENT LIST` sorted by omem: any client > 32mb = a stalled consumer.
 - Accept-queue: `ss -lnt` Recv-Q pegged at backlog on a redis port = event
   loop too busy to accept() = wedge in progress (dials time out while the

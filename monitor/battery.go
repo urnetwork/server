@@ -244,8 +244,9 @@ func redisConnectionBattery(ctx context.Context, env *probeEnv, port int) string
 	if h == nil {
 		return ""
 	}
-	command := fmt.Sprintf(`marker_slot=$(redis-cli --raw -p %d CLUSTER KEYSLOT client_reliability_stats_blocks 2>/dev/null)
-marker_owner=$(redis-cli --raw -p %d CLUSTER NODES 2>/dev/null | awk -v slot="$marker_slot" '
+	command := fmt.Sprintf(`redis_port=%d
+marker_slot=$(redis-cli --raw -p "$redis_port" CLUSTER KEYSLOT client_reliability_stats_blocks 2>/dev/null)
+marker_owner=$(redis-cli --raw -p "$redis_port" CLUSTER NODES 2>/dev/null | awk -v slot="$marker_slot" '
 function owns(token, slot, range) {
   if (token ~ /^\[/) return 0
   if (token ~ /^[0-9]+$/) return token + 0 == slot
@@ -265,9 +266,46 @@ $3 ~ /master/ {
   }
 }')
 owns_marker=false
-[ "$marker_owner" = "%d" ] && owns_marker=true
+[ "$marker_owner" = "$redis_port" ] && owns_marker=true
 echo "reliability_marker_slot=$marker_slot reliability_marker_owner_port=$marker_owner queried_node_owns_reliability_marker=$owns_marker"
-redis-cli -p %d CLIENT LIST 2>/dev/null | awk '
+
+# The marker-free writer hashes 32 independent keys per minute. Resolve the
+# current and previous minute onto this queried master so a pool enlarged by
+# two colliding hot shards is distinguishable from a reconnect storm.
+node_slot_tokens=$(redis-cli --raw -p "$redis_port" CLUSTER NODES 2>/dev/null | awk -v wanted="$redis_port" '
+$3 ~ /master/ {
+  address=$2
+  sub(/@.*/, "", address)
+  sub(/^.*:/, "", address)
+  if (address == wanted) for (i=9; i<=NF; i++) if ($i !~ /^\[/) print $i
+}')
+slot_owned_by_queried_node() {
+  wanted_slot=$1
+  for token in $node_slot_tokens; do
+    case "$token" in
+      *-*) range_start=${token%%-*}; range_end=${token##*-} ;;
+      *) range_start=$token; range_end=$token ;;
+    esac
+    if [ "$range_start" -le "$wanted_slot" ] 2>/dev/null &&
+       [ "$wanted_slot" -le "$range_end" ] 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+current_block=$(($(date +%%s) / 60))
+previous_block=$((current_block - 1))
+current_shards=0
+previous_shards=0
+for shard in $(seq 0 31); do
+  current_slot=$(redis-cli --raw -p "$redis_port" CLUSTER KEYSLOT "client_reliability_stats.$current_block.$shard" 2>/dev/null)
+  previous_slot=$(redis-cli --raw -p "$redis_port" CLUSTER KEYSLOT "client_reliability_stats.$previous_block.$shard" 2>/dev/null)
+  slot_owned_by_queried_node "$current_slot" && current_shards=$((current_shards + 1))
+  slot_owned_by_queried_node "$previous_slot" && previous_shards=$((previous_shards + 1))
+done
+echo "reliability_stats_current_block=$current_block current_reliability_shards_on_node=$current_shards previous_reliability_shards_on_node=$previous_shards reliability_shard_count=32"
+
+redis-cli -p "$redis_port" CLIENT LIST 2>/dev/null | awk '
 {
   source="-"; flags="-"; cmd="-"; lib="-"; idle=0; age=0
   for (i=1; i<=NF; i++) {
@@ -286,7 +324,7 @@ redis-cli -p %d CLIENT LIST 2>/dev/null | awk '
 }
 END {
   for (key in count) print count[key], "max_idle_s=" maxIdle[key], "max_age_s=" maxAge[key], key
-}' | sort -rn | head -20`, port, port, port, port)
+}' | sort -rn | head -20`, port)
 	out, err := env.runner.shell(ctx, h, command)
 	if err != nil {
 		return fmt.Sprintf("node %d CLIENT LIST cohort aggregation failed: %s", port, err)

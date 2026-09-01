@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -135,6 +136,18 @@ type redisConnectionDiagnosis struct {
 	verify    string
 }
 
+func redisConnectionEvidenceInt(evidence, key string) (int, bool) {
+	prefix := key + "="
+	for _, field := range strings.Fields(evidence) {
+		if !strings.HasPrefix(field, prefix) {
+			continue
+		}
+		value, err := strconv.Atoi(strings.TrimPrefix(field, prefix))
+		return value, err == nil
+	}
+	return 0, false
+}
+
 func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
 	lowerEvidence := strings.ToLower(evidence)
 	if strings.Contains(lowerEvidence, "queried_node_owns_reliability_marker=true") &&
@@ -144,6 +157,18 @@ func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
 			context:   "Dominant long-lived normal-client cohorts ending in SADD/EXPIRE identify the legacy client_reliability_stats_blocks fixed-slot variant; the connection count is pool amplification, not a slow Redis process or a reconnect storm.",
 			action:    "Roll out the marker-free reliability writer after the compatible high-water-mark rollup, then restart writers normally so old pools age out. Do not raise pool floors or kill a healthy Redis owner; those actions multiply or churn the connections.",
 			verify:    "The outlier returns near the fleet median after writer rollout/restarts, the SADD/EXPIRE cohorts disappear, and Redis pool-timeout plus node-latency signals remain healthy.",
+		}
+	}
+	currentShards, currentKnown := redisConnectionEvidenceInt(lowerEvidence, "current_reliability_shards_on_node")
+	previousShards, previousKnown := redisConnectionEvidenceInt(lowerEvidence, "previous_reliability_shards_on_node")
+	shardCount, shardCountKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shard_count")
+	if currentKnown && previousKnown && shardCountKnown &&
+		(currentShards >= 2 || previousShards >= 2) && strings.Contains(lowerEvidence, "cmd=expire") {
+		return redisConnectionDiagnosis{
+			mechanism: fmt.Sprintf("This Redis master owns %d of %d current-minute and %d previous-minute client-reliability shards. Independent shard hashing can place multiple hot hashes on one master; each reliability transaction ends in EXPIRE, and that concentrated command load expands the lazy per-node client pools that touched the master.", currentShards, shardCount, previousShards),
+			context:   "The EXPIRE cohort and resolved current/previous client_reliability_stats.<block>.<shard> ownership identify a rotating marker-free reliability load collision. This is not the retired fixed discovery-set writer, and CLIENT LIST alone is not evidence of a reconnect storm or Redis impairment.",
+			action:    "Do not roll back the marker-free writer, kill healthy clients, or lower pool limits from the fleet-median ratio alone. Let minute ownership rotate and ordinary pool idle lifetime contract the shape. If latency, pool timeouts, queues, or memory become unhealthy, use a rolling-compatible wider fanout or deliberate slot placement so simultaneous reliability shards distribute more evenly.",
+			verify:    "Current/previous shard ownership rotates away, the EXPIRE-heavy connection shape ages out, and Redis latency, pool-timeout logs, accept queues, and client-buffer memory remain healthy on consecutive samples.",
 		}
 	}
 	return redisConnectionDiagnosis{

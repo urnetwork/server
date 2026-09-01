@@ -77,3 +77,48 @@ func TestRedisConnectionsSignalDoesNotMisdiagnoseGenericHotNodeAsFixedSlot(t *te
 		t.Fatalf("generic PING/GET/EXEC shape received fixed-slot action: %s", alert.Action)
 	}
 }
+
+func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *testing.T) {
+	source := &syntheticSource{
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, "CLIENT LIST") {
+				for _, fragment := range []string{
+					"date +%s",
+					"client_reliability_stats.$current_block.$shard",
+					"current_reliability_shards_on_node=$current_shards",
+				} {
+					if !strings.Contains(command, fragment) {
+						t.Fatalf("connection battery command missing %q:\n%s", fragment, command)
+					}
+				}
+				if strings.Contains(command, "%!") {
+					t.Fatalf("connection battery command contains a formatting failure:\n%s", command)
+				}
+				return "reliability_marker_slot=9508 reliability_marker_owner_port=6382 queried_node_owns_reliability_marker=false\n" +
+					"reliability_stats_current_block=29804343 current_reliability_shards_on_node=2 previous_reliability_shards_on_node=0 reliability_shard_count=32\n" +
+					"472 max_idle_s=5 max_age_s=3600 source=192.0.2.181 flags=N cmd=expire lib=go-redis", nil
+			}
+			return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6394 100 1000 90 1 55", nil
+		},
+	}
+	alerts, err := NewRedisConnectionsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "clients-spike")
+	markdown := alert.Markdown()
+	for _, detail := range []string{
+		"owns 2 of 32 current-minute and 0 previous-minute client-reliability shards",
+		"each reliability transaction ends in EXPIRE",
+		"rotating marker-free reliability load collision",
+		"Do not roll back the marker-free writer",
+		"Current/previous shard ownership rotates away",
+	} {
+		if !strings.Contains(markdown, detail) {
+			t.Fatalf("shard-collision diagnosis missing %q:\n%s", detail, markdown)
+		}
+	}
+	if strings.Contains(alert.Action, "restart writers normally") || strings.Contains(alert.Action, "Roll out the marker-free reliability writer") {
+		t.Fatalf("shard collision received legacy or destructive action: %s", alert.Action)
+	}
+}
