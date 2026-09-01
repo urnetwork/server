@@ -66,6 +66,7 @@ import (
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	stconn "github.com/urnetwork/server/st"
 )
 
 const statsCollectorInterval = 60 * time.Second
@@ -385,9 +386,21 @@ func statsRefreshChain(ctx context.Context) {
 	}
 }
 
+// Returns the external market URL only for mainnet alpha. Testnet alpha has no
+// USD market and querying the mainnet catalogue for its netuid is a false 404.
+func statsAlphaPriceURL(cfg *StConfig) string {
+	if cfg == nil || cfg.Netuid == 0 || cfg.Profile != stconn.ProfileMainnet {
+		return ""
+	}
+	return fmt.Sprintf("https://api.geckoterminal.com/api/v2/networks/bittensor/pools/0-%d", cfg.Netuid)
+}
+
+// Refreshes the last-known mainnet market price without clearing it on a
+// transient catalogue failure.
 func statsRefreshPrice(ctx context.Context) {
 	cfg := stConfig()
-	if cfg == nil || cfg.Netuid == 0 {
+	url := statsAlphaPriceURL(cfg)
+	if url == "" {
 		return
 	}
 	// the subnet pool on geckoterminal; the site's browser-side fallback
@@ -399,7 +412,6 @@ func statsRefreshPrice(ctx context.Context) {
 			} `json:"attributes"`
 		} `json:"data"`
 	}
-	url := fmt.Sprintf("https://api.geckoterminal.com/api/v2/networks/bittensor/pools/0-%d", cfg.Netuid)
 	response, err := server.HttpGetRequireStatusOk(ctx, url, server.NoCustomHeaders, server.ResponseJsonObject[poolResponse])
 	if err != nil {
 		// keep the last good value; the series only goes stale if the

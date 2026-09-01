@@ -705,22 +705,15 @@ func (self *CoreStClient) eachRpc(ctx context.Context, op func(client *ethclient
 	return fmt.Errorf("st: no rpc endpoint answered: %w", errors.Join(errs...))
 }
 
-// view performs one contract read with rpc failover.
-func stView[T any](self *CoreStClient, ctx context.Context, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
-	return stViewAt(self, ctx, self.cfg.ContractAddress, calldata, unpack)
-}
-
-func stViewAt[T any](self *CoreStClient, ctx context.Context, address common.Address, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
+// Performs one contract read at a caller-selected canonical block with RPC
+// failover. Callers assembling a snapshot reuse one block across every field.
+func stViewAtBlock[T any](self *CoreStClient, ctx context.Context, address common.Address, block uint64, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
 	var out T
 	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
-		finalized, err := client.HeaderByNumber(callCtx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
-		if err != nil || finalized == nil || finalized.Number == nil {
-			return fmt.Errorf("finalized read head: %w", err)
-		}
 		bound := bind.NewBoundContract(address, abi.ABI{}, client, client, client)
-		value, err := bind.Call(bound, &bind.CallOpts{Context: callCtx, BlockNumber: finalized.Number}, calldata, unpack)
+		value, err := bind.Call(bound, &bind.CallOpts{Context: callCtx, BlockNumber: new(big.Int).SetUint64(block)}, calldata, unpack)
 		if err != nil {
 			return err
 		}
@@ -730,13 +723,32 @@ func stViewAt[T any](self *CoreStClient, ctx context.Context, address common.Add
 	return out, err
 }
 
+// Performs one contract read at a freshly selected finalized block.
+func stView[T any](self *CoreStClient, ctx context.Context, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
+	return stViewAt(self, ctx, self.cfg.ContractAddress, calldata, unpack)
+}
+
+// Selects one finalized block before delegating the actual contract read.
+func stViewAt[T any](self *CoreStClient, ctx context.Context, address common.Address, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
+	finalized, err := self.finalizedHeader(ctx)
+	if err != nil {
+		var out T
+		return out, fmt.Errorf("finalized read head: %w", err)
+	}
+	return stViewAtBlock(self, ctx, address, finalized.Number.Uint64(), calldata, unpack)
+}
+
+// Reads the latest finalized header with RPC failover.
 func (self *CoreStClient) finalizedHeader(ctx context.Context) (*types.Header, error) {
 	var header *types.Header
 	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		h, err := client.HeaderByNumber(callCtx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
-		if err != nil {
+		if err != nil || h == nil || h.Number == nil {
+			if err == nil {
+				err = errors.New("empty finalized header")
+			}
 			return err
 		}
 		header = h
@@ -1065,21 +1077,22 @@ func (self *CoreStClient) send(ctx context.Context, operation string, key *ecdsa
 
 func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
 	if self.coordinator != nil {
-		epoch, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackCurrentEpoch(), self.coordinator.UnpackCurrentEpoch)
-		if err != nil {
-			return nil, fmt.Errorf("currentEpoch(): %w", err)
-		}
-		policy, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackPolicyAt(epoch), self.coordinator.UnpackPolicyAt)
-		if err != nil {
-			return nil, fmt.Errorf("policyAt(): %w", err)
-		}
-		start, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackEpochStartBlock(epoch), self.coordinator.UnpackEpochStartBlock)
-		if err != nil {
-			return nil, fmt.Errorf("epochStartBlock(): %w", err)
-		}
 		head, err := self.finalizedHeader(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("finalized head: %w", err)
+		}
+		block := head.Number.Uint64()
+		epoch, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.coordinator.PackCurrentEpoch(), self.coordinator.UnpackCurrentEpoch)
+		if err != nil {
+			return nil, fmt.Errorf("currentEpoch(): %w", err)
+		}
+		policy, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.coordinator.PackPolicyAt(epoch), self.coordinator.UnpackPolicyAt)
+		if err != nil {
+			return nil, fmt.Errorf("policyAt(): %w", err)
+		}
+		start, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.coordinator.PackEpochStartBlock(epoch), self.coordinator.UnpackEpochStartBlock)
+		if err != nil {
+			return nil, fmt.Errorf("epochStartBlock(): %w", err)
 		}
 		return &StEpochState{Epoch: epoch.Uint64(), PendingEpoch: epoch.Uint64(), EpochStartBlock: start.Uint64(),
 			TEpochBlocks: policy.EpochBlocks, CommitWindowBlocks: policy.RootCommitWindowBlocks,

@@ -5,7 +5,23 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	stconn "github.com/urnetwork/server/st"
 )
+
+// Testnet has no external USD market; only a fully identified mainnet subnet
+// may generate a GeckoTerminal lookup.
+func TestStatsAlphaPriceURLIsMainnetOnly(t *testing.T) {
+	if url := statsAlphaPriceURL(&StConfig{Profile: stconn.ProfileTestnet, Netuid: 521}); url != "" {
+		t.Fatalf("testnet alpha price URL = %q", url)
+	}
+	if url := statsAlphaPriceURL(&StConfig{Profile: stconn.ProfileMainnet}); url != "" {
+		t.Fatalf("zero-netuid alpha price URL = %q", url)
+	}
+	want := "https://api.geckoterminal.com/api/v2/networks/bittensor/pools/0-521"
+	if url := statsAlphaPriceURL(&StConfig{Profile: stconn.ProfileMainnet, Netuid: 521}); url != want {
+		t.Fatalf("mainnet alpha price URL = %q, want %q", url, want)
+	}
+}
 
 // the per-country provider gauge is pushed by the taskworker until the
 // process exits, so a country that lost its last provider must have its
