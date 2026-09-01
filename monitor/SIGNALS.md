@@ -6137,6 +6137,15 @@ LAN route were absent, while Mimir still listened on the missing address.
 Current logs repeatedly timed out dialing its own scheduler at that identity,
 and Grafana alert evaluation timed out reaching the LAN PostgreSQL endpoint.
 
+The same missing identity blocked the in-progress Proxy rollout rather than
+identifying a second Proxy-image defect. Crisp completed all ten blocks on
+`2026.8.31+1034210530`, while Fireside completed only g1, g2, and g10. Each
+remaining Fireside candidate timed out reaching PostgreSQL/PgBouncer and Redis
+over the missing LAN route, exited before its status check, and left the
+previous serving process in place. Restore and verify the host-network path
+before retrying those seven blocks; forcing the same candidates or rebuilding
+the already-successful image cannot make their dependencies reachable.
+
 The retained journal pins the causal sequence to the earlier unsafe Proxy
 overlap rather than this Grafana image. During global host pressure,
 `systemd-journald` began repeatedly flushing caches. At 12:47:55Z,
