@@ -439,6 +439,18 @@ WHERE function_name LIKE '%UpdateClient%'
   finding. Its deterministic test rejects the historical version/source and a
   direct jitter-deploy instruction. The operational wallet correction remains
   unchanged.
+
+  The first `03:50Z` run of the replacement watcher found the same defect in
+  the independent `task-canaries` mixed-family guidance: its current
+  `AdvancePayment` alert still asserted that the old version/source was the
+  production Taskworker. The durable task rows do not contain runtime artifact
+  ancestry, so this PostgreSQL probe cannot make that claim. It now requires an
+  explicit per-block ancestry check for typed-reset `b8af229f`, deploys only to
+  older blocks, and treats persistence on already-current blocks as invalid
+  configured-wallet selection. Synthetic mixed-family tests reject the old
+  version, source, and generic `production taskworker` claim. Historical
+  incident paragraphs retain their dated artifacts as evidence, not runtime
+  instructions.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains

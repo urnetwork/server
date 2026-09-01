@@ -483,10 +483,10 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"cannot describe every failing row",
 		"cause_breakdown=wallet-insufficient=368,connection-cleanup-deadline=10,processor-invalid-destination=5,processor-rate-limit=1",
 		"queued, cursor-batched CompletePayment retention path",
-		"active artifact contains typed-reset commit b8af229f",
-		"2026.8.31-outerwerld+1033655820/source 1d8f01e5 contains that reset",
-		"repeated hourly rejection means the invalid configured wallet is still selected",
-		"typed-reset provenance is present",
+		"provenance-gate typed-reset commit b8af229f on every active taskworker",
+		"deploy it only to blocks whose artifact predates it",
+		"on already-current blocks, repeated rejection means the invalid configured wallet is still selected",
+		"every active taskworker contains typed-reset commit b8af229f",
 		"never clear payment rows or keys manually",
 		"do not accelerate processor-rate-limit rows",
 		"verify every taskworker source revision",
@@ -504,6 +504,15 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 	}
 	if strings.Contains(markdown, "processor-bad-request rows") {
 		t.Fatalf("mixed-family alert rendered guidance for an absent class:\n%s", markdown)
+	}
+	for _, staleRuntimeClaim := range []string{
+		"2026.8.31-outerwerld+1033655820",
+		"source 1d8f01e5 contains that reset",
+		"production taskworker",
+	} {
+		if strings.Contains(markdown, staleRuntimeClaim) {
+			t.Fatalf("mixed-family alert retained stale runtime claim %q:\n%s", staleRuntimeClaim, markdown)
+		}
 	}
 }
 
@@ -534,8 +543,8 @@ func TestTaskCanariesSignalMixedGuidanceMatchesPresentMigrationCauses(t *testing
 		"Handle only the present AdvancePayment classes",
 		"restore migration coherence per §8.9",
 		"schema-object-missing clears",
-		"active artifact contains typed-reset commit b8af229f",
-		"2026.8.31-outerwerld+1033655820/source 1d8f01e5 contains that reset",
+		"provenance-gate typed-reset commit b8af229f on every active taskworker",
+		"deploy it only to blocks whose artifact predates it",
 		"SIGNALS.md §1.2, §5.7, and §8.9",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -546,6 +555,8 @@ func TestTaskCanariesSignalMixedGuidanceMatchesPresentMigrationCauses(t *testing
 		"CompletePayment retention path",
 		"processor-bad-request rows",
 		"processor-rate-limit rows",
+		"2026.8.31-outerwerld+1033655820",
+		"source 1d8f01e5 contains that reset",
 	} {
 		if strings.Contains(markdown, absent) {
 			t.Fatalf("migration mixed-family alert rendered absent cause %q:\n%s", absent, markdown)
