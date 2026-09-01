@@ -416,7 +416,11 @@ func TestFramerMessageTooLargeIsClassifiedAndRedacted(t *testing.T) {
 			"messageLen=",
 			"MaxMessageLen=4096",
 			"same immutable Pack",
-			"compatible Connect resident and client/hosted DeviceLocal artifacts",
+			"Connect and Proxy artifacts",
+			"53780b3e",
+			"7e0fcba",
+			"§8.13",
+			"§8.12",
 			"three sustained HTTP/SOCKS/WireGuard overlap campaigns",
 		} {
 			if !strings.Contains(finding.evidence+finding.mechanism+finding.action+finding.verify, want) {

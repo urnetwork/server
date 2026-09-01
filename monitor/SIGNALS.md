@@ -7999,6 +7999,16 @@ limit, every default framer, and the resident exchange/handler cap to the same
 per-device carrier budget remains the admission bound; this is not an
 unbounded-buffer fix.
 
+The v190 standing cadence at 2026-09-01T15:27Z observed a fresh Connect write
+rejection at `messageLen=4408`, `MaxMessageLen=4096`, and
+`maxFrameLen=4100`. That exact runtime cap directly proves the compatible pair
+is absent even while §8.12 source metadata is unavailable: Connect commit
+`7e0fcba` makes the shared minimum 8 KiB, and server commit `53780b3e`
+propagates it through the resident H1 path. After §8.13 is healthy, deploy
+clean artifacts containing both commits (or clean descendants) to Connect and
+Proxy; deploying only one endpoint leaves the other able to reject the same
+carrier. A mutable version label is not proof of either commit.
+
 Deploy both ends of the H1 path before judging the change: the Connect
 resident must admit/forward the carrier and the H1-only hosted DeviceLocal must
 accept it. Require zero new 4 KiB framer rejections, a window at target without
