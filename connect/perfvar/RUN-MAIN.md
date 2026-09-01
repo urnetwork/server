@@ -3,11 +3,17 @@
 This is the operating contract for an agent that measures the current network
 stack, compares it with the active performance baseline, repairs demonstrated
 regressions, and promotes measured improvements. It covers the deterministic
-PERFVAR and sim-latency environments plus the two attached Android test
-devices. The research contracts remain
+PERFVAR environment plus the two attached Android test devices. The research
+contracts remain
 [`connect/LOWBAR.md`](../../../connect/LOWBAR.md),
 [`connect/MEMSTEADY.md`](../../../connect/MEMSTEADY.md), and
 [`PERFVAR.md`](./PERFVAR.md).
+
+`sim-latency` is deliberately outside this harness. Its separate continuous
+test suite owns its instruments, A/A variance studies, comparisons, and
+baseline. A PERFVAR campaign may cite a completed compatible sim-latency result
+as supporting evidence, but must not run, wait for, or promote sim-latency as
+part of this protocol.
 
 All new campaign records go only to
 [`tests/PERFVAR-MEASUREMENTS.md`](../../../tests/PERFVAR-MEASUREMENTS.md).
@@ -43,9 +49,9 @@ external blocker is documented with the evidence needed to remove it.
 
 ## Non-negotiable boundaries
 
-- Never edit PERFVAR, sim-latency, Android collectors, workloads, eligibility
-  rules, statistics, or baselines to make a candidate win. An intentional
-  instrument change creates a new schema and requires a fresh A/A noise study.
+- Never edit PERFVAR, Android collectors, workloads, eligibility rules,
+  statistics, or baselines to make a candidate win. An intentional instrument
+  change creates a new schema and requires a fresh A/A noise study.
 - Never discard a slow, failed, memory-heavy, thermally affected, or
   inconvenient completed attempt after seeing its result. Only a predeclared
   identity/eligibility failure may invalidate an attempt. Preserve invalid and
@@ -84,19 +90,18 @@ At minimum the key contains:
 - server, Connect, SDK, Android, proxy, and tests revisions plus complete dirty
   state hashes where applicable;
 - Go/toolchain, OS, architecture, CPU, `GOMAXPROCS`, race/profile mode, and
-  simulator config hash;
+  PERFVAR simulator config hash;
 - Android device role, model, OS/build, app/test build ID, Chrome version,
   underlay, VPN transport, provider mode, and public versus exact pinned exit;
 - provider build/security-policy identity when exposed, without provider ID;
 - thermal/power eligibility, run order, cold/warm state, UTC interval, and the
   private artifact-bundle hash.
 
-Never compare across a PERFVAR schema/scenario hash, sim-latency config hash,
-host class, Android model/OS, underlay, transport, provider role, payload, or
-memory-policy change. If no compatible reconstructible baseline exists, first
-run an unchanged A/A campaign and append it as a new baseline. Historical dirty
-revisions without retained patch content are evidence, not reconstructible
-controls.
+Never compare across a PERFVAR schema/scenario hash, host class, Android
+model/OS, underlay, transport, provider role, payload, or memory-policy change.
+If no compatible reconstructible baseline exists, first run an unchanged A/A
+campaign and append it as a new baseline. Historical dirty revisions without
+retained patch content are evidence, not reconstructible controls.
 
 Public Internet and public-provider paths can change between attempts. Their
 absolute results are product release gates and longitudinal observations. A
@@ -184,10 +189,9 @@ that may be zero and an exact paired binary method for pass/fail outcomes.
 For PERFVAR and Android paired cohorts, report the paired median effect, a
 deterministically seeded 95% bootstrap confidence interval, and an exact paired
 randomization or signed-rank p-value. Correct primary-metric p-values with Holm
-at family alpha 0.05. Guards use raw alpha 0.05, matching sim-latency's
-conservative guard policy. Record the method, seed, sample count, excluded
-preflight attempts, effect, confidence interval, raw p-value, adjusted p-value,
-and minimum detectable effect.
+at family alpha 0.05. Guards use raw alpha 0.05. Record the method, seed, sample
+count, excluded preflight attempts, effect, confidence interval, raw p-value,
+adjusted p-value, and minimum detectable effect.
 
 Use these minimum independent sample counts:
 
@@ -195,7 +199,6 @@ Use these minimum independent sample counts:
 | --- | --- |
 | Go microbenchmark | 10 fresh process samples per side, same-session order-balanced, analyzed with a pinned `benchstat` version |
 | PERFVAR | 5 fresh complete processes per side; use the documented five internal repetitions and process-level scenario aggregate |
-| sim-latency | its compatible A/A variance baseline plus at least 3 clean candidate runs; obey a larger replicate count fixed by its current scorer |
 | Android | 7 valid paired session blocks per device/build/underlay cell; use the session summary as the unit |
 | Video pass/fail | 7 session opportunities per required cell; do not count multiple requests on one H2/TLS connection as retries |
 
@@ -303,37 +306,6 @@ For changes shared by servers, run every benchmark in `server/connect`,
 control and candidate trees in balanced order. `B/op` and `allocs/op` are
 guards; a throughput win that adds an unexplained hot-path allocation is not a
 promotion.
-
-## Sim-latency campaign
-
-The sim-latency tree is a protected measuring instrument. A candidate may
-change the production selection, multi-client, provider, Connect, or server
-code it exercises, but not the eval wrapper, provider fixture, scorer,
-workloads, seeds, or parsers.
-
-Use [`sim-latency/README.md`](../sim-latency/README.md) and its native tools:
-
-```sh
-cd "$URN_REG_WORKSPACE/server/connect/sim-latency"
-go build -o sim-latency .
-./eval-48.sh init
-./eval-48.sh run --meta /private/path/run.json > /private/path/run.csv
-./sim-latency compare --a candidate.csv --b control.csv \
-  --baseline compatible-baseline.json --p 0.05 --json
-```
-
-Run at least three clean candidate and three same-session control replicates,
-each from `--reset`, while the host is idle and the local stack remains up. Use
-the checked-in eval-48d k=20 noise baseline only on its compatible host/config.
-Otherwise establish a machine-local A/A baseline with at least five unchanged
-runs before comparison. Replacing the checked-in noise baseline requires the
-full current k>=20 campaign, convergence/held-out audit, and verifier; a faster
-candidate run must never overwrite a variance baseline.
-
-Accept the tool's `a_better` only when the candidate is A, the comparison is
-not optimistic, config/host/duration identities match, a primary improves after
-Holm correction, and `fail_rate` plus `throughput_p05_bytes_per_s` are
-non-regressing. Preserve `mixed`, `b_better`, and `indistinguishable` exactly.
 
 ## Physical Android campaign
 
@@ -493,10 +465,7 @@ Promote an `IMPROVEMENT` only when:
 
 Append the complete result to `tests/PERFVAR-MEASUREMENTS.md`, then append a new
 active-baseline registry row pointing to that campaign. Preserve the previous
-row as superseded; do not edit away its values. For sim-latency, distinguish
-the performance incumbent from the A/A variance artifact. Recompute the latter
-only when the environment/noise identity changed or the current protocol
-requires a new-incumbent A/A study.
+row as superseded; do not edit away its values.
 
 ## Cleanup and completion
 
