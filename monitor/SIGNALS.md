@@ -7376,6 +7376,43 @@ WireGuard/HTTP/SOCKS acceptance, a draining kernel `Recv-Q`, and zero receiver
 failures. Per-peer admission drops may occur under an individual client's
 backpressure, but unrelated WireGuard peers must continue.
 
+**H1 encrypted-handshake envelope rejection:** a hosted device can remain
+connected while its provider window drains below target with
+`stall=platform-unreachable`. Before treating that state as provider ingress
+loss, query Connect and the selected Proxy block for
+`[framer][reject] ... messageLen=... > MaxMessageLen=4096`. The 2026-09-01 main
+reproduction rejected 4,232- and 4,187-byte reliable H1 messages during the
+same sustained campaign that retired two exits carrying 16 flows apiece; the
+next SOCKS request completed its public proxy connection and origin TLS
+handshake, then lost the response and ended with EOF. Direct origin controls,
+public listener checks, host packet-discard counters, and the WireGuard socket
+drop counter remained clean. That combination localizes the loss above the
+public proxy listener and below the provider flow, at the reliable Connect H1
+carrier rather than the origin, rate limiter, policy route, TUN handoff, or
+WireGuard queue.
+
+The active post-quantum TLS profile produces a 4,946-4,950-byte fully wrapped
+handshake carrier. The legacy 4 KiB minimum was based on component estimates
+and rejected the integrated message. Transfer then retried the same immutable
+oversized Pack, so the H1 route could not recover and a multi-window refill
+kept trying against an impossible admission boundary. Current Connect defaults
+set `ClientSettings.MinimumMessageLenLimit`, the platform H1 WebSocket read
+limit, every default framer, and the resident exchange/handler cap to the same
+8 KiB pooled class. Ordinary H1 data groups retain their 4 KiB target, and the
+per-device carrier budget remains the admission bound; this is not an
+unbounded-buffer fix.
+
+Deploy both ends of the H1 path before judging the change: the Connect
+resident must admit/forward the carrier and the H1-only hosted DeviceLocal must
+accept it. Require zero new 4 KiB framer rejections, a window at target without
+`platform-unreachable`, no busy exit retirement caused by that stall, and three
+complete sustained HTTP/SOCKS/WireGuard overlap passes. The deterministic
+regressions are `TestMinimumMessageLenLimitFitsWorstCaseHandshake` and
+`TestH1MaximumLogicalGroupEncryptedPackFitsMinimumMessageLimit` in Connect,
+plus `TestResidentAdmitsMinimumMessageLenLimit` in the server Connect package;
+the latter sends the full declared minimum through the production resident
+framing path and would fail at the legacy cap.
+
 **Finite TUN return-burst stall:** HTTP CONNECT and SOCKS can lose a completed
 origin response even with no active WireGuard attachment. The decisive
 2026-08-29 reproduction was an isolated SOCKS request beginning at
