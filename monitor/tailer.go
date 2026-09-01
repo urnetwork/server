@@ -1673,7 +1673,10 @@ type tailTransportMonitorRouteEvidenceCollector func(
 	map[string]*tailTransportRouteAggregate,
 ) tailTransportMonitorRouteEvidence
 
-const monitorIPv6LogTimeLayout = "2006-01-02 15:04:05.000"
+const (
+	monitorIPv6LogTimeLayout          = "2006-01-02 15:04:05.000"
+	monitorIPv6RouteCorrelationWindow = 15 * time.Second
+)
 
 var (
 	monitorIPv6LogTimestampPattern   = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3})`)
@@ -1691,7 +1694,18 @@ func collectTailTransportMonitorRouteEvidence(
 	env *probeEnv,
 	events map[string]*tailTransportRouteAggregate,
 ) tailTransportMonitorRouteEvidence {
-	if runtime.GOOS != "darwin" || env == nil || env.runner == nil {
+	if runtime.GOOS != "darwin" {
+		return tailTransportMonitorRouteEvidence{}
+	}
+	return collectTailTransportMonitorRouteEvidenceFromRunner(ctx, env, events)
+}
+
+func collectTailTransportMonitorRouteEvidenceFromRunner(
+	ctx context.Context,
+	env *probeEnv,
+	events map[string]*tailTransportRouteAggregate,
+) tailTransportMonitorRouteEvidence {
+	if env == nil || env.runner == nil {
 		return tailTransportMonitorRouteEvidence{}
 	}
 	first, last, ok := tailTransportRouteEventBounds(events)
@@ -1703,8 +1717,8 @@ func collectTailTransportMonitorRouteEvidence(
 		"/usr/bin/log",
 		"show",
 		"--style", "compact",
-		"--start", first.Add(-5*time.Second).Format("2006-01-02 15:04:05"),
-		"--end", last.Add(15*time.Second).Format("2006-01-02 15:04:05"),
+		"--start", first.Add(-monitorIPv6RouteCorrelationWindow).Format("2006-01-02 15:04:05"),
+		"--end", last.Add(monitorIPv6RouteCorrelationWindow).Format("2006-01-02 15:04:05"),
 		"--predicate", `process == "configd" AND (eventMessage CONTAINS "RTADV " OR eventMessage CONTAINS "AUTOMATIC-V6 " OR eventMessage CONTAINS "network changed:")`,
 	)
 	if err != nil {
@@ -1796,10 +1810,10 @@ func (e tailTransportMonitorRouteEvidence) matches(event *tailTransportRouteAggr
 	if !ok {
 		return false
 	}
-	return !e.routerLifetimeZeroAt.Before(first.Add(-15*time.Second)) &&
-		!last.Add(15*time.Second).Before(e.routerLifetimeZeroAt) &&
-		!e.ipv6AbsentAt.Before(first.Add(-15*time.Second)) &&
-		!last.Add(15*time.Second).Before(e.ipv6AbsentAt)
+	return !e.routerLifetimeZeroAt.Before(first.Add(-monitorIPv6RouteCorrelationWindow)) &&
+		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.routerLifetimeZeroAt) &&
+		!e.ipv6AbsentAt.Before(first.Add(-monitorIPv6RouteCorrelationWindow)) &&
+		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.ipv6AbsentAt)
 }
 
 type tailTransportRouteTarget struct {

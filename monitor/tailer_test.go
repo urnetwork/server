@@ -288,16 +288,62 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 	if !base.matches(event) {
 		t.Fatal("same-window router withdrawal and IPv6 loss did not match")
 	}
+	preceding := base
+	preceding.routerLifetimeZeroAt = zeroAt.Add(-9 * time.Second)
+	preceding.ipv6AbsentAt = preceding.routerLifetimeZeroAt.Add(250 * time.Millisecond)
+	if !preceding.matches(event) {
+		t.Fatal("proven nine-second router-withdrawal precursor did not match")
+	}
 	withoutLoss := base
 	withoutLoss.ipv6AbsentAt = time.Time{}
 	if withoutLoss.matches(event) {
 		t.Fatal("router-lifetime log without local IPv6 loss was treated as causal")
 	}
 	distant := base
-	distant.routerLifetimeZeroAt = zeroAt.Add(time.Minute)
+	distant.routerLifetimeZeroAt = zeroAt.Add(-monitorIPv6RouteCorrelationWindow - time.Second)
 	distant.ipv6AbsentAt = distant.routerLifetimeZeroAt.Add(time.Second)
 	if distant.matches(event) {
 		t.Fatal("distant router withdrawal was correlated to this transport event")
+	}
+}
+
+func TestCollectTailTransportMonitorRouteEvidenceCoversProvenDiagnosticLag(t *testing.T) {
+	var commandName string
+	var commandArgs []string
+	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
+		commandName = name
+		commandArgs = append([]string(nil), args...)
+		return strings.Join([]string{
+			"2026-09-01 06:59:40.537 Df configd[1:2] RTADV en0: router lifetime became zero",
+			"2026-09-01 06:59:40.570 Df configd[1:2] network changed: v4(en0)",
+		}, "\n"), nil
+	}}
+	env, err := newProbeEnv(syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := map[string]*tailTransportRouteAggregate{
+		"2001:db8:2::44": {
+			first: "2026/09/01 06:59:49",
+			last:  "2026/09/01 06:59:50",
+		},
+	}
+	evidence := collectTailTransportMonitorRouteEvidenceFromRunner(context.Background(), env, events)
+	if !evidence.matches(events["2001:db8:2::44"]) {
+		t.Fatalf("collector missed the proven pre-diagnostic withdrawal: %+v", evidence)
+	}
+	if commandName != "/usr/bin/log" {
+		t.Fatalf("local command = %q", commandName)
+	}
+	joined := strings.Join(commandArgs, " ")
+	for _, want := range []string{
+		"--start 2026-09-01 06:59:34",
+		"--end 2026-09-01 07:00:05",
+		`process == "configd"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("bounded configd command missing %q: %s", want, joined)
+		}
 	}
 }
 

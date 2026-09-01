@@ -9522,6 +9522,14 @@ prefixes, this proves that recurrence was the monitor host losing its local
 IPv6 default router after a first-hop RA withdrawal—not a production edge
 address, interface, LB, LAN neighbor, or service failure.
 
+The earlier events have the identical precursor. Local zero-lifetime RAs at
+11:52:24.621Z, 11:53:35.584Z, and 11:59:40.537Z each removed `en0` IPv6 before
+the standing tails reported route loss at 11:52:32Z, 11:53:44Z, and
+11:59:49Z, respectively; IPv6 returned after 7.1, 16.9, and 7.4 seconds. Thus
+all four observed route-loss waves belong to the monitor's first hop. The
+collector queries and correlates 15 seconds on either side of the transport
+timestamp so the proven 7–9-second diagnostic lag cannot hide the cause.
+
 The software signal now queries only that narrow recent local record after a
 tail route event and attaches the affirmative discriminator without copying
 general system-log contents. When present, its alert says not to mutate the
