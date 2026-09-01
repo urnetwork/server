@@ -124,7 +124,7 @@ func (mimirContinuityProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			"Mimir lost %d five-minute control evaluations across %d bounded gap(s) in the public dashboard window",
 			totalMissing, len(gaps),
 		),
-		mechanism: "The always-emitted build-info control is absent for the same stored intervals as independent Connect and taskworker metrics. Mimir kept its recent TSDB head only in the Grafana container's ephemeral data directory; with flush_blocks_on_shutdown disabled, a clean restart expected that incomplete head to be reused, but container removal discarded it before upload to object storage.",
+		mechanism: "The always-emitted build-info control is absent for the same stored intervals as independent Connect and taskworker metrics. The proven historical mechanism was removal of an ephemeral Grafana container while its Mimir child still had an unflushed partial TSDB head. This range detector proves permanent raw-sample loss, but it cannot infer whether each current child still renders flush_blocks_on_shutdown=false.",
 		baseline: fmt.Sprintf(
 			"The aggregate urnetwork_build_info control has a sample at every %s evaluation across the trailing %s; fewer than %d consecutive missing evaluations in any bounded interval remain below the alert threshold.",
 			mimirContinuityStep, mimirContinuityWindow, mimirContinuityMissingSteps,
@@ -135,9 +135,9 @@ func (mimirContinuityProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			worstMissingStart.Format(time.RFC3339), worstMissingEnd.Format(time.RFC3339), worst.missing,
 		),
 		evidence: strings.Join(evidence, "\n"),
-		context:  "This is raw metric loss, not zero throughput: build-info is independent of user traffic, and the range query bypasses the Grafana panel. Existing holes are not reconstructable from Mimir and remain visible until they age out of the dashboard window.",
-		action:   "Deploy a Warp Grafana image that renders blocks_storage.tsdb.flush_blocks_on_shutdown: true while retaining the Grafana parent's 120-second Mimir child stop allowance inside Warpctl's 3,600-second container drain. Do not zero-fill or span over the panel, and do not shared-mount one TSDB directory into overlapping old and new containers. The first rollout still shuts down old unpatched ingesters; explicitly flushing those old ingesters first is the only way to preserve their current partial head.",
-		verify:   "Confirm every active Grafana block renders flush_blocks_on_shutdown: true, then carry a controlled and a full Grafana rollout through clean shutdown without creating a new bounded control gap. Historical gaps will clear only when they leave the seven-day range.",
+		context:  "This is raw metric loss, not zero throughput: build-info is independent of user traffic, and the range query bypasses the Grafana panel. Existing holes are not reconstructable from Mimir and remain visible until they age out of the dashboard window. The separate §11.21 exact-process signal is the current-state gate; an old gap persisting after that fleet is healthy is not evidence that the fix is absent.",
+		action:   "Run the §11.21 mimir-shutdown signal. If any exact child reports false, deploy a Grafana image from clean Warp commit 7176ccd or a clean descendant while retaining the parent's 120-second Mimir child stop allowance inside Warpctl's 3,600-second container drain. If every current child already reports true, do not redeploy solely for historical gaps; preserve the setting through the next ordinary Grafana rollout and use that shutdown as the discriminator. Do not zero-fill or span over the panel, and do not shared-mount one TSDB directory into overlapping old and new containers.",
+		verify:   "Every exact active Mimir child renders flush_blocks_on_shutdown=true, and a controlled then full Grafana clean-shutdown rollout creates no new bounded build-info gap through the next block-upload window. Historical gaps clear only when they leave the seven-day range.",
 		playbook: "SIGNALS.md §11.20 and §11.6",
 	}}, nil
 }

@@ -7618,16 +7618,20 @@ environment or normal ingestion delay; one or two isolated missing evaluations
 are tolerated. Three or more missing evaluations inside two present samples
 emit `mimir-ingestion-gap`, preserving all gap ranges and the serving gateway.
 
-This alert class is software-owned and requires a Grafana/Warp image deploy.
-Every Mimir config must render
-`blocks_storage.tsdb.flush_blocks_on_shutdown: true`. The Grafana parent gives
-Mimir a 120-second child stop allowance inside Warpctl's normal 3,600-second
-container drain. Keep the TSDB directory
-ephemeral: a persistent directory shared by overlapping old/new containers can
-introduce concurrent WAL/TSDB writers and corruption. Do not zero-fill or
-span-null the dashboard, restart the same artifact, or reinterpret a hole as
-zero throughput. Existing gaps cannot be recovered from Mimir and will age out
-of the dashboard range.
+The causal defect is software-owned, but a historical continuity alert does not
+unconditionally request another Grafana deployment. Pair it with the §11.21
+exact-process signal. Any current child rendering false requires a Grafana/Warp
+image from clean `7176ccd` or a clean descendant. When every current child
+already renders `blocks_storage.tsdb.flush_blocks_on_shutdown: true`, the old
+hole is expected to remain visible and is not evidence that the fix is absent.
+Preserve the setting through the next ordinary rollout and use that clean
+shutdown as the discriminator. The Grafana parent gives Mimir a 120-second
+child stop allowance inside Warpctl's normal 3,600-second container drain. Keep
+the TSDB directory ephemeral: a persistent directory shared by overlapping
+old/new containers can introduce concurrent WAL/TSDB writers and corruption.
+Do not zero-fill or span-null the dashboard, restart the same artifact, or
+reinterpret a hole as zero throughput. Existing gaps cannot be recovered from
+Mimir and will age out of the dashboard range.
 
 The first deployment of this fix still terminates old Mimir children whose
 rendered config lacks the flush. If preservation of their current partial head
@@ -7666,6 +7670,18 @@ offline and disabled in the active inventory, so it was not contacted. This
 proves the production gap was not fixed at that observation time. Warp commit
 `7176ccd` renders the required true value and has a deterministic config test,
 but source presence is not deployment evidence.
+
+The later `2026.9.1-outerwerld+1035004200` deployment changed that current-state
+gate. At `23:17Z`, a direct privacy-reduced read found exactly one Mimir child
+on each enabled services host and `flush_blocks_on_shutdown=true` on all six:
+edge-0 `:14819`, edge-1 `:14819`, edge-3 `:14818`, edge-4 `:14819`, fireside
+`:14818`, and crisp `:14819`. The running parent had already been extracted as
+clean Warp `71731e4`, a descendant of `7176ccd`. Edge-5 remained disabled and
+was not contacted. This closes the current configuration/deployment gate; it
+cannot restore the ten historical §11.20 gaps. The next ordinary Grafana
+replacement, including a deployment of later Warp `13fcd05`, must preserve the
+true setting and produce no new bounded build-info gap through the following
+block-upload window.
 
 This alert is software-owned. First satisfy the §8.13 fail-closed release
 builder, then build and deploy Grafana from clean Warp `7176ccd` or a clean

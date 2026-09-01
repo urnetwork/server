@@ -112,9 +112,14 @@ func TestMimirContinuitySignalSyntheticRestartGap(t *testing.T) {
 		"4 missing 5-minute evaluations",
 		"flush_blocks_on_shutdown",
 		"ephemeral",
+		"cannot infer whether each current child",
 		"not zero throughput",
+		"§11.21 exact-process signal is the current-state gate",
+		"Run the §11.21 mimir-shutdown signal",
+		"clean Warp commit 7176ccd",
+		"do not redeploy solely for historical gaps",
 		"Do not zero-fill",
-		"controlled and a full Grafana rollout",
+		"controlled then full Grafana clean-shutdown rollout",
 		"SIGNALS.md §11.20",
 	} {
 		if !strings.Contains(markdown, want) {
