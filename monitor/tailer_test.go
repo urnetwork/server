@@ -116,6 +116,7 @@ printf '%s\n' '2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [200
 		"first_local=2026/09/01 06:59:49",
 		"stderr",
 		"three pinned HTTP/1.1 requests return 200",
+		"unrelated provider IPv6 prefix",
 	} {
 		combined := strings.Join([]string{
 			routeLoss.target,

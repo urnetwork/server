@@ -9467,9 +9467,10 @@ a monitor-path finding, never a panic or novel error in the requested service.
 Aggregate independent service tails by exact destination address; several
 services failing together prove a shared route event even when it recovers
 between five-minute `edge-ipv6` samples. On any event, immediately run this
-section's identity/public/self-egress battery and retain another IPv6 prefix as
-a same-second control. A later HTTP 200 proves recovery, not that the earlier
-route loss did not occur.
+section's identity/public/self-egress battery and retain both another configured
+edge and an unrelated provider IPv6 prefix as same-second controls. Two
+different prefixes behind one site router are not independent. A later HTTP
+200 proves recovery, not that the earlier route loss did not occur.
 
 The production discriminator occurred on 2026-09-01. Seven of eight standing
 tails simultaneously lost edge-4 `eno3` at 11:52:32Z, another seven did so at
@@ -9487,6 +9488,19 @@ cache exhaustion. The remaining root-cause boundary is a sub-minute
 monitor-side or upstream route/neighbor event. Capture the next pinned
 SYN/ICMPv6 at the monitor, router WAN, and router LAN before installing a static
 neighbor, changing the prefix, or restarting the edge.
+
+The next high-frequency control caught a broader recurrence at
+12:34:28Z–12:34:40Z. Pinned HTTPS to both edge-4 LANs and an edge-3 LAN moved
+together from response/connect timeouts to immediate connect failures, then
+recovered. The datacenter router's contemporaneous capture showed successful
+edge-4 neighbor solicitation/advertisement immediately before and after the
+interval and no destination-unreachable response sent back to the monitor.
+This rules out either edge-4 interface, LB, or LAN neighbor as the shared
+cause and confines the event to the monitor-to-datacenter path, the router WAN,
+or its upstream. Because those three targets still share one site router, that
+sample cannot distinguish a monitor-wide IPv6 outage from withdrawal of the
+site's routed space. The next control must keep a different edge/site prefix
+and an unrelated provider IPv6 endpoint live in the same second.
 
 ## 19. Web platform association metadata
 

@@ -1710,7 +1710,7 @@ func tailTransportRouteFindings(env *probeEnv, events map[string]*tailTransportR
 			services = append(services, service)
 		}
 		sort.Strings(services)
-		correlation := "One tail observed the path failure; use same-second controls before deciding whether the scope was shared."
+		correlation := "One tail observed the path failure; use same-second configured-edge and unrelated-provider IPv6 controls before deciding whether the scope was shared."
 		if len(services) > 1 {
 			correlation = "Multiple independent service tails converged on one exact edge address, proving a shared path event rather than failures in those services."
 		}
@@ -1735,9 +1735,9 @@ func tailTransportRouteFindings(env *probeEnv, events map[string]*tailTransportR
 				address,
 			),
 			evidence: "The finding is parsed only from warpctl stderr's `Tail read error ... no route to host ... Reconnecting` diagnostic. Stderr is duplicated to the operator console but remains isolated from remote service stdout, so it cannot become a service panic or novel-error alert.",
-			context:  "A later pinned HTTP 200 proves recovery, not absence of the earlier interruption. Compare same-second controls to other IPv6 prefixes before attributing the failure to this edge; preserve disabled-host exclusions.",
+			context:  "A later pinned HTTP 200 proves recovery, not absence of the earlier interruption. Compare same-second controls to another configured edge and to an unrelated provider IPv6 prefix before attributing the failure to this edge; two prefixes behind one site router are not independent controls. Preserve disabled-host exclusions.",
 			action:   "Immediately run the §18.1 exact-address battery. Compare active services.yml with the live interface and LB unit, inspect the edge journal for link changes, and inspect the upstream router's exact neighbor plus interface counters. On recurrence, capture the pinned SYN/ICMPv6 at both sides to identify the first hop where it disappears. Do not restart services or change an address, route, firewall rule, or neighbor entry from this transport diagnostic alone.",
-			verify:   "The exact Vault address equals the live interface, three pinned HTTP/1.1 requests return 200, the router resolves the intended MAC, and all standing tails remain free of route-loss diagnostics for ten minutes while another IPv6 prefix stays available as a control.",
+			verify:   "The exact Vault address equals the live interface, three pinned HTTP/1.1 requests return 200, the router resolves the intended MAC, and all standing tails remain free of route-loss diagnostics for ten minutes while both another configured edge and an unrelated provider IPv6 prefix stay available as controls.",
 			playbook: "SIGNALS.md §18.1 and §1.5",
 		})
 	}
