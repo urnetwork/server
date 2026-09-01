@@ -7,6 +7,7 @@ import (
 	"net"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	connectcore "github.com/urnetwork/connect"
@@ -17,14 +18,24 @@ import (
 )
 
 type RunOptions struct {
-	Port int
+	Port               int
+	TLSDefaultHostName string
 }
 
 func (self RunOptions) Validate() error {
 	if self.Port < 1 || self.Port > 65_535 {
 		return fmt.Errorf("connect port %d is outside [1,65535]", self.Port)
 	}
+	if self.TLSDefaultHostName != strings.TrimSpace(self.TLSDefaultHostName) || strings.ContainsAny(self.TLSDefaultHostName, "/\\\x00") {
+		return errors.New("connect TLS default hostname is invalid")
+	}
 	return nil
+}
+
+func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
+	settings := DefaultExchangeSettings()
+	settings.ConnectHandlerSettings.TransportTlsSettings.DefaultHostName = options.TLSDefaultHostName
+	return settings
 }
 
 // Run serves the production connect module until ctx is canceled. The CLI and
@@ -46,7 +57,7 @@ func Run(ctx context.Context, options RunOptions) error {
 	if err := router.StartupReadiness(runCtx); err != nil {
 		glog.Infof("[connect]not ready (%s)\n", err)
 	} else {
-		exchange = NewExchangeFromEnvWithDefaults(runCtx)
+		exchange = NewExchangeFromEnv(runCtx, exchangeSettingsForRun(options))
 		defer exchange.Close()
 		connectRouter := NewConnectRouterWithDefaults(runCtx, cancel, exchange)
 		statusHandler = connectRouter.Status
