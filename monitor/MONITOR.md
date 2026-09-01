@@ -13,8 +13,8 @@ The signal catalog — WHAT to measure, HOW, healthy/broken bands — lives in
 SIGNALS.md (this directory). This document is the architecture of the program
 that encodes those signals as automated probes.
 
-Related: FOLLOWUP.md (open items ledger), SIGNALS.md §7 (the alert emission
-spec this service implements).
+Related: RUN-MAIN.md (continuous root-cause agent harness), FOLLOWUP.md (open
+items ledger), SIGNALS.md §7 (the alert emission spec this service implements).
 
 ---
 

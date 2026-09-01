@@ -136,45 +136,46 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 		"omitted records before they reached the querier",
 		"19,995 per-peer installation lines",
 		"18,165 resets",
-		"v163 was the sole watcher",
-		"9,891 Fireside g10 sync lines",
-		"5,470 resets in the same wall minute",
-		"service-wide query saturated at 20,000 records",
-		"39,378 default-info sync lines",
-		"Fireside and Crisp g1/g4/g5",
-		"6,961 resets",
-		"181 in the prior minute",
-		"aligned within 13 seconds",
-		"one 30-minute interval earlier",
-		"expected periodic full syncs",
-		"next g1 interval at 00:39Z",
-		"38,513 installation lines",
-		"g1=22,400, g2=6,326, g3=9,787",
-		"Fireside=19,623 and Crisp=18,890",
-		"10,937 resets in that wall minute",
-		"162 in the prior minute",
-		"rotating-generation recurrence",
-		"persisted lines remained recoverable",
-		"39,583 more detail lines",
+		"39,378, 38,513, and 39,583 periodic Proxy detail lines",
 		"server.go:764",
-		"9,058",
-		"excluding watcher promotion",
+		"before watcher promotion",
+		"2026.8.31+1034210530",
+		"new one-minute window still returned 1,762 Grafana lines",
+		"344 Mimir query-frontend stats",
+		"344 evaluator stats",
+		"252 Loki table-manager records",
+		"238 reset records",
+		"175 Grafana Prometheus-plugin completions",
+		"observation plane its own default-info producer",
+		"distinct from the earlier Proxy wave",
 		"affirmative internal live-tail loss",
 		"pushTailResponseFromIngester",
 		"discards resp.DroppedStreams",
 		"Grafana is the observation service",
 		"capped service-wide query is not a total",
 		"same absolute window for each configured block",
-		"not distinct peer-installation failures",
-		"Do not jitter or disable the correctness reconciliation",
+		"do not redeploy already-current blocks",
+		"missing Fireside LAN identity",
 		"Warp commit 1e95aef",
 		"server Proxy commit e055c98c",
+		"Warp commit 42168fe",
+		"disables only Mimir's per-query statistics stream",
+		"retaining query execution, metrics, errors, and alert cadence",
 		"Do not raise Loki's fixed queues",
 		"one aggregate summary per reconciling instance",
+		"query-frontend/evaluator statistics fall to zero",
 		"loki-tail-dropped-streams remains zero for 10 minutes",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("Loki dropped-stream alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	for _, staleAction := range []string{
+		"Deploy a Grafana image containing Warp commit 1e95aef",
+		"deploy server Proxy commit e055c98c or later",
+	} {
+		if strings.Contains(markdown, staleAction) {
+			t.Fatalf("Loki dropped-stream alert retained unconditional stale action %q:\n%s", staleAction, markdown)
 		}
 	}
 }
@@ -244,18 +245,32 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 		"internal gRPC tail backend",
 		"59-61-second recurrence",
 		"60-second application read deadline",
+		"The same EOF text is not cause-specific",
+		"backend process exit",
+		"ring-member loss",
 		"long-lived HTTP/2 and gRPC connections",
 		"far below the independent 256-session ceiling",
 		"Canceled/context-canceled",
+		"non-grid EOFs",
+		"2026.8.31+1034210530",
+		"Fireside was absent from the active Loki ring",
+		"disproves blind attribution",
+		"grafana-node findings",
 		"Bounded log reconciliation remains required",
 		"Warp commit 1e95aef",
-		"30-second TCP keepalives",
+		"only to a Grafana block whose image predates it",
+		"do not rebuild or restart it from this alert",
+		"restore any missing ring member or LAN identity",
 		"Do not raise Loki tail-request limits",
+		"every configured active ring member owns its LAN identity",
 		"no loki-tail-backend-eof line recurs for 10 minutes",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("Loki tail backend EOF alert missing %q:\n%s", detail, markdown)
 		}
+	}
+	if strings.Contains(markdown, "Publish and deploy a Grafana image containing Warp commit 1e95aef") {
+		t.Fatalf("post-fix EOF alert retained unconditional legacy deployment action:\n%s", markdown)
 	}
 }
 
