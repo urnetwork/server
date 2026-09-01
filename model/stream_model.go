@@ -449,10 +449,15 @@ func ExpireLeakedStreamKeys(ctx context.Context) (scannedCount int64, fixedCount
 				if 0 < len(keys) {
 					atomic.AddInt64(&scannedCount, int64(len(keys)))
 
-					pttlCmds := make([]*redis.DurationCmd, len(keys))
+					// PTTL can be far larger than time.Duration's roughly
+					// 290-year range for the historical duration-as-seconds
+					// leak. Keep Redis' integer milliseconds intact; the typed
+					// PTTL helper multiplies by time.Millisecond and can overflow
+					// before this cleanup compares the value.
+					pttlCmds := make([]*redis.Cmd, len(keys))
 					_, err := node.Pipelined(nodeCtx, func(pipe redis.Pipeliner) error {
 						for i, key := range keys {
-							pttlCmds[i] = pipe.PTTL(nodeCtx, key)
+							pttlCmds[i] = pipe.Do(nodeCtx, "PTTL", key)
 						}
 						return nil
 					})
@@ -461,10 +466,14 @@ func ExpireLeakedStreamKeys(ctx context.Context) (scannedCount int64, fixedCount
 					}
 					leakedKeys := []string{}
 					for i, pttlCmd := range pttlCmds {
+						pttlMillis, err := pttlCmd.Int64()
+						if err != nil {
+							return err
+						}
 						// negative ttls are missing (-2) or persistent (-1)
 						// keys; the stream writers always set a ttl, so
 						// leave those to inspection
-						if ttl < pttlCmd.Val() {
+						if ttl.Milliseconds() < pttlMillis {
 							leakedKeys = append(leakedKeys, keys[i])
 						}
 					}
