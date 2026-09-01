@@ -5,9 +5,16 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var taskErrorIDPattern = regexp.MustCompile(`(?i)\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b`)
+
+func redactTaskErrorIdentifiers(value string) string {
+	return taskErrorIDPattern.ReplaceAllString(value, "<task-id>")
+}
 
 // taskFailureSummarySQL returns one representative row per failing task
 // function, plus whole-family counts.  Never cap raw pending_task rows before
@@ -194,11 +201,15 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		findings = append(findings, finding{
 			probeId: "pg/canary-dead", tier: tierPage,
 			class: "canary-dead", target: target, sustain: 1,
-			symptom:  fmt.Sprintf("UpdateClientLocations completions in last 3m = 0 (healthy 12–25) on %s", target),
-			baseline: "12–25 completions / 3 min; 0 = redis sick somewhere on the write path (1.2)",
-			observed: "locations_completions_3m=0",
-			evidence: taskErrorBattery(ctx, env),
-			playbook: "SIGNALS.md 5.1",
+			symptom:   fmt.Sprintf("UpdateClientLocations completions in last 3m = 0 (healthy 12–25) on %s", target),
+			mechanism: "No scheduled canary reached finished_task across the taskworker, PostgreSQL scheduler/lease, and Redis write path. Redis failure is one cause, but zero completions alone is not proof of Redis failure: PostgreSQL admission exhaustion, a database-wide wait pileup, or lost taskworker execution can prevent the canary from reaching Redis at all.",
+			baseline:  "12–25 completions / 3 min, with the scheduler/lease, direct PostgreSQL capacity, and Redis cluster independently observable.",
+			observed:  "locations_completions_3m=0",
+			evidence:  taskErrorBattery(ctx, env) + "\n\n" + taskCanaryLifecycleBattery(ctx, env),
+			context:   "The 2026-09-01 production recurrence proved the discriminator: completions were normal through 19:16Z, fell to one at 19:17Z, then were zero for four minutes while direct PostgreSQL reached 1,023 client backends / 995 active, including 803 active loopback sessions waiting on transactionid, BufferContent, WALInsert, and WALWrite during a legacy contract_close reindex. PostgreSQL then logged 602 statements over 30 seconds, 163 client-loss records, and 164 cancellations in one minute. Completions resumed without a Redis repair after the rebuild attempt ended. Treat the canary as end-to-end evidence and use companion signals to locate the failed layer.",
+			action:    "Immediately compare §1.3a direct PostgreSQL capacity, §2.2 active reindex progress, §1.4 Redis cluster state, and the bounded canary lifecycle evidence. If PostgreSQL is saturated behind a legacy large-table rebuild, protect the current operation until it reaches its bounded outcome, then deploy the Taskworker maintenance exclusion/lease fixes before another epoch; do not restart Redis or manually kick the canary. If PostgreSQL is healthy and Redis names a failed node, repair that exact Redis boundary. If both are healthy, attribute the pending claim and taskworker lifecycle before scheduling duplicate work.",
+			verify:    "UpdateClientLocations returns to 12-25 completions in every rolling three-minute window for ten minutes; direct PostgreSQL retains more than 25% headroom; no excluded large/high-churn table appears in reindex progress; Redis remains cluster_state:ok with every node responsive; and no duplicate canary was manually scheduled.",
+			playbook:  "SIGNALS.md §1.2, §1.3a, §1.4, and §2.2",
 		})
 	} else {
 		findings = append(findings, healthyFinding("pg/canary-dead", tierPage, "canary-dead", target))
@@ -453,7 +464,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	for _, r := range failRows {
 		task := r.str(0)
 		familyCount, parkedCount, freshClaimCount := atoiRow(r, 1), atoiRow(r, 2), atoiRow(r, 3)
-		lastError, maxTimeSeconds := r.str(6), r.str(7)
+		lastError, maxTimeSeconds := redactTaskErrorIdentifiers(r.str(6)), r.str(7)
 		causeClassCount, causeSummary := atoiRow(r, 8), r.str(9)
 		mixedCauses := 1 < causeClassCount
 		lowerError := strings.ToLower(lastError)
@@ -603,7 +614,81 @@ func taskErrorBattery(ctx context.Context, env *probeEnv) string {
 	lines := []string{"failing recurring tasks (the error text names the failure mode + sick node):"}
 	for _, r := range rows {
 		lines = append(lines, fmt.Sprintf("  %s rows=%s parked=%s active=%s max_errors=%s :: %s",
-			r.str(0), r.str(1), r.str(2), r.str(3), r.str(4), r.str(6)))
+			r.str(0), r.str(1), r.str(2), r.str(3), r.str(4), redactTaskErrorIdentifiers(r.str(6))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func taskCanaryLifecycleBattery(ctx context.Context, env *probeEnv) string {
+	rows, err := env.runner.pg(ctx, `
+		WITH completion_minutes AS MATERIALIZED (
+			SELECT date_trunc('minute', run_end_time) AS minute,
+			       count(*)::int AS completions,
+			       coalesce(round(min(extract(epoch FROM run_end_time-run_start_time))),0)::bigint AS min_s,
+			       coalesce(round(max(extract(epoch FROM run_end_time-run_start_time))),0)::bigint AS max_s
+			FROM finished_task
+			WHERE function_name LIKE '%UpdateClientLocations%'
+			  AND run_end_time > now() - interval '6 minutes'
+			GROUP BY 1
+		), pending AS MATERIALIZED (
+			SELECT count(*)::int AS rows,
+			       count(*) FILTER (WHERE claim_time > now()-interval '2 minutes')::int AS fresh_claims,
+			       count(*) FILTER (WHERE release_time > now())::int AS live_leases,
+			       coalesce(round(max(extract(epoch FROM now()-run_at))),0)::bigint AS max_due_age_s
+			FROM pending_task
+			WHERE function_name LIKE '%UpdateClientLocations%'
+		), capacity AS MATERIALIZED (
+			SELECT count(*)::int AS clients,
+			       count(*) FILTER (WHERE state='active')::int AS active,
+			       count(*) FILTER (WHERE state='idle')::int AS idle,
+			       count(*) FILTER (WHERE state LIKE 'idle in transaction%')::int AS idle_in_tx
+			FROM pg_stat_activity
+			WHERE backend_type='client backend'
+		), progress AS MATERIALIZED (
+			SELECT relation::regclass::text AS relation,
+			       coalesce(index_relid::regclass::text, '-') AS index_name,
+			       phase,
+			       coalesce(round(extract(epoch FROM now()-query_start)),0)::bigint AS age_s
+			FROM pg_stat_progress_create_index
+			LEFT JOIN pg_stat_activity USING (pid)
+			ORDER BY query_start
+			LIMIT 1
+		)
+		SELECT 'minute', to_char(minute AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:00"Z"'),
+		       completions::text, min_s::text, max_s::text, '', ''
+		FROM completion_minutes
+		UNION ALL
+		SELECT 'pending', rows::text, fresh_claims::text, live_leases::text,
+		       max_due_age_s::text, '', ''
+		FROM pending
+		UNION ALL
+		SELECT 'capacity', clients::text, active::text, idle::text, idle_in_tx::text, '', ''
+		FROM capacity
+		UNION ALL
+		SELECT 'reindex', relation, index_name, phase, age_s::text, '', ''
+		FROM progress
+		ORDER BY 1, 2;
+	`)
+	if err != nil {
+		return "canary lifecycle battery failed: " + err.Error()
+	}
+	lines := []string{"bounded canary lifecycle and current companion state:"}
+	for _, row := range rows {
+		if len(row) != 7 {
+			return fmt.Sprintf("canary lifecycle battery returned %d columns, want 7", len(row))
+		}
+		switch row.str(0) {
+		case "minute":
+			lines = append(lines, fmt.Sprintf("  completion_minute=%s completions=%s duration_s=%s..%s", row.str(1), row.str(2), row.str(3), row.str(4)))
+		case "pending":
+			lines = append(lines, fmt.Sprintf("  pending_rows=%s fresh_claims=%s live_leases=%s max_due_age_s=%s", row.str(1), row.str(2), row.str(3), row.str(4)))
+		case "capacity":
+			lines = append(lines, fmt.Sprintf("  current_pg_clients=%s active=%s idle=%s idle_in_tx=%s", row.str(1), row.str(2), row.str(3), row.str(4)))
+		case "reindex":
+			lines = append(lines, fmt.Sprintf("  current_reindex_relation=%s index=%s phase=%s age_s=%s", row.str(1), row.str(2), row.str(3), row.str(4)))
+		default:
+			return "canary lifecycle battery returned unknown row kind " + row.str(0)
+		}
 	}
 	return strings.Join(lines, "\n")
 }

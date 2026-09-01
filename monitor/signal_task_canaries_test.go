@@ -8,8 +8,16 @@ import (
 
 func TestTaskCanariesSignalSyntheticDeadCanary(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		if strings.Contains(query, "UpdateClientLocations") && strings.Contains(query, "count(*)") {
+		switch {
+		case strings.Contains(query, "run_end_time > now() - interval '3 minutes'"):
 			return []Row{{"0"}}, nil
+		case strings.Contains(query, "WITH completion_minutes AS"):
+			return []Row{
+				{"capacity", "1023", "995", "24", "4", "", ""},
+				{"minute", "2026-09-01T19:17:00Z", "1", "3", "3", "", ""},
+				{"pending", "1", "0", "0", "120", "", ""},
+				{"reindex", "contract_close", "contract_close_pkey_ccnew35", "building index: sorting live tuples", "180", "", ""},
+			}, nil
 		}
 		return nil, nil
 	}}
@@ -17,7 +25,48 @@ func TestTaskCanariesSignalSyntheticDeadCanary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireAlertClass(t, alerts, "canary-dead")
+	alert := requireAlertClass(t, alerts, "canary-dead")
+	for _, want := range []string{
+		"zero completions alone is not proof of Redis failure",
+		"current_pg_clients=1023 active=995",
+		"completion_minute=2026-09-01T19:17:00Z completions=1",
+		"current_reindex_relation=contract_close",
+		"602 statements over 30 seconds",
+		"compare §1.3a direct PostgreSQL capacity",
+		"do not restart Redis",
+		"12-25 completions",
+	} {
+		if markdown := alert.Markdown(); !strings.Contains(markdown, want) {
+			t.Fatalf("dead-canary alert missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
+func TestTaskCanariesSignalRedactsTaskIdentifiersFromErrors(t *testing.T) {
+	taskID := "019f77ae-de98-582a-1c07-83ea3dbd9d0d"
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "run_end_time > now() - interval '3 minutes'"):
+			return []Row{{"0"}}, nil
+		case strings.Contains(query, "WITH completion_minutes AS"):
+			return []Row{{"pending", "1", "0", "0", "0", "", ""}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{"AdvancePayment", "1", "1", "0", "2", "600", "[" + taskID + "] synthetic failure", "120", "1", "other=1", "18.6", "32", "8MB"}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := alerts.Markdown()
+	if strings.Contains(markdown, taskID) {
+		t.Fatalf("task identifier leaked into alert:\n%s", markdown)
+	}
+	if !strings.Contains(markdown, "[<task-id>] synthetic failure") {
+		t.Fatalf("redacted task identifier missing:\n%s", markdown)
+	}
 }
 
 func TestTaskCanariesSignalSyntheticOverdueAndParkedTasks(t *testing.T) {

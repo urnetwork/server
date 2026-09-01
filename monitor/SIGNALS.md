@@ -216,8 +216,14 @@ WHERE create_time >= date_trunc('minute', now()) - interval '1 minute'
 Probe: `task-canaries`
 
 `UpdateClientLocations` runs every ~30s, writes redis across many slots,
-completes in 3–15s. It is the perfect canary: if redis is sick ANYWHERE on the
-write path, it errors within a minute.
+completes in 3–15s. It is an end-to-end canary: if Redis is sick anywhere on
+the write path, it errors within a minute, but a zero-completion window is not
+proof that Redis is the failed layer. PostgreSQL admission exhaustion or a
+database-wide wait pileup can prevent the scheduler/worker from reaching Redis
+at all, and a taskworker lifecycle gap can do the same. On zero completions,
+preserve bounded per-minute completion history, pending claim/lease state,
+direct PostgreSQL capacity, active reindex progress, and Redis cluster state;
+attribute the failed layer before mutating it.
 ```sql
 -- completions (locations) in the last 3 minutes: healthy 12–25, broken 0
 SELECT count(*) FROM finished_task
@@ -240,6 +246,24 @@ FROM failures GROUP BY task;
 - The error TEXT is diagnostic gold: `CLUSTERDOWN` vs `OOM command not
   allowed` vs `dial tcp <ip>:<port>: i/o timeout` vs `connection refused`
   name the failure mode AND the sick node (see section 4 taxonomy).
+- Never emit the task UUID embedded at the front of a stored error. It is not
+  needed to classify the failure and can identify a durable payment/task row;
+  structured alerts replace it with `<task-id>` while preserving the bounded
+  error class and target.
+- The 2026-09-01 recurrence supplied the non-Redis discriminator. Completions
+  were normal through 19:16Z, fell to one at 19:17Z, and were zero for four
+  minutes. At 19:17:47Z, while the legacy maintenance worker was rebuilding
+  `contract_close`, direct PostgreSQL showed 1,023 client backends against a
+  1,021 ordinary-role ceiling, 995 active, and 803 active loopback sessions
+  waiting on transaction IDs, `BufferContent`, `WALInsert`, and `WALWrite`.
+  In 19:18Z PostgreSQL completed 852 logged statements: 835 exceeded ten
+  seconds, 602 exceeded thirty seconds, 163 clients were already gone, and
+  164 statements were canceled. The canary recovered with five completions in
+  19:22Z and six in 19:23Z without a Redis repair after the large rebuild
+  attempt ended. This proves an end-to-end scheduler/database gap, not Redis
+  failure. The root fix remains the large/high-churn maintenance exclusion and
+  lease-owner repair in current Taskworker; do not restart Redis or manually
+  schedule a duplicate canary to mask it.
 - GOTCHA — exponential backoff parks tasks: after N errors, run_at can be an
   hour out. A "quiet" failing task is indistinguishable from a healthy one
   unless you check `run_at` vs `now()`. The monitor must report parked tasks
