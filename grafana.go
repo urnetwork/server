@@ -28,7 +28,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"runtime/debug"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,8 +136,58 @@ var buildInfoGauge = prometheus.NewGaugeVec(
 	[]string{"version"},
 )
 
+var sourceInfoGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Name:      "source_info",
+		Help:      "Go VCS source and immutable image identity of the running service",
+	},
+	[]string{"revision", "modified", "image_digest"},
+)
+
+type sourceBuildInfo struct {
+	revision string
+	modified bool
+}
+
+func sourceBuildInfoFromSettings(settings []debug.BuildSetting) (sourceBuildInfo, bool) {
+	info := sourceBuildInfo{}
+	hasModified := false
+	for _, setting := range settings {
+		switch setting.Key {
+		case "vcs.revision":
+			info.revision = setting.Value
+		case "vcs.modified":
+			modified, err := strconv.ParseBool(setting.Value)
+			if err != nil {
+				return sourceBuildInfo{}, false
+			}
+			info.modified = modified
+			hasModified = true
+		}
+	}
+	return info, info.revision != "" && hasModified
+}
+
+func currentSourceBuildInfo() (sourceBuildInfo, bool) {
+	buildInfo, ok := debug.ReadBuildInfo()
+	if !ok {
+		return sourceBuildInfo{}, false
+	}
+	return sourceBuildInfoFromSettings(buildInfo.Settings)
+}
+
+func sourceInfoLabelValues(source sourceBuildInfo, imageDigest string) []string {
+	return []string{
+		source.revision,
+		strconv.FormatBool(source.modified),
+		strings.TrimSpace(imageDigest),
+	}
+}
+
 func init() {
 	prometheus.MustRegister(buildInfoGauge)
+	prometheus.MustRegister(sourceInfoGauge)
 }
 
 // StartStatsPusher pushes the default prometheus registry
@@ -176,6 +230,12 @@ func StartStatsPusher(ctx context.Context) (flush func()) {
 
 	if version, err := Version(); err == nil {
 		buildInfoGauge.WithLabelValues(version).Set(1)
+	}
+	if source, ok := currentSourceBuildInfo(); ok {
+		sourceInfoGauge.WithLabelValues(sourceInfoLabelValues(
+			source,
+			os.Getenv("WARP_IMAGE_DIGEST"),
+		)...).Set(1)
 	}
 
 	// a random per-process nonce so concurrent containers never write the

@@ -2,6 +2,9 @@ package acceptance
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
 	"net"
@@ -539,6 +542,42 @@ func TestHTTPSRequestTraceIdentifiesTunnelConnectFailure(t *testing.T) {
 	}
 	if !strings.Contains(detail, "dial example.test:443") {
 		t.Errorf("trace detail %q lost the dial endpoint needed to correlate a failed LB path", detail)
+	}
+}
+
+// The live proxy failure supplied only "unknown authority" even though the
+// parsed peer chain was available. Preserve a bounded identity for every
+// certificate so an invalid origin chain and an intercepting exit diverge.
+func TestHTTPSRequestTraceRetainsRejectedPeerCertificateChain(t *testing.T) {
+	started := time.Date(2026, time.September, 1, 6, 20, 12, 0, time.UTC)
+	requestTrace := &httpsRequestTrace{started: started, phase: "starting_request"}
+	clientTrace := requestTrace.clientTrace()
+	leaf := &x509.Certificate{
+		Raw:     []byte("leaf certificate"),
+		Subject: pkix.Name{CommonName: "validation.example"},
+		Issuer:  pkix.Name{CommonName: "unexpected proxy root"},
+	}
+	intermediate := &x509.Certificate{
+		Raw:     []byte("intermediate certificate"),
+		Subject: pkix.Name{CommonName: "unexpected proxy root"},
+		Issuer:  pkix.Name{CommonName: "unexpected proxy root"},
+	}
+	clientTrace.TLSHandshakeDone(tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf, intermediate},
+	}, x509.UnknownAuthorityError{Cert: leaf})
+
+	detail := requestTrace.wrap(x509.UnknownAuthorityError{Cert: leaf}, started.Add(2*time.Second)).Error()
+	for _, evidence := range []string{
+		"phase tls_handshake_failed",
+		"peer_certs=2",
+		"verified_chains=0",
+		"validation.example>unexpected_proxy_root/",
+		"unexpected_proxy_root>unexpected_proxy_root/",
+		"certificate signed by unknown authority",
+	} {
+		if !strings.Contains(detail, evidence) {
+			t.Errorf("trace detail %q does not contain %q", detail, evidence)
+		}
 	}
 }
 

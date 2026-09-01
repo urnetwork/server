@@ -428,17 +428,43 @@ WHERE function_name LIKE '%UpdateClient%'
   limiter before `70b0d269` has completed its 90-minute deployment control.
 
   At `03:22Z` on 2026-09-01, the standing invalid-destination alert exposed a
-  monitor provenance bug after Taskworker had converged: every responding
-  block sampled `2026.8.31+1034210530`, whose source `a52392db` contains
-  `70b0d269`, but the alert still described the historical
-  `2026.8.31-outerwerld+1033655820` artifact as deployed and instructed another
-  jitter rollout. The taxonomy had embedded incident-time provenance in
-  reusable runtime prose. The invalid-destination alert now labels the hourly
-  recurrence as historical, makes no current-version claim, and delegates any
-  software action to the independently triggered `payout-retry-microburst`
-  finding. Its deterministic test rejects the historical version/source and a
-  direct jitter-deploy instruction. The operational wallet correction remains
+  monitor provenance bug: every responding block sampled
+  `2026.8.31+1034210530`, and the investigation initially treated that mutable
+  WARP/config generation as proof that source `a52392db` was running. Exact
+  artifact validation later disproved that inference. Six directly observable
+  blocks on enabled edges 0, 1, and 3 executed image content identity
+  `sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a`;
+  edge-4's two blocks had no retained startup digest and unprivileged Docker
+  inspection was unavailable, so they remain provenance-unknown rather than
+  being counted as proven. The matching amd64 manifest's extracted executable
+  reported base revision `078d6c11` with `vcs.modified=true`, while its BuildKit
+  attestation described Docker context `a52392db`. The prebuilt binary was made
+  from a dirty earlier tree and the Docker context was published after HEAD
+  advanced. This is a release-provenance race, not evidence that config version
+  maps to source.
+
+  Direct binary discriminators nevertheless prove that the six-block artifact
+  contains the proportional-jitter fix: it exports the
+  `task.errorRescheduleDelay` symbol and the post-`70b0d269` direct `run_at=$3`
+  / `$5` error-count SQL rather than the old SQL `power()` backoff. The one
+  four-attempt source second at `06:14:26Z` produced no canonical processor 429
+  and the microburst finding cleared on the next complete cadences. That is not
+  a reason to redeploy the same Taskworker; retain the full observation gate
+  and investigate a repeated current-artifact wave or a coincident 429. The
+  taxonomy now makes no current-version claim and delegates software action to
+  the independently triggered `payout-retry-microburst` finding. Its
+  deterministic test rejects historical version/source assertions and a direct
+  jitter-deploy instruction. The operational wallet correction remains
   unchanged.
+
+  The release root fix belongs to Warp: `warpctl build` now fails before
+  publication when the source tree is dirty, when a Linux binary lacks a full
+  clean embedded revision matching the starting HEAD, or when HEAD changes
+  during compilation/scanning. Generic service telemetry also exports the Go
+  revision, dirty bit, and Warp-injected immutable digest so future probes can
+  join the running process without extracting images. Install/use that Warp
+  builder for subsequent artifacts; it does not require redeploying the current
+  Taskworker solely to re-prove the already-present jitter behavior.
 
   The first `03:50Z` run of the replacement watcher found the same defect in
   the independent `task-canaries` mixed-family guidance: its current
@@ -7303,6 +7329,22 @@ recoverable TUN dial error into a client-visible terminal timeout; current
 proxy/server defaults pace retries at one second and continue until the client
 leaves. A clean immediate rerun does not make the legacy interval safe.
 
+**Rejected TLS-chain attribution:** an acceptance error ending only in
+`x509: certificate signed by unknown authority` does not distinguish a broken
+origin certificate chain from a proxy exit that intercepted or redirected the
+request. The normal TLS verifier has already parsed the peer certificates when
+`httptrace.TLSHandshakeDone` reports the rejection. Preserve a bounded public
+identity for at most four certificates: sanitized subject common name,
+sanitized issuer common name, the first six bytes of SHA-256 over the DER, the
+total peer-certificate count, and the verified-chain count. Do not retain PEM,
+certificate contents, private request headers, or disable verification to get
+a response. Compare the leaf identity and fingerprint with a direct-origin
+control and the exact selected exit. A matching bad origin chain is external;
+a different issuer/fingerprint only through the proxy isolates the exit or
+route. `TestHTTPSRequestTraceRetainsRejectedPeerCertificateChain` supplies a
+synthetic rejected two-certificate chain and requires that bounded diagnostic
+to survive the wrapped acceptance failure.
+
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`
 
@@ -7586,7 +7628,10 @@ generation in every `(host, block)` and join these metrics on exact `env`,
 
 - `process_resident_memory_bytes`
 - `process_start_time_seconds`
-- `urnetwork_build_info` (including its `version` label)
+- `urnetwork_build_info` (including its mutable `version`/config-generation
+  label)
+- `urnetwork_source_info` (full Go `revision`, `modified`, and immutable
+  `image_digest` labels)
 - `go_memstats_heap_alloc_bytes`
 - `go_memstats_heap_objects`
 - `go_goroutines`
@@ -7605,6 +7650,15 @@ is the evaluation time even for a stopped series returned through lookback, so
 the JSON timestamp alone cannot identify a live process. WARN
 `proxy-runtime-unobservable` when a newest fresh identity lacks any member of
 the joined set; a missing owner gauge is unknown memory attribution, not zero.
+The source family is emitted by the running executable from
+`debug.ReadBuildInfo`; Warp supplies `WARP_IMAGE_DIGEST` only after it pulls and
+inspects the platform image, then executes that exact digest. WARN
+`proxy-runtime-provenance` immediately when a source family reports
+`modified=true` or its image digest is not an exact `sha256:` content identity.
+Do not substitute `urnetwork_build_info.version`: `WARP_VERSION` can advance
+with a config generation and is not immutable source or artifact provenance.
+Missing or unverifiable provenance must not suppress a fully observable
+high-live-set alert.
 
 WARN `proxy-runtime-live-set` for two one-minute probes when all of the
 following hold on a newest identity:
@@ -7673,15 +7727,21 @@ heap/object deltas moved both up and down across the fleet, establishing a large
 floor but not monotonic growth; an unbounded cache remains a candidate only
 after its entry count or a heap allocation stack attributes the retained floor.
 
-The startup edge narrows the current owner further. On Proxy build
-`2026.8.31+1034210530`, Fireside g1 started at Unix time 1788236178; its first
-fresh sample 22 seconds later already had 12,857 peers, zero live DeviceLocals,
-zero tracked DeviceLocal bytes, 3,885,930,648 heap bytes, and 29,736,708 heap
-objects. Later ordinary collections repeatedly returned to roughly 3.6 GiB and
-27.5 million objects while peer count moved by only a few. The dominant current
-floor is therefore constructed at the initial peer-sync/process-start boundary,
-not by hours of caller-lock cache accumulation or by hosted DeviceLocals. The
-bounded caller-lock root fix in §14.7c remains required, but it must not be
+The startup edge narrows the current owner further. Under Proxy config
+generation `2026.8.31+1034210530`, Fireside g1 started at Unix time
+1788236178; its first fresh sample 22 seconds later already had 12,857 peers,
+zero live DeviceLocals, zero tracked DeviceLocal bytes, 3,885,930,648 heap
+bytes, and 29,736,708 heap objects. Later ordinary collections repeatedly
+returned to roughly 3.6 GiB and 27.5 million objects while peer count moved by
+only a few. That version label does **not** identify the executable: the
+locally cached exact Proxy image tag
+`2026.8.31-outerwerld-1033797570` contained clean Go base revision
+`2c3b552020160433d3854805f9b9a491859e1bf9`, while every live metric carried
+the later mutable config generation. The dominant current floor is therefore
+constructed at the initial peer-sync/process-start boundary, not by hours of
+caller-lock cache accumulation or by hosted DeviceLocals, but its software
+ancestry remains unknown until the process emits the source/digest family.
+The bounded caller-lock root fix in §14.7c remains required, but it must not be
 credited with closing this larger floor until a deployed entry gauge and
 old/candidate heap comparison prove that effect.
 
@@ -7738,12 +7798,17 @@ explicit operational load reduction) are required even after the live set is
 smaller.
 
 Deploy the Proxy service artifact containing targeted warmup, the value-only
-WireGuard TUN factory, the bounded caller-lock cache, and the new owner gauges;
-no Warp/xops deployment is needed for this process-memory correction. Join
-`urnetwork_build_info{version=...}` to the exact newest process identity so an
-old process cannot be mistaken for proof. Every current identity must keep the
-same peer and active-device service boundary while its first post-sync sample
-and repeated post-GC floor are materially lower than the legacy 3.6–3.9 GiB
+WireGuard TUN factory, the bounded caller-lock cache, the new owner gauges, and
+the generic source/digest gauge; no xops deployment is needed for this
+process-memory correction. The release builder must use the Warp provenance
+gate that rejects dirty source, requires every Linux binary's embedded
+revision and `modified=false` to match the starting clean HEAD, and rechecks
+that HEAD immediately before publishing. Join both `urnetwork_build_info` and
+`urnetwork_source_info` to the exact newest process identity. Every current
+identity must report the intended full revision, `modified=false`, and an
+exact digest independently matching its running container while keeping the
+same peer and active-device service boundary. Its first post-sync sample and
+repeated post-GC floor must be materially lower than the legacy 3.6–3.9 GiB
 heap/27.5–30.5-million-object band. Require the conservative residual below 2
 GiB for 15 minutes across multiple GC cycles, improved RSS and host
 `MemAvailable`, and simultaneous WireGuard plus HTTP/SOCKS acceptance with no
@@ -7751,8 +7816,9 @@ new OOM or adjacent UDP receive drops. If only the closure/cache reductions are
 visible while the large startup floor remains, provenance-check the target
 list before profiling the next owner. SIGNALS.md §14.7b (`proxy-runtime`) maps
 to `signal_proxy_runtime.go` and `signal_proxy_runtime_test.go`; synthetic cases
-pin a complete versioned high live set, conservative owner accounting, missing
-metrics, and newest-generation selection during overlap.
+pin a clean complete high live set, dirty/missing-digest provenance, missing
+source that cannot hide high memory, conservative owner accounting, and
+newest-generation selection during overlap.
 
 ### 14.7c Proxy caller-lock cache boundedness
 Probe: `proxy-cache`

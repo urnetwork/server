@@ -6,8 +6,47 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
+	"slices"
 	"testing"
 )
+
+func TestSourceBuildInfoFromSettings(t *testing.T) {
+	settings := []debug.BuildSetting{
+		{Key: "-buildmode", Value: "exe"},
+		{Key: "vcs.revision", Value: "dc40916a2c6c6e576d77f29aef8634fa45be5a8f"},
+		{Key: "vcs.modified", Value: "false"},
+	}
+	info, ok := sourceBuildInfoFromSettings(settings)
+	if !ok {
+		t.Fatal("complete Go VCS settings were rejected")
+	}
+	if info.revision != "dc40916a2c6c6e576d77f29aef8634fa45be5a8f" || info.modified {
+		t.Fatalf("source info = %+v", info)
+	}
+	labels := sourceInfoLabelValues(
+		info,
+		"  sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a  ",
+	)
+	expectedLabels := []string{
+		"dc40916a2c6c6e576d77f29aef8634fa45be5a8f",
+		"false",
+		"sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a",
+	}
+	if !slices.Equal(labels, expectedLabels) {
+		t.Fatalf("source labels = %q, want %q", labels, expectedLabels)
+	}
+
+	for _, incomplete := range [][]debug.BuildSetting{
+		{{Key: "vcs.modified", Value: "false"}},
+		{{Key: "vcs.revision", Value: "dc40916a"}},
+		{{Key: "vcs.revision", Value: "dc40916a"}, {Key: "vcs.modified", Value: "not-a-bool"}},
+	} {
+		if info, ok := sourceBuildInfoFromSettings(incomplete); ok {
+			t.Fatalf("incomplete settings produced source info %+v", info)
+		}
+	}
+}
 
 // The port comes only from config even if the scoped secret repeats a value.
 func TestGrafanaPushSettingsSeparatesConfigAndSecret(t *testing.T) {

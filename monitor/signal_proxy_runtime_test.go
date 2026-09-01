@@ -10,24 +10,27 @@ import (
 )
 
 type proxyRuntimeFixtureProcess struct {
-	host          string
-	block         string
-	instance      string
-	version       string
-	sampleTime    time.Time
-	startTime     time.Time
-	rss           float64
-	heap          *float64
-	objects       *float64
-	goroutines    *float64
-	peers         *float64
-	devices       *float64
-	deviceTracked *float64
-	poolRetained  *float64
-	nextGC        *float64
-	gogc          *float64
-	stack         *float64
-	lastGC        *float64
+	host           string
+	block          string
+	instance       string
+	version        string
+	sourceRevision string
+	sourceModified string
+	imageDigest    string
+	sampleTime     time.Time
+	startTime      time.Time
+	rss            float64
+	heap           *float64
+	objects        *float64
+	goroutines     *float64
+	peers          *float64
+	devices        *float64
+	deviceTracked  *float64
+	poolRetained   *float64
+	nextGC         *float64
+	gogc           *float64
+	stack          *float64
+	lastGC         *float64
 }
 
 func TestProxyRuntimeSignalSyntheticHighLiveSet(t *testing.T) {
@@ -52,7 +55,10 @@ func TestProxyRuntimeSignalSyntheticHighLiveSet(t *testing.T) {
 	}
 	for _, want := range []string{
 		"1 of 1 newest fresh proxy identities",
-		`build_version="synthetic-proxy"`,
+		`config_version="synthetic-proxy"`,
+		`source_revision="dc40916a2c6c6e576d77f29aef8634fa45be5a8f"`,
+		"source_modified=false",
+		`image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
 		"heap_bytes=4294967296",
 		"heap_objects=30000000",
 		"wg_peers=12800",
@@ -136,14 +142,107 @@ func TestProxyRuntimeSignalSyntheticNewestGenerationMissingMetric(t *testing.T) 
 	}
 }
 
+func TestProxyRuntimeSignalSyntheticMissingSourceDoesNotHideHighLiveSet(t *testing.T) {
+	now := time.Date(2026, 9, 1, 6, 3, 0, 0, time.UTC)
+	process := completeProxyRuntimeFixture("fireside", "g5", "legacy", now.Add(-time.Hour))
+	setProxyRuntimeFixtureValues(
+		&process,
+		float64(5<<30),
+		float64(4<<30),
+		30_000_000,
+		28_000,
+		12_800,
+		0,
+		0,
+		0,
+	)
+	process.sourceRevision = ""
+	process.sourceModified = ""
+	process.imageDigest = ""
+
+	alerts := runProxyRuntimeFixture(t, now, proxyRuntimeFixtureJSON(t, now, process))
+	unobservable := requireAlertClass(t, alerts, "proxy-runtime-unobservable")
+	if !strings.Contains(unobservable.Observed, "fireside/g5#legacy[source-info]") {
+		t.Fatalf("runtime visibility alert did not isolate source-info: %s", unobservable.Observed)
+	}
+	liveSet := requireAlertClass(t, alerts, "proxy-runtime-live-set")
+	for _, want := range []string{
+		`source_revision="unknown"`,
+		"source_modified=unknown",
+		"WARP_VERSION is only the config-generation boundary",
+	} {
+		if !strings.Contains(liveSet.Markdown(), want) {
+			t.Fatalf("runtime live-set alert missing %q:\n%s", want, liveSet.Markdown())
+		}
+	}
+}
+
+func TestProxyRuntimeSignalSyntheticUnverifiableProvenance(t *testing.T) {
+	now := time.Date(2026, 9, 1, 6, 4, 0, 0, time.UTC)
+	dirty := completeProxyRuntimeFixture("fireside", "g1", "dirty", now.Add(-time.Hour))
+	setProxyRuntimeFixtureValues(
+		&dirty,
+		float64(2<<30),
+		float64(1<<30),
+		8_000_000,
+		20_000,
+		10_000,
+		10,
+		16<<20,
+		1<<20,
+	)
+	dirty.sourceModified = "true"
+	missingDigest := completeProxyRuntimeFixture("crisp", "g2", "no-digest", now.Add(-time.Hour))
+	setProxyRuntimeFixtureValues(
+		&missingDigest,
+		float64(2<<30),
+		float64(1<<30),
+		8_000_000,
+		20_000,
+		10_000,
+		10,
+		16<<20,
+		1<<20,
+	)
+	missingDigest.imageDigest = ""
+
+	alerts := runProxyRuntimeFixture(
+		t,
+		now,
+		proxyRuntimeFixtureJSON(t, now, dirty, missingDigest),
+	)
+	alert := requireAlertClass(t, alerts, "proxy-runtime-provenance")
+	for _, want := range []string{
+		"2 of 2 newest fresh proxy identities",
+		"fireside/g1#dirty[source-modified]",
+		"crisp/g2#no-digest[image-digest]",
+		"BuildKit context provenance alone is insufficient",
+		"rejects dirty source",
+		"WARP_VERSION/config generations cannot close this class",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("runtime provenance alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	for _, candidate := range alerts {
+		if candidate.Class == "proxy-runtime-unobservable" {
+			t.Fatalf("valid but unverifiable source metric was classified as missing: %+v", alerts)
+		}
+	}
+}
+
 func completeProxyRuntimeFixture(host, block, instance string, start time.Time) proxyRuntimeFixtureProcess {
 	zero := float64(0)
 	gogc := float64(100)
 	stack := float64(80 << 20)
 	lastGC := float64(start.Add(30 * time.Minute).Unix())
 	return proxyRuntimeFixtureProcess{
-		host: host, block: block, instance: instance, version: "synthetic-proxy", startTime: start,
-		heap: &zero, objects: &zero, goroutines: &zero, peers: &zero,
+		host: host, block: block, instance: instance, version: "synthetic-proxy",
+		sourceRevision: "dc40916a2c6c6e576d77f29aef8634fa45be5a8f",
+		sourceModified: "false",
+		imageDigest:    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		startTime:      start,
+		heap:           &zero, objects: &zero, goroutines: &zero, peers: &zero,
 		devices: &zero, deviceTracked: &zero, poolRetained: &zero,
 		nextGC: &zero, gogc: &gogc, stack: &stack, lastGC: &lastGC,
 	}
@@ -171,6 +270,7 @@ func runProxyRuntimeFixture(t testing.TB, now time.Time, payload string) Alerts 
 		if host.Name != "metrics-1" ||
 			!strings.Contains(command, "go_memstats_heap_alloc_bytes") ||
 			!strings.Contains(command, "urnetwork_proxy_devices_live") ||
+			!strings.Contains(command, "urnetwork_source_info") ||
 			!strings.Contains(command, "%22synthetic%22") ||
 			!strings.Contains(command, "timestamp%28label_replace") ||
 			!strings.Contains(command, "monitor_metric") {
@@ -228,6 +328,21 @@ func proxyRuntimeFixtureJSON(
 			"metric": buildMetric,
 			"value":  []any{float64(sampleTime.Unix()), "1"},
 		})
+		if process.sourceRevision != "" {
+			sourceMetric := map[string]string{
+				"__name__":     "urnetwork_source_info",
+				"revision":     process.sourceRevision,
+				"modified":     process.sourceModified,
+				"image_digest": process.imageDigest,
+			}
+			for key, label := range labels {
+				sourceMetric[key] = label
+			}
+			result = append(result, map[string]any{
+				"metric": sourceMetric,
+				"value":  []any{float64(sampleTime.Unix()), "1"},
+			})
+		}
 		for _, metric := range []struct {
 			name  string
 			value *float64

@@ -5,6 +5,7 @@ package acceptance
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -161,8 +162,38 @@ type httpsRequestTrace struct {
 	dialAddress       string
 	resolvedAddresses string
 	peerAddress       string
+	certificate       string
 	gotConn           bool
 	reused            bool
+}
+
+// Summarizes the public peer chain without retaining certificate contents.
+// TLSHandshakeDone supplies the parsed peer certificates even when normal
+// verification rejects the chain, which distinguishes origin and exit faults.
+func tlsPeerCertificateDiagnostic(state tls.ConnectionState) string {
+	if len(state.PeerCertificates) == 0 {
+		return "peer_certs=none"
+	}
+	const maxCertificates = 4
+	certificates := make([]string, 0, min(len(state.PeerCertificates), maxCertificates))
+	for _, certificate := range state.PeerCertificates {
+		if len(certificates) == cap(certificates) {
+			break
+		}
+		fingerprint := sha256.Sum256(certificate.Raw)
+		certificates = append(certificates, fmt.Sprintf(
+			"%s>%s/%x",
+			compactDiagnosticToken(certificate.Subject.CommonName),
+			compactDiagnosticToken(certificate.Issuer.CommonName),
+			fingerprint[:6],
+		))
+	}
+	return fmt.Sprintf(
+		"peer_certs=%d verified_chains=%d chain=[%s]",
+		len(state.PeerCertificates),
+		len(state.VerifiedChains),
+		strings.Join(certificates, ","),
+	)
 }
 
 // Builds the net/http trace that advances one request's diagnostic phase.
@@ -208,11 +239,14 @@ func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 			}
 		},
 		TLSHandshakeStart: func() { setPhase("tls_handshake") },
-		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
 			if err != nil {
-				setPhase("tls_handshake_failed")
+				self.phase = "tls_handshake_failed"
+				self.certificate = tlsPeerCertificateDiagnostic(state)
 			} else {
-				setPhase("tls_complete")
+				self.phase = "tls_complete"
 			}
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
@@ -256,6 +290,9 @@ func (self *httpsRequestTrace) wrap(err error, finished time.Time) error {
 	}
 	if self.resolvedAddresses != "" {
 		path += "; resolved " + self.resolvedAddresses
+	}
+	if self.certificate != "" {
+		path += "; " + self.certificate
 	}
 	return fmt.Errorf(
 		"request started %s; elapsed %s; phase %s; connection %s%s: %w",
