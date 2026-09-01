@@ -59,9 +59,10 @@ func newWireGuardTransport(ctx context.Context, proxyHost string, config *wireGu
 
 	const mtu = 1420
 	clientTUN := tuntest.NewChannelTUN()
+	clientBind := newWireGuardTrackingBind(conn.NewDefaultBind())
 	clientDevice := uwgdevice.NewDevice(
 		clientTUN.TUN(),
-		conn.NewDefaultBind(),
+		clientBind,
 		logger.NewLogger(logger.LogLevelError, "proxy-acceptance-wg: "),
 	)
 	clientStack, err := newWireGuardStack(clientCtx, clientIPv4, mtu, clientTUN)
@@ -104,6 +105,7 @@ func newWireGuardTransport(ctx context.Context, proxyHost string, config *wireGu
 	transport := &wireGuardDiagnosticTransport{
 		Transport: &http.Transport{DialContext: clientStack.DialContext},
 		stack:     clientStack,
+		bind:      clientBind,
 	}
 	var closeOnce sync.Once
 	closeClient := func() {
@@ -160,6 +162,123 @@ type wireGuardPacketStats struct {
 	DialFlow wireGuardTCPFlow
 }
 
+// wireGuardOuterPacketStats is the encrypted UDP boundary immediately below
+// userwireguard. It deliberately retains only aggregate packet/byte/error
+// counts and timestamps: endpoints and peer keys are unnecessary to distinguish
+// a server/public-path silence from local decrypt/TUN loss.
+type wireGuardOuterPacketStats struct {
+	SendAttemptPackets uint64
+	SendAttemptBytes   uint64
+	SendPackets        uint64
+	SendBytes          uint64
+	SendErrors         uint64
+	ReceivePackets     uint64
+	ReceiveBytes       uint64
+	ReceiveErrors      uint64
+	LastSendNanos      int64
+	LastReceiveNanos   int64
+	// Indexes 1..4 are the public WireGuard message types (handshake
+	// initiation, handshake response, cookie reply, transport data); index 0
+	// is malformed/unknown. These are visible envelope types, not payload or
+	// peer identity.
+	SendMessageTypes    [5]uint64
+	ReceiveMessageTypes [5]uint64
+}
+
+type wireGuardTrackingBind struct {
+	conn.Bind
+	statsLock sync.Mutex
+	stats     wireGuardOuterPacketStats
+}
+
+func newWireGuardTrackingBind(bind conn.Bind) *wireGuardTrackingBind {
+	return &wireGuardTrackingBind{Bind: bind}
+}
+
+func (b *wireGuardTrackingBind) Open(bindIPv4 string, bindIPv6 string, port uint16) ([]conn.ReceiveFunc, uint16, error) {
+	receiveFunctions, actualPort, err := b.Bind.Open(bindIPv4, bindIPv6, port)
+	if err != nil {
+		return nil, actualPort, err
+	}
+	tracked := make([]conn.ReceiveFunc, len(receiveFunctions))
+	for i, receive := range receiveFunctions {
+		receive := receive
+		tracked[i] = func(packets [][]byte, sizes []int, endpoints []conn.Endpoint) (int, error) {
+			n, receiveErr := receive(packets, sizes, endpoints)
+			packetCount := 0
+			byteCount := 0
+			messageTypes := [5]uint64{}
+			for i, size := range sizes[:min(max(0, n), len(sizes))] {
+				if 0 < size {
+					packetCount++
+					byteCount += size
+					messageTypes[wireGuardOuterMessageType(packets[i], size)]++
+				}
+			}
+			b.statsLock.Lock()
+			b.stats.ReceivePackets += uint64(packetCount)
+			b.stats.ReceiveBytes += uint64(byteCount)
+			for messageType, count := range messageTypes {
+				b.stats.ReceiveMessageTypes[messageType] += count
+			}
+			if 0 < packetCount {
+				b.stats.LastReceiveNanos = time.Now().UnixNano()
+			}
+			if receiveErr != nil && !errors.Is(receiveErr, net.ErrClosed) {
+				b.stats.ReceiveErrors++
+			}
+			b.statsLock.Unlock()
+			return n, receiveErr
+		}
+	}
+	return tracked, actualPort, nil
+}
+
+func (b *wireGuardTrackingBind) Send(packets [][]byte, endpoint conn.Endpoint) error {
+	byteCount := 0
+	messageTypes := [5]uint64{}
+	for _, packet := range packets {
+		byteCount += len(packet)
+		messageTypes[wireGuardOuterMessageType(packet, len(packet))]++
+	}
+	err := b.Bind.Send(packets, endpoint)
+	now := time.Now().UnixNano()
+	b.statsLock.Lock()
+	b.stats.SendAttemptPackets += uint64(len(packets))
+	b.stats.SendAttemptBytes += uint64(byteCount)
+	if err == nil {
+		b.stats.SendPackets += uint64(len(packets))
+		b.stats.SendBytes += uint64(byteCount)
+		for messageType, count := range messageTypes {
+			b.stats.SendMessageTypes[messageType] += count
+		}
+		if 0 < len(packets) {
+			b.stats.LastSendNanos = now
+		}
+	} else {
+		b.stats.SendErrors++
+	}
+	b.statsLock.Unlock()
+	return err
+}
+
+func wireGuardOuterMessageType(packet []byte, size int) int {
+	if size < 4 || len(packet) < 4 {
+		return 0
+	}
+	messageType := int(binary.LittleEndian.Uint32(packet[:4]))
+	if 1 <= messageType && messageType <= 4 {
+		return messageType
+	}
+	return 0
+}
+
+func (b *wireGuardTrackingBind) packetStats() wireGuardOuterPacketStats {
+	b.statsLock.Lock()
+	defer b.statsLock.Unlock()
+	return b.stats
+}
+
 type wireGuardTCPFlow struct {
 	SourcePort         uint16
 	ExpectedInboundSeq uint32
@@ -181,6 +300,7 @@ type wireGuardTCPPacket struct {
 type wireGuardDiagnosticTransport struct {
 	*http.Transport
 	stack        *wireGuardStack
+	bind         *wireGuardTrackingBind
 	roundTripper http.RoundTripper
 }
 
@@ -188,6 +308,8 @@ type wireGuardDiagnosticBody struct {
 	io.ReadCloser
 	stack  *wireGuardStack
 	before wireGuardPacketStats
+	bind   *wireGuardTrackingBind
+	outer  wireGuardOuterPacketStats
 }
 
 func (b *wireGuardDiagnosticBody) Read(p []byte) (int, error) {
@@ -207,14 +329,18 @@ func (b *wireGuardDiagnosticBody) wrapError(err error) error {
 		return err
 	}
 	return fmt.Errorf(
-		"WireGuard inner packet trace %s: %w",
-		wireGuardPacketStatsDelta(b.before, b.stack.packetStats(), time.Now()),
+		"%s: %w",
+		wireGuardPacketTrace(b.before, b.stack.packetStats(), b.bind, b.outer, time.Now()),
 		err,
 	)
 }
 
 func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	before := t.stack.packetStats()
+	outerBefore := wireGuardOuterPacketStats{}
+	if t.bind != nil {
+		outerBefore = t.bind.packetStats()
+	}
 	if err := wireGuardForeignReturnError(before, time.Now()); err != nil {
 		return nil, err
 	}
@@ -236,11 +362,27 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 				ReadCloser: response.Body,
 				stack:      t.stack,
 				before:     before,
+				bind:       t.bind,
+				outer:      outerBefore,
 			}
 		}
 		return response, nil
 	}
-	return response, fmt.Errorf("WireGuard inner packet trace %s: %w", wireGuardPacketStatsDelta(before, after, time.Now()), err)
+	return response, fmt.Errorf("%s: %w", wireGuardPacketTrace(before, after, t.bind, outerBefore, time.Now()), err)
+}
+
+func wireGuardPacketTrace(
+	innerBefore wireGuardPacketStats,
+	innerAfter wireGuardPacketStats,
+	bind *wireGuardTrackingBind,
+	outerBefore wireGuardOuterPacketStats,
+	now time.Time,
+) string {
+	detail := "WireGuard inner packet trace " + wireGuardPacketStatsDelta(innerBefore, innerAfter, now)
+	if bind != nil {
+		detail += "; WireGuard outer UDP trace " + wireGuardOuterPacketStatsDelta(outerBefore, bind.packetStats(), now)
+	}
+	return detail
 }
 
 func wireGuardForeignReturnError(stats wireGuardPacketStats, now time.Time) error {
@@ -407,10 +549,63 @@ func subtractWireGuardDirection(before, after wireGuardPacketDirectionStats) wir
 	return delta
 }
 
+func subtractWireGuardOuterStats(before, after wireGuardOuterPacketStats) wireGuardOuterPacketStats {
+	delta := wireGuardOuterPacketStats{
+		SendAttemptPackets: after.SendAttemptPackets - before.SendAttemptPackets,
+		SendAttemptBytes:   after.SendAttemptBytes - before.SendAttemptBytes,
+		SendPackets:        after.SendPackets - before.SendPackets,
+		SendBytes:          after.SendBytes - before.SendBytes,
+		SendErrors:         after.SendErrors - before.SendErrors,
+		ReceivePackets:     after.ReceivePackets - before.ReceivePackets,
+		ReceiveBytes:       after.ReceiveBytes - before.ReceiveBytes,
+		ReceiveErrors:      after.ReceiveErrors - before.ReceiveErrors,
+		LastSendNanos:      after.LastSendNanos,
+		LastReceiveNanos:   after.LastReceiveNanos,
+	}
+	for messageType := range delta.SendMessageTypes {
+		delta.SendMessageTypes[messageType] = after.SendMessageTypes[messageType] - before.SendMessageTypes[messageType]
+		delta.ReceiveMessageTypes[messageType] = after.ReceiveMessageTypes[messageType] - before.ReceiveMessageTypes[messageType]
+	}
+	return delta
+}
+
+func wireGuardOuterPacketStatsDelta(before, after wireGuardOuterPacketStats, now time.Time) string {
+	delta := subtractWireGuardOuterStats(before, after)
+	lastAge := func(nanos int64) string {
+		if nanos == 0 {
+			return "none"
+		}
+		return now.Sub(time.Unix(0, nanos)).Round(time.Millisecond).String() + " ago"
+	}
+	return fmt.Sprintf(
+		"out{attempt=%d/%dB sent=%d/%dB errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s} in{packets=%d bytes=%d errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s}",
+		delta.SendAttemptPackets,
+		delta.SendAttemptBytes,
+		delta.SendPackets,
+		delta.SendBytes,
+		delta.SendErrors,
+		delta.SendMessageTypes[1],
+		delta.SendMessageTypes[2],
+		delta.SendMessageTypes[3],
+		delta.SendMessageTypes[4],
+		delta.SendMessageTypes[0],
+		lastAge(delta.LastSendNanos),
+		delta.ReceivePackets,
+		delta.ReceiveBytes,
+		delta.ReceiveErrors,
+		delta.ReceiveMessageTypes[1],
+		delta.ReceiveMessageTypes[2],
+		delta.ReceiveMessageTypes[3],
+		delta.ReceiveMessageTypes[4],
+		delta.ReceiveMessageTypes[0],
+		lastAge(delta.LastReceiveNanos),
+	)
+}
+
 func wireGuardPacketStatsDelta(before, after wireGuardPacketStats, now time.Time) string {
 	format := func(direction wireGuardPacketDirectionStats) string {
 		last := "none"
-		if direction.Packets != 0 && direction.LastPacketNanos != 0 {
+		if direction.LastPacketNanos != 0 {
 			last = now.Sub(time.Unix(0, direction.LastPacketNanos)).Round(time.Millisecond).String() + " ago"
 		}
 		detail := fmt.Sprintf(

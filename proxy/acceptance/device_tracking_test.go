@@ -277,12 +277,12 @@ func TestHostedDeviceTrackerRetainsProviderQuarantineAndRemovalCause(t *testing.
 	}
 }
 
-func TestHostedDeviceDiagnosticRetainsAggregateStateBeforeTruncation(t *testing.T) {
+func TestHostedDeviceDiagnosticRetainsBoundaryAndRouteBeforeTruncation(t *testing.T) {
 	tracker := &sdkHostedDeviceTracker{}
 	start := time.Date(2026, 8, 29, 5, 0, 0, 0, time.UTC)
 	longProviderDetail := strings.Repeat("p1(flow=1 warn=false),", 40)
 	tracker.record(start, fmt.Sprintf(
-		"remote=connected window={9/11 min=true} reliability={flows=275 exit_loss=21 lost=16 recovery=3/1 pending=1} packets={out=1/40B in=2/80B last_in=05:00:00.000Z(+1/40B)} exits=11 destinations=[65.49.70.84->p1(1)] active=[%s]",
+		"remote=connected window={9/11 min=true} packets={out=1/40B in=2/80B last_in=05:00:00.000Z(+1/40B)} destinations=[65.49.70.84->p1(1)] active=[%s] reliability={flows=275 exit_loss=21 lost=16 recovery=3/1 pending=1} exits=11",
 		longProviderDetail,
 	))
 
@@ -290,9 +290,39 @@ func TestHostedDeviceDiagnosticRetainsAggregateStateBeforeTruncation(t *testing.
 	if len(diagnostic) != hostedDeviceDiagnosticMaxSize+3 {
 		t.Fatalf("truncated diagnostic length = %d, want %d", len(diagnostic), hostedDeviceDiagnosticMaxSize+3)
 	}
-	for _, expected := range []string{"window={9/11 min=true}", "flows=275", "exit_loss=21", "lost=16", "pending=1", "last_in=05:00:00.000Z"} {
+	for _, expected := range []string{"window={9/11 min=true}", "last_in=05:00:00.000Z", "65.49.70.84->p1(1)", "active=[p1(flow=1"} {
 		if !strings.Contains(diagnostic, expected) {
-			t.Fatalf("truncated diagnostic %q does not contain aggregate %q", diagnostic, expected)
+			t.Fatalf("truncated diagnostic %q does not contain boundary %q", diagnostic, expected)
+		}
+	}
+}
+
+func TestHostedDeviceDiagnosticRetainsPacketBoundaryAfterLongCausalHistory(t *testing.T) {
+	tracker := &sdkHostedDeviceTracker{}
+	start := time.Date(2026, 9, 1, 7, 30, 0, 0, time.UTC)
+	tracker.stateLock.Lock()
+	for i := range 6 {
+		tracker.appendCausalWithLock(fmt.Sprintf(
+			"%s exit=p%d removed flows=16 warning=true quarantine=false done=false cause=unhealthy",
+			start.Add(time.Duration(i)*time.Second).Format("15:04:05.000Z"),
+			i+1,
+		))
+	}
+	tracker.stateLock.Unlock()
+	tracker.record(start.Add(10*time.Second), fmt.Sprintf(
+		"remote=connected window={9/9 min=true} packets={out=60/3820B in=0/0B last_in=07:29:59.000Z(+0/0B)} destinations=[142.250.189.131->p7(1)] active=[%s] reliability={%s} exits=9",
+		strings.Repeat("p7(flow=16 warn=true),", 30),
+		strings.Repeat("flows=999 exit_loss=99 lost=999 recovery=99/99 pending=9 ", 3),
+	))
+
+	diagnostic := tracker.Diagnostic()
+	for _, want := range []string{
+		"events=[",
+		"window={9/9 min=true}",
+		"packets={out=60/3820B in=0/0B last_in=07:29:59.000Z",
+	} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("long causal history erased %q from %q", want, diagnostic)
 		}
 	}
 }

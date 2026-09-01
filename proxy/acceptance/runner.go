@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -196,6 +197,25 @@ func tlsPeerCertificateDiagnostic(state tls.ConnectionState) string {
 	)
 }
 
+// The Go TLS trace can report an empty ConnectionState on a failed handshake
+// even though x509 already parsed and rejected the leaf. UnknownAuthorityError
+// retains that certificate. Use it only as a bounded diagnostic fallback; the
+// ordinary verifier remains authoritative and the request still fails.
+func tlsVerificationErrorCertificateDiagnostic(err error) string {
+	var unknownAuthority x509.UnknownAuthorityError
+	if !errors.As(err, &unknownAuthority) || unknownAuthority.Cert == nil {
+		return ""
+	}
+	certificate := unknownAuthority.Cert
+	fingerprint := sha256.Sum256(certificate.Raw)
+	return fmt.Sprintf(
+		"peer_certs=unavailable verified_chains=0 rejected_leaf=%s>%s/%x",
+		compactDiagnosticToken(certificate.Subject.CommonName),
+		compactDiagnosticToken(certificate.Issuer.CommonName),
+		fingerprint[:6],
+	)
+}
+
 // Builds the net/http trace that advances one request's diagnostic phase.
 func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 	setPhase := func(phase string) {
@@ -245,6 +265,11 @@ func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 			if err != nil {
 				self.phase = "tls_handshake_failed"
 				self.certificate = tlsPeerCertificateDiagnostic(state)
+				if len(state.PeerCertificates) == 0 {
+					if fallback := tlsVerificationErrorCertificateDiagnostic(err); fallback != "" {
+						self.certificate = fallback
+					}
+				}
 			} else {
 				self.phase = "tls_complete"
 			}

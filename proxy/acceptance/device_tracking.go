@@ -319,19 +319,19 @@ func formatHostedDeviceState(
 	if 8 < len(activeExitSummaries) {
 		activeExitSummaries = activeExitSummaries[:8]
 	}
-	// Keep the destination-to-provider join immediately after the compact
-	// aggregate state. Packet totals and the number of exits are useful, but they
-	// cannot identify the carrier that lost one already-established flow. In a
-	// busy production device those fields previously consumed the bounded
-	// diagnostic before `destinations` and `active`, erasing the exact evidence
-	// the tracker exists to retain.
+	// Keep the packet boundary immediately after readiness. A long causal-event
+	// prefix can consume most of the bounded failure detail; if packet ingress is
+	// placed after provider lists, the exact one-way-stall discriminator is the
+	// first field truncated. Reliability changes are already retained separately
+	// in causalHistory, while destinations and active exits follow here to join a
+	// surviving flow to its carrier.
 	return fmt.Sprintf(
-		"remote=connected window={%s} reliability={%s} destinations=[%s] active=[%s] packets={%s} exits=%d",
+		"remote=connected window={%s} packets={%s} destinations=[%s] active=[%s] reliability={%s} exits=%d",
 		windowSummary,
-		metricsSummary,
+		packetSummary,
 		strings.Join(destinationSummaries, ","),
 		strings.Join(activeExitSummaries, ","),
-		packetSummary,
+		metricsSummary,
 		totalExits,
 	)
 }

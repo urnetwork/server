@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/userwireguard/conn"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -86,6 +87,17 @@ func TestWireGuardPacketTraceDistinguishesTLSResponseLoss(t *testing.T) {
 	}
 }
 
+func TestWireGuardPacketTraceRetainsPriorIngressAgeWhenRequestGetsNone(t *testing.T) {
+	lastIngress := time.Date(2026, 9, 1, 7, 31, 51, 0, time.UTC)
+	stats := wireGuardPacketStats{
+		Inbound: wireGuardPacketDirectionStats{LastPacketNanos: lastIngress.UnixNano()},
+	}
+	detail := wireGuardPacketStatsDelta(stats, stats, lastIngress.Add(30*time.Second))
+	if !strings.Contains(detail, "in{packets=0") || !strings.Contains(detail, "last=30s ago") {
+		t.Fatalf("zero-return request erased prior ingress age: %q", detail)
+	}
+}
+
 func TestWireGuardPacketTraceRejectsMalformedTCPHeaders(t *testing.T) {
 	stack := &wireGuardStack{}
 	stack.observePacket([]byte{4 << 4}, true)
@@ -158,6 +170,75 @@ type acceptanceRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f acceptanceRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+type acceptanceTrackingBind struct{}
+
+func (*acceptanceTrackingBind) Open(string, string, uint16) ([]conn.ReceiveFunc, uint16, error) {
+	return []conn.ReceiveFunc{func(packets [][]byte, sizes []int, endpoints []conn.Endpoint) (int, error) {
+		copy(packets[0], []byte{2, 0, 0, 0, 99})
+		sizes[0] = 5
+		return 1, nil
+	}}, 12345, nil
+}
+
+func (*acceptanceTrackingBind) Close() error                       { return nil }
+func (*acceptanceTrackingBind) SetMark(uint32) error               { return nil }
+func (*acceptanceTrackingBind) Send([][]byte, conn.Endpoint) error { return nil }
+func (*acceptanceTrackingBind) ParseEndpoint(string) (conn.Endpoint, error) {
+	return nil, nil
+}
+func (*acceptanceTrackingBind) BatchSize() int { return 1 }
+
+// The live one-way WireGuard failure had outbound inner SYNs and no inbound
+// inner packet. The outer bind boundary must survive the wrapped request error
+// so the next run can distinguish public/server silence from local decrypt or
+// TUN loss without packet capture or credentials.
+func TestWireGuardTransportFailureReportsOuterUDPBoundary(t *testing.T) {
+	bind := newWireGuardTrackingBind(&acceptanceTrackingBind{})
+	receive, _, err := bind.Open("", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stack := &wireGuardStack{}
+	stack.stats.DialAddr = netip.MustParseAddr("142.250.189.131")
+	stack.stats.DialPort = 443
+	transport := &wireGuardDiagnosticTransport{
+		stack: stack,
+		bind:  bind,
+		roundTripper: acceptanceRoundTripper(func(*http.Request) (*http.Response, error) {
+			if err := bind.Send([][]byte{{4, 0, 0, 0, 1, 2}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			packets := [][]byte{make([]byte, 16)}
+			sizes := make([]int, 1)
+			endpoints := make([]conn.Endpoint, 1)
+			if _, err := receive[0](packets, sizes, endpoints); err != nil {
+				t.Fatal(err)
+			}
+			return nil, errors.New("request timed out")
+		}),
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://connectivitycheck.gstatic.com/generate_204", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = transport.RoundTrip(request)
+	if err == nil {
+		t.Fatal("request unexpectedly passed")
+	}
+	for _, want := range []string{
+		"WireGuard inner packet trace",
+		"WireGuard outer UDP trace",
+		"out{attempt=1/6B sent=1/6B errors=0 types=0/0/0/1/0",
+		"in{packets=1 bytes=5 errors=0 types=0/1/0/0/0",
+		"request timed out",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("outer-boundary error %q lacks %q", err, want)
+		}
+	}
 }
 
 type acceptanceCloseRecorder struct {

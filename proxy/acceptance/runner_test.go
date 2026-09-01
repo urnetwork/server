@@ -581,6 +581,38 @@ func TestHTTPSRequestTraceRetainsRejectedPeerCertificateChain(t *testing.T) {
 	}
 }
 
+// On the live failure, TLSHandshakeDone carried an empty ConnectionState even
+// though x509 returned UnknownAuthorityError. The rejected leaf inside that
+// error is the last normal-verifier evidence available and must not be lost.
+func TestHTTPSRequestTraceFallsBackToRejectedUnknownAuthorityLeaf(t *testing.T) {
+	started := time.Date(2026, time.September, 1, 7, 46, 47, 0, time.UTC)
+	requestTrace := &httpsRequestTrace{started: started, phase: "starting_request"}
+	clientTrace := requestTrace.clientTrace()
+	leaf := &x509.Certificate{
+		Raw:     []byte("rejected leaf certificate"),
+		Subject: pkix.Name{CommonName: "connectivitycheck.gstatic.com"},
+		Issuer:  pkix.Name{CommonName: "unexpected edge issuer"},
+	}
+	verificationErr := x509.UnknownAuthorityError{Cert: leaf}
+	clientTrace.TLSHandshakeDone(tls.ConnectionState{}, verificationErr)
+
+	detail := requestTrace.wrap(verificationErr, started.Add(1800*time.Millisecond)).Error()
+	for _, evidence := range []string{
+		"phase tls_handshake_failed",
+		"peer_certs=unavailable",
+		"verified_chains=0",
+		"rejected_leaf=connectivitycheck.gstatic.com>unexpected_edge_issuer/",
+		"certificate signed by unknown authority",
+	} {
+		if !strings.Contains(detail, evidence) {
+			t.Errorf("fallback trace detail %q does not contain %q", detail, evidence)
+		}
+	}
+	if strings.Contains(detail, string(leaf.Raw)) {
+		t.Fatalf("fallback trace leaked certificate bytes: %q", detail)
+	}
+}
+
 // A resolved address and the actual connected peer distinguish a bad target
 // block from the proxy listener itself. Keep both in the bounded failure text;
 // relying on the URL hostname erased this boundary in the main proxy incident.
