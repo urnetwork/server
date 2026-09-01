@@ -112,6 +112,9 @@ the lost ephemeral TSDB head root cause plus the clean-shutdown flush fix.
 The same production pass traced dirty, unattributable service executables back
 to older Warpctl copies that predate the fail-closed release builder. Section
 8.13 adds the `release-builder` exact-binary provenance and guard probe.
+The direct runtime follow-up adds §11.21 (`mimir-shutdown`): all six enabled
+Grafana blocks still rendered shutdown flushing false, proving the source fix
+had not reached production even though it existed in Warp.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -5179,6 +5182,7 @@ Tier-1 (warn):
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
 | mimir-ingestion-gap | raw Mimir range | §11.20 always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; any bounded gap |
+| mimir-shutdown-flush-disabled / mimir-shutdown-child-missing | host Mimir config | §11.21 exact-process clean-shutdown flush setting, remotely reduced to one non-secret Boolean | any `flush_blocks_on_shutdown=false`; immediate; child absent for 2 probes |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
@@ -6256,9 +6260,10 @@ directory: old and new deploy generations overlap and must not write the same
 WAL/TSDB. Mimir's default `blocks_storage.tsdb.flush_blocks_on_shutdown: false`
 assumes the incomplete head will be reused from persistent disk after restart;
 container removal instead erases it here. Every generated Mimir config must set
-`flush_blocks_on_shutdown: true` and retain the bounded 120-second service stop
-so clean shutdown uploads the partial head to this MinIO bucket. Do not repair
-this by sharing one TSDB mount between overlapping containers. See §11.20.
+`flush_blocks_on_shutdown: true`. The Grafana parent gives its Mimir child a
+120-second stop allowance, inside Warpctl's normal 3,600-second container drain,
+so clean shutdown can upload the partial head to this MinIO bucket. Do not
+repair this by sharing one TSDB mount between overlapping containers. See §11.20.
 An empty/stale Loki bucket while Loki is crash-looping = writes stopped
 (11.2/11.4), not a storage bug.
 
@@ -7176,8 +7181,9 @@ emit `mimir-ingestion-gap`, preserving all gap ranges and the serving gateway.
 
 This alert class is software-owned and requires a Grafana/Warp image deploy.
 Every Mimir config must render
-`blocks_storage.tsdb.flush_blocks_on_shutdown: true` while the existing
-120-second stop timeout gives the child time to upload. Keep the TSDB directory
+`blocks_storage.tsdb.flush_blocks_on_shutdown: true`. The Grafana parent gives
+Mimir a 120-second child stop allowance inside Warpctl's normal 3,600-second
+container drain. Keep the TSDB directory
 ephemeral: a persistent directory shared by overlapping old/new containers can
 introduce concurrent WAL/TSDB writers and corruption. Do not zero-fill or
 span-null the dashboard, restart the same artifact, or reinterpret a hole as
@@ -7190,6 +7196,57 @@ is required, an operator must explicitly flush those old ingesters before
 rollout; this is a production mutation and the monitor never performs it.
 Verification requires the setting in every active block followed by a
 controlled and then full Grafana rollout with no new bounded build-info gap.
+
+### 11.21 Mimir shutdown durability configuration
+
+Probe: `mimir-shutdown`
+
+The historical range signal in §11.20 proves that data was lost, but source
+code, a desired image tag, and an earlier gap do not prove what each current
+Mimir child will do at its next shutdown. This probe enumerates loopback TCP
+listeners on every enabled `services` host and requests each local `/config`
+endpoint. Rendered Mimir configuration can contain object-store credentials,
+so the remote command selects exactly one Boolean
+`flush_blocks_on_shutdown` field and emits only the port and that Boolean. The
+full response never leaves the host. A bounded four-host fan-out and the shared
+per-host SSH limiter preserve the monitor's admission limits.
+
+HEALTHY: every enabled services host exposes at least one Mimir child and every
+observed child renders `flush_blocks_on_shutdown: true`. During overlap, both
+old and new generations must be checked independently. BROKEN: any exact child
+renders false (`mimir-shutdown-flush-disabled`, immediate). A host with no
+matching child emits `mimir-shutdown-child-missing` after two probes. An SSH or
+parse failure remains `cannot-observe`; it must not clear an existing fleet
+alert. A confirmed false sibling is still reported when another host is
+unobservable.
+
+On 2026-09-01, a direct read of the sole active Grafana block on every enabled
+services host returned false: edge-0 `:14819`, edge-1 `:14819`, edge-3
+`:14818`, edge-4 `:14819`, fireside `:14818`, and crisp `:14818`. Edge-5 was
+offline and disabled in the active inventory, so it was not contacted. This
+proves the production gap was not fixed at that observation time. Warp commit
+`7176ccd` renders the required true value and has a deterministic config test,
+but source presence is not deployment evidence.
+
+This alert is software-owned. First satisfy the §8.13 fail-closed release
+builder, then build and deploy Grafana from clean Warp `7176ccd` or a clean
+descendant. Keep each generation's TSDB private and ephemeral; never
+shared-mount a WAL/TSDB directory into overlapping containers. Retain the
+120-second Mimir child stop allowance and the outer 3,600-second Docker drain.
+The generated systemd unit's separate 60-second timeout applies to the Warpctl
+controller; controller shutdown deliberately leaves service containers running,
+so that value does not truncate a normal container drain and must not be
+misdiagnosed as the gap cause. The first rollout begins by terminating old
+children whose setting is false; preserving their current partial heads
+requires an explicit operator-controlled flush before replacement.
+
+Verification has two layers. First, require the exact loopback value to be true
+on every active block. Then perform a controlled Grafana replacement and the
+full rollout, and require §11.20 to produce no new bounded build-info gap
+through the next restart and block-upload window. Historical holes are
+unrecoverable from Mimir and clear only when they age out of the seven-day
+dashboard range; their continued presence is not evidence that a successfully
+verified rollout regressed.
 
 ---
 

@@ -136,7 +136,7 @@ func (mimirContinuityProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		),
 		evidence: strings.Join(evidence, "\n"),
 		context:  "This is raw metric loss, not zero throughput: build-info is independent of user traffic, and the range query bypasses the Grafana panel. Existing holes are not reconstructable from Mimir and remain visible until they age out of the dashboard window.",
-		action:   "Deploy a Warp Grafana image that renders blocks_storage.tsdb.flush_blocks_on_shutdown: true while retaining the bounded 120-second stop timeout. Do not zero-fill or span over the panel, and do not shared-mount one TSDB directory into overlapping old and new containers. The first rollout still shuts down old unpatched ingesters; explicitly flushing those old ingesters first is the only way to preserve their current partial head.",
+		action:   "Deploy a Warp Grafana image that renders blocks_storage.tsdb.flush_blocks_on_shutdown: true while retaining the Grafana parent's 120-second Mimir child stop allowance inside Warpctl's 3,600-second container drain. Do not zero-fill or span over the panel, and do not shared-mount one TSDB directory into overlapping old and new containers. The first rollout still shuts down old unpatched ingesters; explicitly flushing those old ingesters first is the only way to preserve their current partial head.",
 		verify:   "Confirm every active Grafana block renders flush_blocks_on_shutdown: true, then carry a controlled and a full Grafana rollout through clean shutdown without creating a new bounded control gap. Historical gaps will clear only when they leave the seven-day range.",
 		playbook: "SIGNALS.md §11.20 and §11.6",
 	}}, nil

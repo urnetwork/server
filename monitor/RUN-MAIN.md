@@ -254,6 +254,7 @@ Useful source-of-truth pairings are:
 | host or edge address | live interface and policy-routing state | active `services.yml`, host config, router path, and exact-origin probes |
 | log loss | standing tail health and privacy-safe drop summaries | bounded absolute-window reconciliation per service/block and direct host journal |
 | metrics identity | fresh process-emitted series with host/block/instance labels | live process start, listener, ring membership, and scrape age |
+| metrics restart durability | exact loopback Mimir `/config` value reduced remotely to the non-secret shutdown-flush Boolean | controlled replacement followed by no new bounded §11.20 build-info gap through a block-upload window |
 
 Use the existing SSH and Warpctl transports and the commands documented in
 `SIGNALS.md`; do not improvise a less safe secret path. Never contact a disabled
