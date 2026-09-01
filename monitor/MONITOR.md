@@ -48,13 +48,17 @@ items ledger), SIGNALS.md §7 (the alert emission spec this service implements).
    hosts themselves — not from a side-channel feed or a dashboard. The same
    rule everywhere: pg state from pg_stat_* on the primary, redis state from
    the nodes' own INFO/CLUSTER NODES, host state from the host. Dashboards and
-   inferred aggregates are not probe inputs. The narrow exception is §2.12:
+   inferred aggregates are not probe inputs. The narrow exceptions are §2.12
+   and §11.20:
    Go runtime counters are emitted by the process itself and queried from
    Mimir with host/block/instance identity plus a 90-second freshness bound,
    because `/proc` RSS cannot distinguish allocated Go heap from retained
    pages. `HeapAlloc` can include unreachable objects awaiting the next GC;
    it is still the direct allocator/collector pressure signal, not a claim
-   that every sampled byte remains reachable.
+   that every sampled byte remains reachable. The Mimir-continuity probe tests
+   the metric store itself with the raw range of an always-emitted build-info
+   control; it never treats a dashboard rendering or traffic aggregate as the
+   signal.
 6. **Identity, not volume.** Dedup key = (signal id, class, target, frame)
    per SIGNALS.md §6. Rate is reported; volume is never severity. One ticket
    per identity, updated in place, auto-resolved when the signal returns to
@@ -574,8 +578,9 @@ Decided (2026-07-17):
   need investigation, delivered as tickets. Grafana normally supports the
   *fixer/debugger* working a ticket, not detection. Explicit exceptions are
   bounded application-counter rates whose lossless rate cannot be reconstructed
-  after required log sampling, plus §2.12's fresh process-originated Go heap
-  metrics. Both retain concrete series identity and static bands; neither uses
+  after required log sampling, §2.12's fresh process-originated Go heap
+  metrics, and §11.20's raw always-emitted control used to test Mimir
+  continuity. All retain concrete series identity and static bands; none uses
   a dashboard-derived judgment as the signal.
 - **Runtime**: developed and run locally first (address_mode: overlay,
   ssh_override with the existing workstation access) against main; in-LAN

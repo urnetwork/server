@@ -105,6 +105,10 @@ Updated again after the standing log-tail handover exposed impossible negative
 Loki active-tail gauges. Section 11.19 adds the `loki-tailers` direct-child
 probe, separates invalid accounting from actual live-tail loss, and records
 Loki 3.7.3's non-idempotent double-close root cause.
+Updated 2026-09-01 after the public stats dashboard exposed matching multi-hour
+holes in live throughput, connected devices, provider counts, and network
+counts. Section 11.20 adds the `mimir-continuity` raw-range control and records
+the lost ephemeral TSDB head root cause plus the clean-shutdown flush fix.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -5155,6 +5159,7 @@ Tier-1 (warn):
 | tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window local default-router lifetime expiry and IPv6 loss as an affirmative monitor-first-hop discriminator | any |
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
+| mimir-ingestion-gap | raw Mimir range | §11.20 always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; any bounded gap |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
@@ -6163,10 +6168,19 @@ find $minio_data/loki -name xl.meta -printf '%T+\n' | sort | tail -1   # fresh m
 ls $minio_data/loki/fake | wc -l                                       # loki CHUNK dirs (fake=anon tenant)
 find $minio_data/mimir -name meta.json | wc -l                         # mimir FINALIZED blocks
 ```
-loki flushes on `chunk_idle_period`/shutdown; **mimir uploads only after a ~2h
-TSDB block boundary** — an empty mimir bucket right after a healthy start is
-EXPECTED, not a fault (populates on the next boundary). An empty/stale loki bucket
-while loki is crash-looping = writes stopped (11.2/11.4), not a storage bug.
+loki flushes on `chunk_idle_period`/shutdown. Mimir normally uploads a complete
+TSDB block at roughly a two-hour boundary, so an empty Mimir bucket immediately
+after the first healthy start can be expected. That does **not** make a partial
+head disposable. Warp intentionally does not mount the Grafana bundle's data
+directory: old and new deploy generations overlap and must not write the same
+WAL/TSDB. Mimir's default `blocks_storage.tsdb.flush_blocks_on_shutdown: false`
+assumes the incomplete head will be reused from persistent disk after restart;
+container removal instead erases it here. Every generated Mimir config must set
+`flush_blocks_on_shutdown: true` and retain the bounded 120-second service stop
+so clean shutdown uploads the partial head to this MinIO bucket. Do not repair
+this by sharing one TSDB mount between overlapping containers. See §11.20.
+An empty/stale Loki bucket while Loki is crash-looping = writes stopped
+(11.2/11.4), not a storage bug.
 
 The S3 API must be reachable on both edge-6 addresses: LAN
 `192.168.51.193:23900` and management overlay `172.28.208.177:23900`. Do not
@@ -6335,6 +6349,12 @@ the exact live DNAT rule.
     `[plugin.notRegistered]` → the datasource implementation is absent from
     the image (11.15). Inspect the plugin directory; recreating the row does
     not install the plugin.
+14. some unrelated metric panels have identical historical holes, while data
+    exists on both sides of each hole → raw Mimir continuity loss (11.20).
+    Query the always-emitted build-info control directly through Mimir and
+    correlate gap endpoints with Mimir starts. Do not zero-fill, span-null, or
+    rewrite the throughput query: those treatments turn missing observations
+    into false traffic measurements.
 
 ### 11.10 grafana.yml `{{ env: }}` → fleet-wide startup panic (2026-08-11)
 A config value may thread `{{ env:KEY }}`, but the KEYs live in settings.yml
@@ -7036,6 +7056,60 @@ to reset a gauge; those actions erase evidence while leaving the next
 double-close intact. After every Grafana block converges, verify the gauges
 remain non-negative through two one-hour rotations and that the separate
 dropped-stream/EOF signals remain clear.
+
+### 11.20 Mimir historical sample continuity across restarts
+
+Probe: `mimir-continuity`
+
+The public `live throughput` panel is a fleet-wide rate over
+`urnetwork_connect_exchange_io_bytes_total`; the query and panel are valid.
+On 2026-09-01 its gaps were not specific to that counter. Direct public and
+loopback Mimir range queries found the same missing intervals in independent
+Connect resident-client metrics and taskworker provider/network gauges. In the
+representative `00:00Z` through `04:30Z` range, raw Mimir returned the selected
+dashboard series at `00:00Z`, `04:20Z`, and `04:30Z` only.
+The always-emitted build-info control resolved ten bounded gaps in the trailing
+seven days, including a short island from `02:30Z` through `02:40Z`; the gap
+endpoints aligned with replacement Mimir fleet starts. Repeated restart loops
+extended some holes. This rules out zero traffic, counter reset alone, Grafana
+rendering, a single producer, and the Grafana datasource plugin.
+
+The root cause is the boundary between local ingestion and durable object
+storage. Each service pushes its default Prometheus registry every 15 seconds.
+Mimir ingesters retain recent samples in their local TSDB head/WAL until a
+complete block is uploaded to MinIO. The generated config used
+`/var/lib/mimir/tsdb`, the active Warp service definitions deliberately set
+the Grafana data mount false, and Mimir's `flush_blocks_on_shutdown` default is
+false. That default is safe only when the incomplete TSDB survives and is
+reused after restart. Here, removal of the old container removed the unshipped
+head. A rolling fleet restart eventually removed every replica that still held
+the same interval, making the historical samples permanently unavailable.
+
+The `mimir-continuity` probe directly queries Mimir, not Grafana, for
+`sum(count_over_time(urnetwork_build_info[2m]))` at five-minute steps over the
+same trailing seven-day window. Build-info is emitted regardless of traffic,
+so a bounded absence between present evaluations means raw observation loss.
+Leading and trailing absence is ignored because it can describe a new
+environment or normal ingestion delay; one or two isolated missing evaluations
+are tolerated. Three or more missing evaluations inside two present samples
+emit `mimir-ingestion-gap`, preserving all gap ranges and the serving gateway.
+
+This alert class is software-owned and requires a Grafana/Warp image deploy.
+Every Mimir config must render
+`blocks_storage.tsdb.flush_blocks_on_shutdown: true` while the existing
+120-second stop timeout gives the child time to upload. Keep the TSDB directory
+ephemeral: a persistent directory shared by overlapping old/new containers can
+introduce concurrent WAL/TSDB writers and corruption. Do not zero-fill or
+span-null the dashboard, restart the same artifact, or reinterpret a hole as
+zero throughput. Existing gaps cannot be recovered from Mimir and will age out
+of the dashboard range.
+
+The first deployment of this fix still terminates old Mimir children whose
+rendered config lacks the flush. If preservation of their current partial head
+is required, an operator must explicitly flush those old ingesters before
+rollout; this is a production mutation and the monitor never performs it.
+Verification requires the setting in every active block followed by a
+controlled and then full Grafana rollout with no new bounded build-info gap.
 
 ---
 

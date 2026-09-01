@@ -76,6 +76,25 @@ does).
 - Daily bars (`increase(...[1d])`, min step 1d) align to UTC midnight and
   show complete days only.
 
+### Missing points are not zero traffic
+
+The public panels intentionally do not zero-fill or span missing samples. A
+gap in `live throughput` means Mimir returned no stored evaluation for that
+interval; it does not mean the network carried zero bits. This distinction is
+especially important because the build-info control is independent of user
+traffic.
+
+The 2026-09-01 investigation found matching multi-hour gaps across Connect
+throughput/resident-client metrics and independent taskworker provider/network
+gauges. Every endpoint correlated with a Mimir fleet restart. The Grafana
+bundle used an ephemeral local TSDB directory while Mimir's clean-shutdown
+flush defaulted off, so removing a container discarded the recent unuploaded
+head. Warp must render
+`blocks_storage.tsdb.flush_blocks_on_shutdown: true`; `SIGNALS.md` §11.20 and
+the `mimir-continuity` probe test the raw seven-day control range. Historical
+holes are not reconstructable from Mimir and disappear from this dashboard
+only when they age out of its range.
+
 ## Adding a public stat (checklist)
 
 1. Export it: `newStatsGauge`/`newStatsGaugeVec` in the collector (a gauge
