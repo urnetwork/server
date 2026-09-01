@@ -49,9 +49,10 @@ not pause unrelated probes or investigations.
   use the focused exclusion flag until inventory catches up.
 - Before any authorized privileged host mutation, resolve the connection
   address from the current owning inventory rather than an alert, narrative
-  note, or remembered endpoint. Require the remote hostname to match the
-  selected inventory name before invoking `sudo`; an absent, ambiguous, or
-  mismatched result fails closed without running the mutation.
+  note, remembered endpoint, or `root/servers/table` (which is a reference
+  catalog, not an endpoint authority). Require the remote hostname to match
+  the selected inventory name before invoking `sudo`; an absent, ambiguous,
+  or mismatched result fails closed without running the mutation.
 - Never weaken, exclude, or suppress a signal merely to make the alert file
   quiet. A temporary exclusion must name its operator reason, owner, start
   time, and re-enable condition in the run ledger.
