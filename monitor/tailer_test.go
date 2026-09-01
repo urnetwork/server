@@ -302,6 +302,10 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 		"28 canonical attempts from 56 diagnostic lines",
 		"six attempts at 00:30:43Z",
 		"one canonical 429 in that exact second",
+		"15 canonical 429 events across 12 source seconds and 12 task rows",
+		"every rate-limit second shared at least five canonical wallet-insufficient attempts",
+		"00:49:53.240866Z through 00:49:53.327394Z",
+		"429 evaluator result at 00:49:53.339836Z",
 		"commit 70b0d269 or later only to older blocks",
 		"peak_task_attempts_per_second below 4",
 		"[<id>]eval error",
@@ -384,6 +388,10 @@ func TestPayoutRetryMicroburstNormalizesPeakSourceSecondToUTC(t *testing.T) {
 
 func TestPaymentProcessorRateLimitCountsOneLogicalEventPerDiagnosticPair(t *testing.T) {
 	tailer := newLogTailer("taskworker", nil)
+	for attempt := 100; attempt < 105; attempt++ {
+		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T16:31:47", attempt)
+		tailer.classify(evaluatorLine)
+	}
 	id := "019f77ae-de17-db98-b22d-2642f6f67594"
 	providerLine := "[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.578203Z][circle_client_controller.go:142][circlec]error sending payment: Bad status: 429 Too Many Requests {\"code\":5,\"message\":\"API rate limit error\",\"payment_id\":\"" + id + "\"}"
 	evaluatorLine := "[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.578638Z][task.go:1930][" + id + "]eval error = Bad status: 429 Too Many Requests {\"code\":5,\"message\":\"API rate limit error\"}"
@@ -398,6 +406,13 @@ func TestPaymentProcessorRateLimitCountsOneLogicalEventPerDiagnosticPair(t *test
 		"diagnostic_lines=3",
 		"canonical_source=exact-replay-deduplicated-task-evaluator",
 		"logical event count: 1 exact-replay-deduplicated task evaluator line(s) from 3 diagnostic line(s)",
+		"correlated_source_seconds=1",
+		"correlated_cohort_seconds=1",
+		"coincident_wallet_attempts=5",
+		"peak_coincident_wallet_attempts_per_second=5",
+		"correlation_threshold=4/s",
+		"1/1 payment-processor-rate-limit source second(s) shared at least 4 canonical payout-wallet-insufficient attempt(s)",
+		"5 attempt(s) shared those seconds, peaking at 5/s",
 	} {
 		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
 			t.Fatalf("processor rate-limit finding missing %q: %+v", want, finding)
@@ -413,8 +428,55 @@ func TestPaymentProcessorRateLimitCountsOneLogicalEventPerDiagnosticPair(t *test
 	tailer.classify(evaluatorLine)
 	replay := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
 	if !strings.Contains(replay.observed, "processor_rate_limit_events=0") ||
-		!strings.Contains(replay.observed, "diagnostic_lines=1") {
+		!strings.Contains(replay.observed, "diagnostic_lines=1") ||
+		!strings.Contains(replay.observed, "correlated_source_seconds=0") ||
+		!strings.Contains(replay.evidence, "diagnostic replay is not a new provider event") {
 		t.Fatalf("cross-window replay manufactured a logical event: %+v", replay)
+	}
+}
+
+// A late evaluator line can arrive after the minute containing its triggering
+// wallet cohort was drained. Retain source-second attempt counts only for the
+// bounded reconciliation horizon, join an exact second across that boundary,
+// and never join the adjacent second.
+func TestPaymentProcessorRateLimitCorrelatesAcrossDrainByExactSourceSecond(t *testing.T) {
+	now := time.Date(2026, 8, 31, 16, 32, 0, 0, time.UTC)
+	tailer := newLogTailer("taskworker", nil)
+	tailer.clock = func() time.Time { return now }
+	for attempt := 200; attempt < 205; attempt++ {
+		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T16:31:47", attempt)
+		tailer.classify(evaluatorLine)
+	}
+	_ = tailer.drainWindow()
+
+	now = now.Add(time.Minute)
+	rateLine := `[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.900000Z][task.go:1930][019f77ae-de17-db98-b22d-aaaaaaaaaaaa]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	tailer.classify(rateLine)
+	correlated := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
+	for _, want := range []string{
+		"correlated_source_seconds=1",
+		"correlated_cohort_seconds=1",
+		"coincident_wallet_attempts=5",
+		"peak_coincident_wallet_attempts_per_second=5",
+	} {
+		if combined := correlated.observed + "\n" + correlated.evidence; !strings.Contains(combined, want) {
+			t.Fatalf("cross-drain correlation missing %q: %+v", want, correlated)
+		}
+	}
+
+	adjacentLine := `[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:48.100000Z][task.go:1930][019f77ae-de17-db98-b22d-bbbbbbbbbbbb]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	tailer.classify(adjacentLine)
+	adjacent := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
+	if !strings.Contains(adjacent.observed, "correlated_source_seconds=1") ||
+		!strings.Contains(adjacent.observed, "correlated_cohort_seconds=0") ||
+		!strings.Contains(adjacent.observed, "coincident_wallet_attempts=0") {
+		t.Fatalf("adjacent source second falsely inherited the wallet cohort: %+v", adjacent)
+	}
+
+	now = now.Add(logReconcileRetention + time.Second)
+	_ = tailer.drainWindow()
+	if len(tailer.burstRecentSecondCounts) != 0 || len(tailer.burstRecentSecondSeen) != 0 {
+		t.Fatalf("expired correlation state was not pruned: counts=%v seen=%v", tailer.burstRecentSecondCounts, tailer.burstRecentSecondSeen)
 	}
 }
 

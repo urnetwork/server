@@ -405,6 +405,27 @@ WHERE function_name LIKE '%UpdateClient%'
   fresh live recurrence. Deploy the existing jitter fix; do not add a second
   retry algorithm or confuse dispersion with the separate wallet-liquidity
   operation.
+
+  The unchanged artifact then produced a broader causal control through
+  `00:50Z`. A bounded three-hour query found 15 canonical 429 evaluator events
+  across 12 exact source seconds and 12 task rows. Every one of those seconds
+  also held at least five canonical wallet-insufficient attempts; one held
+  six. In the latest event, five wallet results completed from
+  `00:49:53.240866Z` through `00:49:53.327394Z`, followed by the 429 evaluator
+  result at `00:49:53.339836Z`. The durable family remained exactly 824 rows
+  while its latest-error breakdown moved to 815 wallet-insufficient, six
+  invalid-destination, and three rate-limit rows. This proves another provider
+  throttle was amplification of the existing backlog rather than backlog
+  growth, while also proving the durable class count is not a cumulative 429
+  counter. The tailer now reports a privacy-safe source-second join directly:
+  canonical rate-limit seconds, how many crossed the four-attempt cohort
+  threshold, total/peak coincident wallet attempts, and the canonical logical
+  event count. It retains burst-second counts across the bounded drain overlap
+  so late reconciliation cannot sever the correlation; deterministic tests
+  require an exact-second cross-drain join, reject the adjacent second, expire
+  old state, and keep diagnostic replay at zero logical events. This stronger
+  evidence still does not establish Circle's account quota or justify a shared
+  limiter before `70b0d269` has completed its 90-minute deployment control.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains

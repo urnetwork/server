@@ -51,6 +51,17 @@ type logBurst struct {
 type logCanonical struct {
 	eventRe *regexp.Regexp
 	name    string
+	// correlation optionally joins each canonical source second to canonical
+	// attempts already counted by another class's burst detector. This proves
+	// incident co-residency without treating a minute-wide rate as ordering or
+	// a provider quota.
+	correlation *logCanonicalCorrelation
+}
+
+type logCanonicalCorrelation struct {
+	burstClass string
+	eventName  string
+	threshold  int
 }
 
 // logClass is one row of the SIGNALS.md §4 taxonomy.
@@ -254,7 +265,7 @@ var logClasses = []logClass{
 			tier:      tierWarn,
 			meaning:   "four or more distinct AdvancePayment wallet-rejection attempts landed in one second, the exact short-window shape that preceded live Circle 429s",
 			mechanism: "The old capped task backoff added only 0–2 seconds of jitter, so outage-created rows retained second-scale cohorts across their hourly retries. The standing tailer counts only task evaluator lines (one canonical line per attempt), groups their embedded timestamps by second, and de-duplicates exact replayed lines before computing the peak. This separates attempt concurrency from the parent class's two diagnostic lines per failure.",
-			context:   "This is a deployable software-amplification alert, separate from the operational liquidity alert. The threshold is an empirical incident discriminator: four wallet failures in one second immediately preceded a 429 on 2026-08-31; it is not a claim about Circle's account-specific quota. A post-provenance control on deployed source 1d8f01e5 found 28 canonical attempts from 56 diagnostic lines, peaked at six attempts at 00:30:43Z, and produced one canonical 429 in that exact second. The standing monitor independently rendered the same peak and event.",
+			context:   "This is a deployable software-amplification alert, separate from the operational liquidity alert. The threshold is an empirical incident discriminator: four wallet failures in one second immediately preceded a 429 on 2026-08-31; it is not a claim about Circle's account-specific quota. A post-provenance control on deployed source 1d8f01e5 found 28 canonical attempts from 56 diagnostic lines, peaked at six attempts at 00:30:43Z, and produced one canonical 429 in that exact second. A subsequent bounded three-hour join found 15 canonical 429 events across 12 source seconds and 12 task rows; every rate-limit second shared at least five canonical wallet-insufficient attempts and one shared six. In the latest recurrence, five wallet results completed from 00:49:53.240866Z through 00:49:53.327394Z before the 429 evaluator result at 00:49:53.339836Z. The standing monitor independently rendered the same cohorts and events.",
 			action:    "Verify every taskworker block's embedded source revision and deploy commit 70b0d269 or later only to older blocks. Do not accelerate, manually replay, or delete payment tasks. If every block is already current, do not redeploy from this alert; correlate all Circle request sources and the account's authoritative quota after one 90-minute drain window.",
 			verify:    "After complete taskworker convergence, observe a full 90-minute window with peak_task_attempts_per_second below 4, no payment-processor-rate-limit event, and unchanged payment idempotency keys. Funding or pausing the wallet remains a separate operational verification.",
 			playbook:  "SIGNALS.md §1.2 and §5.7",
@@ -276,10 +287,15 @@ var logClasses = []logClass{
 		canonical: &logCanonical{
 			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
 			name:    "processor_rate_limit_events",
+			correlation: &logCanonicalCorrelation{
+				burstClass: "payout-wallet-insufficient",
+				eventName:  "coincident_wallet_attempts",
+				threshold:  4,
+			},
 		},
 		meaning:   "Circle refused a payment API request because the shared processor identity crossed a short-window request limit",
-		mechanism: "One failed AdvancePayment attempt is normally logged once by the Circle client and again by the task evaluator, so this diagnostic line rate is not a unique-submit rate. In the 2026-08-31 pre-fix retry cohort, five distinct wallet-insufficient attempts landed in one second before a sixth request received 429; ten seconds later, four attempts preceded another 429. The one-hour capped backoff's old 0–2-second jitter preserved these second-scale microbursts across taskworkers even though the minute average looked modest. After artifact provenance proved deployed source 1d8f01e5 predates the jitter fix, the UTC-rollover recurrence produced 28 canonical wallet attempts, a six-attempt peak at 00:30:43Z, and one canonical 429 from two diagnostic lines in that same second.",
-		context:   "A 429 is an ambiguous submit outcome: it is not safe evidence that Circle created no transaction, so the existing payment idempotency key must be retained. Co-residency with the synchronized wallet-insufficient cohort demonstrates application-side amplification for this incident, not a general Circle outage or proof that every future 429 has the same cause.",
+		mechanism: "One failed AdvancePayment attempt is normally logged once by the Circle client and again by the task evaluator, so this diagnostic line rate is not a unique-submit rate. In the 2026-08-31 pre-fix retry cohort, five distinct wallet-insufficient attempts landed in one second before a sixth request received 429; ten seconds later, four attempts preceded another 429. The one-hour capped backoff's old 0–2-second jitter preserved these second-scale microbursts across taskworkers even though the minute average looked modest. After artifact provenance proved deployed source 1d8f01e5 predates the jitter fix, the UTC-rollover recurrence produced 28 canonical wallet attempts, a six-attempt peak at 00:30:43Z, and one canonical 429 from two diagnostic lines in that same second. A later bounded three-hour source-second join found 15 canonical 429 events across 12 seconds and 12 task rows; every rate-limit second shared at least five wallet-insufficient attempts and one shared six. The newest 429 completed 12 milliseconds after the fifth wallet result in its source second, while the durable AdvancePayment family stayed at 824 rows.",
+		context:   "A 429 is an ambiguous submit outcome: it is not safe evidence that Circle created no transaction, so the existing payment idempotency key must be retained. The monitor joins exact-replay-deduplicated evaluator records by normalized source second and retains wallet cohort counts across its bounded reconciliation/drain boundary. Co-residency with the synchronized wallet-insufficient cohort demonstrates application-side amplification for this incident, not a general Circle outage or proof that every future 429 has the same cause. The durable cause breakdown stores only each row's latest error, so its rate-limit count can fall while a different row receives a new 429.",
 		action:    "Do not manually retry, delete, or pull payment tasks forward. Verify every taskworker block's embedded source revision and deploy commit 70b0d269 or later only to older blocks so saturated retries disperse across 30–90 minutes. If every block is already current, do not redeploy from this alert; after one full 90-minute drain window, measure exact per-second Create/Get traffic across every taskworker and any other Circle client against the account's authoritative quota before adding or tuning a shared provider limiter.",
 		verify:    "Every taskworker block runs the proportional-jitter build; the next saturated cohort has no narrow second-scale cluster, the durable processor-rate-limit count does not increase, and retries preserve their original idempotency keys. A remaining 429 must be correlated with all Circle request sources and the provider's account-specific limit rather than inferred from a minute rate.",
 		redactIDs: true},
@@ -537,16 +553,22 @@ type logTailer struct {
 	// log second. Exact-line hashes make a one-second stream replay idempotent.
 	// Retaining the immediately previous drain window covers a reconnect that
 	// straddles the cadence boundary without making this state grow forever.
-	burstSecondCounts     map[string]int
-	burstPeaks            map[string]int
-	burstPeakSeconds      map[string]string
-	burstEventTotals      map[string]int
-	burstSamples          map[string]string
-	burstSeen             map[[sha256.Size]byte]struct{}
-	burstSeenPrevious     map[[sha256.Size]byte]struct{}
-	canonicalCounts       map[string]int
-	canonicalSeen         map[[sha256.Size]byte]struct{}
-	canonicalSeenPrevious map[[sha256.Size]byte]struct{}
+	burstSecondCounts map[string]int
+	burstPeaks        map[string]int
+	burstPeakSeconds  map[string]string
+	burstEventTotals  map[string]int
+	burstSamples      map[string]string
+	burstSeen         map[[sha256.Size]byte]struct{}
+	burstSeenPrevious map[[sha256.Size]byte]struct{}
+	// Recent burst seconds survive cadence drains so a provider result that is
+	// ingested or reconciled in the next minute can still join to the attempts
+	// that caused it. Entries remain bounded by the standing overlap retention.
+	burstRecentSecondCounts map[string]int
+	burstRecentSecondSeen   map[string]time.Time
+	canonicalCounts         map[string]int
+	canonicalSecondCounts   map[string]int
+	canonicalSeen           map[[sha256.Size]byte]struct{}
+	canonicalSeenPrevious   map[[sha256.Size]byte]struct{}
 	// The WebSocket tail is an arrival stream, while the reconciliation query
 	// replays an overlapping source-time window. Retain fingerprints only for
 	// alert-relevant records long enough to make the two transports and
@@ -580,25 +602,28 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 	}
 	startedAt := clock()
 	tailer := &logTailer{
-		service:               service,
-		env:                   env,
-		clock:                 clock,
-		startedAt:             startedAt,
-		classCounts:           map[string]int{},
-		classSamples:          map[string]string{},
-		classTargets:          map[string]string{},
-		burstSecondCounts:     map[string]int{},
-		burstPeaks:            map[string]int{},
-		burstPeakSeconds:      map[string]string{},
-		burstEventTotals:      map[string]int{},
-		burstSamples:          map[string]string{},
-		burstSeen:             map[[sha256.Size]byte]struct{}{},
-		burstSeenPrevious:     map[[sha256.Size]byte]struct{}{},
-		canonicalCounts:       map[string]int{},
-		canonicalSeen:         map[[sha256.Size]byte]struct{}{},
-		canonicalSeenPrevious: map[[sha256.Size]byte]struct{}{},
-		standingSeen:          map[[sha256.Size]byte]time.Time{},
-		novelCounts:           map[string]int{},
+		service:                 service,
+		env:                     env,
+		clock:                   clock,
+		startedAt:               startedAt,
+		classCounts:             map[string]int{},
+		classSamples:            map[string]string{},
+		classTargets:            map[string]string{},
+		burstSecondCounts:       map[string]int{},
+		burstPeaks:              map[string]int{},
+		burstPeakSeconds:        map[string]string{},
+		burstEventTotals:        map[string]int{},
+		burstSamples:            map[string]string{},
+		burstSeen:               map[[sha256.Size]byte]struct{}{},
+		burstSeenPrevious:       map[[sha256.Size]byte]struct{}{},
+		burstRecentSecondCounts: map[string]int{},
+		burstRecentSecondSeen:   map[string]time.Time{},
+		canonicalCounts:         map[string]int{},
+		canonicalSecondCounts:   map[string]int{},
+		canonicalSeen:           map[[sha256.Size]byte]struct{}{},
+		canonicalSeenPrevious:   map[[sha256.Size]byte]struct{}{},
+		standingSeen:            map[[sha256.Size]byte]time.Time{},
+		novelCounts:             map[string]int{},
 		// silence is measured from tailer start until the first line arrives
 		lastLineTime: startedAt,
 	}
@@ -1013,6 +1038,9 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 				if !replayedCurrent && !replayedPrevious {
 					self.canonicalSeen[fingerprint] = struct{}{}
 					self.canonicalCounts[key] += 1
+					if second := logTimestampSecond(line); second != "" {
+						self.canonicalSecondCounts[key+"\x00"+second] += 1
+					}
 				}
 			}
 			if c.burst != nil && c.burst.eventRe.MatchString(line) {
@@ -1024,6 +1052,8 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 						self.burstSeen[fingerprint] = struct{}{}
 						secondKey := key + "\x00" + second
 						self.burstSecondCounts[secondKey] += 1
+						self.burstRecentSecondCounts[secondKey] += 1
+						self.burstRecentSecondSeen[secondKey] = now
 						self.burstEventTotals[key] += 1
 						if self.burstPeaks[key] < self.burstSecondCounts[secondKey] {
 							self.burstPeaks[key] = self.burstSecondCounts[secondKey]
@@ -1055,6 +1085,67 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 			self.novelSample = truncateLine(line)
 		}
 	}
+}
+
+func (self *logTailer) canonicalCorrelationLocked(c logClass, key string) (string, string) {
+	if c.canonical == nil || c.canonical.correlation == nil {
+		return "", ""
+	}
+	correlation := c.canonical.correlation
+	sourcePrefix := key + "\x00"
+	correlatedKey := correlation.burstClass
+	// A grouped canonical class can correlate only within the same frame. The
+	// current payout classes are service-wide, but retaining this suffix makes
+	// the helper safe for a future route- or host-framed class.
+	if separator := strings.IndexByte(key, '\x00'); separator >= 0 {
+		correlatedKey += key[separator:]
+	}
+
+	sourceSeconds := 0
+	qualifyingSeconds := 0
+	coincidentEvents := 0
+	peakCoincidentEvents := 0
+	for secondKey, count := range self.canonicalSecondCounts {
+		if count <= 0 || !strings.HasPrefix(secondKey, sourcePrefix) {
+			continue
+		}
+		second := strings.TrimPrefix(secondKey, sourcePrefix)
+		if second == "" {
+			continue
+		}
+		sourceSeconds++
+		coincident := self.burstRecentSecondCounts[correlatedKey+"\x00"+second]
+		coincidentEvents += coincident
+		peakCoincidentEvents = max(peakCoincidentEvents, coincident)
+		if correlation.threshold <= coincident {
+			qualifyingSeconds++
+		}
+	}
+
+	observed := fmt.Sprintf(
+		" correlated_source_seconds=%d correlated_cohort_seconds=%d %s=%d peak_%s_per_second=%d correlation_threshold=%d/s",
+		sourceSeconds,
+		qualifyingSeconds,
+		correlation.eventName,
+		coincidentEvents,
+		correlation.eventName,
+		peakCoincidentEvents,
+		correlation.threshold,
+	)
+	if sourceSeconds == 0 {
+		return observed, "\nsource-second correlation: no new canonical evaluator source second was present; diagnostic replay is not a new provider event"
+	}
+	evidence := fmt.Sprintf(
+		"\nsource-second correlation: %d/%d %s source second(s) shared at least %d canonical %s attempt(s); %d attempt(s) shared those seconds, peaking at %d/s",
+		qualifyingSeconds,
+		sourceSeconds,
+		c.name,
+		correlation.threshold,
+		correlation.burstClass,
+		coincidentEvents,
+		peakCoincidentEvents,
+	)
+	return observed, evidence
 }
 
 func (self *logTailer) standingReplayLocked(line string, now time.Time) bool {
@@ -1146,6 +1237,9 @@ func (self *logTailer) drainWindow() []finding {
 					self.canonicalCounts[key],
 					count,
 				)
+				correlationObserved, correlationEvidence := self.canonicalCorrelationLocked(c, key)
+				observed += correlationObserved
+				canonicalEvidence += correlationEvidence
 			}
 			symptom := fmt.Sprintf("service %s: %d/min lines of class %s (threshold %d/min)", self.service, count, c.name, c.rateThreshold)
 			if c.observationOnly {
@@ -1259,11 +1353,19 @@ func (self *logTailer) drainWindow() []finding {
 	self.burstSeenPrevious = self.burstSeen
 	self.burstSeen = map[[sha256.Size]byte]struct{}{}
 	self.canonicalCounts = map[string]int{}
+	self.canonicalSecondCounts = map[string]int{}
 	self.canonicalSeenPrevious = self.canonicalSeen
 	self.canonicalSeen = map[[sha256.Size]byte]struct{}{}
 	self.novelCounts = map[string]int{}
 	self.novelSample = ""
-	self.pruneStandingSeenLocked(self.clock())
+	now := self.clock()
+	self.pruneStandingSeenLocked(now)
+	for secondKey, seenAt := range self.burstRecentSecondSeen {
+		if !now.Before(seenAt.Add(logReconcileRetention)) {
+			delete(self.burstRecentSecondSeen, secondKey)
+			delete(self.burstRecentSecondCounts, secondKey)
+		}
+	}
 
 	return findings
 }

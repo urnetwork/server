@@ -351,11 +351,17 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 
 func TestLogErrorsSignalExplainsPaymentProcessorRateLimit(t *testing.T) {
 	line := `[edge-3][taskworker][g2][cid:test][I][2026-08-31T15:46:23Z][task.go:1930][019f77ae-de17-db98-b22d-2642f6f67594]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	lines := []string{}
+	for attempt := 300; attempt < 305; attempt++ {
+		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", attempt)
+		lines = append(lines, evaluatorLine)
+	}
+	lines = append(lines, line)
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-taskworker", nil
 		}
-		return line + "\n", nil
+		return strings.Join(lines, "\n") + "\n", nil
 	}}
 	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -371,9 +377,19 @@ func TestLogErrorsSignalExplainsPaymentProcessorRateLimit(t *testing.T) {
 		"28 canonical wallet attempts",
 		"six-attempt peak at 00:30:43Z",
 		"one canonical 429 from two diagnostic lines in that same second",
+		"15 canonical 429 events across 12 seconds and 12 task rows",
+		"every rate-limit second shared at least five wallet-insufficient attempts",
+		"newest 429 completed 12 milliseconds after the fifth wallet result",
 		"ambiguous submit outcome",
 		"idempotency key must be retained",
+		"joins exact-replay-deduplicated evaluator records by normalized source second",
+		"latest error",
 		"not a general Circle outage",
+		"correlated_source_seconds=1",
+		"correlated_cohort_seconds=1",
+		"coincident_wallet_attempts=5",
+		"peak_coincident_wallet_attempts_per_second=5",
+		"source-second correlation: 1/1 payment-processor-rate-limit source second(s)",
 		"Do not manually retry",
 		"deploy commit 70b0d269 or later only to older blocks",
 		"do not redeploy from this alert",
