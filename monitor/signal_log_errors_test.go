@@ -43,6 +43,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"HTTP write after hijack", "http: response.WriteHeader on hijacked connection from github.com/urnetwork/server/router.(*Router).ServeHTTP.func1.1 (router.go:104)", "http-hijack-write"},
 		{"negative escrow", "[netescrow]negative counter after release", "netescrow-negative"},
 		{"escrow mirror write", "[netescrow]mirror write failed after reservation: i/o timeout", "netescrow-mirror-write"},
+		{"PostgreSQL client slots", "Unexpected error: FATAL: server login has been failing, cached error: sorry, too many clients already (server_login_retry)", "pg-client-capacity"},
 		{"panic", "panic: synthetic crash frame", "panic"},
 		{"payout wallet", "asset amount owned by the wallet is insufficient", "payout-wallet-insufficient"},
 		{"invalid payout destination", `Bad status: 400 Bad Request {"code":155219,"message":"Invalid destination address."}`, "payout-invalid-destination"},
@@ -150,6 +151,52 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 	} {
 		if !strings.Contains(alert.Markdown(), detail) {
 			t.Fatalf("legacy maintenance alert missing %q:\n%s", detail, alert.Markdown())
+		}
+	}
+}
+
+func TestLogErrorsSignalSeparatesPostgresClientExhaustionFromPanic(t *testing.T) {
+	lines := strings.Join([]string{
+		`[edge-3][connect][g4][cid:trace][I][2026-09-01T12:09:30.949276-05:00][trace.go:51]Unexpected error: {"error":"*pgconn.PgError=FATAL: server login has been failing, cached error: sorry, too many clients already (server_login_retry) (SQLSTATE 08P01)","stack":"goroutine 12 [running]"}`,
+		`[edge-3][connect][g4][cid:route][I][2026-09-01T12:09:31.048153-05:00][router.go:99][h]unhandled error from route GET ^/$: {"error":"*pgconn.PgError=FATAL: server login has been failing, cached error: sorry, too many clients already (server_login_retry) (SQLSTATE 08P01)","stack":"goroutine 13 [running]"}`,
+	}, "\n")
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-connect", nil
+		}
+		return lines, nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "pg-client-capacity")
+	if alert.Severity != SeverityPage {
+		t.Fatalf("PostgreSQL client-capacity severity = %q, want PAGE", alert.Severity)
+	}
+	for _, candidate := range alerts {
+		if candidate.Class == "panic" {
+			t.Fatalf("typed PostgreSQL capacity lines also leaked into panic: %+v", alerts)
+		}
+	}
+	for _, detail := range []string{
+		"rate=2/min class=pg-client-capacity",
+		"server_login_retry",
+		"32 independent PgBouncer processes",
+		"diagnostic amplification, not unique rejected PostgreSQL sessions",
+		"takes precedence over panic",
+		"distinct from query_wait_timeout",
+		"direct 5432",
+		"60-66-second COMMITs",
+		"replacement connection churn",
+		"7676014f",
+		"abfd976b",
+		"Do not raise max_connections first",
+		"large work_mem",
+		"headroom stays above 25%",
+	} {
+		if !strings.Contains(alert.Markdown(), detail) {
+			t.Fatalf("PostgreSQL client-capacity alert missing %q:\n%s", detail, alert.Markdown())
 		}
 	}
 }

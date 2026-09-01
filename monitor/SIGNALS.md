@@ -115,6 +115,10 @@ to older Warpctl copies that predate the fail-closed release builder. Section
 The direct runtime follow-up adds §11.21 (`mimir-shutdown`): all six enabled
 Grafana blocks still rendered shutdown flushing false, proving the source fix
 had not reached production even though it existed in Warp.
+The database follow-up adds §1.3a (`pg-capacity`) and a typed
+`pg-client-capacity` log class. It separates PostgreSQL slot exhaustion from
+generic panic amplification and records the validated legacy-reindex, WAL
+stall, client-deadline, and PgBouncer replacement chain.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -585,6 +589,92 @@ FROM pg_stat_activity WHERE backend_type = 'client backend';
   the count warning for capacity attribution, but require the explicit
   continuous-idle age before terminating any session or assigning a leak.
 
+### 1.3a PostgreSQL client-slot capacity and rejected logins
+Probe: `pg-capacity`
+
+Read this through direct port 5432, never through the nginx/PgBouncer frontend.
+The probe derives the ordinary-role ceiling from the deployed server settings,
+counts every `client backend`, and exports only the ten largest groups by
+application, role, client address, state, and wait event. It does not export
+query text or customer identifiers.
+
+```sql
+SELECT name, setting, unit
+FROM pg_settings
+WHERE name IN ('max_connections',
+               'superuser_reserved_connections',
+               'reserved_connections');
+
+SELECT application_name, usename, client_addr, state, count(*)
+FROM pg_stat_activity
+WHERE backend_type = 'client backend'
+GROUP BY application_name, usename, client_addr, state
+ORDER BY count(*) DESC
+LIMIT 10;
+```
+
+- `normal_role_ceiling = max_connections -
+  superuser_reserved_connections - reserved_connections`. Every existing
+  client backend consumes the admission threshold, including a privileged or
+  direct-maintenance owner and the observation session itself.
+- HEALTHY: more than 25% normal-role headroom remains.
+- WARN: at least 75% of that ceiling is occupied for two consecutive 30-second
+  samples. Capacity is not query load: split active, idle, and
+  idle-in-transaction owners before assigning a cause.
+- PAGE: at least 90% is occupied, 64 or fewer normal-role slots remain, or the
+  direct observation itself receives `FATAL: sorry, too many clients already`.
+  A direct rejection has no numeric snapshot, but it is affirmative server
+  capacity evidence rather than a generic monitor visibility failure.
+- PgBouncer `server_login_retry` caches a failed server login. One rejected
+  application request can then produce an `Unexpected error` record, a router
+  recovery record, and goroutine-shaped JSON. Class `pg-client-capacity` takes
+  precedence over generic `panic`; raw line volume is diagnostic amplification,
+  not a count of unique rejected PostgreSQL sessions.
+- This is distinct from `query_wait_timeout`, where a PgBouncer shard already
+  owns all of its server connections and kills a queued client, and from a
+  client write timeout on port 6432, where the request may not reach the pool.
+- ROOT-CAUSE ORDER: first split active, young idle-in-transaction, idle, and
+  starting owners. Correlate active and young transaction cohorts with direct
+  wait events and completed statement or `COMMIT` latency in PostgreSQL logs.
+  A request that reaches its deadline during a stalled transaction can make
+  PgBouncer discard the uncertain server session and open a replacement while
+  the old backend unwinds. Compare PgBouncer connection logs, or `SHOW POOLS`
+  where administrative access exists, across all active shards and with direct
+  maintenance sessions. The current deployment has 32 independent PgBouncer
+  processes; a per-process `default_pool_size` is not a fleet-wide cap. Remove
+  the upstream database stall, transaction leak, or continuously retaining
+  owner before changing that envelope. Do not infer a leak from a later idle
+  recovery cohort; do not first raise `max_connections`, restart PostgreSQL or
+  PgBouncer, or mass-terminate sessions. `work_mem` is per operation and is
+  large on this host, so adding slots without a memory budget can turn an
+  admission incident into host-wide memory pressure.
+- FIX CLASS: software/configuration when a leaking caller, retry loop, or
+  aggregate pool ceiling owns the slots; operational when direct maintenance
+  overlaps serving demand. More hardware may be part of a deliberately larger
+  database concurrency budget, but it does not replace owner attribution and
+  bounded pools.
+- VERIFY: for ten minutes through the workload that triggered the alert,
+  direct 5432 stays observable, ordinary-role headroom remains above 25%,
+  completed `COMMIT` latency and WAL waits return to their ordinary band, and
+  neither `pg-client-capacity` nor `query_wait_timeout` recurs.
+
+The 2026-09-01 production control established the current causal chain rather
+than merely the admission symptom. During the repeatedly lease-recovered
+legacy `DbMaintenance` reindex, PostgreSQL completed large groups of unrelated
+commands and `COMMIT`s together after 60–66 seconds. Direct samples showed
+hundreds of active localhost PgBouncer-owned backends waiting in
+`WALSync`, `WALInsert`, `WALWrite`, and `BufferContent`; PostgreSQL then logged
+client loss as the application deadlines expired. PgBouncer shard 1 alone
+opened 537 replacement server connections during minute `17:25Z`. A direct
+snapshot during the stall reached 824 of the 1,021 ordinary-role slots (80.7%,
+746 active); after the stall it briefly changed to 517 young
+idle-in-transaction sessions and then drained. PostgreSQL never restarted and
+checkpoint sync itself remained below 0.4 seconds. This proves WAL/storage
+stall followed by deadline-driven replacement overlap, not an idle-retention
+leak or a PostgreSQL restart. For this recurrence, wait until
+`pg_stat_progress_create_index` is empty and deploy a clean Taskworker with
+`7676014f` and `abfd976b`; pool tuning is not the root fix.
+
 ### 1.4 redis cluster state + per-node liveness
 Probe: `redis-cluster`
 
@@ -633,6 +723,24 @@ shape, not the sum of unrelated shapes. Public web endpoints routinely receive
 scanner bursts across dozens of nonexistent paths; nginx logs those misses at
 error level, but many one-off paths do not constitute one recurring server
 failure. Keep the total and distinct-shape counts as diagnostic context.
+
+The 2026-09-01 `17:09:30Z` window supplied the PostgreSQL-capacity
+classification control. Connect's four blocks emitted 16,140 cached
+`too many clients already (server_login_retry)` records, 123 paired route
+records, 16,218 `Unexpected error` records, and 16,341 goroutine-shaped
+records in the bounded production pull; the standing monitor reported
+16,342/min as generic panic, while API contributed 11/min. Those counts are
+overlapping renderings, not independent failures. The literal cached-login
+error now maps first to `pg-client-capacity`; §1.3a supplies the authoritative
+direct ceiling and owner snapshot. The line count alone cannot assign a cause,
+but the direct and database-log controls did: the repeated excluded-table
+reindex produced WAL/storage waits and 60–66-second `COMMIT`s; deadline-expired
+clients were lost while PgBouncer opened replacements and the old backends
+unwound. PostgreSQL did not restart. The later young idle-in-transaction and
+idle cohorts were recovery turnover, not proof that idle retention initiated
+the exhaustion. The operational gate is to let current index progress finish,
+then deploy the Taskworker fixes `7676014f` and `abfd976b`; do not tune the 32
+pool shards as the first root-cause action.
 
 Implementation regression learned 2026-08-30: the standing tailer, restart
 health, and scanner-overflow tests existed, but `Monitor.RunLoop` still ran the
@@ -3797,6 +3905,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
+| `server login has been failing, cached error: sorry, too many clients already (server_login_retry)` (`pg-client-capacity`) | PostgreSQL refused a PgBouncer server login at its connection ceiling and PgBouncer cached the result. A timed-out transaction can leave its old backend unwinding while PgBouncer opens a replacement. A single failed request can also be rendered as `Unexpected error`, route recovery, and goroutine-shaped JSON, so the class takes precedence over generic panic and raw log volume is not unique-failure count. The 2026-09-01 control tied the burst to legacy reindex WAL/storage stalls and 60–66-second `COMMIT`s, not idle retention. | Run direct §1.3a immediately; split active, young idle-in-transaction, idle, and starting owners and correlate PostgreSQL waits/commit latency with PgBouncer connection logs or `SHOW POOLS` where permitted. For the matching legacy-reindex chain, wait for index progress to empty and deploy Taskworker fixes `7676014f` and `abfd976b`. Do not first tune pools, raise `max_connections`, restart the database/pools, or mass-terminate sessions; preserve the deployed `work_mem` memory-risk context. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[db]maintenance reindex[<i>/<n>] <excluded-table>` (`db-maintenance-legacy-reindex`) | A Taskworker selected a large or high-churn table that current policy excludes and entered the legacy full-table concurrent-reindex path. Because old code logs before acquiring its maintenance connection, the line proves selection/attempt, not that PostgreSQL began or completed the statement. Interruption plus lease recovery can strand `_ccnew`/`_ccold` artifacts and repeat the rebuild before old end-of-rotation cleanup. | Inspect `pg_stat_progress_create_index`, `reindex-debris`, and the exact DbMaintenance owner before changing Taskworker. Do not let a rollout implicitly cancel active work. After progress is empty, satisfy §8.13 and deploy a clean Taskworker containing `7676014f` plus `abfd976b`; clean debris separately with explicit maintenance authorization and the supported cleanup-only command. Never wildcard-drop artifacts. See §2.2a. |
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` or `/api/ds/query` | Grafana has the provisioned datasource row but cannot load that datasource's native plugin. `/api/health`, Loki/Mimir readiness, and direct storage reads can all stay green while dashboards, Logs Drilldown, and alert rules fail. | Query both `warp-mimir` and `warp-loki` through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13, bake the signed standalone Prometheus and Loki plugins into the image as in §11.15; the Logs Drilldown app does not provide the Loki datasource implementation. Do not recreate a datasource row that already exists. |
