@@ -37,7 +37,7 @@ type probeRunner interface {
 	local(ctx context.Context, name string, args ...string) (string, error)
 	tcpExchange(ctx context.Context, network, address string, payload []byte, responseBytes int) ([]byte, error)
 	warpctl(ctx context.Context, args ...string) (string, error)
-	warpctlStream(ctx context.Context, args ...string) (*exec.Cmd, io.ReadCloser, error)
+	warpctlStream(ctx context.Context, diagnostics io.Writer, args ...string) (*exec.Cmd, io.ReadCloser, error)
 }
 
 // alert tiers (SIGNALS.md §7)

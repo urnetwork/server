@@ -453,7 +453,7 @@ func (r *sourceRunner) warpctl(ctx context.Context, args ...string) (string, err
 	return r.local(ctx, "warpctl", args...)
 }
 
-func (r *sourceRunner) warpctlStream(ctx context.Context, args ...string) (*exec.Cmd, io.ReadCloser, error) {
+func (r *sourceRunner) warpctlStream(ctx context.Context, _ io.Writer, args ...string) (*exec.Cmd, io.ReadCloser, error) {
 	streaming, ok := r.source.(StreamingSignalSource)
 	if !ok {
 		return nil, nil, fmt.Errorf("monitor: SignalSource does not implement StreamingSignalSource")

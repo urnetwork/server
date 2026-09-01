@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"net/netip"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -636,6 +637,11 @@ type logTailer struct {
 	lastLineTime   time.Time
 	restartCount   int
 	scanErrorCount int
+	// warpctl owns WebSocket reconnects internally, so those path failures do
+	// not end the child and cannot increment restartCount. Capture only the
+	// narrow structured transport diagnostic on stderr; remote service records
+	// remain exclusively on stdout.
+	transportRouteEvents map[string]tailTransportRouteEvent
 	// A successful bounded query closes the Search -> LiveTail gap and catches
 	// Loki records ingested behind the WebSocket timestamp cursor. Its health
 	// is independent from the still-connected stream health above.
@@ -679,6 +685,7 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 		canonicalSeenPrevious:   map[[sha256.Size]byte]struct{}{},
 		standingSeen:            map[[sha256.Size]byte]time.Time{},
 		novelCounts:             map[string]int{},
+		transportRouteEvents:    map[string]tailTransportRouteEvent{},
 		// silence is measured from tailer start until the first line arrives
 		lastLineTime: startedAt,
 	}
@@ -1019,7 +1026,100 @@ func (self *logTailer) openStream(ctx context.Context) (*exec.Cmd, io.ReadCloser
 	// replay lands in one minute window as a false rate spike (observed
 	// 2026-07-19: a monitor restart during incident recovery opened
 	// page-tier panic tickets from replayed restart-era lines)
-	return self.env.runner.warpctlStream(ctx, "logs", self.env.cfg.env, self.service, "--since=1s", "-f")
+	return self.env.runner.warpctlStream(
+		ctx,
+		&tailTransportDiagnosticWriter{tailer: self},
+		"logs", self.env.cfg.env, self.service, "--since=1s", "-f",
+	)
+}
+
+var tailIPv6RouteLossPattern = regexp.MustCompile(
+	`^([0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}).*Tail read error .*->\[([0-9A-Fa-f:]+)\]:[0-9]+: read: no route to host`,
+)
+
+type tailTransportRouteEvent struct {
+	address string
+	count   int
+	first   string
+	last    string
+}
+
+// tailTransportDiagnosticWriter reconstructs stderr lines across arbitrary
+// os/exec Write chunks. It intentionally recognizes only explicit warpctl
+// transport diagnostics; generic error text must not become a remote service
+// finding or a recursive log classifier input.
+type tailTransportDiagnosticWriter struct {
+	lock    sync.Mutex
+	pending string
+	tailer  *logTailer
+}
+
+const tailTransportDiagnosticMaxLine = 64 * 1024
+
+func (w *tailTransportDiagnosticWriter) Write(p []byte) (int, error) {
+	w.lock.Lock()
+	defer w.lock.Unlock()
+
+	w.pending += string(p)
+	for {
+		newline := strings.IndexByte(w.pending, '\n')
+		if newline < 0 {
+			break
+		}
+		line := strings.TrimSuffix(w.pending[:newline], "\r")
+		w.pending = w.pending[newline+1:]
+		w.tailer.recordTransportDiagnostic(line)
+	}
+	if len(w.pending) > tailTransportDiagnosticMaxLine {
+		// A malformed local diagnostic must not create an unbounded monitor
+		// allocation. Discard it; stdout has an independent 1 MiB guard.
+		w.pending = ""
+	}
+	return len(p), nil
+}
+
+func (self *logTailer) recordTransportDiagnostic(line string) {
+	match := tailIPv6RouteLossPattern.FindStringSubmatch(strings.TrimSpace(line))
+	if len(match) != 3 {
+		return
+	}
+	address := normalizeTransportIPv6(match[2])
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	event := self.transportRouteEvents[address]
+	event.address = address
+	event.count++
+	if event.first == "" || match[1] < event.first {
+		event.first = match[1]
+	}
+	if event.last == "" || event.last < match[1] {
+		event.last = match[1]
+	}
+	self.transportRouteEvents[address] = event
+}
+
+func normalizeTransportIPv6(value string) string {
+	value = strings.TrimSpace(value)
+	if address, err := netip.ParseAddr(value); err == nil && address.Is6() {
+		return address.String()
+	}
+	return strings.ToLower(value)
+}
+
+func (self *logTailer) drainTransportRouteEvents() []tailTransportRouteEvent {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	addresses := make([]string, 0, len(self.transportRouteEvents))
+	for address := range self.transportRouteEvents {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+	events := make([]tailTransportRouteEvent, 0, len(addresses))
+	for _, address := range addresses {
+		events = append(events, self.transportRouteEvents[address])
+	}
+	self.transportRouteEvents = map[string]tailTransportRouteEvent{}
+	return events
 }
 
 // healthSnapshot returns the tailer's self-health counters (§3.7 visibility).
@@ -1501,12 +1601,31 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		self.lastRestartCounts = make([]int, len(self.tailers))
 	}
 	findings := []finding{}
+	routeEvents := map[string]*tailTransportRouteAggregate{}
 	now := time.Now()
 	if env != nil && env.now != nil {
 		now = env.now()
 	}
 	for i, tailer := range self.tailers {
 		findings = append(findings, tailer.drainWindow()...)
+		for _, event := range tailer.drainTransportRouteEvents() {
+			aggregate := routeEvents[event.address]
+			if aggregate == nil {
+				aggregate = &tailTransportRouteAggregate{
+					address:  event.address,
+					services: map[string]struct{}{},
+				}
+				routeEvents[event.address] = aggregate
+			}
+			aggregate.count += event.count
+			aggregate.services[tailer.service] = struct{}{}
+			if aggregate.first == "" || event.first < aggregate.first {
+				aggregate.first = event.first
+			}
+			if aggregate.last == "" || aggregate.last < event.last {
+				aggregate.last = event.last
+			}
+		}
 
 		lastLine, restarts, scanErrors := tailer.healthSnapshot()
 		restartDelta := restarts - self.lastRestartCounts[i]
@@ -1517,7 +1636,112 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			findings = append(findings, tailerReconcileFinding(tailer.service, now, startedAt, lastSuccess, lastError))
 		}
 	}
+	findings = append(findings, tailTransportRouteFindings(env, routeEvents)...)
 	return findings, nil
+}
+
+type tailTransportRouteAggregate struct {
+	address  string
+	count    int
+	first    string
+	last     string
+	services map[string]struct{}
+}
+
+type tailTransportRouteTarget struct {
+	host          string
+	interfaceName string
+	address       string
+}
+
+func tailTransportRouteFindings(env *probeEnv, events map[string]*tailTransportRouteAggregate) []finding {
+	targets := map[string]tailTransportRouteTarget{}
+	if env != nil && env.cfg != nil {
+		for _, configuredHost := range env.cfg.hosts {
+			for _, configured := range configuredHost.edgeIPv6 {
+				address := normalizeTransportIPv6(configured.Address)
+				if address == "" {
+					continue
+				}
+				targets[address] = tailTransportRouteTarget{
+					host:          configuredHost.name,
+					interfaceName: configured.Interface,
+					address:       address,
+				}
+			}
+		}
+	}
+
+	addresses := make([]string, 0, len(targets)+len(events))
+	seen := map[string]struct{}{}
+	for address := range targets {
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+	for address := range events {
+		if _, ok := seen[address]; ok {
+			continue
+		}
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+
+	findings := make([]finding, 0, len(addresses))
+	for _, address := range addresses {
+		target := targets[address]
+		targetName := "unknown-edge-ipv6"
+		frame := address
+		if target.host != "" {
+			targetName = target.host
+			frame = target.interfaceName + "/" + target.address
+		}
+		event := events[address]
+		if event == nil {
+			findings = append(findings, finding{
+				probeId: "monitor/visibility", tier: tierWarn,
+				class: "tailer-ipv6-route-loss", target: targetName, frame: frame,
+				healthy: true,
+			})
+			continue
+		}
+
+		services := make([]string, 0, len(event.services))
+		for service := range event.services {
+			services = append(services, service)
+		}
+		sort.Strings(services)
+		correlation := "One tail observed the path failure; use same-second controls before deciding whether the scope was shared."
+		if len(services) > 1 {
+			correlation = "Multiple independent service tails converged on one exact edge address, proving a shared path event rather than failures in those services."
+		}
+		findings = append(findings, finding{
+			probeId: "monitor/visibility", tier: tierWarn,
+			class: "tailer-ipv6-route-loss", target: targetName, frame: frame, sustain: 1,
+			symptom: fmt.Sprintf(
+				"%d standing log transport(s) across %d service(s) briefly lost the IPv6 route to %s",
+				event.count,
+				len(services),
+				targetName,
+			),
+			mechanism: "Warpctl's live-tail client received an explicit no-route transport error and reconnected internally, so the child process stayed alive and its ordinary restart counter could not expose the interruption. " + correlation + " The diagnostic alone does not distinguish monitor-side default-route loss, an upstream withdrawal or unreachable response, router neighbor resolution, or the edge interface; the exact-address battery localizes those layers.",
+			baseline:  "No standing observation stream reports an IPv6 no-route reconnect; every configured edge address remains externally reachable while its host identity, router neighbor, and return path stay valid.",
+			observed: fmt.Sprintf(
+				"route_errors=%d services=%d service_sample=%s first_local=%s last_local=%s address=%s",
+				event.count,
+				len(services),
+				strings.Join(services, ","),
+				event.first,
+				event.last,
+				address,
+			),
+			evidence: "The finding is parsed only from warpctl stderr's `Tail read error ... no route to host ... Reconnecting` diagnostic. Stderr is duplicated to the operator console but remains isolated from remote service stdout, so it cannot become a service panic or novel-error alert.",
+			context:  "A later pinned HTTP 200 proves recovery, not absence of the earlier interruption. Compare same-second controls to other IPv6 prefixes before attributing the failure to this edge; preserve disabled-host exclusions.",
+			action:   "Immediately run the §18.1 exact-address battery. Compare active services.yml with the live interface and LB unit, inspect the edge journal for link changes, and inspect the upstream router's exact neighbor plus interface counters. On recurrence, capture the pinned SYN/ICMPv6 at both sides to identify the first hop where it disappears. Do not restart services or change an address, route, firewall rule, or neighbor entry from this transport diagnostic alone.",
+			verify:   "The exact Vault address equals the live interface, three pinned HTTP/1.1 requests return 200, the router resolves the intended MAC, and all standing tails remain free of route-loss diagnostics for ten minutes while another IPv6 prefix stays available as a control.",
+			playbook: "SIGNALS.md §18.1 and §1.5",
+		})
+	}
+	return findings
 }
 
 func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, lastSuccess time.Time, lastError string) finding {

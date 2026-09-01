@@ -449,7 +449,7 @@ func (self *runner) warpctl(ctx context.Context, args ...string) (string, error)
 // must never be classified as lines emitted by the remote service. The caller
 // owns reading the pipe and waiting on the cmd; ctx cancellation kills the
 // process, which closes the pipe and unblocks the reader.
-func (self *runner) warpctlStream(ctx context.Context, args ...string) (*exec.Cmd, io.ReadCloser, error) {
+func (self *runner) warpctlStream(ctx context.Context, diagnostics io.Writer, args ...string) (*exec.Cmd, io.ReadCloser, error) {
 	cmd := exec.CommandContext(ctx, "warpctl", args...)
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -457,6 +457,12 @@ func (self *runner) warpctlStream(ctx context.Context, args ...string) (*exec.Cm
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = os.Stderr
+	if diagnostics != nil {
+		// Preserve local operator diagnostics while giving the standing monitor
+		// a separate, explicitly parsed self-health channel. They must never be
+		// folded into the requested service's stdout log stream.
+		cmd.Stderr = io.MultiWriter(os.Stderr, diagnostics)
+	}
 	if err := cmd.Start(); err != nil {
 		pr.Close()
 		pw.Close()

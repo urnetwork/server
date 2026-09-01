@@ -9415,6 +9415,36 @@ or application-readiness fault. Verification for every repair is three pinned
 HTTP/1.1 IPv6 200 responses per configured address plus advancing counters at
 the repaired layer.
 
+The standing `log-errors` collector also emits derived class
+`tailer-ipv6-route-loss` when warpctl reports `Tail read error ... no route to
+host ... Reconnecting` on its own stderr. Warpctl reconnects internally, so
+its process does not exit and the ordinary tailer restart counter cannot see
+this interruption. Keep that stderr isolated from remote service stdout: it is
+a monitor-path finding, never a panic or novel error in the requested service.
+Aggregate independent service tails by exact destination address; several
+services failing together prove a shared route event even when it recovers
+between five-minute `edge-ipv6` samples. On any event, immediately run this
+section's identity/public/self-egress battery and retain another IPv6 prefix as
+a same-second control. A later HTTP 200 proves recovery, not that the earlier
+route loss did not occur.
+
+The production discriminator occurred on 2026-09-01. Seven of eight standing
+tails simultaneously lost edge-4 `eno3` at 11:52:32Z, another seven did so at
+11:53:44Z, and five independently running old/new watcher tails observed the
+same destination at 11:59:49Z. Both watcher parents and their tail processes
+stayed alive. A focused battery minutes later found the active Vault address
+on live `eno3`, its LB unit active, and three pinned HTTP/1.1 requests returning
+200 in 0.25–0.27 seconds. The edge journal contained no link, address, or LB
+transition in the event window. The upstream router then held the exact target
+MAC as REACHABLE; its eth7 neighbor table contained 15 entries, below the
+1,024/4,096/8,192 garbage-collection thresholds, with zero table-full events.
+Failed neighbors for unrelated addresses and cumulative interface drops are
+background pressure worth monitoring, but these controls do not prove neighbor
+cache exhaustion. The remaining root-cause boundary is a sub-minute
+monitor-side or upstream route/neighbor event. Capture the next pinned
+SYN/ICMPv6 at the monitor, router WAN, and router LAN before installing a static
+neighbor, changing the prefix, or restarting the edge.
+
 ## 19. Web platform association metadata
 
 ### 19.1 Android App Links and Apple association files

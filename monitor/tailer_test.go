@@ -68,6 +68,116 @@ printf '%s\n' 'panic: Loki query error (502): Bad Gateway' >&2
 	}
 }
 
+func TestWarpctlStreamAggregatesInternalIPv6RouteLossWithoutServiceClassification(t *testing.T) {
+	binDir := t.TempDir()
+	warpctlPath := filepath.Join(binDir, "warpctl")
+	script := `#!/bin/sh
+printf '%s\n' '[edge-0][api][g1][cid:abc] ordinary remote log line'
+printf '%s\n' '2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting.' >&2
+`
+	if err := os.WriteFile(warpctlPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	cfg := &monitorConfig{
+		env: "main",
+		hosts: []*host{{
+			name: "edge-4",
+			edgeIPv6: []EdgeIPv6InterfaceSettings{{
+				Interface: "eno3",
+				Address:   "2001:db8:2::44",
+			}},
+		}},
+	}
+	env := &probeEnv{cfg: cfg, runner: newRunner(cfg)}
+	tailer := newLogTailer("api", env)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := tailer.tailOnce(ctx); err != nil {
+		t.Fatalf("tailOnce: %v", err)
+	}
+
+	probe := &logTailProbe{tailers: []*logTailer{tailer}}
+	findings, err := probe.check(ctx, env)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	routeLoss := findingByClass(t, findings, "tailer-ipv6-route-loss")
+	if routeLoss.healthy {
+		t.Fatalf("warpctl's internal reconnect was invisible: %+v", routeLoss)
+	}
+	for _, want := range []string{
+		"edge-4",
+		"eno3/2001:db8:2::44",
+		"route_errors=1",
+		"services=1",
+		"service_sample=api",
+		"first_local=2026/09/01 06:59:49",
+		"stderr",
+		"three pinned HTTP/1.1 requests return 200",
+	} {
+		combined := strings.Join([]string{
+			routeLoss.target,
+			routeLoss.frame,
+			routeLoss.observed,
+			routeLoss.evidence,
+			routeLoss.verify,
+		}, "\n")
+		if !strings.Contains(combined, want) {
+			t.Fatalf("route-loss finding missing %q:\n%+v", want, routeLoss)
+		}
+	}
+	if panicFinding := findingByClass(t, findings, "panic"); !panicFinding.healthy {
+		t.Fatalf("transport stderr became a remote panic: %+v", panicFinding)
+	}
+
+	resolved, err := probe.check(ctx, env)
+	if err != nil {
+		t.Fatalf("resolved check: %v", err)
+	}
+	if routeFinding := findingByClass(t, resolved, "tailer-ipv6-route-loss"); !routeFinding.healthy {
+		t.Fatalf("drained transport event did not resolve: %+v", routeFinding)
+	}
+}
+
+func TestTailTransportDiagnosticWriterReassemblesAndAggregatesServices(t *testing.T) {
+	const diagnostic = "2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting.\n"
+	tailers := []*logTailer{
+		newLogTailer("api", nil),
+		newLogTailer("connect", nil),
+		newLogTailer("taskworker", nil),
+	}
+	for _, tailer := range tailers {
+		writer := &tailTransportDiagnosticWriter{tailer: tailer}
+		for _, fragment := range []string{diagnostic[:17], diagnostic[17:73], diagnostic[73:]} {
+			if _, err := writer.Write([]byte(fragment)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		}
+	}
+
+	findings, err := (&logTailProbe{tailers: tailers}).check(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	routeLoss := findingByClass(t, findings, "tailer-ipv6-route-loss")
+	if routeLoss.healthy {
+		t.Fatalf("fragmented diagnostics were not aggregated: %+v", routeLoss)
+	}
+	for _, want := range []string{
+		"route_errors=3",
+		"services=3",
+		"service_sample=api,connect,taskworker",
+		"unknown-edge-ipv6",
+	} {
+		combined := routeLoss.symptom + "\n" + routeLoss.target + "\n" + routeLoss.observed
+		if !strings.Contains(combined, want) {
+			t.Fatalf("aggregated finding missing %q:\n%+v", want, routeLoss)
+		}
+	}
+}
+
 // Grafana's Loki/Mimir query engine logs the complete query at info level.
 // Searching for an error signature therefore echoes that signature into the
 // grafana service log; the standing grafana tailer must not feed the monitor's
