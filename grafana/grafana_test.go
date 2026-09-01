@@ -695,6 +695,38 @@ func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {
 	}
 }
 
+func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
+	signalExpressions := dashboardExpressions(readTestDashboard(t, "signals.json"))
+	for _, expression := range []string{
+		`sum(rate(urnetwork_circle_transfer_admissions_total{env="$env"}[$__rate_interval]))`,
+		`sum(rate(urnetwork_circle_transfer_deferrals_total{env="$env"}[$__rate_interval]))`,
+		`sum(rate(urnetwork_circle_transfer_admission_errors_total{env="$env"}[$__rate_interval]))`,
+		`histogram_quantile(0.50, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
+		`histogram_quantile(0.95, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env="$env"}[$__rate_interval])))`,
+		`sum(rate(urnetwork_circle_transfer_admission_wait_seconds_sum{env="$env"}[$__rate_interval])) / sum(rate(urnetwork_circle_transfer_admission_wait_seconds_count{env="$env"}[$__rate_interval]))`,
+		`max by (host, block, instance) (urnetwork_proxy_lock_cache_entries{env="$env"})`,
+		`max by (host, block, instance) (urnetwork_proxy_lock_cache_capacity{env="$env"})`,
+		`sum(rate(urnetwork_proxy_lock_cache_hits_total{env="$env"}[$__rate_interval]))`,
+		`sum(rate(urnetwork_proxy_lock_cache_misses_total{env="$env"}[$__rate_interval]))`,
+		`sum(rate(urnetwork_proxy_lock_cache_expirations_total{env="$env"}[$__rate_interval]))`,
+		`sum(rate(urnetwork_proxy_lock_cache_evictions_total{env="$env"}[$__rate_interval]))`,
+	} {
+		if !slices.Contains(signalExpressions, expression) {
+			t.Errorf("signals dashboard is missing actionable query %q", expression)
+		}
+	}
+
+	sourcePanel := dashboardPanelById(readTestDashboard(t, "services-overview.json"), 6)
+	if sourcePanel == nil || sourcePanel.Type != "table" || len(sourcePanel.Targets) != 1 {
+		t.Fatal("running source revisions table is missing")
+	}
+	wantSourceQuery := `urnetwork_source_info{env="$env",service=~"$service",block=~"$block",host=~"$host"}`
+	sourceTarget := sourcePanel.Targets[0]
+	if sourceTarget.Expr != wantSourceQuery || sourceTarget.Format != "table" || !sourceTarget.Instant {
+		t.Errorf("running source revisions query = %+v, want instant table %q", sourceTarget, wantSourceQuery)
+	}
+}
+
 // registeredApplicationMetrics inventories prometheus option literals in the
 // production Go sources. The stats collector creates its gauges through
 // small wrappers (newStatsGauge, newStatsGaugeVec), so their string-literal

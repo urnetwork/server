@@ -3009,13 +3009,313 @@
     },
     {
       "type": "row",
-      "title": "coverage notes",
+      "title": "external admission and proxy lock-cache pressure",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 158
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Circle transfer admission / s",
+      "description": "Fleet rates for Circle Wallets API transfer submissions admitted by the shared rolling-window gate, deferred because its window was full, or failed closed before an external request. Deferrals may exceed admissions because one submission can wait through several full windows.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 159
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_circle_transfer_admissions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "admissions / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_circle_transfer_deferrals_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "deferrals / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_circle_transfer_admission_errors_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "fail-closed / s"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Circle transfer admission wait",
+      "description": "Fleet histogram of time spent waiting for Circle transfer admission. Quantiles merge buckets across taskworkers; the mean merges the histogram sum and count. A nonzero fail-closed rate with no wait sample means admission failed before an external transfer was attempted.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 159
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(urnetwork_circle_transfer_admission_wait_seconds_bucket{env=\"$env\"}[$__rate_interval])))",
+          "refId": "B",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_circle_transfer_admission_wait_seconds_sum{env=\"$env\"}[$__rate_interval])) / sum(rate(urnetwork_circle_transfer_admission_wait_seconds_count{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "mean"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "proxy lock-cache occupancy",
+      "description": "Caller IP-lock cache entries and hard capacity for each Proxy process. A process pinned at capacity while evictions rise is bounded high-cardinality churn; a flat capacity mismatch identifies a stale build or configuration boundary.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 167
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host, block, instance) (urnetwork_proxy_lock_cache_entries{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "entries {{host}} / {{block}} / {{instance}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host, block, instance) (urnetwork_proxy_lock_cache_capacity{env=\"$env\"})",
+          "refId": "B",
+          "legendFormat": "capacity {{host}} / {{block}} / {{instance}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "proxy lock-cache activity / s",
+      "description": "Fleet lookup and removal rates for the bounded caller IP-lock cache. Misses require configuration loading, expirations are ordinary TTL turnover, and evictions identify pressure at the hard LRU capacity. Correlate a rising miss ratio or evictions with occupancy before changing either capacity or TTL.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 167
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_hits_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "hits / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_misses_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "misses / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_expirations_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "expirations / s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_proxy_lock_cache_evictions_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "D",
+          "legendFormat": "evictions / s"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "coverage notes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 175
       }
     },
     {
@@ -3026,7 +3326,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 159
+        "y": 176
       },
       "options": {
         "mode": "markdown",

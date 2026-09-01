@@ -150,6 +150,42 @@
                     "instant": true
                 }
             ]
+        },
+        {
+            "id": 6,
+            "type": "table",
+            "title": "running source revisions",
+            "description": "Full Go VCS revision, modified state, and immutable image digest reported by each selected service process. Use this beside the release version table to distinguish two images or dirty builds carrying the same version label.",
+            "gridPos": {"h": 7, "w": 24, "x": 0, "y": 23},
+            "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+            "fieldConfig": {"defaults": {}, "overrides": []},
+            "options": {},
+            "transformations": [
+                {
+                    "id": "labelsToFields",
+                    "options": {}
+                },
+                {
+                    "id": "organize",
+                    "options": {
+                        "excludeByName": {
+                            "Time": true,
+                            "Value": true,
+                            "__name__": true,
+                            "job": true,
+                            "instance": true
+                        }
+                    }
+                }
+            ],
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "urnetwork_source_info{env=\"$env\",service=~\"$service\",block=~\"$block\",host=~\"$host\"}",
+                    "format": "table",
+                    "instant": true
+                }
+            ]
         }
     ]
 }
