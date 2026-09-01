@@ -6285,6 +6285,18 @@ four service artifacts from the source-gauge commit or a clean descendant
 before attempting to classify its revision/digest. The probe contacted no
 disabled edge and does not need direct access to edge-5 for this metric join.
 
+**Live post-gauge audit (2026-09-01 23:19 UTC):** ordinary Proxy and
+Taskworker deployments reduced the missing set from 68 to 40. All 20 newest
+Proxy and eight Taskworker identities now had complete source/digest families;
+the remaining set was exactly all 20 API and all 20 Connect identities across
+beta and g1-g4 on enabled edges 0/1/3/4. Direct Warp status reported code
+version `2026.8.31+1034210530` for every API and Connect block while their
+config annotation had advanced to `2026.9.1-outerwerld+1035001930`. The code
+version maps to server `a52392db`, which predates source-gauge commit
+`236bf0ce`; the newer config cannot add a metric owned by the executable. Build
+and deploy API and Connect from clean `236bf0ce` or a clean descendant. Do not
+redeploy the already-complete Proxy or Taskworker solely for this class.
+
 The software root fix is the fail-closed Warp release builder at commit
 `217392e` or a clean descendant. It rejects a dirty starting tree, requires
 every Linux binary's embedded revision and `modified=false` to equal that

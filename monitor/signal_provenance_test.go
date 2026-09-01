@@ -80,6 +80,8 @@ func TestProvenanceSignalSyntheticNewestMissingSource(t *testing.T) {
 		"proxy/fireside/g1#current[source-info]",
 		"WARP_VERSION",
 		"Newest process start suppresses a draining generation",
+		"server commit 236bf0ce",
+		"config-only rollout cannot add",
 		"SIGNALS.md §8.12",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
