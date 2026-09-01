@@ -392,6 +392,19 @@ WHERE function_name LIKE '%UpdateClient%'
   does not justify a different retry algorithm or treating the 429 as a broad
   processor outage. Deploy a Taskworker artifact containing `70b0d269`, then
   use the complete 90-minute observation gate already specified above.
+
+  The UTC-rollover recurrence supplied the direct post-provenance control. At
+  `00:31:39Z`, the standing monitor reported 28 exact-replay-deduplicated task
+  attempts from 56 diagnostic lines. Six wallet-insufficient attempts landed
+  at `00:30:43Z`, and one canonical processor 429—two diagnostic lines—landed
+  in that exact second. The independently bounded query produced the same
+  source second and logical event count. Because the deployed image provenance
+  is `1d8f01e5`, this joins the runtime burst to the known pre-`70b0d269`
+  scheduler rather than inferring source age from its version string. It also
+  validates the monitor's peak-sample and canonical-event accounting through a
+  fresh live recurrence. Deploy the existing jitter fix; do not add a second
+  retry algorithm or confuse dispersion with the separate wallet-liquidity
+  operation.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains
