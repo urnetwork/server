@@ -1135,7 +1135,13 @@ func testFullTunP2pFastMtuCorrectness(
 ) {
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			fullTunP2pFastMtuCorrectnessTimeout(
+				fullTunRaceInstrumentationAllowance(),
+				fullTunMinimumDirectionalWorkloadTimeout(),
+			),
+		)
 		profile := allNetworkProfiles(seed)[profileName]
 		environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, true)
 		cleanProfile := allNetworkProfiles(seed)["clean-lan"]
@@ -1167,6 +1173,34 @@ func testFullTunP2pFastMtuCorrectness(
 			)
 		}
 	})
+}
+
+// The full-TUN race fixture gives route construction a larger allowance than
+// production. Its outer context must cover that allowance plus one directional
+// workload boundary; otherwise a healthy no-drop P2P route is canceled by the
+// fixture's former fixed 90-second deadline before the MTU assertion runs.
+func fullTunP2pFastMtuCorrectnessTimeout(
+	routeConstructionAllowance time.Duration,
+	workloadAllowance time.Duration,
+) time.Duration {
+	if routeConstructionAllowance == 0 {
+		return 90 * time.Second
+	}
+	return routeConstructionAllowance + workloadAllowance
+}
+
+func TestFullTunP2pFastMtuCorrectnessTimeoutCoversRaceRouteAndWorkload(t *testing.T) {
+	const routeConstructionAllowance = 4 * time.Minute
+	const workloadAllowance = 2 * time.Minute
+	if got := fullTunP2pFastMtuCorrectnessTimeout(
+		routeConstructionAllowance,
+		workloadAllowance,
+	); got != 6*time.Minute {
+		t.Fatalf("race correctness timeout=%s, want 6m", got)
+	}
+	if got := fullTunP2pFastMtuCorrectnessTimeout(0, 30*time.Second); got != 90*time.Second {
+		t.Fatalf("ordinary correctness timeout=%s, want 90s", got)
+	}
 }
 
 // Fast P2P retains exact inner TCP on an ordinary 1,500-byte outer path.
