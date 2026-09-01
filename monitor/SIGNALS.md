@@ -1387,14 +1387,21 @@ query plan cannot use it.
 
 The probe reads only catalogs. It maps both each public table and that table's
 `reltoastrelid`, counts invalid suffixed indexes and their bytes, reports how
-many are write-ready, and excludes the complete relation while an index
-operation on it remains active. Including TOAST is required: a full-table
-reindex also rebuilds the associated TOAST index, while the old cleanup query
-looked only at indexes whose direct parent name matched the public table. The
-alert is therefore persistent residue, not an invitation to drop the temporary
-index under a progressing build. All affected tables share one cleanup and
-deployment boundary, so the probe emits one aggregate alert with the eight
-largest table owners rather than repeating identical guidance for every table.
+many are write-ready, and excludes an exact index named by
+`pg_stat_progress_create_index.index_relid`. A table-wide concurrent rebuild
+can have non-exact `_ccnew`/`_ccold` siblings that include both its current
+transient work and older debris; those candidates are neither called inactive
+nor hidden. The alert reports confirmed inactive bytes as a lower bound and
+active-table candidate bytes separately as unclassified and explicitly not
+reclaimed. If only active-table candidates exist for two probes, class
+`reindex-debris-obscured` preserves that visibility boundary without directing
+cleanup. Including TOAST is required: a full-table reindex also rebuilds the
+associated TOAST index, while the old cleanup query looked only at indexes
+whose direct parent name matched the public table. The alert is therefore not
+an invitation to drop a temporary index under a progressing build. All
+affected tables share one cleanup and deployment boundary, so the probe emits
+one aggregate alert with bounded samples rather than repeating identical
+guidance for every table.
 
 The 2026-09-01 incident established the causal chain. At 11:15Z, Connect login
 receives against PgBouncer timed out across many blocks while PgBouncer's
@@ -1436,6 +1443,19 @@ cleanup phase advancing; it is not closure while any inactive artifact
 remains. The PostgreSQL filesystem still had 2,529,818,935,296 bytes free at
 66% use, so this was material storage and write amplification rather than an
 immediate disk-exhaustion emergency.
+
+A later monitor run exposed a reporting defect in that relation-wide
+exclusion. The headline moved from 169.19 GiB at 12:37:15Z to 6.92 GiB at
+12:42:17Z, returned to 169.63 GiB at 12:47:18Z, then moved from 162.76 GiB at
+12:49:17Z to 7.60 GiB at 12:59:25Z while index progress started and stopped on
+one large table. No authorized cleanup occurred, and the candidate count moved
+with the same table boundary. The old query had removed every invalid sibling
+whenever any index operation shared its parent relation, so active work made
+roughly 155–162 GiB disappear from the alert without reclaiming it. The new
+lower-bound/active-candidate split prevents that false closure. Synthetic
+regressions pin the combined headline, the active-only obscured class, exact
+progress exclusion, malformed counts, and the rule that a confirmed-byte dip
+paired with active candidate bytes is not cleanup.
 
 The pool timeout was consequently a downstream queue symptom. The daily
 maintenance scheduler had two independent defects: `transfer_escrow` was not
