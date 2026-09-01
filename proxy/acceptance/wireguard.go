@@ -156,11 +156,28 @@ type wireGuardPacketDirectionStats struct {
 }
 
 type wireGuardPacketStats struct {
-	Outbound wireGuardPacketDirectionStats
-	Inbound  wireGuardPacketDirectionStats
-	DialAddr netip.Addr
-	DialPort uint16
-	DialFlow wireGuardTCPFlow
+	Outbound        wireGuardPacketDirectionStats
+	Inbound         wireGuardPacketDirectionStats
+	DialAddr        netip.Addr
+	DialPort        uint16
+	DialFlow        wireGuardTCPFlow
+	EventSequence   uint64
+	RecentTCPEvents [wireGuardTCPPacketEventCount]wireGuardTCPPacketEvent
+}
+
+const wireGuardTCPPacketEventCount = 32
+
+type wireGuardTCPPacketEvent struct {
+	EventSequence   uint64
+	Nanos           int64
+	Outbound        bool
+	SourcePort      uint16
+	DestinationPort uint16
+	TCPSequence     uint32
+	Acknowledgment  uint32
+	Flags           header.TCPFlags
+	PayloadBytes    int
+	ChecksumValid   bool
 }
 
 // wireGuardOuterPacketStats is the encrypted UDP boundary immediately below
@@ -373,9 +390,9 @@ func (b *wireGuardDiagnosticBody) wrapError(err error) error {
 		return err
 	}
 	return fmt.Errorf(
-		"%s: %w",
-		wireGuardPacketTrace(b.before, b.stack.packetStats(), b.bind, b.outer, time.Now()),
+		"%w; %s",
 		err,
+		wireGuardPacketTrace(b.before, b.stack.packetStats(), b.bind, b.outer, time.Now()),
 	)
 }
 
@@ -412,7 +429,7 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 		}
 		return response, nil
 	}
-	return response, fmt.Errorf("%s: %w", wireGuardPacketTrace(before, after, t.bind, outerBefore, time.Now()), err)
+	return response, fmt.Errorf("%w; %s", err, wireGuardPacketTrace(before, after, t.bind, outerBefore, time.Now()))
 }
 
 func wireGuardPacketTrace(
@@ -448,13 +465,14 @@ func (s *wireGuardStack) packetStats() wireGuardPacketStats {
 func (s *wireGuardStack) observePacket(packet []byte, outbound bool) {
 	s.statsLock.Lock()
 	defer s.statsLock.Unlock()
+	now := time.Now()
 	stats := &s.stats.Inbound
 	if outbound {
 		stats = &s.stats.Outbound
 	}
 	stats.Packets++
 	stats.Bytes += uint64(len(packet))
-	stats.LastPacketNanos = time.Now().UnixNano()
+	stats.LastPacketNanos = now.UnixNano()
 
 	if len(packet) < 20 || packet[0]>>4 != 4 {
 		return
@@ -541,6 +559,22 @@ func (s *wireGuardStack) observePacket(packet []byte, outbound bool) {
 		stats.TCPPayloadPackets++
 		stats.TCPPayloadBytes += uint64(payloadBytes)
 	}
+	if s.tcpPacketMatchesDial(tcpPacket, outbound) {
+		s.stats.EventSequence++
+		event := wireGuardTCPPacketEvent{
+			EventSequence:   s.stats.EventSequence,
+			Nanos:           now.UnixNano(),
+			Outbound:        outbound,
+			SourcePort:      tcpPacket.SourcePort,
+			DestinationPort: tcpPacket.DestinationPort,
+			TCPSequence:     tcpPacket.Sequence,
+			Acknowledgment:  tcpPacket.Acknowledgment,
+			Flags:           tcpPacket.Flags,
+			PayloadBytes:    payloadBytes,
+			ChecksumValid:   tcpPacket.ChecksumValid,
+		}
+		s.stats.RecentTCPEvents[(event.EventSequence-1)%uint64(len(s.stats.RecentTCPEvents))] = event
+	}
 	if outbound &&
 		tcpPacket.SourceAddr == s.clientIPv4 &&
 		tcpPacket.DestinationAddr == s.stats.DialAddr &&
@@ -554,6 +588,17 @@ func (s *wireGuardStack) observePacket(packet []byte, outbound bool) {
 			s.stats.DialFlow.ExpectedSeqSet = true
 		}
 	}
+}
+
+func (s *wireGuardStack) tcpPacketMatchesDial(packet wireGuardTCPPacket, outbound bool) bool {
+	if outbound {
+		return packet.SourceAddr == s.clientIPv4 &&
+			packet.DestinationAddr == s.stats.DialAddr &&
+			packet.DestinationPort == s.stats.DialPort
+	}
+	return packet.SourceAddr == s.stats.DialAddr &&
+		packet.DestinationAddr == s.clientIPv4 &&
+		packet.SourcePort == s.stats.DialPort
 }
 
 func (s *wireGuardStack) rstMatchesDial(packet wireGuardTCPPacket) bool {
@@ -622,8 +667,7 @@ func wireGuardOuterPacketStatsDelta(before, after wireGuardOuterPacketStats, now
 		return now.Sub(time.Unix(0, nanos)).Round(time.Millisecond).String() + " ago"
 	}
 	return fmt.Sprintf(
-		"recent=[%s] out{attempt=%d/%dB sent=%d/%dB errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s} in{packets=%d bytes=%d errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s}",
-		formatWireGuardOuterEvents(before, after),
+		"out{attempt=%d/%dB sent=%d/%dB errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s} in{packets=%d bytes=%d errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s} recent=[%s]",
 		delta.SendAttemptPackets,
 		delta.SendAttemptBytes,
 		delta.SendPackets,
@@ -644,6 +688,7 @@ func wireGuardOuterPacketStatsDelta(before, after wireGuardOuterPacketStats, now
 		delta.ReceiveMessageTypes[4],
 		delta.ReceiveMessageTypes[0],
 		lastAge(delta.LastReceiveNanos),
+		formatWireGuardOuterEvents(before, after),
 	)
 }
 
@@ -731,12 +776,52 @@ func wireGuardPacketStatsDelta(before, after wireGuardPacketStats, now time.Time
 		}
 		return detail
 	}
-	return fmt.Sprintf(
+	detail := fmt.Sprintf(
 		"target=%s out{%s} in{%s}",
 		netip.AddrPortFrom(after.DialAddr, after.DialPort),
 		format(subtractWireGuardDirection(before.Outbound, after.Outbound)),
 		format(subtractWireGuardDirection(before.Inbound, after.Inbound)),
 	)
+	if recent := formatWireGuardTCPEvents(before, after); recent != "none" {
+		detail += " tcp_recent=[" + recent + "]"
+	}
+	return detail
+}
+
+func formatWireGuardTCPEvents(before, after wireGuardPacketStats) string {
+	events := make([]wireGuardTCPPacketEvent, 0, len(after.RecentTCPEvents))
+	for _, event := range after.RecentTCPEvents {
+		if before.EventSequence < event.EventSequence && event.EventSequence <= after.EventSequence {
+			events = append(events, event)
+		}
+	}
+	sort.Slice(events, func(i int, j int) bool {
+		return events[i].EventSequence < events[j].EventSequence
+	})
+	if len(events) == 0 {
+		return "none"
+	}
+	start := time.Unix(0, events[0].Nanos)
+	parts := make([]string, 0, len(events))
+	for _, event := range events {
+		direction := "out"
+		if !event.Outbound {
+			direction = "in"
+		}
+		parts = append(parts, fmt.Sprintf(
+			"+%s:%s:%d->%d seq=%d ack=%d flags=%s payload=%dB checksum=%t",
+			time.Unix(0, event.Nanos).Sub(start).Round(time.Millisecond),
+			direction,
+			event.SourcePort,
+			event.DestinationPort,
+			event.TCPSequence,
+			event.Acknowledgment,
+			wireGuardTCPFlags(event.Flags),
+			event.PayloadBytes,
+			event.ChecksumValid,
+		))
+	}
+	return strings.Join(parts, ",")
 }
 
 func formatWireGuardTCPPacket(packet wireGuardTCPPacket, includeExpected bool) string {

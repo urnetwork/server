@@ -88,6 +88,67 @@ func TestWireGuardPacketTraceDistinguishesTLSResponseLoss(t *testing.T) {
 	}
 }
 
+// Aggregate packet counts cannot distinguish an omitted TCP segment from a
+// complete response that gVisor failed to consume. Retain a bounded sequence /
+// acknowledgement trace for the active dial without retaining packet bytes.
+func TestWireGuardPacketTraceRetainsBoundedTCPSequenceHistory(t *testing.T) {
+	clientIP := netip.MustParseAddr("10.0.0.2")
+	targetIP := netip.MustParseAddr("142.251.210.195")
+	clientPort := uint16(51001)
+	targetPort := uint16(443)
+	stack := &wireGuardStack{clientIPv4: clientIP}
+	stack.stats.DialAddr = targetIP
+	stack.stats.DialPort = targetPort
+	before := stack.packetStats()
+
+	for i := 0; i < wireGuardTCPPacketEventCount+3; i++ {
+		sequence := uint32(1001 + i*100)
+		stack.observePacket(acceptanceTCPPacketWithFields(
+			clientIP,
+			targetIP,
+			clientPort,
+			targetPort,
+			sequence,
+			9001,
+			header.TCPFlagAck|header.TCPFlagPsh,
+			100,
+			true,
+		), true)
+	}
+	stack.observePacket(acceptanceTCPPacketWithFields(
+		targetIP,
+		clientIP,
+		targetPort,
+		clientPort,
+		9001,
+		uint32(1001+(wireGuardTCPPacketEventCount+3)*100),
+		header.TCPFlagAck|header.TCPFlagFin,
+		0,
+		true,
+	), false)
+
+	detail := wireGuardPacketStatsDelta(before, stack.packetStats(), time.Now())
+	if count := strings.Count(detail, ":out:") + strings.Count(detail, ":in:"); count != wireGuardTCPPacketEventCount {
+		t.Fatalf("TCP event ring retained %d events, want %d: %s", count, wireGuardTCPPacketEventCount, detail)
+	}
+	for _, want := range []string{
+		"tcp_recent=[",
+		"out:51001->443",
+		"in:443->51001",
+		"seq=9001",
+		"flags=ACK+FIN",
+		"payload=0B",
+		"checksum=true",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("TCP trace %q lacks %q", detail, want)
+		}
+	}
+	if strings.Contains(detail, "payload_bytes=") {
+		t.Fatalf("TCP trace retained packet contents: %s", detail)
+	}
+}
+
 func TestWireGuardPacketTraceRetainsPriorIngressAgeWhenRequestGetsNone(t *testing.T) {
 	lastIngress := time.Date(2026, 9, 1, 7, 31, 51, 0, time.UTC)
 	stats := wireGuardPacketStats{

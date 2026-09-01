@@ -702,6 +702,39 @@ func TestWriteResultsIsPrivateAtomicTSV(t *testing.T) {
 	}
 }
 
+// A live WireGuard overlap failure exceeded the ordinary progress-line budget,
+// which silently removed the encrypted boundary, hosted-device route, and the
+// terminal request error from results.tsv. The private result artifact is the
+// root-cause record and must retain all three bounded diagnostic boundaries.
+func TestWriteResultsRetainsLongWireGuardFailureBoundaries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "results.tsv")
+	detail := "WireGuard inner packet trace " + strings.Repeat("tcp-event ", 140) +
+		"; WireGuard outer UDP trace out{sent=19} in{packets=8}" +
+		"; hosted device timeline: route={142.251.210.195->p41(1)}" +
+		"; net/http: timeout awaiting response headers"
+	if len(detail) <= 1000 {
+		t.Fatalf("test detail is only %d bytes", len(detail))
+	}
+	if err := WriteResults(path, []Result{{Case: "wireguard", Status: "FAIL", Detail: detail}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(data)
+	for _, want := range []string{
+		"WireGuard inner packet trace",
+		"WireGuard outer UDP trace out{sent=19} in{packets=8}",
+		"hosted device timeline: route={142.251.210.195->p41(1)}",
+		"net/http: timeout awaiting response headers",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("private result truncated %q: %q", want, result)
+		}
+	}
+}
+
 func assertResult(t *testing.T, results []Result, name, status string) Result {
 	t.Helper()
 	for _, result := range results {

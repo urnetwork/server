@@ -359,7 +359,7 @@ func (r *runner) progressf(format string, args ...any) {
 	defer r.progressLock.Unlock()
 	message := fmt.Sprintf(format, args...)
 	if r.redactor != nil {
-		message = r.redactor.clean(message)
+		message = r.redactor.cleanProgress(message)
 	}
 	r.opts.Progress(message)
 }
@@ -990,7 +990,7 @@ func WriteResults(path string, results []Result) error {
 		return err
 	}
 	for _, result := range results {
-		detail := cleanField(result.Detail)
+		detail := cleanDetail(result.Detail)
 		if _, err := fmt.Fprintf(temporary, "%s\t%s\t%s\t%s\n", Platform, cleanField(result.Case), cleanField(result.Status), detail); err != nil {
 			temporary.Close()
 			return err
@@ -1030,7 +1030,7 @@ func errorsForEveryProtocol(err error) map[string]error {
 func failedResults(detail string) []Result {
 	result := make([]Result, 0, len(protocolNames))
 	for _, name := range protocolNames {
-		result = append(result, Result{Case: name, Status: "FAIL", Detail: cleanField(detail)})
+		result = append(result, Result{Case: name, Status: "FAIL", Detail: cleanDetail(detail)})
 	}
 	return result
 }
@@ -1076,18 +1076,37 @@ func (r *redactor) addProxyConfig(config *proxyConfigResult) {
 }
 
 func (r *redactor) clean(value string) string {
+	return cleanDetail(r.redact(value))
+}
+
+func (r *redactor) cleanProgress(value string) string {
+	return cleanField(r.redact(value))
+}
+
+func (r *redactor) redact(value string) string {
 	for _, secret := range r.values {
 		value = strings.ReplaceAll(value, secret, "[REDACTED]")
 	}
-	return cleanField(value)
+	return value
 }
 
 func cleanField(value string) string {
+	return cleanFieldWithLimit(value, 1000)
+}
+
+// Failure details are written to a private 0600 artifact and intentionally
+// have a larger bound than console milestones. WireGuard root-cause evidence
+// spans inner TCP, encrypted UDP, and hosted-device boundaries; truncating it
+// to one progress line made the durable artifact less useful than the console.
+func cleanDetail(value string) string {
+	return cleanFieldWithLimit(value, 16*1024)
+}
+
+func cleanFieldWithLimit(value string, maxBytes int) string {
 	value = strings.NewReplacer("\t", " ", "\r", " ", "\n", " ").Replace(value)
 	value = strings.Join(strings.Fields(value), " ")
-	const maxDetailBytes = 1000
-	if len(value) > maxDetailBytes {
-		value = value[:maxDetailBytes] + "..."
+	if maxBytes < len(value) {
+		value = value[:maxBytes] + "..."
 	}
 	return value
 }
