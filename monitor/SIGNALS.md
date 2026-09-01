@@ -5158,6 +5158,26 @@ to match, then read the running container image/digest, embedded source
 revision, process start, and drain ancestors. A legacy address table or a
 normal edge's 404 is neither host assignment nor runtime provenance.
 
+The 2026-09-01 post-fix audit found the source closure ready but the tools
+stale. Clean Warp `217392e6` contains `2e13328`; its deterministic transparent
+sampling tests pass, and a freshly built warpctl returned the explicit
+unavailable-status result in 0.37 seconds without polling. The workstation
+binary was last built on 2026-08-30 and lacked the fix string. The resident
+warpctl binaries on edge-0, edge-1, edge-3, edge-4, Fireside, and Crisp all
+shared one older digest and also lacked it. While edge-5 remains
+operator-declared offline, run from clean Warp `217392e6` or a clean
+descendant:
+
+```sh
+xops/main/ansible/run-edges.sh --limit 'edges:!by-us-fmt-5-edge-5'
+```
+
+Rebuild the workstation warpctl separately. The playbook deployment does not
+replace the developer binary under `warp/warpctl/build/darwin/arm64`. Verify
+both binaries contain the transparent sampling boundary before using
+`--sample` or `--only-older`; do not infer that an earlier `run-edges.sh`
+execution included a later commit.
+
 ### 8.2 The graceful-handoff drain — multiple build generations run at once
 A connect deploy does NOT replace the old containers atomically. New-build
 containers start and take NEW connections; the OLD-build containers keep
