@@ -189,11 +189,11 @@ func TestParseTailTransportMonitorRouteEvidence(t *testing.T) {
 	}, "\n")
 
 	evidence := parseTailTransportMonitorRouteEvidence(out)
-	if evidence.interfaceName != "en0" || evidence.routerLifetimeZeroCount != 1 || evidence.autoconfDetachCount != 1 {
+	if evidence.interfaceName != "en0" || evidence.routerLifetimeExpiredCount != 1 || evidence.autoconfDetachCount != 1 {
 		t.Fatalf("wrong monitor route evidence: %+v", evidence)
 	}
-	if got := evidence.routerLifetimeZeroAt.Format(monitorIPv6LogTimeLayout); got != "2026-09-01 06:59:49.250" {
-		t.Fatalf("router lifetime zero time = %q", got)
+	if got := evidence.routerLifetimeExpiredAt.Format(monitorIPv6LogTimeLayout); got != "2026-09-01 06:59:49.250" {
+		t.Fatalf("router lifetime expiry time = %q", got)
 	}
 	if got := evidence.ipv6AbsentAt.Format(monitorIPv6LogTimeLayout); got != "2026-09-01 06:59:49.500" {
 		t.Fatalf("IPv6 absence time = %q", got)
@@ -203,13 +203,25 @@ func TestParseTailTransportMonitorRouteEvidence(t *testing.T) {
 	}
 }
 
-func TestTailTransportRouteLossUsesMonitorRouterAdvertisementDiscriminator(t *testing.T) {
+func TestParseTailTransportMonitorRouteEvidenceDoesNotInferExpiryFromExplicitZeroLifetimeLog(t *testing.T) {
+	out := strings.Join([]string{
+		"2026-09-01 06:59:49.250 Df configd[1:2] RTADV en0: ignoring RA (lifetime zero)",
+		"2026-09-01 06:59:49.500 Df configd[1:2] network changed: v4(en0)",
+	}, "\n")
+
+	evidence := parseTailTransportMonitorRouteEvidence(out)
+	if evidence.interfaceName != "" || evidence.routerLifetimeExpiredCount != 0 || !evidence.routerLifetimeExpiredAt.IsZero() {
+		t.Fatalf("an adjacent configd message was misclassified as stored-router expiry: %+v", evidence)
+	}
+}
+
+func TestTailTransportRouteLossUsesMonitorRouterLifetimeExpirationDiscriminator(t *testing.T) {
 	tailer := newLogTailer("api", nil)
 	tailer.recordTransportDiagnostic("2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting.")
 	probe := &logTailProbe{
 		tailers: []*logTailer{tailer},
 		monitorRouteEvidence: func(context.Context, *probeEnv, map[string]*tailTransportRouteAggregate) tailTransportMonitorRouteEvidence {
-			zeroAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, "2026-09-01 06:59:49.250", time.Local)
+			expiredAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, "2026-09-01 06:59:49.250", time.Local)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -218,12 +230,12 @@ func TestTailTransportRouteLossUsesMonitorRouterAdvertisementDiscriminator(t *te
 				t.Fatal(err)
 			}
 			return tailTransportMonitorRouteEvidence{
-				interfaceName:           "en0",
-				routerLifetimeZeroAt:    zeroAt,
-				routerLifetimeZeroCount: 1,
-				autoconfDetachCount:     2,
-				ipv6AbsentAt:            zeroAt.Add(250 * time.Millisecond),
-				ipv6RestoredAt:          restoredAt,
+				interfaceName:              "en0",
+				routerLifetimeExpiredAt:    expiredAt,
+				routerLifetimeExpiredCount: 1,
+				autoconfDetachCount:        2,
+				ipv6AbsentAt:               expiredAt.Add(250 * time.Millisecond),
+				ipv6RestoredAt:             restoredAt,
 			}
 		},
 	}
@@ -241,7 +253,7 @@ func TestTailTransportRouteLossUsesMonitorRouterAdvertisementDiscriminator(t *te
 	}
 	routeLoss := findingByClass(t, findings, "tailer-ipv6-route-loss")
 	if routeLoss.healthy {
-		t.Fatalf("monitor-local route withdrawal was not reported: %+v", routeLoss)
+		t.Fatalf("monitor-local router expiry was not reported: %+v", routeLoss)
 	}
 	combined := strings.Join([]string{
 		routeLoss.mechanism,
@@ -252,14 +264,16 @@ func TestTailTransportRouteLossUsesMonitorRouterAdvertisementDiscriminator(t *te
 		routeLoss.verify,
 	}, "\n")
 	for _, want := range []string{
-		"zero-lifetime IPv6 Router Advertisement on en0",
+		"default-router lifetime on en0 reached zero",
 		"monitor_interface=en0",
-		"monitor_router_lifetime_zero=1",
+		"monitor_router_lifetime_expired=1",
 		"monitor_autoconf_detach=2",
 		"monitor_ipv6_absent=2026-09-01 06:59:49.500",
 		"supersedes edge attribution",
 		"not evidence that the named production edge",
 		"Do not change the named production edge",
+		"does not distinguish an explicit zero-lifetime Router Advertisement from missed or late refresh advertisements",
+		"capture timestamped ICMPv6 type 134",
 		"For at least 30 minutes",
 	} {
 		if !strings.Contains(combined, want) {
@@ -267,7 +281,7 @@ func TestTailTransportRouteLossUsesMonitorRouterAdvertisementDiscriminator(t *te
 		}
 	}
 	if strings.HasPrefix(routeLoss.action, "Immediately run the §18.1 exact-address battery") {
-		t.Fatalf("locally proven route withdrawal still starts with edge diagnosis: %s", routeLoss.action)
+		t.Fatalf("locally proven router expiry still starts with edge diagnosis: %s", routeLoss.action)
 	}
 }
 
@@ -276,23 +290,23 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 		first: "2026/09/01 06:59:49",
 		last:  "2026/09/01 06:59:50",
 	}
-	zeroAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, "2026-09-01 06:59:49.250", time.Local)
+	expiredAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, "2026-09-01 06:59:49.250", time.Local)
 	if err != nil {
 		t.Fatal(err)
 	}
 	base := tailTransportMonitorRouteEvidence{
-		interfaceName:        "en0",
-		routerLifetimeZeroAt: zeroAt,
-		ipv6AbsentAt:         zeroAt.Add(250 * time.Millisecond),
+		interfaceName:           "en0",
+		routerLifetimeExpiredAt: expiredAt,
+		ipv6AbsentAt:            expiredAt.Add(250 * time.Millisecond),
 	}
 	if !base.matches(event) {
-		t.Fatal("same-window router withdrawal and IPv6 loss did not match")
+		t.Fatal("same-window router expiry and IPv6 loss did not match")
 	}
 	preceding := base
-	preceding.routerLifetimeZeroAt = zeroAt.Add(-9 * time.Second)
-	preceding.ipv6AbsentAt = preceding.routerLifetimeZeroAt.Add(250 * time.Millisecond)
+	preceding.routerLifetimeExpiredAt = expiredAt.Add(-9 * time.Second)
+	preceding.ipv6AbsentAt = preceding.routerLifetimeExpiredAt.Add(250 * time.Millisecond)
 	if !preceding.matches(event) {
-		t.Fatal("proven nine-second router-withdrawal precursor did not match")
+		t.Fatal("proven nine-second router-expiry precursor did not match")
 	}
 	withoutLoss := base
 	withoutLoss.ipv6AbsentAt = time.Time{}
@@ -300,10 +314,10 @@ func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.
 		t.Fatal("router-lifetime log without local IPv6 loss was treated as causal")
 	}
 	distant := base
-	distant.routerLifetimeZeroAt = zeroAt.Add(-monitorIPv6RouteCorrelationWindow - time.Second)
-	distant.ipv6AbsentAt = distant.routerLifetimeZeroAt.Add(time.Second)
+	distant.routerLifetimeExpiredAt = expiredAt.Add(-monitorIPv6RouteCorrelationWindow - time.Second)
+	distant.ipv6AbsentAt = distant.routerLifetimeExpiredAt.Add(time.Second)
 	if distant.matches(event) {
-		t.Fatal("distant router withdrawal was correlated to this transport event")
+		t.Fatal("distant router expiry was correlated to this transport event")
 	}
 }
 
@@ -330,7 +344,7 @@ func TestCollectTailTransportMonitorRouteEvidenceCoversProvenDiagnosticLag(t *te
 	}
 	evidence := collectTailTransportMonitorRouteEvidenceFromRunner(context.Background(), env, events)
 	if !evidence.matches(events["2001:db8:2::44"]) {
-		t.Fatalf("collector missed the proven pre-diagnostic withdrawal: %+v", evidence)
+		t.Fatalf("collector missed the proven pre-diagnostic expiry: %+v", evidence)
 	}
 	if commandName != "/usr/bin/log" {
 		t.Fatalf("local command = %q", commandName)

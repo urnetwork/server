@@ -1659,12 +1659,12 @@ type tailTransportRouteAggregate struct {
 }
 
 type tailTransportMonitorRouteEvidence struct {
-	interfaceName           string
-	routerLifetimeZeroAt    time.Time
-	routerLifetimeZeroCount int
-	autoconfDetachCount     int
-	ipv6AbsentAt            time.Time
-	ipv6RestoredAt          time.Time
+	interfaceName              string
+	routerLifetimeExpiredAt    time.Time
+	routerLifetimeExpiredCount int
+	autoconfDetachCount        int
+	ipv6AbsentAt               time.Time
+	ipv6RestoredAt             time.Time
 }
 
 type tailTransportMonitorRouteEvidenceCollector func(
@@ -1679,9 +1679,9 @@ const (
 )
 
 var (
-	monitorIPv6LogTimestampPattern   = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3})`)
-	monitorRouterLifetimeZeroPattern = regexp.MustCompile(`RTADV ([[:alnum:]_.-]+): router lifetime became zero`)
-	monitorAutoconfDetachedPattern   = regexp.MustCompile(`AUTOMATIC-V6 ([[:alnum:]_.-]+): all autoconf addresses detached/deprecated`)
+	monitorIPv6LogTimestampPattern      = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3})`)
+	monitorRouterLifetimeExpiredPattern = regexp.MustCompile(`RTADV ([[:alnum:]_.-]+): router lifetime became zero`)
+	monitorAutoconfDetachedPattern      = regexp.MustCompile(`AUTOMATIC-V6 ([[:alnum:]_.-]+): all autoconf addresses detached/deprecated`)
 )
 
 // collectTailTransportMonitorRouteEvidence asks only for the few local
@@ -1761,29 +1761,29 @@ func parseTailTransportMonitorRouteEvidence(out string) tailTransportMonitorRout
 		if err != nil {
 			continue
 		}
-		if match := monitorRouterLifetimeZeroPattern.FindStringSubmatch(line); len(match) == 2 {
+		if match := monitorRouterLifetimeExpiredPattern.FindStringSubmatch(line); len(match) == 2 {
 			if evidence.interfaceName == "" {
 				evidence.interfaceName = match[1]
 			}
 			if match[1] == evidence.interfaceName {
-				evidence.routerLifetimeZeroCount++
-				if evidence.routerLifetimeZeroAt.IsZero() || observedAt.Before(evidence.routerLifetimeZeroAt) {
-					evidence.routerLifetimeZeroAt = observedAt
+				evidence.routerLifetimeExpiredCount++
+				if evidence.routerLifetimeExpiredAt.IsZero() || observedAt.Before(evidence.routerLifetimeExpiredAt) {
+					evidence.routerLifetimeExpiredAt = observedAt
 				}
 			}
 			continue
 		}
 		if match := monitorAutoconfDetachedPattern.FindStringSubmatch(line); len(match) == 2 {
 			// A detach on another interface is not causal evidence for this
-			// route withdrawal. The zero-lifetime RTADV chooses the identity.
+			// route loss. The default-router expiry chooses the identity.
 			if evidence.interfaceName != "" && match[1] == evidence.interfaceName {
 				evidence.autoconfDetachCount++
 			}
 			continue
 		}
 		if evidence.interfaceName != "" &&
-			!evidence.routerLifetimeZeroAt.IsZero() &&
-			evidence.routerLifetimeZeroAt.Before(observedAt) &&
+			!evidence.routerLifetimeExpiredAt.IsZero() &&
+			evidence.routerLifetimeExpiredAt.Before(observedAt) &&
 			strings.Contains(line, "network changed:") &&
 			!strings.Contains(line, "v6("+evidence.interfaceName) &&
 			evidence.ipv6AbsentAt.IsZero() {
@@ -1791,8 +1791,8 @@ func parseTailTransportMonitorRouteEvidence(out string) tailTransportMonitorRout
 			continue
 		}
 		if evidence.interfaceName != "" &&
-			!evidence.routerLifetimeZeroAt.IsZero() &&
-			evidence.routerLifetimeZeroAt.Before(observedAt) &&
+			!evidence.routerLifetimeExpiredAt.IsZero() &&
+			evidence.routerLifetimeExpiredAt.Before(observedAt) &&
 			strings.Contains(line, "network changed:") &&
 			strings.Contains(line, "v6("+evidence.interfaceName) &&
 			evidence.ipv6RestoredAt.IsZero() {
@@ -1803,15 +1803,15 @@ func parseTailTransportMonitorRouteEvidence(out string) tailTransportMonitorRout
 }
 
 func (e tailTransportMonitorRouteEvidence) matches(event *tailTransportRouteAggregate) bool {
-	if e.interfaceName == "" || e.routerLifetimeZeroAt.IsZero() || e.ipv6AbsentAt.IsZero() || event == nil {
+	if e.interfaceName == "" || e.routerLifetimeExpiredAt.IsZero() || e.ipv6AbsentAt.IsZero() || event == nil {
 		return false
 	}
 	first, last, ok := tailTransportRouteEventBounds(map[string]*tailTransportRouteAggregate{"event": event})
 	if !ok {
 		return false
 	}
-	return !e.routerLifetimeZeroAt.Before(first.Add(-monitorIPv6RouteCorrelationWindow)) &&
-		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.routerLifetimeZeroAt) &&
+	return !e.routerLifetimeExpiredAt.Before(first.Add(-monitorIPv6RouteCorrelationWindow)) &&
+		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.routerLifetimeExpiredAt) &&
 		!e.ipv6AbsentAt.Before(first.Add(-monitorIPv6RouteCorrelationWindow)) &&
 		!last.Add(monitorIPv6RouteCorrelationWindow).Before(e.ipv6AbsentAt)
 }
@@ -1899,37 +1899,37 @@ func tailTransportRouteFindings(
 		evidence := "The finding is parsed only from warpctl stderr's `Tail read error ... no route to host ... Reconnecting` diagnostic. Stderr is duplicated to the operator console but remains isolated from remote service stdout, so it cannot become a service panic or novel-error alert."
 		contextText := "A later pinned HTTP 200 proves recovery, not absence of the earlier interruption. Check the monitor's own IPv6 default-router/advertisement state first, then compare same-second controls to another configured edge and to an unrelated provider IPv6 prefix before attributing the failure to this edge; two prefixes behind one site router are not independent controls. Preserve disabled-host exclusions."
 		action := "First inspect the monitor host's IPv6 default route and router-advertisement state at the recorded local time. If they remained stable, run the §18.1 exact-address battery: compare active services.yml with the live interface and LB unit, inspect the edge journal, and inspect the upstream router's exact neighbor and interface counters. On recurrence, capture ICMPv6 Router Advertisements locally plus the pinned SYN/ICMPv6 along the remote path. Do not restart services or change an edge address, route, firewall rule, or neighbor entry from this diagnostic alone."
-		verify := "The monitor retains its IPv6 default router without a zero-lifetime advertisement, the exact Vault address equals the live edge interface, three pinned HTTP/1.1 requests return 200, and all standing tails remain free of route-loss diagnostics for ten minutes while both another configured edge and an unrelated provider IPv6 prefix stay available as controls."
+		verify := "The monitor retains its IPv6 default router, the exact Vault address equals the live edge interface, three pinned HTTP/1.1 requests return 200, and all standing tails remain free of route-loss diagnostics for ten minutes while both another configured edge and an unrelated provider IPv6 prefix stay available as controls."
 		if monitorEvidence.matches(event) {
-			zeroAt := monitorEvidence.routerLifetimeZeroAt.Format(monitorIPv6LogTimeLayout)
+			expiredAt := monitorEvidence.routerLifetimeExpiredAt.Format(monitorIPv6LogTimeLayout)
 			absentAt := monitorEvidence.ipv6AbsentAt.Format(monitorIPv6LogTimeLayout)
 			restoredAt := "not observed in the bounded window"
 			if !monitorEvidence.ipv6RestoredAt.IsZero() {
 				restoredAt = monitorEvidence.ipv6RestoredAt.Format(monitorIPv6LogTimeLayout)
 			}
 			mechanism = fmt.Sprintf(
-				"The monitor host recorded a zero-lifetime IPv6 Router Advertisement on %s at %s inside the transport-failure window. A zero lifetime immediately removes that sender from the default-router list; the monitor then detached/deprecated its autoconfigured IPv6 state, so independent warpctl tails lost their common local route while their child processes remained alive. This affirmative local control supersedes edge attribution for this event.",
+				"The monitor host recorded that its IPv6 default-router lifetime on %s reached zero at %s inside the transport-failure window. The monitor then detached/deprecated its autoconfigured IPv6 state, so independent warpctl tails lost their common local route while their child processes remained alive. This proves local default-router expiration and supersedes edge attribution, but the configd record alone does not distinguish an explicit zero-lifetime Router Advertisement from missed or late refresh advertisements.",
 				monitorEvidence.interfaceName,
-				zeroAt,
+				expiredAt,
 			)
 			observed += fmt.Sprintf(
-				" monitor_interface=%s monitor_router_lifetime_zero=%d monitor_autoconf_detach=%d monitor_ipv6_absent=%s monitor_ipv6_restored=%s",
+				" monitor_interface=%s monitor_router_lifetime_expired=%d monitor_autoconf_detach=%d monitor_ipv6_absent=%s monitor_ipv6_restored=%s",
 				monitorEvidence.interfaceName,
-				monitorEvidence.routerLifetimeZeroCount,
+				monitorEvidence.routerLifetimeExpiredCount,
 				monitorEvidence.autoconfDetachCount,
 				absentAt,
 				restoredAt,
 			)
 			evidence += fmt.Sprintf(
-				" The monitor's bounded configd record independently reports router-lifetime zero on %s at %s, loss of that interface's IPv6 network state at %s, and %d autoconfiguration detach/deprecate transition(s).",
+				" The monitor's bounded configd record independently reports that the stored router lifetime reached zero on %s at %s, loss of that interface's IPv6 network state at %s, and %d autoconfiguration detach/deprecate transition(s).",
 				monitorEvidence.interfaceName,
-				zeroAt,
+				expiredAt,
 				absentAt,
 				monitorEvidence.autoconfDetachCount,
 			)
-			contextText = "This event is a monitor-side first-hop Router Advertisement/default-route withdrawal, not evidence that the named production edge, its interface, LB, or LAN neighbor failed. A later edge HTTP 200 is expected after the monitor's IPv6 route returns. The first-hop router or its RA/failover owner is operational infrastructure and cannot be repaired by deploying an edge service."
-			action = "Inspect and repair the monitor's local first-hop IPv6 router/RA source: correlate its uptime, WAN/failover state, and RA daemon at the recorded time, and capture ICMPv6 type 134 on the monitor interface during recurrence. Configure or replace that first hop so it does not advertise a zero default-router lifetime except during an intentional withdrawal. Do not change the named production edge, its Vault address, LB, firewall, or neighbor state for this locally proven event."
-			verify = "For at least 30 minutes, the monitor retains an IPv6 default router with no zero-lifetime RA, an unrelated-provider IPv6 control and configured edges remain reachable in the same seconds, and every standing tail remains free of route-loss diagnostics."
+			contextText = "This event is a monitor-side first-hop Router Advertisement/default-router expiration, not evidence that the named production edge, its interface, LB, or LAN neighbor failed. A later edge HTTP 200 is expected after the monitor's IPv6 route returns. The first-hop router, its RA/failover owner, or the local path carrying its advertisements is operational infrastructure and cannot be repaired by deploying an edge service."
+			action = "Inspect the monitor's local first-hop IPv6 Router Advertisement path: correlate router and RA-daemon uptime, WAN/failover state, and local-link health at the recorded time, then capture timestamped ICMPv6 type 134 traffic on the monitor interface during recurrence. Use the capture to distinguish an explicit zero-lifetime withdrawal from missed or late refresh advertisements, and repair the identified RA source or delivery path. Do not change the named production edge, its Vault address, LB, firewall, or neighbor state for this locally proven event."
+			verify = "For at least 30 minutes, the monitor's stored default-router lifetime is refreshed before expiry, an unrelated-provider IPv6 control and configured edges remain reachable in the same seconds, and every standing tail remains free of route-loss diagnostics."
 		}
 		findings = append(findings, finding{
 			probeId: "monitor/visibility", tier: tierWarn,

@@ -684,10 +684,12 @@ through the alert path. Every other stderr line remains operator-only. A clean
 next cadence emits the same address identity healthy, while §18.1 owns the
 direct interface, public path, router, and same-second IPv6 controls. On the
 macOS monitor host, a route event also triggers one bounded local `configd`
-query for a same-window zero-lifetime Router Advertisement, autoconfiguration
-detach, and IPv6 restoration. Affirmative local evidence changes the action
-owner to the monitor's first hop; an unavailable platform log leaves the
-generic edge/upstream differential intact rather than hiding the event.
+query for a same-window default-router lifetime reaching zero,
+autoconfiguration detach, and IPv6 restoration. This proves local expiration
+but does not say whether an explicit zero-lifetime advertisement arrived or
+refresh advertisements were missed or late. Affirmative local evidence changes
+the action owner to the monitor's first hop; an unavailable platform log leaves
+the generic edge/upstream differential intact rather than hiding the event.
 
 That Grafana startup outage exposed one more feedback loop. `tailOnce` waited
 for the `warpctl` child but discarded its nonzero exit status, so `run`
@@ -5107,7 +5109,7 @@ Tier-1 (warn):
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; observation service is not selector attribution | any |
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe Warpctl summary from a non-empty HTTP tail `dropped_entries` response | any |
-| tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window zero-lifetime Router Advertisement as an affirmative monitor-first-hop discriminator | any |
+| tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window local default-router lifetime expiry and IPv6 loss as an affirmative monitor-first-hop discriminator | any |
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
@@ -9556,34 +9558,42 @@ local), macOS `configd` recorded `RTADV en0: router lifetime became zero`; it
 immediately published a network state without IPv6 and then recorded two
 autoconfigured-address detach/deprecate transitions. An IPv6-bearing network
 state returned at 12:34:40.895Z, matching the external timeout → immediate
-no-route → recovery sequence. RFC 4861 requires a host that receives a Router
-Advertisement with lifetime zero from a listed default router to time that
-router out immediately. There was no contemporaneous Wi-Fi deauthentication,
-disassociation, roam, link-down, link-up, or power-off event. Together with the
-healthy datacenter NDP capture and the simultaneous failure of multiple routed
-prefixes, this proves that recurrence was the monitor host losing its local
-IPv6 default router after a first-hop RA withdrawal—not a production edge
-address, interface, LB, LAN neighbor, or service failure.
+no-route → recovery sequence. There was no contemporaneous Wi-Fi
+deauthentication, disassociation, roam, link-down, link-up, or power-off event.
+Together with the healthy datacenter NDP capture and the simultaneous failure
+of multiple routed prefixes, this proves that recurrence was the monitor host
+losing its local IPv6 default router when its stored lifetime expired—not a
+production edge address, interface, LB, LAN neighbor, or service failure.
 
-The earlier events have the identical precursor. Local zero-lifetime RAs at
-11:52:24.621Z, 11:53:35.584Z, and 11:59:40.537Z each removed `en0` IPv6 before
-the standing tails reported route loss at 11:52:32Z, 11:53:44Z, and
-11:59:49Z, respectively; IPv6 returned after 7.1, 16.9, and 7.4 seconds. Thus
-all four observed route-loss waves belong to the monitor's first hop. The
-collector queries and correlates 15 seconds on either side of the transport
-timestamp so the proven 7–9-second diagnostic lag cannot hide the cause.
+That `configd` message does **not** prove that the first-hop router transmitted
+an explicit Router Advertisement with lifetime zero. The same local expiry can
+occur when ordinary refresh advertisements are missed or arrive too late. The
+binary has a distinct `ignoring RA (lifetime zero)` diagnostic, which was not
+present in the bounded event records. A timestamped ICMPv6 type 134 capture is
+therefore required to distinguish an intentional or erroneous withdrawal from
+RA refresh or local-link loss before selecting the router change.
+
+The earlier events have the identical precursor. Local default-router lifetime
+expirations at 11:52:24.621Z, 11:53:35.584Z, and 11:59:40.537Z each removed
+`en0` IPv6 before the standing tails reported route loss at 11:52:32Z,
+11:53:44Z, and 11:59:49Z, respectively; IPv6 returned after 7.1, 16.9, and 7.4
+seconds. Thus all four observed route-loss waves belong to the monitor's first
+hop. The collector queries and correlates 15 seconds on either side of the
+transport timestamp so the proven 7–9-second diagnostic lag cannot hide the
+cause.
 
 The software signal now queries only that narrow recent local record after a
 tail route event and attaches the affirmative discriminator without copying
 general system-log contents. When present, its alert says not to mutate the
 named edge and instead directs the operator to correlate the local first-hop
-router's uptime, WAN/failover state, and RA daemon, then capture ICMPv6 type 134
-on the monitor interface during recurrence. Configure or replace that router so
-it does not advertise a zero default-router lifetime except during an
-intentional withdrawal, and verify at least 30 minutes with an unrelated IPv6
-control plus every configured edge. This is an operational/network-appliance
-repair; deploying API, Connect, Proxy, Warpctl, or another edge service cannot
-fix it.
+router's uptime, WAN/failover state, RA daemon, and local-link health, then
+capture timestamped ICMPv6 type 134 traffic on the monitor interface during
+recurrence. Repair the RA source if the capture shows an explicit withdrawal;
+repair RA cadence or delivery if refreshes are absent or late. Verify at least
+30 minutes with the stored router lifetime refreshing before expiry, an
+unrelated IPv6 control, and every configured edge. This is an
+operational/network-appliance repair; deploying API, Connect, Proxy, Warpctl,
+or another edge service cannot fix it.
 
 ## 19. Web platform association metadata
 
