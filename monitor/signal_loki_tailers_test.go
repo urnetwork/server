@@ -61,11 +61,12 @@ func TestLokiTailersSignalHealthySyntheticFleet(t *testing.T) {
 
 func TestLokiTailersSignalSyntheticNegativeAccounting(t *testing.T) {
 	alerts := runLokiTailersSynthetic(t, map[string]string{
+		"edge-0": lokiTailFixture("3.7.3", 1788162008, 0, -1),
 		"edge-1": lokiTailFixture("3.7.3", 1788162011, -16, -16),
 		"edge-4": lokiTailFixture("3.7.3", 1788162014, -16, -20),
 	})
-	if len(alerts) != 2 {
-		t.Fatalf("negative Loki gauges produced %d alerts, want 2: %+v", len(alerts), alerts)
+	if len(alerts) != 3 {
+		t.Fatalf("negative Loki gauges produced %d alerts, want 3: %+v", len(alerts), alerts)
 	}
 	for _, alert := range alerts {
 		if alert.Class != "loki-tail-accounting-invalid" || alert.Sustain != 1 ||
@@ -75,6 +76,10 @@ func TestLokiTailersSignalSyntheticNegativeAccounting(t *testing.T) {
 		markdown := alert.Markdown()
 		for _, want := range []string{
 			"tail_max_duration", "deferred close", "not idempotent",
+			"sole v163 watcher", "23:50:39Z", "00:51:27Z", "tails=-8 and streams=-9",
+			"sole v164 watcher", "unchanged Loki process", "0/-1",
+			"active tails can numerically mask earlier over-decrements",
+			"Zero is not sufficient when the sibling gauge remains negative",
 			"instrumentation invariant violation", "sync.Once", "ba01c98", "two one-hour rotations",
 		} {
 			if !strings.Contains(markdown, want) {
@@ -82,8 +87,14 @@ func TestLokiTailersSignalSyntheticNegativeAccounting(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(alerts[1].Observed, "streams_active=-20") &&
-		!strings.Contains(alerts[0].Observed, "streams_active=-20") {
+	observed := ""
+	for _, alert := range alerts {
+		observed += "\n" + alert.Observed
+	}
+	if !strings.Contains(observed, "tails_active=0 streams_active=-1") {
+		t.Fatalf("masked active-tail underflow was lost: %+v", alerts)
+	}
+	if !strings.Contains(observed, "streams_active=-20") {
 		t.Fatalf("production-shaped stream underflow was lost: %+v", alerts)
 	}
 }

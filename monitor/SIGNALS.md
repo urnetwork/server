@@ -6129,6 +6129,19 @@ two-monitor overlap doubled Loki fan-out. The positive `8/8` process did
 independently match one standing tail for each of the monitor's eight service
 selectors after the predecessor exited.
 
+The sole v163 watcher then supplied a clean one-hour lifecycle control. It
+started at `23:50:39Z` with exactly eight service tails and no collector
+overlap. Edge-0 first became invalid at `00:51:27Z`, immediately after
+`tail_max_duration`, on the same Loki process (`process_start=1788162008`):
+`tails_active=-8 streams_active=-9`. Eight real tails decremented twice explain
+the exact active-tail value: `+8 - 16 = -8`. After v163 exited, the sole v164
+watcher attached its eight service tails to that unchanged process; by
+`01:00:12Z` the pair was `0/-1`, an exact `+8/+8` transition. New live tails
+therefore masked eight prior over-decrements in the first gauge while the
+sibling gauge still exposed the underlying residue. This rules out a scrape
+parser, process restart, or fleet-sum artifact and shows why zero in one gauge
+cannot repair or validate the other.
+
 The root cause is deterministic in Loki 3.7.3 (`82cdcdc0`). `newTailer`
 increments both accounting families for a new tail. The loop calls
 `Tailer.close()` when the configured one-hour `tail_max_duration` expires or
