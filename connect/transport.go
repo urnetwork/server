@@ -237,9 +237,10 @@ const AllowOnlyIpv4 = false
 
 const (
 	// Drain more ACK-sized messages without retaining a larger socket buffer.
-	// Payload traffic stops after 12 KiB, so one complete next <=4-KiB H1
-	// message cannot push the existing 16-KiB coalescer past its bound. The
-	// drain is ready-only: sparse traffic still writes immediately.
+	// Payload traffic stops after 12 KiB, so one complete ordinary <=4-KiB H1
+	// data message fits the existing 16-KiB coalescer. A larger handshake
+	// carrier may make the bounded wrapper flush its prefix before the batch
+	// ends. The drain is ready-only: sparse traffic still writes immediately.
 	connectH1WriteBatchMaxMessageCount = 32
 	connectH1WriteBatchDrainByteCount  = 12 * 1024
 	connectH3WriteBatchMaxMessageCount = 16
@@ -450,8 +451,8 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		ListenerRestartMaxDelay:     5 * time.Second,
 		EnableProxyProtocol:         true,
 		// Floor the framer at the connect runtime minimum message length: every
-		// framer on the resident exchange flow must admit the handshake's TLS
-		// server flight (one ~2.2 KiB pack). Also backs the websocket read limit.
+		// framer on the resident exchange flow must admit the measured 4,950-byte
+		// handshake carrier. Also backs the websocket read limit.
 		FramerSettings:       connect.DefaultFramerSettings(int(connect.DefaultClientSettings().MinimumMessageLenLimit())),
 		TransportTlsSettings: server.DefaultTransportTlsSettings(),
 		EnableH3Datagrams:    true,

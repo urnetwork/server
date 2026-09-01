@@ -1406,10 +1406,10 @@ func testConnect(
 	}
 
 	// The handshake's TLS server flight is one `EncryptedControl{Handshake}`
-	// Pack, ~2 KiB protobuf-wrapped. A framer with `MaxMessageLen` below that
-	// closes the transport mid-handshake, and SendSequence's resend of the
-	// oversized pack deadlocks. Floor every framer cap at
-	// `ClientSettings.MinimumMessageLenLimit()` (worst-case derivation there).
+	// carrier, measured at up to 4,950 bytes with the current sender. A framer
+	// with `MaxMessageLen` below that closes the transport mid-handshake, and
+	// SendSequence's resend of the oversized carrier deadlocks. Floor every cap at
+	// `ClientSettings.MinimumMessageLenLimit()` (measured safety bound there).
 	framerMaxMessageLen := max(
 		2*int(messageContentSizes[len(messageContentSizes)-1]),
 		int(connect.DefaultClientSettings().MinimumMessageLenLimit()),

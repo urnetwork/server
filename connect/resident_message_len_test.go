@@ -12,13 +12,14 @@ import (
 // `MinimumMessageLenLimit()`-byte message passes through the resident
 // exchange's framing layer built from default settings.
 //
-// `MinimumMessageLenLimit()` is the worst-case single-pack wire size of the
-// per-peer encryption handshake's TLS server flight, which every framer along
-// the resident exchange flow must admit. This guards `DefaultConnectHandlerSettings`
-// passing it as the framer max. `DefaultFramerSettings` has no global default,
-// so each context sets its own cap; too small a cap would reject the handshake
-// pack here ("Max message len exceeded"), `SendSequence` would retransmit it
-// forever, and the per-peer session would deadlock.
+// `MinimumMessageLenLimit()` is the bounded admission floor for the per-peer
+// encryption handshake's measured TLS server-flight carrier, which every
+// framer along the resident exchange flow must admit. This guards
+// `DefaultConnectHandlerSettings` passing it as the framer max.
+// `DefaultFramerSettings` has no global default, so each context sets its own
+// cap; too small a cap would reject the handshake carrier here ("Max message
+// len exceeded"), `SendSequence` would retransmit it forever, and the per-peer
+// session would deadlock.
 //
 // `ExchangeSettings` embeds `ConnectHandlerSettings`, so its `FramerSettings`
 // is the same object backing the connect-handler framer and the websocket
@@ -27,6 +28,18 @@ func TestResidentAdmitsMinimumMessageLenLimit(t *testing.T) {
 	settings := DefaultExchangeSettings()
 
 	minLen := int(connect.DefaultClientSettings().MinimumMessageLenLimit())
+	const observedRuntimeHandshakeCarrierByteCount = 4950
+
+	// Preserve the integrated producer regression independently of the shared
+	// minimum. A smaller shared value would otherwise make this test round-trip
+	// that same smaller value and miss the original resident rejection.
+	if settings.FramerSettings.MaxMessageLen < observedRuntimeHandshakeCarrierByteCount {
+		t.Fatalf(
+			"resident exchange framer MaxMessageLen %d < observed runtime handshake carrier %d",
+			settings.FramerSettings.MaxMessageLen,
+			observedRuntimeHandshakeCarrierByteCount,
+		)
+	}
 
 	// Invariant: the resident exchange framer cap admits the connect runtime
 	// minimum message length.
