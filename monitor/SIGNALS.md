@@ -4341,6 +4341,26 @@ of the irreducible commit/post ordering window and keeps the quiet-interval
 observation open; it is not a reason to redeploy the already-present access
 path or clamp fixes.
 
+A second independent control at `23:58:27.918855Z` reproduced that contained
+shape. One taskworker settlement reported `clamped_to=0`; API and Connect
+reported zero negative-counter lines in the same 30-minute window. The
+matching pass completed in roughly 12 seconds and corrected only 196.8MiB
+over-reserved plus 1.15GiB under-reserved across 22 networks. Its successor
+completed in roughly 19 seconds and corrected 1.53GiB over-reserved plus
+196.8MiB under-reserved across 36 networks. Across that successor,
+`pg_stat_statements` added 183 unsettled-partial reservation calls, zero legacy
+`ANY` calls, and about 26.0ms of reservation-query time per page. The apparent
+balance-count jump from roughly 915,000 to 1.82 million was the UTC month
+boundary, not a duplicate walk: 906,710 durable balances became active since
+the UTC day boundary. This combination independently verifies the deployed
+access path and atomic clamp. The next scheduled pass reported after roughly
+20 seconds with 1,821,933 balances, 31 drifted networks, 501.24MiB
+over-reserved, and 475.62MiB under-reserved; taskworker, API, and Connect all
+remained free of negative-counter lines for that full following interval. This
+closes the residual observation without a taskworker redeploy or manual Redis
+mutation. Only recurring matched reversals on fast pages justify durable
+per-balance fencing/versioning.
+
 An independent live-writer variant appeared during the same observation
 window: API emitted 15–18 `[redis][ttl]` lines/minute for `EXPIREAT` on
 `{escrow_<id>}net`, with roughly 36,306 days remaining. PostgreSQL showed this
