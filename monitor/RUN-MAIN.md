@@ -113,6 +113,17 @@ go build -o /tmp/urnetwork-monitor-preflight ./cli/monitor
 Treat a failing preflight as a monitor/repository problem to diagnose, not as a
 production alert.
 
+Before any service release build, run the registered `release-builder` signal
+against the intended environment. Treat either `warpctl-provenance-invalid` or
+`warpctl-release-guard-missing` as a hard release stop: the exact local
+`warpctl` resolved for the build and every installed managed-host copy must
+have one clean embedded revision and all three §8.13 fail-closed guards. A
+desired version label, a clean checkout beside another executable, or a clean
+older launcher is not equivalent evidence. Replace the listed executable with
+a clean Warp `217392e` descendant, repeat the signal, and only then build a new
+service artifact. Rebuild dirty or unattributable artifacts; do not retag or
+reuse them.
+
 ## One-shot diagnostic snapshot
 
 Use one-shot mode for an initial inventory, a focused before/after snapshot, or
@@ -362,13 +373,15 @@ artifact construction.
 Report the exact service(s) and repository commit(s) that must be built. Do not
 claim a fix is deployed from a human version label alone. Prove:
 
-1. the built source contains the required commit by ancestry or immutable
+1. the release-builder gate was healthy for the exact `warpctl` that performed
+   the build;
+2. the built source contains the required commit by ancestry or immutable
    source metadata;
-2. every relevant running unit/container uses that artifact;
-3. process start time is after the actual rollout/config/migration boundary;
-4. prerequisite migrations, resident worker restarts, router changes, or
+3. every relevant running unit/container uses that artifact;
+4. process start time is after the actual rollout/config/migration boundary;
+5. prerequisite migrations, resident worker restarts, router changes, or
    capacity changes are complete; and
-5. the monitor's full signal-specific verification window begins after the
+6. the monitor's full signal-specific verification window begins after the
    last relevant target converges.
 
 Re-run the direct discriminator as well as the monitor signal. Require the

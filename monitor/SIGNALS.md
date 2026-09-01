@@ -109,6 +109,9 @@ Updated 2026-09-01 after the public stats dashboard exposed matching multi-hour
 holes in live throughput, connected devices, provider counts, and network
 counts. Section 11.20 adds the `mimir-continuity` raw-range control and records
 the lost ephemeral TSDB head root cause plus the clean-shutdown flush fix.
+The same production pass traced dirty, unattributable service executables back
+to older Warpctl copies that predate the fail-closed release builder. Section
+8.13 adds the `release-builder` exact-binary provenance and guard probe.
 
 Intended consumer: a monitoring service with read access to pg (primary),
 redis (cluster, all nodes individually), and service logs. Each signal below
@@ -5176,6 +5179,7 @@ Tier-1 (warn):
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
 | migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every published schema artifact | page when any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
+| warpctl-provenance-invalid / warpctl-release-guard-missing | local + managed-host executables | §8.13 exact Warpctl Go provenance plus three fail-closed release gates | any dirty/malformed executable or missing guard; immediate |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
@@ -5871,6 +5875,66 @@ that digest. SIGNALS.md §8.12 (`provenance`) maps to
 clean mixed-service fleet, draining-generation suppression, missing and stale
 source families, a fresh RSS identity without process start, dirty/malformed
 provenance, and a conflicting digest.
+
+### 8.13 Warpctl release-builder provenance and fail-closed guards
+
+Probe: `release-builder`
+
+Section 8.12 detects an unverifiable artifact after it is running. The release
+control must also identify the executable capable of creating the next one.
+Every five minutes, inspect the exact `warpctl` resolved on the monitor/release
+host and `/usr/local/sbin/warpctl` on each enabled managed-services host. Scan
+the Go build settings directly from that executable with bounded binary-safe
+`grep` patterns; do not depend on optional binutils packages or infer them from
+a checkout, desired tag, install timestamp, or a different Warpctl copy.
+Disabled inventory hosts are never contacted.
+
+Emit `warpctl-provenance-invalid` if the embedded revision is not one full
+40- or 64-hex Git object ID, or `vcs.modified` is anything except `false`.
+Emit `warpctl-release-guard-missing` unless the executable contains all three
+independent gates introduced by Warp `217392e`:
+
+- reject a dirty source tree before compilation;
+- reject a built Linux binary whose embedded source is dirty or differs from
+  the clean starting revision; and
+- recheck the same clean source before image publication, catching changes
+  during a long build.
+
+One clean bit is not a substitute for another. A clean older Warpctl can still
+publish a dirty service binary, and checking only the Docker/BuildKit context
+does not identify a Go binary compiled outside that context. Guard presence is
+tested from guard-specific error strings in the exact executable; the Warp
+unit regressions test the behavior that owns those strings.
+
+The 2026-09-01 production discriminator joined all three boundaries. Running
+Taskworker image digest
+`sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a`
+and Proxy image digest
+`sha256:1ec9a150c148f0aa32fafc636241c5e7561a645546c31f4a0dab54ee4c35683c`
+both contained executables with base revision `078d6c11` and
+`vcs.modified=true`, even though their mutable version was
+`2026.8.31+1034210530`. The revision was not available in the current server
+repository. Edge-0's exact installed Warpctl was instead a clean
+`42168fe8` executable, but it predated and lacked every `217392e` release
+guard. The workstation Warpctl resolved by the monitor was older still and
+reported `vcs.modified=true`. Thus neither the tag, the later image context,
+nor a clean launcher proved the service executable's source.
+
+This is a software deployment and release-operations gate, never a hardware
+alert. Stop new release builds through any listed executable. Install a clean
+Warpctl containing `217392e` or a clean descendant on the release host and all
+enabled managed-services hosts. Preserve §8.11 worker freshness when replacing
+host launchers. Rebuild affected service images from clean source; do not retag
+or reuse the dirty artifacts. Verification requires every exact Warpctl path to
+report one clean revision and all three guards, a synthetic dirty build to fail
+before publication, and the next service's source metric to match its extracted
+running executable and image digest for two scrapes.
+
+SIGNALS.md §8.13 (`release-builder`) maps to
+`signal_release_builder.go` and `signal_release_builder_test.go`. Synthetic
+coverage pins a clean fleet, a dirty local builder, independently missing
+guards, partial host observation loss, services-role scoping, and parsing of
+the actual executable-string shape.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 

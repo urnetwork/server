@@ -77,6 +77,7 @@ func NewSignals() []Signal {
 		NewReliabilityIndexSignal(),
 		NewRolloutGuardSignal(),
 		NewProvenanceSignal(),
+		NewReleaseBuilderSignal(),
 		NewRedisKeyEventsSignal(),
 		NewStuckLeasesSignal(),
 		NewTaskConvergenceSignal(),
