@@ -430,9 +430,9 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 			baseline:  fmt.Sprintf("A warp node reaches within %d blocks of the public/reference head after bootstrap", warpMaxLag),
 			observed:  fmt.Sprintf("sync_mode=%s current_head=%d target_head=%d lag=%d peers=%d is_syncing=%t", configured.SyncMode, secondHead, targetHead, lag, node.Direct.Health.Peers, node.Direct.Health.IsSyncing),
 			evidence:  "Confirm in privileged container startup logs: Can't use warp sync mode with a partially synced database / Warp sync failed. Continuing with full sync.",
-			context:   "This is an operational storage/deployment repair. Reusing the same partial path reproduces the failure; deleting it destroys recoverable state.",
-			action:    "Deploy the lightnode with a new empty generation-specific base path while preserving the old path, and require startup logs plus near-head convergence before cutover.",
-			verify:    "Require no cold-start warp fallback, a near-current head, nonzero peers, current runtime identity, and successful gateway RPC.",
+			context:   "This is an operational storage/deployment repair. Reusing the same partial path reproduces the failure; deleting it destroys recoverable state. The configured argv is not proof of the live mount, and the full Subtensor playbook also owns networking and the archive bootstrap.",
+			action:    "After explicit operational authorization, run xops/main/ansible/run-subtensor-lightnode.sh from a clean xops descendant containing 0b1373b. Its isolated playbook must refuse a nonempty inactive generation, preserve old paths, recreate only subtensor-lightnode, and fail on the startup fallback line. Do not run the full run-subtensor.sh merely to change this generation while archive progress must remain uninterrupted.",
+			verify:    "Require the live /data mount to equal the configured new generation, a post-rollout lightnode identity, unchanged archive container ID/start time, no cold-start warp fallback, a near-current head, nonzero peers, current runtime identity, and successful gateway RPC.",
 			playbook:  "SIGNALS.md §17.2",
 		})
 	} else if lag > 128 || node.Direct.Health.IsSyncing {

@@ -55,8 +55,14 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	if lightnode.Sustain != 15 {
 		t.Fatalf("lightnode fallback sustain = %d", lightnode.Sustain)
 	}
-	if !strings.Contains(lightnode.Action, "new empty generation-specific base path") {
+	if !strings.Contains(lightnode.Action, "run-subtensor-lightnode.sh") ||
+		!strings.Contains(lightnode.Action, "recreate only subtensor-lightnode") ||
+		!strings.Contains(lightnode.Action, "Do not run the full run-subtensor.sh") {
 		t.Fatalf("lightnode action is not root-cause specific: %s", lightnode.Action)
+	}
+	if !strings.Contains(lightnode.Verify, "unchanged archive container ID/start time") ||
+		!strings.Contains(lightnode.Verify, "live /data mount") {
+		t.Fatalf("lightnode verification does not preserve the archive boundary: %s", lightnode.Verify)
 	}
 }
 

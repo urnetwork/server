@@ -10101,6 +10101,31 @@ both nodes exposed large, rising incoming-connection counters. Continue to
 alert on zero peers or frozen heads because public TCP reachability alone does
 not prove a retained peer session.
 
+A fresh direct control at 18:53:14Z separated the two bootstrap paths again.
+The archive was at block 6,382,733 of 7,912,210 with seven peers and had reduced
+its lag by about 301 blocks in the preceding two minutes. The lightnode was at
+6,349,148 with nine peers but remained 1,563,062 blocks behind. A privileged,
+read-only inspection then proved the lightnode container had started at
+2026-08-29T02:42:05Z with the pinned image and `--sync=warp`, but its live
+`/data` mount was still `/data/subtensor-lightnode`. The current xops config
+already selected the fresh `/data/subtensor-lightnode-warp-v2` path. The
+millions-behind value therefore represents the still-running failed v1
+generation; the prepared v2 repair had not been deployed. This is direct
+runtime evidence and does not rely on argv or a stale preflight file.
+
+The ordinary `run-subtensor.sh` path also owns netplan, packages, nginx,
+Fluent Bit, and the archive container, so it is not an acceptable way to
+change only this lightnode while the archive's multi-day bootstrap must remain
+uninterrupted. Xops commit `0b1373b` adds
+`main/ansible/run-subtensor-lightnode.sh`: it verifies the exact remote host,
+refuses a nonempty inactive generation twice before activation, preserves the
+old database, runs Compose for only `subtensor-lightnode`, fails immediately on
+the warp-to-full startup discriminator, and asserts the archive container ID
+and start time remain unchanged through the near-head/runtime/gateway gates.
+This tested fix is not deployed. Running it is an explicit operational
+mutation; continue observing both nodes until the operator authorizes it, then
+start the lightnode verification window at the new container start time.
+
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
 ### 18.1 Exact-address HTTPS and upstream identity
