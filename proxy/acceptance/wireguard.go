@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -183,6 +184,18 @@ type wireGuardOuterPacketStats struct {
 	// peer identity.
 	SendMessageTypes    [5]uint64
 	ReceiveMessageTypes [5]uint64
+	EventSequence       uint64
+	RecentEvents        [wireGuardOuterPacketEventCount]wireGuardOuterPacketEvent
+}
+
+const wireGuardOuterPacketEventCount = 16
+
+type wireGuardOuterPacketEvent struct {
+	Sequence    uint64
+	Nanos       int64
+	Bytes       int
+	MessageType uint8
+	Inbound     bool
 }
 
 type wireGuardTrackingBind struct {
@@ -205,14 +218,23 @@ func (b *wireGuardTrackingBind) Open(bindIPv4 string, bindIPv6 string, port uint
 		receive := receive
 		tracked[i] = func(packets [][]byte, sizes []int, endpoints []conn.Endpoint) (int, error) {
 			n, receiveErr := receive(packets, sizes, endpoints)
+			now := time.Now().UnixNano()
 			packetCount := 0
 			byteCount := 0
 			messageTypes := [5]uint64{}
+			events := make([]wireGuardOuterPacketEvent, 0, min(max(0, n), len(sizes)))
 			for i, size := range sizes[:min(max(0, n), len(sizes))] {
 				if 0 < size {
 					packetCount++
 					byteCount += size
-					messageTypes[wireGuardOuterMessageType(packets[i], size)]++
+					messageType := wireGuardOuterMessageType(packets[i], size)
+					messageTypes[messageType]++
+					events = append(events, wireGuardOuterPacketEvent{
+						Nanos:       now,
+						Bytes:       size,
+						MessageType: uint8(messageType),
+						Inbound:     true,
+					})
 				}
 			}
 			b.statsLock.Lock()
@@ -222,10 +244,13 @@ func (b *wireGuardTrackingBind) Open(bindIPv4 string, bindIPv6 string, port uint
 				b.stats.ReceiveMessageTypes[messageType] += count
 			}
 			if 0 < packetCount {
-				b.stats.LastReceiveNanos = time.Now().UnixNano()
+				b.stats.LastReceiveNanos = now
 			}
 			if receiveErr != nil && !errors.Is(receiveErr, net.ErrClosed) {
 				b.stats.ReceiveErrors++
+			}
+			for _, event := range events {
+				b.recordEventWithLock(event)
 			}
 			b.statsLock.Unlock()
 			return n, receiveErr
@@ -237,9 +262,15 @@ func (b *wireGuardTrackingBind) Open(bindIPv4 string, bindIPv6 string, port uint
 func (b *wireGuardTrackingBind) Send(packets [][]byte, endpoint conn.Endpoint) error {
 	byteCount := 0
 	messageTypes := [5]uint64{}
+	events := make([]wireGuardOuterPacketEvent, 0, len(packets))
 	for _, packet := range packets {
 		byteCount += len(packet)
-		messageTypes[wireGuardOuterMessageType(packet, len(packet))]++
+		messageType := wireGuardOuterMessageType(packet, len(packet))
+		messageTypes[messageType]++
+		events = append(events, wireGuardOuterPacketEvent{
+			Bytes:       len(packet),
+			MessageType: uint8(messageType),
+		})
 	}
 	err := b.Bind.Send(packets, endpoint)
 	now := time.Now().UnixNano()
@@ -255,11 +286,24 @@ func (b *wireGuardTrackingBind) Send(packets [][]byte, endpoint conn.Endpoint) e
 		if 0 < len(packets) {
 			b.stats.LastSendNanos = now
 		}
+		for _, event := range events {
+			event.Nanos = now
+			b.recordEventWithLock(event)
+		}
 	} else {
 		b.stats.SendErrors++
 	}
 	b.statsLock.Unlock()
 	return err
+}
+
+// recordEventWithLock retains only public WireGuard envelope metadata. The
+// fixed ring prevents a long soak from growing memory and deliberately omits
+// endpoints, peer keys, and packet contents.
+func (b *wireGuardTrackingBind) recordEventWithLock(event wireGuardOuterPacketEvent) {
+	b.stats.EventSequence++
+	event.Sequence = b.stats.EventSequence
+	b.stats.RecentEvents[(event.Sequence-1)%uint64(len(b.stats.RecentEvents))] = event
 }
 
 func wireGuardOuterMessageType(packet []byte, size int) int {
@@ -578,7 +622,8 @@ func wireGuardOuterPacketStatsDelta(before, after wireGuardOuterPacketStats, now
 		return now.Sub(time.Unix(0, nanos)).Round(time.Millisecond).String() + " ago"
 	}
 	return fmt.Sprintf(
-		"out{attempt=%d/%dB sent=%d/%dB errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s} in{packets=%d bytes=%d errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s}",
+		"recent=[%s] out{attempt=%d/%dB sent=%d/%dB errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s} in{packets=%d bytes=%d errors=%d types=%d/%d/%d/%d/%d(init/response/cookie/data/unknown) last=%s}",
+		formatWireGuardOuterEvents(before, after),
 		delta.SendAttemptPackets,
 		delta.SendAttemptBytes,
 		delta.SendPackets,
@@ -600,6 +645,55 @@ func wireGuardOuterPacketStatsDelta(before, after wireGuardOuterPacketStats, now
 		delta.ReceiveMessageTypes[0],
 		lastAge(delta.LastReceiveNanos),
 	)
+}
+
+func formatWireGuardOuterEvents(before, after wireGuardOuterPacketStats) string {
+	events := make([]wireGuardOuterPacketEvent, 0, len(after.RecentEvents))
+	for _, event := range after.RecentEvents {
+		if before.EventSequence < event.Sequence && event.Sequence <= after.EventSequence {
+			events = append(events, event)
+		}
+	}
+	sort.Slice(events, func(i int, j int) bool {
+		return events[i].Sequence < events[j].Sequence
+	})
+	if len(events) == 0 {
+		return "none"
+	}
+	start := time.Unix(0, events[0].Nanos)
+	parts := make([]string, 0, len(events))
+	for _, event := range events {
+		direction := "out"
+		if event.Inbound {
+			direction = "in"
+		}
+		parts = append(parts, fmt.Sprintf(
+			"+%s:%s:%s/%dB",
+			time.Unix(0, event.Nanos).Sub(start).Round(time.Millisecond),
+			direction,
+			wireGuardOuterMessageTypeName(int(event.MessageType), event.Bytes),
+			event.Bytes,
+		))
+	}
+	return strings.Join(parts, ",")
+}
+
+func wireGuardOuterMessageTypeName(messageType int, bytes int) string {
+	if messageType == 4 && bytes == 32 {
+		return "keepalive"
+	}
+	switch messageType {
+	case 1:
+		return "init"
+	case 2:
+		return "response"
+	case 3:
+		return "cookie"
+	case 4:
+		return "data"
+	default:
+		return "unknown"
+	}
 }
 
 func wireGuardPacketStatsDelta(before, after wireGuardPacketStats, now time.Time) string {

@@ -23,6 +23,7 @@ func TestHostedDeviceStateUsesProviderAliases(t *testing.T) {
 		Warning:                         true,
 		WarningCause:                    "starved",
 		Proven:                          true,
+		ProviderDiagnosticsAvailable:    true,
 		ProviderBlockIngressPacketCount: 7,
 		ProviderBlockEgressPacketCount:  3,
 		ProviderDiagnosticsSequence:     9,
@@ -52,6 +53,7 @@ func TestHostedDeviceStateUsesProviderAliases(t *testing.T) {
 	for _, expected := range []string{
 		"65.49.70.82->p1(1)",
 		"p1(flow=1 dial=0 tier=0/1 warn=true",
+		"diag=true",
 		"blocks=7/3 seq=9 build=2026.8.29_test",
 		"flows=3",
 		"dial=1 reraced=1",
@@ -115,7 +117,7 @@ func TestHostedDeviceTrackerRetainsRecentTransitions(t *testing.T) {
 		t.Fatalf("history did not evict its oldest transitions: %s", first)
 	}
 	diagnostic := tracker.Diagnostic()
-	if diagnostic != "events=[none] state={05:01:09.000Z state=69}" {
+	if diagnostic != "route={none} events=[none] state={05:01:09.000Z state=69}" {
 		t.Fatalf("diagnostic = %q, want latest transition", diagnostic)
 	}
 	tracker.stateLock.Lock()
@@ -123,6 +125,31 @@ func TestHostedDeviceTrackerRetainsRecentTransitions(t *testing.T) {
 	tracker.stateLock.Unlock()
 	if lastHistorySize != hostedDeviceHistorySize {
 		t.Fatalf("an unchanged poll was recorded twice: history length = %d", lastHistorySize)
+	}
+}
+
+// Packet totals advance every second during both healthy traffic and a return
+// stall. They must not evict the last target/provider join before a 30-second
+// request timeout is formatted and the flow has already been cancelled.
+func TestHostedDeviceTrackerRetainsLiveRouteAcrossPacketChurnAndFlowRemoval(t *testing.T) {
+	tracker := &sdkHostedDeviceTracker{}
+	start := time.Date(2026, 9, 1, 8, 31, 18, 0, time.UTC)
+	live := "remote=connected packets={out=1/100B in=1/100B} destinations=[65.49.70.83->p7(1)] active=[p7(flow=1)]"
+	tracker.recordLiveRoute(start, live)
+	tracker.record(start, live)
+	for i := 1; i <= hostedDeviceHistorySize+20; i++ {
+		empty := fmt.Sprintf(
+			"remote=connected packets={out=%d/%dB in=1/100B} destinations=[] active=[]",
+			i+1,
+			(i+1)*100,
+		)
+		tracker.recordLiveRoute(start.Add(time.Duration(i)*time.Second), empty)
+		tracker.record(start.Add(time.Duration(i)*time.Second), empty)
+	}
+
+	diagnostic := tracker.Diagnostic()
+	if !strings.Contains(diagnostic, "route={08:31:18.000Z 65.49.70.83->p7(1)}") {
+		t.Fatalf("packet churn or flow removal erased the last live route: %s", diagnostic)
 	}
 }
 

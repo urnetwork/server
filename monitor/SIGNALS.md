@@ -7581,12 +7581,16 @@ certificate bytes.
 whose inner packet trace ends at outbound TCP retransmits still leaves two
 materially different failure regions: the client may receive no encrypted UDP
 return at all, or encrypted WireGuard packets may arrive but fail to produce
-the expected inner packet. The acceptance client's WireGuard bind therefore
-records aggregate outer send-attempt, successful-send, receive, byte, error,
+the expected inner packet. Aggregate transport-data counts alone do not resolve
+that boundary: an established peer sends empty authenticated transport packets
+as 32-byte keepalives, so a later inbound count can rise without carrying any
+return payload. The acceptance client's WireGuard bind therefore records both
+aggregate outer send-attempt, successful-send, receive, byte, error,
 last-activity, and public message-type counts (handshake initiation/response,
-cookie, and transport data). It deliberately retains no endpoint, key, payload,
-or customer identity. Snapshot these counters with the inner trace for the same
-request:
+cookie, and transport data), plus a fixed 16-event ring of direction, relative
+time, envelope type, and encrypted datagram size. It deliberately retains no
+endpoint, key, payload, packet contents, or customer identity. Snapshot these
+counters and recent sizes with the inner trace for the same request:
 
 - a local send error or attempted/successful-send mismatch is below the public
   path and must be repaired before blaming the server;
@@ -7594,10 +7598,12 @@ request:
   before client-side decryption/TUN delivery, but still require server socket,
   LB/DNAT, provider/origin, and return-path evidence to distinguish which side
   produced no reply;
-- new outer transport-data receive packets with no corresponding inner receive
-  packet prove encrypted ingress reached the client but move the failed
-  request into WireGuard peer/decryption/AllowedIP processing only when the
-  exact interval and healthy control rule out handshake/keepalive traffic; and
+- only inbound 32-byte transport events after inner receive stopped are empty
+  keepalives, not proof that the missing response reached the client;
+- larger outer transport-data receive packets with no corresponding inner
+  receive packet prove encrypted payload ingress reached the client and move
+  the failed request into WireGuard peer/decryption/AllowedIP processing when
+  the exact interval and healthy control rule out unrelated traffic; and
 - corresponding inner receive packets move the loss above decryption into the
   inner TCP/TUN/application path.
 
@@ -7608,9 +7614,11 @@ root cause from a zero count alone, expose endpoints or keys, disable
 authentication, or present this instrumentation as a fix. Join it to the exact
 request time, selected block, server/LB evidence, and a healthy control.
 `TestWireGuardTransportFailureReportsOuterUDPBoundary` reproduces the tracked
-send, receive, message-type, and wrapped-error evidence. Server commit
-`b5624057` makes this boundary available in the acceptance binary; it does not
-require or substitute for a Proxy service deployment.
+send, receive, message-type, and wrapped-error evidence.
+`TestWireGuardOuterTraceDistinguishesKeepaliveFromReturnDataAndStaysBounded`
+pins the 32-byte keepalive discriminator, larger encrypted-data event, privacy
+boundary, and fixed ring capacity. This client-side boundary does not require
+or substitute for a Proxy service deployment.
 
 ### 14.7 Proxy host rollout memory and UDP starvation
 Probe: `proxy-memory`

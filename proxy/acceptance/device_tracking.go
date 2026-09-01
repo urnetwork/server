@@ -42,6 +42,7 @@ type sdkHostedDeviceTracker struct {
 	history       []string
 	causalHistory []string
 	lastSignature string
+	lastLiveRoute string
 	closeOnce     sync.Once
 	packetState   hostedDevicePacketState
 	lastMetrics   sdk.ReliabilityMetrics
@@ -150,6 +151,7 @@ func (self *sdkHostedDeviceTracker) snapshot() string {
 		self.remote.GetDestinationExits(),
 		self.aliases,
 	)
+	self.recordLiveRoute(now, snapshot)
 	self.recordReliability(now, metrics)
 	self.recordExitTransitions(now, exits)
 	return snapshot
@@ -287,7 +289,7 @@ func formatHostedDeviceState(
 			activeExits = append(activeExits, activeExitSummary{
 				flowCount: exit.FlowCount,
 				value: fmt.Sprintf(
-					"%s(flow=%d dial=%d tier=%d/%d warn=%t quarantine=%t done=%t cause=%s proven=%t blocks=%d/%d seq=%d build=%s)",
+					"%s(flow=%d dial=%d tier=%d/%d warn=%t quarantine=%t done=%t cause=%s proven=%t diag=%t blocks=%d/%d seq=%d build=%s)",
 					providerAlias(exit.ClientId),
 					exit.FlowCount,
 					exit.DialFailureCount,
@@ -298,6 +300,7 @@ func formatHostedDeviceState(
 					exit.Done,
 					compactDiagnosticToken(exit.WarningCause),
 					exit.Proven,
+					exit.ProviderDiagnosticsAvailable,
 					exit.ProviderBlockIngressPacketCount,
 					exit.ProviderBlockEgressPacketCount,
 					exit.ProviderDiagnosticsSequence,
@@ -629,6 +632,26 @@ func compactDiagnosticToken(value string) string {
 	return strings.Join(strings.Fields(value), "_")
 }
 
+// recordLiveRoute stores the last sampled destination-to-provider join outside
+// the packet-counter history. Packet totals change on every poll and can evict
+// a stalled request's route before its timeout is formatted; this one bounded
+// string survives later empty snapshots without retaining provider ids.
+func (self *sdkHostedDeviceTracker) recordLiveRoute(now time.Time, signature string) {
+	const prefix = "destinations=["
+	start := strings.Index(signature, prefix)
+	if start < 0 {
+		return
+	}
+	value := signature[start+len(prefix):]
+	end := strings.IndexByte(value, ']')
+	if end <= 0 {
+		return
+	}
+	self.stateLock.Lock()
+	self.lastLiveRoute = fmt.Sprintf("%s %s", now.UTC().Format("15:04:05.000Z"), value[:end])
+	self.stateLock.Unlock()
+}
+
 // record stores only state transitions; repeated steady-state polling cannot
 // evict the moment a flow first selected its provider.
 func (self *sdkHostedDeviceTracker) record(now time.Time, signature string) {
@@ -668,7 +691,11 @@ func (self *sdkHostedDeviceTracker) Diagnostic() string {
 		start := max(0, len(self.causalHistory)-causalEventCount)
 		causal = strings.Join(self.causalHistory[start:], " | ")
 	}
-	diagnostic = "events=[" + causal + "] state={" + diagnostic + "}"
+	liveRoute := self.lastLiveRoute
+	if liveRoute == "" {
+		liveRoute = "none"
+	}
+	diagnostic = "route={" + liveRoute + "} events=[" + causal + "] state={" + diagnostic + "}"
 	if hostedDeviceDiagnosticMaxSize < len(diagnostic) {
 		diagnostic = diagnostic[:hostedDeviceDiagnosticMaxSize] + "..."
 	}

@@ -3,6 +3,7 @@ package acceptance
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
@@ -231,12 +232,53 @@ func TestWireGuardTransportFailureReportsOuterUDPBoundary(t *testing.T) {
 	for _, want := range []string{
 		"WireGuard inner packet trace",
 		"WireGuard outer UDP trace",
+		"recent=[+0s:out:data/6B,+",
+		":in:response/5B]",
 		"out{attempt=1/6B sent=1/6B errors=0 types=0/0/0/1/0",
 		"in{packets=1 bytes=5 errors=0 types=0/1/0/0/0",
 		"request timed out",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("outer-boundary error %q lacks %q", err, want)
+		}
+	}
+}
+
+// A live stall can continue receiving encrypted WireGuard envelopes after the
+// inner TCP stream stops. Empty transport packets are 32-byte keepalives and
+// do not prove the response reached the client; larger transport packets do.
+// Retain that distinction in a bounded ring so long soaks cannot leak memory.
+func TestWireGuardOuterTraceDistinguishesKeepaliveFromReturnDataAndStaysBounded(t *testing.T) {
+	bind := newWireGuardTrackingBind(&acceptanceTrackingBind{})
+	before := bind.packetStats()
+	for i := 0; i < wireGuardOuterPacketEventCount+3; i++ {
+		size := 32
+		if i == wireGuardOuterPacketEventCount+2 {
+			size = 144
+		}
+		packet := make([]byte, size)
+		binary.LittleEndian.PutUint32(packet, 4)
+		if err := bind.Send([][]byte{packet}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := bind.packetStats()
+	detail := wireGuardOuterPacketStatsDelta(before, after, time.Now())
+	if strings.Count(detail, ":out:") != wireGuardOuterPacketEventCount {
+		t.Fatalf("recent event ring is not bounded to %d entries: %s", wireGuardOuterPacketEventCount, detail)
+	}
+	for _, want := range []string{
+		"out:keepalive/32B",
+		"out:data/144B",
+		fmt.Sprintf("sent=%d/", wireGuardOuterPacketEventCount+3),
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("outer trace %q lacks %q", detail, want)
+		}
+	}
+	for _, forbidden := range []string{"endpoint", "peer", "key", "payload"} {
+		if strings.Contains(strings.ToLower(detail), forbidden) {
+			t.Fatalf("outer trace exposes %q: %s", forbidden, detail)
 		}
 	}
 }
