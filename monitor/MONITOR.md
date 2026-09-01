@@ -545,13 +545,16 @@ probes; every other signal and host continues. Unknown host names fail closed.
    same burst made Loki reset its dropped-stream metadata 18,165 times/minute,
    which is now an explicit `loki-tail-dropped-streams` finding. Deterministic
    tests cover partition recovery, boundary recovery, non-advancement, and the
-   page bound. The ingester reset remains `loki-tail-dropped-streams`; Loki
-   3.7.3 discards its internal `DroppedStreams` metadata at the querier hop, so
-   the Grafana log is not affected-selector attribution. At the later
-   querier-to-WebSocket boundary, Warpctl at Warp commit `26089b2` surfaces
-   every non-empty `dropped_entries` response as one privacy-safe service/count
+   page bound. The ingester reset remains `loki-tail-dropped-streams`; the raw
+   Grafana log is not affected-selector attribution. Upstream Loki 3.7.3
+   discards its internal `DroppedStreams` metadata at the querier hop, while
+   Warp commit `5927527` forwards that bounded metadata into Loki's existing
+   HTTP `dropped_entries` response without raising a queue. The later
+   querier-to-WebSocket overflow uses the same field. Warpctl at Warp commit
+   `26089b2` surfaces every non-empty response as one privacy-safe service/count
    summary. The monitor maps that direct, service-attributed evidence to the
-   separate `loki-tail-dropped-entries` class.
+   separate `loki-tail-dropped-entries` class and correlates it with the raw
+   reset to distinguish the earlier stage.
    A later exact 60-second Loki backend-EOF cadence exposed
    Warp's ring TCP application read deadline; the classifier now distinguishes
    that internal EOF from expected client cancellation while reconciliation
