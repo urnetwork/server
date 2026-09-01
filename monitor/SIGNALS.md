@@ -426,6 +426,19 @@ WHERE function_name LIKE '%UpdateClient%'
   old state, and keep diagnostic replay at zero logical events. This stronger
   evidence still does not establish Circle's account quota or justify a shared
   limiter before `70b0d269` has completed its 90-minute deployment control.
+
+  At `03:22Z` on 2026-09-01, the standing invalid-destination alert exposed a
+  monitor provenance bug after Taskworker had converged: every responding
+  block sampled `2026.8.31+1034210530`, whose source `a52392db` contains
+  `70b0d269`, but the alert still described the historical
+  `2026.8.31-outerwerld+1033655820` artifact as deployed and instructed another
+  jitter rollout. The taxonomy had embedded incident-time provenance in
+  reusable runtime prose. The invalid-destination alert now labels the hourly
+  recurrence as historical, makes no current-version claim, and delegates any
+  software action to the independently triggered `payout-retry-microburst`
+  finding. Its deterministic test rejects the historical version/source and a
+  direct jitter-deploy instruction. The operational wallet correction remains
+  unchanged.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains

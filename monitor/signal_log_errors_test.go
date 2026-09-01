@@ -282,18 +282,15 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 		"invalid for its declared chain",
 		"safely releases only that pre-chain submit attempt",
 		"selects the same invalid payout_wallet configuration",
-		"OCI/SLSA provenance",
-		"2026.8.31-outerwerld+1033655820",
-		"source 1d8f01e5",
-		"typed-reset commit b8af229f",
-		"retry-dispersion commit 70b0d269",
-		"18 canonical evaluator attempts",
-		"same six payments recurred at the same minute",
-		"exact hourly alignment independently proves the old jitter",
-		"retry dispersion cannot repair wallet data",
-		"operational wallet-configuration evidence",
+		"Historical bounded controls on a pre-dispersion taskworker",
+		"same six payments recurring at the same minute",
+		"not a statement about the currently deployed artifact",
+		"does not infer runtime provenance from a historical version",
+		"Retry dispersion cannot repair wallet data",
+		"separate payout-retry-microburst finding",
 		"supported account API",
-		"do not present that deployment as the wallet correction",
+		"account-owner/operations action only",
+		"do not redeploy taskworker solely from this invalid-destination alert",
 		"Do not edit account_payment or pending_task rows",
 		"invalid_destination_events=1",
 		"diagnostic_lines=3",
@@ -303,6 +300,15 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("invalid-destination alert missing %q:\n%s", detail, markdown)
+		}
+	}
+	for _, staleDeploymentClaim := range []string{
+		"2026.8.31-outerwerld+1033655820",
+		"source 1d8f01e5",
+		"deploy taskworker commit 70b0d269",
+	} {
+		if strings.Contains(markdown, staleDeploymentClaim) {
+			t.Fatalf("invalid-destination alert retained stale deployment claim %q:\n%s", staleDeploymentClaim, markdown)
 		}
 	}
 	for _, id := range []string{paymentID, taskID} {
