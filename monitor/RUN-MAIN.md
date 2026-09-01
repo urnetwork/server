@@ -119,10 +119,14 @@ against the intended environment. Treat either `warpctl-provenance-invalid` or
 `warpctl` resolved for the build and every installed managed-host copy must
 have one clean embedded revision and all three §8.13 fail-closed guards. A
 desired version label, a clean checkout beside another executable, or a clean
-older launcher is not equivalent evidence. Replace the listed executable with
-a clean Warp `217392e` descendant, repeat the signal, and only then build a new
-service artifact. Rebuild dirty or unattributable artifacts; do not retag or
-reuse them.
+older launcher is not equivalent evidence. The local repositories are the
+intentional deployment source: rebuild the workstation executable through the
+current `warp/warpctl/Makefile`, and rerun the local
+`xops/main/ansible/run-edges.sh` to build and install managed-host copies from
+the current local Warp checkout. Do not substitute a published or cached
+Warpctl. Require a clean Warp `217392e` descendant, repeat the signal, and only
+then build a new service artifact. Rebuild dirty or unattributable artifacts;
+do not retag or reuse them.
 
 ## One-shot diagnostic snapshot
 

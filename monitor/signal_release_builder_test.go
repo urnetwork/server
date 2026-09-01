@@ -107,12 +107,22 @@ func TestReleaseBuilderSignalSyntheticDirtyAndUnguarded(t *testing.T) {
 	if invalid.SignalNumber != "8.13" || invalid.SignalKey != "release-builder" {
 		t.Fatalf("wrong release-builder identity: %+v", invalid)
 	}
-	for _, want := range []string{"monitor-host", "modified=true", releaseBuilderCommit, "Stop release builds", "urnetwork_source_info"} {
+	for _, want := range []string{
+		"monitor-host", "modified=true", releaseBuilderCommit, "Stop release builds",
+		"warp/warpctl/Makefile", "xops/main/ansible/run-edges.sh",
+		"current local Warp checkout", "Do not substitute a published or cached Warpctl",
+		"urnetwork_source_info",
+	} {
 		if !strings.Contains(invalid.Markdown(), want) {
 			t.Errorf("invalid-provenance alert lacks %q: %s", want, invalid.Markdown())
 		}
 	}
-	for _, want := range []string{"monitor-host", "edge-0", "binary-clean", "start-clean", "source-stable", "Do not run another release build", releaseBuilderCommit} {
+	for _, want := range []string{
+		"monitor-host", "edge-0", "binary-clean", "start-clean", "source-stable",
+		"Do not run another release build", releaseBuilderCommit,
+		"warp/warpctl/Makefile", "xops/main/ansible/run-edges.sh",
+		"current local Warp checkout", "Do not substitute a published or cached Warpctl",
+	} {
 		if !strings.Contains(missing.Markdown(), want) {
 			t.Errorf("missing-guard alert lacks %q: %s", want, missing.Markdown())
 		}

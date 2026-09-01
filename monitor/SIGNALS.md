@@ -5909,6 +5909,12 @@ the Go build settings directly from that executable with bounded binary-safe
 a checkout, desired tag, install timestamp, or a different Warpctl copy.
 Disabled inventory hosts are never contacted.
 
+The local repositories are intentionally the authoritative deployment source.
+This control does not require a published, cached, or centrally downloaded
+Warpctl and must not classify use of a local checkout as a defect. It validates
+the executable produced and installed from that checkout: the installed bytes
+must identify one clean revision and contain the release guards below.
+
 Emit `warpctl-provenance-invalid` if the embedded revision is not one full
 40- or 64-hex Git object ID, or `vcs.modified` is anything except `false`.
 Emit `warpctl-release-guard-missing` unless the executable contains all three
@@ -5941,14 +5947,19 @@ reported `vcs.modified=true`. Thus neither the tag, the later image context,
 nor a clean launcher proved the service executable's source.
 
 This is a software deployment and release-operations gate, never a hardware
-alert. Stop new release builds through any listed executable. Install a clean
-Warpctl containing `217392e` or a clean descendant on the release host and all
-enabled managed-services hosts. Preserve §8.11 worker freshness when replacing
-host launchers. Rebuild affected service images from clean source; do not retag
-or reuse the dirty artifacts. Verification requires every exact Warpctl path to
-report one clean revision and all three guards, a synthetic dirty build to fail
-before publication, and the next service's source metric to match its extracted
-running executable and image digest for two scrapes.
+alert. Stop new release builds through any listed executable. Use the existing
+local-source workflows: rebuild the workstation copy through the current Warp
+checkout's `warp/warpctl/Makefile`, then rerun
+`xops/main/ansible/run-edges.sh` to build the three target binaries from that
+same local Warp checkout and install the managed-host copies. This is not a
+request to substitute a published or cached Warpctl. The checkout used for the
+rebuild must contain `217392e` or a clean descendant. Preserve §8.11 worker
+freshness when replacing host launchers. Rebuild affected service images from
+clean source; do not retag or reuse the dirty artifacts. Verification requires
+every exact Warpctl path to report one clean revision and all three guards, a
+synthetic dirty build to fail before publication, and the next service's source
+metric to match its extracted running executable and image digest for two
+scrapes.
 
 SIGNALS.md §8.13 (`release-builder`) maps to
 `signal_release_builder.go` and `signal_release_builder_test.go`. Synthetic
