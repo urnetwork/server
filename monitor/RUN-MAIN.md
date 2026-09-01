@@ -47,6 +47,11 @@ not pause unrelated probes or investigations.
   contact a host whose current inventory entry has `disabled: true`. A user's
   live pause or offline declaration is stronger than stale repository state;
   use the focused exclusion flag until inventory catches up.
+- Before any authorized privileged host mutation, resolve the connection
+  address from the current owning inventory rather than an alert, narrative
+  note, or remembered endpoint. Require the remote hostname to match the
+  selected inventory name before invoking `sudo`; an absent, ambiguous, or
+  mismatched result fails closed without running the mutation.
 - Never weaken, exclude, or suppress a signal merely to make the alert file
   quiet. A temporary exclusion must name its operator reason, owner, start
   time, and re-enable condition in the run ledger.
@@ -89,7 +94,9 @@ Before the first production command:
    displaying secrets;
 4. verify that the current `services.yml` version is the intended active
    topology; and
-5. run the local monitor tests before trusting a newly built detector.
+5. resolve each host endpoint from its current owning inventory and verify its
+   remote hostname before any privileged action; and
+6. run the local monitor tests before trusting a newly built detector.
 
 The normal workstation mode is `overlay`; use `lan` only from a host with the
 configured LAN routes. An explicit `-ssh-key` may be repeated when the SSH

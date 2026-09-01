@@ -6251,6 +6251,20 @@ advancing. After address recovery, require local scheduler and database TCP
 success, three fast `vector(1)` responses on both Grafana hosts, fresh metrics
 from both host labels, and no address loss through a controlled Proxy rollout.
 
+The controlled activation completed on 2026-09-01, Fireside first at 04:12:44Z
+and Crisp only after Fireside passed at 04:14:34Z. A live ARP check found no
+owner for Fireside's `.196`; before Crisp activation, Fireside resolved `.198`
+to Crisp's exact `eno3` MAC. Both hosts then held their configured address with
+infinite lifetime, a connected LAN route, `routable (configured)` state, and
+zero failed networkd links. Scheduler and PostgreSQL TCP passed, as did three
+local `vector(1)` queries per host (all under 7ms). Each local Mimir frontend
+returned fresh `urnetwork_build_info` for both `fireside` and `crisp`. The eight
+standing Loki tails made one reconnect wave as the ring paths reconfigured and
+then remained connected; the authoritative monitor emitted no further
+`grafana-node` alert through multiple one-minute cadences. This clears the
+host-network incident, while the separate Proxy memory/headroom and controlled
+rollout verification gates remain open.
+
 SIGNALS.md §11.17a (`grafana-node`) maps to `signal_grafana_node.go` and
 `signal_grafana_node_test.go`. Synthetic cases preserve the causally bracketed
 OOM/networkd/LAN-loss signature, unrelated pressure-event negative control,
