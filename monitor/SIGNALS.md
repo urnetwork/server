@@ -1457,6 +1457,16 @@ regressions pin the combined headline, the active-only obscured class, exact
 progress exclusion, malformed counts, and the rule that a confirmed-byte dip
 paired with active candidate bytes is not cleanup.
 
+The first production run of the corrected probe at 13:31:41Z resolved the
+apparent cleanup: 320 confirmed inactive artifacts across 35 tables occupied
+at least 162.90 GiB, while 18 additional invalid candidates totaling 7.56 GiB
+shared one table with active index work. The active operation had moved away
+from the previously masked large owner, so the confirmed and unclassified
+buckets swapped scale while their combined storage remained in the same
+roughly 170 GiB band. This validates both the lower-bound wording and the rule
+that neither bucket may be interpreted as reclaimed until progress exits and
+the catalog reaches zero.
+
 The pool timeout was consequently a downstream queue symptom. The daily
 maintenance scheduler had two independent defects: `transfer_escrow` was not
 excluded from the two-hour full-table policy despite its documented one-time
