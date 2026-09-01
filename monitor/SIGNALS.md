@@ -813,6 +813,17 @@ recoverable through the partitioned reconciliation even though the live tail
 lost streams; it does not validate the still-undeployed producer verbosity
 fix.
 
+The `02:09Z` rotation supplied a third independent production control.
+Block-partitioned reads found 39,583 peer-detail lines across g1, g3, and g9
+(`19,809 + 9,800 + 9,974`); every line came from `server.go:764`, the
+unconditional pre-`e055c98c` callsite. Six direct Grafana journals returned
+exactly the range-query reset total of 9,058 over `02:08:30Z-02:11:00Z`, split
+by wall minute as `137 + 7,523 + 1,398`. The producer wave began at
+`02:09:40Z`, while sole watcher v165 did not start until `02:11:41Z`, excluding
+watcher promotion. This immutable source boundary proves production still
+needs Proxy `e055c98c`; a version label or capped service-wide aggregate alone
+is not sufficient rollout evidence.
+
 Never report a service-wide cap as this event's total. Use the configured block
 inventory, one shared absolute window, and bounded inclusive continuation;
 direct journals are the independent control when attribution itself is in
