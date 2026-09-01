@@ -27,7 +27,7 @@ or private review artifact in chat, tickets, dashboards, or public logs.
 ### Runner heartbeat stale over 30 seconds
 
 1. Confirm whether the epoch is scheduled, open, or grading.
-2. Check the `RUN-MAIN.sh` process and one-shot `competitionworker` without
+2. Check the `run-main.sh` process and one-shot `competitionworker` without
    starting a second worker.
 3. Confirm main PostgreSQL/Redis connectivity and the worker runtime image
    identity. Preserve stdout/stderr and process/service-manager events.
@@ -78,7 +78,7 @@ unrevealed; the CLI requires explicit confirmation of that invariant.
 
 Do not approve or promote. Preserve the private candidate directory and write
 a bounded JSON review report identifying the observed behavior. Reject through
-`RUN-MAIN.sh`, which records the decision append-only and advances to the next
+`run-main.sh`, which records the decision append-only and advances to the next
 ranked significant candidate. If a promoted branch is suspected, stop the next
 round before admission and retain all Git, score, patch, and MinIO identities;
 do not rewrite published history.

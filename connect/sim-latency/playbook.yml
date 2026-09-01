@@ -158,7 +158,7 @@ checklist:
     evidence: sn/api/competition.yml
   - id: six_epoch_immediate_fifo_lifecycle
     status: complete
-    evidence: server/controller/competition_controller.go and server/connect/sim-latency/RUN-MAIN.sh
+    evidence: server/controller/competition_controller.go and server/connect/sim-latency/run-main.sh
   - id: immutable_artifact_implementation
     status: complete
     evidence: server/controller/competition_controller.go and server/blob.go

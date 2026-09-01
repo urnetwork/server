@@ -85,7 +85,7 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		t.Fatal("tests.sh must remain Go-only")
 	}
 
-	seasonHarnessBytes, err := os.ReadFile("RUN-MAIN.sh")
+	seasonHarnessBytes, err := os.ReadFile("run-main.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,11 +101,11 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		"return 20",
 	} {
 		if !strings.Contains(seasonHarness, required) {
-			t.Errorf("RUN-MAIN.sh is missing fail-closed lifecycle contract %q", required)
+			t.Errorf("run-main.sh is missing fail-closed lifecycle contract %q", required)
 		}
 	}
 	if strings.Contains(strings.ToLower(seasonHarness), "python") {
-		t.Fatal("RUN-MAIN.sh must remain Go/shell-only")
+		t.Fatal("run-main.sh must remain Go/shell-only")
 	}
 	seasonRunbook, err := os.ReadFile("RUN-MAIN.md")
 	if err != nil {
@@ -208,7 +208,7 @@ func TestOnlyCurrentEntrypointsRemainAtPackageRoot(t *testing.T) {
 		"OFFICIAL-RUN.md",
 		"PLAYBOOK.md",
 		"RUN-MAIN.md",
-		"RUN-MAIN.sh",
+		"run-main.sh",
 		"playbook.yml",
 		"official-run.sh",
 		"baseline/README.md",
