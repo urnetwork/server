@@ -272,13 +272,20 @@ func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
 		(currentShards >= 2 || previousShards >= 2)
 	historicalCollision := recentMaxKnown && recentMax >= 2
 	if shardCountKnown && (currentCollision || historicalCollision) && strings.Contains(lowerEvidence, "cmd=expire") {
-		mechanism := fmt.Sprintf("This Redis master owns %d of %d current-minute and %d previous-minute client-reliability shards. Independent shard hashing can place multiple hot hashes on one master; each reliability transaction ends in EXPIRE, and that concentrated command load expands the lazy per-node client pools that touched the master.", currentShards, shardCount, previousShards)
+		mechanism := fmt.Sprintf("At the connection-spike trip, this Redis master owned %d of %d client-reliability shards for the trip minute and %d for the immediately preceding minute. Independent shard hashing can place multiple hot hashes on one master; each reliability transaction ends in EXPIRE, and that concentrated command load expands the lazy per-node client pools that touched the master.", currentShards, shardCount, previousShards)
 		if !currentCollision && historicalCollision && lookbackKnown && recentMaxAgeKnown {
-			mechanism = fmt.Sprintf("This Redis master owns %d of %d current-minute and %d previous-minute client-reliability shards, but owned as many as %d within the bounded %d-block history (%d block(s) ago). Independent shard hashing created that earlier hot-key collision, each reliability transaction ended in EXPIRE, and lazy per-node pools outlived the one-minute key ownership that expanded them.", currentShards, shardCount, previousShards, recentMax, lookbackBlocks, recentMaxAge)
+			mechanism = fmt.Sprintf("At the connection-spike trip, this Redis master owned %d of %d client-reliability shards for the trip minute and %d for the immediately preceding minute, but had owned as many as %d within the bounded %d-block history (%d block(s) before the trip). Independent shard hashing created that earlier hot-key collision, each reliability transaction ended in EXPIRE, and lazy per-node pools outlived the one-minute key ownership that expanded them.", currentShards, shardCount, previousShards, recentMax, lookbackBlocks, recentMaxAge)
 		}
+		frameContext := "The trip-time EXPIRE cohort and bounded client_reliability_stats.<block>.<shard> ownership history identify a rotating marker-free reliability load collision."
+		if strings.Contains(lowerEvidence, "battery collected once at trip") {
+			frameContext += " This cached battery precedes the alert symptom's later sustained client ratio, so a different CLIENT LIST total is expected while idle pools contract."
+		} else {
+			frameContext += " In a one-shot alert, these battery values share the trip frame with the observed client ratio."
+		}
+		frameContext += " This is not the retired fixed discovery-set writer, and CLIENT LIST alone is not evidence of a reconnect storm or Redis impairment."
 		return redisConnectionDiagnosis{
 			mechanism: mechanism,
-			context:   appendControlSummary("The EXPIRE cohort and bounded client_reliability_stats.<block>.<shard> ownership history identify a rotating marker-free reliability load collision. This is not the retired fixed discovery-set writer, and CLIENT LIST alone is not evidence of a reconnect storm or Redis impairment."),
+			context:   appendControlSummary(frameContext),
 			action:    appendPressureAction("Do not roll back the marker-free writer, kill healthy clients, or lower pool limits from the fleet-median ratio alone. Let minute ownership rotate and ordinary pool idle lifetime contract the shape. If latency, pool timeouts, queues, or memory become unhealthy, use a rolling-compatible wider fanout or deliberate slot placement so simultaneous reliability shards distribute more evenly."),
 			verify:    "The bounded shard-history collision ages out together with the EXPIRE-heavy connection shape, and Redis latency, pool-timeout logs, accept queues, and client-buffer memory remain healthy on consecutive samples.",
 		}

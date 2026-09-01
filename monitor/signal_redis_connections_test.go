@@ -119,7 +119,8 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 	alert := requireAlertClass(t, alerts, "clients-spike")
 	markdown := alert.Markdown()
 	for _, detail := range []string{
-		"owns 2 of 32 current-minute and 0 previous-minute client-reliability shards",
+		"At the connection-spike trip",
+		"owned 2 of 32 client-reliability shards for the trip minute and 0 for the immediately preceding minute",
 		"each reliability transaction ends in EXPIRE",
 		"rotating marker-free reliability load collision",
 		"Trip-time Redis controls",
@@ -153,9 +154,9 @@ func TestRedisConnectionsSignalAttributesExpiredShardOwnership(t *testing.T) {
 
 	diagnosis := diagnoseRedisConnectionSpike(evidence)
 	for _, want := range []string{
-		"owns 0 of 32 current-minute and 0 previous-minute",
-		"as many as 5 within the bounded 6-block history",
-		"4 block(s) ago",
+		"owned 0 of 32 client-reliability shards for the trip minute and 0 for the immediately preceding minute",
+		"had owned as many as 5 within the bounded 6-block history",
+		"4 block(s) before the trip",
 		"pools outlived the one-minute key ownership",
 		"rotating marker-free reliability load collision",
 		"below their alert bands",
@@ -164,6 +165,58 @@ func TestRedisConnectionsSignalAttributesExpiredShardOwnership(t *testing.T) {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("historical-collision diagnosis missing %q: %+v", want, diagnosis)
 		}
+	}
+}
+
+func TestRedisConnectionsSignalKeepsTripFrameDistinctFromSustainedCount(t *testing.T) {
+	snapshotCalls := 0
+	batteryCalls := 0
+	source := &syntheticSource{
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, "CLIENT LIST") {
+				batteryCalls++
+				return "reliability_marker_slot=9508 reliability_marker_owner_port=6382 queried_node_owns_reliability_marker=false\n" +
+					"reliability_stats_current_block=29804673 current_reliability_shards_on_node=0 previous_reliability_shards_on_node=1 reliability_shard_count=32 reliability_shard_lookback_blocks=6 reliability_shards_recent_max=2 reliability_shards_recent_max_age_blocks=4 reliability_shards_recent_total=5 reliability_shard_history=29804668:2,29804669:2,29804672:1 max_expire_idle_s=299\n" +
+					"blocked_clients=0\nused_memory_bytes=1408354048\nmem_clients_normal_bytes=5753722\n" +
+					"latency_avg_ms=0.297\naccept_recv_q=0 accept_send_q=65535\n" +
+					"client_list_total=55 client_output_memory_bytes=0 client_output_memory_max_bytes=0\n" +
+					"40 max_idle_s=295 max_age_s=4579 source=192.0.2.181 flags=N cmd=expire lib=go-redis", nil
+			}
+			snapshotCalls++
+			if snapshotCalls == 1 {
+				return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6394 100 1000 90 1 55", nil
+			}
+			return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6394 100 1000 90 1 45", nil
+		},
+	}
+	signal := NewRedisConnectionsSignal()
+	first, err := signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requireAlertClass(t, first, "clients-spike").Observed; !strings.Contains(got, "connected=55") {
+		t.Fatalf("trip observation = %q; want connected=55", got)
+	}
+	second, err := signal.Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, second, "clients-spike")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"connected=45",
+		"client_list_total=55",
+		"battery collected once at trip",
+		"At the connection-spike trip",
+		"cached battery precedes the alert symptom's later sustained client ratio",
+		"different CLIENT LIST total is expected",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("sustained alert does not distinguish trip and current frames; missing %q:\n%s", want, markdown)
+		}
+	}
+	if batteryCalls != 1 {
+		t.Fatalf("battery ran %d times; want exactly once across sustained samples", batteryCalls)
 	}
 }
 

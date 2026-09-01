@@ -439,7 +439,7 @@ END {
 	if strings.TrimSpace(out) == "" {
 		return fmt.Sprintf("node %d CLIENT LIST returned no cohorts", port)
 	}
-	return fmt.Sprintf("node %d CLIENT LIST top cohorts (count, idle/age, source, flags, last command, library):\n  %s",
+	return fmt.Sprintf("node %d trip-time CLIENT LIST top cohorts (count, idle/age, source, flags, last command, library):\n  %s",
 		port, strings.ReplaceAll(strings.TrimSpace(out), "\n", "\n  "))
 }
 

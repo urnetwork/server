@@ -3560,6 +3560,19 @@ Probe: `redis-connections`
   bounded history derived from EXPIRE idle age; a future collision with any
   control in its alert band escalates to active pressure and the compatible
   wider-fanout/placement repair instead of waiting only for idle pools.
+- The promoted v194 watcher supplied the full sustained-frame control. Its
+  trip battery at 16:33:51Z counted 2,244 CLIENT LIST rows and retained a
+  two-shard collision four minute blocks earlier; at the 16:38:53Z sustained
+  sample, port 6394 had already contracted to 1,574 connected clients against
+  a 384-node median. The controls captured at the trip remained healthy:
+  zero blocked clients, 0.297ms local latency, an empty accept queue against a
+  65,535 backlog, about 5.8MB of normal-client memory, and zero output-buffer
+  bytes. Those two client totals are intentionally different time frames, not
+  inconsistent Redis counters. Alerts therefore label shard ownership,
+  CLIENT LIST cohorts, and pressure controls as trip-time evidence while the
+  symptom and ratio remain the later sustained sample. This live contraction
+  continues to support observation rather than a client kill, pool-limit
+  change, or marker-writer rollback.
 - `CLIENT LIST` sorted by omem: any client > 32mb = a stalled consumer.
 - Accept-queue: `ss -lnt` Recv-Q pegged at backlog on a redis port = event
   loop too busy to accept() = wedge in progress (dials time out while the
