@@ -202,6 +202,60 @@ func TestEmailAssetsSignalLeavesExactTransportFailureToEdgeIPv6(t *testing.T) {
 	}
 }
 
+func TestEmailAssetsSignalClassifiesTransientCDNTransport(t *testing.T) {
+	address := "2001:db8:19::35"
+	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
+		if name != "curl" {
+			return "", errors.New("unexpected local command")
+		}
+		joined := strings.Join(args, " ")
+		asset := requestedEmailAsset(joined)
+		if asset == "" {
+			return "", fmt.Errorf("request omitted a tracked email asset: %s", joined)
+		}
+		if !strings.Contains(joined, "--resolve") && asset == "/res/emails/urnetwork-goodbye-vpn.gif" {
+			return emailAssetHTTPFixture("000", "35", "", "0", "2001:db8:ffff::35"),
+				errors.New("curl --http1.1 https://example.com/res/emails/urnetwork-goodbye-vpn.gif: exit status 35")
+		}
+		return emailAssetHTTPFixture("200", "0", "image/gif", "4096", address), nil
+	}}
+
+	alerts, err := NewEmailAssetsSignal().Run(
+		context.Background(),
+		emailAssetSyntheticSettings(source, address),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("alerts = %d, want one transport diagnostic: %+v", len(alerts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "web-email-assets-transport")
+	if alert.Sustain != 2 {
+		t.Fatalf("transport alert sustain = %d, want two consecutive cadences", alert.Sustain)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"transport_failures=1",
+		"other_response_failures=0",
+		"cdn_failed=1",
+		"origin_failed=0",
+		"problem=curl exit 35",
+		"before receiving any HTTP response",
+		"two consecutive five-minute cadences",
+		"separately over IPv4 and IPv6",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("transport alert missing %q: %s", want, markdown)
+		}
+	}
+	for _, stale := range []string{"cached negative/error response", "invalidate only the failed", "curl --http1.1"} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("transport alert retained stale diagnosis %q: %s", stale, markdown)
+		}
+	}
+}
+
 func emailAssetSyntheticSettings(source SignalSource, addresses ...string) SignalSettings {
 	settings := syntheticSettings(source)
 	settings.PublicDomain = "example.com"

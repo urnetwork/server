@@ -8686,7 +8686,14 @@ non-empty body at both relevant layers. First request the recipient-facing
 enabled edge IPv6 address. The second check detects one stale web generation
 and distinguishes an origin fault from CDN configuration or a cached error.
 Curl exit 7/28 on an exact edge remains owned by §18.1; failure of the public
-CDN path remains user-facing and is never suppressed.
+CDN path remains user-facing and is always measured. An affirmative HTTP or
+content failure is class `web-email-assets` on the first cadence. A request
+that ends before any HTTP response is instead class
+`web-email-assets-transport`: retain its selected address and curl exit as
+evidence, but require two consecutive five-minute cadences before alerting.
+One transport miss cannot establish missing bytes, origin-Host drift, or a
+cached error and must not prescribe invalidation. A one-shot diagnostic still
+returns the first sample.
 
 At 2026-08-31 20:10Z all six recipient-facing URLs returned HTTP 404
 `text/html` with the same 146-byte error body. Bounded web logs independently
@@ -8728,12 +8735,26 @@ emitted the 54/54 aggregate above, and the first one-minute log cadence emitted
 a current Grafana EOF finding without a visibility error. Only after those
 gates did v153 receive SIGTERM; v154 remained the sole standing watcher.
 
+At 2026-09-01 04:17:20Z, watcher v170 provided the transport negative control:
+53 of 54 checks were healthy and every exact origin passed, while one public
+GIF request ended with curl TLS exit 35 before an HTTP response. Five immediate
+IPv4 and five IPv6 repeats all returned the full 4,935,604-byte `image/gif`
+with HTTP 200, and a direct handshake to the previously selected CloudFront
+IPv6 address also verified successfully. The next scheduled signal run at
+04:22:20Z emitted no email-asset alert while other monitor observations
+continued. This was transient transport, not evidence for cache invalidation
+or another web deployment, and is the production discriminator for the
+separate two-cadence `web-email-assets-transport` class.
+
 This alert can cross from software into operations: exact-origin failures need
 the web image/config repair and full edge rollout; if every exact origin is
 healthy while only the public URL fails, ownership moves to CDN origin settings
-or stale negative-cache invalidation. It does not require hardware. Do not copy
-assets into live containers, broaden the default nginx server, or invalidate
-CDN objects before the exact origins are proven healthy.
+or stale negative-cache invalidation **only after an HTTP error response proves
+that boundary**. A transport-only failure instead needs IPv4/IPv6, resolver,
+TLS, selected-CDN-address, and exact-origin controls; it does not justify cache
+mutation. This signal does not require hardware. Do not copy assets into live
+containers, broaden the default nginx server, or invalidate CDN objects before
+the exact origins are proven healthy.
 
 Verification requires all six public paths and every enabled exact-origin
 path to return HTTP 200 `image/*` with nonzero bytes, the public and

@@ -151,6 +151,7 @@ func emailAssetFindings(domain, originHostname string, results []emailAssetResul
 	originMissing := 0
 	nonImage := 0
 	empty := 0
+	transportFailures := 0
 	other := 0
 
 	for _, result := range results {
@@ -180,6 +181,8 @@ func emailAssetFindings(domain, originHostname string, results []emailAssetResul
 			nonImage++
 		case "empty":
 			empty++
+		case "transport":
+			transportFailures++
 		default:
 			other++
 		}
@@ -189,8 +192,12 @@ func emailAssetFindings(domain, originHostname string, results []emailAssetResul
 		return nil
 	}
 
+	class := "web-email-assets"
+	sustain := 1
 	mechanism := "A recipient-facing CDN request or one exact web origin did not return the byte-bearing image embedded by a server email template. Ordinary page redirects and /status can remain healthy because those routes do not exercise the asset namespace, content type, body, CDN cache, and origin Host together."
+	context := "These absolute URLs are embedded in authentication, password, welcome, subscription, interview, and receipt emails. A 404 produces broken recipient content and is a functional product regression, not generic scanner traffic. The required asset list is maintained beside this probe and must track controller/email_templates."
 	action := "Compare the CDN response with the same path pinned to every exact origin address. If exact origins fail, deploy one web generation that contains the asset directory and explicitly serves the CDN origin Host. If only the CDN fails, verify its configured origin Host and clear the stale error object after the origins are healthy."
+	verify := "Require every listed public URL to return HTTP 200 image/* with nonzero bytes; require the same for every enabled edge when pinned with the exact main-web SNI/Host; preserve 301 redirects for legacy page paths; then require zero exact-path nginx ENOENT lines for ten minutes."
 	if originMissing > 0 {
 		mechanism = "CloudFront deliberately replaces the public Host with `" + originHostname + "`. Web commit `dc8fd20c` narrowed the former wildcard legacy server to the apex redirect and stopped matching that origin Host. The request consequently fell into nginx's empty default `/etc/nginx/html` root and returned 404 even though the image contained every email asset."
 		action = "Build and deploy the web service from web commit `2b410faa` or later. It explicitly serves `/res/emails/` from the BringYour asset tree for both the public and CDN-origin Hosts while preserving the ur.io redirect for legacy pages. Do not copy files into live containers or turn the default server into a broad static host."
@@ -198,18 +205,29 @@ func emailAssetFindings(domain, originHostname string, results []emailAssetResul
 		mechanism = "Every checked exact origin is healthy, but the recipient-facing CDN response is not. The remaining boundary is CDN configuration or a cached negative/error response produced before the origin Host repair; the web asset bytes themselves are present and reachable."
 		action = "Confirm the distribution still sends `Host: " + originHostname + "`, then invalidate only the failed `/res/emails/` objects if its negative-cache TTL has not expired. Recheck the public URLs; do not redeploy unrelated API, Connect, taskworker, or database services."
 	}
+	if transportFailures == len(failures) {
+		class = "web-email-assets-transport"
+		sustain = 2
+		mechanism = "The failed checks ended before receiving any HTTP response. That proves a recipient-path transport failure but does not prove that the image bytes, CDN origin Host, or cached object are wrong. A single DNS route, CDN point-of-presence, TCP, or TLS failure cannot distinguish those causes."
+		if originFailures == 0 && cdnFailures > 0 {
+			mechanism += " Every exact origin completed its semantic image check, isolating the observation to the public CDN transport path."
+		}
+		context = "Continuous mode requires this transport-only identity on two consecutive five-minute cadences; one-shot diagnostics still expose the first sample. Semantic HTTP/content failures remain immediate because they affirmatively observe the broken object response."
+		action = "Repeat the failed public path separately over IPv4 and IPv6 while recording the selected remote address and TLS result, and compare the exact origins. If the next cadence is healthy, retain the first sample as a transient control. If the same boundary persists, diagnose the client route, resolver, TLS handshake, and selected CDN point-of-presence. Do not invalidate CDN objects without an HTTP error response."
+		verify = "The failed URL returns HTTP 200 image/* with nonzero bytes over IPv4, IPv6, and ordinary DNS selection, every exact origin remains healthy, and two consecutive five-minute signal cadences contain no transport failure."
+	}
 
 	return []finding{{
 		probeId: "synthetic/web-email-assets", tier: tierWarn,
-		class: "web-email-assets", target: domain, sustain: 1,
+		class: class, target: domain, sustain: sustain,
 		symptom:   fmt.Sprintf("%s transactional-email images fail on %d CDN/origin checks", domain, len(failures)),
 		mechanism: mechanism,
 		baseline:  fmt.Sprintf("All %d distinct images embedded by controller/email_templates return HTTP 200, an image/* media type, and a non-empty body through %s and through %s pinned to every enabled edge address.", len(emailAssets), domain, originHostname),
-		observed:  fmt.Sprintf("checked=%d failed=%d cdn_failed=%d origin_failed=%d missing_404=%d non_image=%d empty_body=%d other_response_failures=%d", checked, len(failures), cdnFailures, originFailures, missing, nonImage, empty, other),
+		observed:  fmt.Sprintf("checked=%d failed=%d cdn_failed=%d origin_failed=%d missing_404=%d non_image=%d empty_body=%d transport_failures=%d other_response_failures=%d", checked, len(failures), cdnFailures, originFailures, missing, nonImage, empty, transportFailures, other),
 		evidence:  strings.Join(failures, "\n"),
-		context:   "These absolute URLs are embedded in authentication, password, welcome, subscription, interview, and receipt emails. A 404 produces broken recipient content and is a functional product regression, not generic scanner traffic. The required asset list is maintained beside this probe and must track controller/email_templates.",
+		context:   context,
 		action:    action,
-		verify:    "Require every listed public URL to return HTTP 200 image/* with nonzero bytes; require the same for every enabled edge when pinned with the exact main-web SNI/Host; preserve 301 redirects for legacy page paths; then require zero exact-path nginx ENOENT lines for ten minutes.",
+		verify:    verify,
 		playbook:  "SIGNALS.md §19.2",
 	}}
 }
@@ -218,13 +236,16 @@ func emailAssetProblem(result exactHTTPSResult) (problem, category string) {
 	exitCode := result.values["monitor_exitcode"]
 	code := result.values["monitor_http_code"]
 	switch {
-	case result.err != nil:
-		return result.err.Error(), "response"
 	case exitCode != "0":
 		if exitCode == "" {
+			if result.err != nil {
+				return result.err.Error(), "transport"
+			}
 			exitCode = "<missing>"
 		}
-		return "curl exit " + exitCode, "response"
+		return "curl exit " + exitCode, "transport"
+	case result.err != nil:
+		return result.err.Error(), "transport"
 	case code == "404":
 		return "required image returned HTTP 404", "missing"
 	case code != "200":
