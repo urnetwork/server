@@ -776,6 +776,20 @@ handover and did not show 39,378 failed peer installations. It was the
 already-identified O(peers) default logging defect multiplying a correctness
 reconcile into a live-tail producer burst.
 
+The next g1 interval repeated at `00:39Z` and supplied a second complete
+control with a different generation cohort. Block-partitioned range reads
+returned exactly 38,513 installation lines over about eight seconds: 22,400
+from g1, 6,326 from g2, and 9,787 from g3. Direct host journals independently
+returned the same 38,513 total, split 19,623 on Fireside and 18,890 on Crisp.
+Grafana emitted 10,937 ingester reset lines in the matching wall minute versus
+162 in the preceding minute. g1's recurrence exactly one configured interval
+after the `00:09Z` wave, while g2 and g3 joined this rotation, confirms aligned
+periodic reconciliation rather than a deployment or monitor lifecycle event.
+The exact journal/range-query agreement also proves persisted records were
+recoverable through the partitioned reconciliation even though the live tail
+lost streams; it does not validate the still-undeployed producer verbosity
+fix.
+
 Never report a service-wide cap as this event's total. Use the configured block
 inventory, one shared absolute window, and bounded inclusive continuation;
 direct journals are the independent control when attribution itself is in
