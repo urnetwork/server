@@ -2266,8 +2266,8 @@
     },
     {
       "type": "timeseries",
-      "title": "contract + task terminal outcomes / s",
-      "description": "Expired contracts force-closed by resolution, plus RunPost tasks whose finished-task row had already been reaped. The orphaned task outcome is a safe no-op, but any sustained rate merits retention/scheduling investigation.",
+      "title": "contract + task exceptional outcomes / s",
+      "description": "Expired contracts force-closed by resolution, RunPost tasks whose finished-task row had already been reaped, and timestamp-heartbeat writes that failed while advisory ownership remained healthy. Any sustained task rate merits database-pool and retention/scheduling investigation.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2324,6 +2324,15 @@
           "expr": "sum(rate(urnetwork_task_run_post_orphaned_total{env=\"$env\"}[$__rate_interval]))",
           "refId": "B",
           "legendFormat": "orphaned RunPost"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_task_timestamp_lease_refresh_errors_total{env=\"$env\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "timestamp heartbeat failure"
         }
       ]
     },

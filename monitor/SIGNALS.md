@@ -3668,7 +3668,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
-| `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` | Grafana has the provisioned datasource row but cannot load that datasource's plugin. `/api/health`, Mimir `/ready`, and the UI can all stay green while every affected dashboard query and alert rule fails. | Query through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13.2, bake the signed standalone Prometheus plugin into the image as in §11.15; do not recreate a datasource row that already exists. |
+| `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` or `/api/ds/query` | Grafana has the provisioned datasource row but cannot load that datasource's native plugin. `/api/health`, Loki/Mimir readiness, and direct storage reads can all stay green while dashboards, Logs Drilldown, and alert rules fail. | Query both `warp-mimir` and `warp-loki` through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13, bake the signed standalone Prometheus and Loki plugins into the image as in §11.15; the Logs Drilldown app does not provide the Loki datasource implementation. Do not recreate a datasource row that already exists. |
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The historical exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline. The current off-grid wave followed Loki's 15-second blocked-ingester-tail close path alongside 11,583 reset records after all six active ring nodes were healthy. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Provenance-gate Warp `1e95aef`; deploy it only to older Grafana blocks. For the current fleet, deploy Grafana with Warp `42168fe` plus `bca37cf`, which removes Mimir per-query statistics and adds the actual backend address without claiming instrumentation fixes loss. Require query stats zero, rules/metrics healthy, and both EOF/reset classes zero for ten minutes with stable tails and bounded reconciliation. Investigate a residual `addr` frame on that node. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail queue overflowed before its internal gRPC send. Loki 3.7.3 discards the accompanying `resp.DroppedStreams` in the querier; continued traffic after 15 seconds closes the backend tail and produces the paired EOF. Grafana is the observation point, not affected-service attribution. Historical waves paired with pre-fix Proxy logs. The current six-host window had 11,583 resets plus 11,022 avoidable Mimir per-query records after LAN/ring health was restored. | Provenance-gate Warp `1e95aef` and server `e055c98c`. For already-current blocks, deploy Grafana with Warp `42168fe` plus `bca37cf`; reconcile every service window and require query stats zero, alert rules/metrics healthy, and both loss classes zero for ten minutes. Any residual EOF must carry a backend frame. Do not raise queues, suppress the reset, or claim Grafana was the affected selector. See §1.5. |
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | The later querier-to-WebSocket response channel overflowed for the named standing tail. Warpctl received API `dropped_entries`; unlike the earlier ingester reset, this evidence is service-attributed. | Run Warpctl with Warp `26089b2`, retain bounded reconciliation for the named service, and remove its producer/consumer stall. Never print the dropped labels or timestamps. Require zero `loki-tail-dropped-entries` for ten minutes through the triggering load. See §1.5. |
@@ -5147,7 +5147,8 @@ Tier-1 (warn):
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
 | retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
-| grafana-plugin-unregistered | logs | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
+| grafana-plugin-unregistered | logs + Grafana `/api/ds/query` | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
+| grafana-datasource-query | Grafana `/api/ds/query` | 11.15 authenticated `warp-mimir` or `warp-loki` control does not return a successful result after plugin loading | 2 consecutive probes |
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; observation service is not selector attribution | any |
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe Warpctl summary from a non-empty HTTP tail `dropped_entries` response | any |
@@ -6616,36 +6617,72 @@ grep -cE '^ *name +prometheus_scrape' /etc/fluent-bit/fluent-bit.conf
   `xops/main/ansible/tests/test_fluent_bit_shipper.py` asserts the limit leads
   `redis_count`, so the next time that number grows the test fails first.
 
-### 11.15 Grafana 13.2 datasource row without its Prometheus plugin (2026-08-29)
+### 11.15 Grafana 13 datasource rows without native plugins (2026-08-29, 2026-09-01)
 
-Grafana 13.2 extracted the formerly core Prometheus datasource into a
-standalone native plugin. Main retained its provisioned `warp-mimir` datasource
-row and every front/backend health endpoint stayed green, but Grafana could not
-execute the datasource. The alert scheduler retried each rule on every Grafana
-host, producing roughly 220–250 error-shaped lines/minute:
+Probe: `grafana-datasources`
+
+Grafana 13 packages the formerly core Prometheus and Loki datasource
+implementations as standalone native plugins. A provisioned datasource row and
+an installed app plugin do not supply either implementation.
+
+The 2026-08-29 failure retained the provisioned `warp-mimir` row and green
+front/backend health, but omitted the Prometheus plugin. The alert scheduler
+retried each rule on every Grafana host, producing roughly 220–250
+error-shaped lines/minute:
 ```
 error="the result-set has errors that can be retried: [plugin.notRegistered] plugin not registered"
 ```
-The decisive check is a query through Grafana itself, not a direct Mimir read:
+
+The 2026-09-01 Loki failure had the same shape. Direct Loki and `warpctl logs`
+returned fresh `web_page_view` events, and `/api/datasources/uid/warp-loki`
+returned the expected provisioned row. Grafana's installed-plugin list
+contained the Logs Drilldown app and the Prometheus datasource, but no native
+`loki` datasource plugin. The Web Analytics query through `/api/ds/query`
+returned HTTP 404 `plugin.notRegistered`; Logs Drilldown displayed "no Loki
+datasource configured" and emitted a URL with an empty `var-ds=`. Its
+provisioned `jsonData.dataSource: warp-loki` was already correct: Logs
+Drilldown is an app frontend and only considers a datasource usable after
+Grafana registers type `loki`.
+
+The decisive check is an authenticated query through Grafana itself, not a
+direct storage read:
 ```
-# authenticated against a live Grafana child/front
-POST /api/ds/query   {"queries":[{"datasource":{"uid":"warp-mimir"},"expr":"vector(1)"}],...}
-# broken: HTTP 500 / plugin.notRegistered
-find /var/lib/grafana/plugins -maxdepth 2 -type f | grep '/prometheus/'
-# broken image: no standalone Prometheus plugin files
+# controls authenticated against a live Grafana child/front
+POST /api/ds/query  warp-mimir / prometheus / vector(1)
+POST /api/ds/query  warp-loki / loki / sum(count_over_time({service="web"}[1m]))
+# broken: HTTP 404/500 or an embedded result error containing plugin.notRegistered
+find /var/lib/grafana/plugins -maxdepth 2 -type f \
+  | grep -E '/(prometheus|loki)/'
 ```
 - A datasource database row proves only configuration. Direct Mimir success
-  proves only storage/query health. Neither proves Grafana can instantiate the
-  datasource implementation.
+  or fresh direct Loki events prove only storage/query health. Neither proves
+  Grafana can instantiate the datasource implementation.
 - Runtime plugin preinstallation is deliberately disabled so readiness does
   not depend on internet access. The image fix in `warp/grafana/Dockerfile`
   bakes Prometheus plugin 13.1.7 for both amd64 and arm64 with catalog-published
-  SHA-256 checksums; `grafana/prometheus_plugin_test.go` holds that offline
-  invariant.
-- Verify after rollout with `vector(1)` through `/api/ds/query`, zero new
-  `grafana-plugin-unregistered` lines, and successful evaluation of one
-  provisioned rule. Do not silence scheduler errors or recreate the existing
-  datasource as remediation.
+  SHA-256 checksums and Loki datasource plugin 13.1.0 with its per-architecture
+  catalog checksums. `grafana/prometheus_plugin_test.go` and
+  `grafana/loki_datasource_plugin_test.go` hold those offline invariants.
+- Warp deployment readiness now submits both bounded controls through
+  Grafana's local `/api/ds/query` boundary. A new artifact cannot take over
+  merely because `/api/health`, Loki, and Mimir are green while a datasource
+  plugin is absent.
+- The Grafana front redirects only the exact Logs Drilldown GET route when it
+  carries an explicit empty `var-ds=`, replacing that stale override with
+  `var-ds=warp-loki` while preserving every other query variable. URLs with a
+  valid datasource, and URLs that omit the variable so app provisioning can
+  choose the default, pass through unchanged.
+- The standing `grafana-datasources` probe submits the two controls separately
+  through the public Grafana boundary every minute. It reads the existing
+  Grafana admin credential from `vault/<env>/grafana.yml`, sends it only as
+  in-memory Basic Auth, bounds the response, and raises
+  `grafana-plugin-unregistered` immediately when Grafana names that failure.
+- Verify every active exact-edge generation with successful results for both
+  controls, Web Analytics view panels populated from `web_page_view`, Logs
+  Drilldown selecting `var-ds=warp-loki`, successful evaluation of one
+  provisioned rule, and zero new `grafana-plugin-unregistered` lines after
+  ingestion delay. Do not silence query errors, recreate either existing
+  datasource, or restart the same image as remediation.
 
 ### 11.16 Alert interval outside Grafana's scheduler grid (2026-08-30)
 
@@ -9335,7 +9372,9 @@ gateway, and overlay lifecycle as separate layers. In particular,
 `active (exited)` proves only that Compose accepted the start; it does not prove
 that the container is current, peered, syncing, or reachable through nginx.
 
-### 17.1 Listener and deployment identity
+### 17.1 Listener and deployment identity — SUBTENSOR1
+
+Probe: `subtensor`
 
 Run these together on snow:
 ```
@@ -9358,7 +9397,7 @@ reaches Frontier, `evm_chain_id` can be unavailable and
 `evm_chain_id_error.message` can say that
 `EthereumRuntimeRPCApi_chain_id` is not found; this is bootstrap state only
 when peers and heads are progressing. Application cutover requires
-`ready=true`, `isSyncing=false`, runtime specification 447, transaction version
+`ready=true`, `isSyncing=false`, runtime specification 452, transaction version
 1, EVM chain ID `0x3b1`, and an available `eth_getLogs`. A missing preflight or
 a mutable `v3.x` image is an undeployed/stale node even when the oneshot unit
 is green.
@@ -9398,7 +9437,7 @@ interval. Deployment-healthy bootstrap means peers are greater than zero, the
 best/finalized head advances, and the direct and proxied identity agree; it is
 valid for `isSyncing` to remain true while millions of archive blocks download.
 Chain-ready additionally requires `isSyncing=false`, preflight `ready=true`,
-and runtime specification 447. An RPC response alone is insufficient: a
+and runtime specification 452. An RPC response alone is insufficient: a
 zero-peer node can serve a permanently stale local chain.
 
 `isSyncing=false` is especially unsafe by itself. With no peers, Subtensor can
@@ -9446,17 +9485,17 @@ Two independent faults were present:
 2. The node was still the old `ghcr.io/opentensor/subtensor:v3.2.7` deployment,
    runtime specification 212 with RocksDB/pruning 256. It had zero peers and a
    best head stuck at 3,424,064 despite the target already exceeding 7.8 million
-   at its prior start. The desired pinned runtime-447 archive deployment and
+   at its prior start. The desired pinned v447-binary archive deployment and
    `/etc/subtensor/preflight.json` had never reached the host.
 
 The first pinned-image deployment then exposed a playbook bug: it asserted
-`isSyncing=false` and exact runtime 447 before installing nginx. At that point
+`isSyncing=false` and the then-current exact runtime 447 before installing nginx. At that point
 the new node was healthy bootstrap state—one peer, advancing from block 50,296
 toward 7,826,287, and reporting historical runtime 135 at that historical
 head—but the assertion aborted the play and left port 9944 closed. The corrected
 gate requires peer, identity, and head progress during bootstrap; writes
 `preflight.json` with `ready=false`; installs and probes nginx; and enforces
-runtime 447 only after synchronization converges. The nginx drop-in orders it
+the current runtime only after synchronization converges. The nginx drop-in orders it
 after `openvpn@by-pre.service`, waits for the exact overlay address, and restarts
 after transient bind failures.
 
@@ -9498,13 +9537,53 @@ independent-host handshake and rising inbound-connection counter.
 
 Gateway recovery and archive bootstrap deployment are complete after deploying
 `run-subtensor.sh`: the pinned image/chain identity, temporary peers, advancing
-heads, `/healthz`, and JSON-RPC on overlay 9944 are proven. P2P remains degraded
-until the upstream TCP/30333 forward is installed and externally verified;
-chain cutover additionally waits for preflight `ready=true` and runtime 447.
+heads, `/healthz`, and JSON-RPC on overlay 9944 are proven. Chain cutover waits
+for live convergence at runtime 452; a historical `preflight.json` is only a
+deployment-time observation and must not be treated as current status.
 Reboot snow once as a deployment gate: nginx must wait until
 `172.28.208.185` exists or restart on the transient bind failure.
 `network-online.target` alone does not guarantee that the later OpenVPN address
 is present.
+
+### 17.4 2026-09-01 exporter validation and warp-fallback root cause
+
+The Grafana dashboard's millions-behind values were validated against both
+source layers. Direct JSON-RPC on snow and the matching Mimir series agreed on
+archive/lightnode best heads, sync targets, and peer counts; Mimir samples were
+about seven seconds old and the `job=subtensor` and
+`job=subtensor-lightnode` labels were distinct. This rules out a stale scrape,
+label collision, unit-conversion error, or Grafana export bug. At the audit
+boundary the archive was about 1.56 million blocks behind and the lightnode
+about 1.62 million behind, while each advanced 24 blocks in a 12-second sample
+with 9 and 7 peers respectively. One-hour Mimir slopes estimated archive net
+catch-up near 1.93 blocks/s (roughly 9.4 days) and lightnode net catch-up near
+3.13 blocks/s (roughly 6.0 days), if those rates hold. The dashboard therefore
+must display explicit sync-target lag and sample age; raw best-block height
+without those labels is easy to misread.
+
+The lightnode lag is not an acceptable warp bootstrap. Its startup log records
+`Can't use warp sync mode with a partially synced database`, followed by
+`Warp sync failed. Continuing with full sync.` The process command still says
+`--sync=warp`, so inspecting argv alone produces a false healthy signal. The
+durable `/data/subtensor-lightnode` path already held a partially synchronized
+database and forced the full-sync fallback. The archive is intentionally
+`--sync=full`; its lag is ordinary bootstrap while peers and progress remain
+healthy.
+
+The root-cause repair is operational and storage-aware: deploy the lightnode
+against a new empty, generation-specific base path, preserve the old path for
+rollback/evidence, and gate deployment on both the startup fallback log and a
+near-reference head. Do not wipe or reuse the failed partial path. This cannot
+be closed by deploying server application code alone; it requires the xops
+Subtensor playbook and a controlled node restart. A future hardware/storage
+alert likewise needs capacity work when disk, memory, or sustained import
+throughput—not software correctness—is the measured bottleneck.
+
+The 2026-09-01 public-path retest closes the earlier P2P-forward incident:
+independent Fireside TCP probes reached snow's WAN ports 30333 and 30334, and
+both nodes exposed large, rising incoming-connection counters. Continue to
+alert on zero peers or frozen heads because public TCP reachability alone does
+not prove a retained peer session.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 

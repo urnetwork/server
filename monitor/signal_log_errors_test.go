@@ -524,7 +524,7 @@ func TestLogErrorsSignalExplainsLongLivedNetEscrowMirror(t *testing.T) {
 	}
 }
 
-func TestLogErrorsSignalExplainsGrafanaPrometheusPluginFailure(t *testing.T) {
+func TestLogErrorsSignalExplainsGrafanaDatasourcePluginFailure(t *testing.T) {
 	line := `logger=ngalert.scheduler rule_uid=redis-node-down error="the result-set has errors that can be retried: [plugin.notRegistered] plugin not registered"`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
@@ -538,14 +538,16 @@ func TestLogErrorsSignalExplainsGrafanaPrometheusPluginFailure(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "grafana-plugin-unregistered").Markdown()
 	for _, detail := range []string{
-		"Grafana 13 extracted the formerly core Prometheus datasource",
-		"provisioned warp-mimir row",
-		"direct Mimir query",
+		"Prometheus and Loki datasource implementations as standalone native plugins",
+		"warp-mimir and warp-loki rows",
+		"Logs Drilldown app is a frontend",
+		"direct Mimir or Loki query",
 		"exact Grafana generation and image",
-		"pinned Prometheus plugin and catalog SHA-256",
-		"Prometheus plugin and provisioned-alert interval tests",
-		"Do not recreate the datasource",
-		"vector(1) through Grafana /api/ds/query",
+		"pinned Prometheus and Loki plugins and catalog SHA-256",
+		"datasource-plugin packaging, Logs Drilldown provisioning",
+		"Do not recreate either datasource",
+		"count_over_time query through warp-loki via Grafana /api/ds/query",
+		"var-ds=warp-loki",
 		"every active exact-edge generation",
 	} {
 		if !strings.Contains(markdown, detail) {

@@ -43,6 +43,22 @@ type monitorYaml struct {
 			LoadBalancerUnit string   `yaml:"load_balancer_unit"`
 			AddressFamilies  []string `yaml:"address_families"`
 		} `yaml:"proxy"`
+		Subtensor *struct {
+			PublicRPCURL               string `yaml:"public_rpc_url"`
+			ExpectedChain              string `yaml:"expected_chain"`
+			ExpectedGenesisHash        string `yaml:"expected_genesis_hash"`
+			ExpectedSpecName           string `yaml:"expected_spec_name"`
+			ExpectedSpecVersion        int64  `yaml:"expected_spec_version"`
+			ExpectedTransactionVersion int64  `yaml:"expected_transaction_version"`
+			ExpectedEVMChainID         string `yaml:"expected_evm_chain_id"`
+			WarpMaxLag                 int64  `yaml:"warp_max_lag"`
+			Nodes                      []struct {
+				Name        string `yaml:"name"`
+				SyncMode    string `yaml:"sync_mode"`
+				RPCPort     int    `yaml:"rpc_port"`
+				GatewayPort int    `yaml:"gateway_port"`
+			} `yaml:"nodes"`
+		} `yaml:"subtensor"`
 	} `yaml:"hosts"`
 	Pg struct {
 		Port          int `yaml:"port"`
@@ -84,6 +100,12 @@ type servicesLBInterfaceYaml struct {
 	Transparent bool   `yaml:"transparent"`
 }
 
+type grafanaVaultYaml struct {
+	Grafana struct {
+		AdminPassword string `yaml:"admin_password"`
+	} `yaml:"grafana"`
+}
+
 // LoadSignalSettings loads production settings from the standard WARP_HOME
 // config/vault resolvers. Keeping this here makes cli/monitor a thin wrapper.
 func LoadSignalSettings() (SignalSettings, error) {
@@ -107,6 +129,18 @@ func LoadSignalSettings() (SignalSettings, error) {
 	pgKeys, err := pgResource.ParseE()
 	if err != nil {
 		return SignalSettings{}, err
+	}
+
+	grafanaResource, err := server.Vault.SimpleResource("grafana.yml")
+	if err != nil {
+		return SignalSettings{}, fmt.Errorf("grafana.yml: %w", err)
+	}
+	var grafanaVault grafanaVaultYaml
+	if err := grafanaResource.UnmarshalYamlE(&grafanaVault); err != nil {
+		return SignalSettings{}, err
+	}
+	if grafanaVault.Grafana.AdminPassword == "" {
+		return SignalSettings{}, fmt.Errorf("grafana.yml: grafana.admin_password is required")
 	}
 
 	servicesResource, err := server.Vault.SimpleResource("services.yml")
@@ -159,6 +193,9 @@ func LoadSignalSettings() (SignalSettings, error) {
 			Password:      yamlString(pgKeys["password"]),
 			Database:      yamlString(pgKeys["db"]),
 		},
+		Grafana: GrafanaSettings{
+			AdminPassword: grafanaVault.Grafana.AdminPassword,
+		},
 		SourceAttribution: SourceAttributionSettings{
 			IPv4URL:      y.SourceAttribution.IPv4URL,
 			IPv6URL:      y.SourceAttribution.IPv6URL,
@@ -200,6 +237,24 @@ func LoadSignalSettings() (SignalSettings, error) {
 				RoutingTable:     configured.Proxy.RoutingTable,
 				LoadBalancerUnit: configured.Proxy.LoadBalancerUnit,
 				AddressFamilies:  append([]string(nil), configured.Proxy.AddressFamilies...),
+			}
+		}
+		if configured.Subtensor != nil {
+			h.Subtensor = &SubtensorHostSettings{
+				PublicRPCURL:               configured.Subtensor.PublicRPCURL,
+				ExpectedChain:              configured.Subtensor.ExpectedChain,
+				ExpectedGenesisHash:        configured.Subtensor.ExpectedGenesisHash,
+				ExpectedSpecName:           configured.Subtensor.ExpectedSpecName,
+				ExpectedSpecVersion:        configured.Subtensor.ExpectedSpecVersion,
+				ExpectedTransactionVersion: configured.Subtensor.ExpectedTransactionVersion,
+				ExpectedEVMChainID:         configured.Subtensor.ExpectedEVMChainID,
+				WarpMaxLag:                 configured.Subtensor.WarpMaxLag,
+			}
+			for _, node := range configured.Subtensor.Nodes {
+				h.Subtensor.Nodes = append(h.Subtensor.Nodes, SubtensorNodeSettings{
+					Name: node.Name, SyncMode: node.SyncMode,
+					RPCPort: node.RPCPort, GatewayPort: node.GatewayPort,
+				})
 			}
 		}
 		settings.Hosts = append(settings.Hosts, h)

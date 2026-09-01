@@ -468,6 +468,25 @@ func TestSubtensorDashboardSeparatesArchiveAndLightnodeMetrics(t *testing.T) {
 	}
 }
 
+func TestSubtensorDashboardDistinguishesRealLagFromStaleExport(t *testing.T) {
+	dashboard := readTestDashboard(t, "subtensor.json")
+	queries := strings.Join(dashboardExpressions(dashboard), "\n")
+	for _, required := range []string{
+		`status="sync_target"`,
+		`status="best"`,
+		`deriv(substrate_block_height`,
+		`[1h]`,
+		`time() - max by (job) (timestamp(`,
+	} {
+		if !strings.Contains(queries, required) {
+			t.Errorf("Subtensor dashboard cannot disambiguate lag/export freshness: missing %s", required)
+		}
+	}
+	if !strings.Contains(queries, `status="sync_target"}) - max by (job)`) {
+		t.Error("Subtensor dashboard must calculate node-reported target minus best head")
+	}
+}
+
 // the scalar operator network measurements (controller/stats_collector.go).
 // every taskworker publishes the same value, so a dashboard must read each
 // with max — never sum or avg — to select the measurement without replica

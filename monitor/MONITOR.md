@@ -108,9 +108,11 @@ tags on the edges, not git.
 The monitor has full vault + config access (the standard WARP_HOME
 resolvers) and reads every shared fact from its source of truth rather than
 duplicating it: pg credentials from `vault/<env>/pg.yml`, redis credentials
-from `vault/<env>/redis.yml`, host LAN IPs from `config/<env>/settings.yml`
-routes. Public edge IPv6 identities come from the first active version in
-`vault/<env>/services.yml`; historical versions are never probe targets.
+from `vault/<env>/redis.yml`, the Grafana datasource-probe credential from
+`vault/<env>/grafana.yml`, and host LAN IPs from
+`config/<env>/settings.yml` routes. Public edge IPv6 identities come from the
+first active version in `vault/<env>/services.yml`; historical versions are
+never probe targets.
 `vault/<env>/monitor.yml` (§7) carries only what exists nowhere else: the
 monitor ssh identity, host roles, explicit operator-disabled state, overlay
 IPs (local dev), and redis port layout. The pg path has one special rule from
@@ -379,7 +381,7 @@ server/monitor/
   run.go                run-all, one-signal, and cadence scheduling utilities
   signal_short_key.go       focused implementation linked to SIGNALS.md §X.Y
   signal_short_key_test.go  synthetic broken-state test for that probe
-  config.go             monitor.yml + pg.yml + settings.yml routes assembly
+  config.go             monitor/shared vault + settings.yml routes assembly
   conn.go               ssh-exec transport; pg/redis/shell/warpctl runners
   baseline.go           local metric history (trailing medians, retention)
   battery.go            escalation batteries (5.8 plan wall, 5.2/5.4 node)
@@ -425,7 +427,22 @@ hosts:                # only monitor-specific facts; lan ips come
       routing_table: 100
       load_balancer_unit: warp-main-lb-eno1.service
       address_families: [ipv4, ipv6]
-  # ... service hosts with roles [services], snow [subtensor]
+  - name: snow
+    overlay_ip: 172.28.208.185
+    roles: [subtensor]
+    subtensor:
+      public_rpc_url: https://test.finney.opentensor.ai
+      expected_chain: Bittensor
+      expected_genesis_hash: "0x..."
+      expected_spec_name: node-subtensor
+      expected_spec_version: 452
+      expected_transaction_version: 1
+      expected_evm_chain_id: "0x3b1"
+      warp_max_lag: 4096
+      nodes:
+        - {name: archive, sync_mode: full, rpc_port: 9945, gateway_port: 9944}
+        - {name: lightnode, sync_mode: warp, rpc_port: 9947, gateway_port: 9946}
+  # ... other service hosts with roles [services]
 pg:
   port: 5432          # direct; 6432 probed separately as pgbouncer
 source_attribution:   # optional; each expected address arms that family
@@ -438,8 +455,10 @@ IdentityFile per host. Everything else shared is read from its source of
 truth, never duplicated here (§2): pg credentials from `vault/<env>/pg.yml`
 (password passed on stdin line 1 of each battery, never argv), redis
 credentials from `vault/<env>/redis.yml`, LAN routes from
-`config/<env>/settings.yml`, and active nontransparent edge IPv6 interfaces
-from the first `vault/<env>/services.yml` version.
+`config/<env>/settings.yml`, the Grafana admin credential used only for the
+authenticated datasource control from `vault/<env>/grafana.yml`, and active
+nontransparent edge IPv6 interfaces from the first
+`vault/<env>/services.yml` version.
 
 ## 8. Development plan
 
@@ -567,7 +586,7 @@ Decided (2026-07-17):
   IdentityFile per host (assumed set up). The `monitor` user does NOT exist
   on hosts yet — provisioning is an ops task.
 - **Vault + config access**: the monitor runs with the standard WARP_HOME
-  resolvers and reads shared values (pg/redis credentials, LAN routes)
+  resolvers and reads shared values (pg/redis/Grafana credentials, LAN routes)
   directly from vault/<env> and config/<env> — monitor.yml never duplicates
   a fact that has a source of truth elsewhere.
 

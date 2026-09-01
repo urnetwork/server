@@ -40,6 +40,34 @@ type HostSettings struct {
 	// duplicated in monitor.yml, so public probes always compare the live host
 	// with the same configured identity used by warpctl.
 	EdgeIPv6 []EdgeIPv6InterfaceSettings
+
+	// Subtensor arms SIGNALS.md §17.1 for this host. Stable chain identity and
+	// node endpoints live in monitor.yml so the reusable probe does not bake a
+	// testnet/mainnet choice into its implementation.
+	Subtensor *SubtensorHostSettings
+}
+
+// SubtensorHostSettings describes one Subtensor deployment and its external
+// reference chain. The reference RPC is observational only; node traffic keeps
+// using the configured archive/lightnode gateways.
+type SubtensorHostSettings struct {
+	PublicRPCURL               string
+	ExpectedChain              string
+	ExpectedGenesisHash        string
+	ExpectedSpecName           string
+	ExpectedSpecVersion        int64
+	ExpectedTransactionVersion int64
+	ExpectedEVMChainID         string
+	WarpMaxLag                 int64
+	Nodes                      []SubtensorNodeSettings
+}
+
+// SubtensorNodeSettings is one independently checked local RPC/gateway pair.
+type SubtensorNodeSettings struct {
+	Name        string
+	SyncMode    string
+	RPCPort     int
+	GatewayPort int
 }
 
 // EdgeIPv6InterfaceSettings describes one configured public IPv6 LB path.
@@ -69,6 +97,13 @@ type PostgreSQLSettings struct {
 	User          string
 	Password      string
 	Database      string
+}
+
+// GrafanaSettings carries only the credential needed to exercise provisioned
+// datasources through Grafana itself. The monitor sends it as HTTP Basic Auth
+// in memory; it is never included in an alert, command line, or query body.
+type GrafanaSettings struct {
+	AdminPassword string
 }
 
 // SourceAttributionSettings arms SIGNALS.md §8.8. Each configured expected
@@ -152,6 +187,7 @@ type SignalSettings struct {
 
 	Hosts             []HostSettings
 	PostgreSQL        PostgreSQLSettings
+	Grafana           GrafanaSettings
 	SourceAttribution SourceAttributionSettings
 	StateDir          string
 
@@ -306,28 +342,29 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
-		env:                 settings.Environment,
-		publicDomain:        settings.PublicDomain,
-		websiteDomain:       settings.WebsiteDomain,
-		logServices:         append([]string(nil), settings.LogServices...),
-		logServiceBlocks:    cloneLogServiceBlocks(settings.LogServiceBlocks),
-		verificationEnabled: settings.VerificationEnabled,
-		sshUser:             settings.SSHUser,
-		sshDevUser:          settings.SSHDevUser,
-		sshKeyPaths:         append([]string(nil), settings.SSHKeyPaths...),
-		addressMode:         string(settings.AddressMode),
-		pgPort:              settings.PostgreSQL.Port,
-		pgbouncerPort:       settings.PostgreSQL.PgBouncerPort,
-		pgUser:              settings.PostgreSQL.User,
-		pgPassword:          settings.PostgreSQL.Password,
-		pgDb:                settings.PostgreSQL.Database,
-		sourceIPv4URL:       settings.SourceAttribution.IPv4URL,
-		sourceIPv6URL:       settings.SourceAttribution.IPv6URL,
-		expectedSourceIPv4:  settings.SourceAttribution.ExpectedIPv4,
-		expectedSourceIPv6:  settings.SourceAttribution.ExpectedIPv6,
-		stateDir:            settings.StateDir,
-		sshConnectTimeout:   settings.SSHConnectTimeout,
-		commandTimeout:      settings.CommandTimeout,
+		env:                  settings.Environment,
+		publicDomain:         settings.PublicDomain,
+		websiteDomain:        settings.WebsiteDomain,
+		logServices:          append([]string(nil), settings.LogServices...),
+		logServiceBlocks:     cloneLogServiceBlocks(settings.LogServiceBlocks),
+		verificationEnabled:  settings.VerificationEnabled,
+		sshUser:              settings.SSHUser,
+		sshDevUser:           settings.SSHDevUser,
+		sshKeyPaths:          append([]string(nil), settings.SSHKeyPaths...),
+		addressMode:          string(settings.AddressMode),
+		pgPort:               settings.PostgreSQL.Port,
+		pgbouncerPort:        settings.PostgreSQL.PgBouncerPort,
+		pgUser:               settings.PostgreSQL.User,
+		pgPassword:           settings.PostgreSQL.Password,
+		pgDb:                 settings.PostgreSQL.Database,
+		grafanaAdminPassword: settings.Grafana.AdminPassword,
+		sourceIPv4URL:        settings.SourceAttribution.IPv4URL,
+		sourceIPv6URL:        settings.SourceAttribution.IPv6URL,
+		expectedSourceIPv4:   settings.SourceAttribution.ExpectedIPv4,
+		expectedSourceIPv6:   settings.SourceAttribution.ExpectedIPv6,
+		stateDir:             settings.StateDir,
+		sshConnectTimeout:    settings.SSHConnectTimeout,
+		commandTimeout:       settings.CommandTimeout,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands
@@ -342,6 +379,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 			redisExpectedReplicas: configured.RedisExpectedReplicas,
 			proxy:                 cloneProxyHostSettings(configured.Proxy),
 			edgeIPv6:              cloneEdgeIPv6Settings(configured.EdgeIPv6),
+			subtensor:             cloneSubtensorHostSettings(configured.Subtensor),
 		}
 		if len(configured.RedisNodePorts) > 0 {
 			h.redisPorts = append([]int(nil), configured.RedisNodePorts...)
@@ -378,6 +416,7 @@ func hostSettingsFromHost(h *host) HostSettings {
 		RedisExpectedReplicas: h.redisExpectedReplicas,
 		Proxy:                 cloneProxyHostSettings(h.proxy),
 		EdgeIPv6:              cloneEdgeIPv6Settings(h.edgeIPv6),
+		Subtensor:             cloneSubtensorHostSettings(h.subtensor),
 	}
 }
 
@@ -392,6 +431,15 @@ func cloneProxyHostSettings(settings *ProxyHostSettings) *ProxyHostSettings {
 
 func cloneEdgeIPv6Settings(settings []EdgeIPv6InterfaceSettings) []EdgeIPv6InterfaceSettings {
 	return append([]EdgeIPv6InterfaceSettings(nil), settings...)
+}
+
+func cloneSubtensorHostSettings(settings *SubtensorHostSettings) *SubtensorHostSettings {
+	if settings == nil {
+		return nil
+	}
+	clone := *settings
+	clone.Nodes = append([]SubtensorNodeSettings(nil), settings.Nodes...)
+	return &clone
 }
 
 type sourceRunner struct {

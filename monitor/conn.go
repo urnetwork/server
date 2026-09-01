@@ -106,6 +106,7 @@ type host struct {
 	redisExpectedReplicas int
 	proxy                 *ProxyHostSettings
 	edgeIPv6              []EdgeIPv6InterfaceSettings
+	subtensor             *SubtensorHostSettings
 }
 
 func (self *host) hasRole(role string) bool {
@@ -162,6 +163,8 @@ type monitorConfig struct {
 	pgUser        string
 	pgPassword    string
 	pgDb          string
+
+	grafanaAdminPassword string
 
 	sourceIPv4URL      string
 	sourceIPv6URL      string
