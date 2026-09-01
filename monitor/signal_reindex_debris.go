@@ -10,7 +10,8 @@ import (
 
 // SIGNALS.md §2.2a maps to signal_reindex_debris.go and
 // signal_reindex_debris_test.go. The probe reads only PostgreSQL catalogs and
-// excludes indexes belonging to an active CREATE/REINDEX operation.
+// excludes indexes belonging to an active CREATE/REINDEX operation and keeps
+// that operation's bounded progress counters beside the obscured candidates.
 func NewReindexDebrisSignal() Signal {
 	return &signalAdapter{
 		number: "2.2a",
@@ -36,10 +37,33 @@ const reindexDebrisCatalogQuery = `
 		WHERE table_namespace.nspname = 'public'
 		  AND table_class.relkind IN ('r', 'p')
 	), progress AS MATERIALIZED (
-		SELECT relid, index_relid
-		FROM pg_stat_progress_create_index
+		SELECT progress.relid,
+		       progress.index_relid,
+		       format(
+			       'relation=%s index=%s command=%L phase=%L query_age_s=%s wait=%s:%s blockers=%s blocks=%s/%s tuples=%s/%s lockers=%s/%s partitions=%s/%s',
+			       progress.relid::regclass::text,
+			       progress.index_relid::regclass::text,
+			       progress.command,
+			       progress.phase,
+			       coalesce(round(extract(epoch FROM clock_timestamp() - activity.query_start))::bigint, -1),
+			       coalesce(activity.wait_event_type, '-'),
+			       coalesce(activity.wait_event, '-'),
+			       coalesce(cardinality(pg_blocking_pids(progress.pid)), 0),
+			       coalesce(progress.blocks_done, 0),
+			       coalesce(progress.blocks_total, 0),
+			       coalesce(progress.tuples_done, 0),
+			       coalesce(progress.tuples_total, 0),
+			       coalesce(progress.lockers_done, 0),
+			       coalesce(progress.lockers_total, 0),
+			       coalesce(progress.partitions_done, 0),
+			       coalesce(progress.partitions_total, 0)
+		       ) AS detail
+		FROM pg_stat_progress_create_index progress
+		LEFT JOIN pg_stat_activity activity USING (pid)
 	), candidates AS (
-		SELECT public_tables.table_name,
+		SELECT public_tables.oid AS table_oid,
+		       public_tables.reltoastrelid AS toast_oid,
+		       public_tables.table_name,
 		       index_class.oid AS index_oid,
 		       index_state.indisready,
 		       pg_relation_size(index_class.oid) AS index_bytes,
@@ -85,9 +109,14 @@ const reindexDebrisCatalogQuery = `
 	       count(*) FILTER (WHERE relation_in_progress AND indisready)::int,
 	       coalesce(sum(index_bytes) FILTER (WHERE relation_in_progress), 0)::bigint,
 	       coalesce(string_agg(qualified_name, ', ' ORDER BY qualified_name)
-	                FILTER (WHERE relation_in_progress AND sample_rank <= 5), '')
+	                FILTER (WHERE relation_in_progress AND sample_rank <= 5), ''),
+	       coalesce((
+		       SELECT string_agg(progress.detail, '; ' ORDER BY progress.index_relid)
+		       FROM progress
+		       WHERE progress.relid IN (ranked.table_oid, ranked.toast_oid)
+	       ), '') AS active_progress
 	FROM ranked
-	GROUP BY table_name
+	GROUP BY table_oid, toast_oid, table_name
 	ORDER BY coalesce(sum(index_bytes), 0) DESC, count(*) DESC, table_name;
 `
 
@@ -101,11 +130,12 @@ type reindexDebrisState struct {
 	activeTableReadyCount int64
 	activeTableBytes      int64
 	activeTableSamples    string
+	activeProgress        string
 }
 
 func parseReindexDebrisState(row pgRow) (reindexDebrisState, error) {
-	if len(row) != 9 {
-		return reindexDebrisState{}, fmt.Errorf("reindex debris query returned %d columns, want 9", len(row))
+	if len(row) != 10 {
+		return reindexDebrisState{}, fmt.Errorf("reindex debris query returned %d columns, want 10", len(row))
 	}
 	parseNonnegative := func(column int, name string) (int64, error) {
 		value, err := strconv.ParseInt(row.str(column), 10, 64)
@@ -119,6 +149,7 @@ func parseReindexDebrisState(row pgRow) (reindexDebrisState, error) {
 		tableName:          row.str(0),
 		samples:            row.str(4),
 		activeTableSamples: row.str(8),
+		activeProgress:     row.str(9),
 	}
 	if state.tableName == "" {
 		return reindexDebrisState{}, fmt.Errorf("reindex debris query returned an empty table name")
@@ -154,6 +185,18 @@ func parseReindexDebrisState(row pgRow) (reindexDebrisState, error) {
 			"invalid active-table reindex candidate counts count=%d ready=%d",
 			state.activeTableCount,
 			state.activeTableReadyCount,
+		)
+	}
+	if state.activeTableCount > 0 && state.activeProgress == "" {
+		return reindexDebrisState{}, fmt.Errorf(
+			"active-table reindex candidates for %q have no progress detail",
+			state.tableName,
+		)
+	}
+	if state.activeTableCount == 0 && state.activeProgress != "" {
+		return reindexDebrisState{}, fmt.Errorf(
+			"inactive reindex owner %q unexpectedly has progress detail",
+			state.tableName,
 		)
 	}
 	if state.count == 0 && state.activeTableCount == 0 {
@@ -215,12 +258,13 @@ func (reindexDebrisProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		}
 		if state.activeTableCount > 0 && len(activeEvidence) < 8 {
 			activeEvidence = append(activeEvidence, fmt.Sprintf(
-				"%s: invalid_candidates=%d write_ready=%d bytes=%d samples=%s",
+				"%s: invalid_candidates=%d write_ready=%d bytes=%d samples=%s progress={%s}",
 				state.tableName,
 				state.activeTableCount,
 				state.activeTableReadyCount,
 				state.activeTableBytes,
 				state.activeTableSamples,
+				state.activeProgress,
 			))
 		}
 	}

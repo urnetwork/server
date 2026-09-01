@@ -1517,7 +1517,13 @@ nor hidden. The alert reports confirmed inactive bytes as a lower bound and
 active-table candidate bytes separately as unclassified and explicitly not
 reclaimed. If only active-table candidates exist for two probes, class
 `reindex-debris-obscured` preserves that visibility boundary without directing
-cleanup. Including TOAST is required: a full-table reindex also rebuilds the
+cleanup. From the same catalog snapshot, each active owner carries its bounded
+`pg_stat_progress_create_index` relation/index, command, phase, query age,
+wait, blocker count, and block/tuple/locker/partition done/total counters.
+Compare phase and counters across samples: movement is forward progress, while
+one flat point is not enough to call a stall. Phase-specific zero totals remain
+literal PostgreSQL evidence rather than an inferred percentage. Including
+TOAST is required: a full-table reindex also rebuilds the
 associated TOAST index, while the old cleanup query looked only at indexes
 whose direct parent name matched the public table. The alert is therefore not
 an invitation to drop a temporary index under a progressing build. All
@@ -1576,8 +1582,9 @@ whenever any index operation shared its parent relation, so active work made
 roughly 155–162 GiB disappear from the alert without reclaiming it. The new
 lower-bound/active-candidate split prevents that false closure. Synthetic
 regressions pin the combined headline, the active-only obscured class, exact
-progress exclusion, malformed counts, and the rule that a confirmed-byte dip
-paired with active candidate bytes is not cleanup.
+progress exclusion, bounded progress fields, malformed counts, missing or
+impossible progress detail, and the rule that a confirmed-byte dip paired with
+active candidate bytes is not cleanup.
 
 The first production run of the corrected probe at 13:31:41Z resolved the
 apparent cleanup: 320 confirmed inactive artifacts across 35 tables occupied
@@ -1661,6 +1668,26 @@ backend added one durable artifact. This five-minute recovery is an ongoing
 artifact-creation loop, not a historical debris inventory. It also supplied
 the production fixture for matching excluded daily partition names in
 addition to the seven exact-table exclusions.
+
+Later samples supplied the first same-snapshot progress controls for this
+loop. At 18:21:40Z, `transfer_escrow_unsettled_balance_contract_ccnew10` was
+in `index validation: scanning table`, with no wait or blockers and
+10,190,966 of 20,116,380 blocks complete (50.7%). At 18:24:45Z that exact
+operation had exited and all 30 `transfer_escrow` artifacts, totaling
+291,331,448,832 bytes, were confirmed inactive; the same legacy cycle had
+immediately moved to `contract_close_pkey_ccnew33`, which was in
+`building index: scanning table`, with no wait or blockers and 27,621,896 of
+29,871,309 blocks complete (92.5%). At 18:27:15Z progress was empty, but the
+catalog held 366 confirmed inactive artifacts across 36 owners, totaling
+307,542,106,112 bytes (286.42 GiB): `transfer_escrow` owned 30 and
+`contract_close` owned 34. Legacy start lines for two excluded daily
+reliability partitions followed at 18:26:21Z. Thus phase/counter movement and
+the empty final progress sample prove this retry advanced through its bounded
+operations; the larger inactive inventory proves that completion was not
+cleanup. One table leaving progress never authorizes an interruption while
+the next table is active. The rollout gate opens only on an empty progress
+sample, and deployment still separately requires the trusted release-builder
+gate in section 8.13.
 
 Standing class `db-maintenance-legacy-reindex` matches only the old-format
 start line for an exact table or daily reliability partition excluded by
