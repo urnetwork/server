@@ -18,8 +18,9 @@ import (
 )
 
 type RunOptions struct {
-	Port               int
-	TLSDefaultHostName string
+	Port                 int
+	TLSDefaultHostName   string
+	DirectH3LoopbackMode bool
 }
 
 func (self RunOptions) Validate() error {
@@ -29,13 +30,38 @@ func (self RunOptions) Validate() error {
 	if self.TLSDefaultHostName != strings.TrimSpace(self.TLSDefaultHostName) || strings.ContainsAny(self.TLSDefaultHostName, "/\\\x00") {
 		return errors.New("connect TLS default hostname is invalid")
 	}
+	if self.DirectH3LoopbackMode {
+		ip := net.ParseIP(self.TLSDefaultHostName)
+		if ip == nil || ip.To4() == nil || !ip.IsLoopback() {
+			return errors.New("direct H3 loopback mode requires an IPv4 loopback TLS default hostname")
+		}
+	}
 	return nil
 }
 
 func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	settings := DefaultExchangeSettings()
 	settings.ConnectHandlerSettings.TransportTlsSettings.DefaultHostName = options.TLSDefaultHostName
+	if options.DirectH3LoopbackMode {
+		// Production ingress supplies Proxy Protocol on every new UDP flow. The
+		// simulator owns its exact loopback listeners and dials them directly,
+		// so retaining that wrapper would discard every QUIC Initial before TLS.
+		settings.ConnectHandlerSettings.EnableProxyProtocol = false
+	}
 	return settings
+}
+
+// Keeps the simulator-only bypass confined to a socket the same host owns.
+// An ordinary production listener may still bind any configured address.
+func validateRunListenIPv4(options RunOptions, listenIPv4 string) error {
+	if !options.DirectH3LoopbackMode {
+		return nil
+	}
+	ip := net.ParseIP(listenIPv4)
+	if ip == nil || ip.To4() == nil || !ip.IsLoopback() {
+		return fmt.Errorf("direct H3 loopback mode cannot bind %q", listenIPv4)
+	}
+	return nil
 }
 
 // Run serves the production connect module until ctx is canceled. The CLI and
@@ -45,6 +71,10 @@ func Run(ctx context.Context, options RunOptions) error {
 		return errors.New("connect run context is nil")
 	}
 	if err := options.Validate(); err != nil {
+		return err
+	}
+	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
+	if err := validateRunListenIPv4(options, listenIPv4); err != nil {
 		return err
 	}
 	connectcore.ResizeMessagePools(connectcore.Gib(16))
@@ -95,7 +125,6 @@ func Run(ctx context.Context, options RunOptions) error {
 
 	server.StartStatsPusher(runCtx)
 	glog.Infof("[connect]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
-	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
 	err := server.HttpListenAndServeWithReusePort(
 		runCtx,
 		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
