@@ -4817,6 +4817,30 @@ sudo -S -p '' docker ps --format '{{.Names}}\t{{.Image}}\t{{.RunningFor}}\t{{.St
   live" from `git status`/`git log` — inspect the running image, and confirm
   with the behavior signal (8.2).
 
+### 8.1a Transparent services have no load-balancer status route
+
+A service assigned only to transparent load-balancer interfaces cannot be
+sampled through `https://<env>-lb/.../by/b/<service>/<block>/status`. Those
+routes exist only on non-transparent load balancers. Proxy is in this class:
+on 2026-09-01, the old `warpctl ls versions main proxy --sample` reached
+edge-1 over IPv6 and received HTTP 404 for every block. A completed TLS/HTTP
+exchange proved that IPv6 routing worked; the 404 meant the application route
+did not exist. Do not classify that response as an edge-IPv6 failure.
+
+Warpctl must fail closed at this observability boundary. `ls versions
+--sample` now reports that status sampling is unavailable without issuing the
+false requests. `deploy --only-older` refuses to deploy when a transparent,
+non-standard, unexposed, errored, or empty sample prevents it from proving the
+running version of every selected block. Never substitute the registry's
+desired version for a live observation: that recreates the blind deployment
+the option is meant to avoid.
+
+For transparent services, verify convergence directly on each assigned host
+from the current `services.yml` inventory: first require the remote hostname
+to match, then read the running container image/digest, embedded source
+revision, process start, and drain ancestors. A legacy address table or a
+normal edge's 404 is neither host assignment nor runtime provenance.
+
 ### 8.2 The graceful-handoff drain — multiple build generations run at once
 A connect deploy does NOT replace the old containers atomically. New-build
 containers start and take NEW connections; the OLD-build containers keep

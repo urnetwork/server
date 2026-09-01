@@ -376,6 +376,15 @@ healthy control to remain healthy and check for displaced failure modes. A
 single later success, green `/hello`, quiet minute, or desired-version control
 plane row does not prove fleet convergence.
 
+Before using `warpctl ls versions --sample` as live provenance, determine
+whether the service has at least one non-transparent load-balancer allocation.
+Transparent-only services have no load-balancer block-status route. The command
+must report that limitation without polling, and `deploy --only-older` must
+fail closed because it cannot compare an unobserved running version. Verify
+such services directly on every host assigned by the current `services.yml`;
+an HTTP 404 from a normal edge proves the request arrived but not that the
+transparent service or its version was sampled.
+
 When deployment is not yet authorized or an external measurement must not be
 interrupted, state what is ready, what must be deployed, and the earliest valid
 verification time. Schedule the check automatically when the operator has
