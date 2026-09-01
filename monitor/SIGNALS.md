@@ -1467,6 +1467,19 @@ roughly 170 GiB band. This validates both the lower-bound wording and the rule
 that neither bucket may be interpreted as reclaimed until progress exits and
 the catalog reaches zero.
 
+The owner split also proves the maintenance root fix is not deployed. At that
+same corrected sample, `transfer_escrow` was fully inactive with 18 artifacts,
+3 write-ready, totaling 174,875,197,440 bytes. The earlier post-operation
+sample had 15 artifacts totaling 174,100,488,192 bytes: three more siblings
+and 774,709,248 additional bytes were created. Meanwhile `contract_close`
+owned the 18 active-table candidates, all not-ready, totaling 8,122,728,448
+bytes. This is continuing retry creation, not merely a new presentation of the
+old catalog. Deploy Taskworker from a clean server revision containing
+`7676014f` before another maintenance cycle; focused normal and race tests for
+the transfer exclusion and cleanup-before/rebuild/cleanup-after state machine
+pass. Do not conflate that software deployment with authorization to delete
+the existing relations while `contract_close` progress remains active.
+
 The pool timeout was consequently a downstream queue symptom. The daily
 maintenance scheduler had two independent defects: `transfer_escrow` was not
 excluded from the two-hour full-table policy despite its documented one-time
