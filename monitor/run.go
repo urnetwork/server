@@ -142,7 +142,10 @@ func (m *Monitor) prepareRunLoop(ctx context.Context) ([]Signal, []*logTailer, e
 		number: logSignal.number,
 		key:    logSignal.key,
 		name:   logSignal.name,
-		probe:  &logTailProbe{tailers: tailers},
+		probe: &logTailProbe{
+			tailers:              tailers,
+			monitorRouteEvidence: collectTailTransportMonitorRouteEvidence,
+		},
 		accept: logSignal.accept,
 	}
 	return signals, tailers, nil

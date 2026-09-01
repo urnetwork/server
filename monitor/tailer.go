@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1576,6 +1577,11 @@ type logTailProbe struct {
 	// delta. Only the probe goroutine touches this (a probe never overlaps
 	// itself).
 	lastRestartCounts []int
+	// monitorRouteEvidence is enabled only by the production standing runner.
+	// It is a narrow, fail-soft local discriminator: a remote tail transport
+	// event must remain visible even when the monitor host cannot expose recent
+	// router-advertisement state. Tests inject it explicitly.
+	monitorRouteEvidence tailTransportMonitorRouteEvidenceCollector
 }
 
 // tailerSilentThreshold: no line for this long means the monitor is blind to
@@ -1636,7 +1642,11 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			findings = append(findings, tailerReconcileFinding(tailer.service, now, startedAt, lastSuccess, lastError))
 		}
 	}
-	findings = append(findings, tailTransportRouteFindings(env, routeEvents)...)
+	monitorEvidence := tailTransportMonitorRouteEvidence{}
+	if len(routeEvents) != 0 && self.monitorRouteEvidence != nil {
+		monitorEvidence = self.monitorRouteEvidence(ctx, env, routeEvents)
+	}
+	findings = append(findings, tailTransportRouteFindings(env, routeEvents, monitorEvidence)...)
 	return findings, nil
 }
 
@@ -1648,13 +1658,161 @@ type tailTransportRouteAggregate struct {
 	services map[string]struct{}
 }
 
+type tailTransportMonitorRouteEvidence struct {
+	interfaceName           string
+	routerLifetimeZeroAt    time.Time
+	routerLifetimeZeroCount int
+	autoconfDetachCount     int
+	ipv6AbsentAt            time.Time
+	ipv6RestoredAt          time.Time
+}
+
+type tailTransportMonitorRouteEvidenceCollector func(
+	context.Context,
+	*probeEnv,
+	map[string]*tailTransportRouteAggregate,
+) tailTransportMonitorRouteEvidence
+
+const monitorIPv6LogTimeLayout = "2006-01-02 15:04:05.000"
+
+var (
+	monitorIPv6LogTimestampPattern   = regexp.MustCompile(`^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3})`)
+	monitorRouterLifetimeZeroPattern = regexp.MustCompile(`RTADV ([[:alnum:]_.-]+): router lifetime became zero`)
+	monitorAutoconfDetachedPattern   = regexp.MustCompile(`AUTOMATIC-V6 ([[:alnum:]_.-]+): all autoconf addresses detached/deprecated`)
+)
+
+// collectTailTransportMonitorRouteEvidence asks only for the few local
+// configd records that can distinguish a production edge failure from the
+// monitor losing its own IPv6 default router. The current durable monitor runs
+// on macOS. Other platforms retain the generic exact-address battery without
+// turning an unavailable platform log into a second visibility incident.
+func collectTailTransportMonitorRouteEvidence(
+	ctx context.Context,
+	env *probeEnv,
+	events map[string]*tailTransportRouteAggregate,
+) tailTransportMonitorRouteEvidence {
+	if runtime.GOOS != "darwin" || env == nil || env.runner == nil {
+		return tailTransportMonitorRouteEvidence{}
+	}
+	first, last, ok := tailTransportRouteEventBounds(events)
+	if !ok {
+		return tailTransportMonitorRouteEvidence{}
+	}
+	out, err := env.runner.local(
+		ctx,
+		"/usr/bin/log",
+		"show",
+		"--style", "compact",
+		"--start", first.Add(-5*time.Second).Format("2006-01-02 15:04:05"),
+		"--end", last.Add(15*time.Second).Format("2006-01-02 15:04:05"),
+		"--predicate", `process == "configd" AND (eventMessage CONTAINS "RTADV " OR eventMessage CONTAINS "AUTOMATIC-V6 " OR eventMessage CONTAINS "network changed:")`,
+	)
+	if err != nil {
+		return tailTransportMonitorRouteEvidence{}
+	}
+	return parseTailTransportMonitorRouteEvidence(out)
+}
+
+func tailTransportRouteEventBounds(events map[string]*tailTransportRouteAggregate) (time.Time, time.Time, bool) {
+	var first time.Time
+	var last time.Time
+	for _, event := range events {
+		for _, value := range []string{event.first, event.last} {
+			parsed, err := time.ParseInLocation("2006/01/02 15:04:05", value, time.Local)
+			if err != nil {
+				continue
+			}
+			if first.IsZero() || parsed.Before(first) {
+				first = parsed
+			}
+			if last.IsZero() || last.Before(parsed) {
+				last = parsed
+			}
+		}
+	}
+	return first, last, !first.IsZero() && !last.IsZero()
+}
+
+func parseTailTransportMonitorRouteEvidence(out string) tailTransportMonitorRouteEvidence {
+	evidence := tailTransportMonitorRouteEvidence{}
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		timestampMatch := monitorIPv6LogTimestampPattern.FindStringSubmatch(line)
+		if len(timestampMatch) != 2 {
+			continue
+		}
+		observedAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, timestampMatch[1], time.Local)
+		if err != nil {
+			continue
+		}
+		if match := monitorRouterLifetimeZeroPattern.FindStringSubmatch(line); len(match) == 2 {
+			if evidence.interfaceName == "" {
+				evidence.interfaceName = match[1]
+			}
+			if match[1] == evidence.interfaceName {
+				evidence.routerLifetimeZeroCount++
+				if evidence.routerLifetimeZeroAt.IsZero() || observedAt.Before(evidence.routerLifetimeZeroAt) {
+					evidence.routerLifetimeZeroAt = observedAt
+				}
+			}
+			continue
+		}
+		if match := monitorAutoconfDetachedPattern.FindStringSubmatch(line); len(match) == 2 {
+			// A detach on another interface is not causal evidence for this
+			// route withdrawal. The zero-lifetime RTADV chooses the identity.
+			if evidence.interfaceName != "" && match[1] == evidence.interfaceName {
+				evidence.autoconfDetachCount++
+			}
+			continue
+		}
+		if evidence.interfaceName != "" &&
+			!evidence.routerLifetimeZeroAt.IsZero() &&
+			evidence.routerLifetimeZeroAt.Before(observedAt) &&
+			strings.Contains(line, "network changed:") &&
+			!strings.Contains(line, "v6("+evidence.interfaceName) &&
+			evidence.ipv6AbsentAt.IsZero() {
+			evidence.ipv6AbsentAt = observedAt
+			continue
+		}
+		if evidence.interfaceName != "" &&
+			!evidence.routerLifetimeZeroAt.IsZero() &&
+			evidence.routerLifetimeZeroAt.Before(observedAt) &&
+			strings.Contains(line, "network changed:") &&
+			strings.Contains(line, "v6("+evidence.interfaceName) &&
+			evidence.ipv6RestoredAt.IsZero() {
+			evidence.ipv6RestoredAt = observedAt
+		}
+	}
+	return evidence
+}
+
+func (e tailTransportMonitorRouteEvidence) matches(event *tailTransportRouteAggregate) bool {
+	if e.interfaceName == "" || e.routerLifetimeZeroAt.IsZero() || e.ipv6AbsentAt.IsZero() || event == nil {
+		return false
+	}
+	first, last, ok := tailTransportRouteEventBounds(map[string]*tailTransportRouteAggregate{"event": event})
+	if !ok {
+		return false
+	}
+	return !e.routerLifetimeZeroAt.Before(first.Add(-15*time.Second)) &&
+		!last.Add(15*time.Second).Before(e.routerLifetimeZeroAt) &&
+		!e.ipv6AbsentAt.Before(first.Add(-15*time.Second)) &&
+		!last.Add(15*time.Second).Before(e.ipv6AbsentAt)
+}
+
 type tailTransportRouteTarget struct {
 	host          string
 	interfaceName string
 	address       string
 }
 
-func tailTransportRouteFindings(env *probeEnv, events map[string]*tailTransportRouteAggregate) []finding {
+func tailTransportRouteFindings(
+	env *probeEnv,
+	events map[string]*tailTransportRouteAggregate,
+	monitorEvidence tailTransportMonitorRouteEvidence,
+) []finding {
 	targets := map[string]tailTransportRouteTarget{}
 	if env != nil && env.cfg != nil {
 		for _, configuredHost := range env.cfg.hosts {
@@ -1714,6 +1872,51 @@ func tailTransportRouteFindings(env *probeEnv, events map[string]*tailTransportR
 		if len(services) > 1 {
 			correlation = "Multiple independent service tails converged on one exact edge address, proving a shared path event rather than failures in those services."
 		}
+		mechanism := "Warpctl's live-tail client received an explicit no-route transport error and reconnected internally, so the child process stayed alive and its ordinary restart counter could not expose the interruption. " + correlation + " The diagnostic alone does not distinguish monitor-side default-route loss, an upstream withdrawal or unreachable response, router neighbor resolution, or the edge interface; the exact-address battery localizes those layers."
+		observed := fmt.Sprintf(
+			"route_errors=%d services=%d service_sample=%s first_local=%s last_local=%s address=%s",
+			event.count,
+			len(services),
+			strings.Join(services, ","),
+			event.first,
+			event.last,
+			address,
+		)
+		evidence := "The finding is parsed only from warpctl stderr's `Tail read error ... no route to host ... Reconnecting` diagnostic. Stderr is duplicated to the operator console but remains isolated from remote service stdout, so it cannot become a service panic or novel-error alert."
+		contextText := "A later pinned HTTP 200 proves recovery, not absence of the earlier interruption. Check the monitor's own IPv6 default-router/advertisement state first, then compare same-second controls to another configured edge and to an unrelated provider IPv6 prefix before attributing the failure to this edge; two prefixes behind one site router are not independent controls. Preserve disabled-host exclusions."
+		action := "First inspect the monitor host's IPv6 default route and router-advertisement state at the recorded local time. If they remained stable, run the §18.1 exact-address battery: compare active services.yml with the live interface and LB unit, inspect the edge journal, and inspect the upstream router's exact neighbor and interface counters. On recurrence, capture ICMPv6 Router Advertisements locally plus the pinned SYN/ICMPv6 along the remote path. Do not restart services or change an edge address, route, firewall rule, or neighbor entry from this diagnostic alone."
+		verify := "The monitor retains its IPv6 default router without a zero-lifetime advertisement, the exact Vault address equals the live edge interface, three pinned HTTP/1.1 requests return 200, and all standing tails remain free of route-loss diagnostics for ten minutes while both another configured edge and an unrelated provider IPv6 prefix stay available as controls."
+		if monitorEvidence.matches(event) {
+			zeroAt := monitorEvidence.routerLifetimeZeroAt.Format(monitorIPv6LogTimeLayout)
+			absentAt := monitorEvidence.ipv6AbsentAt.Format(monitorIPv6LogTimeLayout)
+			restoredAt := "not observed in the bounded window"
+			if !monitorEvidence.ipv6RestoredAt.IsZero() {
+				restoredAt = monitorEvidence.ipv6RestoredAt.Format(monitorIPv6LogTimeLayout)
+			}
+			mechanism = fmt.Sprintf(
+				"The monitor host recorded a zero-lifetime IPv6 Router Advertisement on %s at %s inside the transport-failure window. A zero lifetime immediately removes that sender from the default-router list; the monitor then detached/deprecated its autoconfigured IPv6 state, so independent warpctl tails lost their common local route while their child processes remained alive. This affirmative local control supersedes edge attribution for this event.",
+				monitorEvidence.interfaceName,
+				zeroAt,
+			)
+			observed += fmt.Sprintf(
+				" monitor_interface=%s monitor_router_lifetime_zero=%d monitor_autoconf_detach=%d monitor_ipv6_absent=%s monitor_ipv6_restored=%s",
+				monitorEvidence.interfaceName,
+				monitorEvidence.routerLifetimeZeroCount,
+				monitorEvidence.autoconfDetachCount,
+				absentAt,
+				restoredAt,
+			)
+			evidence += fmt.Sprintf(
+				" The monitor's bounded configd record independently reports router-lifetime zero on %s at %s, loss of that interface's IPv6 network state at %s, and %d autoconfiguration detach/deprecate transition(s).",
+				monitorEvidence.interfaceName,
+				zeroAt,
+				absentAt,
+				monitorEvidence.autoconfDetachCount,
+			)
+			contextText = "This event is a monitor-side first-hop Router Advertisement/default-route withdrawal, not evidence that the named production edge, its interface, LB, or LAN neighbor failed. A later edge HTTP 200 is expected after the monitor's IPv6 route returns. The first-hop router or its RA/failover owner is operational infrastructure and cannot be repaired by deploying an edge service."
+			action = "Inspect and repair the monitor's local first-hop IPv6 router/RA source: correlate its uptime, WAN/failover state, and RA daemon at the recorded time, and capture ICMPv6 type 134 on the monitor interface during recurrence. Configure or replace that first hop so it does not advertise a zero default-router lifetime except during an intentional withdrawal. Do not change the named production edge, its Vault address, LB, firewall, or neighbor state for this locally proven event."
+			verify = "For at least 30 minutes, the monitor retains an IPv6 default router with no zero-lifetime RA, an unrelated-provider IPv6 control and configured edges remain reachable in the same seconds, and every standing tail remains free of route-loss diagnostics."
+		}
 		findings = append(findings, finding{
 			probeId: "monitor/visibility", tier: tierWarn,
 			class: "tailer-ipv6-route-loss", target: targetName, frame: frame, sustain: 1,
@@ -1723,22 +1926,14 @@ func tailTransportRouteFindings(env *probeEnv, events map[string]*tailTransportR
 				len(services),
 				targetName,
 			),
-			mechanism: "Warpctl's live-tail client received an explicit no-route transport error and reconnected internally, so the child process stayed alive and its ordinary restart counter could not expose the interruption. " + correlation + " The diagnostic alone does not distinguish monitor-side default-route loss, an upstream withdrawal or unreachable response, router neighbor resolution, or the edge interface; the exact-address battery localizes those layers.",
+			mechanism: mechanism,
 			baseline:  "No standing observation stream reports an IPv6 no-route reconnect; every configured edge address remains externally reachable while its host identity, router neighbor, and return path stay valid.",
-			observed: fmt.Sprintf(
-				"route_errors=%d services=%d service_sample=%s first_local=%s last_local=%s address=%s",
-				event.count,
-				len(services),
-				strings.Join(services, ","),
-				event.first,
-				event.last,
-				address,
-			),
-			evidence: "The finding is parsed only from warpctl stderr's `Tail read error ... no route to host ... Reconnecting` diagnostic. Stderr is duplicated to the operator console but remains isolated from remote service stdout, so it cannot become a service panic or novel-error alert.",
-			context:  "A later pinned HTTP 200 proves recovery, not absence of the earlier interruption. Compare same-second controls to another configured edge and to an unrelated provider IPv6 prefix before attributing the failure to this edge; two prefixes behind one site router are not independent controls. Preserve disabled-host exclusions.",
-			action:   "Immediately run the §18.1 exact-address battery. Compare active services.yml with the live interface and LB unit, inspect the edge journal for link changes, and inspect the upstream router's exact neighbor plus interface counters. On recurrence, capture the pinned SYN/ICMPv6 at both sides to identify the first hop where it disappears. Do not restart services or change an address, route, firewall rule, or neighbor entry from this transport diagnostic alone.",
-			verify:   "The exact Vault address equals the live interface, three pinned HTTP/1.1 requests return 200, the router resolves the intended MAC, and all standing tails remain free of route-loss diagnostics for ten minutes while both another configured edge and an unrelated provider IPv6 prefix stay available as controls.",
-			playbook: "SIGNALS.md §18.1 and §1.5",
+			observed:  observed,
+			evidence:  evidence,
+			context:   contextText,
+			action:    action,
+			verify:    verify,
+			playbook:  "SIGNALS.md §18.1 and §1.5",
 		})
 	}
 	return findings

@@ -179,6 +179,128 @@ func TestTailTransportDiagnosticWriterReassemblesAndAggregatesServices(t *testin
 	}
 }
 
+func TestParseTailTransportMonitorRouteEvidence(t *testing.T) {
+	out := strings.Join([]string{
+		"2026-09-01 06:59:48.000 Df configd[1:2] AUTOMATIC-V6 en8: all autoconf addresses detached/deprecated",
+		"2026-09-01 06:59:49.250 Df configd[1:2] RTADV en0: router lifetime became zero",
+		"2026-09-01 06:59:49.500 Df configd[1:2] network changed: v4(en0)",
+		"2026-09-01 06:59:50.000 Df configd[1:2] AUTOMATIC-V6 en0: all autoconf addresses detached/deprecated",
+		"2026-09-01 06:59:55.750 Df configd[1:2] network changed: v4(en0) v6(en0:ready)",
+	}, "\n")
+
+	evidence := parseTailTransportMonitorRouteEvidence(out)
+	if evidence.interfaceName != "en0" || evidence.routerLifetimeZeroCount != 1 || evidence.autoconfDetachCount != 1 {
+		t.Fatalf("wrong monitor route evidence: %+v", evidence)
+	}
+	if got := evidence.routerLifetimeZeroAt.Format(monitorIPv6LogTimeLayout); got != "2026-09-01 06:59:49.250" {
+		t.Fatalf("router lifetime zero time = %q", got)
+	}
+	if got := evidence.ipv6AbsentAt.Format(monitorIPv6LogTimeLayout); got != "2026-09-01 06:59:49.500" {
+		t.Fatalf("IPv6 absence time = %q", got)
+	}
+	if got := evidence.ipv6RestoredAt.Format(monitorIPv6LogTimeLayout); got != "2026-09-01 06:59:55.750" {
+		t.Fatalf("IPv6 restoration time = %q", got)
+	}
+}
+
+func TestTailTransportRouteLossUsesMonitorRouterAdvertisementDiscriminator(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	tailer.recordTransportDiagnostic("2026/09/01 06:59:49 client.go:473: Tail read error (read tcp [2001:db8:1::10]:62001->[2001:db8:2::44]:443: read: no route to host). Reconnecting.")
+	probe := &logTailProbe{
+		tailers: []*logTailer{tailer},
+		monitorRouteEvidence: func(context.Context, *probeEnv, map[string]*tailTransportRouteAggregate) tailTransportMonitorRouteEvidence {
+			zeroAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, "2026-09-01 06:59:49.250", time.Local)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restoredAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, "2026-09-01 06:59:55.750", time.Local)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return tailTransportMonitorRouteEvidence{
+				interfaceName:           "en0",
+				routerLifetimeZeroAt:    zeroAt,
+				routerLifetimeZeroCount: 1,
+				autoconfDetachCount:     2,
+				ipv6AbsentAt:            zeroAt.Add(250 * time.Millisecond),
+				ipv6RestoredAt:          restoredAt,
+			}
+		},
+	}
+	env := &probeEnv{cfg: &monitorConfig{hosts: []*host{{
+		name: "edge-4",
+		edgeIPv6: []EdgeIPv6InterfaceSettings{{
+			Interface: "eno3",
+			Address:   "2001:db8:2::44",
+		}},
+	}}}}
+
+	findings, err := probe.check(context.Background(), env)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	routeLoss := findingByClass(t, findings, "tailer-ipv6-route-loss")
+	if routeLoss.healthy {
+		t.Fatalf("monitor-local route withdrawal was not reported: %+v", routeLoss)
+	}
+	combined := strings.Join([]string{
+		routeLoss.mechanism,
+		routeLoss.observed,
+		routeLoss.evidence,
+		routeLoss.context,
+		routeLoss.action,
+		routeLoss.verify,
+	}, "\n")
+	for _, want := range []string{
+		"zero-lifetime IPv6 Router Advertisement on en0",
+		"monitor_interface=en0",
+		"monitor_router_lifetime_zero=1",
+		"monitor_autoconf_detach=2",
+		"monitor_ipv6_absent=2026-09-01 06:59:49.500",
+		"supersedes edge attribution",
+		"not evidence that the named production edge",
+		"Do not change the named production edge",
+		"For at least 30 minutes",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("monitor-local discriminator missing %q:\n%+v", want, routeLoss)
+		}
+	}
+	if strings.HasPrefix(routeLoss.action, "Immediately run the §18.1 exact-address battery") {
+		t.Fatalf("locally proven route withdrawal still starts with edge diagnosis: %s", routeLoss.action)
+	}
+}
+
+func TestTailTransportMonitorRouteEvidenceRequiresSameWindowIPv6Loss(t *testing.T) {
+	event := &tailTransportRouteAggregate{
+		first: "2026/09/01 06:59:49",
+		last:  "2026/09/01 06:59:50",
+	}
+	zeroAt, err := time.ParseInLocation(monitorIPv6LogTimeLayout, "2026-09-01 06:59:49.250", time.Local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := tailTransportMonitorRouteEvidence{
+		interfaceName:        "en0",
+		routerLifetimeZeroAt: zeroAt,
+		ipv6AbsentAt:         zeroAt.Add(250 * time.Millisecond),
+	}
+	if !base.matches(event) {
+		t.Fatal("same-window router withdrawal and IPv6 loss did not match")
+	}
+	withoutLoss := base
+	withoutLoss.ipv6AbsentAt = time.Time{}
+	if withoutLoss.matches(event) {
+		t.Fatal("router-lifetime log without local IPv6 loss was treated as causal")
+	}
+	distant := base
+	distant.routerLifetimeZeroAt = zeroAt.Add(time.Minute)
+	distant.ipv6AbsentAt = distant.routerLifetimeZeroAt.Add(time.Second)
+	if distant.matches(event) {
+		t.Fatal("distant router withdrawal was correlated to this transport event")
+	}
+}
+
 // Grafana's Loki/Mimir query engine logs the complete query at info level.
 // Searching for an error signature therefore echoes that signature into the
 // grafana service log; the standing grafana tailer must not feed the monitor's

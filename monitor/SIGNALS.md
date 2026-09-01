@@ -682,7 +682,12 @@ diagnostic across arbitrary stderr write chunks, groups independent service
 tails by exact active edge address, and sends only the structured route event
 through the alert path. Every other stderr line remains operator-only. A clean
 next cadence emits the same address identity healthy, while §18.1 owns the
-direct interface, public path, router, and same-second IPv6 controls.
+direct interface, public path, router, and same-second IPv6 controls. On the
+macOS monitor host, a route event also triggers one bounded local `configd`
+query for a same-window zero-lifetime Router Advertisement, autoconfiguration
+detach, and IPv6 restoration. Affirmative local evidence changes the action
+owner to the monitor's first hop; an unavailable platform log leaves the
+generic edge/upstream differential intact rather than hiding the event.
 
 That Grafana startup outage exposed one more feedback loop. `tailOnce` waited
 for the `warpctl` child but discarded its nonzero exit status, so `run`
@@ -5059,6 +5064,7 @@ Tier-1 (warn):
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
 | loki-tail-dropped-streams | logs | §1.5 exact ingester dropped-stream reset; observation service is not selector attribution | any |
 | loki-tail-dropped-entries | logs | §1.5 exact privacy-safe Warpctl summary from a non-empty HTTP tail `dropped_entries` response | any |
+| tailer-ipv6-route-loss | standing-tail stderr + monitor local IPv6 state | §18.1 exact `no route to host` reconnect, with same-window zero-lifetime Router Advertisement as an affirmative monitor-first-hop discriminator | any |
 | mimir-bucket-index-lag | logs | §11.18 store-gateway local/requested bucket-index difference; one-generation phase skew excluded | magnitude >= 1,800s, any line |
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
@@ -9467,10 +9473,12 @@ a monitor-path finding, never a panic or novel error in the requested service.
 Aggregate independent service tails by exact destination address; several
 services failing together prove a shared route event even when it recovers
 between five-minute `edge-ipv6` samples. On any event, immediately run this
-section's identity/public/self-egress battery and retain both another configured
-edge and an unrelated provider IPv6 prefix as same-second controls. Two
-different prefixes behind one site router are not independent. A later HTTP
-200 proves recovery, not that the earlier route loss did not occur.
+section's monitor-local/default-router check and retain both another configured
+edge and an unrelated provider IPv6 prefix as same-second controls. If the
+monitor's IPv6 state remained stable, continue through the
+identity/public/self-egress battery. Two different prefixes behind one site
+router are not independent. A later HTTP 200 proves recovery, not that the
+earlier route loss did not occur.
 
 The production discriminator occurred on 2026-09-01. Seven of eight standing
 tails simultaneously lost edge-4 `eno3` at 11:52:32Z, another seven did so at
@@ -9484,10 +9492,9 @@ MAC as REACHABLE; its eth7 neighbor table contained 15 entries, below the
 1,024/4,096/8,192 garbage-collection thresholds, with zero table-full events.
 Failed neighbors for unrelated addresses and cumulative interface drops are
 background pressure worth monitoring, but these controls do not prove neighbor
-cache exhaustion. The remaining root-cause boundary is a sub-minute
-monitor-side or upstream route/neighbor event. Capture the next pinned
-SYN/ICMPv6 at the monitor, router WAN, and router LAN before installing a static
-neighbor, changing the prefix, or restarting the edge.
+cache exhaustion. At that point the remaining boundary was a sub-minute
+monitor-side or upstream route/neighbor event; no edge or router mutation was
+justified.
 
 The next high-frequency control caught a broader recurrence at
 12:34:28Z–12:34:40Z. Pinned HTTPS to both edge-4 LANs and an edge-3 LAN moved
@@ -9498,9 +9505,34 @@ interval and no destination-unreachable response sent back to the monitor.
 This rules out either edge-4 interface, LB, or LAN neighbor as the shared
 cause and confines the event to the monitor-to-datacenter path, the router WAN,
 or its upstream. Because those three targets still share one site router, that
-sample cannot distinguish a monitor-wide IPv6 outage from withdrawal of the
-site's routed space. The next control must keep a different edge/site prefix
-and an unrelated provider IPv6 endpoint live in the same second.
+sample alone could not distinguish a monitor-wide IPv6 outage from withdrawal
+of the site's routed space.
+
+The monitor-local control closes that boundary. At 12:34:34.419Z (07:34:34.419
+local), macOS `configd` recorded `RTADV en0: router lifetime became zero`; it
+immediately published a network state without IPv6 and then recorded two
+autoconfigured-address detach/deprecate transitions. An IPv6-bearing network
+state returned at 12:34:40.895Z, matching the external timeout → immediate
+no-route → recovery sequence. RFC 4861 requires a host that receives a Router
+Advertisement with lifetime zero from a listed default router to time that
+router out immediately. There was no contemporaneous Wi-Fi deauthentication,
+disassociation, roam, link-down, link-up, or power-off event. Together with the
+healthy datacenter NDP capture and the simultaneous failure of multiple routed
+prefixes, this proves that recurrence was the monitor host losing its local
+IPv6 default router after a first-hop RA withdrawal—not a production edge
+address, interface, LB, LAN neighbor, or service failure.
+
+The software signal now queries only that narrow recent local record after a
+tail route event and attaches the affirmative discriminator without copying
+general system-log contents. When present, its alert says not to mutate the
+named edge and instead directs the operator to correlate the local first-hop
+router's uptime, WAN/failover state, and RA daemon, then capture ICMPv6 type 134
+on the monitor interface during recurrence. Configure or replace that router so
+it does not advertise a zero default-router lifetime except during an
+intentional withdrawal, and verify at least 30 minutes with an unrelated IPv6
+control plus every configured edge. This is an operational/network-appliance
+repair; deploying API, Connect, Proxy, Warpctl, or another edge service cannot
+fix it.
 
 ## 19. Web platform association metadata
 
