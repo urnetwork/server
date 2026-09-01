@@ -677,6 +677,78 @@ current-main commits `908a8b2c` and `d8392c83`; pool tuning is not the root
 fix. Those commits have the same stable patch IDs as the former `7676014f`
 and `abfd976b` hashes from before main was rewritten.
 
+### 1.3b PgBouncer idle-backend retention
+Probe: `pool-retention`
+
+This is the reserve-shape companion to §1.3a. Read it through direct 5432 and
+count loopback client backends by state; do not assume that every loopback
+backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
+proves the owner.
+
+```sql
+SELECT count(*) FILTER (WHERE client_addr <<= inet '127.0.0.0/8'
+                         AND state = 'idle') AS loopback_idle,
+       count(*) FILTER (WHERE client_addr <<= inet '127.0.0.0/8'
+                         AND state = 'idle'
+                         AND state_change <= now() - interval '600 seconds')
+         AS loopback_idle_aged,
+       max(now() - state_change) FILTER (
+         WHERE client_addr <<= inet '127.0.0.0/8' AND state = 'idle'
+       ) AS oldest_loopback_idle
+FROM pg_stat_activity
+WHERE backend_type = 'client backend';
+```
+
+- HEALTHY: idle loopback backends consume less than 50% of the ordinary-role
+  ceiling, excess pool connections drain toward their configured warm minimum
+  after 600 idle seconds, and §1.3a retains more than 25% total headroom.
+- WARN: idle loopback backends consume at least 50% of the ordinary-role
+  ceiling for ten consecutive 30-second samples. Report local idle, active,
+  idle-in-transaction, continuously idle for at least 600 seconds, and the
+  oldest continuous idle age. A zero aged count distinguishes a young
+  post-peak or recurring-demand cohort from proved long-idle retention; it
+  does not restore the admission reserve.
+- MECHANISM: `default_pool_size` is per PgBouncer process and user/database
+  pair, not a database-wide cap. Every idle server connection still owns a
+  PostgreSQL slot. `server_idle_timeout=0` disables idle draining, so a peak
+  can leave every independent shard near its maximum until `server_lifetime`
+  turns the connections over. `min_pool_size` remains the intentional warm
+  floor when a nonzero idle timeout is active.
+- ROOT-CAUSE ORDER: first read the selected settings from every live shard and
+  take one root socket census. If the timeout is zero, apply the isolated
+  `xops/main/ansible/run-pgbouncer.sh` change only after protected database
+  maintenance is empty and with explicit operational authorization. It sets
+  the documented 600-second PgBouncer default, reloads only changed pooler
+  units, and fails if any PID changes across reload. If 600 is already
+  effective but the reserve remains consumed, use `SHOW POOLS`/`SHOW STATS`
+  and wait metrics to decide whether the per-shard pool size is justified.
+  Do not restart PostgreSQL/PgBouncer, terminate sessions, or raise
+  `max_connections` to silence this signal.
+- FIX CLASS: software/configuration for disabled draining or an oversized
+  aggregate pool envelope; operational for sequencing the reload outside
+  protected maintenance. If observed demand genuinely requires the retained
+  concurrency, adding database memory/CPU hardware may be necessary before
+  raising the total connection budget. Software cannot manufacture that host
+  capacity, and hardware does not replace bounded pools or owner attribution.
+- VERIFY: every live shard file reports `server_idle_timeout=600`; every
+  PgBouncer PID is unchanged across the isolated reload; after more than 600
+  seconds outside a demand peak, excess connections contract toward the warm
+  floor; §1.3a headroom stays above 25% for ten minutes; and neither
+  `query_wait_timeout` nor a rejected server login recurs.
+
+The 2026-09-01 production control supplied exact causal evidence. Edge-2 had
+32 running PgBouncer units. All 32 live files selected
+`default_pool_size=20`, `min_pool_size=8`, `reserve_pool_size=4`,
+`server_lifetime=3600`, and `server_idle_timeout=0`. One privileged socket
+census found 16–20 established PostgreSQL connections per shard and 608 total;
+the direct PostgreSQL view independently showed roughly 600 idle loopback
+backends while only single-digit queries were active. The disabled timeout
+therefore permits a 640-connection retained ceiling instead of contraction
+toward the 256-connection warm floor. This is a real post-incident reserve
+defect, but it did not initiate the earlier capacity burst: §1.3a proved that
+legacy reindex WAL/storage stalls and deadline-driven replacement overlap did.
+Both root fixes are required at their own boundaries.
+
 ### 1.4 redis cluster state + per-node liveness
 Probe: `redis-cluster`
 
