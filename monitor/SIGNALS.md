@@ -745,8 +745,32 @@ and independently confirms the high-cardinality full-sync amplification.
 The nonzero adjacent-minute reset baseline remains a separate reason to deploy
 the Grafana transport fix. Deploy server Proxy `e055c98c` or later and Grafana
 with Warp `1e95aef` or later; verify the next full sync has one aggregate
-summary and zero dropped-stream resets rather than treating either fix as a
-substitute for the other.
+summary per reconciling instance and zero dropped-stream resets rather than
+treating either fix as a substitute for the other.
+
+The `00:09Z` recurrence exposed a material undercount in an unpartitioned
+control query. The service-wide Proxy read reached its 20,000-record cap and
+initially appeared to contain 19,995 sync-detail lines. Repeating the identical
+absolute window by block, then checking the source journals, produced the
+complete retained count: 39,378 default-info `sync peer installed` lines over
+roughly 13 seconds. Fireside emitted 19,800 and Crisp emitted 19,578 across
+g1, g4, and g5. Grafana emitted 6,961 ingester reset lines in the matching wall
+minute, versus 181 in the prior minute; the standing rolling window reported
+7,105/min. The previous g1/g4 reconcile starts were one configured
+30-minute interval earlier, proving that near-synchronous process starts had
+aligned normal periodic full syncs. This was neither a deployment nor watcher
+handover and did not show 39,378 failed peer installations. It was the
+already-identified O(peers) default logging defect multiplying a correctness
+reconcile into a live-tail producer burst.
+
+Never report a service-wide cap as this event's total. Use the configured block
+inventory, one shared absolute window, and bounded inclusive continuation;
+direct journals are the independent control when attribution itself is in
+question. Do not jitter or disable full reconciliation to suppress its output.
+Deploy Proxy `e055c98c` or later so each reconciling instance retains one
+aggregate summary and its peer gauge while per-peer details require `V(1)`.
+The Grafana `1e95aef` transport fix remains independently required for the
+nonzero adjacent-minute reset baseline.
 
 Separately, the querier has its own ten-response channel to the WebSocket. If
 that later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors
