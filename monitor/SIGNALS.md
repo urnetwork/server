@@ -3198,7 +3198,7 @@ Probe: `key-families`
 
 ```bash
 redis-cli -p <port> --scan --count 5000 \
- | sed -E 's/[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/<id>/g' \
+ | sed -E 's/[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}/<id>/g' \
  | sort | uniq -c | sort -rn | head -20
 ```
 Shapes, not bytes (a few huge keys are invisible here — pair with
@@ -3206,6 +3206,22 @@ Shapes, not bytes (a few huge keys are invisible here — pair with
 legacy pile families were identified. The monitor can run this on the
 fullest node daily + on any skew alert, and diff family counts week-over-week
 (a family growing without bound = missing TTL — the recurring disease).
+
+The shell normalization is not itself a safe persistence boundary. A key from
+an unknown schema can contain non-UTF-8 bytes, printable identifiers, or a
+shape longer than an alert field. Before logging, baselining, or alerting, the
+probe retains only bounded printable shapes from a compile-time allowlist of
+known schemas whose dynamic fields are explicit placeholders. A new schema is
+redacted until its normalized static form is reviewed. The probe aggregates
+every other label into
+`redacted-binary-family`, `redacted-unnormalized-family`, or
+`redacted-oversize-family`; protected diagnosis can inspect that class without
+copying a raw key into an alert. In v189 at 2026-09-01T15:14Z, the former path
+logged one malformed binary fragment because unmatched `SCAN` output flowed
+straight into the histogram. That observation proves the monitor leak, not
+that the underlying Redis key is corrupt. Synthetic coverage pins binary
+aggregation and verifies that neither the raw fragment nor replacement runes
+reach Markdown.
 
 ### 3.3a Impossible TTL residue (writer fixed, stale keys remain)
 Probe: `ttl-leaks`

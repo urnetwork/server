@@ -7,8 +7,11 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/urnetwork/glog"
 )
@@ -28,6 +31,23 @@ const familyScanKeyLimit = 300_000
 // a family only alerts once it is both large in the sample and well above its
 // own trailing median count
 const familyAlertMinCount = 20_000
+
+// Every retained label is a static Redis schema shape with all dynamic values
+// replaced. New schemas remain in a redacted aggregate until their normalized
+// form is deliberately reviewed and added here.
+var safeRedisFamilyShapes = []*regexp.Regexp{
+	regexp.MustCompile(`^ckey_<id>$`),
+	regexp.MustCompile(`^ncr_<id>$`),
+	regexp.MustCompile(`^\{pm_<id>\}(rp|pms|sk_[0-9]+)$`),
+	regexp.MustCompile(`^\{<id>\}s2?_c_eid$`),
+	regexp.MustCompile(`^\{connect_<id><id>\}total_<id>$`),
+	regexp.MustCompile(`^\{cs_[0-9]+_[a-z]_<id>_<id>\}(a|c|f)_(g|l)$`),
+	regexp.MustCompile(`^\{cs_[0-9]+_[a-z]_<id>_<id>\}s_(g|l)_[0-9]+$`),
+	regexp.MustCompile(`^\{vce2_<id>\}$`),
+	regexp.MustCompile(`^\{pd_<id>\}c$`),
+	regexp.MustCompile(`^verify_egress_v2_<id>(<id>)?$`),
+	regexp.MustCompile(`^\{account_balance_<id>\}(np|npbc)$`),
+}
 
 // redisFamilyProbe runs the 3.3 histogram daily on the fullest node: a
 // sampled --scan with ids normalized away, counted by family shape. Each
@@ -59,7 +79,7 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	// slow walk.
 	scan := fmt.Sprintf(
 		`LC_ALL=C timeout 170 redis-cli -p %d --scan --count 5000 2>/dev/null | head -%d `+
-			`| sed -E 's/[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/<id>/g; s/[0-9]{6,}/<n>/g' `+
+			`| sed -E 's/[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}/<id>/g; s/[0-9]{6,}/<n>/g' `+
 			`| sort | uniq -c | sort -rn | head -20`,
 		fullest.port, familyScanKeyLimit)
 	out, err := env.runner.sshTimeout(ctx, h, scan, "", 200*time.Second)
@@ -71,13 +91,33 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	findings := []finding{}
 	histogramLines := []string{}
 	alerted := false
+	familyCounts := map[string]int{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
 		}
 		count := atoi(fields[0])
-		family := strings.Join(fields[1:], " ")
+		family := safeRedisFamilyLabel(strings.Join(fields[1:], " "))
+		familyCounts[family] += count
+	}
+	type familyCount struct {
+		family string
+		count  int
+	}
+	families := make([]familyCount, 0, len(familyCounts))
+	for family, count := range familyCounts {
+		families = append(families, familyCount{family: family, count: count})
+	}
+	sort.Slice(families, func(i, j int) bool {
+		if families[i].count != families[j].count {
+			return families[i].count > families[j].count
+		}
+		return families[i].family < families[j].family
+	})
+	for _, sampled := range families {
+		family := sampled.family
+		count := sampled.count
 		histogramLines = append(histogramLines, fmt.Sprintf("  %8d %s", count, family))
 
 		metric := "redis/family/" + family
@@ -110,4 +150,33 @@ func (self redisFamilyProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		findings = append(findings, healthyFinding("redis/key-families", tierWarn, "family-growth", target))
 	}
 	return findings, nil
+}
+
+// safeRedisFamilyLabel is the persistence boundary for sampled key material.
+// The remote scan replaces known identifier forms with placeholders, but an
+// unknown schema can contain binary bytes or an identifier that those patterns
+// do not recognize. Keep useful normalized shapes and collapse everything else
+// into non-identifying classes before it reaches a log, baseline key, or alert.
+func safeRedisFamilyLabel(family string) string {
+	if !utf8.ValidString(family) {
+		return "redacted-binary-family"
+	}
+	if len(family) > 160 {
+		return "redacted-oversize-family"
+	}
+	for _, value := range []byte(family) {
+		if ('a' <= value && value <= 'z') ||
+			('A' <= value && value <= 'Z') ||
+			('0' <= value && value <= '9') ||
+			strings.ContainsRune("_{}:<>=+./-", rune(value)) {
+			continue
+		}
+		return "redacted-unnormalized-family"
+	}
+	for _, shape := range safeRedisFamilyShapes {
+		if shape.MatchString(family) {
+			return family
+		}
+	}
+	return "redacted-unnormalized-family"
 }
