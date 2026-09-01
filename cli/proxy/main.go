@@ -98,7 +98,9 @@ Options:
 	})
 
 	proxyDeviceManager := proxy.NewProxyDeviceManagerWithDefaults(ctx)
-	defer proxyDeviceManager.Close()
+	defer func() {
+		_ = proxyDeviceManager.CloseAndWait(context.Background())
+	}()
 
 	transportTls, err := server.NewTransportTlsFromConfigWithDefaults()
 	if err != nil {

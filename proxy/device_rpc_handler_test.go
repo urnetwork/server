@@ -28,7 +28,9 @@ func TestDeviceRpcHandlerAuth(t *testing.T) {
 		defer cancel()
 
 		pdm := NewProxyDeviceManager(ctx, DefaultProxyDeviceManagerSettings())
-		defer pdm.Close()
+		defer func() {
+			_ = pdm.CloseAndWait(context.Background())
+		}()
 
 		handler := NewDeviceRpcHandler(pdm, DefaultProxySettings())
 		ts := httptest.NewServer(router.NewRouter(ctx, []*router.Route{

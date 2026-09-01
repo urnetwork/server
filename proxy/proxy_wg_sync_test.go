@@ -50,7 +50,9 @@ func TestWgServerSyncProxyClients(t *testing.T) {
 		defer cancel()
 
 		proxyDeviceManager := NewProxyDeviceManagerWithDefaults(ctx)
-		defer proxyDeviceManager.Close()
+		defer func() {
+			_ = proxyDeviceManager.CloseAndWait(context.Background())
+		}()
 
 		wgCtx, wgCancel := context.WithCancel(ctx)
 		defer wgCancel()

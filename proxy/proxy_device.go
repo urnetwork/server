@@ -83,12 +83,25 @@ type ProxyDeviceManager struct {
 	cancel   context.CancelFunc
 	settings *ProxyDeviceManagerSettings
 
+	// Close rejects new opens before waiting for every admitted construction
+	// and device worker. The shared NetworkSpace is released only after those
+	// borrowers have stopped, so its client strategy cannot disappear beneath
+	// a hosted API refresh or transport callback.
+	lifecycleLock sync.Mutex
+	closed        bool
+	openWorkers   sync.WaitGroup
+	deviceWorkers sync.WaitGroup
+	joinOnce      sync.Once
+	closeDone     chan struct{}
+
 	// Every production device borrows one manager-owned NetworkSpace. Its API
 	// request core and client strategy are shared; sdk.DeviceLocal isolates the
 	// mutable hosted credential session and all memory budgets per device.
 	networkSpaceOnce    sync.Once
 	networkSpace        *sdk.NetworkSpace
 	networkSpaceBuilder func(context.Context) *sdk.NetworkSpace
+	ownsNetworkSpace    bool
+	proxyDeviceBuilder  func(server.Id) (*ProxyDevice, error)
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -125,14 +138,17 @@ func NewProxyDeviceManagerWithDefaults(ctx context.Context) *ProxyDeviceManager 
 func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSettings) *ProxyDeviceManager {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	manager := &ProxyDeviceManager{
-		ctx:          cancelCtx,
-		cancel:       cancel,
-		settings:     settings,
-		networkSpace: settings.NetworkSpace,
-		proxyDevices: map[server.Id]*proxyDeviceState{},
-		lockCache:    newProxyLockCache(proxyLockCacheMaxEntries),
+		ctx:              cancelCtx,
+		cancel:           cancel,
+		settings:         settings,
+		closeDone:        make(chan struct{}),
+		networkSpace:     settings.NetworkSpace,
+		ownsNetworkSpace: settings.NetworkSpace == nil,
+		proxyDevices:     map[server.Id]*proxyDeviceState{},
+		lockCache:        newProxyLockCache(proxyLockCacheMaxEntries),
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
+	manager.proxyDeviceBuilder = manager.newProxyDevice
 	return manager
 }
 
@@ -158,6 +174,11 @@ func newProxyDeviceManagerNetworkSpace(ctx context.Context) *sdk.NetworkSpace {
 func (self *ProxyDeviceManager) networkSpaceForDevice() *sdk.NetworkSpace {
 	self.networkSpaceOnce.Do(func() {
 		if self.networkSpace == nil {
+			select {
+			case <-self.ctx.Done():
+				return
+			default:
+			}
 			self.networkSpace = self.networkSpaceBuilder(self.ctx)
 		}
 	})
@@ -165,6 +186,15 @@ func (self *ProxyDeviceManager) networkSpaceForDevice() *sdk.NetworkSpace {
 }
 
 func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
+	self.lifecycleLock.Lock()
+	if self.closed {
+		self.lifecycleLock.Unlock()
+		return nil, fmt.Errorf("Proxy device manager closed.")
+	}
+	self.openWorkers.Add(1)
+	self.lifecycleLock.Unlock()
+	defer self.openWorkers.Done()
+
 	pdState := func() *proxyDeviceState {
 		// fast path: an existing entry, read concurrently (the common case)
 		self.stateLock.RLock()
@@ -224,14 +254,29 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 		pdState.creating = c
 		pdState.StateLock.Unlock()
 
-		pd, err := self.newProxyDevice(proxyId)
+		pd, err := self.proxyDeviceBuilder(proxyId)
 
+		accepted := false
 		pdState.StateLock.Lock()
 		pdState.creating = nil
 		if err == nil {
-			pdState.ProxyDevice = pd
+			self.lifecycleLock.Lock()
+			if self.closed {
+				err = fmt.Errorf("Proxy device manager closed.")
+			} else {
+				self.deviceWorkers.Add(2)
+				pdState.ProxyDevice = pd
+				accepted = true
+			}
+			self.lifecycleLock.Unlock()
 		}
 		pdState.StateLock.Unlock()
+
+		if accepted {
+			self.startProxyDevice(proxyId, pd)
+		} else if pd != nil {
+			_ = pd.Close()
+		}
 
 		// waiters re-read pdState.ProxyDevice (re-validating liveness) on wake, so
 		// only the error needs to be shared directly
@@ -245,9 +290,8 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 	}
 }
 
-// newProxyDevice creates a fresh proxy device for the proxy id and starts its
-// run + idle-check goroutines. It does db + network + tun setup, so it must be
-// called WITHOUT holding any manager or pdState lock (see OpenProxyDevice).
+// Constructs a fresh device without publishing or starting it. Database,
+// network and tun setup run without manager or device-state locks.
 func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
 	proxyDeviceConfig := model.GetProxyDeviceConfig(self.ctx, proxyId)
 	if proxyDeviceConfig == nil {
@@ -255,6 +299,9 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 	}
 
 	networkSpace := self.networkSpaceForDevice()
+	if networkSpace == nil {
+		return nil, fmt.Errorf("Proxy device manager closed.")
+	}
 
 	settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
 	settings.ClientSecurityPolicyGenerator = self.settings.ClientSecurityPolicyGenerator
@@ -264,7 +311,14 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 		return nil, err
 	}
 
+	return pd, nil
+}
+
+// Runs the externally managed device lifecycle and its idle watcher. The
+// caller publishes the device and admits both workers before calling this.
+func (self *ProxyDeviceManager) startProxyDevice(proxyId server.Id, pd *ProxyDevice) {
 	go server.HandleError(func() {
+		defer self.deviceWorkers.Done()
 		defer func() {
 			// forget the device (if it is still the installed one), then close it
 			// OUTSIDE the manager lock: deviceLocal/tun close can block, and holding
@@ -295,6 +349,7 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 	})
 
 	go server.HandleError(func() {
+		defer self.deviceWorkers.Done()
 		for {
 			if pd.CancelIfIdle() {
 				return
@@ -307,8 +362,6 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 			}
 		}
 	})
-
-	return pd, nil
 }
 
 // ValidCaller reports whether a caller at `addr` is authorized to use `proxyId`.
@@ -465,8 +518,51 @@ func (self *ProxyDeviceManager) DeviceCount() int {
 	return len(self.proxyDevices)
 }
 
+// Requests manager shutdown and starts asynchronous ownership cleanup. This
+// remains safe from a device callback; external owners use CloseAndWait.
 func (self *ProxyDeviceManager) Close() {
-	self.cancel()
+	self.lifecycleLock.Lock()
+	if !self.closed {
+		self.closed = true
+		self.cancel()
+	}
+	self.lifecycleLock.Unlock()
+
+	self.joinOnce.Do(func() {
+		go func() {
+			self.openWorkers.Wait()
+			self.deviceWorkers.Wait()
+			// Prevent a test-only direct lazy lookup from constructing an owned
+			// session after all admitted production opens have drained.
+			self.networkSpaceOnce.Do(func() {})
+			if self.ownsNetworkSpace && self.networkSpace != nil {
+				self.networkSpace.Close()
+			}
+			close(self.closeDone)
+		}()
+	})
+}
+
+// Joins every admitted open and device worker before releasing the shared
+// NetworkSpace. External process owners use this; callbacks may use Close.
+func (self *ProxyDeviceManager) CloseAndWait(ctx context.Context) error {
+	self.Close()
+	select {
+	case <-self.closeDone:
+		return nil
+	default:
+	}
+	select {
+	case <-self.closeDone:
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-self.closeDone:
+			return nil
+		default:
+			return ctx.Err()
+		}
+	}
 }
 
 type proxyDeviceState struct {
@@ -656,7 +752,7 @@ func NewProxyDevice(
 	if err != nil {
 		// release in the same order as `Close`
 		cancel()
-		deviceLocal.Close()
+		_ = deviceLocal.CloseAndWait(context.Background())
 		return nil, err
 	}
 
@@ -1153,7 +1249,7 @@ func (self *ProxyDevice) Close() error {
 	}
 
 	if self.deviceLocal != nil {
-		self.deviceLocal.Close()
+		_ = self.deviceLocal.CloseAndWait(context.Background())
 	}
 	var closeErr error
 	if self.tun != nil {

@@ -488,7 +488,9 @@ func TestProxyContractChurnLoad(t *testing.T) {
 		// the assertions; abandoned in-flight contracts become janitor debris
 		// (no-close / one-side-close shapes), which is exactly the production
 		// straggler population the force-close task has to settle
-		h.proxyDeviceManager.Close()
+		if err := h.proxyDeviceManager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 		// let in-flight closes land, then settle the stragglers like the
 		// production janitor
 		select {

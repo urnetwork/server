@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sdk"
@@ -143,7 +147,8 @@ func newProxyDeviceTransportTestDevice(t testing.TB) (*sdk.DeviceLocal, func()) 
 		t.Fatal(err)
 	}
 	return deviceLocal, func() {
-		deviceLocal.Close()
+		_ = deviceLocal.CloseAndWait(context.Background())
+		networkSpace.Close()
 		cancel()
 	}
 }
@@ -264,7 +269,9 @@ func TestProxyDeviceManagerRetainsRetryingDeviceAcrossWindowLoss(t *testing.T) {
 	managerCtx, cancelManager := context.WithCancel(context.Background())
 	defer cancelManager()
 	manager := NewProxyDeviceManager(managerCtx, DefaultProxyDeviceManagerSettings())
-	defer manager.Close()
+	defer func() {
+		_ = manager.CloseAndWait(context.Background())
+	}()
 
 	deviceCtx, cancelDevice := context.WithCancel(manager.ctx)
 	defer cancelDevice()
@@ -440,7 +447,15 @@ func TestProxyDeviceManagerSharesOneNetworkSpaceLifetime(t *testing.T) {
 	managerCtx, managerCancel := context.WithCancel(context.Background())
 	defer managerCancel()
 	manager := NewProxyDeviceManager(managerCtx, DefaultProxyDeviceManagerSettings())
-	ownedNetworkSpace := &sdk.NetworkSpace{}
+	clientSettings := connect.DefaultClientStrategySettings()
+	clientSettings.EnableNormal = true
+	clientSettings.EnableResilient = false
+	ownedNetworkSpace := sdk.NewNetworkSpaceWithUrls(
+		managerCtx,
+		"http://127.0.0.1:1",
+		"wss://127.0.0.1:1",
+		clientSettings,
+	)
 	var networkSpaceCtx context.Context
 	buildCount := 0
 	manager.networkSpaceBuilder = func(ctx context.Context) *sdk.NetworkSpace {
@@ -464,11 +479,177 @@ func TestProxyDeviceManagerSharesOneNetworkSpaceLifetime(t *testing.T) {
 	default:
 	}
 
-	manager.Close()
+	if err := manager.CloseAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-networkSpaceCtx.Done():
 	default:
 		t.Fatal("closing manager retained its shared NetworkSpace lifetime")
+	}
+}
+
+// Closing a production manager waits for its shared API worker before
+// releasing the underlying strategy. Cancellation alone is not completion.
+func TestProxyDeviceManagerCloseAndWaitJoinsOwnedNetworkSpace(t *testing.T) {
+	requestEntered := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	requestRelease := make(chan struct{})
+	var enteredOnce sync.Once
+	var canceledOnce sync.Once
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(requestRelease)
+		})
+	}
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hello" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		enteredOnce.Do(func() {
+			close(requestEntered)
+		})
+		<-r.Context().Done()
+		canceledOnce.Do(func() {
+			close(requestCanceled)
+		})
+		<-requestRelease
+	}))
+
+	managerCtx, managerCancel := context.WithCancel(context.Background())
+	manager := NewProxyDeviceManager(managerCtx, DefaultProxyDeviceManagerSettings())
+	clientSettings := connect.DefaultClientStrategySettings()
+	clientSettings.EnableNormal = true
+	clientSettings.EnableResilient = false
+	ownedNetworkSpace := sdk.NewNetworkSpaceWithUrls(
+		managerCtx,
+		apiServer.URL,
+		"wss://127.0.0.1:1",
+		clientSettings,
+	)
+	manager.networkSpaceBuilder = func(context.Context) *sdk.NetworkSpace {
+		return ownedNetworkSpace
+	}
+	if got := manager.networkSpaceForDevice(); got != ownedNetworkSpace {
+		t.Fatal("manager did not install its owned NetworkSpace")
+	}
+	t.Cleanup(func() {
+		release()
+		_ = manager.CloseAndWait(context.Background())
+		apiServer.Close()
+		managerCancel()
+	})
+
+	refreshJwt, err := gojwt.NewWithClaims(gojwt.SigningMethodNone, gojwt.MapClaims{
+		"client_id": "00000000-0000-0000-0000-000000000001",
+		"device_id": "00000000-0000-0000-0000-000000000002",
+		"exp":       time.Now().Add(24 * time.Hour).Unix(),
+	}).SignedString(gojwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedNetworkSpace.GetApi().SetByJwt(refreshJwt)
+	ownedNetworkSpace.GetApi().StartJwtRefresh()
+
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+	select {
+	case <-testCtx.Done():
+		t.Fatal(testCtx.Err())
+	case <-requestEntered:
+	}
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- manager.CloseAndWait(context.Background())
+	}()
+	<-manager.ctx.Done()
+	select {
+	case <-testCtx.Done():
+		t.Fatal(testCtx.Err())
+	case <-requestCanceled:
+	}
+	select {
+	case err := <-closeResult:
+		t.Fatalf("manager close returned before API cleanup: %v", err)
+	default:
+	}
+	release()
+	select {
+	case <-testCtx.Done():
+		t.Fatal(testCtx.Err())
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Shutdown closes admission before waiting: an already admitted constructor
+// drains without publication, while a late caller cannot race WaitGroup.Wait.
+func TestProxyDeviceManagerCloseJoinsAdmittedOpenAndRejectsLateOpen(t *testing.T) {
+	managerCtx, managerCancel := context.WithCancel(context.Background())
+	defer managerCancel()
+	settings := DefaultProxyDeviceManagerSettings()
+	settings.NetworkSpace = &sdk.NetworkSpace{}
+	manager := NewProxyDeviceManager(managerCtx, settings)
+	constructionEntered := make(chan struct{})
+	constructionRelease := make(chan struct{})
+	var constructionCount atomic.Int64
+	manager.proxyDeviceBuilder = func(server.Id) (*ProxyDevice, error) {
+		constructionCount.Add(1)
+		close(constructionEntered)
+		<-constructionRelease
+		deviceCtx, deviceCancel := context.WithCancel(managerCtx)
+		return &ProxyDevice{
+			ctx:      deviceCtx,
+			cancel:   deviceCancel,
+			settings: DefaultProxyDeviceSettings(),
+		}, nil
+	}
+
+	openResult := make(chan error, 1)
+	go func() {
+		_, err := manager.OpenProxyDevice(server.NewId())
+		openResult <- err
+	}()
+	<-constructionEntered
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- manager.CloseAndWait(context.Background())
+	}()
+	<-manager.ctx.Done()
+	select {
+	case err := <-closeResult:
+		t.Fatalf("manager close returned before admitted construction: %v", err)
+	default:
+	}
+	if _, err := manager.OpenProxyDevice(server.NewId()); err == nil {
+		t.Fatal("manager admitted an open after shutdown")
+	}
+	if got := constructionCount.Load(); got != 1 {
+		t.Fatalf("late open reached constructor: count=%d", got)
+	}
+
+	close(constructionRelease)
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+	select {
+	case <-testCtx.Done():
+		t.Fatal(testCtx.Err())
+	case err := <-openResult:
+		if err == nil {
+			t.Fatal("shutdown-time construction was published")
+		}
+	}
+	select {
+	case <-testCtx.Done():
+		t.Fatal(testCtx.Err())
+	case err := <-closeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -488,7 +669,9 @@ func TestProxyDeviceManagerPreservesInjectedNetworkSpace(t *testing.T) {
 	if got := manager.networkSpaceForDevice(); got != sharedNetworkSpace {
 		t.Fatal("manager replaced injected NetworkSpace")
 	}
-	manager.Close()
+	if err := manager.CloseAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-managerCtx.Done():
 		t.Fatal("manager canceled caller-owned parent context")

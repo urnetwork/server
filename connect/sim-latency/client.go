@@ -355,7 +355,9 @@ func (self *ClientDriver) ProbeMatchmaking(ctx context.Context, probeIndex int) 
 	clientStrategy := connect.NewClientStrategy(ctx, clientStrategySettings)
 	defer clientStrategy.Close()
 	api := sdk.NewApi(ctx, clientStrategy, self.apiUrl)
-	defer api.Close()
+	defer func() {
+		_ = api.CloseAndWait(context.Background())
+	}()
 	api.SetByJwt(identity.ByJwt)
 
 	locationId, err := sdk.ParseId(self.locationId.String())

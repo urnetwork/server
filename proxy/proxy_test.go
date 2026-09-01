@@ -163,8 +163,23 @@ type proxyTestHarness struct {
 
 func (self *proxyTestHarness) close(t testing.TB) {
 	self.closeOnce.Do(func() {
+		closeProxyDeviceManager(t, self.proxyDeviceManager)
 		closeProxyConnectLifecycles(t, self.connectServer, self.exchange, self.cancel)
 	})
+}
+
+// Joins every admitted hosted device while its in-process Connect peer is
+// still available for final contract cleanup. Returning from one acceptance
+// test must not leave netstacks competing with the next test in the package.
+func closeProxyDeviceManager(t testing.TB, manager *ProxyDeviceManager) {
+	if manager == nil {
+		return
+	}
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	if err := manager.CloseAndWait(closeCtx); err != nil {
+		t.Errorf("proxy device manager did not finish during harness teardown: %v", err)
+	}
 }
 
 // Describes the shutdown boundary shared by the in-process connect handler
@@ -317,6 +332,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort),
 		connectSettings,
 	)
+	t.Cleanup(networkSpace.Close)
 
 	apiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
 	platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
@@ -471,7 +487,7 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 	proxyDeviceManager := NewProxyDeviceManager(ctx, pdmSettings)
 	go func() {
 		<-ctx.Done()
-		proxyDeviceManager.Close()
+		_ = proxyDeviceManager.CloseAndWait(context.Background())
 	}()
 
 	deviceRpcUrl := ""

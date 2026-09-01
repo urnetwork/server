@@ -79,7 +79,7 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		pdmSettings := DefaultProxyDeviceManagerSettings()
 		pdmSettings.NetworkSpace = h.networkSpace
 		freshManager := NewProxyDeviceManager(h.ctx, pdmSettings)
-		defer freshManager.Close()
+		defer closeProxyDeviceManager(t, freshManager)
 
 		bSettings := *DefaultProxySettings()
 		bSettings.WgHandoffPollInterval = 20 * time.Millisecond
@@ -182,7 +182,7 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		os.Setenv("WARP_HOST", crashHost)
 		model.TouchProxyClientActivity(h.ctx, crashHost, block, server.NowUtc(), h.proxyId)
 		fallbackManager := NewProxyDeviceManager(h.ctx, pdmSettings)
-		defer fallbackManager.Close()
+		defer closeProxyDeviceManager(t, fallbackManager)
 
 		cSettings := bSettings
 		cSettings.WgHandoffPollTimeout = 1 * time.Second

@@ -19,6 +19,7 @@ func TestActiveProxyIds(t *testing.T) {
 	defer cancel()
 
 	manager := NewProxyDeviceManagerWithDefaults(ctx)
+	defer closeProxyDeviceManager(t, manager)
 
 	newDevice := func(lastActivity time.Time) *ProxyDevice {
 		pdCtx, pdCancel := context.WithCancel(ctx)
@@ -94,7 +95,7 @@ func TestProxyPrewarm(t *testing.T) {
 		pdmSettings := DefaultProxyDeviceManagerSettings()
 		pdmSettings.NetworkSpace = h.networkSpace
 		freshManager := NewProxyDeviceManager(h.ctx, pdmSettings)
-		defer freshManager.Close()
+		defer closeProxyDeviceManager(t, freshManager)
 		if deviceCount := freshManager.DeviceCount(); deviceCount != 0 {
 			t.Fatalf("fresh manager device count = %d, want 0", deviceCount)
 		}

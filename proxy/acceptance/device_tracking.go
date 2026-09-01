@@ -33,10 +33,11 @@ type hostedDeviceTrackerFactory func(context.Context, provisionResult) (hostedDe
 // existing device-rpc endpoint. Provider ids never leave aliases; the raw ids
 // exist only in this in-memory map for the lifetime of one acceptance client.
 type sdkHostedDeviceTracker struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	remote  *sdk.DeviceRemote
-	aliases map[string]string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	networkSpace *sdk.NetworkSpace
+	remote       *sdk.DeviceRemote
+	aliases      map[string]string
 
 	stateLock     sync.Mutex
 	history       []string
@@ -97,14 +98,16 @@ func (r *runner) productionHostedDeviceTracker(ctx context.Context, provisioned 
 		instanceID,
 	)
 	if err != nil {
+		networkSpace.Close()
 		cancel()
 		return nil, fmt.Errorf("create hosted device tracker: %w", err)
 	}
 	tracker := &sdkHostedDeviceTracker{
-		ctx:     trackerCtx,
-		cancel:  cancel,
-		remote:  remote,
-		aliases: map[string]string{},
+		ctx:          trackerCtx,
+		cancel:       cancel,
+		networkSpace: networkSpace,
+		remote:       remote,
+		aliases:      map[string]string{},
 	}
 	tracker.record(time.Now(), "remote=connecting")
 	go tracker.run()
@@ -704,7 +707,12 @@ func (self *sdkHostedDeviceTracker) Diagnostic() string {
 
 func (self *sdkHostedDeviceTracker) Close() {
 	self.closeOnce.Do(func() {
-		self.remote.Close()
+		if self.remote != nil {
+			self.remote.Close()
+		}
+		if self.networkSpace != nil {
+			self.networkSpace.Close()
+		}
 		self.cancel()
 	})
 }
