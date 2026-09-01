@@ -674,6 +674,16 @@ shape on stderr, then proves the service panic finding stays healthy. An
 exhausted query still restarts the tailer and is surfaced by tailer health; it
 is neither hidden nor attributed to the observed service.
 
+The stderr boundary still needs narrow self-health parsing. Warpctl reconnects
+an interrupted WebSocket internally, so an explicit `Tail read error ... no
+route to host ... Reconnecting` does not exit the child or increment the
+tailer's restart counter. Class `tailer-ipv6-route-loss` now reconstructs that
+diagnostic across arbitrary stderr write chunks, groups independent service
+tails by exact active edge address, and sends only the structured route event
+through the alert path. Every other stderr line remains operator-only. A clean
+next cadence emits the same address identity healthy, while §18.1 owns the
+direct interface, public path, router, and same-second IPv6 controls.
+
 That Grafana startup outage exposed one more feedback loop. `tailOnce` waited
 for the `warpctl` child but discarded its nonzero exit status, so `run`
 mistook every exhausted 429/502 query for a clean stream rotation and reset
