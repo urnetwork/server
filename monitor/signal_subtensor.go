@@ -15,8 +15,9 @@ const subtensorMarker = "monitor-signal-17.1-subtensor"
 
 // Signal subtensor implements SIGNALS.md §17.1. It compares each local node
 // and overlay gateway with the configured public reference chain. In
-// particular, it detects a nominal --sync=warp lightnode that is still doing a
-// millions-of-block full sync after Subtensor rejected its reused database.
+// particular, it distinguishes a reused-database warp fallback from a genuine
+// warp stuck on historical GRANDPA finality proofs and verifies the configured
+// container image and data-generation identity.
 func NewSubtensorSignal() Signal {
 	return &signalAdapter{
 		number: "17.1", key: "subtensor", name: "Subtensor node, gateway, and synchronization health",
@@ -56,15 +57,21 @@ type subtensorRPCObservation struct {
 }
 
 type subtensorNodeObservation struct {
-	Name        string                  `json:"name"`
-	SyncMode    string                  `json:"sync_mode"`
-	RPCPort     int                     `json:"rpc_port"`
-	GatewayPort int                     `json:"gateway_port"`
-	Direct      subtensorRPCObservation `json:"direct"`
-	Gateway     subtensorRPCObservation `json:"gateway"`
-	FirstHead   string                  `json:"first_head"`
-	SecondHead  string                  `json:"second_head"`
-	GatewayHTTP int                     `json:"gateway_http"`
+	Name             string                  `json:"name"`
+	SyncMode         string                  `json:"sync_mode"`
+	RPCPort          int                     `json:"rpc_port"`
+	GatewayPort      int                     `json:"gateway_port"`
+	Direct           subtensorRPCObservation `json:"direct"`
+	Gateway          subtensorRPCObservation `json:"gateway"`
+	FirstHead        string                  `json:"first_head"`
+	SecondHead       string                  `json:"second_head"`
+	GatewayHTTP      int                     `json:"gateway_http"`
+	ContainerImage   string                  `json:"container_image"`
+	ContainerStarted string                  `json:"container_started"`
+	DataPath         string                  `json:"data_path"`
+	WarpFallback     bool                    `json:"warp_fallback"`
+	WarpProofStarted bool                    `json:"warp_proof_started"`
+	ContainerError   string                  `json:"container_error"`
 }
 
 type subtensorRuntimeVersion struct {
@@ -140,6 +147,15 @@ func validateSubtensorSettings(settings *SubtensorHostSettings) error {
 		if node.RPCPort < 1 || node.RPCPort > 65535 || node.GatewayPort < 1 || node.GatewayPort > 65535 {
 			return fmt.Errorf("subtensor: node %s has invalid ports", node.Name)
 		}
+		if (node.ExpectedImage != "" || node.ExpectedDataPath != "") && node.ContainerName == "" {
+			return fmt.Errorf("subtensor: node %s has deployment expectations without a container name", node.Name)
+		}
+		if node.ExpectedImage != "" && !strings.HasPrefix(node.ExpectedImage, "ghcr.io/raofoundation/subtensor@sha256:") {
+			return fmt.Errorf("subtensor: node %s has an invalid expected image", node.Name)
+		}
+		if node.ExpectedDataPath != "" && !strings.HasPrefix(node.ExpectedDataPath, "/data/") {
+			return fmt.Errorf("subtensor: node %s has an invalid expected data path", node.Name)
+		}
 	}
 	return nil
 }
@@ -196,6 +212,23 @@ def unit_state(unit):
     run = subprocess.run(["systemctl", "is-active", unit], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return run.stdout.strip() or "unknown"
 
+def inspect_container(node):
+    name = node.get("ContainerName", "")
+    if not name:
+        return {}
+    try:
+        output = subprocess.check_output(
+            ["sudo", "-n", "/usr/local/sbin/subtensor-monitor", name],
+            text=True, stderr=subprocess.STDOUT,
+            timeout=10,
+        )
+        result = json.loads(output)
+        if not isinstance(result, dict):
+            raise RuntimeError("Subtensor monitor helper returned a non-object")
+        return result
+    except Exception as error:
+        return {"container_error": "%s: %s" % (type(error).__name__, error)}
+
 observation = {
     "units": {unit: unit_state(unit) for unit in ("subtensor", "nginx", "openvpn@by-pre")},
     "overlay_present": False,
@@ -228,7 +261,7 @@ for node in config["nodes"]:
             gateway_http = response.status
     except Exception as error:
         gateway.setdefault("errors", {})["healthz"] = "%s: %s" % (type(error).__name__, error)
-    observation["nodes"].append({
+    node_observation = {
         "name": node["Name"],
         "sync_mode": node["SyncMode"],
         "rpc_port": node["RPCPort"],
@@ -238,7 +271,9 @@ for node in config["nodes"]:
         "first_head": direct.get("head", ""),
         "second_head": "",
         "gateway_http": gateway_http,
-    })
+    }
+    node_observation.update(inspect_container(node))
+    observation["nodes"].append(node_observation)
 
 time.sleep(15)
 for node in observation["nodes"]:
@@ -344,6 +379,39 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		return findings
 	}
 
+	if configured.ContainerName != "" {
+		if node.ContainerError != "" {
+			findings = append(findings, cannotObserveFinding(identity+"/container-identity", fmt.Errorf("%s", node.ContainerError)))
+		} else {
+			deploymentProblems := []string{}
+			if configured.ExpectedImage != "" && node.ContainerImage != configured.ExpectedImage {
+				deploymentProblems = append(deploymentProblems, fmt.Sprintf("image=%q expected=%q", node.ContainerImage, configured.ExpectedImage))
+			}
+			if configured.ExpectedDataPath != "" && node.DataPath != configured.ExpectedDataPath {
+				deploymentProblems = append(deploymentProblems, fmt.Sprintf("data_path=%q expected=%q", node.DataPath, configured.ExpectedDataPath))
+			}
+			if len(deploymentProblems) > 0 {
+				action := "Reconcile the digest-pinned image and data generation through the owning Subtensor playbook, then re-read the live container identity."
+				if configured.SyncMode == "warp" {
+					action = "After explicit operational authorization, run xops/main/ansible/run-subtensor-lightnode.sh from the committed xops revision. It must preserve old generations, recreate only subtensor-lightnode, and prove the archive container identity did not change."
+				}
+				findings = append(findings, finding{
+					probeId: "subtensor/node-health", tier: tierWarn, class: "subtensor-deployment-drift",
+					target: target.name, frame: configured.Name, sustain: 1,
+					symptom:   fmt.Sprintf("%s is not running its configured image and data generation", identity),
+					mechanism: "A healthy RPC or --sync argv does not prove the active container uses the release with the required consensus fixes or the intended empty generation.",
+					baseline:  "The live container Config.Image and sole /data mount exactly match the configured immutable digest and generation path.",
+					observed:  strings.Join(deploymentProblems, "; "),
+					evidence:  fmt.Sprintf("container=%s started_at=%s", configured.ContainerName, firstNonempty(node.ContainerStarted, "unknown")),
+					context:   "This is an operational deployment/storage repair; preserving failed generations is required for rollback and evidence.",
+					action:    action,
+					verify:    "Require exact live image and /data identities, a new container start only where intended, unchanged archive identity for an isolated lightnode repair, and all RPC convergence gates.",
+					playbook:  "SIGNALS.md §17.4",
+				})
+			}
+		}
+	}
+
 	gatewayErrors := map[string]string{}
 	for _, key := range []string{"healthz", "chain", "genesis", "head"} {
 		if value := node.Gateway.Errors[key]; value != "" {
@@ -422,18 +490,34 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		warpMaxLag = 4096
 	}
 	if configured.SyncMode == "warp" && lag > warpMaxLag {
+		class := "subtensor-warp-bootstrap"
+		mechanism := "The node is configured for warp sync but has not reached the near-head band. Startup evidence is required to distinguish a normal cold bootstrap from a database fallback or a historical finality-proof failure."
+		evidence := fmt.Sprintf("startup_fallback=%t finality_proof_download=%t image=%q data_path=%q", node.WarpFallback, node.WarpProofStarted, node.ContainerImage, node.DataPath)
+		context := "A cold warp may be behind briefly. Do not reuse or delete a failed data generation, and do not restart the full archive playbook to repair only this lightnode."
+		action := "Keep the lightnode out of cutover and inspect its bounded startup log, live image provenance, /data mount, peers, and head progression before choosing a new generation."
+		if node.WarpFallback {
+			class = "subtensor-warp-fallback"
+			mechanism = "The startup discriminator proves Subtensor rejected a partially synced database and falls back to full sync. The configured command can still say --sync=warp."
+			context = "This is an operational storage/deployment repair. Reusing the same partial path reproduces the failure; deleting it destroys recoverable state."
+			action = "After explicit operational authorization, select the next empty generation and run xops/main/ansible/run-subtensor-lightnode.sh from the committed xops revision. It must preserve old paths and recreate only subtensor-lightnode. Do not run the full run-subtensor.sh merely to change this generation while archive progress must remain uninterrupted."
+		} else if node.WarpProofStarted && secondHead <= 1 {
+			class = "subtensor-warp-checkpoint"
+			mechanism = "The node reached peers and entered GRANDPA finality-proof download without falling back, but remained at genesis. This is the testnet historical-checkpoint failure reproduced with v447, which predates the corrected checkpoint transition and signing sets in v448."
+			context = "This is a pinned-node-binary defect plus an operational generation change, not a Grafana exporter error, peer-install failure, or reason to erase either failed database."
+			action = "Pin an attested upstream release containing commits add2b31a19ccf650ad50d79e8ba2668e6494f56f and 0876234316a3b9107ce1eb0781b04ae55f5df89e, select the next empty generation, and deploy only with xops/main/ansible/run-subtensor-lightnode.sh."
+		}
 		findings = append(findings, finding{
-			probeId: "subtensor/node-health", tier: tierWarn, class: "subtensor-warp-fallback",
+			probeId: "subtensor/node-health", tier: tierWarn, class: class,
 			target: target.name, frame: configured.Name, sustain: 15,
 			symptom:   fmt.Sprintf("%s is configured for warp sync but remains %d blocks behind", identity, lag),
-			mechanism: "This sustained lag is the signature produced when Subtensor refuses warp sync for an already partially synced database and falls back to full sync. A fresh cold warp can be far behind briefly; the fifteen-minute sustain and startup log distinguish it. The configured command can still say --sync=warp.",
+			mechanism: mechanism,
 			baseline:  fmt.Sprintf("A warp node reaches within %d blocks of the public/reference head after bootstrap", warpMaxLag),
 			observed:  fmt.Sprintf("sync_mode=%s current_head=%d target_head=%d lag=%d peers=%d is_syncing=%t", configured.SyncMode, secondHead, targetHead, lag, node.Direct.Health.Peers, node.Direct.Health.IsSyncing),
-			evidence:  "Confirm in privileged container startup logs: Can't use warp sync mode with a partially synced database / Warp sync failed. Continuing with full sync.",
-			context:   "This is an operational storage/deployment repair. Reusing the same partial path reproduces the failure; deleting it destroys recoverable state. The configured argv is not proof of the live mount, and the full Subtensor playbook also owns networking and the archive bootstrap.",
-			action:    "After explicit operational authorization, run xops/main/ansible/run-subtensor-lightnode.sh from a clean xops descendant containing 0b1373b. Its isolated playbook must refuse a nonempty inactive generation, preserve old paths, recreate only subtensor-lightnode, and fail on the startup fallback line. Do not run the full run-subtensor.sh merely to change this generation while archive progress must remain uninterrupted.",
+			evidence:  evidence,
+			context:   context,
+			action:    action,
 			verify:    "Require the live /data mount to equal the configured new generation, a post-rollout lightnode identity, unchanged archive container ID/start time, no cold-start warp fallback, a near-current head, nonzero peers, current runtime identity, and successful gateway RPC.",
-			playbook:  "SIGNALS.md §17.2",
+			playbook:  "SIGNALS.md §17.4",
 		})
 	} else if lag > 128 || node.Direct.Health.IsSyncing {
 		class := "subtensor-sync-lag"

@@ -64,10 +64,13 @@ type SubtensorHostSettings struct {
 
 // SubtensorNodeSettings is one independently checked local RPC/gateway pair.
 type SubtensorNodeSettings struct {
-	Name        string
-	SyncMode    string
-	RPCPort     int
-	GatewayPort int
+	Name             string
+	SyncMode         string
+	RPCPort          int
+	GatewayPort      int
+	ContainerName    string
+	ExpectedImage    string
+	ExpectedDataPath string
 }
 
 // EdgeIPv6InterfaceSettings describes one configured public IPv6 LB path.

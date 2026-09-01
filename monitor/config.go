@@ -53,10 +53,13 @@ type monitorYaml struct {
 			ExpectedEVMChainID         string `yaml:"expected_evm_chain_id"`
 			WarpMaxLag                 int64  `yaml:"warp_max_lag"`
 			Nodes                      []struct {
-				Name        string `yaml:"name"`
-				SyncMode    string `yaml:"sync_mode"`
-				RPCPort     int    `yaml:"rpc_port"`
-				GatewayPort int    `yaml:"gateway_port"`
+				Name             string `yaml:"name"`
+				SyncMode         string `yaml:"sync_mode"`
+				RPCPort          int    `yaml:"rpc_port"`
+				GatewayPort      int    `yaml:"gateway_port"`
+				ContainerName    string `yaml:"container_name"`
+				ExpectedImage    string `yaml:"expected_image"`
+				ExpectedDataPath string `yaml:"expected_data_path"`
 			} `yaml:"nodes"`
 		} `yaml:"subtensor"`
 	} `yaml:"hosts"`
@@ -254,6 +257,8 @@ func LoadSignalSettings() (SignalSettings, error) {
 				h.Subtensor.Nodes = append(h.Subtensor.Nodes, SubtensorNodeSettings{
 					Name: node.Name, SyncMode: node.SyncMode,
 					RPCPort: node.RPCPort, GatewayPort: node.GatewayPort,
+					ContainerName: node.ContainerName, ExpectedImage: node.ExpectedImage,
+					ExpectedDataPath: node.ExpectedDataPath,
 				})
 			}
 		}

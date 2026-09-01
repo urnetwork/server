@@ -9,7 +9,11 @@ import (
 	"testing"
 )
 
-const syntheticSubtensorGenesis = "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+const (
+	syntheticSubtensorGenesis = "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
+	syntheticSubtensorImage   = "ghcr.io/raofoundation/subtensor@sha256:a1ac7792b5279cdad701eec15742296f91d4be83e256a29fe57cffd500fa8f13"
+	syntheticSubtensorData    = "/data/subtensor-lightnode-warp-v3"
+)
 
 func TestSubtensorSignalHealthySyntheticNodes(t *testing.T) {
 	observation := healthySubtensorObservation()
@@ -35,6 +39,7 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	observation.Nodes[1].Direct.Sync.HighestBlock = 7_910_000
 	observation.Nodes[1].Direct.Health.IsSyncing = true
 	observation.Nodes[1].Direct.Runtime.SpecVersion = 365
+	observation.Nodes[1].WarpFallback = true
 	observation.Nodes[1].FirstHead = blockHex(6_290_000)
 	observation.Nodes[1].SecondHead = blockHex(6_290_006)
 	observation.Nodes[1].Direct.Head = observation.Nodes[1].FirstHead
@@ -63,6 +68,57 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	if !strings.Contains(lightnode.Verify, "unchanged archive container ID/start time") ||
 		!strings.Contains(lightnode.Verify, "live /data mount") {
 		t.Fatalf("lightnode verification does not preserve the archive boundary: %s", lightnode.Verify)
+	}
+}
+
+func TestSubtensorSignalDetectsHistoricalWarpCheckpointFailure(t *testing.T) {
+	observation := healthySubtensorObservation()
+	node := &observation.Nodes[1]
+	node.Direct.Sync = subtensorSyncState{CurrentBlock: 0, HighestBlock: 7_910_000}
+	node.Direct.Health = subtensorHealth{Peers: 3, IsSyncing: true}
+	node.Direct.Runtime.SpecVersion = 365
+	node.FirstHead = blockHex(0)
+	node.SecondHead = blockHex(0)
+	node.Direct.Head = blockHex(0)
+	node.Gateway.Head = blockHex(0)
+	node.WarpFallback = false
+	node.WarpProofStarted = true
+	node.ContainerImage = "ghcr.io/raofoundation/subtensor@sha256:3e37b8d9a4f3c60ba66652cae79fe54d81d868558fb0159842ff952eee5115de"
+	node.DataPath = "/data/subtensor-lightnode-warp-v2"
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := requireAlertClass(t, alerts, "subtensor-warp-checkpoint")
+	for _, want := range []string{
+		"remained at genesis",
+		"v447",
+		"v448",
+		"add2b31a19ccf650ad50d79e8ba2668e6494f56f",
+		"0876234316a3b9107ce1eb0781b04ae55f5df89e",
+		"run-subtensor-lightnode.sh",
+	} {
+		if !strings.Contains(checkpoint.Markdown(), want) {
+			t.Fatalf("checkpoint alert missing %q:\n%s", want, checkpoint.Markdown())
+		}
+	}
+	drift := requireAlertClass(t, alerts, "subtensor-deployment-drift")
+	if !strings.Contains(drift.Observed, "subtensor-lightnode-warp-v2") ||
+		!strings.Contains(drift.Observed, "subtensor-lightnode-warp-v3") {
+		t.Fatalf("deployment drift lost generation identity: %+v", drift)
+	}
+}
+
+func TestSubtensorSignalCollectsContainerStartupDiscriminators(t *testing.T) {
+	for _, want := range []string{
+		`["sudo", "-n", "/usr/local/sbin/subtensor-monitor", name]`,
+		`result = json.loads(output)`,
+		`"container_error"`,
+	} {
+		if !strings.Contains(subtensorScript, want) {
+			t.Fatalf("Subtensor collector missing %q", want)
+		}
 	}
 }
 
@@ -158,7 +214,11 @@ func subtensorSyntheticSettings(source SignalSource) SignalSettings {
 			WarpMaxLag:                 4096,
 			Nodes: []SubtensorNodeSettings{
 				{Name: "archive", SyncMode: "full", RPCPort: 9945, GatewayPort: 9944},
-				{Name: "lightnode", SyncMode: "warp", RPCPort: 9947, GatewayPort: 9946},
+				{
+					Name: "lightnode", SyncMode: "warp", RPCPort: 9947, GatewayPort: 9946,
+					ContainerName: "subtensor-lightnode", ExpectedImage: syntheticSubtensorImage,
+					ExpectedDataPath: syntheticSubtensorData,
+				},
 			},
 		},
 	})
@@ -169,6 +229,9 @@ func healthySubtensorObservation() subtensorObservation {
 	public := healthySubtensorRPC(7_910_000)
 	archive := healthySubtensorNode("archive", "full", 9945, 9944, 7_909_990, 7_909_992)
 	lightnode := healthySubtensorNode("lightnode", "warp", 9947, 9946, 7_909_994, 7_909_996)
+	lightnode.ContainerImage = syntheticSubtensorImage
+	lightnode.ContainerStarted = "2026-09-01T20:00:00Z"
+	lightnode.DataPath = syntheticSubtensorData
 	return subtensorObservation{
 		Units: map[string]string{
 			"subtensor": "active", "nginx": "active", "openvpn@by-pre": "active",

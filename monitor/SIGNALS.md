@@ -10235,9 +10235,42 @@ refuses a nonempty inactive generation twice before activation, preserves the
 old database, runs Compose for only `subtensor-lightnode`, fails immediately on
 the warp-to-full startup discriminator, and asserts the archive container ID
 and start time remain unchanged through the near-head/runtime/gateway gates.
-This tested fix is not deployed. Running it is an explicit operational
-mutation; continue observing both nodes until the operator authorizes it, then
-start the lightnode verification window at the new container start time.
+That isolated runner was the prerequisite for the authorized v2 control below;
+its full readiness result remained pending until the new container's own
+verification window completed.
+
+The authorized isolated v2 rollout supplied a second, distinct failure
+discriminator. It created the previously unused
+`/data/subtensor-lightnode-warp-v2`, recreated only `subtensor-lightnode`, and
+retained the archive identity. The v447 node resolved the bootnode, reached
+three peers, and entered `Warping, Downloading finality proofs` without either
+warp-to-full fallback line, but its best and finalized heads remained at
+genesis throughout all 360 five-second readiness attempts. The gate failed with
+HTTP 200 and block `0x0`, rather than mistaking a reachable RPC for progress. A
+new empty path therefore removes the v1 database fallback but does not make
+v447's testnet warp valid.
+
+The pinned v447 source predates two upstream testnet GRANDPA repairs:
+`add2b31a19ccf650ad50d79e8ba2668e6494f56f` corrects the checkpoint transition
+and `0876234316a3b9107ce1eb0781b04ae55f5df89e` supplies the historical signing
+sets. Both are ancestors of RaoFoundation tag v448. The official v448 OCI
+provenance resolves its AMD64 image to source commit
+`e18ca67f1a00b35c7d5986888d1cc388da8c095f`; pin the multi-platform index
+digest `sha256:a1ac7792b5279cdad701eec15742296f91d4be83e256a29fe57cffd500fa8f13`.
+The controlled repair is v448 on a new empty
+`/data/subtensor-lightnode-warp-v3`, still through the isolated runner. Preserve
+both failed generations and require the same archive-identity, startup,
+near-head, runtime, EVM, peer, and gateway gates before declaring recovery.
+
+The `subtensor` probe now reads the live container's configured image, sole
+`/data` mount, start time, and bounded startup-log discriminators. Class
+`subtensor-deployment-drift` reports an image or generation mismatch;
+`subtensor-warp-fallback` remains specific to a rejected partial database;
+`subtensor-warp-checkpoint` identifies a peer-connected finality-proof download
+stuck at genesis without fallback; and `subtensor-warp-bootstrap` preserves the
+generic lag case when neither root cause is yet proven. These classes require
+operational deployment/storage action and cannot be closed by server
+application code alone.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
