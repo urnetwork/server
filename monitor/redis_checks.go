@@ -148,33 +148,145 @@ func redisConnectionEvidenceInt(evidence, key string) (int, bool) {
 	return 0, false
 }
 
+func redisConnectionEvidenceFloat(evidence, key string) (float64, bool) {
+	prefix := key + "="
+	for _, field := range strings.Fields(evidence) {
+		if !strings.HasPrefix(field, prefix) {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimPrefix(field, prefix), 64)
+		return value, err == nil
+	}
+	return 0, false
+}
+
+func redisConnectionEvidenceInt64(evidence, key string) (int64, bool) {
+	prefix := key + "="
+	for _, field := range strings.Fields(evidence) {
+		if !strings.HasPrefix(field, prefix) {
+			continue
+		}
+		value, err := strconv.ParseInt(strings.TrimPrefix(field, prefix), 10, 64)
+		return value, err == nil
+	}
+	return 0, false
+}
+
+func redisConnectionControlSummary(evidence string) (string, bool) {
+	details := []string{}
+	unhealthy := false
+	complete := true
+
+	blocked, blockedKnown := redisConnectionEvidenceInt(evidence, "blocked_clients")
+	complete = complete && blockedKnown
+	if blockedKnown {
+		details = append(details, fmt.Sprintf("blocked_clients=%d", blocked))
+	}
+
+	latency, latencyKnown := redisConnectionEvidenceFloat(evidence, "latency_avg_ms")
+	complete = complete && latencyKnown
+	if latencyKnown {
+		details = append(details, fmt.Sprintf("latency_avg_ms=%.3f", latency))
+		unhealthy = unhealthy || latency >= 10
+	}
+
+	acceptQueue, acceptQueueKnown := redisConnectionEvidenceInt(evidence, "accept_recv_q")
+	acceptBacklog, acceptBacklogKnown := redisConnectionEvidenceInt(evidence, "accept_send_q")
+	complete = complete && acceptQueueKnown && acceptBacklogKnown
+	if acceptQueueKnown {
+		details = append(details, fmt.Sprintf("accept_recv_q=%d", acceptQueue))
+	}
+	if acceptBacklogKnown {
+		details = append(details, fmt.Sprintf("accept_send_q=%d", acceptBacklog))
+	}
+	if acceptQueueKnown && acceptBacklogKnown {
+		unhealthy = unhealthy || acceptQueue > 0 && (acceptBacklog <= 0 || acceptBacklog <= acceptQueue)
+	}
+
+	clientMemory, clientMemoryKnown := redisConnectionEvidenceInt64(evidence, "mem_clients_normal_bytes")
+	usedMemory, usedMemoryKnown := redisConnectionEvidenceInt64(evidence, "used_memory_bytes")
+	complete = complete && clientMemoryKnown && usedMemoryKnown
+	if clientMemoryKnown {
+		details = append(details, fmt.Sprintf("client_memory_bytes=%d", clientMemory))
+	}
+	if usedMemoryKnown {
+		details = append(details, fmt.Sprintf("used_memory_bytes=%d", usedMemory))
+	}
+	if clientMemoryKnown && usedMemoryKnown {
+		unhealthy = unhealthy || clientMemory > int64(2<<30) || 4*clientMemory > usedMemory
+	}
+
+	maxOutputMemory, maxOutputMemoryKnown := redisConnectionEvidenceInt64(evidence, "client_output_memory_max_bytes")
+	complete = complete && maxOutputMemoryKnown
+	if maxOutputMemoryKnown {
+		details = append(details, fmt.Sprintf("max_client_output_memory_bytes=%d", maxOutputMemory))
+		unhealthy = unhealthy || maxOutputMemory > int64(32<<20)
+	}
+
+	if len(details) == 0 {
+		return "", false
+	}
+	summary := "Trip-time Redis controls: " + strings.Join(details, " ") + "."
+	switch {
+	case complete && unhealthy:
+		summary += " At least one captured latency, accept-queue/backlog, client-memory, or output-buffer control is unhealthy; the attributed workload shape is exerting active pressure. Blocked-client state is retained as supporting context rather than treated as pressure by itself."
+	case complete:
+		summary += " All captured latency, accept-queue/backlog, client-memory, and output-buffer controls are below their alert bands; blocked-client state is retained as supporting context."
+	default:
+		summary += " Control coverage is incomplete, so this battery cannot independently clear Redis impairment."
+	}
+	return summary, complete && unhealthy
+}
+
 func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
 	lowerEvidence := strings.ToLower(evidence)
+	controlSummary, controlsUnhealthy := redisConnectionControlSummary(lowerEvidence)
+	appendControlSummary := func(context string) string {
+		if controlSummary == "" {
+			return context
+		}
+		return context + " " + controlSummary
+	}
+	appendPressureAction := func(action string) string {
+		if !controlsUnhealthy {
+			return action
+		}
+		return action + " At least one trip-time control is already unhealthy; treat this as active Redis pressure and execute the compatible workload-distribution repair instead of waiting only for idle-pool contraction."
+	}
 	if strings.Contains(lowerEvidence, "queried_node_owns_reliability_marker=true") &&
 		strings.Contains(lowerEvidence, "cmd=sadd") {
 		return redisConnectionDiagnosis{
 			mechanism: "A Redis cluster client creates and retains a per-node pool when a process first touches that node. The SADD cohort identifies the legacy client_reliability_stats_blocks fixed-slot key writer: one fleet-wide marker key concentrates every writer process's pool on its owner.",
-			context:   "Dominant long-lived normal-client cohorts ending in SADD/EXPIRE identify the legacy client_reliability_stats_blocks fixed-slot variant; the connection count is pool amplification, not a slow Redis process or a reconnect storm.",
-			action:    "Roll out the marker-free reliability writer after the compatible high-water-mark rollup, then restart writers normally so old pools age out. Do not raise pool floors or kill a healthy Redis owner; those actions multiply or churn the connections.",
+			context:   appendControlSummary("Dominant long-lived normal-client cohorts ending in SADD/EXPIRE identify the legacy client_reliability_stats_blocks fixed-slot variant; the connection count is pool amplification, not by itself a slow Redis process or a reconnect storm."),
+			action:    appendPressureAction("Roll out the marker-free reliability writer after the compatible high-water-mark rollup, then restart writers normally so old pools age out. Do not raise pool floors or kill a healthy Redis owner; those actions multiply or churn the connections."),
 			verify:    "The outlier returns near the fleet median after writer rollout/restarts, the SADD/EXPIRE cohorts disappear, and Redis pool-timeout plus node-latency signals remain healthy.",
 		}
 	}
 	currentShards, currentKnown := redisConnectionEvidenceInt(lowerEvidence, "current_reliability_shards_on_node")
 	previousShards, previousKnown := redisConnectionEvidenceInt(lowerEvidence, "previous_reliability_shards_on_node")
 	shardCount, shardCountKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shard_count")
-	if currentKnown && previousKnown && shardCountKnown &&
-		(currentShards >= 2 || previousShards >= 2) && strings.Contains(lowerEvidence, "cmd=expire") {
+	recentMax, recentMaxKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shards_recent_max")
+	lookbackBlocks, lookbackKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shard_lookback_blocks")
+	recentMaxAge, recentMaxAgeKnown := redisConnectionEvidenceInt(lowerEvidence, "reliability_shards_recent_max_age_blocks")
+	currentCollision := currentKnown && previousKnown && currentShards >= 0 && previousShards >= 0 &&
+		(currentShards >= 2 || previousShards >= 2)
+	historicalCollision := recentMaxKnown && recentMax >= 2
+	if shardCountKnown && (currentCollision || historicalCollision) && strings.Contains(lowerEvidence, "cmd=expire") {
+		mechanism := fmt.Sprintf("This Redis master owns %d of %d current-minute and %d previous-minute client-reliability shards. Independent shard hashing can place multiple hot hashes on one master; each reliability transaction ends in EXPIRE, and that concentrated command load expands the lazy per-node client pools that touched the master.", currentShards, shardCount, previousShards)
+		if !currentCollision && historicalCollision && lookbackKnown && recentMaxAgeKnown {
+			mechanism = fmt.Sprintf("This Redis master owns %d of %d current-minute and %d previous-minute client-reliability shards, but owned as many as %d within the bounded %d-block history (%d block(s) ago). Independent shard hashing created that earlier hot-key collision, each reliability transaction ended in EXPIRE, and lazy per-node pools outlived the one-minute key ownership that expanded them.", currentShards, shardCount, previousShards, recentMax, lookbackBlocks, recentMaxAge)
+		}
 		return redisConnectionDiagnosis{
-			mechanism: fmt.Sprintf("This Redis master owns %d of %d current-minute and %d previous-minute client-reliability shards. Independent shard hashing can place multiple hot hashes on one master; each reliability transaction ends in EXPIRE, and that concentrated command load expands the lazy per-node client pools that touched the master.", currentShards, shardCount, previousShards),
-			context:   "The EXPIRE cohort and resolved current/previous client_reliability_stats.<block>.<shard> ownership identify a rotating marker-free reliability load collision. This is not the retired fixed discovery-set writer, and CLIENT LIST alone is not evidence of a reconnect storm or Redis impairment.",
-			action:    "Do not roll back the marker-free writer, kill healthy clients, or lower pool limits from the fleet-median ratio alone. Let minute ownership rotate and ordinary pool idle lifetime contract the shape. If latency, pool timeouts, queues, or memory become unhealthy, use a rolling-compatible wider fanout or deliberate slot placement so simultaneous reliability shards distribute more evenly.",
-			verify:    "Current/previous shard ownership rotates away, the EXPIRE-heavy connection shape ages out, and Redis latency, pool-timeout logs, accept queues, and client-buffer memory remain healthy on consecutive samples.",
+			mechanism: mechanism,
+			context:   appendControlSummary("The EXPIRE cohort and bounded client_reliability_stats.<block>.<shard> ownership history identify a rotating marker-free reliability load collision. This is not the retired fixed discovery-set writer, and CLIENT LIST alone is not evidence of a reconnect storm or Redis impairment."),
+			action:    appendPressureAction("Do not roll back the marker-free writer, kill healthy clients, or lower pool limits from the fleet-median ratio alone. Let minute ownership rotate and ordinary pool idle lifetime contract the shape. If latency, pool timeouts, queues, or memory become unhealthy, use a rolling-compatible wider fanout or deliberate slot placement so simultaneous reliability shards distribute more evenly."),
+			verify:    "The bounded shard-history collision ages out together with the EXPIRE-heavy connection shape, and Redis latency, pool-timeout logs, accept queues, and client-buffer memory remain healthy on consecutive samples.",
 		}
 	}
 	return redisConnectionDiagnosis{
 		mechanism: "Connected clients are concentrated on this Redis node, but its bounded battery does not prove the reliability-marker fingerprint (the node must own client_reliability_stats_blocks and expose a SADD cohort). Long-lived PING/GET/EXEC cohorts can be normal lazy cluster pools on an actively used slot; uniformly young NULL/PING cohorts instead indicate reconnect churn, while abnormal flags or output memory indicate a stalled consumer.",
-		context:   "A fleet-median ratio identifies shape, not root cause. Attribute this node's command rate and hot key slots, compare cohort ages and source processes, and read node latency before treating the sockets as harmful.",
-		action:    "If latency and pool-timeout signals are healthy with long-lived normal-client cohorts, observe consecutive ticks and fix only the workload or pool ownership that explains the hot slots. For uniformly young cohorts, investigate the matching deploy/reconnect boundary; for abnormal flags or output memory, follow the slow-consumer playbook. Do not apply the reliability-marker rollout solely from this alert.",
+		context:   appendControlSummary("A fleet-median ratio identifies shape, not root cause. Attribute this node's command rate and hot key slots, compare cohort ages and source processes, and read node latency before treating the sockets as harmful."),
+		action:    appendPressureAction("If latency and pool-timeout signals are healthy with long-lived normal-client cohorts, observe consecutive ticks and fix only the workload or pool ownership that explains the hot slots. For uniformly young cohorts, investigate the matching deploy/reconnect boundary; for abnormal flags or output memory, follow the slow-consumer playbook. Do not apply the reliability-marker rollout solely from this alert."),
 		verify:    "The node returns near the fleet connection shape or a stable expected hot-slot owner is documented; node latency, pool timeouts, accept queue, and client output memory remain healthy on consecutive samples.",
 	}
 }

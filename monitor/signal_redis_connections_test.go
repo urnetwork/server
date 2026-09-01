@@ -84,8 +84,16 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 			if strings.Contains(command, "CLIENT LIST") {
 				for _, fragment := range []string{
 					"date +%s",
-					"client_reliability_stats.$current_block.$shard",
+					"CLUSTER KEYSLOT client_reliability_stats.%s.%s",
 					"current_reliability_shards_on_node=$current_shards",
+					"reliability_shards_recent_max=$history_max",
+					"max_expire_idle",
+					"done | redis-cli --raw",
+					"INFO clients",
+					"INFO memory",
+					"--latency",
+					"ss -lnt",
+					"client_output_memory_max_bytes",
 				} {
 					if !strings.Contains(command, fragment) {
 						t.Fatalf("connection battery command missing %q:\n%s", fragment, command)
@@ -95,7 +103,10 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 					t.Fatalf("connection battery command contains a formatting failure:\n%s", command)
 				}
 				return "reliability_marker_slot=9508 reliability_marker_owner_port=6382 queried_node_owns_reliability_marker=false\n" +
-					"reliability_stats_current_block=29804343 current_reliability_shards_on_node=2 previous_reliability_shards_on_node=0 reliability_shard_count=32\n" +
+					"reliability_stats_current_block=29804343 current_reliability_shards_on_node=2 previous_reliability_shards_on_node=0 reliability_shard_count=32 reliability_shard_lookback_blocks=2 reliability_shards_recent_max=2 reliability_shards_recent_max_age_blocks=0\n" +
+					"blocked_clients=0\nused_memory_bytes=1412572232\nmem_clients_normal_bytes=3716242\n" +
+					"latency_avg_ms=0.279\naccept_recv_q=0 accept_send_q=65535\n" +
+					"client_list_total=472 client_output_memory_bytes=0 client_output_memory_max_bytes=0\n" +
 					"472 max_idle_s=5 max_age_s=3600 source=192.0.2.181 flags=N cmd=expire lib=go-redis", nil
 			}
 			return "6380 100 1000 90 1 10\n6381 100 1000 90 1 10\n6394 100 1000 90 1 55", nil
@@ -111,8 +122,12 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 		"owns 2 of 32 current-minute and 0 previous-minute client-reliability shards",
 		"each reliability transaction ends in EXPIRE",
 		"rotating marker-free reliability load collision",
+		"Trip-time Redis controls",
+		"latency_avg_ms=0.279",
+		"client_memory_bytes=3716242",
+		"below their alert bands",
 		"Do not roll back the marker-free writer",
-		"Current/previous shard ownership rotates away",
+		"bounded shard-history collision ages out",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("shard-collision diagnosis missing %q:\n%s", detail, markdown)
@@ -120,5 +135,61 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 	}
 	if strings.Contains(alert.Action, "restart writers normally") || strings.Contains(alert.Action, "Roll out the marker-free reliability writer") {
 		t.Fatalf("shard collision received legacy or destructive action: %s", alert.Action)
+	}
+}
+
+func TestRedisConnectionsSignalAttributesExpiredShardOwnership(t *testing.T) {
+	evidence := strings.Join([]string{
+		"reliability_marker_slot=9508 reliability_marker_owner_port=6382 queried_node_owns_reliability_marker=false",
+		"reliability_stats_current_block=29804665 current_reliability_shards_on_node=0 previous_reliability_shards_on_node=0 reliability_shard_count=32 reliability_shard_lookback_blocks=6 reliability_shards_recent_max=5 reliability_shards_recent_max_age_blocks=4 reliability_shards_recent_total=9 reliability_shard_history=29804661:5,29804662:2 max_expire_idle_s=259",
+		"blocked_clients=0",
+		"used_memory_bytes=1403831800",
+		"mem_clients_normal_bytes=3897298",
+		"latency_avg_ms=0.319",
+		"accept_recv_q=0 accept_send_q=65535",
+		"client_list_total=1486 client_output_memory_bytes=0 client_output_memory_max_bytes=0",
+		"531 max_idle_s=259 max_age_s=6770 source=192.0.2.181 flags=N cmd=expire lib=go-redis",
+	}, "\n")
+
+	diagnosis := diagnoseRedisConnectionSpike(evidence)
+	for _, want := range []string{
+		"owns 0 of 32 current-minute and 0 previous-minute",
+		"as many as 5 within the bounded 6-block history",
+		"4 block(s) ago",
+		"pools outlived the one-minute key ownership",
+		"rotating marker-free reliability load collision",
+		"below their alert bands",
+	} {
+		combined := diagnosis.mechanism + " " + diagnosis.context + " " + diagnosis.action
+		if !strings.Contains(combined, want) {
+			t.Fatalf("historical-collision diagnosis missing %q: %+v", want, diagnosis)
+		}
+	}
+}
+
+func TestRedisConnectionsSignalEscalatesAttributedActivePressure(t *testing.T) {
+	evidence := strings.Join([]string{
+		"reliability_marker_slot=9508 reliability_marker_owner_port=6382 queried_node_owns_reliability_marker=false",
+		"reliability_stats_current_block=29804343 current_reliability_shards_on_node=3 previous_reliability_shards_on_node=2 reliability_shard_count=32",
+		"blocked_clients=2",
+		"used_memory_bytes=8589934592",
+		"mem_clients_normal_bytes=3221225472",
+		"latency_avg_ms=12.500",
+		"accept_recv_q=7 accept_send_q=7",
+		"client_list_total=900 client_output_memory_bytes=67108864 client_output_memory_max_bytes=41943040",
+		"700 max_idle_s=5 max_age_s=3600 source=192.0.2.181 flags=N cmd=expire lib=go-redis",
+	}, "\n")
+
+	diagnosis := diagnoseRedisConnectionSpike(evidence)
+	for _, want := range []string{
+		"rotating marker-free reliability load collision",
+		"At least one captured",
+		"active pressure",
+		"compatible workload-distribution repair",
+	} {
+		combined := diagnosis.mechanism + " " + diagnosis.context + " " + diagnosis.action
+		if !strings.Contains(combined, want) {
+			t.Fatalf("active-pressure diagnosis missing %q: %+v", want, diagnosis)
+		}
 	}
 }

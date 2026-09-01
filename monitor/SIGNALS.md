@@ -3470,8 +3470,17 @@ Probe: `redis-connections`
   NODE ×32 — a config of 64 = 2k idle conns per process).
 - On a sustained per-node outlier, the probe runs one bounded `CLIENT LIST`
   battery and aggregates on the Redis host by source, flags, last command, and
-  client library. This distinguishes one fixed-slot key touched fleet-wide
-  from a reconnect storm without transferring raw client rows.
+  client library. The same trip-time battery records blocked clients, local
+  latency, accept receive queue versus listener backlog, Redis client memory,
+  and maximum client output memory. For marker-free reliability traffic it also
+  resolves a bounded minute-block ownership history sized from the EXPIRE
+  cohort's observed idle age, using one pipelined `redis-cli` session. This
+  distinguishes one
+  fixed-slot key touched fleet-wide from a reconnect storm without transferring
+  raw client rows, preserves a rotating shard collision after its one-minute
+  keys have moved, and prevents a correctly attributed workload collision from
+  being mistaken for harmless socket shape when it is already exerting
+  measurable pressure.
 - 2026-08-29 fixed-slot variant: node 6382 reached 2,535 clients against a
   fleet median near 231 (6394 briefly reached 1,271). The new battery found
   the dominant 6382 cohorts ending in `EXPIRE` and `SADD`—788 `EXPIRE`
@@ -3537,6 +3546,20 @@ Probe: `redis-connections`
   controls remain green; if the collision causes measured pressure, use a
   rolling-compatible wider fanout or deliberate slot placement, with a
   dual-schema rollup during transition.
+- The 16:18Z recurrence strengthened that boundary. Port 6394 reached 1,276
+  clients against a 244 median while it owned three current-minute and two
+  previous-minute shards; a direct 16:21Z control then found 1,472 clients
+  while ownership rose to five current plus two previous shards. The node had
+  zero blocked clients, 0.279ms average local latency, zero accept receive
+  queue, about 3.7MB of normal-client memory, and zero client output-buffer
+  bytes. By 16:25Z ownership had rotated to zero current and zero previous
+  shards while the node still held 1,486 clients, proving a two-block lookup
+  can lose the causal collision before its lazy pools contract. The fleet
+  ratio is therefore a real randomized load/pool shape but not current Redis
+  impairment. The reusable trip battery now carries those controls and a
+  bounded history derived from EXPIRE idle age; a future collision with any
+  control in its alert band escalates to active pressure and the compatible
+  wider-fanout/placement repair instead of waiting only for idle pools.
 - `CLIENT LIST` sorted by omem: any client > 32mb = a stalled consumer.
 - Accept-queue: `ss -lnt` Recv-Q pegged at backlog on a redis port = event
   loop too busy to accept() = wedge in progress (dials time out while the

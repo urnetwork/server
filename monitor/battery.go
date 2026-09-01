@@ -269,9 +269,27 @@ owns_marker=false
 [ "$marker_owner" = "$redis_port" ] && owns_marker=true
 echo "reliability_marker_slot=$marker_slot reliability_marker_owner_port=$marker_owner queried_node_owns_reliability_marker=$owns_marker"
 
+client_list=$(redis-cli -p "$redis_port" CLIENT LIST 2>/dev/null)
+max_expire_idle=$(printf '%%s\n' "$client_list" | awk '
+BEGIN { maximum=0 }
+{
+  cmd="-"; idle=0
+  for (i=1; i<=NF; i++) {
+    split($i, value, "=")
+    if (value[1] == "cmd") cmd=value[2]
+    else if (value[1] == "idle") idle=value[2]+0
+  }
+  if (cmd == "expire" && maximum < idle) maximum=idle
+}
+END { print maximum }
+')
+
 # The marker-free writer hashes 32 independent keys per minute. Resolve the
-# current and previous minute onto this queried master so a pool enlarged by
-# two colliding hot shards is distinguishable from a reconnect storm.
+# bounded block history capable of explaining the observed EXPIRE cohort's
+# idle age. Lazy pools outlive a one-minute key, so current/previous ownership
+# alone can lose the causal collision before the connection alert sustains.
+# Feed every KEYSLOT command through one redis-cli session rather than opening
+# one process/connection per block and shard.
 node_slot_tokens=$(redis-cli --raw -p "$redis_port" CLUSTER NODES 2>/dev/null | awk -v wanted="$redis_port" '
 $3 ~ /master/ {
   address=$2
@@ -295,17 +313,106 @@ slot_owned_by_queried_node() {
 }
 current_block=$(($(date +%%s) / 60))
 previous_block=$((current_block - 1))
+lookback_blocks=$((max_expire_idle / 60 + 2))
+[ "$lookback_blocks" -lt 2 ] && lookback_blocks=2
+[ "$lookback_blocks" -gt 62 ] && lookback_blocks=62
+oldest_block=$((current_block - lookback_blocks + 1))
+slot_values=$(
+  for block in $(seq "$oldest_block" "$current_block"); do
+    for shard in $(seq 0 31); do
+      printf 'CLUSTER KEYSLOT client_reliability_stats.%%s.%%s\n' "$block" "$shard"
+    done
+  done | redis-cli --raw -p "$redis_port" 2>/dev/null
+)
+set -- $slot_values
 current_shards=0
 previous_shards=0
-for shard in $(seq 0 31); do
-  current_slot=$(redis-cli --raw -p "$redis_port" CLUSTER KEYSLOT "client_reliability_stats.$current_block.$shard" 2>/dev/null)
-  previous_slot=$(redis-cli --raw -p "$redis_port" CLUSTER KEYSLOT "client_reliability_stats.$previous_block.$shard" 2>/dev/null)
-  slot_owned_by_queried_node "$current_slot" && current_shards=$((current_shards + 1))
-  slot_owned_by_queried_node "$previous_slot" && previous_shards=$((previous_shards + 1))
+history_max=0
+history_max_age=0
+history_total=0
+history=""
+history_valid=1
+for block in $(seq "$oldest_block" "$current_block"); do
+  count=0
+  for shard in $(seq 0 31); do
+    if [ "$#" -eq 0 ]; then
+      history_valid=0
+      break 2
+    fi
+    slot=$1
+    shift
+    case "$slot" in
+      ''|*[!0-9]*) history_valid=0; break 2 ;;
+    esac
+    slot_owned_by_queried_node "$slot" && count=$((count + 1))
+  done
+  age=$((current_block - block))
+  [ "$age" -eq 0 ] && current_shards=$count
+  [ "$age" -eq 1 ] && previous_shards=$count
+  history_total=$((history_total + count))
+  if [ "$count" -gt 0 ]; then
+    history="${history}${history:+,}${block}:${count}"
+  fi
+  if [ "$count" -ge "$history_max" ]; then
+    history_max=$count
+    history_max_age=$age
+  fi
 done
-echo "reliability_stats_current_block=$current_block current_reliability_shards_on_node=$current_shards previous_reliability_shards_on_node=$previous_shards reliability_shard_count=32"
+[ "$#" -eq 0 ] || history_valid=0
+if [ "$history_valid" -eq 1 ]; then
+  [ -n "$history" ] || history=none
+  echo "reliability_stats_current_block=$current_block current_reliability_shards_on_node=$current_shards previous_reliability_shards_on_node=$previous_shards reliability_shard_count=32 reliability_shard_lookback_blocks=$lookback_blocks reliability_shards_recent_max=$history_max reliability_shards_recent_max_age_blocks=$history_max_age reliability_shards_recent_total=$history_total reliability_shard_history=$history max_expire_idle_s=$max_expire_idle"
+else
+  echo "reliability_stats_current_block=$current_block current_reliability_shards_on_node=-1 previous_reliability_shards_on_node=-1 reliability_shard_count=32 reliability_shard_lookback_blocks=$lookback_blocks reliability_shards_recent_max=-1 reliability_shards_recent_max_age_blocks=-1 reliability_shards_recent_total=-1 reliability_shard_history=unavailable max_expire_idle_s=$max_expire_idle"
+fi
 
-redis-cli -p "$redis_port" CLIENT LIST 2>/dev/null | awk '
+redis-cli --raw -p "$redis_port" INFO clients 2>/dev/null | awk -F: '
+/^blocked_clients:/ { gsub(/\r/, "", $2); print "blocked_clients=" $2 }
+'
+redis-cli --raw -p "$redis_port" INFO memory 2>/dev/null | awk -F: '
+/^(used_memory|mem_clients_normal):/ { gsub(/\r/, "", $2); print $1 "_bytes=" $2 }
+'
+latency_sample=$(timeout 2 redis-cli --raw -p "$redis_port" --latency 2>/dev/null | tr '\r' '\n' | awk 'NF { last=$0 } END { print last }')
+latency_avg=$(printf '%%s\n' "$latency_sample" | awk '
+NF == 4 && $1 ~ /^[0-9.]+$/ && $3 ~ /^[0-9.]+$/ { print $3; exit }
+{
+  for (i=1; i<=NF; i++) if ($i == "avg:") {
+    value=$(i+1)
+    gsub(/,/, "", value)
+    print value
+    exit
+  }
+}')
+[ -n "$latency_avg" ] || latency_avg=-
+printf 'latency_avg_ms=%%s\n' "$latency_avg"
+ss -lnt 2>/dev/null | awk -v port="$redis_port" '
+BEGIN { maxRecv=0; maxSend=0; found=0 }
+$4 ~ (":" port "$") {
+  found=1
+  if (maxRecv < $2+0) maxRecv=$2+0
+  if (maxSend < $3+0) maxSend=$3+0
+}
+END {
+  if (found) print "accept_recv_q=" maxRecv, "accept_send_q=" maxSend
+  else print "accept_recv_q=- accept_send_q=-"
+}'
+
+printf '%%s\n' "$client_list" | awk '
+BEGIN { count=0; total=0; maximum=0 }
+{
+  omem=0
+  for (i=1; i<=NF; i++) {
+    split($i, value, "=")
+    if (value[1] == "omem") omem=value[2]+0
+  }
+  count++
+  total+=omem
+  if (maximum < omem) maximum=omem
+}
+END {
+  print "client_list_total=" count, "client_output_memory_bytes=" total, "client_output_memory_max_bytes=" maximum
+}'
+printf '%%s\n' "$client_list" | awk '
 {
   source="-"; flags="-"; cmd="-"; lib="-"; idle=0; age=0
   for (i=1; i<=NF; i++) {
