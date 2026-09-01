@@ -70,6 +70,7 @@ type circleTransferAdmission struct {
 
 type circleTransferAdmitFunc func(context.Context, string) (circleTransferAdmission, error)
 type circleTransferSleepFunc func(context.Context, time.Duration) error
+type circleTransferRedisFunc func(context.Context, func(server.RedisClient))
 
 type circleTransferLimiter struct {
 	newMember func() string
@@ -155,10 +156,45 @@ func admitCircleTransfer(ctx context.Context, member string) (
 	decision circleTransferAdmission,
 	returnErr error,
 ) {
+	return admitCircleTransferWithRedis(
+		ctx,
+		member,
+		func(ctx context.Context, callback func(server.RedisClient)) {
+			server.Redis(ctx, callback)
+		},
+	)
+}
+
+// admitCircleTransferWithRedis converts the server Redis wrapper's narrowly
+// scoped panic contract into an ordinary admission error. The caller can then
+// increment fail-closed telemetry and log the event before AdvancePayment
+// returns; no Circle HTTP request has occurred at this point.
+func admitCircleTransferWithRedis(
+	ctx context.Context,
+	member string,
+	redisCall circleTransferRedisFunc,
+) (
+	decision circleTransferAdmission,
+	returnErr error,
+) {
 	if err := ctx.Err(); err != nil {
 		return circleTransferAdmission{}, err
 	}
-	server.Redis(ctx, func(client server.RedisClient) {
+	if redisCall == nil {
+		return circleTransferAdmission{}, fmt.Errorf("circle transfer admission Redis call is nil")
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			switch value := recovered.(type) {
+			case error:
+				returnErr = fmt.Errorf("circle transfer admission Redis failure: %w", value)
+			default:
+				returnErr = fmt.Errorf("circle transfer admission Redis failure: %v", value)
+			}
+			decision = circleTransferAdmission{}
+		}
+	}()
+	redisCall(ctx, func(client server.RedisClient) {
 		decision, returnErr = redisCircleTransferAdmission(
 			ctx,
 			client,

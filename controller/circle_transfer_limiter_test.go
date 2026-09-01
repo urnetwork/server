@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -65,6 +66,23 @@ func TestCircleTransferLimiterFailsClosedOnCancellation(t *testing.T) {
 	}
 	if waited != 0 || deferrals != 1 {
 		t.Fatalf("canceled wait result = %s/%d, want 0/1", waited, deferrals)
+	}
+}
+
+func TestCircleTransferAdmissionConvertsRedisPanicToFailClosedError(t *testing.T) {
+	decision, err := admitCircleTransferWithRedis(
+		context.Background(),
+		"redis-panic-member",
+		func(context.Context, func(server.RedisClient)) {
+			panic(errors.New("synthetic Redis connection timeout"))
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "circle transfer admission Redis failure") ||
+		!strings.Contains(err.Error(), "synthetic Redis connection timeout") {
+		t.Fatalf("Redis panic error = %v, want fail-closed admission error", err)
+	}
+	if decision.allowed || decision.wait != 0 {
+		t.Fatalf("Redis panic decision = %+v, want no admission", decision)
 	}
 }
 
