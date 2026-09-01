@@ -1395,6 +1395,20 @@ remaining high counts were predominantly 8 KiB TOAST remnants. This separates
 material disk debt, write-maintained overhead, and catalog-count noise without
 weakening the zero-artifact healthy invariant.
 
+The protected `transfer_escrow` rebuild exited at 11:54:17Z after 2,035.18
+seconds. The first post-operation probe at 11:57:39Z then exposed what the live
+relation exclusion had intentionally hidden: 330 inactive artifacts across 36
+owners, 304 write-ready, totaling 180,814,946,304 bytes (168.40 GiB).
+`transfer_escrow` alone owned 15 artifacts totaling 174,100,488,192 bytes.
+A second read-only sample at 12:09:51Z found 317 artifacts across 35 owners,
+304 write-ready, totaling 174,179,827,712 bytes (162.22 GiB): the 13 not-ready
+`contract_close` artifacts had disappeared while all 15 `transfer_escrow`
+artifacts remained. The changing count is compatible with the deployed task's
+cleanup phase advancing; it is not closure while any inactive artifact
+remains. The PostgreSQL filesystem still had 2,529,818,935,296 bytes free at
+66% use, so this was material storage and write amplification rather than an
+immediate disk-exhaustion emergency.
+
 The pool timeout was consequently a downstream queue symptom. The daily
 maintenance scheduler had two independent defects: `transfer_escrow` was not
 excluded from the two-hour full-table policy despite its documented one-time
@@ -1403,6 +1417,14 @@ table rotation. A timed-out rebuild or later task cancellation could strand
 its artifacts; the next attempt then created another numbered sibling before
 cleanup was ever reached. This is not evidence for a PostgreSQL/PgBouncer
 restart, a larger service pool, or a PostgreSQL 18.6 correctness workaround.
+
+Taskworker lifecycle evidence separately showed one durable `DbMaintenance`
+task and epoch moving through sequential lease-recovery attempts separated by
+roughly five minutes. No attempts overlapped, so the existing session advisory
+guard did its job; adding another singleton lock would not fix this incident.
+The oversized database operation stalled ordinary work long enough to lose an
+evaluation, lease recovery retried the same epoch, and each retry encountered
+or created numbered debris under the old cleanup ordering.
 
 The software closure is in `db_maintenance.go`: exclude `transfer_escrow` from
 full-table reindex, retain its targeted indexes and one-time operational
