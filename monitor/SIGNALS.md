@@ -5380,6 +5380,88 @@ cover legacy, disabled, missing, unknown, healthy full-overlap, an on-disk fix
 with stale/unverifiable workers, partial host failure, a managed host with no
 units, and exclusion of non-services hosts.
 
+### 8.12 Fleet service artifact provenance
+Probe: `provenance`
+
+A desired version, a healthy route, and a source checkout do not prove which
+executable a running process contains. Query Mimir once per minute for the
+newest actual-scrape-fresh `api`, `connect`, `competitionworker`, `proxy`, and
+`taskworker` identity in each `(job, host, block)`. Join these four families on
+exact `env`, `job`, `host`, `block`, and `instance` labels:
+
+- `process_resident_memory_bytes` is the live-process denominator;
+- `process_start_time_seconds` selects the newest overlap generation;
+- `urnetwork_build_info.version` preserves the mutable config annotation; and
+- `urnetwork_source_info` carries the full Go VCS `revision`, `modified` bit,
+  and exact OCI `image_digest` that Warp inspected and executed.
+
+Filter every family independently with its source timestamp no older than 90
+seconds before joining. An instant Prometheus result can otherwise give a
+stopped lookback series the current query timestamp. A fresh RSS identity that
+omits process start remains an explicit unknown: dropping it would let the
+generation-selection prerequisite hide itself. When a new long-running Go
+service adopts `StartStatsPusher`, add its job to this probe's explicit service
+set; exporters and short commands are not deployment denominators.
+
+WARN `service-provenance-unobservable` when the newest identity lacks process
+start, build info, or source info. WARN `service-provenance-invalid` when the
+source family has anything other than a full 40- or 64-hex Git object ID,
+Boolean `modified=false`, and `sha256:` plus 64 lowercase hex characters.
+WARN `service-provenance-conflict` when one valid immutable digest maps to more
+than one `(revision, modified)` tuple across fresh identities. The conflict is
+stronger than version skew: one content digest cannot legitimately describe
+two executables. Stop promotion and preserve the raw series until direct
+container and extracted-binary inspection identifies collector-label,
+platform-manifest, or runtime-injection drift.
+
+Do not substitute `WARP_VERSION`: it can change in a config-only rollout. Do
+not substitute an image tag, desired registry entry, current git checkout, or
+BuildKit context attestation either. `urnetwork_source_info` comes from the
+running executable's `debug.ReadBuildInfo`; `WARP_IMAGE_DIGEST` is injected
+only after Warp pulls and inspects the exact image it passes to `docker run`.
+Both halves are required, and the reported digest must independently match the
+running container and the executable extracted from that digest.
+
+The production discriminator was a Taskworker release on 2026-09-01. Six
+directly observable blocks on enabled edges 0/1/3 executed config digest
+`sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a`.
+Its extracted binary reported base revision
+`078d6c1117bd8537a47b1933301e546cf500cf90` with `modified=true`, while the
+image's SLSA Docker context identified `a52392db`. Direct symbols and SQL
+proved the intended retry-jitter change was present, but neither revision
+alone described the binary. Edge-4's two blocks remained provenance-unknown
+because their digest could not be inspected without authorized Docker access;
+they were not silently counted clean. This exposed a shared-worktree race:
+the Linux binary was compiled from one dirty state and copied into an image
+whose later build context described another state.
+
+**Live pre-gauge audit (2026-09-01 07:05 UTC):** the new signal selected 68
+newest fresh processes through one services gateway: 20 API, 20 Connect, 20
+Proxy, and eight Taskworker identities. All 68 had fresh RSS, process start,
+and build info, and all 68 lacked `urnetwork_source_info`; no current
+Competitionworker entered the denominator. This is a clean legacy-instrumentation
+boundary, not evidence that all 68 binaries are dirty. Deploy each of those
+four service artifacts from the source-gauge commit or a clean descendant
+before attempting to classify its revision/digest. The probe contacted no
+disabled edge and does not need direct access to edge-5 for this metric join.
+
+The software root fix is the fail-closed Warp release builder at commit
+`217392e` or a clean descendant. It rejects a dirty starting tree, requires
+every Linux binary's embedded revision and `modified=false` to equal that
+starting HEAD, rechecks the same clean HEAD after compilation, and checks again
+immediately before publication. This alert is a deployment/operational gate:
+rebuild and roll each affected service normally. Hardware cannot repair dirty,
+missing, or conflicting provenance, and a redeploy is not justified solely by
+the mutable config version when direct behavior already proves a fix present.
+
+Recovery requires two consecutive complete clean scrapes, followed by direct
+inspection of the exact running container digest and the binary extracted from
+that digest. SIGNALS.md §8.12 (`provenance`) maps to
+`signal_provenance.go` and `signal_provenance_test.go`; synthetic cases pin a
+clean mixed-service fleet, draining-generation suppression, missing and stale
+source families, a fresh RSS identity without process start, dirty/malformed
+provenance, and a conflicting digest.
+
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
 Signals for the redis keyspace-notification transport for peers + stream hops
@@ -7623,15 +7705,13 @@ Probe: `proxy-runtime`
 
 The host-capacity and message-pool probes answer different questions from the
 Go process itself. Query Mimir for the newest actual-scrape-fresh proxy
-generation in every `(host, block)` and join these metrics on exact `env`,
-`host`, `block`, and `instance` labels:
+generation in every `(host, block)` and join these fourteen required memory
+attribution metrics on exact `env`, `host`, `block`, and `instance` labels:
 
 - `process_resident_memory_bytes`
 - `process_start_time_seconds`
 - `urnetwork_build_info` (including its mutable `version`/config-generation
   label)
-- `urnetwork_source_info` (full Go `revision`, `modified`, and immutable
-  `image_digest` labels)
 - `go_memstats_heap_alloc_bytes`
 - `go_memstats_heap_objects`
 - `go_goroutines`
@@ -7650,15 +7730,14 @@ is the evaluation time even for a stopped series returned through lookback, so
 the JSON timestamp alone cannot identify a live process. WARN
 `proxy-runtime-unobservable` when a newest fresh identity lacks any member of
 the joined set; a missing owner gauge is unknown memory attribution, not zero.
-The source family is emitted by the running executable from
-`debug.ReadBuildInfo`; Warp supplies `WARP_IMAGE_DIGEST` only after it pulls and
-inspects the platform image, then executes that exact digest. WARN
-`proxy-runtime-provenance` immediately when a source family reports
-`modified=true` or its image digest is not an exact `sha256:` content identity.
-Do not substitute `urnetwork_build_info.version`: `WARP_VERSION` can advance
-with a config generation and is not immutable source or artifact provenance.
-Missing or unverifiable provenance must not suppress a fully observable
-high-live-set alert.
+The query also selects `urnetwork_source_info` as optional alert context when
+it is present. Fleet-wide missing, dirty, malformed, and conflicting source or
+image identity is independently owned by §8.12 (`provenance`), not by this
+memory signal. That separation keeps a legacy process without the new source
+gauge fully eligible for the high-live-set alert and prevents source rollout
+from masquerading as missing memory ownership. Do not substitute
+`urnetwork_build_info.version`: `WARP_VERSION` can advance with a config
+generation and is not immutable source or artifact provenance.
 
 WARN `proxy-runtime-live-set` for two one-minute probes when all of the
 following hold on a newest identity:
@@ -7803,12 +7882,11 @@ the generic source/digest gauge; no xops deployment is needed for this
 process-memory correction. The release builder must use the Warp provenance
 gate that rejects dirty source, requires every Linux binary's embedded
 revision and `modified=false` to match the starting clean HEAD, and rechecks
-that HEAD immediately before publishing. Join both `urnetwork_build_info` and
-`urnetwork_source_info` to the exact newest process identity. Every current
-identity must report the intended full revision, `modified=false`, and an
-exact digest independently matching its running container while keeping the
-same peer and active-device service boundary. Its first post-sync sample and
-repeated post-GC floor must be materially lower than the legacy 3.6–3.9 GiB
+that HEAD immediately before publishing. Require §8.12 to join both
+`urnetwork_build_info` and `urnetwork_source_info` to the exact newest process
+identity and independently match the running container. With that provenance
+gate separate and healthy, the first post-sync sample and repeated post-GC
+floor must be materially lower than the legacy 3.6–3.9 GiB
 heap/27.5–30.5-million-object band. Require the conservative residual below 2
 GiB for 15 minutes across multiple GC cycles, improved RSS and host
 `MemAvailable`, and simultaneous WireGuard plus HTTP/SOCKS acceptance with no
@@ -7816,9 +7894,9 @@ new OOM or adjacent UDP receive drops. If only the closure/cache reductions are
 visible while the large startup floor remains, provenance-check the target
 list before profiling the next owner. SIGNALS.md §14.7b (`proxy-runtime`) maps
 to `signal_proxy_runtime.go` and `signal_proxy_runtime_test.go`; synthetic cases
-pin a clean complete high live set, dirty/missing-digest provenance, missing
-source that cannot hide high memory, conservative owner accounting, and
-newest-generation selection during overlap.
+pin a complete high live set, optional source context that cannot hide high
+memory, conservative owner accounting, and newest-generation selection during
+overlap.
 
 ### 14.7c Proxy caller-lock cache boundedness
 Probe: `proxy-cache`

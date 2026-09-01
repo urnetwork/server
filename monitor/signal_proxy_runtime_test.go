@@ -161,10 +161,6 @@ func TestProxyRuntimeSignalSyntheticMissingSourceDoesNotHideHighLiveSet(t *testi
 	process.imageDigest = ""
 
 	alerts := runProxyRuntimeFixture(t, now, proxyRuntimeFixtureJSON(t, now, process))
-	unobservable := requireAlertClass(t, alerts, "proxy-runtime-unobservable")
-	if !strings.Contains(unobservable.Observed, "fireside/g5#legacy[source-info]") {
-		t.Fatalf("runtime visibility alert did not isolate source-info: %s", unobservable.Observed)
-	}
 	liveSet := requireAlertClass(t, alerts, "proxy-runtime-live-set")
 	for _, want := range []string{
 		`source_revision="unknown"`,
@@ -175,58 +171,9 @@ func TestProxyRuntimeSignalSyntheticMissingSourceDoesNotHideHighLiveSet(t *testi
 			t.Fatalf("runtime live-set alert missing %q:\n%s", want, liveSet.Markdown())
 		}
 	}
-}
-
-func TestProxyRuntimeSignalSyntheticUnverifiableProvenance(t *testing.T) {
-	now := time.Date(2026, 9, 1, 6, 4, 0, 0, time.UTC)
-	dirty := completeProxyRuntimeFixture("fireside", "g1", "dirty", now.Add(-time.Hour))
-	setProxyRuntimeFixtureValues(
-		&dirty,
-		float64(2<<30),
-		float64(1<<30),
-		8_000_000,
-		20_000,
-		10_000,
-		10,
-		16<<20,
-		1<<20,
-	)
-	dirty.sourceModified = "true"
-	missingDigest := completeProxyRuntimeFixture("crisp", "g2", "no-digest", now.Add(-time.Hour))
-	setProxyRuntimeFixtureValues(
-		&missingDigest,
-		float64(2<<30),
-		float64(1<<30),
-		8_000_000,
-		20_000,
-		10_000,
-		10,
-		16<<20,
-		1<<20,
-	)
-	missingDigest.imageDigest = ""
-
-	alerts := runProxyRuntimeFixture(
-		t,
-		now,
-		proxyRuntimeFixtureJSON(t, now, dirty, missingDigest),
-	)
-	alert := requireAlertClass(t, alerts, "proxy-runtime-provenance")
-	for _, want := range []string{
-		"2 of 2 newest fresh proxy identities",
-		"fireside/g1#dirty[source-modified]",
-		"crisp/g2#no-digest[image-digest]",
-		"BuildKit context provenance alone is insufficient",
-		"rejects dirty source",
-		"WARP_VERSION/config generations cannot close this class",
-	} {
-		if !strings.Contains(alert.Markdown(), want) {
-			t.Fatalf("runtime provenance alert missing %q:\n%s", want, alert.Markdown())
-		}
-	}
 	for _, candidate := range alerts {
 		if candidate.Class == "proxy-runtime-unobservable" {
-			t.Fatalf("valid but unverifiable source metric was classified as missing: %+v", alerts)
+			t.Fatalf("optional source provenance was classified as missing memory attribution: %+v", alerts)
 		}
 	}
 }

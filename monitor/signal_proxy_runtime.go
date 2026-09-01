@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"net/url"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,9 +19,6 @@ const (
 	proxyRuntimeResidualWarnBytes    = float64(2 << 30)
 	proxyRuntimePeerAllowancePerPeer = float64(48 << 10)
 )
-
-var proxyRuntimeSourceRevisionPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
-var proxyRuntimeImageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // Signal proxy-runtime implements SIGNALS.md §14.7b. It joins the newest
 // scrape-fresh Proxy process identity to Go-runtime and owner gauges so a
@@ -71,7 +67,7 @@ const (
 		proxyRuntimeMetricGOGC |
 		proxyRuntimeMetricStack |
 		proxyRuntimeMetricLastGC
-	proxyRuntimeMetricAll = proxyRuntimeMetricAttributionAll | proxyRuntimeMetricSource
+	proxyRuntimeMetricAll = proxyRuntimeMetricAttributionAll
 )
 
 var proxyRuntimeMetricNames = []string{
@@ -210,15 +206,11 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				process.availableMask |= proxyRuntimeMetricBuild
 			}
 		case "urnetwork_source_info":
-			revision := series.Metric["revision"]
-			modified := series.Metric["modified"]
-			if value > 0 && proxyRuntimeSourceRevisionPattern.MatchString(revision) {
-				if parsedModified, parseErr := strconv.ParseBool(modified); parseErr == nil {
-					process.sourceRevision = revision
-					process.sourceModified = strconv.FormatBool(parsedModified)
-					process.imageDigest = series.Metric["image_digest"]
-					process.availableMask |= proxyRuntimeMetricSource
-				}
+			if value > 0 {
+				process.sourceRevision = series.Metric["revision"]
+				process.sourceModified = series.Metric["modified"]
+				process.imageDigest = series.Metric["image_digest"]
+				process.availableMask |= proxyRuntimeMetricSource
 			}
 		case "go_memstats_heap_alloc_bytes":
 			process.heap = value
@@ -268,7 +260,6 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	})
 
 	missing := []string{}
-	unverifiable := []string{}
 	high := []string{}
 	for _, process := range current {
 		if process.availableMask&proxyRuntimeMetricAll != proxyRuntimeMetricAll {
@@ -278,29 +269,6 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				strings.Join(proxyRuntimeMissingMetrics(process.availableMask), ","),
 			))
 		}
-		if process.availableMask&proxyRuntimeMetricSource != 0 {
-			reasons := []string{}
-			if process.sourceModified != "false" {
-				reasons = append(reasons, "source-modified")
-			}
-			if !proxyRuntimeImageDigestPattern.MatchString(process.imageDigest) {
-				reasons = append(reasons, "image-digest")
-			}
-			if len(reasons) > 0 {
-				unverifiable = append(unverifiable, fmt.Sprintf(
-					"%s[%s](source_revision=%q source_modified=%s image_digest=%q)",
-					proxyRuntimeLabel(process),
-					strings.Join(reasons, ","),
-					process.sourceRevision,
-					process.sourceModified,
-					process.imageDigest,
-				))
-			}
-		}
-		// Source provenance is independently required, but its absence must not
-		// hide a fully observable high heap on a legacy process. Keep emitting
-		// the live-set alert alongside the provenance alert until the new source
-		// gauge arrives on that exact identity.
 		if process.availableMask&proxyRuntimeMetricAttributionAll != proxyRuntimeMetricAttributionAll {
 			continue
 		}
@@ -323,37 +291,16 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				"%d of %d newest fresh proxy identities lack the complete runtime memory attribution metric set",
 				len(missing), len(current),
 			),
-			mechanism: "The query proved the selected process identity through fresh RSS and process-start metrics, but one or more Go-runtime or owner gauges are absent on that exact identity. A missing metric is unknown ownership, not a zero-byte pool, zero hosted devices, or an empty WireGuard peer table.",
-			baseline:  "Every newest actual-scrape-fresh proxy identity exports RSS, process start, mutable config version, immutable source revision/modified state, HeapAlloc, heap objects, goroutines, WireGuard peers, hosted devices, tracked DeviceLocal bytes, returned message-pool bytes, next-GC goal, GOGC, stack-in-use bytes, and last-GC time on the same labels.",
+			mechanism: "The query proved the selected process identity through fresh RSS and process-start metrics, but one or more Go-runtime or memory-owner gauges are absent on that exact identity. A missing metric is unknown ownership, not a zero-byte pool, zero hosted devices, or an empty WireGuard peer table.",
+			baseline:  "Every newest actual-scrape-fresh proxy identity exports RSS, process start, mutable config version, HeapAlloc, heap objects, goroutines, WireGuard peers, hosted devices, tracked DeviceLocal bytes, returned message-pool bytes, next-GC goal, GOGC, stack-in-use bytes, and last-GC time on the same labels.",
 			observed: fmt.Sprintf(
 				"current_proxy_identities=%d complete_runtime_identities=%d missing_identities=%d missing=%s metrics_gateway=%s",
 				len(current), len(current)-len(missing), len(missing), strings.Join(missing, ";"), metricHost.name,
 			),
 			evidence: fmt.Sprintf("Every metric family is filtered by its source timestamp at no more than %.0f seconds old before the exact host/block/instance join; newest process start suppresses a draining generation.", proxyRuntimeFreshness.Seconds()),
-			context:  "This is attribution or immutable-provenance loss, not proof of a memory leak. WARP_VERSION can advance during a config-only rollout and therefore cannot prove source ancestry. Host process count, MemAvailable, OOM, and UDP loss remain owned by §14.7; message-pool capacity invariants remain owned by §14.7a. A complete legacy attribution set can still emit the live-set alert alongside this finding.",
-			action:   "Provenance-check the selected Proxy image and metrics collector, then deploy the missing identity-free gauges through the ordinary host-serialized rollout. Require urnetwork_source_info from Go build metadata; do not substitute WARP_VERSION, restart solely to erase the high-RSS generation, or treat an absent owner gauge as zero.",
-			verify:   "Every newest fresh identity exports all fifteen metrics for two consecutive scrapes, including source revision and modified state, after which the live-set discriminator and exact software ancestry can be evaluated without changing its process generation.",
-			playbook: "SIGNALS.md §14.7b",
-		})
-	}
-	if len(unverifiable) > 0 {
-		findings = append(findings, finding{
-			probeId: "runtime/proxy-live-set", tier: tierWarn,
-			class: "proxy-runtime-provenance", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
-			symptom: fmt.Sprintf(
-				"%d of %d newest fresh proxy identities do not have clean source and immutable image provenance",
-				len(unverifiable), len(current),
-			),
-			mechanism: "The running process reports its Go VCS base revision and dirty bit, while Warp injects the exact inspected image content digest before executing that digest. A dirty executable can contain changes not represented by its base revision. A missing or malformed digest cannot be joined back to the exact pulled artifact. BuildKit context provenance alone is insufficient because these images copy a Go binary compiled before the Docker build.",
-			baseline:  "Every newest Proxy identity reports a full Go VCS revision with source_modified=false and an exact sha256 image content identity from WARP_IMAGE_DIGEST on the same fresh process labels.",
-			observed: fmt.Sprintf(
-				"current_proxy_identities=%d unverifiable_identities=%d unverifiable=%s metrics_gateway=%s",
-				len(current), len(unverifiable), strings.Join(unverifiable, ";"), metricHost.name,
-			),
-			evidence: "The source labels are emitted by the running executable from debug.ReadBuildInfo; the image digest is injected by Warp only after pulling and inspecting the image and is the same immutable identity passed to docker run.",
-			context:  "This is release-provenance failure, not proof that the memory fix is absent. On 2026-09-01 an exact Taskworker image attested Docker context a52392db while its copied executable reported dirty base 078d6c11; direct symbols proved the intended jitter function was present, but neither revision alone described the binary. Mutable WARP_VERSION/config generations cannot close this class.",
-			action:   "Use a Warp release builder that rejects dirty source, verifies every Linux binary's embedded revision and modified=false against the starting clean HEAD, and rechecks HEAD immediately before publishing. Rebuild and deploy the Proxy from a clean committed tree; do not retag an old image, copy a prebuilt binary across revisions, or substitute the config generation for source or artifact identity.",
-			verify:   "For two consecutive scrapes, every newest Proxy identity reports source_modified=false, the intended full source revision, and a valid image digest; each running container independently reports that same digest, and the digest's extracted executable reports the same clean revision.",
+			context:  "This is memory-attribution loss, not proof of a memory leak. Fleet source and image identity are independently owned by §8.12. Host process count, MemAvailable, OOM, and UDP loss remain owned by §14.7; message-pool capacity invariants remain owned by §14.7a.",
+			action:   "Deploy the missing identity-free runtime or owner gauges through the ordinary host-serialized rollout. Do not restart solely to erase the high-RSS generation or treat an absent owner gauge as zero; use §8.12 separately for source and artifact provenance.",
+			verify:   "Every newest fresh identity exports all fourteen required memory-attribution metrics for two consecutive scrapes, after which the live-set discriminator can be evaluated without changing its process generation; §8.12 independently verifies software ancestry.",
 			playbook: "SIGNALS.md §14.7b",
 		})
 	}
@@ -373,7 +320,7 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				proxyRuntimeResidualWarnBytes, proxyRuntimePeerAllowancePerPeer,
 				strings.Join(high, ";"), metricHost.name,
 			),
-			evidence: "The newest process generation and config version are selected independently for every host/block from actual-scrape-fresh Mimir series; source revision, dirty state, and image digest are reported when present, with a separate provenance finding when they are absent or unverifiable. NextGC and GOGC expose the collector's heap goal after its prior live-heap mark instead of inferring reachability from one HeapAlloc point. Corrected isolated controls measured exactly two durable goroutines per up peer, 44.6 KiB marginal RSS for endpoint-seeded server-initiated handshaking peers, and 904.2 MiB RSS/557.5 MiB heap at 20,000 such peers. Applying the server's 8 GiB logical message-pool ceiling did not materially change the up-peer result, so neither peer lifecycle nor empty pool capacity reproduces this multi-gigabyte heap floor. A live legacy process already held 3.89 GiB heap and 29.7 million objects 22 seconds after start with zero hosted devices, matching eager startup retention rather than caller-lock growth.",
+			evidence: "The newest process generation and config version are selected independently for every host/block from actual-scrape-fresh Mimir series; source revision, dirty state, and image digest are reported as optional context when present, while §8.12 owns their validity. NextGC and GOGC expose the collector's heap goal after its prior live-heap mark instead of inferring reachability from one HeapAlloc point. Corrected isolated controls measured exactly two durable goroutines per up peer, 44.6 KiB marginal RSS for endpoint-seeded server-initiated handshaking peers, and 904.2 MiB RSS/557.5 MiB heap at 20,000 such peers. Applying the server's 8 GiB logical message-pool ceiling did not materially change the up-peer result, so neither peer lifecycle nor empty pool capacity reproduces this multi-gigabyte heap floor. A live legacy process already held 3.89 GiB heap and 29.7 million objects 22 seconds after start with zero hosted devices, matching eager startup retention rather than caller-lock growth.",
 			context:  "This is a software attribution and efficiency alert, not yet a claim that one cache leaks monotonically. The 2026-09-01 fleet showed both positive and negative thirty-minute heap/object deltas around the large floor. Software can lower the floor, but it cannot create RAM or additional hard client slots: §14.7 still requires capable hardware when an optimized fleet or serialized old/candidate pair cannot fit with reserve.",
 			action:   "Provenance-check the selected source revision and modified state. If it predates the Proxy startup fix, deploy the Proxy artifact that selects no API/model warmup targets, retains only ProxyId in durable WireGuard TUN factories, and bounds the caller-lock cache. If a source-proven current artifact still crosses the band, capture an aggregate heap allocation profile or add identity-free owner gauges on that exact generation and separate full-sync payloads, shared NetworkSpace, hosted DeviceLocal structure, and active HTTP/SOCKS flows. Preserve pool/device metrics as negative controls. Do not force a production GC, restart away the evidence, raise GOGC, lower a cgroup below the measured live set, or shrink WireGuard queues without packet-ordering and slow-peer isolation tests.",
 			verify:   "Deploy the Proxy root-cause artifact through the host-serialized rollout. For 15 minutes across multiple GC cycles, every newest identity reports that exact Go source revision with modified=false, preserves peer/device counts and simultaneous WireGuard plus HTTP/SOCKS acceptance, and has a materially lower startup heap/object floor with conservative residual below 2 GiB; RSS and host reserve improve with no new OOM or adjacent UDP receive drops.",
@@ -433,7 +380,6 @@ func proxyRuntimeMissingMetrics(mask uint16) []string {
 	}{
 		{proxyRuntimeMetricHeap, "heap-alloc"},
 		{proxyRuntimeMetricBuild, "build-info"},
-		{proxyRuntimeMetricSource, "source-info"},
 		{proxyRuntimeMetricObjects, "heap-objects"},
 		{proxyRuntimeMetricGoroutines, "goroutines"},
 		{proxyRuntimeMetricPeers, "wg-peers"},
