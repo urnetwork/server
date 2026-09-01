@@ -50,6 +50,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"net escrow ttl", `[redis][ttl]"expireat" key="{escrow_019c640e-f467-4fa7-177f-d7ca43c33b6f}net" ttl 3139393191s-from-now exceeds 9600h0m0s`, "redis-netescrow-ttl"},
 		{"redis ttl", "[redis][ttl] suspicious ttl on key", "redis-ttl-suspect"},
 		{"taskworker drain", "[taskworker]drain gave up with 2 tasks", "taskworker-drain-gave-up"},
+		{"legacy database maintenance", "[db]maintenance reindex[16/22] contract_close", "db-maintenance-legacy-reindex"},
 		{"tls identity", "CONTRACT vs FETCHED peer client public key MISMATCH", "tls-key-mitm"},
 		{"tls rotation", "peer client public key mismatch with prior commitment", "tls-key-rotate-refused"},
 		{"tls publication", "Invalid PEM in certificate chain", "tls-cert-publish-invalid"},
@@ -78,6 +79,78 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
+	for _, tableName := range []string{
+		"client_reliability",
+		"client_reliability_p20260901",
+		"contract_close",
+		"network_client_location_reliability",
+		"network_client_connection",
+		"transfer_contract",
+		"transfer_escrow",
+		"transfer_escrow_sweep",
+	} {
+		line := "[db]maintenance reindex[1/22] " + tableName
+		if !dbMaintenanceLegacyReindexRe.MatchString(line) {
+			t.Fatalf("excluded table %s is not recognized in the legacy start format", tableName)
+		}
+		if got := dbMaintenanceLegacyReindexLogGroup(line); got != "table="+tableName {
+			t.Fatalf("excluded table %s has frame %q", tableName, got)
+		}
+	}
+
+	queryLines := strings.Join([]string{
+		// The fixed table/step state machine and an ordinary old-format table
+		// are not evidence that an excluded full-table rebuild was selected.
+		`[edge-3][taskworker][g2][cid:fixed][I][2026-09-01T11:50:38.900708-05:00][db_maintenance.go:300][db]maintenance table[16/22] cleanup-before transfer_escrow`,
+		`[edge-3][taskworker][g2][cid:ordinary][I][2026-09-01T11:50:38.900708-05:00][db_maintenance.go:225][db]maintenance reindex[1/22] st_epoch`,
+		// A completion line is not a second launch event.
+		`[edge-3][taskworker][g2][cid:legacy][I][2026-09-01T11:55:38.900708-05:00][db_maintenance.go:239][db]maintenance reindex[16/22] contract_close reindex took 300.00s`,
+	}, "\n")
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return queryLines, nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "db-maintenance-legacy-reindex" {
+			t.Fatalf("fixed, ordinary, or completion log was classified as a legacy excluded-table selection:\n%s", alert.Markdown())
+		}
+	}
+
+	queryLines = `[edge-3][taskworker][g2][cid:602dc13cd6f0][I][2026-09-01T11:50:38.900708-05:00][db_maintenance.go:225][db]maintenance reindex[16/22] contract_close`
+	alerts, err = NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "db-maintenance-legacy-reindex")
+	if alert.Frame != "table=contract_close" {
+		t.Fatalf("legacy maintenance frame = %q, want table=contract_close", alert.Frame)
+	}
+	for _, detail := range []string{
+		"frame=table=contract_close",
+		"legacy full-table concurrent-reindex path",
+		"7676014f",
+		"abfd976b",
+		"pg_stat_progress_create_index",
+		"does not by itself prove that PostgreSQL began the statement",
+		"Do not let a rollout or manual cancellation implicitly interrupt a protected rebuild",
+		"cancellation is a database mutation and requires authorization",
+		"supported cleanup-only maintenance command",
+		"never wildcard-drop _ccnew/_ccold indexes",
+		"one complete maintenance epoch emits no legacy start line",
+	} {
+		if !strings.Contains(alert.Markdown(), detail) {
+			t.Fatalf("legacy maintenance alert missing %q:\n%s", detail, alert.Markdown())
+		}
 	}
 }
 

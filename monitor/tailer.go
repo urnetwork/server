@@ -346,6 +346,15 @@ var logClasses = []logClass{
 	{name: "taskworker-drain-gave-up", re: regexp.MustCompile(`\[taskworker\]drain gave up`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 12.1",
 		meaning: "a taskworker drain exceeded finish+cancel timeouts and the process was killed with tasks running — every in-flight claim is leased until its max time; check pg/task-lease-stranded and release stranded claims"},
+	{name: "db-maintenance-legacy-reindex", re: dbMaintenanceLegacyReindexRe,
+		groupBy:       dbMaintenanceLegacyReindexLogGroup,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §2.2a",
+		meaning:   "a Taskworker selected a table that current maintenance policy excludes and entered the legacy full-table concurrent-reindex path",
+		mechanism: "Before server commits 7676014f and abfd976b, the daily hash rotation could select these large or high-churn tables, and incomplete-index cleanup ran only after the whole rotation. An interrupted rebuild can leave numbered _ccnew/_ccold artifacts; the same durable DbMaintenance epoch can then be lease-recovered and launch another full-table rebuild before reaching cleanup. The current policy excludes these tables, keeps cleanup adjacent to every permitted rebuild, and preserves task ownership when only the pooled timestamp refresh stalls.",
+		context:   "The exact start line proves legacy selection and entry into the call path; because old code logs before opening the maintenance connection, it does not by itself prove that PostgreSQL began the statement, that the operation completed or remains active, or that it created any particular artifact. Correlate the table with pg_stat_progress_create_index, the reindex-debris lower-bound/active-candidate split, and the exact DbMaintenance task/worker lifecycle. A shift between those two byte buckets is not cleanup.",
+		action:    "Inspect the active database operation before changing Taskworker. Do not let a rollout or manual cancellation implicitly interrupt a protected rebuild. Operations must explicitly choose whether a bounded active operation should finish or be canceled; cancellation is a database mutation and requires authorization. Once pg_stat_progress_create_index is empty, satisfy §8.13 and deploy Taskworker from a clean descendant containing server commits 7676014f and abfd976b. Clean existing artifacts separately with the supported cleanup-only maintenance command and explicit database-maintenance authorization; never wildcard-drop _ccnew/_ccold indexes.",
+		verify:    "§8.12 proves every active Taskworker is a clean descendant of both fixes; one complete maintenance epoch emits no legacy start line and pg_stat_progress_create_index never names an excluded table; after authorized cleanup the reindex-debris probe reports zero inactive artifacts; and no related DataFileExtend/WAL wait cluster or Connect login-timeout wave recurs.",
+	},
 	{name: "framer-message-too-large", re: framerRejectRe,
 		sample:        framerRejectLogSample,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §14.6",
@@ -431,6 +440,7 @@ var netEscrowNegativeSiteRe = regexp.MustCompile(`\[netescrow\]negative counter 
 var netEscrowClampMarkerRe = regexp.MustCompile(`\bclamped_to=[^\s]+`)
 var lokiTailBackendAddrRe = regexp.MustCompile(`[[:space:]]addr=("[^"]+"|[^[:space:]]+)`)
 var warpLogIdentityRe = regexp.MustCompile(`^\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[cid:([^\]]+)\]`)
+var dbMaintenanceLegacyReindexRe = regexp.MustCompile(`\[db\]maintenance reindex\[[0-9]+/[0-9]+\] (client_reliability(?:_p[0-9]{8})?|contract_close|network_client_location_reliability|network_client_connection|transfer_contract|transfer_escrow|transfer_escrow_sweep)[[:space:]]*$`)
 
 type warpLogIdentity struct {
 	host       string
@@ -493,6 +503,17 @@ func lokiTailBackendEOFLogGroup(line string) string {
 		return ""
 	}
 	return "backend=" + address
+}
+
+// dbMaintenanceLegacyReindexLogGroup retains the excluded table that the old
+// maintenance path selected. The start-only regexp deliberately rejects the
+// later "reindex took" completion line and the fixed table/step log format.
+func dbMaintenanceLegacyReindexLogGroup(line string) string {
+	match := dbMaintenanceLegacyReindexRe.FindStringSubmatch(line)
+	if len(match) < 2 {
+		return ""
+	}
+	return "table=" + match[1]
 }
 
 // netEscrowNegativeLogSample makes the atomic-clamp discriminator explicit.

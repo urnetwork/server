@@ -1492,6 +1492,65 @@ the transfer exclusion and cleanup-before/rebuild/cleanup-after state machine
 pass. Do not conflate that software deployment with authorization to delete
 the existing relations while `contract_close` progress remains active.
 
+The same legacy policy recurred under a later owner boundary. Task
+`01a05aeb-4595-ff84-af06-add9ce62726e`, epoch 422, started old-format
+`maintenance reindex[6/22] transfer_escrow` on edge-3/g1 at 16:33:01Z. It did
+not emit a matching completion line; its last heartbeat was at 16:44:27Z and
+the maintenance call unwound at 16:44:57Z while other tasks on that process
+also became stranded. At 16:47:23Z the corrected catalog probe found 355
+confirmed inactive artifacts totaling 231.07 GiB. `transfer_escrow` now owned
+24 artifacts and 234,002,931,712 bytes, one more failed-attempt artifact than
+the preceding sample. The same task was lease-recovered by edge-3/g2 at
+16:49:19Z, replayed the old 22-table rotation, and launched old-format
+`maintenance reindex[16/22] contract_close` at 16:50:38Z. A focused catalog
+read then kept the 24 `transfer_escrow` artifacts in the confirmed bucket and
+framed 29 `contract_close` candidates totaling 14,070,284,288 bytes behind the
+active relation. This is direct launch and retry evidence, not proof that the
+active rebuild completed or that either byte bucket was reclaimed. Do not
+roll Taskworker across this operation merely to land the fix; first establish
+its current PostgreSQL progress and make any cancel-versus-finish decision as
+an explicit authorized database operation.
+
+That retry then reproduced the heartbeat/cancellation half of the chain. Its
+last heartbeat was 16:53:09Z. The active `contract_close` call stopped without
+a completion line at 16:53:39Z; in the same millisecond, the canceled context
+printed start lines for all remaining tables and then cleanup lines for all 22
+tables, with no per-object completion. In particular, the 16:53:39Z
+`transfer_escrow` start line did **not** correspond to a new PostgreSQL backend:
+the instantaneous unwind and a 16:57:42Z progress-free catalog sample are the
+negative control for interpreting the standing class. That catalog sample
+instead found 356 confirmed inactive artifacts totaling 249,039,659,008 bytes
+(231.94 GiB). `contract_close` had risen from 29 active candidates to 30
+inactive artifacts totaling 14,936,702,976 bytes, while `transfer_escrow`
+remained at 24 artifacts totaling 234,066,706,432 bytes. The second interrupted
+`contract_close` build therefore created another durable artifact, and the old
+end-of-rotation cleanup did not remove it. This independently validates both
+source fixes: adjacent cleanup/exclusion (`7676014f`) and preserving ownership
+through a pooled timestamp-refresh stall (`abfd976b`).
+
+The lease recovered the same task a third time on edge-0/g1 at 16:58:04Z.
+The unchanged legacy policy again selected 22 of 171 tables, including four
+daily reliability partitions, `contract_close`, and `transfer_escrow`; its
+random order reached `contract_close` at 16:58:09Z after only two tables. The
+task was still heartbeating while that PostgreSQL operation was active. This
+five-minute recovery is an ongoing retry loop capable of adding another
+artifact on each heartbeat/cancellation boundary, not a historical debris
+inventory. It also supplied the production fixture for matching excluded
+daily partition names in addition to the seven exact-table exclusions.
+
+Standing class `db-maintenance-legacy-reindex` matches only the old-format
+start line for an exact table or daily reliability partition excluded by
+current policy, groups it by table, and warns on the first occurrence. It
+deliberately excludes the later `reindex took` completion line, ordinary
+old-format tables, and the fixed
+`maintenance table[...] <step> <table>` state-machine format. Old code writes
+the start line before it opens the maintenance connection, so this proves
+legacy selection and call-path entry but not that PostgreSQL began the
+statement. The class gives that legacy attempt an immediate operational gate
+while `pg_stat_progress_create_index` and `reindex-debris` remain the sources
+of truth for an active backend and for confirmed inactive/active-table
+candidate artifacts.
+
 The pool timeout was consequently a downstream queue symptom. The daily
 maintenance scheduler had two independent defects: `transfer_escrow` was not
 excluded from the two-hour full-table policy despite its documented one-time
@@ -3730,6 +3789,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
+| `[db]maintenance reindex[<i>/<n>] <excluded-table>` (`db-maintenance-legacy-reindex`) | A Taskworker selected a large or high-churn table that current policy excludes and entered the legacy full-table concurrent-reindex path. Because old code logs before acquiring its maintenance connection, the line proves selection/attempt, not that PostgreSQL began or completed the statement. Interruption plus lease recovery can strand `_ccnew`/`_ccold` artifacts and repeat the rebuild before old end-of-rotation cleanup. | Inspect `pg_stat_progress_create_index`, `reindex-debris`, and the exact DbMaintenance owner before changing Taskworker. Do not let a rollout implicitly cancel active work. After progress is empty, satisfy §8.13 and deploy a clean Taskworker containing `7676014f` plus `abfd976b`; clean debris separately with explicit maintenance authorization and the supported cleanup-only command. Never wildcard-drop artifacts. See §2.2a. |
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` or `/api/ds/query` | Grafana has the provisioned datasource row but cannot load that datasource's native plugin. `/api/health`, Loki/Mimir readiness, and direct storage reads can all stay green while dashboards, Logs Drilldown, and alert rules fail. | Query both `warp-mimir` and `warp-loki` through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13, bake the signed standalone Prometheus and Loki plugins into the image as in §11.15; the Logs Drilldown app does not provide the Loki datasource implementation. Do not recreate a datasource row that already exists. |
 | `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The historical exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline. The current off-grid wave followed Loki's 15-second blocked-ingester-tail close path alongside 11,583 reset records after all six active ring nodes were healthy. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Provenance-gate Warp `1e95aef`; deploy it only to older Grafana blocks. For the current fleet, deploy Grafana with Warp `42168fe` plus `bca37cf`, which removes Mimir per-query statistics and adds the actual backend address without claiming instrumentation fixes loss. Require query stats zero, rules/metrics healthy, and both EOF/reset classes zero for ten minutes with stable tails and bounded reconciliation. Investigate a residual `addr` frame on that node. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
 | `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail queue overflowed before its internal gRPC send. Loki 3.7.3 discards the accompanying `resp.DroppedStreams` in the querier; continued traffic after 15 seconds closes the backend tail and produces the paired EOF. Grafana is the observation point, not affected-service attribution. Historical waves paired with pre-fix Proxy logs. The current six-host window had 11,583 resets plus 11,022 avoidable Mimir per-query records after LAN/ring health was restored. | Provenance-gate Warp `1e95aef` and server `e055c98c`. For already-current blocks, deploy Grafana with Warp `42168fe` plus `bca37cf`; reconcile every service window and require query stats zero, alert rules/metrics healthy, and both loss classes zero for ten minutes. Any residual EOF must carry a backend frame. Do not raise queues, suppress the reset, or claim Grafana was the affected selector. See §1.5. |
