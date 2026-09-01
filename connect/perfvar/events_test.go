@@ -1037,36 +1037,34 @@ func TestFullTunOutageRecoveryCorrectness(t *testing.T) {
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
 		for routeIndex, route := range []fullTunRoute{fullTunRouteP2pFast, fullTunRouteExchangeH3} {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			profile := allNetworkProfiles(4100 + int64(routeIndex))["rate-10mbps"]
-			enableNetworkPeers := route == fullTunRouteP2pFast
-			environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, enableNetworkPeers)
-			path := newFullTunPath(ctx, t, environment, route)
-			result, err := measureFullTunOutageRecovery(ctx, path, 512*1024, 300*time.Millisecond)
-			if err != nil {
-				path.close()
-				environment.close()
-				cancel()
-				t.Fatalf("full-TUN %s outage recovery: %v", route, err)
-			}
-			if result.RecoveryTime <= 0 || 30*time.Second < result.RecoveryTime {
-				t.Fatalf("full-TUN %s recovery=%s", route, result.RecoveryTime)
-			}
-			t.Logf(
-				"[perfvar] outage route=%s duration=%s recovery=%s bytes-at-outage=%d goodput=%.6fGbps",
-				route,
-				result.OutageDuration,
-				result.RecoveryTime,
-				result.BytesAtOutage,
-				result.Workload.GoodputGigabits,
-			)
-			verifyErr := path.verifyRoute()
-			path.close()
-			environment.close()
-			cancel()
-			if verifyErr != nil {
-				t.Fatal(verifyErr)
-			}
+			func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer cancel()
+				profile := allNetworkProfiles(4100 + int64(routeIndex))["rate-10mbps"]
+				enableNetworkPeers := route == fullTunRouteP2pFast
+				environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, enableNetworkPeers)
+				defer environment.close()
+				path := newFullTunPath(ctx, t, environment, route)
+				defer path.close()
+				result, err := measureFullTunOutageRecovery(ctx, path, 512*1024, 300*time.Millisecond)
+				if err != nil {
+					t.Fatalf("full-TUN %s outage recovery: %v", route, err)
+				}
+				if result.RecoveryTime <= 0 || 30*time.Second < result.RecoveryTime {
+					t.Fatalf("full-TUN %s recovery=%s", route, result.RecoveryTime)
+				}
+				t.Logf(
+					"[perfvar] outage route=%s duration=%s recovery=%s bytes-at-outage=%d goodput=%.6fGbps",
+					route,
+					result.OutageDuration,
+					result.RecoveryTime,
+					result.BytesAtOutage,
+					result.Workload.GoodputGigabits,
+				)
+				if err := path.verifyRoute(); err != nil {
+					t.Fatal(err)
+				}
+			}()
 		}
 	})
 }
@@ -1084,9 +1082,11 @@ func testFullTunImpairmentCorrectness(
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
 		profile := allNetworkProfiles(seed)[profileName]
 		enableNetworkPeers := route == fullTunRouteP2pFast
 		environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, enableNetworkPeers)
+		defer environment.close()
 		if route == fullTunRouteP2pFast && profile.Forward.OuterMtu < 1500 {
 			cleanProfile := allNetworkProfiles(seed)["clean-lan"]
 			environment.accessProfile = cleanProfile
@@ -1094,11 +1094,9 @@ func testFullTunImpairmentCorrectness(
 			environment.deviceAccessProfile = cleanProfile
 		}
 		path := newFullTunPath(ctx, t, environment, route)
+		defer path.close()
 		result, err := measureFullTunUpload(ctx, path, 128*1024)
 		verifyErr := path.verifyRoute()
-		path.close()
-		environment.close()
-		cancel()
 		if err != nil {
 			t.Fatalf("full-TUN %s/%s: %v", route, profileName, err)
 		}
@@ -1142,19 +1140,19 @@ func testFullTunP2pFastMtuCorrectness(
 				fullTunMinimumDirectionalWorkloadTimeout(),
 			),
 		)
+		defer cancel()
 		profile := allNetworkProfiles(seed)[profileName]
 		environment := newRouteEnvironmentWithNetworkPeers(ctx, t, profile, true)
+		defer environment.close()
 		cleanProfile := allNetworkProfiles(seed)["clean-lan"]
 		environment.accessProfile = cleanProfile
 		environment.providerAccessProfile = cleanProfile
 		environment.deviceAccessProfile = cleanProfile
 		path := newFullTunPath(ctx, t, environment, fullTunRouteP2pFast)
+		defer path.close()
 		result, transferErr := measureFullTunUpload(ctx, path, 128*1024)
 		snapshot := path.p2pNetwork.snapshot()
 		verifyErr := path.verifyRoute()
-		path.close()
-		environment.close()
-		cancel()
 		if transferErr != nil {
 			t.Fatalf("P2P fast %s path: %v", profileName, transferErr)
 		}

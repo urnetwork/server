@@ -2961,6 +2961,47 @@ func fullTunRaceInstrumentationAllowance() time.Duration {
 	return 2 * fullTunMinimumDirectionalWorkloadTimeout()
 }
 
+// The API strategy is an inner route-construction boundary. Leaving its
+// production 15-second deadlines unchanged under race instrumentation abandons
+// a valid AuthNetworkClient response before the generated platform can form.
+func TestRouteClientStrategySettingsBoundRaceControlRequests(t *testing.T) {
+	settings := routeClientStrategySettings()
+	defaults := clientconnect.DefaultClientStrategySettings()
+	if !perfvarRaceEnabled {
+		if settings.RequestTimeout != defaults.RequestTimeout ||
+			settings.ConnectTimeout != defaults.ConnectTimeout ||
+			settings.TlsTimeout != defaults.TlsTimeout ||
+			settings.HandshakeTimeout != defaults.HandshakeTimeout {
+			t.Fatalf(
+				"ordinary route strategy=%s/%s/%s/%s, want defaults=%s/%s/%s/%s",
+				settings.RequestTimeout,
+				settings.ConnectTimeout,
+				settings.TlsTimeout,
+				settings.HandshakeTimeout,
+				defaults.RequestTimeout,
+				defaults.ConnectTimeout,
+				defaults.TlsTimeout,
+				defaults.HandshakeTimeout,
+			)
+		}
+		return
+	}
+	allowance := fullTunRaceInstrumentationAllowance()
+	if settings.RequestTimeout < allowance ||
+		settings.ConnectTimeout < allowance ||
+		settings.TlsTimeout < allowance ||
+		settings.HandshakeTimeout < allowance {
+		t.Fatalf(
+			"race route strategy=%s/%s/%s/%s, want each at least %s",
+			settings.RequestTimeout,
+			settings.ConnectTimeout,
+			settings.TlsTimeout,
+			settings.HandshakeTimeout,
+			allowance,
+		)
+	}
+}
+
 // A full-TUN endpoint clones the production transport-budget capacity because
 // PERFVAR hosts independent device and provider processes in one test process.
 // Replacement transports still share their endpoint-local budget.
@@ -6812,57 +6853,51 @@ func TestFullTunWarmedTCPRouteCorrectness(t *testing.T) {
 		defer cancel()
 		profile := initialNetworkProfiles(4003)["clean-lan"]
 		for _, route := range []fullTunRoute{fullTunRouteExchangeH1, fullTunRouteP2pFast} {
-			enableNetworkPeers := route == fullTunRouteP2pFast
-			environment := newRouteEnvironmentWithNetworkPeers(
-				ctx,
-				t,
-				profile,
-				enableNetworkPeers,
-			)
-			path := newFullTunPath(ctx, t, environment, route)
-			for _, direction := range []perfvarDirection{
-				perfvarDirectionUpload,
-				perfvarDirectionDownload,
-			} {
-				scenario := perfvarScenario{
-					Route:                 route,
-					Profile:               profile,
-					ProviderAccessProfile: profile,
-					Workload:              perfvarWorkloadTCPWarmed,
-					Direction:             direction,
-					Topology:              perfvarTopologyOneHop,
-					Resource:              perfvarResourceDefault,
-					PayloadByteCount:      128 * 1024,
-					FlowCount:             1,
+			func() {
+				enableNetworkPeers := route == fullTunRouteP2pFast
+				environment := newRouteEnvironmentWithNetworkPeers(
+					ctx,
+					t,
+					profile,
+					enableNetworkPeers,
+				)
+				defer environment.close()
+				path := newFullTunPath(ctx, t, environment, route)
+				defer path.close()
+				for _, direction := range []perfvarDirection{
+					perfvarDirectionUpload,
+					perfvarDirectionDownload,
+				} {
+					scenario := perfvarScenario{
+						Route:                 route,
+						Profile:               profile,
+						ProviderAccessProfile: profile,
+						Workload:              perfvarWorkloadTCPWarmed,
+						Direction:             direction,
+						Topology:              perfvarTopologyOneHop,
+						Resource:              perfvarResourceDefault,
+						PayloadByteCount:      128 * 1024,
+						FlowCount:             1,
+					}
+					scenario.WarmupByteCount = perfvarDirectionalBandwidthDelayByteCount(scenario)
+					result, err := measurePerfvarFullTun(ctx, path, scenario)
+					if err != nil {
+						t.Fatalf("%s/%s warmed TCP: %v", route, direction, err)
+					}
+					if result.WarmupByteCount != scenario.WarmupByteCount ||
+						result.WarmupDuration <= 0 ||
+						result.UsefulByteCount != scenario.PayloadByteCount ||
+						result.ContentHash != deterministicPayloadHash(scenario.PayloadByteCount) {
+						t.Fatalf("%s/%s warmed result=%+v scenario=%+v", route, direction, result, scenario)
+					}
+					if path.takeCarrierMeasurementStart() == nil {
+						t.Fatalf("%s/%s did not publish a measured carrier boundary", route, direction)
+					}
 				}
-				scenario.WarmupByteCount = perfvarDirectionalBandwidthDelayByteCount(scenario)
-				result, err := measurePerfvarFullTun(ctx, path, scenario)
-				if err != nil {
-					path.close()
-					environment.close()
-					t.Fatalf("%s/%s warmed TCP: %v", route, direction, err)
+				if err := path.verifyRoute(); err != nil {
+					t.Fatal(err)
 				}
-				if result.WarmupByteCount != scenario.WarmupByteCount ||
-					result.WarmupDuration <= 0 ||
-					result.UsefulByteCount != scenario.PayloadByteCount ||
-					result.ContentHash != deterministicPayloadHash(scenario.PayloadByteCount) {
-					path.close()
-					environment.close()
-					t.Fatalf("%s/%s warmed result=%+v scenario=%+v", route, direction, result, scenario)
-				}
-				if path.takeCarrierMeasurementStart() == nil {
-					path.close()
-					environment.close()
-					t.Fatalf("%s/%s did not publish a measured carrier boundary", route, direction)
-				}
-			}
-			if err := path.verifyRoute(); err != nil {
-				path.close()
-				environment.close()
-				t.Fatal(err)
-			}
-			path.close()
-			environment.close()
+			}()
 		}
 	})
 }

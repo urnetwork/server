@@ -623,6 +623,19 @@ func dividedRouteProfile(profile networkProfile, segmentCount int, seedOffset in
 	return divided
 }
 
+// Keeps TUN-carried control requests alive for the same bounded interval as
+// race-instrumented route construction. Production deadlines remain unchanged.
+func routeClientStrategySettings() *clientconnect.ClientStrategySettings {
+	settings := clientconnect.DefaultClientStrategySettings()
+	if allowance := fullTunRaceInstrumentationAllowance(); 0 < allowance {
+		settings.RequestTimeout = max(settings.RequestTimeout, allowance)
+		settings.ConnectTimeout = max(settings.ConnectTimeout, allowance)
+		settings.TlsTimeout = max(settings.TlsTimeout, allowance)
+		settings.HandshakeTimeout = max(settings.HandshakeTimeout, allowance)
+	}
+	return settings
+}
+
 // A fresh client TUN reaches the edge directly or through one real extender.
 func (self *routeEnvironment) newClientNode(useExtender bool) (*clientconnect.Tun, *clientconnect.ClientStrategy) {
 	return self.newClientNodeWithProfile(useExtender, self.accessProfile)
@@ -671,7 +684,7 @@ func (self *routeEnvironment) newClientNodeWithProfileAt(
 		self.t.Fatalf("add %s TUN: %v", name, err)
 	}
 
-	strategySettings := clientconnect.DefaultClientStrategySettings()
+	strategySettings := routeClientStrategySettings()
 	strategySettings.EnableResilient = false
 	strategySettings.MinNextConnectDelay = 0
 	strategySettings.MaxNextConnectDelay = 0
