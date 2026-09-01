@@ -1689,6 +1689,18 @@ the next table is active. The rollout gate opens only on an empty progress
 sample, and deployment still separately requires the trusted release-builder
 gate in section 8.13.
 
+The next lease recovery demonstrated the new progress evidence in the
+authoritative watcher. At 18:30:54Z, the legacy task selected
+`contract_close` first and PostgreSQL was building
+`contract_close_pkey_ccnew34`: 4,510,923 of 29,871,309 blocks were complete,
+the wait was `IO:BuffileWrite`, and there were no blockers. At 18:31:55Z the
+same exact index had advanced to 15,985,477 blocks with no wait or blockers.
+Progress was empty at 18:33:58Z, but `contract_close` then owned 35 confirmed
+artifacts totaling 17,110,269,952 bytes, one more than before the recovery;
+the fleet total was 367 artifacts / 308,522,303,488 bytes (287.33 GiB). This
+is the positive production control for the phase/counter fields and another
+direct reproduction of the legacy artifact-creation loop.
+
 Standing class `db-maintenance-legacy-reindex` matches only the old-format
 start line for an exact table or daily reliability partition excluded by
 current policy, groups it by table, and warns on the first occurrence. It
@@ -6196,6 +6208,21 @@ repository. Edge-0's exact installed Warpctl was instead a clean
 guard. The workstation Warpctl resolved by the monitor was older still and
 reported `vcs.modified=true`. Thus neither the tag, the later image context,
 nor a clean launcher proved the service executable's source.
+
+The later remediation sample separates workflow correctness from rollout
+timing. By 18:31:02Z the workstation executable was a clean descendant at
+Warp `7176ccdc`, with all three guards, while all six enabled managed-services
+hosts still had the clean `42168fe8` executable and lacked all three guards.
+`42168fe8` was committed at 22:38:11-05:00 on August 31; `217392e` landed at
+01:49:21-05:00 on September 1. The earlier `run-edges.sh` invocation therefore
+installed the then-current local checkout; its remaining age is not evidence
+that local checkout deployment is defective. It must be rerun after the guard
+commit. The default playbook also restarts Warp services, so do not run that
+restart across protected PostgreSQL index progress. If operators deliberately
+stage only the on-disk binary with `WARP_SKIP_SERVICES` set, this exact-binary
+probe may become healthy while §8.11 correctly keeps resident pre-install
+workers stale. No service rollout is provenance-cleared until both controls
+are healthy.
 
 This is a software deployment and release-operations gate, never a hardware
 alert. Stop new release builds through any listed executable. Use the existing
