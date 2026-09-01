@@ -16,11 +16,11 @@ preparation_seconds=${SIM_LATENCY_PREPARATION_SECONDS:-57600}
 usage() {
     cat <<'EOF'
 Usage:
-  RUN-MAIN.sh run
-  RUN-MAIN.sh status [--epoch N]
-  RUN-MAIN.sh candidate --epoch N
-  RUN-MAIN.sh approve --epoch N --job-id ID --evidence FILE --reason TEXT
-  RUN-MAIN.sh reject --epoch N --job-id ID --evidence FILE --reason TEXT
+  run-main.sh run
+  run-main.sh status [--epoch N]
+  run-main.sh candidate --epoch N
+  run-main.sh approve --epoch N --job-id ID --evidence FILE --reason TEXT
+  run-main.sh reject --epoch N --job-id ID --evidence FILE --reason TEXT
 
 Required environment for run:
   SIM_LATENCY_OPERATOR_TOKEN_FILE  private file containing the operator token
@@ -47,7 +47,7 @@ case ${1:-} in
 esac
 
 fail() {
-    printf 'RUN-MAIN.sh: %s\n' "$*" >&2
+    printf 'run-main.sh: %s\n' "$*" >&2
     exit 1
 }
 

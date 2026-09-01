@@ -1,6 +1,6 @@
 # Sim-latency season agent runbook
 
-`RUN-MAIN.sh` is the fail-closed agent harness for the six-epoch competition.
+`run-main.sh` is the fail-closed agent harness for the six-epoch competition.
 It drives the continuously deployed main API and one-shot worker while keeping
 the measured `connect`, `sdk`, `server`, and `proxy` source isolated in
 temporary clones. Neither evaluation nor promotion changes the operator's
@@ -34,7 +34,7 @@ Run launch preflight and retain its passing JSON before the first epoch. Then:
 
 ```sh
 cd /home/by/urnetwork/server/connect/sim-latency
-./RUN-MAIN.sh run
+./run-main.sh run
 ```
 
 Starting early is safe. The worker begins its 15-second heartbeat immediately,
@@ -65,7 +65,7 @@ Write a JSON object containing the evidence inspected and an explicit boolean
 finding for every item. Keep it mode 0600. If honest and safe:
 
 ```sh
-./RUN-MAIN.sh approve --epoch N --job-id ID \
+./run-main.sh approve --epoch N --job-id ID \
   --evidence /secure/path/review.json \
   --reason 'honest allowed-path optimization; no scoring or sandbox tampering'
 ```
@@ -73,14 +73,14 @@ finding for every item. Keep it mode 0600. If honest and safe:
 If any check fails:
 
 ```sh
-./RUN-MAIN.sh reject --epoch N --job-id ID \
+./run-main.sh reject --epoch N --job-id ID \
   --evidence /secure/path/review.json \
   --reason 'specific dishonest or unsafe behavior found'
 ```
 
 Rejection is append-only and advances to the next ranked significant candidate
 without materializing a second temporary directory. The harness pauses again
-with status 20; run `./RUN-MAIN.sh candidate --epoch N` to materialize that
+with status 20; run `./run-main.sh candidate --epoch N` to materialize that
 candidate before reviewing it. If candidates are exhausted, it records
 a no-winner transition and carries the exact incumbent commits and significance
 threshold into the next epoch. Approval authenticates the reviewed score and
@@ -90,7 +90,7 @@ runner tree is unchanged, pushes the product branches, and pushes the config
 ledger last. It then starts the next epoch. Temporary candidate and promotion
 directories are deleted after use.
 
-After epoch 6 is reviewed, `RUN-MAIN.sh` exits zero. A canceled round, missing
+After epoch 6 is reviewed, `run-main.sh` exits zero. A canceled round, missing
 source commit, source/API epoch mismatch, failed worker, incomplete drain,
 invalid review evidence, failed push, or unavailable dependency exits nonzero
 without advancing the source ledger.
