@@ -42,13 +42,16 @@ func priorityReindexIndexesForEpoch(epoch uint64) []string {
 }
 
 // These tables are too large or too frequently updated to rebuild as a whole;
-// each has an alternate strategy (partition turnover or targeted indexes).
+// they use partition turnover, targeted indexes, or tuned autovacuum plus an
+// explicitly scheduled one-time pg_repack instead.
 var dbMaintenanceSkipReindexTables = map[string]bool{
 	"client_reliability":                  true,
+	"contract_close":                      true,
 	"network_client_location_reliability": true,
 	"network_client_connection":           true,
 	"transfer_contract":                   true,
 	"transfer_escrow":                     true,
+	"transfer_escrow_sweep":               true,
 }
 
 // Daily reliability partitions are dropped whole at retention, so their

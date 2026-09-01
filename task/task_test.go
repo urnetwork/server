@@ -514,6 +514,112 @@ func TestTaskLeaseIsBoundedAndExtendedByKeepalive(t *testing.T) {
 	})
 }
 
+// A timestamp heartbeat uses the ordinary pooled DB path, which raises query
+// errors as panics. If that pool stalls while the direct advisory-lock session
+// is healthy, the timestamp may expire but a second worker still cannot own the
+// task. The live task must therefore continue instead of losing its guard and
+// restarting from the beginning on another worker.
+func TestTaskTimestampLeaseRefreshPanicDoesNotCancelLiveOwner(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		leaseWorkStarted = make(chan struct{}, 1)
+		leaseWorkRelease = make(chan struct{})
+		var releaseOnce sync.Once
+		releaseWork := func() {
+			releaseOnce.Do(func() {
+				close(leaseWorkRelease)
+			})
+		}
+		defer releaseWork()
+
+		ctx := context.Background()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
+
+		taskId := ScheduleTask(
+			LeaseWork,
+			&LeaseWorkArgs{},
+			clientSession,
+			RunAt(server.NowUtc().Add(-time.Minute)),
+			MaxTime(time.Hour),
+		)
+
+		taskWorker := NewTaskWorkerWithDefaults(ctx)
+		taskWorker.AddTargets(NewTaskTarget(LeaseWork))
+		heartbeatTick := make(chan time.Time, 1)
+		refreshAttempted := make(chan bool, 1)
+		taskWorker.heartbeatAfter = func(time.Duration) <-chan time.Time {
+			return heartbeatTick
+		}
+		refreshFailure := errors.New("synthetic pooled lease refresh timeout")
+		taskWorker.refreshTaskTimestampLeases = func(
+			ctx context.Context,
+			tasks map[server.Id]*Task,
+		) {
+			_, containsTask := tasks[taskId]
+			refreshAttempted <- containsTask
+			panic(refreshFailure)
+		}
+
+		type evalResult struct {
+			finishedTaskIds        []server.Id
+			rescheduledTaskIds     []server.Id
+			postRescheduledTaskIds []server.Id
+			err                    error
+		}
+		evalDone := make(chan evalResult, 1)
+		go func() {
+			finishedTaskIds, rescheduledTaskIds, postRescheduledTaskIds, err := taskWorker.EvalTasks(1)
+			evalDone <- evalResult{
+				finishedTaskIds:        finishedTaskIds,
+				rescheduledTaskIds:     rescheduledTaskIds,
+				postRescheduledTaskIds: postRescheduledTaskIds,
+				err:                    err,
+			}
+		}()
+
+		select {
+		case <-leaseWorkStarted:
+		case <-time.After(10 * time.Second):
+			t.Fatal("lease work never started")
+		}
+
+		heartbeatTick <- time.Now()
+		select {
+		case containsTask := <-refreshAttempted:
+			if !containsTask {
+				t.Fatalf("timestamp refresh did not receive claimed task %s", taskId)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timestamp refresh was not attempted")
+		}
+
+		select {
+		case result := <-evalDone:
+			t.Fatalf("pooled timestamp refresh panic terminated live evaluation: %+v", result)
+		default:
+		}
+
+		releaseWork()
+		select {
+		case result := <-evalDone:
+			if result.err != nil {
+				t.Fatalf("EvalTasks after timestamp refresh panic: %v", result.err)
+			}
+			if len(result.finishedTaskIds) != 1 || result.finishedTaskIds[0] != taskId {
+				t.Fatalf("finished tasks = %v, want only %s", result.finishedTaskIds, taskId)
+			}
+			if len(result.rescheduledTaskIds) != 0 {
+				t.Fatalf("rescheduled tasks = %v, want none", result.rescheduledTaskIds)
+			}
+			if len(result.postRescheduledTaskIds) != 0 {
+				t.Fatalf("post-rescheduled tasks = %v, want none", result.postRescheduledTaskIds)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("live task did not finish after timestamp refresh failure")
+		}
+	})
+}
+
 // An expired timestamp alone must not permit duplicate execution while the
 // owner's PostgreSQL session is alive. Once that session disappears (as it does
 // automatically on process death), the task becomes reclaimable without

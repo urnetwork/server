@@ -1499,15 +1499,57 @@ The oversized database operation stalled ordinary work long enough to lose an
 evaluation, lease recovery retried the same epoch, and each retry encountered
 or created numbered debris under the old cleanup ordering.
 
-The software closure is in `db_maintenance.go`: exclude `transfer_escrow` from
-full-table reindex, retain its targeted indexes and one-time operational
-`pg_repack` strategy, and execute cleanup-before → rebuild → cleanup-after for
-each selected table or priority index. A failed prerequisite cleanup prevents
-the rebuild; a failed rebuild still reaches its immediate post-cleanup. The
-cleanup query schema-qualifies identifiers, includes TOAST, and refuses to
-touch a relation represented by live progress. Synthetic regressions enforce
-the ordering, the failure branches, the large-table exclusion, and this
-probe's active-build distinction.
+The later `contract_close` phase isolated why those otherwise-exclusive
+evaluations were lost. Task `01a05aeb-4595-ff84-af06-add9ce62726e` completed a
+2,023.98-second `transfer_escrow` rebuild on edge-1 at 13:30:05Z, started
+`contract_close` at 13:30:18Z, and emitted its last ten-second heartbeat at
+13:33:06Z without any terminal result. The same task then emitted its first
+heartbeat on edge-4 at 13:38:08Z and on edge-0 at 13:45:59Z, again without a
+terminal result from either prior owner. Direct PostgreSQL progress showed a
+new `REINDEX TABLE CONCURRENTLY contract_close` during each ownership window.
+The roughly five-minute handoffs matched the timestamp lease; the absence of
+overlap matched the session advisory lock.
+
+The production boundary was `task/task.go`'s heartbeat. It first pinged the
+direct PostgreSQL session that carries the advisory ownership lock, then wrote
+`claim_time`/`release_time` through the ordinary PgBouncer transaction path.
+When the reindex-induced pool stall made that second write hit its 30-second
+bound, `server.Tx` raised the error. The panic escaped `EvalTasks`, its deferred
+guard release closed the healthy ownership session and canceled the maintenance
+context, and the still-pending row became eligible after its last successful
+five-minute timestamp. The timestamp is not the ownership authority: an
+expired timestamp cannot pass `pg_try_advisory_lock` while the direct session
+is alive. Current taskworkers therefore treat a pooled timestamp-refresh
+failure as visible, nonfatal recovery-metadata loss after a successful direct
+ping; loss of the direct session remains fatal. Metric
+`urnetwork_task_timestamp_lease_refresh_errors_total` and the paired log retain
+the degraded heartbeat signal. A barrier-driven regression injects the same
+pooled panic, proves the live task does not terminate or reschedule, then lets
+it finish normally; the existing owner-session test proves an expired timestamp
+still cannot create a second owner.
+
+The adjacent table policy was also incomplete. At 13:48Z `contract_close` was
+355,384,926,208 bytes (2.10 billion estimated live rows, only 173,427 dead), and
+`transfer_escrow_sweep` was 107,269,292,032 bytes (271 million live rows, only
+six dead). Full-table rebuilds of those large, autovacuum-healthy tables add
+hundreds of gigabytes of scan/write work without addressing measured churn.
+They now join `transfer_contract` and `transfer_escrow` in the recurring
+whole-table exclusion; tuned autovacuum and explicitly scheduled one-time
+`pg_repack`/targeted maintenance remain their supported strategies. The
+synthetic policy test covers all four large tables and proves an ordinary table
+remains in rotation.
+
+The software closure spans `db_maintenance.go` and `task/task.go`: exclude the
+four large contract/escrow tables from full-table reindex, retain supported
+targeted and one-time operational strategies, execute cleanup-before → rebuild
+→ cleanup-after for each selected table or priority index, and keep live work
+owned when only its pooled timestamp refresh fails. A failed prerequisite
+cleanup prevents the rebuild; a failed rebuild still reaches its immediate
+post-cleanup. The cleanup query schema-qualifies identifiers, includes TOAST,
+and refuses to touch a relation represented by live progress. Synthetic
+regressions enforce the ordering, failure branches, complete large-table
+exclusion, heartbeat ownership boundary, and this probe's active-build
+distinction.
 
 Do not interrupt a protected in-progress rebuild merely to apply the source
 fix. Deploy the fixed server revision to taskworker so future daily maintenance

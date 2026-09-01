@@ -64,8 +64,23 @@ var orphanedRunPostCounter = prometheus.NewCounter(
 	},
 )
 
+// taskTimestampLeaseRefreshErrorCounter counts timestamp-heartbeat writes that
+// failed while the direct PostgreSQL session still proved advisory ownership.
+// The advisory lock is the duplicate-execution guard; this timestamp is only
+// the bounded crash-recovery hint, so a pooled write stall must stay visible
+// without canceling live work and releasing its ownership session.
+var taskTimestampLeaseRefreshErrorCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "task",
+		Name:      "timestamp_lease_refresh_errors_total",
+		Help:      "Task timestamp lease refreshes that failed while advisory ownership remained healthy",
+	},
+)
+
 func init() {
 	prometheus.MustRegister(orphanedRunPostCounter)
+	prometheus.MustRegister(taskTimestampLeaseRefreshErrorCounter)
 }
 
 // the task system captures work that needs to be done to advance the platform
@@ -1345,6 +1360,12 @@ type TaskWorker struct {
 	targets     map[string]Target
 	settings    *TaskWorkerSettings
 
+	// These production-boundary functions are fields so tests can trigger a
+	// heartbeat and a pooled refresh panic with explicit barriers. Every worker
+	// constructed through NewTaskWorker receives the real clock and DB write.
+	heartbeatAfter             func(time.Duration) <-chan time.Time
+	refreshTaskTimestampLeases func(context.Context, map[server.Id]*Task)
+
 	stateLock sync.Mutex
 	draining  bool
 
@@ -1362,14 +1383,16 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 	drainCtx, drainCancel := context.WithCancel(cancelCtx)
 
 	taskWorker := &TaskWorker{
-		ctx:         cancelCtx,
-		cancel:      cancel,
-		runCtx:      runCtx,
-		runCancel:   runCancel,
-		drainCtx:    drainCtx,
-		drainCancel: drainCancel,
-		targets:     map[string]Target{},
-		settings:    settings,
+		ctx:                        cancelCtx,
+		cancel:                     cancel,
+		runCtx:                     runCtx,
+		runCancel:                  runCancel,
+		drainCtx:                   drainCtx,
+		drainCancel:                drainCancel,
+		targets:                    map[string]Target{},
+		settings:                   settings,
+		heartbeatAfter:             time.After,
+		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
 	}
 
 	taskWorker.AddTargets(
@@ -1815,6 +1838,62 @@ func (self *TaskWorker) takeTasks(n int) (
 	return claimedTasks, claimGuard, nil
 }
 
+// refreshTaskTimestampLeases writes the short crash-recovery timestamps through
+// the ordinary pooled DB path. server.Tx raises DB errors, so callers must keep
+// this operation behind tryRefreshTaskTimestampLeases's narrow recovery
+// boundary. The direct taskClaimGuard session remains the ownership authority.
+func refreshTaskTimestampLeases(
+	ctx context.Context,
+	tasks map[server.Id]*Task,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+			claimTime := server.NowUtc()
+			releaseTime := claimTime.Add(TaskLeaseTimeout)
+
+			for _, task := range tasks {
+				// GREATEST prevents a backwards clock adjustment from
+				// shortening an existing lease. Under a normal clock every
+				// heartbeat advances the bounded recovery deadline.
+				batch.Queue(
+					`
+						UPDATE pending_task
+						SET
+							claim_time = $2,
+							release_time = GREATEST(release_time, $3)
+						WHERE task_id = $1
+					`,
+					task.TaskId,
+					claimTime,
+					releaseTime,
+				)
+			}
+		})
+	})
+}
+
+// tryRefreshTaskTimestampLeases converts only the pooled timestamp-refresh
+// operation's panic contract into an error. Losing that recovery hint is
+// observable but nonfatal while claimGuard.ping has just proved the direct
+// advisory-lock session healthy.
+func tryRefreshTaskTimestampLeases(
+	ctx context.Context,
+	tasks map[server.Id]*Task,
+	refresh func(context.Context, map[server.Id]*Task),
+) (returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if err, ok := recovered.(error); ok {
+				returnErr = fmt.Errorf("refresh task timestamp leases: %w", err)
+			} else {
+				returnErr = fmt.Errorf("refresh task timestamp leases: %v", recovered)
+			}
+		}
+	}()
+	refresh(ctx, tasks)
+	return nil
+}
+
 // return taskIds of the finished tasks, rescheduled tasks
 func (self *TaskWorker) EvalTasks(n int) (
 	finishedTaskIds []server.Id,
@@ -1972,7 +2051,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					rescheduledTasks[r.task.TaskId] = r.err
 				}
 
-			case <-time.After(ReleaseTimeout / 3):
+			case <-self.heartbeatAfter(ReleaseTimeout / 3):
 				elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
 				if 10 <= elapsedSeconds {
 					for _, task := range tasks {
@@ -1995,32 +2074,21 @@ func (self *TaskWorker) EvalTasks(n int) (
 				)
 				// Keep the direct session carrying the advisory ownership lock
 				// active and fail this evaluation if that ownership session is lost.
-				server.Raise(claimGuard.ping(heartbeatCtx))
-				server.Tx(heartbeatCtx, func(tx server.PgTx) {
-					server.BatchInTx(heartbeatCtx, tx, func(batch server.PgBatch) {
-						claimTime := server.NowUtc()
-						releaseTime := claimTime.Add(TaskLeaseTimeout)
-
-						for _, task := range tasks {
-							// GREATEST prevents a backwards clock adjustment from
-							// shortening an existing lease. Under a normal clock every
-							// heartbeat advances the bounded recovery deadline.
-							batch.Queue(
-								`
-									UPDATE pending_task
-									SET
-										claim_time = $2,
-										release_time = GREATEST(release_time, $3)
-									WHERE task_id = $1
-								`,
-								task.TaskId,
-								claimTime,
-								releaseTime,
-							)
-						}
-					})
-				})
-				heartbeatCancel()
+				func() {
+					defer heartbeatCancel()
+					server.Raise(claimGuard.ping(heartbeatCtx))
+					if err := tryRefreshTaskTimestampLeases(
+						heartbeatCtx,
+						tasks,
+						self.refreshTaskTimestampLeases,
+					); err != nil {
+						taskTimestampLeaseRefreshErrorCounter.Inc()
+						glog.Infof(
+							"[taskworker]timestamp lease refresh failed while advisory ownership remained healthy: %v\n",
+							err,
+						)
+					}
+				}()
 			}
 		}
 	}()

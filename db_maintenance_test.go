@@ -7,14 +7,23 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-func TestPriorityReindexIndexesAreCoveredExactlyOncePerCycle(t *testing.T) {
-	if dbMaintenanceShouldReindexTable("transfer_contract") {
-		t.Fatal("transfer_contract would still be rebuilt as a whole")
+func TestDbMaintenanceSkipsWholeReindexForLargeHighChurnTables(t *testing.T) {
+	for _, tableName := range []string{
+		"contract_close",
+		"transfer_contract",
+		"transfer_escrow",
+		"transfer_escrow_sweep",
+	} {
+		if dbMaintenanceShouldReindexTable(tableName) {
+			t.Fatalf("%s would still be rebuilt as a whole", tableName)
+		}
 	}
-	if dbMaintenanceShouldReindexTable("transfer_escrow") {
-		t.Fatal("transfer_escrow would still be rebuilt as a whole")
+	if !dbMaintenanceShouldReindexTable("account_feedback") {
+		t.Fatal("ordinary table was excluded from the reindex rotation")
 	}
+}
 
+func TestPriorityReindexIndexesAreCoveredExactlyOncePerCycle(t *testing.T) {
 	seen := map[string]int{}
 	for epoch := uint64(0); epoch < DbReindexEpochs; epoch++ {
 		for _, name := range priorityReindexIndexesForEpoch(epoch) {
