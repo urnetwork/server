@@ -31,18 +31,34 @@ func TestClientDriverProbeMatchmakingUsesPoolIdentityAndQualitySpec(t *testing.T
 		ClientId:                providerId,
 		EstimatedBytesPerSecond: 1024,
 	})
+	helloObserved := make(chan struct{}, 1)
 	observed := make(chan observedMatchmakingProbe, 1)
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/hello" {
+			select {
+			case helloObserved <- struct{}{}:
+			default:
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if request.Method != http.MethodPost || request.URL.Path != "/network/find-providers2" {
+			http.Error(w, "unexpected matchmaking probe route", http.StatusNotFound)
+			return
+		}
 		value := observedMatchmakingProbe{
 			forwardedFor:  request.Header.Get("X-UR-Forwarded-For"),
 			authorization: request.Header.Get("Authorization"),
 		}
-		if request.URL.Path != "/network/find-providers2" {
-			value.err = fmt.Errorf("path = %q", request.URL.Path)
-		} else if err := json.NewDecoder(request.Body).Decode(&value.args); err != nil {
+		if err := json.NewDecoder(request.Body).Decode(&value.args); err != nil {
 			value.err = fmt.Errorf("decode request: %w", err)
 		}
-		observed <- value
+		select {
+		case observed <- value:
+		default:
+			http.Error(w, "duplicate matchmaking probe", http.StatusConflict)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&sdk.FindProviders2Result{ProviderStats: providerStats})
 	}))
@@ -67,7 +83,17 @@ func TestClientDriverProbeMatchmakingUsesPoolIdentityAndQualitySpec(t *testing.T
 	if err := driver.ProbeMatchmaking(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
-	value := <-observed
+	select {
+	case <-helloObserved:
+	default:
+		t.Fatal("matchmaking probe skipped route hello")
+	}
+	var value observedMatchmakingProbe
+	select {
+	case value = <-observed:
+	case <-ctx.Done():
+		t.Fatal("matchmaking POST was not observed")
+	}
 	if value.err != nil {
 		t.Fatal(value.err)
 	}
@@ -93,6 +119,14 @@ func TestClientDriverProbeMatchmakingUsesPoolIdentityAndQualitySpec(t *testing.T
 
 func TestClientDriverProbeMatchmakingRejectsEmptyProviderPool(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/hello" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if request.Method != http.MethodPost || request.URL.Path != "/network/find-providers2" {
+			http.Error(w, "unexpected matchmaking probe route", http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&sdk.FindProviders2Result{
 			ProviderStats: sdk.NewFindProvidersProviderList(),
