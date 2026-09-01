@@ -113,6 +113,8 @@ type logClass struct {
 
 type logReconcileQuery func(ctx context.Context, start time.Time, blocks []string) (string, error)
 
+var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: batch)?) messageLen=[0-9]+ > MaxMessageLen=[0-9]+(?: \(maxFrameLen=[0-9]+\))?`)
+
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
 	{name: "dial-io-timeout", re: regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`),
@@ -334,6 +336,15 @@ var logClasses = []logClass{
 	{name: "taskworker-drain-gave-up", re: regexp.MustCompile(`\[taskworker\]drain gave up`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 12.1",
 		meaning: "a taskworker drain exceeded finish+cancel timeouts and the process was killed with tasks running — every in-flight claim is leased until its max time; check pg/task-lease-stranded and release stranded claims"},
+	{name: "framer-message-too-large", re: framerRejectRe,
+		sample:        framerRejectLogSample,
+		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §14.6",
+		meaning:   "a reliable Connect carrier exceeded the H1 framer admission envelope; retries of the same immutable Pack cannot refill that route",
+		mechanism: "The integrated post-quantum TLS handshake carrier can exceed a legacy component-estimated cap even when every ordinary data group stays below its target. A write rejection strands the sender; a read rejection closes the receiving route. Multi-window retry remains live but cannot make an unchanged oversized carrier fit, so a hosted H1-only provider window can drain to platform-unreachable and retire exits carrying active proxy flows.",
+		context:   "This is a transport admission defect, not evidence that the origin, public proxy listener, rate limiter, policy route, TUN handoff, or WireGuard socket dropped the flow. Preserve direction plus message and cap lengths; correlate the same interval with window target/readiness and exit retirement.",
+		action:    "Deploy compatible Connect resident and client/hosted DeviceLocal artifacts whose shared minimum carrier limit fits the worst-case integrated handshake. Keep ordinary data coalescing and per-device memory admission bounded; do not suppress the rejection or make the buffer unbounded.",
+		verify:    "All active Connect and Proxy blocks run the compatible carrier-limit build; no framer-message-too-large line recurs; provider windows stay at target without platform-unreachable; and three sustained HTTP/SOCKS/WireGuard overlap campaigns pass.",
+	},
 	// e2e encryption (post-quantum) sessions — SIGNALS.md §15. The client-side
 	// [tls]/[key] lines surface in server logs through the connect stacks the
 	// server itself hosts (the proxy service's devices; providers run with the
@@ -527,6 +538,16 @@ func mimirBucketIndexLagLogSample(line string) string {
 		return truncateLine(sample)
 	}
 	return truncateLinePreservingSuffix(line, "bucket index version (updated_at) is older than requested")
+}
+
+// framerRejectLogSample drops the Warp identity and any customer correlation
+// fields while retaining the only actionable dimensions: direction, observed
+// carrier size, and configured admission envelope.
+func framerRejectLogSample(line string) string {
+	if sample := framerRejectRe.FindString(line); sample != "" {
+		return sample
+	}
+	return "[framer][reject]"
 }
 
 // isGrafanaQueryEcho identifies query-engine metadata that repeats the query

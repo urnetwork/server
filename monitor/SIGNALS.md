@@ -7380,7 +7380,9 @@ backpressure, but unrelated WireGuard peers must continue.
 connected while its provider window drains below target with
 `stall=platform-unreachable`. Before treating that state as provider ingress
 loss, query Connect and the selected Proxy block for
-`[framer][reject] ... messageLen=... > MaxMessageLen=4096`. The 2026-09-01 main
+`[framer][reject] ... messageLen=... > MaxMessageLen=4096`. The standing
+`logs/framer-message-too-large` class covers this signal explicitly because
+the transport emits the rejection at info severity. The 2026-09-01 main
 reproduction rejected 4,232- and 4,187-byte reliable H1 messages during the
 same sustained campaign that retired two exits carrying 16 flows apiece; the
 next SOCKS request completed its public proxy connection and origin TLS

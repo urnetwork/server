@@ -104,6 +104,46 @@ func TestGrafanaQueryEchoCannotCreateLogAlerts(t *testing.T) {
 	}
 }
 
+// The production H1 admission rejection is an info-level diagnostic and does
+// not contain a generic error-shaped word. Without an explicit class, the
+// standing monitor silently misses a carrier that can never fit on retry.
+func TestFramerMessageTooLargeIsClassifiedAndRedacted(t *testing.T) {
+	for _, line := range []string{
+		`[edge-4][connect][g2][cid:customer-one][I][2026-09-01T07:14:00Z][framer][reject]write messageLen=4232 > MaxMessageLen=4096 (maxFrameLen=4100)`,
+		`[fireside][proxy][g3][cid:customer-two][I][2026-09-01T07:14:01Z][framer][reject]read messageLen=4950 > MaxMessageLen=4096 (maxFrameLen=4100)`,
+		`[fireside][proxy][g3][cid:customer-three][I][2026-09-01T07:14:02Z][framer][reject]write batch messageLen=4187 > MaxMessageLen=4096 (maxFrameLen=4100)`,
+	} {
+		tailer := newLogTailer("connect", nil)
+		tailer.classify(line)
+		finding := findingByClass(t, tailer.drainWindow(), "framer-message-too-large")
+		if finding.healthy {
+			t.Fatalf("info-level framer rejection was not classified: %q", line)
+		}
+		for _, want := range []string{
+			"messageLen=",
+			"MaxMessageLen=4096",
+			"same immutable Pack",
+			"compatible Connect resident and client/hosted DeviceLocal artifacts",
+			"three sustained HTTP/SOCKS/WireGuard overlap campaigns",
+		} {
+			if !strings.Contains(finding.evidence+finding.mechanism+finding.action+finding.verify, want) {
+				t.Fatalf("framer rejection finding lacks %q: %+v", want, finding)
+			}
+		}
+		for _, secret := range []string{"customer-one", "customer-two", "customer-three", "fireside", "edge-4"} {
+			if strings.Contains(finding.evidence, secret) {
+				t.Fatalf("framer rejection evidence retained identity %q: %q", secret, finding.evidence)
+			}
+		}
+	}
+
+	adjacent := newLogTailer("connect", nil)
+	adjacent.classify(`[edge-4][connect][g2][I][framer]write messageLen=4232 MaxMessageLen=8192`)
+	if finding := findingByClass(t, adjacent.drainWindow(), "framer-message-too-large"); !finding.healthy {
+		t.Fatalf("ordinary framer log was classified as a rejection: %+v", finding)
+	}
+}
+
 func TestMimirBucketIndexLagSeparatesNormalPhaseSkew(t *testing.T) {
 	const normal = `[by-us-fmt-5-edge-1][grafana][g1][cid:normal][2026-08-31T22:42:00Z]level=warn ts=2026-08-31T22:42:00Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T22:12:17Z requested=2026-08-31T22:26:50Z diff=-873 msg="bucket index version (updated_at) is older than requested"`
 	const belowThreshold = `[by-us-fmt-5-edge-1][grafana][g1][cid:below][2026-08-31T22:42:01Z]level=warn ts=2026-08-31T22:42:01Z caller=bucket.go:1248 user=anonymous level=warn ours=2026-08-31T21:56:51Z requested=2026-08-31T22:26:50Z diff=-1799 msg="bucket index version (updated_at) is older than requested"`
