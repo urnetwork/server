@@ -589,6 +589,9 @@ type ConnectHandler struct {
 
 	listenerStateLock sync.RWMutex
 	listenerStates    map[connectListenerKey]bool
+	// Optional synchronization hook for deterministic listener lifecycle
+	// tests. It runs after the guarded state transition and must not block.
+	listenerStateObserver func(connectListenerKey, bool)
 
 	activeLock  sync.Mutex
 	activeCount int
@@ -824,6 +827,9 @@ func (self *ConnectHandler) setListenerUp(key connectListenerKey, up bool) {
 		value = 1
 	}
 	h3ListenerUpGauge.WithLabelValues(key.transport, strconv.Itoa(key.port)).Set(value)
+	if self.listenerStateObserver != nil {
+		self.listenerStateObserver(key, up)
+	}
 }
 
 // ListenerReadyUdpPorts reports the dynamic state and logical UDP ports of

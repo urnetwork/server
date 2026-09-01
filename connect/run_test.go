@@ -2,9 +2,14 @@ package connect
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/urnetwork/server"
 )
 
@@ -68,6 +73,97 @@ func TestRunSettingsDirectH3LoopbackBypassesProxyProtocol(t *testing.T) {
 	}
 	if settings.ConnectHandlerSettings.TransportTlsSettings.DefaultHostName != "127.0.1.1" {
 		t.Fatalf("direct H3 TLS fallback = %q", settings.ConnectHandlerSettings.TransportTlsSettings.DefaultHostName)
+	}
+}
+
+// Reproduces the production router boundary that used to replace the
+// simulator's customized handler settings with a fresh default snapshot.
+func TestRunRouterRetainsDirectH3LoopbackSettings(t *testing.T) {
+	settings := exchangeSettingsForRun(RunOptions{
+		Port:                 443,
+		TLSDefaultHostName:   "127.0.1.1",
+		DirectH3LoopbackMode: true,
+	})
+	exchange := &Exchange{settings: settings}
+	handlerSettings := connectHandlerSettingsFromExchange(exchange)
+	if handlerSettings != &settings.ConnectHandlerSettings {
+		t.Fatal("router did not retain the exchange's exact handler settings snapshot")
+	}
+	if handlerSettings.EnableProxyProtocol {
+		t.Fatal("router restored Proxy Protocol on direct loopback ingress")
+	}
+	if handlerSettings.TransportTlsSettings.DefaultHostName != "127.0.1.1" {
+		t.Fatalf("router TLS fallback = %q", handlerSettings.TransportTlsSettings.DefaultHostName)
+	}
+}
+
+// Exercises the exact exchange-to-router settings handoff through a real QUIC
+// Initial. Before the fix this handoff installed the Proxy Protocol wrapper,
+// so the listener consumed the datagram without ever reaching TLS.
+func TestRunRouterDirectH3LoopbackCompletesHandshake(t *testing.T) {
+	settings := exchangeSettingsForRun(RunOptions{
+		Port:                 443,
+		TLSDefaultHostName:   "127.0.0.1",
+		DirectH3LoopbackMode: true,
+	})
+	settings.ConnectHandlerSettings.TransportTlsSettings.EnableSelfSign = true
+	exchange := &Exchange{settings: settings}
+	handlerSettings := connectHandlerSettingsFromExchange(exchange)
+	packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := connectListenerKey{transport: connectListenerTransportH3, port: 0}
+	ctx, cancel := context.WithCancel(context.Background())
+	listenerUp := make(chan struct{})
+	var listenerUpOnce sync.Once
+	handler := &ConnectHandler{
+		ctx:          ctx,
+		settings:     handlerSettings,
+		transportTls: server.NewTransportTls(map[string]bool{}, handlerSettings.TransportTlsSettings),
+		listenerStates: map[connectListenerKey]bool{
+			key: false,
+		},
+		listenerStateObserver: func(observedKey connectListenerKey, up bool) {
+			if observedKey == key && up {
+				listenerUpOnce.Do(func() { close(listenerUp) })
+			}
+		},
+	}
+	listenerExit := make(chan error, 1)
+	go func() {
+		listenerExit <- handler.listenH3(key, packetConn)
+	}()
+	select {
+	case <-listenerUp:
+	case err := <-listenerExit:
+		cancel()
+		t.Fatalf("H3 listener exited before readiness: %v", err)
+	}
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	connection, err := quic.DialAddr(
+		dialCtx,
+		packetConn.LocalAddr().String(),
+		&tls.Config{
+			InsecureSkipVerify: true, // deterministic self-signed test identity
+			MinVersion:         tls.VersionTLS13,
+			ServerName:         "127.0.0.1",
+		},
+		&quic.Config{HandshakeIdleTimeout: time.Second},
+	)
+	dialCancel()
+	if err != nil {
+		cancel()
+		<-listenerExit
+		t.Fatalf("direct H3 handshake: %v", err)
+	}
+	if err := connection.CloseWithError(0, "test complete"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-listenerExit; err == nil {
+		t.Fatal("canceled H3 listener returned no error")
 	}
 }
 

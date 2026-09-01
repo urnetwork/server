@@ -95,7 +95,7 @@ func Run(ctx context.Context, options RunOptions) error {
 	} else {
 		exchange = NewExchangeFromEnv(runCtx, exchangeSettingsForRun(options))
 		defer exchange.Close()
-		connectRouter := NewConnectRouterWithDefaults(runCtx, cancel, exchange)
+		connectRouter := NewConnectRouterFromExchange(runCtx, cancel, exchange)
 		statusHandler = connectRouter.Status
 		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
 		server.Warmup(connectWarmupTargets()...)

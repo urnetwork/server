@@ -23,7 +23,15 @@ type ConnectRouter struct {
 	connectHandler *ConnectHandler
 }
 
-func NewConnectRouterWithDefaults(
+func connectHandlerSettingsFromExchange(exchange *Exchange) *ConnectHandlerSettings {
+	return &exchange.settings.ConnectHandlerSettings
+}
+
+// Keeps the handler and exchange on one settings snapshot. Callers that
+// customize ingress cannot safely reconstruct handler defaults here: doing so
+// silently restores Proxy Protocol and discards TLS identity settings after
+// the exchange has already been created.
+func NewConnectRouterFromExchange(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	exchange *Exchange,
@@ -32,7 +40,7 @@ func NewConnectRouterWithDefaults(
 		ctx,
 		cancel,
 		exchange,
-		DefaultConnectHandlerSettings(),
+		connectHandlerSettingsFromExchange(exchange),
 	)
 }
 
