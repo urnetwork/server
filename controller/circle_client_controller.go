@@ -107,6 +107,9 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	}
 
 	uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
+	if err := waitForCircleTransferAdmission(ctx); err != nil {
+		return nil, err
+	}
 
 	res, err := server.HttpPostRequireStatusOk(
 		ctx,
