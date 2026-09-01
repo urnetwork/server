@@ -353,6 +353,7 @@ func (self *ClientDriver) ProbeMatchmaking(ctx context.Context, probeIndex int) 
 	clientStrategySettings.EnableResilient = false
 	clientStrategySettings.ExtraHeaders = extraHeaders
 	clientStrategy := connect.NewClientStrategy(ctx, clientStrategySettings)
+	defer clientStrategy.Close()
 	api := sdk.NewApi(ctx, clientStrategy, self.apiUrl)
 	defer api.Close()
 	api.SetByJwt(identity.ByJwt)

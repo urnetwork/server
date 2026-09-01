@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,7 +35,11 @@ func TestClientDriverProbeMatchmakingUsesPoolIdentityAndQualitySpec(t *testing.T
 	})
 	helloObserved := make(chan struct{}, 1)
 	observed := make(chan observedMatchmakingProbe, 1)
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	idle := make(chan struct{})
+	closed := make(chan struct{})
+	var idleOnce sync.Once
+	var closedOnce sync.Once
+	apiServer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet && request.URL.Path == "/hello" {
 			select {
 			case helloObserved <- struct{}{}:
@@ -62,7 +68,16 @@ func TestClientDriverProbeMatchmakingUsesPoolIdentityAndQualitySpec(t *testing.T
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&sdk.FindProviders2Result{ProviderStats: providerStats})
 	}))
-	defer apiServer.Close()
+	apiServer.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateIdle:
+			idleOnce.Do(func() { close(idle) })
+		case http.StateClosed:
+			closedOnce.Do(func() { close(closed) })
+		}
+	}
+	apiServer.Start()
+	t.Cleanup(apiServer.Close)
 
 	config := defaultConfig(1, 1, 1, 60)
 	config.Clients.QualityWindowSize = 3
@@ -114,6 +129,16 @@ func TestClientDriverProbeMatchmakingUsesPoolIdentityAndQualitySpec(t *testing.T
 	}
 	if !strings.Contains(value.authorization, "matchmaking-probe-jwt") {
 		t.Fatalf("authorization did not carry pool identity: %q", value.authorization)
+	}
+	select {
+	case <-idle:
+	case <-time.After(5 * time.Second):
+		t.Fatal("matchmaking probe connection never became idle")
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("matchmaking probe retained its one-shot strategy connection")
 	}
 }
 
