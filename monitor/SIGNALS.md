@@ -1531,12 +1531,21 @@ through a pooled timestamp-refresh stall (`abfd976b`).
 The lease recovered the same task a third time on edge-0/g1 at 16:58:04Z.
 The unchanged legacy policy again selected 22 of 171 tables, including four
 daily reliability partitions, `contract_close`, and `transfer_escrow`; its
-random order reached `contract_close` at 16:58:09Z after only two tables. The
-task was still heartbeating while that PostgreSQL operation was active. This
-five-minute recovery is an ongoing retry loop capable of adding another
-artifact on each heartbeat/cancellation boundary, not a historical debris
-inventory. It also supplied the production fixture for matching excluded
-daily partition names in addition to the seven exact-table exclusions.
+random order reached `contract_close` at 16:58:09Z after only two tables. Its
+last heartbeat was 17:00:35Z and the call unwound 30 seconds later. At
+17:03:38Z, the catalog contained 357 inactive artifacts totaling
+250,213,687,296 bytes (233.03 GiB): `contract_close` had risen to 31 artifacts
+and 16,077,586,432 bytes. A fourth recovery began on edge-0/g2 at 17:05:27Z,
+selected two excluded daily partitions and then `contract_close`, and produced
+the first live `db-maintenance-legacy-reindex` alerts at 17:06:18Z with all
+three exact table frames. Its last heartbeat was 17:08:33Z, the canceled loop
+reached its log-only `transfer_escrow` entry 30 seconds later, and the
+17:09:48Z catalog contained 358 inactive artifacts totaling 250,231,382,016
+bytes; `contract_close` had risen again to 32 artifacts. Each interrupted
+backend added one durable artifact. This five-minute recovery is an ongoing
+artifact-creation loop, not a historical debris inventory. It also supplied
+the production fixture for matching excluded daily partition names in
+addition to the seven exact-table exclusions.
 
 Standing class `db-maintenance-legacy-reindex` matches only the old-format
 start line for an exact table or daily reliability partition excluded by
