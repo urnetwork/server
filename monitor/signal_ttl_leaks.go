@@ -198,7 +198,7 @@ done`, ports[0], ports[len(ports)-1]))
 		mechanism := "One or more expiring Redis key families have TTLs far beyond any intentional retention window. A fixed writer does not repair the persistent expiry metadata already stored in the keyspace."
 		evidence := "INFO keyspace independently shows the impossible-TTL residue across ports " + strings.Join(affectedPorts, ",") + "."
 		action := "Run a bounded, binary-safe PTTL attribution before changing data. Repair the identified writer and cleanup scope; do not raise maxmemory to conceal effectively immortal residue."
-		context := "INFO keyspace is read-only and aggregate. The attribution sample runs SCAN and PTTL inside Redis through EVAL_RO, so binary keys never cross a shell variable."
+		context := "INFO keyspace is read-only and aggregate. The attribution sample runs SCAN and raw-integer PTTL inside Redis through EVAL_RO, so binary keys never cross a shell variable and multi-century TTLs never overflow a Go time.Duration."
 		attribution, attributionErr := sampleRedisTTLAttribution(ctx, env, h, maxTTLNode.port)
 		if attributionErr != nil {
 			observed += " sample_status=unavailable"
@@ -218,8 +218,9 @@ done`, ports[0], ports[len(ports)-1]))
 				if 0 < attribution.legacyContracts+attribution.legacyIDs {
 					mechanism += " The first cleanup matched only current s2 stream names, while production residue uses legacy s_sk suffixes."
 				}
+				mechanism += " An intermediate cleanup then read PTTL through go-redis's time.Duration result; converting Redis milliseconds beyond roughly 290 years can overflow and misclassify a leaked key below the 8-hour repair threshold."
 				mechanism += fmt.Sprintf(" The bounded sample measured %d bytes across those suspect keys; this proves the expiry defect but does not make it the capacity root cause.", attribution.suspectBytes)
-				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. With explicit maintenance authority, run the corrected binary-safe expire-leaked-ttls cleanup that covers legacy s_sk and current s2_sk names. Use redis-bytes for capacity ownership; do not assume this residue creates material headroom, or raise maxmemory to conceal either defect."
+				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. Build bringyourctl from server commit d9b2e291 or a clean descendant and prove expire-leaked-ttls reads PTTL as raw integer milliseconds; do not run an older typed-duration cleanup artifact. With explicit maintenance authority, run that binary-safe cleanup across legacy s_sk and current s2_sk names. Use redis-bytes for capacity ownership; do not assume this residue creates material headroom, or raise maxmemory to conceal either defect."
 			}
 		}
 		findings = append(findings, finding{
@@ -235,7 +236,7 @@ done`, ports[0], ports[len(ports)-1]))
 			evidence:  evidence,
 			context:   context + " TTL and MEMORY USAGE answer different questions: this signal proves invalid expiry metadata; redis-bytes attributes capacity.",
 			action:    action,
-			verify:    "No sampled key exceeds its family TTL, every node's avg_ttl returns below two years, and no new TTL warning appears; verify capacity recovery independently with redis-bytes and redis-memory.",
+			verify:    "The cleanup artifact is a clean d9b2e291 descendant; a binary-safe raw-integer PTTL sample shows no targeted key beyond 8 hours, every node's avg_ttl returns below two years, and no new TTL warning appears. Verify capacity recovery independently with redis-bytes and redis-memory.",
 			playbook:  "SIGNALS.md §3.3a, §3.3b, and §4",
 		})
 	}

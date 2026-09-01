@@ -3094,20 +3094,41 @@ families. Bounded two-hour Connect queries returned zero `[redis][ttl]`,
 residue count is therefore not evidence of a resumed writer; a new writer
 requires a current-family sample or a post-deploy TTL warning.
 
+A pre-maintenance cleanup audit on 2026-09-01 found a second cleanup-side
+correctness defect before any authorized production run. The scanner used
+go-redis's typed `PTTL` result, whose reply path multiplies Redis's raw integer
+milliseconds by `time.Millisecond`. Go `time.Duration` spans only roughly 290
+years, while the observed legacy TTLs are roughly 913,000 years, so that
+conversion necessarily wraps before the scanner compares it with eight hours.
+The exact wrapped value depends on the raw TTL; an observed value may happen to
+remain above eight hours, but it is not a trustworthy ordering. A deterministic
+local Redis fixture sets `PTTL=18,446,744,073,710ms` (roughly 584 years), proves
+the typed result wraps below one millisecond and the old comparison would skip
+the key, then proves the corrected cleanup clamps the raw value to eight hours.
+Server commit `d9b2e291` pipelines generic `PTTL` commands and reads the signed
+64-bit millisecond result directly. No production TTL was changed during this
+audit. Any authorized cleanup artifact must be a clean descendant of that
+commit; an older typed-duration build is unsafe even if it contains the legacy
+suffix fix.
+
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
-  `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines PTTL on each
-  shard. Its first implementation scanned only the newer `*s2_sk_*` names and
-  therefore missed the production residue, which predates that namespace and
-  uses `*s_sk_*`. The corrected scanner covers both generations and validates
-  the exact suffix before changing a key.
+  `ExpireLeakedStreamKeys` scanner is binary-safe and pipelines raw-integer
+  `PTTL` on each shard. Its first implementation scanned only the newer
+  `*s2_sk_*` names and therefore missed the production residue, which predates
+  that namespace and uses `*s_sk_*`; its next revision used a typed duration
+  that could overflow. The corrected scanner covers both generations,
+  validates the exact suffix before changing a key, and retains Redis's int64
+  milliseconds through the threshold comparison.
 - Classify every new `redis-ttl-suspect` line by command and redacted key
   family. Require zero new stream-family warnings before cleanup; a warning on
   another family is an independent writer defect, not proof that stream writes
   resumed. Running `bringyourctl streams expire-leaked-ttls` changes production
-  TTLs and therefore requires explicit maintenance authority. It clamps only
-  legacy/current stream-id and stream-contract keys beyond 8h, allowing active
-  streams to refresh and orphaned residue to expire.
+  TTLs and therefore requires explicit maintenance authority. First prove the
+  binary is a clean `d9b2e291` descendant and does not use go-redis's typed
+  duration result for `PTTL`. It clamps only legacy/current stream-id and
+  stream-contract keys beyond 8h, allowing active streams to refresh and
+  orphaned residue to expire.
 - 2026-08-30 net-escrow variant: API emitted repeated `EXPIREAT` warnings for
   one `{escrow_<balance-id>}net` key with about 3.139B seconds (99.5 years)
   remaining. PostgreSQL confirmed a legitimate 10TiB balance ending
@@ -3125,9 +3146,9 @@ requires a current-family sample or a post-deploy TTL warning.
   non-action in its Markdown. The first complete fixed-cadence production
   stream later measured 20/min on old API g4, followed by 12/min and 15/min;
   this is a rollout target, not evidence to shorten the durable balance.
-- Verify TTL repair with a binary-safe sample, `avg_ttl` below two years, and
-  no new TTL warnings. Verify dataset-memory recovery independently through
-  §3.3b; raising maxmemory repairs neither defect.
+- Verify TTL repair with a binary-safe raw-integer `PTTL` sample, `avg_ttl`
+  below two years, and no new TTL warnings. Verify dataset-memory recovery
+  independently through §3.3b; raising maxmemory repairs neither defect.
 
 ### 3.3b Sampled byte-family attribution
 Probe: `redis-bytes`

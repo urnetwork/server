@@ -31,8 +31,13 @@ func TestTTLLeaksSignalSyntheticDurationAsSecondsResidue(t *testing.T) {
 		!strings.Contains(alert.Observed, "sample_legacy_ids=52") ||
 		!strings.Contains(alert.Observed, "sample_suspect_bytes=12694") ||
 		!strings.Contains(alert.Mechanism, "legacy s_sk suffixes") ||
+		!strings.Contains(alert.Mechanism, "time.Duration") ||
+		!strings.Contains(alert.Mechanism, "overflow") ||
 		!strings.Contains(alert.Mechanism, "does not make it the capacity root cause") ||
-		!strings.Contains(alert.Action, "binary-safe expire-leaked-ttls") {
+		!strings.Contains(alert.Action, "d9b2e291") ||
+		!strings.Contains(alert.Action, "raw integer milliseconds") ||
+		!strings.Contains(alert.Action, "do not run an older typed-duration cleanup artifact") ||
+		!strings.Contains(alert.Verify, "raw-integer PTTL") {
 		t.Fatalf("fleet TTL residue alert lost aggregation, attribution, or remediation: %+v", alert)
 	}
 }
