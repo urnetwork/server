@@ -338,19 +338,18 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 		"diagnostic_lines=9",
 		"exact-replay-deduplicated task evaluator lines",
 		"separate from the operational liquidity alert",
-		"post-provenance control on deployed source 1d8f01e5",
-		"28 canonical attempts from 56 diagnostic lines",
-		"six attempts at 00:30:43Z",
-		"one canonical 429 in that exact second",
-		"15 canonical 429 events across 12 source seconds and 12 task rows",
-		"every rate-limit second shared at least five canonical wallet-insufficient attempts",
-		"00:49:53.240866Z through 00:49:53.327394Z",
-		"429 evaluator result at 00:49:53.339836Z",
-		"commit 70b0d269 or later only to older blocks",
-		"peak_task_attempts_per_second below 4",
+		"Proportional 30–90-minute jitter",
+		"independent random choices still cannot impose a fleet-wide per-second ceiling",
+		"five wallet rejections completed and a sixth transfer request received 429",
+		"four of those five rejections came from blocks whose exact executable already contained proportional jitter",
+		"commit eb7e79b6",
+		"commit b8718420",
+		"atomic Redis-time rolling gate of three transfer submits/second",
+		"complete §2.14 admission metrics",
+		"peak_task_attempts_per_second stays below 4",
 		"[<id>]eval error",
 	} {
-		if combined := finding.observed + "\n" + finding.evidence + "\n" + finding.context + "\n" + finding.action + "\n" + finding.verify; !strings.Contains(combined, want) {
+		if combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism + "\n" + finding.context + "\n" + finding.action + "\n" + finding.verify; !strings.Contains(combined, want) {
 			t.Fatalf("microburst finding missing %q: %+v", want, finding)
 		}
 	}

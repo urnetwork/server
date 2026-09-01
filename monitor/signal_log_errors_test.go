@@ -390,11 +390,12 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 		"operational liquidity boundary",
 		"software release cannot fund",
 		"Do not delete or manually replay pending_task rows",
-		"First verify every taskworker block's embedded source revision",
-		"Deploy the proportional-jitter taskworker only to blocks older than commit 70b0d269",
-		"do not redeploy from this alert",
-		"allow up to 90 minutes plus log-ingestion delay",
-		"no duplicate Circle transfers",
+		"First use §8.12 to verify every taskworker block's immutable source",
+		"artifact containing server commit b8718420",
+		"§2.14 to prove complete admission metrics",
+		"fewer than four canonical attempts/second",
+		"allow the same window plus ingestion delay",
+		"duplicate Circle transfers",
 		"wallet <id>",
 	} {
 		if !strings.Contains(markdown, detail) {
@@ -432,15 +433,10 @@ func TestLogErrorsSignalExplainsPaymentProcessorRateLimit(t *testing.T) {
 	for _, detail := range []string{
 		"short-window request limit",
 		"diagnostic line rate is not a unique-submit rate",
-		"five distinct wallet-insufficient attempts landed in one second",
-		"second-scale microbursts",
-		"artifact provenance proved deployed source 1d8f01e5 predates the jitter fix",
-		"28 canonical wallet attempts",
-		"six-attempt peak at 00:30:43Z",
-		"one canonical 429 from two diagnostic lines in that same second",
-		"15 canonical 429 events across 12 seconds and 12 task rows",
-		"every rate-limit second shared at least five wallet-insufficient attempts",
-		"newest 429 completed 12 milliseconds after the fifth wallet result",
+		"post-jitter recurrence at 07:12:48Z",
+		"four of those five rejections were on exact executables already proven to contain proportional jitter",
+		"Independent random retry times",
+		"Circle documents a default five POST requests/second",
 		"ambiguous submit outcome",
 		"idempotency key must be retained",
 		"joins exact-replay-deduplicated evaluator records by normalized source second",
@@ -452,11 +448,13 @@ func TestLogErrorsSignalExplainsPaymentProcessorRateLimit(t *testing.T) {
 		"peak_coincident_wallet_attempts_per_second=5",
 		"source-second correlation: 1/1 payment-processor-rate-limit source second(s)",
 		"Do not manually retry",
-		"deploy commit 70b0d269 or later only to older blocks",
-		"do not redeploy from this alert",
-		"one full 90-minute drain window",
+		"commit b8718420",
+		"fleet-wide Redis-time transfer gate",
+		"conservative three-per-second ceiling",
+		"all §2.14 admission metrics",
+		"full 90-minute retry window",
 		"account's authoritative quota",
-		"durable processor-rate-limit count does not increase",
+		"processor-rate-limit events stay zero",
 		"[<id>]eval error",
 	} {
 		if !strings.Contains(markdown, detail) {
@@ -465,6 +463,34 @@ func TestLogErrorsSignalExplainsPaymentProcessorRateLimit(t *testing.T) {
 	}
 	if strings.Contains(markdown, "019f77ae-de17-db98-b22d-2642f6f67594") {
 		t.Fatalf("payment-processor-rate-limit alert leaked the payment id:\n%s", markdown)
+	}
+}
+
+func TestLogErrorsSignalExplainsCircleAdmissionFailClosed(t *testing.T) {
+	line := `[edge-1][taskworker][g2][cid:test][I][2026-09-01T08:10:00Z][circle_transfer_limiter.go:225][circlec][transfer-admission] failed closed after 2 deferral(s), wait=1.5s: redis: i/o timeout`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-taskworker", nil
+		}
+		return line + "\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "circle-transfer-admission-failed").Markdown()
+	for _, want := range []string{
+		"deliberately returned before the financial POST",
+		"Fail-closed behavior prevents an uncounted, ambiguous transfer submit",
+		"deploy drain can cancel a waiter once",
+		"durable Circle idempotency key is retained",
+		"§2.14 admission-error metrics",
+		"do not manually replay the payment",
+		"three-per-second ceiling",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("Circle admission failure alert missing %q:\n%s", want, markdown)
+		}
 	}
 }
 

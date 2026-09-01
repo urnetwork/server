@@ -61,6 +61,7 @@ func NewSignals() []Signal {
 		NewPgBouncerStallsSignal(),
 		NewWorkerMemorySignal(),
 		NewWorkerChurnSignal(),
+		NewCircleAdmissionSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),

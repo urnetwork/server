@@ -489,10 +489,10 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 		"every active taskworker contains typed-reset commit b8af229f",
 		"never clear payment rows or keys manually",
 		"do not accelerate processor-rate-limit rows",
-		"verify every taskworker source revision",
-		"deploy the proportional-jitter taskworker only to blocks older than commit 70b0d269",
-		"do not redeploy already-current blocks from this alert",
-		"a saturated cohort disperses across 30–90 minutes instead of repeating one narrow hourly wave",
+		"provenance-gate server commit b8718420 on every active taskworker",
+		"shared Redis-time Circle transfer admission",
+		"keep the gate fail closed",
+		"canonical payout attempts stay below four per second for a full 90-minute retry window",
 		"Do not delete or manually replay the mixed family",
 	} {
 		if !strings.Contains(markdown, want) {

@@ -457,6 +457,37 @@ WHERE function_name LIKE '%UpdateClient%'
   jitter-deploy instruction. The operational wallet correction remains
   unchanged.
 
+  The required post-jitter control then failed at `07:12:48Z` on 2026-09-01.
+  Five canonical wallet-insufficient transfer results completed in that source
+  second and a sixth transfer request received Circle 429; three results came
+  from edge-0/g1, one from edge-1/g1, and one from edge-4/g1, while the 429
+  came from edge-1/g2. Four of the five successful rejections therefore came
+  from blocks whose exact executable had already been proven to contain the
+  proportional-jitter implementation; edge-4's unknown artifact cannot explain
+  away the recurrence. At `07:12:49Z`, three more edge-1/g2 wallet rejections
+  and another canonical 429 followed. This rules out stale retry jitter as the
+  remaining root cause: independent 30–90-minute random choices lower average
+  synchronization but cannot enforce a fleet-wide instantaneous ceiling.
+  Circle's current [Wallets API rate-limit
+  documentation](https://developers.circle.com/api-reference/wallets/rate-limits)
+  specifies five default POST requests/second and a 429 when exceeded, matching
+  the observed five completed rejections plus sixth refusal.
+
+  Server commit `eb7e79b6` is the root fix. Immediately before the developer
+  transfer POST, every process contends on one Redis-time rolling sorted set;
+  an atomic Lua decision admits at most three submits in any rolling second,
+  leaving two requests/second of documented headroom. A unique member makes a
+  lost-response command replay idempotent. Redis or context failure is fail
+  closed before HTTP, and the durable payment idempotency key remains unchanged.
+  A deterministic synthetic test launches eight concurrent fleet callers at
+  one timestamp, requires exactly three admissions/five deferrals, replays an
+  admitted member without consuming a slot, and reopens capacity only after the
+  rolling second expires. §2.14 owns deployment and runtime verification; the
+  existing source-second log join remains the provider-outcome control.
+  Follow-up commit `b8718420` converts the server Redis wrapper's connection
+  panic path into that same measured fail-closed error, so it is the minimum
+  deployable source for complete §2.14 telemetry.
+
   The release root fix belongs to Warp: `warpctl build` now fails before
   publication when the source tree is dirty, when a Linux binary lacks a full
   clean embedded revision matching the starting HEAD, or when HEAD changes
@@ -2828,6 +2859,72 @@ synthetic scheduled-reboot case includes two long active heartbeats and makes
 one exact id complete before the previous-boot boundary; only the genuinely
 interrupted task may alert.
 
+### 2.14 Circle transfer admission — fleet ceiling vs random retry dispersion
+Probe: `circle-admission`
+
+Circle's [Wallets API rate-limit
+documentation](https://developers.circle.com/api-reference/wallets/rate-limits)
+currently specifies 20 GET requests/second, five default POST requests/second,
+selected POST exceptions at ten/second, and HTTP 429 after a limit is exceeded.
+`POST /v1/w3s/developer/transactions/transfer` is not listed as an exception.
+The 2026-09-01 post-jitter control in §1.2 matched that default boundary: five
+wallet rejection responses and a sixth 429 landed in one source second even
+though four of the five responses came from executables already proven to
+contain proportional retry jitter. Random scheduling is useful load
+dispersion, but it is not admission control.
+
+Server commit `eb7e79b6` puts one fail-closed, fleet-wide gate immediately
+before the transfer POST. Redis server time eliminates host-clock skew. One
+atomic sorted-set script admits no more than three unique transfer calls in a
+rolling second, leaving two requests/second of headroom for other callers. A
+stable per-call member makes Redis command replay idempotent. A waiter retains
+the payment's durable Circle idempotency key, and a Redis/context error returns
+before HTTP rather than guessing that an ambiguous financial submit is safe.
+Descendant `b8718420` also converts the Redis wrapper's pre-command connection
+panic into the same error/counter/log path; use that descendant as the minimum
+observable deployment baseline.
+
+The Taskworker exports these process metrics:
+
+- `urnetwork_circle_transfer_admissions_total`
+- `urnetwork_circle_transfer_deferrals_total`
+- `urnetwork_circle_transfer_admission_errors_total`
+- `urnetwork_circle_transfer_admission_wait_seconds_count`
+- `urnetwork_circle_transfer_admission_wait_seconds_sum`
+
+The probe selects the newest actual-scrape-fresh process for each host/block,
+so an old draining generation cannot supply a replacement's missing collector.
+It evaluates five-minute counter increases per exact process.
+
+- HEALTHY: every newest Taskworker exposes all five families; admission errors
+  are zero; fleet and per-process mean completed wait are at most five seconds.
+  Deferrals may be non-zero—they prove the gate prevented an unsafe burst.
+- WARN `circle-transfer-admission-unobservable`: a newest process lacks any
+  family. Deploy a clean Taskworker artifact containing `b8718420` only to the
+  missing blocks, using §8.12 source/digest provenance rather than a mutable
+  config version.
+- WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
+  exact window with taskworker drain state, Redis liveness/latency, and the
+  privacy-safe admission failure line. Never bypass the gate or manually replay
+  a payment.
+- WARN `circle-transfer-admission-pressure`: fleet or one process averages more
+  than five seconds of completed admission wait across two probes. Keep the
+  safety ceiling. If `payout-wallet-insufficient` is active, this is partly an
+  **operations/finance** boundary: fund or pause that wallet because software
+  cannot create liquidity. For legitimate sustained payout growth, obtain the
+  account's authoritative Circle quota before changing code or thresholds.
+- VERIFY: §8.12 proves every newest Taskworker contains `b8718420`; all metric
+  families are present for two scrapes; admission errors and Circle 429s stay
+  zero; canonical wallet attempts stay below four/second; and payment
+  idempotency keys remain stable for one full 90-minute retry window.
+
+Implementation convention: SIGNALS.md §2.14 (`circle-admission`) maps to
+`signal_circle_admission.go` and `signal_circle_admission_test.go`. Synthetic
+tests cover a healthy newest generation, a replacement missing two metric
+families, fail-closed errors, excessive per-process wait hidden by a lower
+fleet mean, and invalid counter data. The product-level Redis synthetic covers
+the eight-caller atomic ceiling and replay semantics.
+
 ---
 
 ## 3. redis signal catalog
@@ -3324,9 +3421,10 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
-| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N retry lines/hour on average. Pre-fix 0–2-second capped jitter can preserve a synchronized wave and provoke a bounded processor 429; current code disperses saturated retries across 30–90 minutes. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Verify every taskworker revision and deploy `70b0d269` or later only to older blocks; do not redeploy already-current blocks merely because liquidity remains absent. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
-| `payout-retry-microburst` (derived standing-tail finding; not a literal log line) | At least four exact-replay-deduplicated task evaluator attempts landed in one embedded source second. This isolates synchronized software retry amplification from the parent wallet-liquidity volume; four/second is the smallest live pre-429 cohort observed on 2026-08-31, not an asserted processor quota. | **Software deployment action:** inspect every taskworker's embedded revision and deploy `70b0d269` or later only to stale blocks. Preserve normal backoff and idempotency keys. Verify a full 90-minute window below four attempts/second with no new processor-rate-limit event. Funding or pausing the wallet remains a separate finance/ops action. |
-| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. On 2026-08-31, the pre-fix capped cohort placed five wallet-insufficient attempts and then a 429 in one second, followed ten seconds later by four attempts and another 429. This is second-scale retry amplification hidden by the minute average, not proof of a general Circle outage. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Verify every taskworker revision and deploy `70b0d269` or later only to older blocks. If all are current, do not redeploy from this alert: wait one 90-minute drain window, then aggregate per-second Create/Get traffic across every Circle client and compare it with the account-specific authoritative quota before adding a shared limiter. |
+| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N retry lines/hour on average. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; `eb7e79b6` separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean `b8718420` Taskworker only where §8.12/§2.14 proves it absent; another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
+| `payout-retry-microburst` (derived standing-tail finding; not a literal log line) | At least four exact-replay-deduplicated task evaluator attempts landed in one embedded source second. The post-jitter 2026-09-01 control proved independent random delays still reached five responses plus a sixth 429; four/second is therefore both the empirical precursor and the invariant below the new three/rolling-second gate. | **Software deployment action:** use §8.12 and §2.14 to deploy a clean Taskworker containing `b8718420` only where absent. Preserve backoff and idempotency keys. Verify all admission collectors, zero gate errors, a full 90-minute window below four attempts/second, and no new processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
+| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `b8718420` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
+| `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The destination is invalid for its declared chain and Circle rejected it before creating a transfer. The pre-fix chain-blind validator admitted 44-character Solana base58 keys stored as active `MATIC` wallets. Current validation blocks that shape and the taskworker releases only this definitive pre-chain attempt, but six existing payments continued exactly once/hour because the configured payout wallets were still unchanged. | **Account-owner/operations action required:** correct the payout wallet through the supported account API. The current taskworker already releases the typed failed attempt so `UpdatePaymentWallet` can select the correction; another service deploy cannot invent or authorize replacement wallet data. Preserve keys for transport failures, 429s, and ambiguous submits; never edit/delete payment, task, or sweep rows. Verify the next natural retry uses the corrected chain-compatible wallet and the durable/logical counts clear within 90 minutes. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
@@ -3491,8 +3589,11 @@ limit:
   17:35–17:52Z. Five attempts ran on g1 and seven on g2, ruling out one stale
   taskworker generation as the owner. Combined with the embedded-revision
   ancestry above, this is continued invalid wallet selection after the safe
-  typed reset, not evidence that the reset code is missing. It does not weaken
-  the separate requirement to deploy `70b0d269` for retry dispersion.
+  typed reset, not evidence that the reset code is missing. At that point it
+  did not weaken the separate requirement to deploy `70b0d269` for retry
+  dispersion; the later `b8718420` baseline contains that jitter, the fleet
+  admission gate, and complete fail-closed telemetry required by the
+  post-jitter control.
 
   An independent artifact/runtime control at the UTC day boundary removed the
   remaining provenance assumption. The published OCI/SLSA build provenance for
@@ -3504,9 +3605,11 @@ limit:
   the same six logical payments at the same minute in each of the 21Z, 22Z,
   and 23Z hours. The deployed reset is therefore active and repeatedly exposes
   the still-invalid selected wallet, while the hour-locked cadence separately
-  proves the old jitter. Correct the wallet through the supported account API
-  and deploy `70b0d269` for retry dispersion as two independent actions; the
-  latter cannot invent or authorize valid payout-wallet data.
+  proves the old jitter. The incident therefore required both correcting the
+  wallet through the supported account API and deploying retry dispersion;
+  current software convergence uses `b8718420`, which includes the independently
+  required fleet admission gate and its failure telemetry. Neither software
+  fix can invent or authorize valid payout-wallet data.
 - `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
   2026-08-31 UTC production row reached 153 failures on PostgreSQL 18.4 while
   `effective_io_concurrency=200` and `temp_buffers=8MB`. Its stack ended in
