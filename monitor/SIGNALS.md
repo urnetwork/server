@@ -6176,6 +6176,8 @@ host independently once per minute:
 
 - the exact LAN IPv4 from `config/<env>/settings.yml routes` is present on a
   global-scope interface;
+- `networkctl` reports zero failed links, so an ad-hoc or retained address
+  cannot masquerade as durable network ownership;
 - an interface-scoped `warp-<env>-grafana-*-g1.service` is active;
 - the Mimir scheduler accepts TCP on the exact LAN identity and port 6490;
 - the PostgreSQL LAN endpoint accepts TCP when a primary is configured; and
@@ -6185,7 +6187,9 @@ host independently once per minute:
 PAGE `grafana-lan-identity` when the configured address is absent. A socket can
 remain bound with non-local/freebind semantics and the Warp unit can remain
 active, so neither listener output nor a prior `Deploy success` clears this
-class. PAGE focused `grafana-node-unit`, `grafana-ring-local`,
+class. WARN `grafana-networkd-link` when the address exists but networkd still
+reports a failed link; this prevents a temporary `ip address add` from closing
+the durable configuration gate. PAGE focused `grafana-node-unit`, `grafana-ring-local`,
 `grafana-database-path`, or `grafana-node-query` for the later boundaries only
 when the preceding identity checks pass. `vector(1)` reads no customer series;
 its timeout is a query-control-plane failure, not an expensive workload query.
@@ -6211,16 +6215,26 @@ before retrying those seven blocks; forcing the same candidates or rebuilding
 the already-successful image cannot make their dependencies reachable.
 
 The retained journal pins the causal sequence to the earlier unsafe Proxy
-overlap rather than this Grafana image. During global host pressure,
-`systemd-journald` began repeatedly flushing caches. At 12:47:55Z,
-`systemd-networkd` failed `eno3` after
-`Could not set NDisc address: Connection timed out`; at 12:53:24Z the kernel's
-global OOM killed a roughly 5.5GiB Proxy. Networkd never restored the DHCP LAN
-address. The saved lease still named `.196` with a one-day lifetime, while the
-live link remained `routable (failed)`. This is a secondary host-network
-failure caused by the same memory-capacity event in §14.7, and it explains why
+overlap rather than this Grafana image. During the second global-pressure
+window, `systemd-journald` flushed caches at 12:47:01Z, 54 seconds before
+`systemd-networkd` timed out setting the NDisc address at 12:47:55Z. Journald
+reported pressure again two seconds later and repeatedly through 12:53:24Z,
+when the kernel's global OOM killed a roughly 5.5GiB Proxy. Networkd never
+restored the DHCP LAN address; the live link remained `routable (failed)` with
+only IPv6. This exact pressure-before/NDisc/pressure-after/OOM ordering, not the
+mere presence of events somewhere in a 72-hour count, ties the secondary
+host-network failure to the §14.7 memory-capacity incident and explains why
 Fireside metrics disappeared from Mimir while direct Proxy processes continued
 running.
+
+The probe therefore carries the last NDisc epoch, nearest pressure epochs
+before and after it, and first following OOM epoch in addition to counts. It
+labels pressure causal only when a pressure event precedes the NDisc failure by
+at most ten minutes and either another pressure event follows within ten minutes
+or an OOM follows within fifteen minutes. Otherwise the 72-hour events remain
+context and the networkd failure is diagnosed independently. A deterministic
+six-hour/20-hour negative control rejects the former count-only false
+attribution.
 
 There are two required fixes. First, deploy Warp's serialized candidate-start
 guard (§8.11/§14.7) so a Proxy image or config-generation rollout cannot create
@@ -6229,15 +6243,19 @@ after checking that no other MAC owns it, then deploy the xops netplan change
 that pins stable service-host LAN identities statically instead of depending on
 a renewable DHCP lease. This second step is an **operational host-network
 change**; redeploying Grafana cannot add the address. Do not restart Grafana as
-the first action. After address recovery, require local scheduler and database
-TCP success, three fast `vector(1)` responses on both Grafana hosts, fresh
-metrics from both host labels, and no address loss through a controlled Proxy
-rollout.
+the first action. The scoped xops entry point is `run-edges.sh --limit <host>
+--tags netplan_config`, one host at a time, first Fireside and then Crisp. That
+tag copies `/etc/netplan/0-by.yaml`; it does not activate netplan, so use the
+approved controlled activation or reboot procedure and verify each host before
+advancing. After address recovery, require local scheduler and database TCP
+success, three fast `vector(1)` responses on both Grafana hosts, fresh metrics
+from both host labels, and no address loss through a controlled Proxy rollout.
 
 SIGNALS.md §11.17a (`grafana-node`) maps to `signal_grafana_node.go` and
-`signal_grafana_node_test.go`. Synthetic cases preserve the OOM/networkd/LAN
-loss signature, inactive unit, missing local scheduler, missing database path,
-trivial-query timeout, a healthy node, and exclusion of non-Grafana hosts.
+`signal_grafana_node_test.go`. Synthetic cases preserve the causally bracketed
+OOM/networkd/LAN-loss signature, unrelated pressure-event negative control,
+inactive unit, missing local scheduler, missing database path, trivial-query
+timeout, a healthy node, and exclusion of non-Grafana hosts.
 
 ### 11.18 Mimir bucket-index and store-gateway freshness
 

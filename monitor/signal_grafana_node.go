@@ -31,17 +31,21 @@ func (grafanaNodeProbe) tier() string           { return tierPage }
 func (grafanaNodeProbe) cadence() time.Duration { return time.Minute }
 
 type grafanaNodeSample struct {
-	unitActive            bool
-	lanPresent            bool
-	networkFailedLinks    int64
-	schedulerTCP          bool
-	databaseTCP           int
-	queryExit             int64
-	queryHTTP             int64
-	querySeconds          float64
-	networkdNDiscTimeouts int64
-	memoryPressureEvents  int64
-	oomKills              int64
+	unitActive                     bool
+	lanPresent                     bool
+	networkFailedLinks             int64
+	schedulerTCP                   bool
+	databaseTCP                    int
+	queryExit                      int64
+	queryHTTP                      int64
+	querySeconds                   float64
+	networkdNDiscTimeouts          int64
+	networkdNDiscLastEpoch         int64
+	memoryPressureEvents           int64
+	memoryPressureBeforeNDiscEpoch int64
+	memoryPressureAfterNDiscEpoch  int64
+	oomKills                       int64
+	oomAfterNDiscEpoch             int64
 }
 
 type grafanaNodeResult struct {
@@ -150,17 +154,39 @@ query_http=${1:-000}
 query_seconds=${2:-4}
 
 networkd_ndisc_timeouts=0
+networkd_ndisc_last_epoch=0
 memory_pressure_events=0
+memory_pressure_before_ndisc_epoch=0
+memory_pressure_after_ndisc_epoch=0
 oom_kills=0
+oom_after_ndisc_epoch=0
 if [ "$unit_active" -ne 1 ] || [ "$lan_present" -ne 1 ] ||
    [ "$scheduler_tcp" -ne 1 ] || [ "$database_tcp" -eq 0 ] ||
    [ "$query_exit" -ne 0 ] || [ "$query_http" != 200 ]; then
-  networkd_ndisc_timeouts=$(journalctl -u systemd-networkd --since '72 hours ago' --no-pager 2>/dev/null |
-    grep -c 'Could not set NDisc address: Connection timed out' || true)
-  memory_pressure_events=$(journalctl --since '72 hours ago' SYSLOG_IDENTIFIER=systemd-journald --no-pager 2>/dev/null |
-    grep -c 'Under memory pressure' || true)
-  oom_kills=$(journalctl -k --since '72 hours ago' --no-pager 2>/dev/null |
-    grep -c 'Out of memory: Killed process' || true)
+  set -- $(journalctl -u systemd-networkd --since '72 hours ago' --no-pager -o short-unix 2>/dev/null |
+    awk '/Could not set NDisc address: Connection timed out/ {
+      split($1, timestamp, "."); count++; last=timestamp[1]+0
+    } END {print count+0, last+0}')
+  networkd_ndisc_timeouts=$1
+  networkd_ndisc_last_epoch=$2
+
+  set -- $(journalctl --since '72 hours ago' SYSLOG_IDENTIFIER=systemd-journald --no-pager -o short-unix 2>/dev/null |
+    awk -v ndisc="$networkd_ndisc_last_epoch" '/Under memory pressure/ {
+      split($1, timestamp, "."); event=timestamp[1]+0; count++
+      if (ndisc > 0 && event <= ndisc) before=event
+      if (ndisc > 0 && event > ndisc && after == 0) after=event
+    } END {print count+0, before+0, after+0}')
+  memory_pressure_events=$1
+  memory_pressure_before_ndisc_epoch=$2
+  memory_pressure_after_ndisc_epoch=$3
+
+  set -- $(journalctl -k --since '72 hours ago' --no-pager -o short-unix 2>/dev/null |
+    awk -v ndisc="$networkd_ndisc_last_epoch" '/Out of memory: Killed process/ {
+      split($1, timestamp, "."); event=timestamp[1]+0; count++
+      if (ndisc > 0 && event >= ndisc && after == 0) after=event
+    } END {print count+0, after+0}')
+  oom_kills=$1
+  oom_after_ndisc_epoch=$2
 fi
 
 printf 'unit_active %s\n' "$unit_active"
@@ -172,8 +198,12 @@ printf 'query_exit %s\n' "$query_exit"
 printf 'query_http %s\n' "$query_http"
 printf 'query_seconds %s\n' "$query_seconds"
 printf 'networkd_ndisc_timeouts %s\n' "$networkd_ndisc_timeouts"
+printf 'networkd_ndisc_last_epoch %s\n' "$networkd_ndisc_last_epoch"
 printf 'memory_pressure_events %s\n' "$memory_pressure_events"
+printf 'memory_pressure_before_ndisc_epoch %s\n' "$memory_pressure_before_ndisc_epoch"
+printf 'memory_pressure_after_ndisc_epoch %s\n' "$memory_pressure_after_ndisc_epoch"
 printf 'oom_kills %s\n' "$oom_kills"
+printf 'oom_after_ndisc_epoch %s\n' "$oom_after_ndisc_epoch"
 `
 
 func parseGrafanaNodeSample(output string) (grafanaNodeSample, error) {
@@ -218,7 +248,10 @@ func parseGrafanaNodeSample(output string) (grafanaNodeSample, error) {
 				return sample, fmt.Errorf("grafana node line %d: invalid query_seconds %q", lineNumber+1, raw)
 			}
 			sample.querySeconds = value
-		case "network_failed_links", "query_exit", "query_http", "networkd_ndisc_timeouts", "memory_pressure_events", "oom_kills":
+		case "network_failed_links", "query_exit", "query_http",
+			"networkd_ndisc_timeouts", "networkd_ndisc_last_epoch",
+			"memory_pressure_events", "memory_pressure_before_ndisc_epoch", "memory_pressure_after_ndisc_epoch",
+			"oom_kills", "oom_after_ndisc_epoch":
 			value, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil || value < 0 {
 				return sample, fmt.Errorf("grafana node line %d: invalid %s %q", lineNumber+1, key, raw)
@@ -232,10 +265,18 @@ func parseGrafanaNodeSample(output string) (grafanaNodeSample, error) {
 				sample.queryHTTP = value
 			case "networkd_ndisc_timeouts":
 				sample.networkdNDiscTimeouts = value
+			case "networkd_ndisc_last_epoch":
+				sample.networkdNDiscLastEpoch = value
 			case "memory_pressure_events":
 				sample.memoryPressureEvents = value
+			case "memory_pressure_before_ndisc_epoch":
+				sample.memoryPressureBeforeNDiscEpoch = value
+			case "memory_pressure_after_ndisc_epoch":
+				sample.memoryPressureAfterNDiscEpoch = value
 			case "oom_kills":
 				sample.oomKills = value
+			case "oom_after_ndisc_epoch":
+				sample.oomAfterNDiscEpoch = value
 			}
 		default:
 			return sample, fmt.Errorf("grafana node line %d: unknown field %q", lineNumber+1, key)
@@ -243,7 +284,10 @@ func parseGrafanaNodeSample(output string) (grafanaNodeSample, error) {
 	}
 	for _, required := range []string{
 		"unit_active", "lan_present", "network_failed_links", "scheduler_tcp", "database_tcp",
-		"query_exit", "query_http", "query_seconds", "networkd_ndisc_timeouts", "memory_pressure_events", "oom_kills",
+		"query_exit", "query_http", "query_seconds",
+		"networkd_ndisc_timeouts", "networkd_ndisc_last_epoch",
+		"memory_pressure_events", "memory_pressure_before_ndisc_epoch", "memory_pressure_after_ndisc_epoch",
+		"oom_kills", "oom_after_ndisc_epoch",
 	} {
 		if !seen[required] {
 			return sample, fmt.Errorf("grafana node: missing %s", required)
@@ -265,19 +309,22 @@ func parseGrafanaNodeBool(raw string) (bool, error) {
 
 func evaluateGrafanaNode(hostName, expectedLAN string, sample grafanaNodeSample) *finding {
 	observed := fmt.Sprintf(
-		"expected_lan_address=%s unit_active=%t lan_present=%t network_failed_links=%d scheduler_tcp=%t database_tcp=%d query_http=%d query_exit=%d query_seconds=%.3f networkd_ndisc_timeouts_72h=%d memory_pressure_events_72h=%d oom_kills_72h=%d",
+		"expected_lan_address=%s unit_active=%t lan_present=%t network_failed_links=%d scheduler_tcp=%t database_tcp=%d query_http=%d query_exit=%d query_seconds=%.3f networkd_ndisc_timeouts_72h=%d networkd_ndisc_last_epoch=%d memory_pressure_events_72h=%d memory_pressure_before_ndisc_epoch=%d memory_pressure_after_ndisc_epoch=%d oom_kills_72h=%d oom_after_ndisc_epoch=%d",
 		expectedLAN, sample.unitActive, sample.lanPresent, sample.networkFailedLinks,
 		sample.schedulerTCP, sample.databaseTCP, sample.queryHTTP, sample.queryExit,
-		sample.querySeconds, sample.networkdNDiscTimeouts, sample.memoryPressureEvents, sample.oomKills,
+		sample.querySeconds, sample.networkdNDiscTimeouts, sample.networkdNDiscLastEpoch,
+		sample.memoryPressureEvents, sample.memoryPressureBeforeNDiscEpoch, sample.memoryPressureAfterNDiscEpoch,
+		sample.oomKills, sample.oomAfterNDiscEpoch,
 	)
+	timeline, pressureLinked := grafanaNodePressureTimeline(sample)
 	base := finding{
 		probeId: "observability/grafana-node", tier: tierPage,
 		target: hostName, frame: expectedLAN, sustain: 2,
 		baseline: "Every active Grafana host owns its configured LAN IPv4 address; its unit is active, local Mimir scheduler TCP and PostgreSQL LAN TCP connect, and vector(1) returns HTTP 200 within four seconds.",
 		observed: observed,
 		evidence: fmt.Sprintf(
-			"bounded host battery: networkd_ndisc_timeouts_72h=%d memory_pressure_events_72h=%d oom_kills_72h=%d",
-			sample.networkdNDiscTimeouts, sample.memoryPressureEvents, sample.oomKills,
+			"bounded host battery: networkd_ndisc_timeouts_72h=%d memory_pressure_events_72h=%d oom_kills_72h=%d; %s",
+			sample.networkdNDiscTimeouts, sample.memoryPressureEvents, sample.oomKills, timeline,
 		),
 		playbook: "SIGNALS.md §11.17a",
 	}
@@ -285,10 +332,31 @@ func evaluateGrafanaNode(hostName, expectedLAN string, sample grafanaNodeSample)
 	if !sample.lanPresent {
 		base.class = "grafana-lan-identity"
 		base.symptom = fmt.Sprintf("%s does not own Grafana's configured LAN address %s", hostName, expectedLAN)
-		base.mechanism = "Grafana, Loki, and Mimir advertise and dial the host's configured LAN identity. The address is absent even though the service unit can remain active and listeners can retain a non-local bind, so local ring RPC, metrics ingestion, PostgreSQL-backed alert evaluation, and direct queries fail together. Networkd failure plus NDisc timeouts in the same window as memory-pressure/OOM records is the host-network side effect of global pressure; compare their exact journal timestamps before attribution."
+		base.mechanism = "Grafana, Loki, and Mimir advertise and dial the host's configured LAN identity. The address is absent even though the service unit can remain active and listeners can retain a non-local bind, so local ring RPC, metrics ingestion, PostgreSQL-backed alert evaluation, and direct queries fail together."
+		if pressureLinked {
+			base.mechanism += " The exact host journal brackets the networkd NDisc timeout with memory-pressure events and records a subsequent global OOM inside the bounded incident window. That ordering links this address-loss event to host-global pressure rather than merely correlating two counts from the same 72-hour period."
+		} else if sample.networkdNDiscTimeouts > 0 || sample.memoryPressureEvents > 0 || sample.oomKills > 0 {
+			base.mechanism += " Networkd, memory-pressure, or OOM events exist in the 72-hour battery, but their timestamps do not bracket this NDisc failure inside the bounded incident window. Those counts are context only and do not establish the cause of this address loss."
+		}
 		base.context = "A successful Grafana deployment record proves only that the candidate once passed readiness. Public/DNS-selected health can continue through another Grafana host and cannot clear this exact-node failure. This is an operational host-address recovery plus durable network-configuration fix, not a reason to redeploy the same Grafana image."
-		base.action = "First confirm the configured LAN address is not active on another MAC, then restore it through the approved netplan/systemd-networkd path. Deploy the static service-host LAN configuration so a DHCP/networkd failure cannot silently remove Grafana's ring identity. Separately deploy the serialized Proxy rollout guard that prevents the global memory-pressure precursor. Do not restart or redeploy Grafana as the first action."
+		base.action = "First confirm the configured LAN address is not active on another MAC, then restore it through the approved netplan/systemd-networkd path. Deploy the static service-host LAN configuration so a DHCP/networkd failure cannot silently remove Grafana's ring identity."
+		if pressureLinked {
+			base.action += " Separately deploy the serialized Proxy rollout guard that prevents the proven global memory-pressure precursor."
+		} else {
+			base.action += " Diagnose the networkd failure independently unless an exact pressure timeline establishes the rollout-memory precursor."
+		}
+		base.action += " Do not restart or redeploy Grafana as the first action."
 		base.verify = "The exact LAN address is present on the intended interface, networkctl has no failed link, scheduler TCP and PostgreSQL LAN TCP connect, vector(1) returns HTTP 200 in under four seconds, both Grafana hosts ingest/query fresh metrics, and the next Proxy rollout has no OOM or address loss."
+		return &base
+	}
+	if sample.networkFailedLinks > 0 {
+		base.tier = tierWarn
+		base.class = "grafana-networkd-link"
+		base.symptom = fmt.Sprintf("%s owns Grafana's LAN address but networkd still reports %d failed link(s)", hostName, sample.networkFailedLinks)
+		base.mechanism = "The address is currently present, but at least one networkd-managed link remains failed. An ad-hoc address add or a retained kernel address can temporarily restore traffic without repairing declarative ownership, so the LAN identity can disappear again on reconfiguration or reboot."
+		base.context = "Identify the failed link before attributing it to the Grafana service path. A failed unrelated link is configuration drift; a failed service LAN link means address presence alone is not recovery."
+		base.action = "Inspect `networkctl list` and the failed link's status, then repair and activate its approved netplan/systemd-networkd configuration. Do not clear this state with only an ad-hoc `ip address add` or a Grafana restart."
+		base.verify = "networkctl reports zero failed links, the configured LAN address survives a managed reconfiguration, both local TCP paths connect, and vector(1) returns HTTP 200 for three consecutive probes."
 		return &base
 	}
 	if !sample.unitActive {
@@ -328,4 +396,50 @@ func evaluateGrafanaNode(hostName, expectedLAN string, sample grafanaNodeSample)
 		return &base
 	}
 	return nil
+}
+
+const (
+	grafanaNodePressureBracket = 10 * time.Minute
+	grafanaNodeOOMAfterWindow  = 15 * time.Minute
+)
+
+func grafanaNodePressureTimeline(sample grafanaNodeSample) (string, bool) {
+	ndisc := sample.networkdNDiscLastEpoch
+	before := sample.memoryPressureBeforeNDiscEpoch
+	after := sample.memoryPressureAfterNDiscEpoch
+	oom := sample.oomAfterNDiscEpoch
+
+	beforeDelta, beforeClose := grafanaNodeBeforeDelta(ndisc, before, grafanaNodePressureBracket)
+	afterDelta, afterClose := grafanaNodeAfterDelta(ndisc, after, grafanaNodePressureBracket)
+	oomDelta, oomClose := grafanaNodeAfterDelta(ndisc, oom, grafanaNodeOOMAfterWindow)
+	linked := beforeClose && (afterClose || oomClose)
+
+	return fmt.Sprintf(
+		"networkd_ndisc_last=%s memory_pressure_before=%s pressure_before_delta=%s memory_pressure_after=%s pressure_after_delta=%s oom_after=%s oom_after_delta=%s pressure_linked=%t",
+		grafanaNodeEventTime(ndisc), grafanaNodeEventTime(before), beforeDelta,
+		grafanaNodeEventTime(after), afterDelta, grafanaNodeEventTime(oom), oomDelta, linked,
+	), linked
+}
+
+func grafanaNodeEventTime(epoch int64) string {
+	if epoch <= 0 {
+		return "-"
+	}
+	return time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+}
+
+func grafanaNodeBeforeDelta(event, before int64, maximum time.Duration) (string, bool) {
+	if event <= 0 || before <= 0 || before > event {
+		return "-", false
+	}
+	delta := time.Duration(event-before) * time.Second
+	return delta.String(), delta <= maximum
+}
+
+func grafanaNodeAfterDelta(event, after int64, maximum time.Duration) (string, bool) {
+	if event <= 0 || after <= 0 || after < event {
+		return "-", false
+	}
+	delta := time.Duration(after-event) * time.Second
+	return delta.String(), delta <= maximum
 }
