@@ -18,10 +18,12 @@ const (
 	proxyPoolFreshness     = 90 * time.Second
 )
 
-// Signal proxy-pool implements SIGNALS.md §14.7a. It joins each live proxy's
-// ordinary process metric to the message-pool gauges, so a missing collector
-// cannot be mistaken for a zero-byte pool and an old one-argument 8 GiB
-// configuration is distinguishable from the intended process-wide ceiling.
+// Signal proxy-pool implements SIGNALS.md §14.7a. It joins the newest
+// actual-scrape-fresh proxy identity for each host/block to the message-pool
+// gauges, so draining generations cannot inflate the deployment denominator,
+// a missing collector cannot be mistaken for a zero-byte pool, and an old
+// one-argument 8 GiB configuration is distinguishable from the intended
+// process-wide ceiling.
 func NewProxyPoolSignal() Signal {
 	return &signalAdapter{
 		number: "14.7a", key: "proxy-pool", name: "Proxy message-pool capacity",
@@ -64,13 +66,35 @@ type proxyPoolMetrics struct {
 	availableMask uint8
 }
 
+func proxyPoolQuery(metricNames []string, environment string) string {
+	parts := make([]string, 0, len(metricNames))
+	for _, metricName := range metricNames {
+		// monitor_metric keeps the seven independently filtered metric families
+		// distinct across PromQL's set union. Binary set matching otherwise
+		// ignores __name__ and collapses equal host/block/instance label sets.
+		series := fmt.Sprintf(
+			`label_replace(%s{env=%s,job="proxy"},"monitor_metric",%s,"job",".*")`,
+			metricName,
+			strconv.Quote(environment),
+			strconv.Quote(metricName),
+		)
+		parts = append(parts, fmt.Sprintf(
+			`(%s and on(monitor_metric,env,host,block,instance) (timestamp(%s) >= time() - %d))`,
+			series,
+			series,
+			int64(proxyPoolFreshness/time.Second),
+		))
+	}
+	return strings.Join(parts, " or ")
+}
+
 func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	metricHosts := env.cfg.hostsWithRole("services")
 	if len(metricHosts) == 0 {
 		return nil, fmt.Errorf("proxy pool: no services host in inventory for the loopback Mimir query")
 	}
 
-	metricNames := strings.Join([]string{
+	metricNames := []string{
 		"process_resident_memory_bytes",
 		"process_start_time_seconds",
 		"urnetwork_message_pool_capacity_bytes",
@@ -78,12 +102,8 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		"urnetwork_message_pool_packet_retained_bytes",
 		"urnetwork_message_pool_large_object_retained_bytes",
 		"urnetwork_message_pool_outstanding",
-	}, "|")
-	query := fmt.Sprintf(
-		`{__name__=~%s,env=%s,job="proxy"}`,
-		strconv.Quote(metricNames),
-		strconv.Quote(env.cfg.env),
-	)
+	}
+	query := proxyPoolQuery(metricNames, env.cfg.env)
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" + url.QueryEscape(query)
 	out, metricHost, err := shellFirstServiceGateway(
 		ctx,
@@ -112,16 +132,20 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 	now := env.now().UTC()
 	processes := map[string]*proxyPoolMetrics{}
 	for _, series := range response.Data.Result {
+		metricName := series.Metric["monitor_metric"]
+		if metricName == "" {
+			metricName = series.Metric["__name__"]
+		}
 		observedAt, value, err := mimirInstantValue(series.Value)
 		if err != nil {
-			return nil, fmt.Errorf("proxy pool: parse %s sample: %w", series.Metric["__name__"], err)
+			return nil, fmt.Errorf("proxy pool: parse %s sample: %w", metricName, err)
 		}
 		age := now.Sub(observedAt)
 		if age > proxyPoolFreshness || age < -30*time.Second {
 			continue
 		}
 		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-			return nil, fmt.Errorf("proxy pool: invalid %s value %v", series.Metric["__name__"], value)
+			return nil, fmt.Errorf("proxy pool: invalid %s value %v", metricName, value)
 		}
 		host := series.Metric["host"]
 		if host == "" {
@@ -135,7 +159,7 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			process = &proxyPoolMetrics{host: host, block: block, instance: instance}
 			processes[key] = process
 		}
-		switch series.Metric["__name__"] {
+		switch metricName {
 		case "process_resident_memory_bytes":
 			process.rss = value
 			process.availableMask |= proxyPoolMetricRSS
@@ -160,21 +184,19 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		}
 	}
 
-	live := make([]*proxyPoolMetrics, 0, len(processes))
-	for _, process := range processes {
-		if process.availableMask&proxyPoolMetricRSS != 0 && process.rss > 0 {
-			live = append(live, process)
-		}
+	current, err := newestProxyPoolProcesses(processes)
+	if err != nil {
+		return nil, err
 	}
-	if len(live) == 0 {
-		return nil, fmt.Errorf("proxy pool: Mimir returned no fresh live proxy process samples")
+	if len(current) == 0 {
+		return nil, fmt.Errorf("proxy pool: Mimir returned no actual-scrape-fresh proxy process samples")
 	}
-	sort.Slice(live, func(i, j int) bool { return proxyPoolLabel(live[i]) < proxyPoolLabel(live[j]) })
+	sort.Slice(current, func(i, j int) bool { return proxyPoolLabel(current[i]) < proxyPoolLabel(current[j]) })
 
 	missing := []string{}
 	oversized := []string{}
 	invalid := []string{}
-	for _, process := range live {
+	for _, process := range current {
 		if process.availableMask&proxyPoolMetricAll != proxyPoolMetricAll {
 			missing = append(missing, fmt.Sprintf(
 				"%s[%s]",
@@ -201,19 +223,19 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			probeId: "runtime/proxy-message-pool-capacity", tier: tierWarn,
 			class: "proxy-message-pool-unobservable", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
 			symptom: fmt.Sprintf(
-				"%d of %d live proxy processes do not export the complete message-pool capacity/retention gauge set",
-				len(missing), len(live),
+				"%d of %d newest fresh proxy identities do not export the complete message-pool capacity/retention gauge set",
+				len(missing), len(current),
 			),
-			mechanism: "Fresh process RSS proves these proxy processes are being scraped, so the missing pool gauges are not zero-byte pools or a blind metrics backend. The known source boundary registered the collector in controller, which proxy does not import; consequently the service with the material memory ceiling could not prove its configured or retained pool bytes.",
-			baseline:  "Every fresh live proxy identity exports capacity, retained, packet-retained, large-object-retained, and outstanding gauges on the same scrape labels.",
+			mechanism: "The query filters on each process RSS series' actual scrape timestamp, then process_start_time_seconds selects the newest generation per host/block. That identity is being scraped, so its missing pool gauges are not zero-byte pools or a blind metrics backend. The known source boundary registered the collector in controller, which proxy does not import; consequently the service with the material memory ceiling could not prove its configured or retained pool bytes.",
+			baseline:  "The newest actual-scrape-fresh proxy identity for every host/block exports capacity, retained, packet-retained, large-object-retained, and outstanding gauges on the same labels.",
 			observed: fmt.Sprintf(
-				"live_proxy_processes=%d complete_pool_metric_processes=%d missing_processes=%d missing=%s metrics_gateway=%s",
-				len(live), len(live)-len(missing), len(missing), strings.Join(missing, ";"), metricHost.name,
+				"current_proxy_identities=%d complete_pool_metric_identities=%d missing_identities=%d missing=%s metrics_gateway=%s",
+				len(current), len(current)-len(missing), len(missing), strings.Join(missing, ";"), metricHost.name,
 			),
-			evidence: "The probe joins fresh process_resident_memory_bytes and urnetwork_message_pool_* series by exact host, block, and runtime instance. A process metric without the five pool gauges is affirmative instrumentation drift.",
-			context:  "Do not infer a pool leak from missing counters. Host RSS/OOM and UDP-drop evidence in §14.7 remain valid, while the allocation-versus-retention split is unknown until this collector is deployed. Lower software retention does not raise the fleet's hardware-backed active-client ceiling.",
+			evidence: fmt.Sprintf("PromQL timestamp(process_resident_memory_bytes) enforces an actual-scrape age of at most %.0f seconds before the exact host/block/instance join; the newest start time suppresses draining generations. A selected process metric without the five pool gauges is affirmative instrumentation drift.", proxyPoolFreshness.Seconds()),
+			context:  "This identity count is not a live process-overlap measurement: Prometheus lookback can retain a stopped generation, and §14.7 reads each host's process table for rollout/OOM evidence. Do not infer a pool leak from missing counters. The allocation-versus-retention split remains unknown until this collector is deployed, and lower software retention does not raise the fleet's hardware-backed active-client ceiling.",
 			action:   "Deploy a proxy build that registers message-pool metrics from the root server package and applies one 8 GiB total budget with the two-argument ResizeMessagePools form. Do not restart solely to erase RSS evidence; use the ordinary host-serialized rollout guard.",
-			verify:   "All fresh live proxy identities export the five gauges; each capacity is at most 8 GiB plus 16 KiB rounding, packet plus large-object retained bytes equals total retained bytes, and host RSS is followed across a controlled rollout.",
+			verify:   "Every newest fresh proxy identity exports the five gauges; each capacity is at most 8 GiB plus 16 KiB rounding, packet plus large-object retained bytes equals total retained bytes, and direct host RSS is followed across a controlled rollout.",
 			playbook: "SIGNALS.md 14.7a",
 		})
 	}
@@ -222,14 +244,14 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 			probeId: "runtime/proxy-message-pool-capacity", tier: tierWarn,
 			class: "proxy-message-pool-capacity", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
 			symptom: fmt.Sprintf(
-				"%d of %d live proxy processes permit more than the intended 8 GiB total message-pool retention",
-				len(oversized), len(live),
+				"%d of %d newest fresh proxy identities permit more than the intended 8 GiB total message-pool retention",
+				len(oversized), len(current),
 			),
 			mechanism: "ResizeMessagePools' historical one-argument form gives its byte budget to the packet classes and independently to each large-object class. With two large classes, a call that appears to request 8 GiB therefore permits roughly 24 GiB process-wide; the capacity gauge distinguishes that logical ceiling from current RSS or an in-flight ownership leak.",
 			baseline:  "Each proxy process has a process-wide message-pool capacity no greater than 8 GiB plus 16 KiB of class-size rounding.",
 			observed: fmt.Sprintf(
-				"live_proxy_processes=%d oversized_processes=%d limit_bytes=%.0f tolerance_bytes=%.0f oversized=%s metrics_gateway=%s",
-				len(live), len(oversized), proxyPoolByteLimit, proxyPoolByteTolerance, strings.Join(oversized, ";"), metricHost.name,
+				"current_proxy_identities=%d oversized_identities=%d limit_bytes=%.0f tolerance_bytes=%.0f oversized=%s metrics_gateway=%s",
+				len(current), len(oversized), proxyPoolByteLimit, proxyPoolByteTolerance, strings.Join(oversized, ";"), metricHost.name,
 			),
 			evidence: "Capacity is the configured free-list retention ceiling exported from one aggregate library snapshot. Retained bytes are included separately; neither value includes every non-pool heap object or host-kernel allocation.",
 			context:  "This is a software efficiency defect and a deployment gate, but it does not by itself prove the earlier OOM was a steady-state pool leak. The incident's 19-process/ten-unit overlap remains direct evidence, and additional hardware is still required when steady client demand reaches the aggregate proxy ceiling.",
@@ -242,7 +264,7 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-message-pool-capacity", tier: tierWarn,
 			class: "proxy-message-pool-metrics-invalid", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
-			symptom:   fmt.Sprintf("%d live proxy processes export internally inconsistent message-pool gauges", len(invalid)),
+			symptom:   fmt.Sprintf("%d newest fresh proxy identities export internally inconsistent message-pool gauges", len(invalid)),
 			mechanism: "A single library snapshot defines capacity and retention. Total retained bytes must not exceed capacity, and packet plus large-object retained bytes must exactly reconstruct total retained bytes; violating either invariant makes deployment validation unsafe.",
 			baseline:  "capacity_bytes is positive, retained_bytes is no greater than capacity_bytes, and packet_retained_bytes + large_object_retained_bytes = retained_bytes.",
 			observed:  fmt.Sprintf("invalid_processes=%d invalid=%s metrics_gateway=%s", len(invalid), strings.Join(invalid, ";"), metricHost.name),
@@ -257,6 +279,36 @@ func (proxyPoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, erro
 		return []finding{healthyFinding("runtime/proxy-message-pool-capacity", tierWarn, "proxy-message-pool-capacity", "proxy-fleet")}, nil
 	}
 	return findings, nil
+}
+
+func newestProxyPoolProcesses(processes map[string]*proxyPoolMetrics) ([]*proxyPoolMetrics, error) {
+	newest := map[string]*proxyPoolMetrics{}
+	for _, process := range processes {
+		if process.availableMask&proxyPoolMetricRSS == 0 || process.rss <= 0 {
+			continue
+		}
+		if process.availableMask&proxyPoolMetricStart == 0 {
+			return nil, fmt.Errorf(
+				"proxy pool: fresh RSS identity %s omitted process_start_time_seconds",
+				proxyPoolLabel(process),
+			)
+		}
+		slot := process.host + "\x00" + process.block
+		if process.block == "" {
+			// A missing block label cannot safely collapse unrelated processes.
+			slot += "\x00" + process.instance
+		}
+		previous := newest[slot]
+		if previous == nil || process.start > previous.start ||
+			(process.start == previous.start && process.instance > previous.instance) {
+			newest[slot] = process
+		}
+	}
+	current := make([]*proxyPoolMetrics, 0, len(newest))
+	for _, process := range newest {
+		current = append(current, process)
+	}
+	return current, nil
 }
 
 func proxyPoolLabel(process *proxyPoolMetrics) string {

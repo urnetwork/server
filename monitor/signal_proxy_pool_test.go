@@ -19,6 +19,8 @@ type proxyPoolFixtureProcess struct {
 	packet      *float64
 	large       *float64
 	outstanding *float64
+	startTime   time.Time
+	sampleTime  time.Time
 	poolTime    time.Time
 }
 
@@ -34,15 +36,56 @@ func TestProxyPoolSignalSyntheticMissingCollector(t *testing.T) {
 		t.Fatalf("wrong missing-collector identity: %+v", alert)
 	}
 	for _, want := range []string{
-		"2 of 2 live proxy processes",
-		"missing_processes=2",
+		"2 of 2 newest fresh proxy identities",
+		"missing_identities=2",
 		"fireside/g1#proxy-a[capacity,retained,packet-retained,large-retained,outstanding]",
+		"actual scrape timestamp",
+		"not a live process-overlap measurement",
 		"controller, which proxy does not import",
 		"Do not infer a pool leak",
 		"two-argument ResizeMessagePools",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("missing-collector alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestProxyPoolSignalSyntheticRolloutSelectsNewestFreshGeneration(t *testing.T) {
+	now := time.Date(2026, 9, 1, 2, 34, 50, 0, time.UTC)
+	capacity := float64((8 << 30) - (8 << 10))
+	retained := float64(4 << 30)
+	packet := float64(1 << 30)
+	large := retained - packet
+	outstanding := 48.0
+	complete := func(host string, block string, instance string, start time.Time) proxyPoolFixtureProcess {
+		return proxyPoolFixtureProcess{
+			host: host, block: block, instance: instance, rss: 5 << 30, startTime: start,
+			capacity: &capacity, retained: &retained, packet: &packet, large: &large, outstanding: &outstanding,
+		}
+	}
+	payload := proxyPoolFixtureJSON(t, now,
+		proxyPoolFixtureProcess{host: "crisp", block: "g1", instance: "old-g1", rss: 5 << 30, startTime: now.Add(-2 * time.Hour)},
+		complete("crisp", "g1", "new-g1", now.Add(-time.Minute)),
+		complete("crisp", "g2", "old-g2", now.Add(-2*time.Hour)),
+		proxyPoolFixtureProcess{host: "crisp", block: "g2", instance: "new-g2", rss: 5 << 30, startTime: now.Add(-time.Minute)},
+	)
+	alerts := runProxyPoolFixture(t, now, payload)
+	alert := requireAlertClass(t, alerts, "proxy-message-pool-unobservable")
+	for _, want := range []string{
+		"1 of 2 newest fresh proxy identities",
+		"current_proxy_identities=2",
+		"missing_identities=1",
+		"crisp/g2#new-g2[capacity,retained,packet-retained,large-retained,outstanding]",
+		"newest start time suppresses draining generations",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("rollout collector alert lacks %q:\n%s", want, alert.Markdown())
+		}
+	}
+	for _, omitted := range []string{"old-g1", "old-g2", "new-g1"} {
+		if strings.Contains(alert.Observed, omitted) {
+			t.Fatalf("rollout collector alert retained non-missing generation %q: %s", omitted, alert.Observed)
 		}
 	}
 }
@@ -122,7 +165,9 @@ func runProxyPoolFixture(t testing.TB, now time.Time, payload string) Alerts {
 	t.Helper()
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if host.Name != "metrics-1" || !strings.Contains(command, "message_pool_capacity_bytes") ||
-			!strings.Contains(command, "%22synthetic%22") {
+			!strings.Contains(command, "%22synthetic%22") ||
+			!strings.Contains(command, "timestamp%28label_replace") ||
+			!strings.Contains(command, "monitor_metric") {
 			return "", fmt.Errorf("unexpected Mimir command on %s: %s", host.Name, command)
 		}
 		return payload, nil
@@ -155,11 +200,19 @@ func proxyPoolFixtureJSON(t testing.TB, now time.Time, processes ...proxyPoolFix
 				"value":  []any{float64(observedAt.Unix()), fmt.Sprintf("%.0f", value)},
 			})
 		}
-		add("process_resident_memory_bytes", process.rss, now)
-		add("process_start_time_seconds", float64(now.Add(-time.Hour).Unix()), now)
+		sampleTime := process.sampleTime
+		if sampleTime.IsZero() {
+			sampleTime = now
+		}
+		startTime := process.startTime
+		if startTime.IsZero() {
+			startTime = now.Add(-time.Hour)
+		}
+		add("process_resident_memory_bytes", process.rss, sampleTime)
+		add("process_start_time_seconds", float64(startTime.Unix()), sampleTime)
 		poolTime := process.poolTime
 		if poolTime.IsZero() {
-			poolTime = now
+			poolTime = sampleTime
 		}
 		for _, metric := range []struct {
 			name  string

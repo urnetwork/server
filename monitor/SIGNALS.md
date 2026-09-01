@@ -5209,6 +5209,14 @@ target set. Repository HEAD `a85a277` contains root fix `7e2075c`; its focused
 race-enabled host-lock/config-validation tests and full `go test ./...` passed,
 but that source result is not evidence that any installed worker runs it.
 
+A config-only Proxy control on 2026-09-01 proved that “service release” includes
+both identities from §8.6. The service image stayed on
+`2026.8.31-outerwerld+1033797570` while config advanced to
+`2026.8.31+1034210530`; every legacy worker nevertheless entered the same
+candidate-start path. The host lock must therefore cover candidate creation for
+a service-image change, a config-generation change, or both. An unchanged
+application image is not evidence that rollout memory is unchanged.
+
 This is a software deployment and operational-restart gate, not a hardware
 capacity alert. Deploy validated Warp commit `a85a277` or later, remove every
 disabling override, and restart every running Warp service worker. Adding RAM
@@ -7232,18 +7240,32 @@ was 07:11:52Z, while the root fix was committed at 13:00:33Z. Other enabled
 hosts either carried the same legacy binary or could not expose a recognizable
 guard. Therefore the earlier Warp rollout did not deploy this root fix. Deploy
 `7e2075c` or later and restart every Warp service worker before starting any
-proxy release; then require the fleet-wide §8.11 probe to report
+proxy image or config-generation rollout; then require the fleet-wide §8.11 probe to report
 `full-overlap` with fresh workers on each managed services host.
 
-Verify a complete rollout, not an idle snapshot: proxy process count must stay
-at or below running blocks plus configured host concurrency; `MemAvailable`
-must remain above reserve; swap must not exhaust; kernel OOM and incident-window
-`UdpRcvbufErrors` deltas must remain zero; and the simultaneous WireGuard plus
-HTTP/SOCKS acceptance request must complete. Implementation convention:
+**Config-only overlap control (2026-09-01):** at `02:28:29Z`, Proxy's service
+image remained `2026.8.31-outerwerld+1033797570` while the independently polled
+config generation advanced to `2026.8.31+1034210530`. The still-legacy workers
+started candidates across all ten blocks on both hosts. The monitor sampled
+Crisp at 18 processes using 83.47 GiB RSS with 33.41 GiB available, and
+Fireside at 14 processes using 60.46 GiB RSS with 25.25 GiB available. The
+fleet metric subsequently observed 30 live processes before drains completed.
+By `02:33:58Z` both hosts had returned to ten processes; no new kernel OOM or
+`UdpRcvbufErrors` delta occurred, swap remained available, and memory reserve
+recovered. That recovery is a near-miss control, not proof the old guard is
+safe: a config-only generation traverses the same replacement path and must be
+serialized before candidate start.
+
+Verify a complete image or config-generation rollout, not an idle snapshot:
+proxy process count must stay at or below running blocks plus configured host
+concurrency; `MemAvailable` must remain above reserve; swap must not exhaust;
+kernel OOM and incident-window `UdpRcvbufErrors` deltas must remain zero; and
+the simultaneous WireGuard plus HTTP/SOCKS acceptance request must complete.
+Implementation convention:
 SIGNALS.md §14.7 (`proxy-memory`) maps to `signal_proxy_memory.go` and
 `signal_proxy_memory_test.go`. Synthetic cases preserve the 19-process/ten-unit
-OOM, live unsafe overlap, steady Fireside headroom deficit, Crisp-sized healthy
-headroom, guard-aware incident actions, live UDP receive drops,
+OOM, live unsafe overlap, config-generation overlap, steady Fireside headroom
+deficit, Crisp-sized healthy headroom, guard-aware incident actions, live UDP receive drops,
 first-sample/reboot/small-delta warmups, and a configured non-proxy host that
 must be skipped. Canonical legacy/disabled/unverified guard cases belong to
 §8.11.
@@ -7253,8 +7275,10 @@ Probe: `proxy-pool`
 
 The process RSS signal cannot distinguish live application objects from free
 buffers retained for reuse unless proxy exports the connect library's pool
-state. Join each fresh `process_resident_memory_bytes{job="proxy"}` series to
-these gauges on exact host, block, and runtime instance:
+state. Filter `process_resident_memory_bytes{job="proxy"}` by its actual scrape
+timestamp, select the newest `process_start_time_seconds` for each host/block,
+and join that identity to these gauges on exact host, block, and runtime
+instance:
 
 - `urnetwork_message_pool_capacity_bytes`
 - `urnetwork_message_pool_retained_bytes`
@@ -7262,17 +7286,29 @@ these gauges on exact host, block, and runtime instance:
 - `urnetwork_message_pool_large_object_retained_bytes`
 - `urnetwork_message_pool_outstanding`
 
-WARN `proxy-message-pool-unobservable` when a fresh live process lacks any of
-the five pool gauges. This is affirmative instrumentation drift rather than a
-zero pool: before the 2026-08-31 correction, the collector lived in the
+WARN `proxy-message-pool-unobservable` when a newest fresh process identity
+lacks any of the five pool gauges. This is affirmative instrumentation drift
+rather than a zero pool: before the 2026-08-31 correction, the collector lived in the
 `controller` package, which proxy does not import. The ordinary process metric
 was present on all 20 live proxies while every `urnetwork_message_pool_*`
 series was absent for `job="proxy"`; the same counters were visible on API,
 Connect, and taskworker. Do not diagnose a pool leak from that absence. Deploy
 the root server collector first and preserve host RSS/OOM evidence meanwhile.
 
-WARN `proxy-message-pool-capacity` when a live process permits more than 8 GiB
-plus 16 KiB of class-size rounding. The proxy's old source comment said “8gib
+The 2026-09-01 config-only rollout exposed a freshness bug in the first probe
+implementation. Direct host process tables had already returned to ten proxies
+on Crisp and ten on Fireside, while Mimir's instant query still returned 34
+recent old/candidate identities. Prometheus lookback selected stopped-series
+samples but the instant API rendered the evaluation timestamp, so subtracting
+the JSON sample timestamp from local `now` falsely classified every returned
+identity as live. The query now filters on
+`timestamp(process_resident_memory_bytes) >= time() - 90` and then retains only
+the newest process start per host/block. This produces the deployment
+denominator; it is deliberately not an overlap counter. Use direct host
+processes from §14.7 for live old/candidate concurrency and OOM risk.
+
+WARN `proxy-message-pool-capacity` when a newest fresh identity permits more
+than 8 GiB plus 16 KiB of class-size rounding. The proxy's old source comment said “8gib
 message pool,” but called `ResizeMessagePools(Gib(8))`. That API's historical
 one-argument form gives the full argument to the packet classes and again to
 **each** large-object class. With today's 4 KiB and 8 KiB large classes, the
@@ -7303,14 +7339,15 @@ created more customer capacity.
 
 Deployment gate: roll a proxy build containing both the root collector and the
 two-argument total-budget helper under the §14.7 full-overlap guard. Require a
-fresh complete gauge set for every live proxy, capacity no greater than 8 GiB
-plus rounding, retained no greater than capacity, and matching packet/large
-subtotals. Then follow RSS, `MemAvailable`, kernel OOM, and adjacent UDP drop
-deltas through the serialized rollout; the gauges supplement rather than
-replace those host boundaries. SIGNALS.md §14.7a (`proxy-pool`) maps to
+fresh complete gauge set for the newest identity in every host/block, capacity
+no greater than 8 GiB plus rounding, retained no greater than capacity, and
+matching packet/large subtotals. Then follow RSS, `MemAvailable`, kernel OOM,
+and adjacent UDP drop deltas through the serialized rollout; the gauges
+supplement rather than replace those host boundaries. SIGNALS.md §14.7a (`proxy-pool`) maps to
 `signal_proxy_pool.go` and `signal_proxy_pool_test.go`; synthetic cases pin the
-controller-only blind spot, the legacy ~24 GiB cap, a fixed healthy cap, stale
-series, and internally inconsistent snapshots.
+controller-only blind spot, newest-generation selection during a rollout, the
+legacy ~24 GiB cap, a fixed healthy cap, stale series, and internally
+inconsistent snapshots.
 
 ---
 

@@ -26,9 +26,10 @@ const (
 	proxyUDPReceiveDropPageRatio     = 0.01
 )
 
-// Signal proxy-memory implements SIGNALS.md §14.7. It treats a proxy rollout
-// as a host-capacity event: candidates coexist with the old block processes,
-// so steady-state health alone cannot prove that the replacement fleet fits.
+// Signal proxy-memory implements SIGNALS.md §14.7. It treats a proxy image or
+// config-generation rollout as a host-capacity event: either change creates
+// candidates that coexist with the old block processes, so steady-state health
+// alone cannot prove that the replacement fleet fits.
 func NewProxyMemorySignal() Signal {
 	return &signalAdapter{
 		number: "14.7", key: "proxy-memory", name: "Proxy rollout memory headroom and host OOM",
@@ -408,9 +409,9 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 		}
 		action := "The full-overlap host guard is installed; preserve the incident processes and validate why more than one replacement entered. Then reduce steady proxy RSS or add RAM if one old/candidate pair plus reserve cannot fit. Do not restart WireGuard, reinstall peers, or set a cgroup limit below the measured steady process size."
 		if sample.warpctlRolloutGuard == proxyRolloutGuardDrainOnly || sample.warpctlRolloutGuard == proxyRolloutGuardDisabled {
-			action = fmt.Sprintf("Deploy Warp commit %s or later and restart every Warp service worker before another proxy release. It must serialize candidate start through old-process drain, not only the drains. Then reduce steady proxy RSS or add RAM if one old/candidate pair plus reserve cannot fit. Do not restart WireGuard, reinstall peers, or set a cgroup limit below measured steady RSS.", proxyRolloutGuardCommit)
+			action = fmt.Sprintf("Deploy Warp commit %s or later and restart every Warp service worker before another proxy image or config-generation rollout. It must serialize candidate start through old-process drain, not only the drains. Then reduce steady proxy RSS or add RAM if one old/candidate pair plus reserve cannot fit. Do not restart WireGuard, reinstall peers, or set a cgroup limit below measured steady RSS.", proxyRolloutGuardCommit)
 		} else if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
-			action = fmt.Sprintf("Do not start another proxy release until the installed Warp path is resolved and commit %s or later is running in every service worker. Then validate one serialized replacement, reduce steady proxy RSS, or add RAM if that pair plus reserve cannot fit. Do not restart WireGuard or reinstall peers for this signature.", proxyRolloutGuardCommit)
+			action = fmt.Sprintf("Do not start another proxy image or config-generation rollout until the installed Warp path is resolved and commit %s or later is running in every service worker. Then validate one serialized replacement, reduce steady proxy RSS, or add RAM if that pair plus reserve cannot fit. Do not restart WireGuard or reinstall peers for this signature.", proxyRolloutGuardCommit)
 		}
 		findings = append(findings, finding{
 			probeId: "proxy/host-memory", tier: tierPage,
@@ -425,15 +426,15 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 			evidence: sample.oomLine,
 			context:  "UdpRcvbufErrors is cumulative since boot, not a current rate. A large incident-correlated increase supports host receive starvation, but the kernel OOM and excess proxy-process count are the causal memory evidence; changing WireGuard peers or only enlarging UDP buffers does not restore rollout capacity.",
 			action:   action,
-			verify:   "During a complete proxy rollout, process count never exceeds running blocks plus configured host concurrency, MemAvailable stays above the reserve, swap is not exhausted, no new kernel OOM appears, UdpRcvbufErrors has zero incident-window delta, and the WireGuard acceptance request succeeds.",
+			verify:   "During a complete proxy image or config-generation rollout, process count never exceeds running blocks plus configured host concurrency, MemAvailable stays above the reserve, swap is not exhausted, no new kernel OOM appears, UdpRcvbufErrors has zero incident-window delta, and the WireGuard acceptance request succeeds.",
 			playbook: "SIGNALS.md §14.7",
 		})
 	}
 
 	if sample.proxyProcesses > sample.runningUnits && sample.memAvailableKiB < sample.proxyMaxRSSKiB+reserveKiB {
-		action := "Pause new candidates on this host until an old proxy exits or capacity is restored, then resume with host-aware bounded concurrency and the same memory preflight. Preserve the current processes long enough to identify old versus candidate ownership."
+		action := "Pause new candidates on this host until an old proxy exits or capacity is restored, then resume the proxy image or config-generation rollout with host-aware bounded concurrency and the same memory preflight. Preserve the current processes long enough to identify old versus candidate ownership."
 		if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
-			action = fmt.Sprintf("Pause new candidates and do not resume a proxy release until Warp commit %s or later is installed and every service worker has restarted. Preserve the current processes long enough to identify old versus candidate ownership, then validate one serialized replacement with the memory preflight.", proxyRolloutGuardCommit)
+			action = fmt.Sprintf("Pause new candidates and do not resume a proxy image or config-generation rollout until Warp commit %s or later is installed and every service worker has restarted. Preserve the current processes long enough to identify old versus candidate ownership, then validate one serialized replacement with the memory preflight.", proxyRolloutGuardCommit)
 		}
 		findings = append(findings, finding{
 			probeId: "proxy/host-memory", tier: tierPage,
@@ -455,25 +456,25 @@ func evaluateProxyMemory(host string, sample proxyMemorySample) []finding {
 		mechanism := "The installed full-overlap guard should serialize replacements to one old/candidate pair. This host still cannot hold a second complete fleet: the current fleet's aggregate RSS plus operational reserve exceeds MemAvailable, so all-block parallel rollout is a hardware-capacity requirement, not a safe software setting."
 		action := "Keep proxy deployment serialized. Reduce the roughly per-process steady RSS or provision enough RAM/hosts before requiring greater parallel rollout concurrency; the full-overlap guard does not raise the active-client ceiling."
 		if sample.warpctlRolloutGuard == proxyRolloutGuardDrainOnly || sample.warpctlRolloutGuard == proxyRolloutGuardDisabled {
-			mechanism = "The installed drain-only or disabled guard can start a candidate for every block before old processes drain. The current fleet's aggregate RSS is the best measured estimate of that second fleet; adding operational reserve exceeds MemAvailable on this host."
-			action = fmt.Sprintf("Deploy Warp commit %s or later and restart every service worker before another proxy release, then keep this host serialized. Separately reduce steady proxy RSS or add RAM/hosts if greater concurrency or client capacity is required.", proxyRolloutGuardCommit)
+			mechanism = "The installed drain-only or disabled guard can start a candidate for every block before old processes drain. A proxy service-image or config-generation change can trigger the same replacement path. The current fleet's aggregate RSS is the best measured estimate of that second fleet; adding operational reserve exceeds MemAvailable on this host."
+			action = fmt.Sprintf("Deploy Warp commit %s or later and restart every service worker before another proxy image or config-generation rollout, then keep this host serialized. Separately reduce steady proxy RSS or add RAM/hosts if greater concurrency or client capacity is required.", proxyRolloutGuardCommit)
 		} else if sample.warpctlRolloutGuard != proxyRolloutGuardFull {
 			mechanism = "The host cannot hold a second complete proxy fleet, and the monitor cannot verify that its deployed Warp serializes candidate starts. The current fleet's aggregate RSS plus operational reserve exceeds MemAvailable."
-			action = fmt.Sprintf("Do not release proxy until Warp commit %s or later is verified in every service worker. Keep rollout serialized, and add RAM/hosts if greater concurrency or client capacity is required.", proxyRolloutGuardCommit)
+			action = fmt.Sprintf("Do not release a proxy image or config generation until Warp commit %s or later is verified in every service worker. Keep rollout serialized, and add RAM/hosts if greater concurrency or client capacity is required.", proxyRolloutGuardCommit)
 		}
 		findings = append(findings, finding{
 			probeId: "proxy/host-memory", tier: tierWarn,
 			class: "proxy-rollout-headroom", target: host, frame: "full-fleet-overlap", sustain: 1,
 			symptom:   fmt.Sprintf("%s cannot hold a second full proxy fleet with host reserve", host),
 			mechanism: mechanism,
-			baseline:  "MemAvailable is at least the current proxy fleet's aggregate RSS plus the larger of 8 GiB or 5% of physical RAM before an all-block rollout begins.",
+			baseline:  "MemAvailable is at least the current proxy fleet's aggregate RSS plus the larger of 8 GiB or 5% of physical RAM before an all-block image or config-generation rollout begins.",
 			observed: fmt.Sprintf("%s running_block_units=%d proxy_processes=%d proxy_rss_gib=%.2f mem_total_gib=%.2f mem_available_gib=%.2f operational_reserve_gib=%.2f full_rollout_required_available_gib=%.2f capacity_deficit_gib=%.2f unbounded_proxy_cgroups=%d udp_rcvbuf_errors_since_boot=%d",
 				guardObservation, sample.runningUnits, sample.proxyProcesses, kiBToGiB(sample.proxyRSSKiB), kiBToGiB(sample.memTotalKiB),
 				kiBToGiB(sample.memAvailableKiB), kiBToGiB(reserveKiB), kiBToGiB(fullRolloutRequiredKiB),
 				kiBToGiB(fullRolloutDeficitKiB), sample.proxyMemoryUnbounded, sample.udpRcvbufErrors),
 			context:  "Summed RSS is conservative because shared pages can be counted more than once, but proxy heaps dominate the measured processes and the kernel OOM task table uses the same resident-memory boundary. A host-safe serialized rollout needs only one candidate RSS plus reserve, not a duplicate full fleet.",
 			action:   action,
-			verify:   "A full rollout completes with process count inside the configured bound, at least 8 GiB available, unused swap, no new OOM, flat UdpRcvbufErrors over the rollout window, and successful WireGuard plus public-proxy acceptance.",
+			verify:   "A full proxy image or config-generation rollout completes with process count inside the configured bound, at least 8 GiB available, unused swap, no new OOM, flat UdpRcvbufErrors over the rollout window, and successful WireGuard plus public-proxy acceptance.",
 			playbook: "SIGNALS.md §14.7",
 		})
 	}

@@ -47,6 +47,7 @@ func TestProxyMemorySignalSyntheticGlobalOOM(t *testing.T) {
 		"warpctl_rollout_guard=drain-only",
 		"udp_rcvbuf_errors_since_boot=122012",
 		"7e2075c",
+		"proxy image or config-generation rollout",
 		"Do not restart WireGuard",
 	} {
 		if !strings.Contains(markdown, want) {
@@ -87,9 +88,46 @@ func TestProxyMemorySignalSyntheticUnsafeLiveOverlap(t *testing.T) {
 	if overlap.Severity != SeverityPage {
 		t.Fatalf("live overlap severity = %q", overlap.Severity)
 	}
-	for _, want := range []string{"running_block_units=10", "proxy_processes=13", "Pause new candidates"} {
+	for _, want := range []string{"running_block_units=10", "proxy_processes=13", "Pause new candidates", "proxy image or config-generation rollout"} {
 		if !strings.Contains(overlap.Markdown(), want) {
 			t.Fatalf("live overlap alert missing %q:\n%s", want, overlap.Markdown())
+		}
+	}
+}
+
+func TestProxyMemorySignalSyntheticConfigGenerationOverlap(t *testing.T) {
+	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+		if !strings.Contains(command, proxyMemoryMarker) {
+			return "", errors.New("unexpected synthetic host command")
+		}
+		return proxyMemoryFixture(proxyMemorySample{
+			warpctlRolloutGuard:  proxyRolloutGuardDrainOnly,
+			memTotalKiB:          131314856,
+			memAvailableKiB:      35032900,
+			swapTotalKiB:         8388604,
+			swapFreeKiB:          8388604,
+			runningUnits:         10,
+			proxyProcesses:       18,
+			proxyRSSKiB:          87524600,
+			proxyMaxRSSKiB:       5583012,
+			proxyMemoryUnbounded: 18,
+			udpRcvbufErrors:      48,
+		}), nil
+	}}
+
+	alerts, err := NewProxyMemorySignal().Run(context.Background(), proxyMemorySyntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	headroom := requireAlertClass(t, alerts, "proxy-rollout-headroom")
+	for _, want := range []string{
+		"proxy_processes=18",
+		"service-image or config-generation change",
+		"before another proxy image or config-generation rollout",
+		"all-block image or config-generation rollout",
+	} {
+		if !strings.Contains(headroom.Markdown(), want) {
+			t.Fatalf("config-generation headroom alert missing %q:\n%s", want, headroom.Markdown())
 		}
 	}
 }
