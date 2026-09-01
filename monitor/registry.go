@@ -48,6 +48,7 @@ func NewSignals() []Signal {
 		NewLogErrorsSignal(),
 		NewActiveQueriesSignal(),
 		NewWaitEventsSignal(),
+		NewReindexDebrisSignal(),
 		NewPlannerFlipsSignal(),
 		NewVacuumHealthSignal(),
 		NewTaskHealthSignal(),

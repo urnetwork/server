@@ -74,6 +74,30 @@ func TestWaitEventsSignalExplainsClientWriteBackpressure(t *testing.T) {
 	}
 }
 
+func TestWaitEventsSignalAttributesTransferEscrowReindexExtension(t *testing.T) {
+	const sample = "REINDEX TABLE CONCURRENTLY transfer_escrow"
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"IO", "DataFileExtend", "1", "190", sample, "3597393", "unknown", "taskworker", "192.0.2.10"}}, nil
+	}}
+	alerts, err := NewWaitEventsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "wait-event-cluster").Markdown()
+	for _, want := range []string{
+		"very large, high-churn transfer_escrow table",
+		"clustered WAL and storage work",
+		"PgBouncer only exposes the resulting queueing",
+		"Do not interrupt the protected in-progress transfer_escrow rebuild",
+		"excludes transfer_escrow from full-table reindex",
+		"reindex-debris",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("transfer_escrow DataFileExtend alert missing %q: %s", want, markdown)
+		}
+	}
+}
+
 func TestWaitEventsSignalClientReadRequiresOldWaiter(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -341,6 +341,47 @@ func TestTaskCanariesSignalExplainsProgressingMaintenanceAfterBlockerRelease(t *
 	}
 }
 
+func TestTaskCanariesSignalAttributesOversizedTransferEscrowReindex(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return []Row{{"DbMaintenance", "9120", "1800", "f", "86400"}}, nil
+		case strings.Contains(query, "pg_stat_progress_create_index"):
+			return []Row{{
+				"transfer_escrow", "transfer_escrow_pkey_ccnew36",
+				"building index: scanning table", "190", "IO", "DataFileExtend", "{}", "", "",
+				"48213", "1081742992",
+			}}, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return nil, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-overdue").Markdown()
+	for _, want := range []string{
+		"very large, high-churn relation",
+		"two-hour per-object policy",
+		"Connect logins and unrelated tasks to time out",
+		"numbered _ccnew debris",
+		"PgBouncer timeout symptoms are downstream queueing",
+		"Do not cancel or duplicate the protected in-progress rebuild",
+		"excludes transfer_escrow from full-table reindex",
+		"cleans incomplete indexes before and after every selected object",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("transfer_escrow maintenance alert missing %q: %s", want, markdown)
+		}
+	}
+}
+
 func TestTaskCanariesSignalExplainsOverlappingParkedAndFreshClaimCounts(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {

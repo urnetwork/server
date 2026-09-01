@@ -415,7 +415,12 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				dbMaintenanceEvidence.str(6), dbMaintenanceEvidence.str(7), dbMaintenanceEvidence.str(8),
 				dbMaintenanceEvidence.str(9), dbMaintenanceEvidence.str(10),
 			)
-			if strings.Contains(strings.ToLower(dbMaintenanceEvidence.str(8)), "client_reliability_running") {
+			if strings.EqualFold(dbMaintenanceEvidence.str(0), "transfer_escrow") {
+				alert.mechanism = "The daily table rotation selected transfer_escrow for REINDEX TABLE CONCURRENTLY even though this is a very large, high-churn relation whose full rebuild cannot reliably fit the two-hour per-object policy. Extending the replacement relation and generating its WAL can saturate PostgreSQL long enough for Connect logins and unrelated tasks to time out; repeated interrupted attempts can leave numbered _ccnew debris."
+				alert.context += " The live progress row identifies the current bounded operation; reindex-debris independently identifies residue from earlier attempts. PgBouncer timeout symptoms are downstream queueing, not evidence that the pooler initiated the load."
+				alert.action = "Do not cancel or duplicate the protected in-progress rebuild. Deploy the taskworker maintenance revision that excludes transfer_escrow from full-table reindex and cleans incomplete indexes before and after every selected object. After the protected operation finishes, require explicit maintenance authorization before running the supported cleanup-only cycle."
+				alert.verify = "The current attempt reaches its bounded outcome, transfer_escrow never appears in a later full-table maintenance progress row, reindex-debris reaches zero under an authorized cleanup window, and one complete post-deploy maintenance cycle causes no PostgreSQL or Connect timeout wave."
+			} else if strings.Contains(strings.ToLower(dbMaintenanceEvidence.str(8)), "client_reliability_running") {
 				alert.mechanism = "The concurrent index rebuild is waiting for old snapshots, and PostgreSQL identifies the UpdateReliabilities running-window re-anchor as its virtual-XID blocker. REINDEX CONCURRENTLY cannot complete its index swap while that older transaction remains visible."
 				alert.context += ". The maintenance claim heartbeat is live: this is downstream lock coupling, not an abandoned task lease."
 				alert.action = "Let the configured deadlines arbitrate the current work. Roll out the four-hour cadence, per-lookback reliability checkpoints, and optional-anchor maintenance deferral; do not cancel either progressing task, raise its deadline, or rebuild the same index again."

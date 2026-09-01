@@ -16,11 +16,15 @@ type pgActiveQueryProbe struct{}
 
 const concurrentReindexActiveGrace = 2 * time.Hour
 
-func expectedConcurrentReindex(sample string, oldestSeconds int) bool {
+func concurrentReindexQuery(sample string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(sample))
-	isConcurrentReindex := strings.HasPrefix(upper, "REINDEX TABLE CONCURRENTLY ") ||
+	return strings.HasPrefix(upper, "REINDEX TABLE CONCURRENTLY ") ||
 		strings.HasPrefix(upper, "REINDEX INDEX CONCURRENTLY ")
-	return isConcurrentReindex && time.Duration(oldestSeconds)*time.Second < concurrentReindexActiveGrace
+}
+
+func expectedConcurrentReindex(sample string, oldestSeconds int) bool {
+	return concurrentReindexQuery(sample) &&
+		time.Duration(oldestSeconds)*time.Second < concurrentReindexActiveGrace
 }
 
 func legacyPayoutSubsidyRangeQuery(sample string) bool {

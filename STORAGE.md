@@ -272,7 +272,13 @@ Storage tuning is not one-and-done — inflow and schema change. Each cycle:
 Cadence: snapshot monthly, and any time an alert fires on primary disk. The
 `bringyourctl db maintenance <epoch> [--reindex] [--cleanup] [--analyze]`
 command drives the periodic REINDEX/ANALYZE rotation (`db_maintenance.go`);
-per-table autovacuum handles the between-maintenance reclamation.
+per-table autovacuum handles the between-maintenance reclamation. The recurring
+rotation must not full-table reindex `transfer_escrow`, `transfer_contract`, or
+the partition-managed reliability/connection tables: their size or churn
+requires the targeted-index, partition-turnover, or one-time `pg_repack`
+strategies above. With cleanup enabled, maintenance removes inactive
+`_ccnew`/`_ccold` indexes (including associated TOAST indexes) before and after
+each rebuild so an interrupted attempt cannot accumulate numbered retry debris.
 
 ### Watch items carried out of 2026-07 (update as resolved)
 - [ ] `contract_close`, `transfer_contract`, `transfer_escrow`: one-time

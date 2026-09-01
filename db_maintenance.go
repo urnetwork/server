@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/glog"
 )
 
@@ -47,6 +48,7 @@ var dbMaintenanceSkipReindexTables = map[string]bool{
 	"network_client_location_reliability": true,
 	"network_client_connection":           true,
 	"transfer_contract":                   true,
+	"transfer_escrow":                     true,
 }
 
 // Daily reliability partitions are dropped whole at retention, so their
@@ -83,6 +85,44 @@ type DbMaintenanceOptions struct {
 	Analyze bool
 }
 
+type dbMaintenanceObjectStep string
+
+const (
+	dbMaintenanceCleanupBefore dbMaintenanceObjectStep = "cleanup-before"
+	dbMaintenanceReindex       dbMaintenanceObjectStep = "reindex"
+	dbMaintenanceCleanupAfter  dbMaintenanceObjectStep = "cleanup-after"
+)
+
+// dbMaintenanceObjectSteps makes cleanup a guard around every rebuild. A
+// timed-out REINDEX CONCURRENTLY can leave an invalid _ccnew/_ccold relation;
+// cleaning only after the entire epoch lets a later timeout or task
+// cancellation strand it, and the next epoch then creates a numbered sibling.
+func dbMaintenanceObjectSteps(cleanup bool, reindex bool) []dbMaintenanceObjectStep {
+	steps := []dbMaintenanceObjectStep{}
+	if cleanup {
+		steps = append(steps, dbMaintenanceCleanupBefore)
+	}
+	if reindex {
+		steps = append(steps, dbMaintenanceReindex)
+		if cleanup {
+			steps = append(steps, dbMaintenanceCleanupAfter)
+		}
+	}
+	return steps
+}
+
+// runDbMaintenanceObjectSteps refuses to start a rebuild when its prerequisite
+// cleanup failed. A failed rebuild still reaches cleanup-after so its own
+// incomplete artifact is removed before maintenance advances to another
+// object.
+func runDbMaintenanceObjectSteps(steps []dbMaintenanceObjectStep, run func(dbMaintenanceObjectStep) bool) {
+	for _, step := range steps {
+		if ok := run(step); !ok && step == dbMaintenanceCleanupBefore {
+			return
+		}
+	}
+}
+
 func DbMaintenanceWithDefaults(ctx context.Context, epoch uint64) {
 	DbMaintenance(ctx, epoch, DefaultDbMaintenanceOptions())
 }
@@ -98,19 +138,17 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 	// see https://www.postgresql.org/docs/current/sql-reindex.html
 
 	reindex := func(conn PgConn, tableName string) {
-		if dbMaintenanceShouldReindexTable(tableName) {
-			// note "reindex concurrently" can in some rare cases cause a deadlock with autovacuum
-			// use a timeout to recover from these cases
-			// any reindex taking longer than the timeout should generally be added to `skipReindexTables`
-			timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Hour)
-			defer timeoutCancel()
-			RaisePgResult(conn.Exec(
-				timeoutCtx,
-				`
-				REINDEX TABLE CONCURRENTLY 
-				`+tableName,
-			))
-		}
+		// note "reindex concurrently" can in some rare cases cause a deadlock with autovacuum
+		// use a timeout to recover from these cases
+		// any reindex taking longer than the timeout should generally be added to `skipReindexTables`
+		timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Hour)
+		defer timeoutCancel()
+		RaisePgResult(conn.Exec(
+			timeoutCtx,
+			`
+			REINDEX TABLE CONCURRENTLY
+			`+tableName,
+		))
 	}
 	reindexIndex := func(conn PgConn, indexName string) {
 		timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 2*time.Hour)
@@ -127,26 +165,43 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT
-				    pg_class.relname AS index_name
-				FROM
-				    pg_class
-				INNER JOIN
-				    pg_index ON pg_index.indexrelid = pg_class.oid
-				INNER JOIN
-				    pg_class t ON t.oid = pg_index.indrelid
-				WHERE
-				    pg_index.indisvalid = false AND
-				    t.relname = $1
+				WITH public_table AS (
+					SELECT table_class.oid, table_class.reltoastrelid
+					FROM pg_class table_class
+					INNER JOIN pg_namespace table_namespace
+						ON table_namespace.oid = table_class.relnamespace
+					WHERE table_namespace.nspname = 'public'
+					  AND table_class.relname = $1
+				)
+				SELECT index_namespace.nspname, index_class.relname
+				FROM public_table
+				INNER JOIN pg_index
+					ON pg_index.indrelid IN (public_table.oid, public_table.reltoastrelid)
+				INNER JOIN pg_class index_class
+					ON index_class.oid = pg_index.indexrelid
+				INNER JOIN pg_namespace index_namespace
+					ON index_namespace.oid = index_class.relnamespace
+				WHERE pg_index.indisvalid = false
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM pg_stat_progress_create_index progress
+					WHERE progress.relid IN (public_table.oid, public_table.reltoastrelid)
+					   OR progress.index_relid = index_class.oid
+				  )
+				ORDER BY index_namespace.nspname, index_class.relname
 			`,
 			tableName,
 		)
 		WithPgResult(result, err, func() {
 			for result.Next() {
+				var indexNamespace string
 				var indexName string
-				Raise(result.Scan(&indexName))
+				Raise(result.Scan(&indexNamespace, &indexName))
 				if isIncompleteIndexName(indexName) {
-					incompleteIndexNames = append(incompleteIndexNames, indexName)
+					incompleteIndexNames = append(
+						incompleteIndexNames,
+						pgx.Identifier{indexNamespace, indexName}.Sanitize(),
+					)
 				}
 			}
 		})
@@ -219,79 +274,81 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 		reindexTableNames[i], reindexTableNames[j] = reindexTableNames[j], reindexTableNames[i]
 	})
 
-	if opts.Reindex {
-		// reindex concurrently
-		for i, reindexTableName := range reindexTableNames {
+	// Cleanup and reindex each selected table as one ordered unit. In
+	// particular, a failed rebuild gets its cleanup attempt before maintenance
+	// advances to the next table, and a failed prerequisite cleanup prevents a
+	// new numbered _ccnew sibling from being created.
+	for i, reindexTableName := range reindexTableNames {
+		steps := dbMaintenanceObjectSteps(
+			opts.Cleanup,
+			opts.Reindex && dbMaintenanceShouldReindexTable(reindexTableName),
+		)
+		runDbMaintenanceObjectSteps(steps, func(step dbMaintenanceObjectStep) bool {
 			glog.Infof(
-				"[db]maintenance reindex[%d/%d] %s\n",
+				"[db]maintenance table[%d/%d] %s %s\n",
 				i+1,
 				len(reindexTableNames),
+				step,
 				reindexTableName,
 			)
-
-			// pg might raise a deadlock or other unrecoverable error during reindex
-			HandleError(func() {
+			startTime := time.Now()
+			recovered := HandleError(func() {
 				MaintenanceDb(ctx, func(conn PgConn) {
-					// reindex
-					startTime := time.Now()
-					reindex(conn, reindexTableName)
-					endTime := time.Now()
-					glog.Infof(
-						"[db]maintenance reindex[%d/%d] %s reindex took %.2fs\n",
-						i+1,
-						len(reindexTableNames),
-						reindexTableName,
-						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
-					)
+					switch step {
+					case dbMaintenanceCleanupBefore, dbMaintenanceCleanupAfter:
+						cleanUpIncompleteIndexes(conn, reindexTableName)
+					case dbMaintenanceReindex:
+						reindex(conn, reindexTableName)
+					}
 				}, OptNoRetry())
 			})
-		}
-
-		for i, indexName := range reindexIndexNames {
 			glog.Infof(
-				"[db]maintenance priority reindex[%d/%d] %s\n",
+				"[db]maintenance table[%d/%d] %s %s took %.2fs\n",
 				i+1,
-				len(reindexIndexNames),
-				indexName,
+				len(reindexTableNames),
+				step,
+				reindexTableName,
+				float64(time.Since(startTime)/time.Millisecond)/1000.0,
 			)
-			HandleError(func() {
-				MaintenanceDb(ctx, func(conn PgConn) {
-					startTime := time.Now()
-					reindexIndex(conn, indexName)
-					glog.Infof(
-						"[db]maintenance priority reindex[%d/%d] %s took %.2fs\n",
-						i+1,
-						len(reindexIndexNames),
-						indexName,
-						float64(time.Since(startTime)/time.Millisecond)/1000.0,
-					)
-				}, OptNoRetry())
-			})
-		}
+			return recovered == nil
+		})
 	}
 
-	if opts.Cleanup {
-		for i, reindexTableName := range reindexTableNames {
-			glog.Infof(
-				"[db]maintenance reindex[%d/%d] cleanup %s\n",
-				i+1,
-				len(reindexTableNames),
-				reindexTableName,
-			)
-
-			HandleError(func() {
-				MaintenanceDb(ctx, func(conn PgConn) {
-					startTime := time.Now()
-					cleanUpIncompleteIndexes(conn, reindexTableName)
-					endTime := time.Now()
-					glog.Infof(
-						"[db]maintenance reindex[%d/%d] cleanup %s took %.2fs\n",
-						i+1,
-						len(reindexTableNames),
-						reindexTableName,
-						float64(endTime.Sub(startTime)/time.Millisecond)/1000.0,
-					)
-				}, OptNoRetry())
+	if opts.Reindex {
+		for i, indexName := range reindexIndexNames {
+			// Every priority index currently belongs to transfer_contract. Keep its
+			// incomplete-index cleanup adjacent to the individual rebuild just as
+			// it is for a table rebuild; the table's hash-selected epoch may differ.
+			const tableName = "transfer_contract"
+			steps := dbMaintenanceObjectSteps(opts.Cleanup, true)
+			runDbMaintenanceObjectSteps(steps, func(step dbMaintenanceObjectStep) bool {
+				glog.Infof(
+					"[db]maintenance priority index[%d/%d] %s %s\n",
+					i+1,
+					len(reindexIndexNames),
+					step,
+					indexName,
+				)
+				startTime := time.Now()
+				recovered := HandleError(func() {
+					MaintenanceDb(ctx, func(conn PgConn) {
+						switch step {
+						case dbMaintenanceCleanupBefore, dbMaintenanceCleanupAfter:
+							cleanUpIncompleteIndexes(conn, tableName)
+						case dbMaintenanceReindex:
+							reindexIndex(conn, indexName)
+						}
+					}, OptNoRetry())
+				})
+				glog.Infof(
+					"[db]maintenance priority index[%d/%d] %s %s took %.2fs\n",
+					i+1,
+					len(reindexIndexNames),
+					step,
+					indexName,
+					float64(time.Since(startTime)/time.Millisecond)/1000.0,
+				)
+				return recovered == nil
 			})
 		}
 	}

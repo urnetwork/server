@@ -1346,6 +1346,89 @@ was stuck. This is another clean deployed result and another 22-minute
 all-lookback rollback unit. Retain the four-hour optional-anchor cadence,
 maintenance deferral, and per-lookback commits.
 
+### 2.2a Incomplete concurrent-index debris — retry residue vs a live build
+Probe: `reindex-debris`
+
+`REINDEX ... CONCURRENTLY` temporarily creates invalid indexes with PostgreSQL's
+`_ccnew`, `_ccnewN`, `_ccold`, or `_ccoldN` suffixes. One belonging to a live
+`pg_stat_progress_create_index` row is expected transient state. The healthy
+steady-state count is zero after that operation exits. An inactive suffixed
+index is durable retry debris: it consumes storage, and any artifact with
+`pg_index.indisready=true` is also maintained by later writes even though a
+query plan cannot use it.
+
+The probe reads only catalogs. It maps both each public table and that table's
+`reltoastrelid`, counts invalid suffixed indexes and their bytes, reports how
+many are write-ready, and excludes the complete relation while an index
+operation on it remains active. Including TOAST is required: a full-table
+reindex also rebuilds the associated TOAST index, while the old cleanup query
+looked only at indexes whose direct parent name matched the public table. The
+alert is therefore persistent residue, not an invitation to drop the temporary
+index under a progressing build. All affected tables share one cleanup and
+deployment boundary, so the probe emits one aggregate alert with the eight
+largest table owners rather than repeating identical guidance for every table.
+
+The 2026-09-01 incident established the causal chain. At 11:15Z, Connect login
+receives against PgBouncer timed out across many blocks while PgBouncer's
+one-minute average transaction and wait times rose from milliseconds to
+hundreds of milliseconds and, on one shifted sample, seconds. PostgreSQL had
+not restarted, PgBouncer's 32 real instances remained active, the host had no
+contemporaneous kernel OOM, and API/taskworker did not report the same login
+signature. Direct PostgreSQL sampling instead found:
+
+- `REINDEX TABLE CONCURRENTLY transfer_escrow` active on the roughly
+  1.08-billion-row, high-churn table (about 153.5 GiB heap and 257.8 GiB with
+  indexes), waiting on `IO:DataFileExtend`;
+- simultaneous `LWLock:WALInsert` and `LWLock:WALWrite` clusters on ordinary
+  inserts; and
+- PostgreSQL warnings that the same attempt was skipping dozens of invalid
+  public and TOAST `_ccnew` indexes, with numbered suffixes from earlier
+  attempts.
+
+The first direct run of the new catalog probe at 11:44:43Z validated both
+branches. It excluded active `transfer_escrow`, while finding 315 inactive
+artifacts across 35 other public-table owners: 301 were write-ready and the
+total occupied 6,714,458,112 bytes (6.25 GiB). `contract_close` owned
+6,678,208,512 bytes across 13 not-ready artifacts; `pending_task` owned the
+largest write-ready byte set at 31,645,696 bytes across 21 artifacts. The
+remaining high counts were predominantly 8 KiB TOAST remnants. This separates
+material disk debt, write-maintained overhead, and catalog-count noise without
+weakening the zero-artifact healthy invariant.
+
+The pool timeout was consequently a downstream queue symptom. The daily
+maintenance scheduler had two independent defects: `transfer_escrow` was not
+excluded from the two-hour full-table policy despite its documented one-time
+`pg_repack` strategy, and incomplete-index cleanup ran only after the entire
+table rotation. A timed-out rebuild or later task cancellation could strand
+its artifacts; the next attempt then created another numbered sibling before
+cleanup was ever reached. This is not evidence for a PostgreSQL/PgBouncer
+restart, a larger service pool, or a PostgreSQL 18.6 correctness workaround.
+
+The software closure is in `db_maintenance.go`: exclude `transfer_escrow` from
+full-table reindex, retain its targeted indexes and one-time operational
+`pg_repack` strategy, and execute cleanup-before → rebuild → cleanup-after for
+each selected table or priority index. A failed prerequisite cleanup prevents
+the rebuild; a failed rebuild still reaches its immediate post-cleanup. The
+cleanup query schema-qualifies identifiers, includes TOAST, and refuses to
+touch a relation represented by live progress. Synthetic regressions enforce
+the ordering, the failure branches, the large-table exclusion, and this
+probe's active-build distinction.
+
+Do not interrupt a protected in-progress rebuild merely to apply the source
+fix. Deploy the fixed server revision to taskworker so future daily maintenance
+uses the new policy. Existing debris is a separate operational database
+mutation: after the protected operation finishes, obtain explicit maintenance
+authorization and run the supported cleanup-only full cycle:
+
+```sh
+bringyourctl db maintenance all --cleanup
+```
+
+Do not wildcard-drop `_ccnew` indexes by hand. Closure requires zero inactive
+suffixed artifacts, no later full-table `transfer_escrow` progress row, and one
+complete post-deploy maintenance cycle with no recurring DataFileExtend/WAL
+cluster or Connect login-timeout wave.
+
 ### 2.3 Planner-flip detection
 Probe: `planner-flips`
 
