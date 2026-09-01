@@ -859,7 +859,7 @@ and its peer gauge while per-peer details require `V(1)`; a Grafana artifact
 predating Warp `1e95aef` independently needs the ring transport fix. Do not
 redeploy already-current blocks from this historical evidence.
 
-The post-fix control on `2026.8.31+1034210530` changed the active diagnosis.
+The first post-fix control on `2026.8.31+1034210530` changed the active diagnosis.
 Every responding Grafana and Proxy block contained the ring-deadline and
 per-peer-log fixes, and the current edge-4 Grafana container had started at
 `02:29Z`, after that artifact boundary. A fresh one-minute Grafana window still
@@ -870,22 +870,51 @@ completion lines. Roughly 170 short alert-rule queries per minute therefore
 made the observation plane its own default-info producer after the Proxy burst
 was removed. Direct five-minute journals independently found 280 reset lines on
 Crisp while Fireside emitted none because it was no longer an active Loki ring
-member, not because it was a healthy control.
+member, not because it was a healthy control. That was a real prerequisite at
+the time, but it is historical rather than a standing action.
 
-That control also exposed a prerequisite failure: the active Loki ring had only
-edge-0, edge-1, edge-3, edge-4, and Crisp. Fireside was absent after losing its
-configured `192.168.51.196` LAN identity; the operator-disabled edge remained
-out of scope. Restore the missing active node and its LAN/ring ownership before
-attributing all residual resets to self-telemetry. Warp commit `42168fe`
-disables Mimir `frontend.query_stats_enabled` in the generated Grafana config,
-removing per-query statistics logs while retaining query execution, errors,
-metrics, and alert cadence. Its deterministic config test also preserves the
-ring address and gRPC port. Deploy that fix only after the node prerequisite is
-understood, then require query-frontend/evaluator statistics to fall to zero,
-alert rules and query metrics to stay healthy, bounded reconciliation to drain,
-and `loki-tail-dropped-streams` to remain zero for ten minutes. Raising Loki's
-fixed queues or suppressing the reset would hide correctness loss rather than
-remove either producer.
+Controlled netplan activation cleared that prerequisite at `04:12:44Z` on
+Fireside and `04:14:34Z` on Crisp. Both hosts then retained their configured LAN
+identity, local scheduler/database paths, fresh cross-host metrics, and ring
+membership. A direct immutable-container window from `04:15:08Z` through
+`04:29:30Z` across edge-0, edge-1, edge-3, edge-4, Fireside, and Crisp contained
+35,909 Grafana records. Of those, 11,583 were dropped-stream resets, 5,511 were
+Mimir query-frontend statistics, another 5,511 were evaluator statistics, 4,596
+were Loki `caller=table_manager.go:195 msg="get or create table"` records, and
+182 were exact unquoted backend EOFs. Those EOFs split 37 on edge-0 and 145 on
+edge-4; 48 quoted cancellation records
+from deliberate watcher retirement were counted separately and remain excluded
+from the class. All six active nodes were healthy, so missing LAN identity is no
+longer the current reset or EOF prerequisite.
+
+The exact transition supplied the causal discriminator. Loki 3.7.3 gives each
+ingester tail a 100-stream processing queue and a five-stream send queue. The
+first dropped stream sets `blockedAt`; when another stream arrives more than 15
+seconds later, the ingester closes that server-side tail. `Ingester.Tail`
+returns nil, the querier's `Recv` observes EOF and removes the client, and its
+five-second connection ticker reconnects. The first edge-0 EOF arrived about 17
+seconds after the replacement watcher's tail children started, during the same
+reset wave. Current `loki_querier_tail_active` state then showed all eight
+external tails on edge-0 and zero on the other five nodes, proving that the
+emitting host followed the selected querier and was not the failed backend
+identity. This makes the present off-grid EOF a downstream blocked-tail symptom,
+while process exit or ring loss remain alternate ways to produce the same text.
+
+Warp commit `42168fe` disables Mimir `frontend.query_stats_enabled` in the
+generated Grafana config, removing the 11,022 avoidable per-query records while
+retaining query execution, errors, metrics, and alert cadence. That is the next
+controlled producer reduction, not proof that all remaining volume is harmless
+or that it is the sole cause. The deployed Loki log has an `addr` variable in
+scope but omits it from the EOF record. Warp commit `bca37cf` adds that backend
+address and a pinned-upstream regression, while the monitor accepts both rolling
+formats and frames new alerts by backend. Deploy one Grafana image containing
+both commits. Then require query statistics to reach zero, alert rules and query
+metrics to stay healthy, every bounded reconciliation partition to drain, and
+both `loki-tail-dropped-streams` and `loki-tail-backend-eof` to remain zero for
+ten minutes. Any residual EOF must name the backend and be reconciled against
+that node's process, tailer, ring, and network state. Raising Loki's fixed queues
+or suppressing either record would hide correctness loss rather than remove the
+producer or blocked path.
 
 Separately, the querier has its own ten-response channel to the WebSocket. If
 that later queue fills, Loki attaches up to 1,000 `dropped_entries` descriptors
@@ -934,22 +963,24 @@ The standing classifier reports only the unquoted internal EOF form as
 `loki-tail-backend-eof` at 5/minute. It deliberately excludes quoted gRPC
 `Canceled ... context canceled` lines: explicitly retiring the old v150
 watchers at `19:17:37Z` produced a large expected cancellation burst without
-proving a backend fault. After deployment, require every Grafana block to run
-the fixed image. The same EOF text is not cause-specific: after
-`2026.8.31+1034210530` deployed the deadline fix, the current edge-4 container
-and then edge-0 emitted non-grid EOFs. At the same time Fireside was absent from
-the active Loki ring because its configured LAN address was missing. That
-disproves unconditional attribution to the old 60-second deadline, but does not
-by itself prove every new EOF came from the missing node. For a current image,
-preserve cadence and emitting container, inspect ring membership and the
-`grafana-node` signal, restore any missing active node/LAN identity, and only
-then capture the exact backend route if EOF persists. Do not rebuild or restart
-an already-current image from the historical deadline prose, raise Loki
-tail-request limits, or raise the ring-session cap. Closure requires every
-configured active ring member to own its LAN identity and heartbeat plus ten
-minutes of stable external tails with zero recurring backend EOF. The bounded
-two-minute reconciliation remains required because late source timestamps and
-the Search-to-tail handoff are independent completeness boundaries.
+proving a backend fault. The current fixed-image window above proves the same
+EOF text is not cause-specific: its off-grid instances co-occurred with the
+15-second blocked-tailer reset path after all active ring nodes were healthy.
+Because the emitting host follows the externally selected querier, a pre-
+`bca37cf` line cannot identify its failed backend and must retain an empty frame.
+After `bca37cf`, the exact `addr=<backend>` becomes the stable alert frame; the
+synthetic regression requires that format while preserving legacy detection and
+the cancellation negative control. Provenance-gate `1e95aef` and deploy it only
+to older Grafana blocks. For the current fleet, deploy one Grafana image that
+also contains `42168fe` and `bca37cf`. Do not claim the attribution patch itself
+fixes loss, rebuild from the historical deadline prose, raise Loki tail-request
+limits, raise the fixed queues, or raise the ring-session cap. Closure requires
+query statistics at zero with rules and query metrics healthy, every active ring
+member owning its LAN identity and heartbeat, and ten minutes of stable external
+tails with zero reset and EOF classes. A residual framed EOF is investigated on
+that exact backend. Bounded two-minute reconciliation remains required because
+late source timestamps and the Search-to-tail handoff are independent
+completeness boundaries.
 
 The first production run of that classifier supplied its end-to-end control.
 Monitor v152 was built from clean server commit `45d832aa` (binary SHA-256
@@ -3253,8 +3284,8 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[plugin.notRegistered] plugin not registered` in `ngalert.scheduler` | Grafana has the provisioned datasource row but cannot load that datasource's plugin. `/api/health`, Mimir `/ready`, and the UI can all stay green while every affected dashboard query and alert rule fails. | Query through Grafana's `/api/ds/query`, then inspect `/var/lib/grafana/plugins`. For Grafana 13.2, bake the signed standalone Prometheus plugin into the image as in §11.15; do not recreate a datasource row that already exists. |
-| `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The historical exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline, not the 256-session ceiling. The same text later recurred off-grid on current fixed containers while a configured ring node lacked its LAN identity, so EOF alone is not cause-specific. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Provenance-gate Warp `1e95aef`; deploy it only to older Grafana blocks. On a current block, inspect `grafana-node`, LAN identity, ring membership, cadence, and exact backend route; restore missing active members before deeper attribution. Require every active ring node healthy and zero recurring `loki-tail-backend-eof` for ten minutes with stable tails and bounded reconciliation. Do not raise tail/ring limits or restart the same image. See §1.5. |
-| `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail queue overflowed before its internal gRPC send. Loki 3.7.3 then discards the accompanying `resp.DroppedStreams` in the querier, so the Grafana log is an observation point, not affected-service attribution. Historical reset waves paired with pre-fix per-peer Proxy logs. After those fixes deployed, a one-minute control still found 238 resets among 1,762 Grafana records, led by Mimir per-query statistics, while Fireside was absent from the ring. | Provenance-gate Warp `1e95aef` and server `e055c98c`; restore active Grafana-node LAN/ring health first. For already-current blocks, deploy Warp `42168fe` to disable only Mimir per-query statistics. Reconcile every service window and require query stats zero, alert rules/metrics healthy, and `loki-tail-dropped-streams` zero for ten minutes. Do not raise queues, suppress the reset, or claim Grafana was the affected selector. See §1.5. |
+| `caller=tail.go:<line> component=tail-querier ... msg="Error receiving response from grpc tail client" [addr=<backend>] err=EOF` | Loki's external WebSocket tail can remain connected while an internal gRPC tail backend is lost, omitting that backend's live entries. The historical exact 59–61-second recurrence was Warp's 60-second ring TCP application read deadline. The current off-grid wave followed Loki's 15-second blocked-ingester-tail close path alongside 11,583 reset records after all six active ring nodes were healthy. The emitting Grafana host follows the selected querier and is not backend attribution. A quoted `Canceled ... context canceled` during deliberate client retirement is a separate lifecycle. | Provenance-gate Warp `1e95aef`; deploy it only to older Grafana blocks. For the current fleet, deploy Grafana with Warp `42168fe` plus `bca37cf`, which removes Mimir per-query statistics and adds the actual backend address without claiming instrumentation fixes loss. Require query stats zero, rules/metrics healthy, and both EOF/reset classes zero for ten minutes with stable tails and bounded reconciliation. Investigate a residual `addr` frame on that node. Do not raise tail/queue/ring limits or restart the same image. See §1.5. |
+| `caller=tailer.go:<line> msg="tailer dropped streams is reset"` | An ingester-side live-tail queue overflowed before its internal gRPC send. Loki 3.7.3 discards the accompanying `resp.DroppedStreams` in the querier; continued traffic after 15 seconds closes the backend tail and produces the paired EOF. Grafana is the observation point, not affected-service attribution. Historical waves paired with pre-fix Proxy logs. The current six-host window had 11,583 resets plus 11,022 avoidable Mimir per-query records after LAN/ring health was restored. | Provenance-gate Warp `1e95aef` and server `e055c98c`. For already-current blocks, deploy Grafana with Warp `42168fe` plus `bca37cf`; reconcile every service window and require query stats zero, alert rules/metrics healthy, and both loss classes zero for ten minutes. Any residual EOF must carry a backend frame. Do not raise queues, suppress the reset, or claim Grafana was the affected selector. See §1.5. |
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | The later querier-to-WebSocket response channel overflowed for the named standing tail. Warpctl received API `dropped_entries`; unlike the earlier ingester reset, this evidence is service-attributed. | Run Warpctl with Warp `26089b2`, retain bounded reconciliation for the named service, and remove its producer/consumer stall. Never print the dropped labels or timestamps. Require zero `loki-tail-dropped-entries` for ten minutes through the triggering load. See §1.5. |
 | `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 logs whenever a store-gateway's local bucket index is older than the querier's requested version. The live fleet's exact `diff=-873` was one normal generation of independent 15-minute phase skew, not a query failure. `mimir-bucket-index-lag` matches only magnitude >=1,800 seconds, where at least one additional sync interval is missing. | Use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
 | `http: response.WriteHeader on hijacked connection ... router.(*Router).ServeHTTP` | Router recovery attempted an HTTP 500 after the Connect handler transferred its H1 socket to Gorilla. In the 2026-08-31 control, 131 canonical warnings with zero `[h]unhandled` records proved the expected-Done branch fell through to `http.Error`; the rejected response is teardown log amplification, not proof of a failed active transport. | Deploy the router fix that returns immediately for `server.IsDoneError`, then require zero `http-hijack-write` lines for ten minutes of normal H1 teardown. Do not suppress net/http logging globally. A warning paired with `[h]unhandled error from route` instead requires fixing that unexpected route panic. See §1.5. |

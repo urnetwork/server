@@ -32,7 +32,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"pool timeout", "redis: connection pool timeout", "pool-timeout"},
 		{"cluster down", "CLUSTERDOWN Hash slot not served", "clusterdown"},
 		{"oom writes", "OOM command not allowed when used memory > maxmemory", "oom-writes"},
-		{"Loki tail backend EOF", `level=error caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`, "loki-tail-backend-eof"},
+		{"Loki tail backend EOF", `level=error caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" addr=192.0.2.10:6490 err=EOF`, "loki-tail-backend-eof"},
 		{"Loki tail dropped streams", `level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`, "loki-tail-dropped-streams"},
 		{"Warpctl direct Loki tail loss", `[warpctl][loki-tail-dropped-entries] service=proxy count=2`, "loki-tail-dropped-entries"},
 		{"connection reset", "read: connection reset by peer", "conn-reset"},
@@ -134,37 +134,36 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 		"100-stream processing queue",
 		"five-stream send queue",
 		"omitted records before they reached the querier",
-		"19,995 per-peer installation lines",
-		"18,165 resets",
-		"39,378, 38,513, and 39,583 periodic Proxy detail lines",
-		"server.go:764",
-		"before watcher promotion",
-		"2026.8.31+1034210530",
-		"new one-minute window still returned 1,762 Grafana lines",
-		"344 Mimir query-frontend stats",
-		"344 evaluator stats",
-		"252 Loki table-manager records",
-		"238 reset records",
-		"175 Grafana Prometheus-plugin completions",
-		"observation plane its own default-info producer",
-		"distinct from the earlier Proxy wave",
+		"more traffic arrives over 15 seconds after blockedAt",
+		"five-second ticker",
+		"35,909 Grafana records",
+		"11,583 resets",
+		"5,511 Mimir query-frontend statistics",
+		"5,511 evaluator statistics",
+		"4,596 Loki `get or create table` records",
+		"182 exact backend EOFs",
+		"11,022 avoidable per-query records",
+		"not a proven sole cause",
 		"affirmative internal live-tail loss",
 		"pushTailResponseFromIngester",
 		"discards resp.DroppedStreams",
 		"Grafana is the observation service",
+		"all six active Grafana nodes were healthy",
+		"removes missing LAN identity as the current prerequisite",
 		"capped service-wide query is not a total",
 		"same absolute window for each configured block",
 		"do not redeploy already-current blocks",
-		"missing Fireside LAN identity",
 		"Warp commit 1e95aef",
 		"server Proxy commit e055c98c",
-		"Warp commit 42168fe",
+		"Warp commits 42168fe and bca37cf",
 		"disables only Mimir's per-query statistics stream",
 		"retaining query execution, metrics, errors, and alert cadence",
+		"preserves the backend address on any residual EOF",
 		"Do not raise Loki's fixed queues",
 		"one aggregate summary per reconciling instance",
 		"query-frontend/evaluator statistics fall to zero",
-		"loki-tail-dropped-streams remains zero for 10 minutes",
+		"loki-tail-dropped-streams plus loki-tail-backend-eof remain zero for 10 minutes",
+		"residual EOF is framed by backend address",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("Loki dropped-stream alert missing %q:\n%s", detail, markdown)
@@ -173,6 +172,8 @@ func TestLogErrorsSignalExplainsLokiTailDroppedStreams(t *testing.T) {
 	for _, staleAction := range []string{
 		"Deploy a Grafana image containing Warp commit 1e95aef",
 		"deploy server Proxy commit e055c98c or later",
+		"missing Fireside LAN identity",
+		"node recovery remains a prerequisite",
 	} {
 		if strings.Contains(markdown, staleAction) {
 			t.Fatalf("Loki dropped-stream alert retained unconditional stale action %q:\n%s", staleAction, markdown)
@@ -210,7 +211,8 @@ func TestLogErrorsSignalExplainsDirectLokiTailDroppedEntries(t *testing.T) {
 }
 
 func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
-	eofLine := `[edge-0][grafana][g1][cid:test][2026-08-31T19:20:51.247763Z]level=error ts=2026-08-31T19:20:51.244318653Z caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`
+	legacyEOFLine := `[edge-0][grafana][g1][cid:test][2026-08-31T19:20:51.247763Z]level=error ts=2026-08-31T19:20:51.244318653Z caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err=EOF`
+	attributedEOFLine := `[edge-0][grafana][g1][cid:test][2026-09-01T05:00:17.247763Z]level=error ts=2026-09-01T05:00:17.244318653Z caller=tail.go:232 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" addr=192.0.2.10:6490 err=EOF`
 	canceledLine := `[edge-1][grafana][g1][cid:test][2026-08-31T19:17:37.333774Z]level=error ts=2026-08-31T19:17:37.270771087Z caller=tail.go:230 component=tail-querier org_id=fake msg="Error receiving response from grpc tail client" err="rpc error: code = Canceled desc = context canceled"`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
@@ -218,7 +220,7 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 		}
 		// Four EOFs are below the threshold. The expected watcher-retirement
 		// variant must not be counted as the fifth internal backend loss.
-		return strings.Repeat(eofLine+"\n", 4) + strings.Repeat(canceledLine+"\n", 20), nil
+		return strings.Repeat(attributedEOFLine+"\n", 4) + strings.Repeat(canceledLine+"\n", 20), nil
 	}}
 	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -234,7 +236,7 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-grafana", nil
 		}
-		return strings.Repeat(eofLine+"\n", 5), nil
+		return strings.Repeat(attributedEOFLine+"\n", 5), nil
 	}
 	alerts, err = NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -243,34 +245,67 @@ func TestLogErrorsSignalExplainsLokiTailBackendEOF(t *testing.T) {
 	markdown := requireAlertClass(t, alerts, "loki-tail-backend-eof").Markdown()
 	for _, detail := range []string{
 		"internal gRPC tail backend",
+		"frame=backend=192.0.2.10:6490",
 		"59-61-second recurrence",
 		"60-second application read deadline",
-		"The same EOF text is not cause-specific",
+		"100-stream processing queue",
+		"five-stream send queue",
+		"more than 15 seconds later closes",
+		"Recv observes EOF",
+		"five-second connection ticker reconnects",
 		"backend process exit",
-		"ring-member loss",
+		"ring loss",
 		"long-lived HTTP/2 and gRPC connections",
-		"far below the independent 256-session ceiling",
 		"Canceled/context-canceled",
-		"non-grid EOFs",
+		"182 exact EOFs",
+		"11,583 dropped-stream resets",
+		"48 quoted cancellations",
 		"2026.8.31+1034210530",
-		"Fireside was absent from the active Loki ring",
-		"disproves blind attribution",
-		"grafana-node findings",
+		"emitting host moved from edge-4 to edge-0",
+		"log host is not the failed backend identity",
+		"Warp commit bca37cf adds that address",
+		"restored all six active ring nodes",
+		"missing LAN identity is no longer a current prerequisite",
 		"Bounded log reconciliation remains required",
 		"Warp commit 1e95aef",
-		"only to a Grafana block whose image predates it",
-		"do not rebuild or restart it from this alert",
-		"restore any missing ring member or LAN identity",
-		"Do not raise Loki tail-request limits",
+		"only to older Grafana blocks",
+		"Warp commits 42168fe and bca37cf",
+		"Do not claim the instrumentation itself fixes loss",
+		"named backend's tailer, process, ring, and network state",
+		"Do not raise Loki's fixed queues",
 		"every configured active ring member owns its LAN identity",
-		"no loki-tail-backend-eof line recurs for 10 minutes",
+		"loki-tail-dropped-streams plus loki-tail-backend-eof remain zero for 10 minutes",
+		"residual EOF must carry a backend frame",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("Loki tail backend EOF alert missing %q:\n%s", detail, markdown)
 		}
 	}
-	if strings.Contains(markdown, "Publish and deploy a Grafana image containing Warp commit 1e95aef") {
-		t.Fatalf("post-fix EOF alert retained unconditional legacy deployment action:\n%s", markdown)
+	for _, staleAction := range []string{
+		"Publish and deploy a Grafana image containing Warp commit 1e95aef",
+		"restore any missing ring member or LAN identity",
+		"Fireside was absent from the active Loki ring",
+	} {
+		if strings.Contains(markdown, staleAction) {
+			t.Fatalf("post-fix EOF alert retained stale guidance %q:\n%s", staleAction, markdown)
+		}
+	}
+
+	// Rolling deployment remains observable: a pre-instrumentation line has no
+	// backend frame, but must still classify instead of falling into novel.
+	source.localFn = func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-grafana", nil
+		}
+		return strings.Repeat(legacyEOFLine+"\n", 5), nil
+	}
+	alerts, err = NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyMarkdown := requireAlertClass(t, alerts, "loki-tail-backend-eof").Markdown()
+	if !strings.Contains(legacyMarkdown, "frame=") || strings.Contains(legacyMarkdown, "frame=backend=") {
+		t.Fatalf("legacy Loki EOF should remain un-attributed during rollout:\n%s", legacyMarkdown)
 	}
 }
 
