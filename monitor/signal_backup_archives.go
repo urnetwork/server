@@ -24,6 +24,8 @@ const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
 github_unit_state=$(systemctl is-active github-backup-archive.service 2>/dev/null || true)
 github_main_pid=$(systemctl show github-backup-archive.service -p MainPID --value 2>/dev/null || true)
 remote_unit_state=$(systemctl show remote-backup-archive.service -p ActiveState --value 2>/dev/null || true)
+remote_unit_substate=$(systemctl show remote-backup-archive.service -p SubState --value 2>/dev/null || true)
+remote_main_pid=$(systemctl show remote-backup-archive.service -p MainPID --value 2>/dev/null || true)
 remote_result=$(systemctl show remote-backup-archive.service -p Result --value 2>/dev/null || true)
 remote_restart=$(systemctl show remote-backup-archive.service -p Restart --value 2>/dev/null || true)
 remote_restart_delay=$(systemctl show remote-backup-archive.service -p RestartUSec --value 2>/dev/null || true)
@@ -36,6 +38,8 @@ remote_redis_port=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n
 case "${github_unit_state}" in '') github_unit_state=unknown ;; esac
 case "${github_main_pid}" in ''|*[!0-9]*) github_main_pid=0 ;; esac
 case "${remote_unit_state}" in '') remote_unit_state=unknown ;; esac
+case "${remote_unit_substate}" in '') remote_unit_substate=unknown ;; esac
+case "${remote_main_pid}" in ''|*[!0-9]*) remote_main_pid=0 ;; esac
 case "${remote_result}" in '') remote_result=unknown ;; esac
 case "${remote_restart}" in '') remote_restart=unknown ;; esac
 case "${remote_restart_delay}" in ''|*[!0-9a-z]*) remote_restart_delay=unknown ;; esac
@@ -47,6 +51,8 @@ case "${remote_redis_port}" in ''|*[!0-9]*) remote_redis_port=0 ;; esac
 printf 'github_unit_state=%s\n' "${github_unit_state}"
 printf 'github_main_pid=%s\n' "${github_main_pid}"
 printf 'remote_unit_state=%s\n' "${remote_unit_state}"
+printf 'remote_unit_substate=%s\n' "${remote_unit_substate}"
+printf 'remote_main_pid=%s\n' "${remote_main_pid}"
 printf 'remote_result=%s\n' "${remote_result}"
 printf 'remote_restart=%s\n' "${remote_restart}"
 printf 'remote_restart_delay=%s\n' "${remote_restart_delay}"
@@ -101,6 +107,8 @@ type backupArchiveWriterObservation struct {
 	unitState          string
 	mainPID            int64
 	remoteUnitState    string
+	remoteUnitSubstate string
+	remoteMainPID      int64
 	remoteResult       string
 	remoteRestart      string
 	remoteRestartDelay string
@@ -270,6 +278,7 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 	for _, host := range backupHosts {
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
+		findings = append(findings, evaluateBackupArchiveRun(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveRetry(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveSourceRoute(
 			writers[host.name],
@@ -321,6 +330,8 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"github_unit_state",
 		"github_main_pid",
 		"remote_unit_state",
+		"remote_unit_substate",
+		"remote_main_pid",
 		"remote_result",
 		"remote_restart",
 		"remote_restart_delay",
@@ -338,7 +349,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 			return backupArchiveWriterObservation{}, fmt.Errorf("missing property %q", key)
 		}
 	}
-	for _, key := range []string{"github_unit_state", "remote_unit_state", "remote_result", "remote_restart"} {
+	for _, key := range []string{"github_unit_state", "remote_unit_state", "remote_unit_substate", "remote_result", "remote_restart"} {
 		if matched, _ := regexp.MatchString(`^[a-z-]+$`, values[key]); !matched {
 			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
 		}
@@ -349,6 +360,10 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	mainPID, err := strconv.ParseInt(values["github_main_pid"], 10, 64)
 	if err != nil || mainPID < 0 {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid main PID %q", values["github_main_pid"])
+	}
+	remoteMainPID, err := strconv.ParseInt(values["remote_main_pid"], 10, 64)
+	if err != nil || remoteMainPID < 0 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote main PID %q", values["remote_main_pid"])
 	}
 	remoteExitStatus, err := strconv.ParseInt(values["remote_exit_status"], 10, 64)
 	if err != nil || remoteExitStatus < 0 {
@@ -372,6 +387,8 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		unitState:          values["github_unit_state"],
 		mainPID:            mainPID,
 		remoteUnitState:    values["remote_unit_state"],
+		remoteUnitSubstate: values["remote_unit_substate"],
+		remoteMainPID:      remoteMainPID,
 		remoteResult:       values["remote_result"],
 		remoteRestart:      values["remote_restart"],
 		remoteRestartDelay: values["remote_restart_delay"],
@@ -381,6 +398,62 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		remoteRedisSource:  values["remote_redis_source"],
 		remoteRedisPort:    remoteRedisPort,
 	}, nil
+}
+
+func backupArchiveRemoteWriterRunning(observation backupArchiveWriterObservation) bool {
+	switch observation.remoteUnitState {
+	case "active", "activating", "reloading":
+		return 0 < observation.remoteMainPID && observation.remoteUnitSubstate != "auto-restart"
+	default:
+		return false
+	}
+}
+
+func evaluateBackupArchiveRun(observation backupArchiveWriterObservation) finding {
+	target := observation.host + "/remote"
+	if backupArchiveRemoteWriterRunning(observation) ||
+		(observation.remoteUnitState != "failed" &&
+			observation.remoteUnitSubstate != "auto-restart" &&
+			observation.remoteResult == "success" &&
+			observation.remoteExitStatus == 0) {
+		return healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-run-failed", target,
+		)
+	}
+
+	symptom := fmt.Sprintf("%s data archive pull failed", target)
+	mechanism := "The last remote-backup-archive.service ExecStart terminated unsuccessfully, so no atomic PostgreSQL or Redis recovery point was published. A configured retry policy limits how long the failure persists; it does not make the failed attempt healthy."
+	context := "Rsync's partial directory is intentionally resumable and incomplete files do not match the generation parser. Preserve that partial rather than renaming it or starting a concurrent writer."
+	action := "Read the bounded unit journal, verify the mounted archive and both direct SSH endpoints, then repair the first failed dependency. If systemd has no retry scheduled, obtain operator authorization before starting one catch-up run."
+	verify := "Exactly one subsequent unit generation runs with a nonzero MainPID, resumes the partial over the configured direct endpoint, exits successfully, validates both artifacts and manifests, and publishes fresh completed generations in two direct Mimir reads."
+	if observation.remoteUnitSubstate == "auto-restart" {
+		symptom = fmt.Sprintf("%s data archive pull failed and is waiting in systemd restart backoff", target)
+		mechanism = "The last remote-backup-archive.service ExecStart exited unsuccessfully. Systemd keeps ActiveState=activating while SubState=auto-restart waits for RestartUSec, but no archive writer is active during the restart backoff and the failed attempt produced no atomic recovery point."
+		action = "Do not manually start or duplicate the unit while its bounded on-failure retry is scheduled. Preserve the rsync partial, read the bounded journal, verify both direct SSH forwards, and observe the next systemd-owned attempt. Escalate the shared route or source failure if that attempt cannot sustain progress."
+	}
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: "backup-archive-run-failed", target: target,
+		frame: "unit=remote-backup-archive.service", sustain: 1,
+		symptom:   symptom,
+		mechanism: mechanism,
+		baseline:  "An active data pull has a nonzero MainPID. Otherwise the last completed remote-backup-archive.service invocation has Result=success and ExecMainStatus=0; auto-restart backoff is reported as a failed attempt, not live progress.",
+		observed: fmt.Sprintf(
+			"unit_state=%s unit_substate=%s main_pid=%d result=%s exit_status=%d restart=%s restart_delay=%s",
+			observation.remoteUnitState,
+			observation.remoteUnitSubstate,
+			observation.remoteMainPID,
+			observation.remoteResult,
+			observation.remoteExitStatus,
+			observation.remoteRestart,
+			observation.remoteRestartDelay,
+		),
+		evidence: "ActiveState, SubState, MainPID, Result, ExecMainStatus, Restart, and RestartUSec are read directly from the effective unit on the configured backup host.",
+		context:  context,
+		action:   action,
+		verify:   verify,
+		playbook: "SIGNALS.md §11.22",
+	}
 }
 
 func evaluateBackupArchiveSourceRoute(
@@ -584,6 +657,8 @@ type backupArchiveQueueObservation struct {
 	activeArchive string
 	unit          string
 	unitState     string
+	unitSubstate  string
+	mainPID       int64
 }
 
 func backupArchiveQueuedBehind(
@@ -594,8 +669,7 @@ func backupArchiveQueuedBehind(
 	if observation == nil || (observation.archive != "pg" && observation.archive != "redis") {
 		return backupArchiveQueueObservation{}
 	}
-	if writer.remoteUnitState != "active" && writer.remoteUnitState != "activating" &&
-		writer.remoteUnitState != "reloading" {
+	if !backupArchiveRemoteWriterRunning(writer) {
 		return backupArchiveQueueObservation{}
 	}
 	progress, valid := backupArchiveProgress(observation)
@@ -616,6 +690,8 @@ func backupArchiveQueuedBehind(
 		activeArchive: activeArchive,
 		unit:          "remote-backup-archive.service",
 		unitState:     writer.remoteUnitState,
+		unitSubstate:  writer.remoteUnitSubstate,
+		mainPID:       writer.remoteMainPID,
 	}
 }
 
@@ -744,10 +820,12 @@ func evaluateBackupArchive(
 		} else if queue.activeArchive != "" {
 			frame = "queued-behind=" + queue.activeArchive
 			queueObserved = fmt.Sprintf(
-				" queued_behind=%s owner_unit=%s owner_unit_state=%s owner_progress=1",
+				" queued_behind=%s owner_unit=%s owner_unit_state=%s owner_unit_substate=%s owner_main_pid=%d owner_progress=1",
 				queue.activeArchive,
 				queue.unit,
 				queue.unitState,
+				queue.unitSubstate,
+				queue.mainPID,
 			)
 			mechanism = fmt.Sprintf(
 				"The source textfile is current and %s is idle only because the same single-writer data job is actively transferring %s first. The script processes PostgreSQL and Redis serially, so the second source cannot enter its in-progress phase until the first transfer and atomic archive rotation finish.",

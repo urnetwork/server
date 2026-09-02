@@ -22,6 +22,8 @@ type backupArchiveWriterFixture struct {
 	unitState          string
 	mainPID            int64
 	remoteUnitState    string
+	remoteUnitSubstate string
+	remoteMainPID      int64
 	remoteResult       string
 	remoteRestart      string
 	remoteRestartDelay string
@@ -143,7 +145,9 @@ func TestBackupArchivesSignalSyntheticStaleArchiveQueuedBehindActiveDataWriter(t
 	stale := now.Add(-13 * 24 * time.Hour)
 	fresh := now.Add(-24 * time.Hour)
 	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
-		remoteUnitState: "activating",
+		remoteUnitState:    "activating",
+		remoteUnitSubstate: "start",
+		remoteMainPID:      156739,
 	},
 		backupArchiveFixture{archive: "pg", generation: "main-pg-old.sql.xz", createdAt: &stale, progress: &one},
 		backupArchiveFixture{archive: "redis", generation: "main-redis-old.rdb", createdAt: &stale, progress: &zero},
@@ -159,6 +163,8 @@ func TestBackupArchivesSignalSyntheticStaleArchiveQueuedBehindActiveDataWriter(t
 		"queued_behind=pg",
 		"owner_unit=remote-backup-archive.service",
 		"owner_unit_state=activating",
+		"owner_unit_substate=start",
+		"owner_main_pid=156739",
 		"Preserve the active pg phase",
 		"Do not start, restart, or duplicate",
 		"publishes redis in_progress=1 without a second unit generation",
@@ -226,7 +232,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 11 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 13 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
@@ -277,6 +283,96 @@ func TestBackupArchivesSignalSyntheticDetectsDisabledPullRetry(t *testing.T) {
 			t.Fatalf("disabled retry alert missing %q:\n%s", want, alert.Markdown())
 		}
 	}
+}
+
+// A oneshot with Restart=on-failure enters ActiveState=activating while it
+// waits in the auto-restart backoff. Treating every activating state as a live
+// transfer hid the failed September 2 direct PostgreSQL pull: ExecStart had
+// exited 1, both progress gauges were zero, and no rsync process existed.
+func TestBackupArchivesSignalSyntheticDetectsFailedPullInRestartBackoff(t *testing.T) {
+	now := time.Date(2026, 9, 2, 20, 49, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState:    "activating",
+		remoteUnitSubstate: "auto-restart",
+		remoteResult:       "exit-code",
+		remoteRestart:      "on-failure",
+		remoteRestartDelay: "30min",
+		remoteExitStatus:   1,
+	}, fixtures...)
+
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-run-failed", "backup-1/remote")
+	for _, want := range []string{
+		"unit_state=activating",
+		"unit_substate=auto-restart",
+		"main_pid=0",
+		"result=exit-code",
+		"exit_status=1",
+		"restart=on-failure",
+		"restart_delay=30min",
+		"no archive writer is active during the restart backoff",
+		"Preserve the rsync partial",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("failed pull alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestBackupArchivesSignalSyntheticActivePullHasNoFailureAlert(t *testing.T) {
+	now := time.Date(2026, 9, 2, 20, 50, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState:    "activating",
+		remoteUnitSubstate: "start",
+		remoteMainPID:      4201,
+	}, fixtures...)
+
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-run-failed", "backup-1/remote"); alert != nil {
+		t.Fatalf("live data pull was misclassified as a failed invocation: %+v", *alert)
+	}
+}
+
+// A stale progress textfile must not turn an auto-restart backoff into an
+// apparent serial queue. MainPID is the discriminator between an executing
+// oneshot and systemd merely retaining ActiveState=activating for its timer.
+func TestBackupArchivesSignalSyntheticRestartBackoffIsNotActiveQueue(t *testing.T) {
+	now := time.Date(2026, 9, 2, 20, 51, 0, 0, time.UTC)
+	zero := float64(0)
+	one := float64(1)
+	stale := now.Add(-13 * 24 * time.Hour)
+	fresh := now.Add(-24 * time.Hour)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState:    "activating",
+		remoteUnitSubstate: "auto-restart",
+		remoteResult:       "exit-code",
+		remoteExitStatus:   1,
+	},
+		backupArchiveFixture{archive: "pg", generation: "main-pg-old.sql.xz", createdAt: &stale, progress: &one},
+		backupArchiveFixture{archive: "redis", generation: "main-redis-old.tar.gpg", createdAt: &stale, progress: &zero},
+		backupArchiveFixture{archive: "github-urnetwork", generation: "main-code-urnetwork-current.tar.xz", createdAt: &fresh, progress: &zero},
+		backupArchiveFixture{archive: "github-urfoundation", generation: "main-code-urfoundation-current.tar.xz", createdAt: &fresh, progress: &zero},
+	)
+
+	redis := requireBackupArchiveAlert(t, alerts, "backup-archive-stale", "backup-1/redis")
+	if redis.Frame == "queued-behind=pg" || strings.Contains(redis.Action, "Preserve the active pg phase") {
+		t.Fatalf("restart backoff was misclassified as an active PostgreSQL phase: %+v", redis)
+	}
+	requireBackupArchiveAlert(t, alerts, "backup-archive-run-failed", "backup-1/remote")
 }
 
 func TestBackupArchivesSignalSyntheticDetectsManagementVPNSourceRouting(t *testing.T) {
@@ -412,6 +508,9 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.remoteUnitState == "" {
 		fixture.remoteUnitState = "inactive"
 	}
+	if fixture.remoteUnitSubstate == "" {
+		fixture.remoteUnitSubstate = "dead"
+	}
 	if fixture.remoteResult == "" {
 		fixture.remoteResult = "success"
 	}
@@ -437,6 +536,8 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		"github_unit_state=%s\n"+
 			"github_main_pid=%d\n"+
 			"remote_unit_state=%s\n"+
+			"remote_unit_substate=%s\n"+
+			"remote_main_pid=%d\n"+
 			"remote_result=%s\n"+
 			"remote_restart=%s\n"+
 			"remote_restart_delay=%s\n"+
@@ -448,6 +549,8 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.unitState,
 		fixture.mainPID,
 		fixture.remoteUnitState,
+		fixture.remoteUnitSubstate,
+		fixture.remoteMainPID,
 		fixture.remoteResult,
 		fixture.remoteRestart,
 		fixture.remoteRestartDelay,

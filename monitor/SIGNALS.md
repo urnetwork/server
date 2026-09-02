@@ -8456,9 +8456,9 @@ sample on Planetoid before treating the panel as capacity evidence.
 The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
 role. It also reads `github-backup-archive.service` state and MainPID plus the
-effective `remote-backup-archive.service` state, result, exit status, restart
-policy, restart delay, and its four non-secret PostgreSQL/Redis source endpoint
-values directly on that backup host, and queries the
+effective `remote-backup-archive.service` active state, substate, MainPID,
+result, exit status, restart policy, restart delay, and its four non-secret
+PostgreSQL/Redis source endpoint values directly on that backup host, and queries the
 producer-owned `urnetwork_backup_archive_heartbeat_timestamp_seconds` values
 alongside the progress gauges. It expects exactly the four archive names above.
 Samples older than 90 seconds are observation loss even when their archive
@@ -8479,7 +8479,10 @@ The data-pull oneshot has effective `Restart=on-failure` and
 successful pulls repeat. The effective data-pull unit matches the two
 dedicated direct SSH endpoints and ports recorded in monitor inventory. These
 bulk paths deliberately bypass the `172.28.*` management VPN; the monitor
-itself may still use that VPN to inspect Planetoid.
+itself may still use that VPN to inspect Planetoid. An executing data pull has
+a nonzero MainPID. Otherwise its last invocation has `Result=success` and
+`ExecMainStatus=0`; `ActiveState=activating` with `SubState=auto-restart` and a
+zero MainPID is a failed attempt waiting for its retry, not active progress.
 BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
@@ -8512,6 +8515,11 @@ BROKEN:
   unit is not configured with the bounded on-failure retry above. This is a
   software policy failure even when its precipitating missing mount needs an
   operator or hardware repair.
+- `backup-archive-run-failed` is immediate when the last data-pull invocation
+  failed or is waiting in `auto-restart` with no MainPID. Preserve its rsync
+  partial and the single-writer boundary, inspect the bounded journal and both
+  direct endpoints, and observe the scheduled systemd-owned retry. A retry
+  policy is recovery machinery; it does not make the failed attempt healthy.
 - `backup-archive-source-route` is immediate when either effective source
   target or port differs from its exact monitor-inventory direct SSH endpoint,
   or when either source uses `172.28.*`. This is a configuration failure even
@@ -8651,6 +8659,24 @@ phases near 17.3 hours before validation/rotation overhead, well inside the
 five-day objective. This is a capacity projection, not recovery proof. Continue
 measuring the same socket and PID; only a material sustained-rate drop that
 moves the projection outside the objective reopens the network/hardware branch.
+
+At `2026-09-02T20:33:16Z`, that direct PostgreSQL session was reset after rsync
+had received 90,338,645,957 bytes. The unit then tried the separate Redis
+forward and it was reset immediately before an authenticated session reached
+edge-6. Neither source host nor either SSH daemon restarted, the archive
+remained mounted with about 5.4 TiB free, and both direct ports again returned
+SSH banners during the investigation. This localizes the interruption to the
+shared public-forward path, but does not yet distinguish router restart,
+conntrack eviction, or another upstream reset. Rsync retained the partial and
+systemd correctly scheduled its 30-minute retry. Direct state during that wait
+was `ActiveState=activating`, `SubState=auto-restart`, `MainPID=0`,
+`Result=exit-code`, and `ExecMainStatus=1`; the prior probe emitted only stale
+generation alerts because it treated `activating` as sufficient evidence of a
+live writer. The `backup-archive-run-failed` class and MainPID-gated queue
+attribution make that failed-attempt boundary explicit. Do not add a second
+writer or abandon the direct path: observe the scheduled retry, preserve the
+partial, and escalate the shared router/network boundary if progress cannot be
+sustained.
 
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
