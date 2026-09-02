@@ -260,7 +260,13 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	sort.Strings(keys)
 	findings := make([]finding, 0, len(keys)*2)
 	for _, key := range keys {
-		findings = append(findings, evaluateBackupArchive(now, observations[key], metricHost.name)...)
+		observation := observations[key]
+		findings = append(findings, evaluateBackupArchive(
+			now,
+			observation,
+			metricHost.name,
+			backupArchiveQueuedBehind(observation, writers[observation.host], observations),
+		)...)
 	}
 	for _, host := range backupHosts {
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
@@ -550,7 +556,58 @@ func isBackupArchiveName(name string) bool {
 	return false
 }
 
-func evaluateBackupArchive(now time.Time, observation *backupArchiveObservation, gateway string) []finding {
+type backupArchiveQueueObservation struct {
+	activeArchive string
+	unit          string
+	unitState     string
+}
+
+func backupArchiveQueuedBehind(
+	observation *backupArchiveObservation,
+	writer backupArchiveWriterObservation,
+	observations map[string]*backupArchiveObservation,
+) backupArchiveQueueObservation {
+	if observation == nil || (observation.archive != "pg" && observation.archive != "redis") {
+		return backupArchiveQueueObservation{}
+	}
+	if writer.remoteUnitState != "active" && writer.remoteUnitState != "activating" &&
+		writer.remoteUnitState != "reloading" {
+		return backupArchiveQueueObservation{}
+	}
+	progress, valid := backupArchiveProgress(observation)
+	if !valid || progress != 0 {
+		return backupArchiveQueueObservation{}
+	}
+	activeArchive := "pg"
+	if observation.archive == "pg" {
+		activeArchive = "redis"
+	}
+	active, valid := backupArchiveProgress(
+		observations[backupArchiveKey(observation.host, activeArchive)],
+	)
+	if !valid || active != 1 {
+		return backupArchiveQueueObservation{}
+	}
+	return backupArchiveQueueObservation{
+		activeArchive: activeArchive,
+		unit:          "remote-backup-archive.service",
+		unitState:     writer.remoteUnitState,
+	}
+}
+
+func backupArchiveProgress(observation *backupArchiveObservation) (float64, bool) {
+	if observation == nil || len(observation.progress) != 1 || len(observation.invalidProgress) != 0 {
+		return 0, false
+	}
+	return observation.progress[0], true
+}
+
+func evaluateBackupArchive(
+	now time.Time,
+	observation *backupArchiveObservation,
+	gateway string,
+	queue backupArchiveQueueObservation,
+) []finding {
 	target := observation.host + "/" + observation.archive
 	findings := []finding{}
 
@@ -653,15 +710,42 @@ func evaluateBackupArchive(now time.Time, observation *backupArchiveObservation,
 		context := "This alert is operational and may require persistent mount configuration, replacement media, or more archive capacity. A collector, Grafana, or code deploy alone cannot create a new recovery point."
 		action := "Read the owning unit result and journal, verify the configured archive path is a real mounted filesystem with enough free space, then repair the first failed prerequisite. Start a catch-up run only with operator authorization; never refresh the metric without producing and validating a new archive."
 		verify := "The exact unit exits successfully, the completed generation and manifest validate on mounted media, its timestamp is within five days, and two consecutive direct Mimir reads show the same new generation."
+		frame := ""
+		queueObserved := ""
 		if progress == "1" {
 			mechanism = "The source textfile is current and a writer is active, but no new atomic recovery point exists until that transfer completes. A healthy process can remain outside the five-day objective when source backlog divided by sustained offsite throughput exceeds the available recovery window."
 			context = "An active single-writer transfer is operationally pending, not fixed and not stalled merely because its final timestamp is unchanged. Software cannot create WAN bandwidth, attach seed media, or shorten the bytes that must cross the recovery boundary."
 			action = "Preserve the active writer. Confirm one stable unit/PID, one source transfer, a read-write mounted archive, fresh progress telemetry, and increasing receive bytes; then compare source backlog with sustained VPN throughput. If the projected completion misses the recovery-point objective, operations must provision a faster path or an approved offline seed. Do not restart, duplicate, or manually finalize the transfer to make the timestamp move."
 			verify = "The same authorized run completes atomically, its artifact and manifest validate, two direct Mimir reads expose the new generation, and a subsequent scheduled run proves the available offsite throughput can keep the archive inside the five-day objective."
+		} else if queue.activeArchive != "" {
+			frame = "queued-behind=" + queue.activeArchive
+			queueObserved = fmt.Sprintf(
+				" queued_behind=%s owner_unit=%s owner_unit_state=%s owner_progress=1",
+				queue.activeArchive,
+				queue.unit,
+				queue.unitState,
+			)
+			mechanism = fmt.Sprintf(
+				"The source textfile is current and %s is idle only because the same single-writer data job is actively transferring %s first. The script processes PostgreSQL and Redis serially, so the second source cannot enter its in-progress phase until the first transfer and atomic archive rotation finish.",
+				observation.archive,
+				queue.activeArchive,
+			)
+			context = "This is queued work inside one healthy authorized writer, not an idle scheduler and not a second catch-up authorization. Its completion is still capacity-bound by the active source transfer. Software cannot create WAN bandwidth, attach seed media, or shorten the queued bytes."
+			action = fmt.Sprintf(
+				"Preserve the active %s phase and the owning %s process. Do not start, restart, or duplicate the data pull because %s reports in_progress=0. Track increasing receive bytes and source backlog for the active phase; if its projected completion misses the recovery-point objective, operations must provision a faster path or an approved offline seed.",
+				queue.activeArchive,
+				queue.unit,
+				observation.archive,
+			)
+			verify = fmt.Sprintf(
+				"The same authorized unit completes %s atomically, then publishes %s in_progress=1 without a second unit generation; both artifacts and manifests validate, and two direct Mimir reads expose completed generations inside the five-day objective.",
+				queue.activeArchive,
+				observation.archive,
+			)
 		}
 		findings = append(findings, finding{
 			probeId: "observability/backup-archives", tier: tierPage,
-			class: "backup-archive-stale", target: target, sustain: 1,
+			class: "backup-archive-stale", target: target, frame: frame, sustain: 1,
 			symptom: fmt.Sprintf(
 				"%s newest completed generation is %s old",
 				target, ageText,
@@ -669,8 +753,8 @@ func evaluateBackupArchive(now time.Time, observation *backupArchiveObservation,
 			mechanism: mechanism,
 			baseline:  "Every completed archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale.",
 			observed: fmt.Sprintf(
-				"generation=%s completed_at=%s age=%s in_progress=%s fresh_latest_samples=%d metrics_gateway=%s",
-				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, len(observation.latest), gateway,
+				"generation=%s completed_at=%s age=%s in_progress=%s fresh_latest_samples=%d metrics_gateway=%s%s",
+				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, len(observation.latest), gateway, queueObserved,
 			),
 			evidence: "Archive age comes from the producer's completed-file timestamp carried as the metric value, not from the fresh Mimir scrape timestamp.",
 			context:  context,

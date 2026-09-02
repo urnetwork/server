@@ -8103,7 +8103,11 @@ BROKEN:
   path while reporting an expired recovery-point objective. When
   `in_progress=1`, preserve the single active writer and compare increasing
   receive bytes plus source backlog with sustained VPN throughput. A transfer
-  is not stalled merely because its atomic final timestamp has not moved.
+  is not stalled merely because its atomic final timestamp has not moved. When
+  a stale `pg` or `redis` gauge is zero but the direct data-pull unit is active
+  and its sibling gauge is one, frame it as `queued-behind=<sibling>`: the
+  script serializes those two sources, so zero describes the next phase rather
+  than an idle scheduler. Never start a second catch-up run for that phase.
 - `backup-archive-progress-stale` after two probes means direct systemd state
   and the two exported GitHub phase gauges disagree, the active unit has no
   MainPID, or its producer heartbeat value is absent or more than 90 seconds
@@ -8213,6 +8217,15 @@ partial-capable rsync; operations must provision a faster offsite path or an
 approved offline seed, then prove later scheduled deltas keep every recovery
 point inside five days. This is a **network/operations or hardware-capacity
 closure**, not a software-only fix.
+
+The same run also establishes the serial queue contract. Direct systemd state
+remained `activating` while the fresh PostgreSQL in-progress gauge was one and
+the Redis gauge was zero. Redis was not an idle or independently failed job: it
+was queued behind PostgreSQL inside the same authorized writer and could not
+start until that transfer and rotation completed. The stale Redis alert must
+therefore preserve the PostgreSQL phase and require Redis to transition to one
+without a second unit generation. Generic “start a catch-up run” guidance at
+this boundary is a monitor defect because it risks concurrent writers.
 
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;

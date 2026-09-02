@@ -135,6 +135,43 @@ func TestBackupArchivesSignalSyntheticStaleActiveTransferNeedsCapacity(t *testin
 	}
 }
 
+func TestBackupArchivesSignalSyntheticStaleArchiveQueuedBehindActiveDataWriter(t *testing.T) {
+	now := time.Date(2026, 9, 2, 13, 0, 0, 0, time.UTC)
+	zero := float64(0)
+	one := float64(1)
+	stale := now.Add(-13 * 24 * time.Hour)
+	fresh := now.Add(-24 * time.Hour)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState: "activating",
+	},
+		backupArchiveFixture{archive: "pg", generation: "main-pg-old.sql.xz", createdAt: &stale, progress: &one},
+		backupArchiveFixture{archive: "redis", generation: "main-redis-old.rdb", createdAt: &stale, progress: &zero},
+		backupArchiveFixture{archive: "github-urnetwork", generation: "main-code-urnetwork-current.tar.xz", createdAt: &fresh, progress: &zero},
+		backupArchiveFixture{archive: "github-urfoundation", generation: "main-code-urfoundation-current.tar.xz", createdAt: &fresh, progress: &zero},
+	)
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-stale", "backup-1/redis")
+	if alert.Frame != "queued-behind=pg" {
+		t.Fatalf("queued archive frame=%q, want queued-behind=pg", alert.Frame)
+	}
+	for _, want := range []string{
+		"same single-writer data job",
+		"queued_behind=pg",
+		"owner_unit=remote-backup-archive.service",
+		"owner_unit_state=activating",
+		"Preserve the active pg phase",
+		"Do not start, restart, or duplicate",
+		"publishes redis in_progress=1 without a second unit generation",
+		"Software cannot create WAN bandwidth",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("queued stale archive alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Action, "Start a catch-up run") {
+		t.Fatalf("queued transfer retained stale start guidance: %+v", alert)
+	}
+}
+
 func TestBackupArchivesSignalSyntheticDetectsStaleActiveWriterProgress(t *testing.T) {
 	now := time.Date(2026, 9, 1, 23, 56, 0, 0, time.UTC)
 	zero := float64(0)
