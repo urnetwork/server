@@ -364,11 +364,9 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		} else {
 			observed += " " + diagnostic.observed()
 			if diagnostic.classificationVersion < reliabilityDriftClassificationVersion &&
-				diagnostic.scoreRows >= reliabilityDriftMinimumRows &&
-				diagnostic.passingRows == 0 &&
-				diagnostic.maxWeight < reliabilityDriftMinimumWeight {
+				reliabilityGateEffectivelyEmpty(diagnostic.scoreRows, diagnostic.passingRows) {
 				frame = "reliability-window-churn"
-				mechanism = "The surge is a provider-window feedback loop, not a simultaneous service restart: the same parent/network population is minting short-lived child clients while degraded-classification version 0 admits zero scored providers at the 12-hour gate. The moving-median numerator loss narrows provider diversity; window replacement then cycles fresh derived identities against that constrained set."
+				mechanism = "The surge is a provider-window feedback loop, not a simultaneous service restart: the same parent/network population is minting short-lived child clients while degraded-classification version 0 admits fewer than one scored provider per 1,000 rows at the 12-hour gate. An isolated extreme outlier is not meaningful provider diversity. The moving-median numerator loss narrows provider diversity; window replacement then cycles fresh derived identities against that constrained set."
 				evidence += " PostgreSQL joins the aggregate child/parent/network and mature lifetime cohorts to the complete 12-hour reliability distribution and durable classification version; no client identifiers leave the database."
 				context = "The three-hour comparison distinguishes amplification by the same source population from new account growth. Run the dedicated §2.15 probe for anchor/current degraded-block counts, and correlate its UpdateReliabilities completion with the first subsequent score-cache publication."
 				action = "Apply the §2.15 migrations through schema head 603, converge every Taskworker on the current Server revision, and let the serialized reliability task perform its mandatory guarded re-anchor and normal score export. Do not restart Connect, manually rotate child identities, edit score rows/Redis blobs, or weaken the reliability gate."

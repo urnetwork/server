@@ -12,7 +12,17 @@ const (
 	reliabilityDriftClassificationVersion = 1
 	reliabilityDriftMinimumWeight         = 0.7
 	reliabilityDriftMinimumRows           = 1000
+	reliabilityDriftPassingDenominator    = 1000
 )
+
+// reliabilityGateEffectivelyEmpty rejects a lone outlier from clearing a
+// fleet-wide provider gate collapse. Below the minimum corpus another signal
+// owns bootstrap/empty-state visibility; at scale, fewer than one passing row
+// per thousand scored rows is conservatively unusable provider diversity.
+func reliabilityGateEffectivelyEmpty(scoreRows int, passingRows int) bool {
+	return scoreRows >= reliabilityDriftMinimumRows &&
+		int64(passingRows)*reliabilityDriftPassingDenominator < int64(scoreRows)
+}
 
 // Signal reliability-drift implements SIGNALS.md §2.15. It checks the
 // materialized 12-hour provider reliability gate and the durable degraded-block
@@ -173,12 +183,12 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 		writeTokenPresent &&
 		classificationGuardPresent &&
 		scoreRows > 0 &&
-		(scoreRows < reliabilityDriftMinimumRows || passingRows > 0 || maxWeight >= reliabilityDriftMinimumWeight) {
+		!reliabilityGateEffectivelyEmpty(scoreRows, passingRows) {
 		return []finding{healthyFinding("pg/reliability-drift", tierPage, "reliability-classification-drift", pgTarget(env))}, nil
 	}
 
 	frame := "gate-collapse"
-	mechanism := "The 12-hour provider gate has no scored client at or above its 0.70 minimum. This can be genuine fleet-wide unreliability, but it is also the exact downstream state produced when a rolling numerator and denominator disagree; use the classification version and block counts to distinguish them."
+	mechanism := "Fewer than one in 1,000 scored clients passes the 12-hour provider gate at its 0.70 minimum. One extreme outlier cannot supply meaningful provider diversity. This can be genuine fleet-wide unreliability, but it is also the exact downstream state produced when a rolling numerator and denominator disagree; use the classification version and block counts to distinguish them."
 	action := "Inspect the reliability inputs and recent fleet events. Do not loosen the 0.70 product threshold, delete score rows, edit Redis cache keys, or restart Connect clients to manufacture recovery."
 	if classificationVersion < reliabilityDriftClassificationVersion {
 		frame = "moving-median-v0"

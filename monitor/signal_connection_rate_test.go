@@ -75,7 +75,7 @@ func TestConnectionRateSignalSyntheticReliabilityWindowChurn(t *testing.T) {
 			return []Row{{
 				"25998", "24411", "1146", "978", "108", "8.76", "24.51",
 				"14501", "6292", "1119", "992", "2249", "70.26", "5379.84",
-				"0", "100737", "0", "0.666203",
+				"0", "101225", "1", "1.087622",
 			}}, nil
 		}
 		return []Row{{"25000"}}, nil
@@ -100,7 +100,8 @@ func TestConnectionRateSignalSyntheticReliabilityWindowChurn(t *testing.T) {
 	for _, want := range []string{
 		"provider-window feedback loop",
 		"classification_version=0",
-		"score_passing_12h=0",
+		"score_passing_12h=1",
+		"fewer than one scored provider per 1,000 rows",
 		"current_children_per_parent=21.30",
 		"schema head 603",
 		"SIGNALS.md §2.7 and §2.15",

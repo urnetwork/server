@@ -78,7 +78,7 @@ func TestReliabilityDriftSignalSyntheticCurrentGateCollapse(t *testing.T) {
 		postgresFn: func(string) ([]Row, error) {
 			return []Row{{
 				"1", "29805040", "29805761", "29805761",
-				"80000", "0", "0.62", "0.50",
+				"101225", "1", "1.087622", "0.50",
 				"450", "360", "721", "76000", "0", "0", "0", "t", "t",
 			}}, nil
 		},
@@ -92,8 +92,38 @@ func TestReliabilityDriftSignalSyntheticCurrentGateCollapse(t *testing.T) {
 	if alert.Frame != "gate-collapse" {
 		t.Fatalf("frame = %q, want gate-collapse", alert.Frame)
 	}
-	if !strings.Contains(alert.Markdown(), "genuine fleet-wide unreliability") {
-		t.Fatalf("alert loses the post-migration discriminator:\n%s", alert.Markdown())
+	for _, want := range []string{
+		"admits 1 of 101225",
+		"Fewer than one in 1,000",
+		"One extreme outlier cannot supply meaningful provider diversity",
+		"genuine fleet-wide unreliability",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("alert loses post-migration discriminator %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestReliabilityGateEffectivelyEmptyBoundary(t *testing.T) {
+	tests := []struct {
+		name        string
+		scoreRows   int
+		passingRows int
+		empty       bool
+	}{
+		{name: "bootstrap belongs to empty-state signal", scoreRows: 999, passingRows: 0},
+		{name: "zero at minimum corpus", scoreRows: 1000, passingRows: 0, empty: true},
+		{name: "exact one-per-thousand boundary", scoreRows: 1000, passingRows: 1},
+		{name: "one below scaled boundary", scoreRows: 100000, passingRows: 99, empty: true},
+		{name: "scaled boundary", scoreRows: 100000, passingRows: 100},
+		{name: "production isolated outlier", scoreRows: 101225, passingRows: 1, empty: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := reliabilityGateEffectivelyEmpty(tt.scoreRows, tt.passingRows); got != tt.empty {
+				t.Fatalf("reliabilityGateEffectivelyEmpty(%d, %d) = %t, want %t", tt.scoreRows, tt.passingRows, got, tt.empty)
+			}
+		})
 	}
 }
 

@@ -2817,7 +2817,11 @@ GROUP BY 1 ORDER BY 1;
   joins the durable §2.15 classification version and complete 12-hour score
   distribution. The incident held roughly the same parent/network population
   while child creation per parent multiplied, p50 fell from 70.3s to 8.8s,
-  and the provider score gate admitted 0 of 100,737 rows. Frame
+  and the provider score gate admitted 0 of 100,737 rows. A later live sample
+  admitted only one extreme outlier of 101,225 while apps still failed to find
+  usable providers. Fewer than one passing row per 1,000 scored rows is therefore
+  the conservative effective-empty boundary; one outlier must not erase the
+  causal frame. Frame
   `reliability-window-churn` therefore identifies a provider-window feedback
   loop; do not call it a fleet restart or organic account growth. Apply and
   verify the §2.15 root fix, then require destination diversity and two mature
@@ -3748,8 +3752,9 @@ Alert frames:
 - `unguarded-version`: a row claims version 1 without both a nonempty write
   token and the enabled guard trigger. The marker cannot establish writer
   provenance. Apply migration 603 and let a current writer re-anchor it.
-- `gate-collapse`: version 1 is present but no meaningful 12-hour population
-  passes, with the token and trigger present. Treat this as genuine
+- `gate-collapse`: version 1 is present but fewer than one in 1,000 scored rows
+  pass the 12-hour gate, with the token and trigger present. An isolated
+  extreme outlier is not meaningful provider diversity. Treat this as genuine
   reliability-input failure until the raw block, coverage, and fleet-event
   evidence proves otherwise; do not weaken 0.70.
 
