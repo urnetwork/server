@@ -19,8 +19,13 @@ type backupArchiveFixture struct {
 }
 
 type backupArchiveWriterFixture struct {
-	unitState string
-	mainPID   int64
+	unitState          string
+	mainPID            int64
+	remoteUnitState    string
+	remoteResult       string
+	remoteRestart      string
+	remoteRestartDelay string
+	remoteExitStatus   int64
 }
 
 func TestBackupArchivesSignalSyntheticHealthy(t *testing.T) {
@@ -143,14 +148,16 @@ func TestBackupArchivesSignalSyntheticDetectsStaleActiveWriterProgress(t *testin
 }
 
 func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testing.T) {
+	valid := backupArchiveWriterFixtureText(backupArchiveWriterFixture{})
 	for _, testCase := range []struct {
 		name   string
 		output string
 		want   string
 	}{
-		{name: "missing", output: "activating", want: "expected state"},
-		{name: "state", output: "ACTIVE 12", want: "invalid unit state"},
-		{name: "pid", output: "activating nope", want: "invalid main PID"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 7 properties"},
+		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
+		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
+		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			_, err := parseBackupArchiveWriterObservation("backup-1", testCase.output)
@@ -158,6 +165,45 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 				t.Fatalf("parse error=%v, want substring %q", err, testCase.want)
 			}
 		})
+	}
+}
+
+func TestBackupArchivesSignalSyntheticDetectsDisabledPullRetry(t *testing.T) {
+	now := time.Date(2026, 9, 2, 2, 0, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState:          "inactive",
+		remoteUnitState:    "failed",
+		remoteResult:       "exit-code",
+		remoteRestart:      "no",
+		remoteRestartDelay: "100ms",
+		remoteExitStatus:   1,
+	}, fixtures...)
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-retry-disabled", "backup-1/remote")
+	if alert.Sustain != 1 {
+		t.Fatalf("retry policy sustain=%d, want 1", alert.Sustain)
+	}
+	for _, want := range []string{
+		"result=exit-code",
+		"exit_status=1",
+		"restart=no",
+		"restart_delay=100ms",
+		"Xops commit 2311114",
+		"cannot unlock LUKS",
+		"does not authorize a catch-up pull",
+		"run-planetoid.sh",
+		"RestartUSec=30min",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("disabled retry alert missing %q:\n%s", want, alert.Markdown())
+		}
 	}
 }
 
@@ -213,11 +259,7 @@ func runBackupArchiveFixturesWithWriter(
 	payload := backupArchiveFixtureJSON(t, now, fixtures...)
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
 		if host.Name == "backup-1" && strings.Contains(command, "monitor-signal-11.22-backup-archives") {
-			return fmt.Sprintf(
-				"%s %d\n",
-				writer.unitState,
-				writer.mainPID,
-			), nil
+			return backupArchiveWriterFixtureText(writer), nil
 		}
 		if host.Name != "metrics-1" ||
 			!strings.Contains(command, "urnetwork_backup_archive_%28latest_timestamp_seconds%7Cin_progress%7Cheartbeat_timestamp_seconds%29") ||
@@ -238,6 +280,40 @@ func runBackupArchiveFixturesWithWriter(
 		t.Fatal(err)
 	}
 	return alerts
+}
+
+func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
+	if fixture.unitState == "" {
+		fixture.unitState = "inactive"
+	}
+	if fixture.remoteUnitState == "" {
+		fixture.remoteUnitState = "inactive"
+	}
+	if fixture.remoteResult == "" {
+		fixture.remoteResult = "success"
+	}
+	if fixture.remoteRestart == "" {
+		fixture.remoteRestart = "on-failure"
+	}
+	if fixture.remoteRestartDelay == "" {
+		fixture.remoteRestartDelay = "30min"
+	}
+	return fmt.Sprintf(
+		"github_unit_state=%s\n"+
+			"github_main_pid=%d\n"+
+			"remote_unit_state=%s\n"+
+			"remote_result=%s\n"+
+			"remote_restart=%s\n"+
+			"remote_restart_delay=%s\n"+
+			"remote_exit_status=%d\n",
+		fixture.unitState,
+		fixture.mainPID,
+		fixture.remoteUnitState,
+		fixture.remoteResult,
+		fixture.remoteRestart,
+		fixture.remoteRestartDelay,
+		fixture.remoteExitStatus,
+	)
 }
 
 func backupArchiveFixtureJSON(t testing.TB, now time.Time, fixtures ...backupArchiveFixture) string {

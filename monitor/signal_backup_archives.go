@@ -21,11 +21,27 @@ const (
 )
 
 const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
-unit_state=$(systemctl is-active github-backup-archive.service 2>/dev/null || true)
-main_pid=$(systemctl show github-backup-archive.service -p MainPID --value 2>/dev/null || true)
-case "${unit_state}" in '') unit_state=unknown ;; esac
-case "${main_pid}" in ''|*[!0-9]*) main_pid=0 ;; esac
-printf '%s %s\n' "${unit_state}" "${main_pid}"`
+github_unit_state=$(systemctl is-active github-backup-archive.service 2>/dev/null || true)
+github_main_pid=$(systemctl show github-backup-archive.service -p MainPID --value 2>/dev/null || true)
+remote_unit_state=$(systemctl show remote-backup-archive.service -p ActiveState --value 2>/dev/null || true)
+remote_result=$(systemctl show remote-backup-archive.service -p Result --value 2>/dev/null || true)
+remote_restart=$(systemctl show remote-backup-archive.service -p Restart --value 2>/dev/null || true)
+remote_restart_delay=$(systemctl show remote-backup-archive.service -p RestartUSec --value 2>/dev/null || true)
+remote_exit_status=$(systemctl show remote-backup-archive.service -p ExecMainStatus --value 2>/dev/null || true)
+case "${github_unit_state}" in '') github_unit_state=unknown ;; esac
+case "${github_main_pid}" in ''|*[!0-9]*) github_main_pid=0 ;; esac
+case "${remote_unit_state}" in '') remote_unit_state=unknown ;; esac
+case "${remote_result}" in '') remote_result=unknown ;; esac
+case "${remote_restart}" in '') remote_restart=unknown ;; esac
+case "${remote_restart_delay}" in ''|*[!0-9a-z]*) remote_restart_delay=unknown ;; esac
+case "${remote_exit_status}" in ''|*[!0-9]*) remote_exit_status=0 ;; esac
+printf 'github_unit_state=%s\n' "${github_unit_state}"
+printf 'github_main_pid=%s\n' "${github_main_pid}"
+printf 'remote_unit_state=%s\n' "${remote_unit_state}"
+printf 'remote_result=%s\n' "${remote_result}"
+printf 'remote_restart=%s\n' "${remote_restart}"
+printf 'remote_restart_delay=%s\n' "${remote_restart_delay}"
+printf 'remote_exit_status=%s\n' "${remote_exit_status}"`
 
 var backupArchiveNames = []string{
 	"pg",
@@ -68,9 +84,14 @@ type backupArchiveObservation struct {
 }
 
 type backupArchiveWriterObservation struct {
-	host      string
-	unitState string
-	mainPID   int64
+	host               string
+	unitState          string
+	mainPID            int64
+	remoteUnitState    string
+	remoteResult       string
+	remoteRestart      string
+	remoteRestartDelay string
+	remoteExitStatus   int64
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -221,23 +242,96 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 	for _, host := range backupHosts {
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
+		findings = append(findings, evaluateBackupArchiveRetry(writers[host.name]))
 	}
 	return findings, nil
 }
 
 func parseBackupArchiveWriterObservation(hostName, output string) (backupArchiveWriterObservation, error) {
-	fields := strings.Fields(strings.TrimSpace(output))
-	if len(fields) != 2 {
-		return backupArchiveWriterObservation{}, fmt.Errorf("expected state and main PID; got %q", strings.TrimSpace(output))
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || key == "" || value == "" {
+			return backupArchiveWriterObservation{}, fmt.Errorf("invalid property line %q", line)
+		}
+		if _, duplicate := values[key]; duplicate {
+			return backupArchiveWriterObservation{}, fmt.Errorf("duplicate property %q", key)
+		}
+		values[key] = value
 	}
-	if matched, _ := regexp.MatchString(`^[a-z-]+$`, fields[0]); !matched {
-		return backupArchiveWriterObservation{}, fmt.Errorf("invalid unit state %q", fields[0])
+	required := []string{
+		"github_unit_state",
+		"github_main_pid",
+		"remote_unit_state",
+		"remote_result",
+		"remote_restart",
+		"remote_restart_delay",
+		"remote_exit_status",
 	}
-	mainPID, err := strconv.ParseInt(fields[1], 10, 64)
+	if len(values) != len(required) {
+		return backupArchiveWriterObservation{}, fmt.Errorf("expected %d properties; got %q", len(required), strings.TrimSpace(output))
+	}
+	for _, key := range required {
+		if _, ok := values[key]; !ok {
+			return backupArchiveWriterObservation{}, fmt.Errorf("missing property %q", key)
+		}
+	}
+	for _, key := range []string{"github_unit_state", "remote_unit_state", "remote_result", "remote_restart"} {
+		if matched, _ := regexp.MatchString(`^[a-z-]+$`, values[key]); !matched {
+			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
+		}
+	}
+	if matched, _ := regexp.MatchString(`^(unknown|[0-9]+(?:us|ms|s|min|h|d|w))$`, values["remote_restart_delay"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_restart_delay %q", values["remote_restart_delay"])
+	}
+	mainPID, err := strconv.ParseInt(values["github_main_pid"], 10, 64)
 	if err != nil || mainPID < 0 {
-		return backupArchiveWriterObservation{}, fmt.Errorf("invalid main PID %q", fields[1])
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid main PID %q", values["github_main_pid"])
 	}
-	return backupArchiveWriterObservation{host: hostName, unitState: fields[0], mainPID: mainPID}, nil
+	remoteExitStatus, err := strconv.ParseInt(values["remote_exit_status"], 10, 64)
+	if err != nil || remoteExitStatus < 0 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote exit status %q", values["remote_exit_status"])
+	}
+	return backupArchiveWriterObservation{
+		host:               hostName,
+		unitState:          values["github_unit_state"],
+		mainPID:            mainPID,
+		remoteUnitState:    values["remote_unit_state"],
+		remoteResult:       values["remote_result"],
+		remoteRestart:      values["remote_restart"],
+		remoteRestartDelay: values["remote_restart_delay"],
+		remoteExitStatus:   remoteExitStatus,
+	}, nil
+}
+
+func evaluateBackupArchiveRetry(observation backupArchiveWriterObservation) finding {
+	target := observation.host + "/remote"
+	if observation.remoteRestart == "on-failure" && observation.remoteRestartDelay == "30min" {
+		return healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-retry-disabled", target,
+		)
+	}
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: "backup-archive-retry-disabled", target: target,
+		frame: "unit=remote-backup-archive.service", sustain: 1,
+		symptom:   fmt.Sprintf("%s cannot recover automatically when its encrypted archive mount appears after the daily trigger", target),
+		mechanism: "The persistent timer starts the PostgreSQL/Redis archive pull once at 04:00. The oneshot waits 15 minutes for the udisks mount, but without an on-failure restart it remains failed after that deadline even if an operator mounts the encrypted disk later. On 2026-09-01 this left the August 20 recovery points unchanged for the rest of the day.",
+		baseline:  "The effective remote-backup-archive.service policy is Restart=on-failure with RestartUSec=30min. A successful oneshot remains inactive and does not repeat.",
+		observed: fmt.Sprintf(
+			"unit_state=%s result=%s exit_status=%d restart=%s restart_delay=%s",
+			observation.remoteUnitState,
+			observation.remoteResult,
+			observation.remoteExitStatus,
+			observation.remoteRestart,
+			observation.remoteRestartDelay,
+		),
+		evidence: "The monitor reads ActiveState, Result, ExecMainStatus, Restart, and RestartUSec from the effective systemd unit on the configured backup host; it does not infer policy from the source template or Grafana.",
+		context:  "Xops commit 2311114 supplies the software retry. It cannot unlock LUKS, attach unavailable media, replace a failed disk, or create capacity; those remain operator or hardware work. Installing the unit does not authorize a catch-up pull.",
+		action:   "After the active GitHub archive writer has safely completed, deploy a clean Xops descendant of 2311114 with main/ansible/run-planetoid.sh. Do not restart the healthy GitHub compression. Obtain operator authorization before starting a catch-up data pull, and unlock/mount the archive disk first.",
+		verify:   "After daemon-reload, require direct systemctl properties Restart=on-failure and RestartUSec=30min. On the next genuine prerequisite failure, require systemd to schedule a delayed retry; after the disk is mounted, require exactly one pull to complete, validate its artifacts and manifests, and confirm the unit remains inactive rather than repeating.",
+		playbook: "SIGNALS.md §11.22",
+	}
 }
 
 func evaluateBackupArchiveWriter(

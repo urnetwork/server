@@ -7752,23 +7752,27 @@ no completed backup from a missing collector.
 
 The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
-role. It also reads `github-backup-archive.service` state and MainPID directly
-on that backup host, and queries the producer-owned
-`urnetwork_backup_archive_heartbeat_timestamp_seconds` values alongside the
-progress gauges. It expects exactly the four archive names above. Samples older
-than 90 seconds are observation loss even when their archive timestamp value is
-old. The newest valid generation is selected during the short Mimir staleness
-overlap after a label change. Metric values must be finite, generations must be
-non-empty, archive and heartbeat timestamps may not be more than five minutes
-in the future, and each in-progress gauge must be uniquely present and equal to
-zero or one. The query and direct discriminator carry no credentials,
-repository names, paths, or backup contents.
+role. It also reads `github-backup-archive.service` state and MainPID plus the
+effective `remote-backup-archive.service` state, result, exit status, restart
+policy, and restart delay directly on that backup host, and queries the
+producer-owned `urnetwork_backup_archive_heartbeat_timestamp_seconds` values
+alongside the progress gauges. It expects exactly the four archive names above.
+Samples older than 90 seconds are observation loss even when their archive
+timestamp value is old. The newest valid generation is selected during the
+short Mimir staleness overlap after a label change. Metric values must be
+finite, generations must be non-empty, archive and heartbeat timestamps may
+not be more than five minutes in the future, and each in-progress gauge must be
+uniquely present and equal to zero or one. The query and direct discriminator
+carry no credentials, repository names, paths, or backup contents.
 
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
 at least one complete generation; and each newest completion is no more than
 five days old. While the GitHub unit is active, its MainPID is nonzero, both
 producer heartbeat values are no more than 90 seconds old, and exactly one
 GitHub organization gauge is one; while it is inactive or failed both are zero.
+The data-pull oneshot has effective `Restart=on-failure` and
+`RestartUSec=30min`, so a late encrypted-disk mount can recover without making
+successful pulls repeat.
 BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
@@ -7790,6 +7794,10 @@ BROKEN:
   old. Fluent Bit gives every reread a fresh scrape timestamp, so raw-Mimir
   sample freshness alone cannot disprove source-file staleness; the heartbeat
   must be checked as a metric value.
+- `backup-archive-retry-disabled` is immediate when the effective data-pull
+  unit is not configured with the bounded on-failure retry above. This is a
+  software policy failure even when its precipitating missing mount needs an
+  operator or hardware repair.
 
 The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
 ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both
@@ -7810,8 +7818,15 @@ The newly visible state showed real operational failures. The PostgreSQL and
 Redis values still named August 20 generations, outside the five-day band.
 The data unit's direct journal showed that its September 1 04:00 run waited the
 full 900 seconds for `/run/media/by/archive1`, then exited because the udisks
-mount was absent. The timer remains scheduled for 04:00, while that session
-mount is not guaranteed at boot. The first GitHub job began at
+mount was absent. Its effective properties were `ActiveState=failed`,
+`Result=exit-code`, `ExecMainStatus=1`, `Restart=no`, and `RestartUSec=100ms`.
+The disk appeared later, but a persistent daily timer does not revisit an
+already-consumed trigger, so the failed oneshot remained failed. Xops commit
+`2311114` adds `Restart=on-failure` with a 30-minute delay. It retries only a
+failure; successful pulls still stop. Deploy that unit with
+`main/ansible/run-planetoid.sh` after the active GitHub writer safely finishes,
+and authorize any immediate catch-up separately. The timer remains scheduled
+for 04:00, while that session mount is not guaranteed at boot. The first GitHub job began at
 `2026-09-01T21:30:55Z`; it mirrored all 47 urnetwork repositories (about 69.9
 GB) and remained in its atomic compression phase with no final organization
 tarball at the observation boundary. Preserve that job rather than restarting
@@ -7844,13 +7859,13 @@ commit, and never restart the current job, rerun an already-current playbook,
 or hand-edit the metric merely to change the panel.
 
 Ownership is deliberately split. The quote bug, refresh race, atomic writers,
-and monitor detector are software/configuration work. Making the archive disk
-available before unattended timers and authorizing a catch-up run are operator
-work. A persistent mount may require an approved fstab/systemd-mount design;
-replacement media and additional free capacity are hardware work. Software
-cannot attach an absent disk or create archive capacity. Never fabricate a
-timestamp, rename a partial artifact, refresh a stale value, or raise the
-five-day threshold to clear these classes.
+bounded failed-pull retry, and monitor detector are software/configuration
+work. Making the archive disk available before unattended timers and
+authorizing a catch-up run are operator work. A persistent mount may require an
+approved fstab/systemd-mount design; replacement media and additional free
+capacity are hardware work. Software cannot attach an absent disk or create
+archive capacity. Never fabricate a timestamp, rename a partial artifact,
+refresh a stale value, or raise the five-day threshold to clear these classes.
 
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
