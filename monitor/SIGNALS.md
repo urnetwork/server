@@ -734,10 +734,13 @@ WHERE backend_type = 'client backend';
   does not restore the admission reserve.
 - MECHANISM: `default_pool_size` is per PgBouncer process and user/database
   pair, not a database-wide cap. Every idle server connection still owns a
-  PostgreSQL slot. `server_idle_timeout=0` disables idle draining, so a peak
-  can leave every independent shard near its maximum until `server_lifetime`
-  turns the connections over. `min_pool_size` remains the intentional warm
-  floor when a nonzero idle timeout is active.
+  PostgreSQL slot. A zero `server_idle_timeout` can retain a peak until
+  `server_lifetime`; a nonzero timeout should contract each continuously
+  unused server connection toward the `min_pool_size` warm floor. A young
+  cohort that has not crossed the configured interval proves a temporary
+  reserve squeeze, not disabled draining. A cohort that survives beyond the
+  interval requires both owner attribution and the selected live settings
+  before classifying the drain as disabled, ineffective, or mismatched.
 - ROOT-CAUSE ORDER: first read the selected settings from every live shard and
   take one root socket census. If the timeout is zero, apply the isolated
   Xops commit `31ae1e7` only after protected database maintenance is empty and
@@ -789,6 +792,20 @@ That clears the reserve threshold and validates `server_idle_timeout=600` as
 the active drain mechanism. Continue the ten-minute headroom control and let
 the cohort contract; do not redeploy merely because the expected post-reboot
 warmup briefly crossed the warning band.
+
+A second 2026-09-02 production control reproduced the same boundary without a
+host reboot. At `05:55:23Z`, PostgreSQL reported 589 loopback clients, 577 of
+them idle, 684 total client backends, and a 574-second oldest idle age. Thirty-
+two seconds later, as that cohort reached its configured expiry, loopback
+clients fell to 366, idle fell to 358, and total client backends fell to 461;
+the following sample's oldest idle age reset to 462 seconds. A direct systemd
+census afterward found all 32 PgBouncer units active, every `NRestarts=0`, and
+every process start still dated 2026-08-09. The drop was timeout contraction,
+not a PgBouncer restart, reload, or forced session termination. This second
+control rejects the probe's former unconditional “with idle draining disabled”
+diagnosis for a young cohort while retaining the warning as an early reserve-
+pressure detector. The ten-minute §1.3a headroom gate remains the full closure
+criterion.
 
 ### 1.4 redis cluster state + per-node liveness
 Probe: `redis-cluster`

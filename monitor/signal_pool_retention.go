@@ -132,8 +132,24 @@ func poolRetentionContext(state poolRetentionState) string {
 		aged,
 		"Loopback is an attribution candidate, not an assumption: confirm owners with one privileged socket census or PgBouncer SHOW POOLS before changing the envelope.",
 		"The 2026-09-01 production control found 32 live PgBouncer shards, every live file set to default_pool_size=20, min_pool_size=8, server_lifetime=3600, and server_idle_timeout=0, with 16-20 established PostgreSQL backends per shard and 608 total. Zero disables idle draining; 32*20 permits 640 retained server connections while the warm floor is 32*8=256.",
-		"Xops commit 31ae1e7 sets server_idle_timeout=600 through the consolidated run-dbs.sh --pgbouncer-only path; there is no separate run-pgbouncer.sh. A young post-reboot refill must first receive one complete idle-timeout interval before another deployment or pool-size change is justified.",
+		"Xops commit 31ae1e7 sets server_idle_timeout=600 through the consolidated run-dbs.sh --pgbouncer-only path; there is no separate run-pgbouncer.sh.",
+		"The 2026-09-02 production controls found all 32 live files already set to 600 and observed two fleet-wide refill cohorts drain near that boundary. In the later control, loopback clients fell from 589 to 366 and total client backends from 684 to 461 in 32 seconds as the oldest idle cohort advanced from 574 to 593 seconds; the following sample's oldest age reset to 462 seconds. A direct systemd census then found all 32 PgBouncer units still active with their August 9 process starts and NRestarts=0. That proves active timeout draining for the current configuration without a reload, restart, or session termination.",
+		"A young refill must first receive one complete idle-timeout interval before another deployment or pool-size change is justified.",
 	}, " ")
+}
+
+func poolRetentionMechanism(state poolRetentionState) string {
+	base := "Independent transaction-pool processes each enforce a per-process server pool. Their aggregate idle server connections still consume PostgreSQL admission slots. A zero server_idle_timeout can retain peak occupancy until server_lifetime, while a nonzero timeout should contract each continuously unused server connection toward the configured warm floor."
+	if state.agedIdle == 0 {
+		return fmt.Sprintf(
+			"%s No loopback idle backend in this snapshot has yet crossed the %d-second drain interval, so the observation is compatible with an expected young refill or recurring demand and does not prove that idle draining is disabled.",
+			base, poolRetentionIdleSeconds,
+		)
+	}
+	return fmt.Sprintf(
+		"%s The %d loopback idle backend(s) continuously idle beyond the %d-second drain interval require owner and live-setting attribution: after that proof they can expose disabled, ineffective, or mismatched draining, but loopback age alone does not select among those causes.",
+		base, state.agedIdle, poolRetentionIdleSeconds,
+	)
 }
 
 func (poolRetentionProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -164,7 +180,7 @@ func (poolRetentionProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			"%d idle loopback backends consume %.1f%% of PostgreSQL's ordinary-role ceiling",
 			state.localIdle, 100*idleFraction,
 		),
-		mechanism: "Independent transaction-pool processes each enforce a per-process server pool. Their aggregate idle server connections still consume PostgreSQL admission slots. With idle draining disabled, a peak can leave every shard near default_pool_size until server_lifetime turns connections over, reducing the reserve available for direct maintenance and deadline-driven replacement overlap.",
+		mechanism: poolRetentionMechanism(state),
 		baseline:  "Idle loopback backends consume less than 50% of the ordinary-role ceiling, excess pools drain toward their configured warm minimum after 600 idle seconds, and §1.3a retains more than 25% total headroom.",
 		observed:  observed,
 		evidence: fmt.Sprintf(

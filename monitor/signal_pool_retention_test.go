@@ -35,6 +35,7 @@ func TestPoolRetentionSignalSyntheticRetainedFleet(t *testing.T) {
 	for _, want := range []string{
 		"600 idle loopback backends consume 58.8%",
 		"loopback_idle_at_least_600s=384",
+		"384 loopback idle backend(s) continuously idle beyond the 600-second drain interval",
 		"32 live PgBouncer shards",
 		"server_idle_timeout=0",
 		"608 total",
@@ -66,11 +67,22 @@ func TestPoolRetentionSignalSyntheticYoungCohortPreservesDiscriminator(t *testin
 	for _, want := range []string{
 		"No loopback idle backend in this snapshot is yet continuously idle for 600 seconds",
 		"young post-peak or recurring-demand cohort",
+		"does not prove that idle draining is disabled",
+		"loopback clients fell from 589 to 366",
+		"NRestarts=0",
 		"observe one complete timeout interval",
 		"not an assumption",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("young-cohort alert missing %q: %s", want, alert.Markdown())
+		}
+	}
+	for _, stale := range []string{
+		"With idle draining disabled",
+		"a peak can leave every shard near default_pool_size",
+	} {
+		if strings.Contains(alert.Markdown(), stale) {
+			t.Fatalf("young-cohort alert retained stale diagnosis %q: %s", stale, alert.Markdown())
 		}
 	}
 }
