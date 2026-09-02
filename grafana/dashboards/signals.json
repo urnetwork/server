@@ -218,7 +218,7 @@
     },
     {
       "type": "timeseries",
-      "title": "\u00a74 contract failures / min by cause + companion (lossless)",
+      "title": "\u00a74 contract failures + missing-origin details / min (lossless)",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -264,9 +264,18 @@
           "expr": "sum by (cause, companion) (rate(urnetwork_connect_contract_failures_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "refId": "F",
           "legendFormat": "{{cause}} companion={{companion}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (request_companion, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "refId": "G",
+          "legendFormat": "missing origin request_companion={{request_companion}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
         }
       ],
-      "description": "urnetwork_connect_contract_failures_total \u2014 the lossless counter behind the sampled contract-error log exemplars. missing_companion_origin climbing while everything else is healthy = stale provider selection serving zombies (playbook 5.9; post-churn variant 5.9.7). insufficient_balance step-change = netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
+      "description": "urnetwork_connect_contract_failures_total is the lossless counter behind the sampled contract-error log exemplars. The missing-origin detail series partitions only missing_companion_origin by bounded original request bit, resolution path, relationship, and endpoint lifecycle; use those dimensions to distinguish request shapes without client identifiers. request_companion is not an endpoint-role label. An insufficient_balance step-change can indicate netEscrow drift re-emerging (\u00a74). Empty until the instrumented api build deploys."
     },
     {
       "type": "timeseries",

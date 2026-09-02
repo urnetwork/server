@@ -221,10 +221,11 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 }
 
 type testTarget struct {
-	Expr    string `json:"expr"`
-	Instant bool   `json:"instant"`
-	Range   *bool  `json:"range"`
-	Format  string `json:"format"`
+	Expr         string `json:"expr"`
+	Instant      bool   `json:"instant"`
+	Range        *bool  `json:"range"`
+	Format       string `json:"format"`
+	LegendFormat string `json:"legendFormat"`
 }
 
 func readTestDashboard(t *testing.T, name string) testDashboard {
@@ -893,6 +894,40 @@ func TestInternalDashboardsCoverEveryApplicationMetric(t *testing.T) {
 		if !strings.Contains(queries, metric) {
 			t.Errorf("custom application metric %s is absent from the internal dashboards", metric)
 		}
+	}
+}
+
+// The lossless failure total identifies the alerting cause, while this bounded
+// breakdown distinguishes request shapes without exposing client identifiers.
+func TestMissingOriginDetailsHaveActionableDashboardQuery(t *testing.T) {
+	dashboard := readTestDashboard(t, "signals.json")
+	wantTitle := "\u00a74 contract failures + missing-origin details / min (lossless)"
+	var detailsTarget *testTarget
+	for panelIndex := range dashboard.Panels {
+		panel := &dashboard.Panels[panelIndex]
+		if panel.Title != wantTitle {
+			continue
+		}
+		for targetIndex := range panel.Targets {
+			target := &panel.Targets[targetIndex]
+			if strings.Contains(target.Expr, "urnetwork_connect_missing_origin_details_total") {
+				detailsTarget = target
+				break
+			}
+		}
+		break
+	}
+	if detailsTarget == nil {
+		t.Fatalf("signals dashboard panel %q lacks the missing-origin detail query", wantTitle)
+	}
+
+	wantQuery := `sum by (request_companion, resolution, relationship, source_lifecycle, destination_lifecycle) (rate(urnetwork_connect_missing_origin_details_total{env="$env",instance!=""}[$__rate_interval])) * 60`
+	if detailsTarget.Expr != wantQuery {
+		t.Errorf("missing-origin detail query = %q, want %q", detailsTarget.Expr, wantQuery)
+	}
+	wantLegend := "missing origin request_companion={{request_companion}} resolution={{resolution}} relationship={{relationship}} source={{source_lifecycle}} destination={{destination_lifecycle}}"
+	if detailsTarget.LegendFormat != wantLegend {
+		t.Errorf("missing-origin detail legend = %q, want %q", detailsTarget.LegendFormat, wantLegend)
 	}
 }
 
