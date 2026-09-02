@@ -220,7 +220,7 @@ done`, ports[0], ports[len(ports)-1]))
 				}
 				mechanism += " An intermediate cleanup then read PTTL through go-redis's time.Duration result; converting Redis milliseconds beyond roughly 290 years can overflow and misclassify a leaked key below the 8-hour repair threshold."
 				mechanism += fmt.Sprintf(" The bounded sample measured %d bytes across those suspect keys; this proves the expiry defect but does not make it the capacity root cause.", attribution.suspectBytes)
-				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. Build bringyourctl from current-main server commit d8e34003 or a clean descendant and prove expire-leaked-ttls reads PTTL as raw integer milliseconds; do not run an older typed-duration cleanup artifact. With explicit maintenance authority, run that binary-safe cleanup across legacy s_sk and current s2_sk names. Use redis-bytes for capacity ownership; do not assume this residue creates material headroom, or raise maxmemory to conceal either defect."
+				action = "Confirm current stream writers emit no stream-key redis-ttl-suspect lines; diagnose warnings for other key families independently. Build bringyourctl from an intentional local server checkout containing current-main commit d8e34003 and prove expire-leaked-ttls reads PTTL as raw integer milliseconds; record any participating diff and do not run an older typed-duration cleanup artifact. With explicit maintenance authority, run that binary-safe cleanup across legacy s_sk and current s2_sk names. Use redis-bytes for capacity ownership; do not assume this residue creates material headroom, or raise maxmemory to conceal either defect."
 			}
 		}
 		findings = append(findings, finding{
@@ -236,7 +236,7 @@ done`, ports[0], ports[len(ports)-1]))
 			evidence:  evidence,
 			context:   context + " TTL and MEMORY USAGE answer different questions: this signal proves invalid expiry metadata; redis-bytes attributes capacity.",
 			action:    action,
-			verify:    "The cleanup artifact is a clean descendant of current-main server commit d8e34003; a binary-safe raw-integer PTTL sample shows no targeted key beyond 8 hours, every node's avg_ttl returns below two years, and no new TTL warning appears. Verify capacity recovery independently with redis-bytes and redis-memory.",
+			verify:    "The cleanup artifact is attributable to an intentional local checkout containing current-main server commit d8e34003; a binary-safe raw-integer PTTL sample shows no targeted key beyond 8 hours, every node's avg_ttl returns below two years, and no new TTL warning appears. Verify capacity recovery independently with redis-bytes and redis-memory.",
 			playbook:  "SIGNALS.md §3.3a, §3.3b, and §4",
 		})
 	}

@@ -228,8 +228,8 @@ func (provenanceProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			),
 			evidence: fmt.Sprintf("Each of the four metric families is independently filtered by its source timestamp at no more than %.0f seconds old before the exact identity join. Newest process start suppresses a draining generation; a fresh RSS identity without start remains visible because its generation cannot be proven.", provenanceFreshness.Seconds()),
 			context:  "WARP_VERSION is deliberately reported as config_version only. It can advance in a config-only rollout and is neither source ancestry nor immutable OCI identity. This is an observability and deployment-control failure, not proof that the intended fix is absent.",
-			action:   "Build and deploy only the affected services from server commit 236bf0ce or a clean descendant using the fail-closed Warp builder, then let ordinary host-serialized rollout replace each legacy generation. A config-only rollout cannot add the executable-owned source-info metric. Do not substitute a tag, config generation, git checkout, or BuildKit context attestation for the running executable and container identities.",
-			verify:   "For two consecutive scrapes, every newest service identity has all four families; then independently inspect each running container's exact digest and the digest's extracted executable and require the same clean full revision.",
+			action:   "Build and deploy only the affected services from an intentional local checkout containing server commit 236bf0ce, then let ordinary host-serialized rollout replace each legacy generation. A config-only rollout cannot add the executable-owned source-info metric. Record the checkout base and any participating local diff, and do not substitute a tag, config generation, checkout HEAD alone, or BuildKit context attestation for the running executable and container identities.",
+			verify:   "For two consecutive scrapes, every newest service identity has all four families; then independently inspect each running container's exact digest and the digest's extracted executable and require the same full revision and Boolean modified identity.",
 			playbook: "SIGNALS.md §8.12",
 		})
 	}
@@ -238,19 +238,19 @@ func (provenanceProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			probeId: "deploy/provenance", tier: tierWarn,
 			class: "service-provenance-invalid", target: "service-fleet", sustain: 1,
 			symptom: fmt.Sprintf(
-				"%d of %d newest fresh service identities report dirty or malformed artifact provenance",
+				"%d of %d newest fresh service identities report malformed artifact provenance",
 				len(invalid), len(current),
 			),
-			mechanism: "The source labels come from debug.ReadBuildInfo in the executable, while Warp injects the pulled image's inspected content digest before executing that digest. modified=true means the binary contains changes not named by its base revision. A malformed revision, modified label, or digest breaks the immutable join. BuildKit context provenance alone is insufficient when an image copies a binary compiled earlier.",
-			baseline:  "Every newest service identity reports a 40- or 64-hex Go VCS revision, source_modified=false, and an exact sha256 OCI image content digest.",
+			mechanism: "The source labels come from debug.ReadBuildInfo in the executable, while Warp injects the pulled image's inspected content digest before executing that digest. The Boolean modified bit is valid context for an intentional local-checkout build; a malformed revision, non-Boolean modified label, or malformed digest breaks the identity join. BuildKit context provenance alone is insufficient when an image copies a binary compiled earlier.",
+			baseline:  "Every newest service identity reports a 40- or 64-hex Go VCS revision, source_modified=true or source_modified=false, and an exact sha256 OCI image content digest.",
 			observed: fmt.Sprintf(
 				"current_service_identities=%d invalid_identities=%d invalid=%s metrics_gateway=%s",
 				len(current), len(invalid), strings.Join(invalid, ";"), metricHost.name,
 			),
-			evidence: "On 2026-09-01, six directly observed Taskworker blocks ran one exact image digest whose extracted executable reported dirty base revision 078d6c11 while the image's Docker context attested a52392db. Symbols proved the intended code was present, but neither revision alone described that executable. Two edge-4 blocks remained unknown because their digest could not be inspected without authorization.",
-			context:  "This is a release-provenance failure, not proof that a behavioral fix is absent. Mutable WARP_VERSION/config generations cannot close it.",
-			action:   "Build with Warp commit 217392e or a clean descendant: reject dirty source, require every Linux binary's embedded clean revision to match the starting HEAD, recheck the same clean HEAD after compilation and immediately before publication, then rebuild and deploy the affected service. Do not retag or reuse an unverifiable binary.",
-			verify:   "For two consecutive scrapes, every newest identity reports modified=false, the intended full revision, and a valid digest; independently require the running container and the digest's extracted executable to report those same immutable identities.",
+			evidence: "On 2026-09-01, six directly observed Taskworker blocks ran one exact image digest whose extracted executable reported modified base revision 078d6c11 while the image's Docker context attested a52392db. Symbols proved the intended code was present, but neither revision alone described that executable. This is why an intentional modified build must retain its checkout diff; modified=true itself is not malformed.",
+			context:  "This is an identity-format failure, not proof that a behavioral fix is absent and not a ban on local modifications. Mutable WARP_VERSION/config generations cannot close it.",
+			action:   "Repair the missing or malformed build identity and rebuild the affected service through the intentional local-checkout workflow. Preserve and record any participating local diff instead of discarding it merely to clear the monitor. Do not retag or reuse an artifact whose revision, Boolean modified field, or content digest cannot be parsed.",
+			verify:   "For two consecutive scrapes, every newest identity reports an intended full revision, a Boolean modified value, and a valid digest; independently require the running container and the digest's extracted executable to report those same identities.",
 			playbook: "SIGNALS.md §8.12",
 		})
 	}
@@ -267,8 +267,8 @@ func (provenanceProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			observed:  fmt.Sprintf("conflicting_digests=%d conflicts=%s metrics_gateway=%s", len(conflicts), strings.Join(conflicts, ";"), metricHost.name),
 			evidence:  "The comparison uses only newest actual-scrape-fresh identities with syntactically valid full revisions, Boolean modified labels, and exact sha256 digests; mutable tags and config versions are excluded from the equality key.",
 			context:   "Do not infer which claimant is correct from service health or lexicographic version order. The immutable identity contract itself is broken.",
-			action:    "Stop promotion of the conflicting artifact. Preserve the raw metric series, inspect the platform-specific manifest and running container digest for every named identity, extract each binary, and repair the first collector, manifest-selection, or runtime-injection mismatch before rebuilding from a clean source tree.",
-			verify:    "Two consecutive scrapes map every exact digest to one clean source tuple, and independent container plus extracted-binary inspection agrees with that tuple on each affected platform.",
+			action:    "Stop promotion of the conflicting artifact. Preserve the raw metric series, inspect the platform-specific manifest and running container digest for every named identity, extract each binary, and repair the first collector, manifest-selection, or runtime-injection mismatch before rebuilding from the intended local checkout.",
+			verify:    "Two consecutive scrapes map every exact digest to one source tuple, and independent container plus extracted-binary inspection agrees with that tuple on each affected platform.",
 			playbook:  "SIGNALS.md §8.12",
 		})
 	}
@@ -344,9 +344,7 @@ func provenanceInvalidReasons(process *provenanceProcess) []string {
 		reasons = append(reasons, "source-revision")
 	}
 	switch process.sourceModified {
-	case "true":
-		reasons = append(reasons, "source-modified")
-	case "false":
+	case "true", "false":
 	default:
 		reasons = append(reasons, "source-modified-label")
 	}

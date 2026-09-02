@@ -114,19 +114,19 @@ Treat a failing preflight as a monitor/repository problem to diagnose, not as a
 production alert.
 
 Before any service release build, run the registered `release-builder` signal
-against the intended environment. Treat either `warpctl-provenance-invalid` or
-`warpctl-release-guard-missing` as a hard release stop: the exact local
-`warpctl` resolved for the build and every installed managed-host copy must
-have one clean embedded revision and all three §8.13 fail-closed guards. A
-desired version label, a clean checkout beside another executable, or a clean
-older launcher is not equivalent evidence. The local repositories are the
-intentional deployment source: rebuild the workstation executable through the
-current `warp/warpctl/Makefile`, and rerun the local
+against the intended environment. The local repositories are intentionally the
+authoritative deployment source, including deliberate uncommitted changes.
+The exact local `warpctl` resolved for the build and every installed
+managed-host copy must expose a parseable full Go VCS base revision and Boolean
+modified bit; `modified=true` is context, not a fault. A desired version label,
+a checkout beside another executable, or an install timestamp is not equivalent
+evidence. If identity is missing or malformed, rebuild the workstation
+executable through the current `warp/warpctl/Makefile`, and rerun the local
 `xops/main/ansible/run-edges.sh` to build and install managed-host copies from
-the current local Warp checkout. Do not substitute a published or cached
-Warpctl. Require a clean Warp `217392e` descendant, repeat the signal, and only
-then build a new service artifact. Rebuild dirty or unattributable artifacts;
-do not retag or reuse them.
+that local Warp checkout. Do not substitute a published or cached Warpctl, and
+do not discard an intentional diff merely to make a signal green. Record and
+preserve the checkout base plus participating diff when exact replay matters;
+§8.12 independently verifies the resulting running service artifact.
 
 ## One-shot diagnostic snapshot
 
@@ -378,8 +378,9 @@ artifact construction.
 Report the exact service(s) and repository commit(s) that must be built. Do not
 claim a fix is deployed from a human version label alone. Prove:
 
-1. the release-builder gate was healthy for the exact `warpctl` that performed
-   the build;
+1. §8.13 recorded a parseable identity for the exact local-checkout `warpctl`
+   that performed the build, including its Boolean modified state and any
+   participating diff needed for replay;
 2. the built source contains the required commit by ancestry or immutable
    source metadata;
 3. every relevant running unit/container uses that artifact;

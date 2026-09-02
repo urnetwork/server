@@ -116,7 +116,7 @@ func TestMimirContinuitySignalSyntheticRestartGap(t *testing.T) {
 		"not zero throughput",
 		"§11.21 exact-process signal is the current-state gate",
 		"Run the §11.21 mimir-shutdown signal",
-		"clean Warp commit 7176ccd",
+		"intentional local Warp checkout containing commit 7176ccd",
 		"do not redeploy solely for historical gaps",
 		"Do not zero-fill",
 		"controlled then full Grafana clean-shutdown rollout",

@@ -76,7 +76,7 @@ func TestReindexDebrisSignalSyntheticFailedTransferEscrowRetries(t *testing.T) {
 		"excludes the large/high-churn contract and escrow tables",
 		"cleanup before and after each permitted object",
 		"keeps DbMaintenance owned when only its pooled timestamp refresh stalls",
-		"§8.12 proves every active Taskworker is a clean descendant of both fixes",
+		"§8.12 proves every active Taskworker's source/digest identity and the runtime behavior of both fixes",
 		"bringyourctl db maintenance all --cleanup",
 		"Do not wildcard-drop indexes or cancel a live rebuild",
 	} {

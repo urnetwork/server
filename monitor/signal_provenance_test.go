@@ -93,7 +93,7 @@ func TestProvenanceSignalSyntheticNewestMissingSource(t *testing.T) {
 	}
 }
 
-func TestProvenanceSignalSyntheticDirtyAndMalformed(t *testing.T) {
+func TestProvenanceSignalSyntheticAllowsModifiedAndRejectsMalformed(t *testing.T) {
 	now := time.Date(2026, 9, 1, 7, 2, 0, 0, time.UTC)
 	dirty := completeProvenanceFixture("api", "edge-0", "beta", "dirty", now.Add(-time.Hour))
 	dirty.sourceModified = "true"
@@ -111,14 +111,14 @@ func TestProvenanceSignalSyntheticDirtyAndMalformed(t *testing.T) {
 	)
 	alert := requireAlertClass(t, alerts, "service-provenance-invalid")
 	for _, want := range []string{
-		"4 of 4 newest fresh service identities",
-		"api/edge-0/beta#dirty[source-modified]",
+		"3 of 4 newest fresh service identities",
 		"connect/edge-1/g2#no-digest[image-digest]",
 		"taskworker/edge-3/g4#bad-revision[source-revision]",
 		"proxy/fireside/g3#bad-modified[source-modified-label]",
-		"dirty base revision 078d6c11",
+		"modified base revision 078d6c11",
 		"BuildKit context provenance alone is insufficient",
-		"Warp commit 217392e",
+		"intentional local-checkout workflow",
+		"modified=true itself is not malformed",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("invalid provenance alert missing %q:\n%s", want, alert.Markdown())
@@ -128,6 +128,20 @@ func TestProvenanceSignalSyntheticDirtyAndMalformed(t *testing.T) {
 		if candidate.Class == "service-provenance-unobservable" {
 			t.Fatalf("present but invalid source family was classified as absent: %+v", alerts)
 		}
+	}
+	if strings.Contains(alert.Observed, "api/edge-0/beta#dirty") {
+		t.Fatalf("intentional modified identity was classified invalid: %s", alert.Observed)
+	}
+}
+
+func TestProvenanceSignalSyntheticModifiedIdentityIsHealthy(t *testing.T) {
+	now := time.Date(2026, 9, 1, 7, 2, 0, 0, time.UTC)
+	modified := completeProvenanceFixture("api", "edge-0", "beta", "modified", now.Add(-time.Hour))
+	modified.sourceModified = "true"
+
+	alerts := runProvenanceFixture(t, now, provenanceFixtureJSON(t, now, modified))
+	if len(alerts) != 0 {
+		t.Fatalf("intentional modified service artifact alerted: %+v", alerts)
 	}
 }
 

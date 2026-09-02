@@ -4,23 +4,20 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const (
-	releaseBuilderMarker = "monitor-signal-8.13-release-builder"
-	releaseBuilderCommit = "217392e"
-)
+const releaseBuilderMarker = "monitor-signal-8.13-release-builder"
 
-// Signal release-builder implements SIGNALS.md §8.13. It inspects the exact
-// local and managed-host Warpctl executables so a clean tag or service image
-// cannot hide a release builder that still permits dirty, mismatched binaries.
+// Signal release-builder implements SIGNALS.md §8.13. It inventories the exact
+// local and managed-host Warpctl executables built from the operator's local
+// checkout. A dirty checkout is an intentional supported source, so its Go VCS
+// modified bit is identity context rather than a release failure.
 func NewReleaseBuilderSignal() Signal {
 	return &signalAdapter{
-		number: "8.13", key: "release-builder", name: "Warpctl release provenance enforcement",
+		number: "8.13", key: "release-builder", name: "Warpctl local-checkout executable identity",
 		probe: releaseBuilderProbe{},
 	}
 }
@@ -32,12 +29,9 @@ func (releaseBuilderProbe) tier() string           { return tierWarn }
 func (releaseBuilderProbe) cadence() time.Duration { return 5 * time.Minute }
 
 type releaseBuilderSample struct {
-	path              string
-	revision          string
-	modified          string
-	startCleanGuard   bool
-	binaryCleanGuard  bool
-	sourceStableGuard bool
+	path     string
+	revision string
+	modified string
 }
 
 type releaseBuilderResult struct {
@@ -94,8 +88,11 @@ func (releaseBuilderProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 
 	observable := true
 	invalid := []string{}
-	missingGuards := []string{}
-	findings := []finding{}
+	// Clear state left by watcher binaries that implemented the withdrawn
+	// fail-closed release policy. Guard absence is now intentional in Warp.
+	findings := []finding{healthyFinding(
+		"deploy/release-builder", tierWarn, "warpctl-release-guard-missing", "warpctl-control-plane",
+	)}
 	for _, result := range results {
 		if result.err != nil {
 			observable = false
@@ -111,52 +108,25 @@ func (releaseBuilderProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 				result.sample.modified, strings.Join(reasons, ","),
 			))
 		}
-		if missing := releaseBuilderMissingGuards(result.sample); len(missing) > 0 {
-			missingGuards = append(missingGuards, fmt.Sprintf(
-				"%s(path=%s revision=%s missing=%s)",
-				result.target, result.sample.path, result.sample.revision,
-				strings.Join(missing, ","),
-			))
-		}
 	}
 
 	if len(invalid) > 0 {
 		findings = append(findings, finding{
 			probeId: "deploy/release-builder", tier: tierWarn,
 			class: "warpctl-provenance-invalid", target: "warpctl-control-plane", sustain: 1,
-			symptom:   fmt.Sprintf("%d Warpctl executable(s) have dirty or malformed embedded source provenance", len(invalid)),
-			mechanism: "Warpctl is the release builder and service launcher. An executable with modified=true contains source not named by its embedded revision, so neither its own behavior nor an artifact it publishes is reproducible from that revision.",
-			baseline:  "The monitor-host and every enabled managed-services host execute a Warpctl with a full 40- or 64-hex Go VCS revision and modified=false.",
+			symptom:   fmt.Sprintf("%d Warpctl executable(s) lack parseable embedded local-checkout identity", len(invalid)),
+			mechanism: "Warpctl is built directly from an operator-controlled local checkout. Its Go VCS revision names the checkout base and its Boolean modified bit records whether local changes participated. A missing or malformed field prevents even that bounded attribution; modified=true by itself is intentional and is not a defect.",
+			baseline:  "The monitor-host and every enabled managed-services host execute a Warpctl with one full 40- or 64-hex Go VCS revision and a Boolean modified label; either true or false is valid.",
 			observed:  strings.Join(invalid, ";"),
-			evidence:  "The probe scans Go build settings in the exact executable resolved by command -v warpctl on the monitor/release host and the canonical /usr/local/sbin/warpctl on managed hosts; it does not use a checkout, image tag, desired version, or file timestamp.",
-			context:   "A dirty Warpctl does not prove every existing service artifact is dirty, but it cannot be trusted to establish clean release provenance. Hardware and a successful route do not repair this control-plane boundary.",
-			action:    "Stop release builds through every listed executable. Use the intentional local-checkout workflows: rebuild the workstation executable through the current warp/warpctl/Makefile and rerun xops/main/ansible/run-edges.sh to build and install managed-host copies from the current local Warp checkout. Do not substitute a published or cached Warpctl. Require Warp commit 217392e or a clean descendant, then rebuild affected service images from clean source; do not retag or reuse an unverifiable binary or infer source from WARP_VERSION.",
-			verify:    "Rerun this signal and require modified=false with one valid full revision on every target; then require each rebuilt service's urnetwork_source_info revision and image digest to match the extracted running executable for two scrapes.",
+			evidence:  "The probe scans Go build settings in the exact executable resolved by command -v warpctl on the monitor/release host and the canonical /usr/local/sbin/warpctl on managed hosts; it does not use a service image tag, desired version, install timestamp, or a different Warpctl copy.",
+			context:   "This signal does not require a clean checkout and does not establish the exact content of an intentionally modified build. Preserve the owning checkout and diff when exact replay matters. Hardware, a service tag, or a successful route cannot reconstruct malformed identity.",
+			action:    "Rebuild each listed executable through the intentional local-checkout workflow: use the current warp/warpctl/Makefile for the workstation copy and xops/main/ansible/run-edges.sh for managed-host copies. Do not substitute a published or cached Warpctl. Do not discard an intentional local diff merely to clear this warning; the fault is the missing or malformed identity field.",
+			verify:    "Every exact executable reports one full revision and modified=true or modified=false. A synthetic dirty local build remains accepted, while a missing revision or non-Boolean modified label remains visible. Validate each deployed service artifact independently through §8.12.",
 			playbook:  "SIGNALS.md §8.13 and §8.12",
 		})
 	} else if observable {
 		findings = append(findings, healthyFinding(
 			"deploy/release-builder", tierWarn, "warpctl-provenance-invalid", "warpctl-control-plane",
-		))
-	}
-
-	if len(missingGuards) > 0 {
-		findings = append(findings, finding{
-			probeId: "deploy/release-builder", tier: tierWarn,
-			class: "warpctl-release-guard-missing", target: "warpctl-control-plane", sustain: 1,
-			symptom:   fmt.Sprintf("%d Warpctl executable(s) lack one or more fail-closed release provenance guards", len(missingGuards)),
-			mechanism: "Legacy Warpctl can start from a dirty worktree, compile a binary whose embedded source differs from the later Docker context, and publish that image. A clean Warpctl executable alone is insufficient unless its release pipeline rejects a dirty start, a dirty/mismatched built binary, and source changes before publication.",
-			baseline:  "Every exact Warpctl executable contains all three release gates introduced by Warp 217392e: clean starting source, clean matching binary provenance, and unchanged source through publication.",
-			observed:  strings.Join(missingGuards, ";"),
-			evidence:  "The probe checks three independent guard-specific strings in the exact executable and records its embedded revision. A missing string identifies code that cannot execute that corresponding fail-closed branch.",
-			context:   "This is a software deployment and release-operations gate. Installing more capacity or redeploying a service with the same legacy builder cannot establish which source produced its executable.",
-			action:    "Do not run another release build with the listed Warpctl copies. Use the intentional local-checkout workflows: rebuild the workstation executable through the current warp/warpctl/Makefile and rerun xops/main/ansible/run-edges.sh to build and install managed-host copies from the current local Warp checkout. Do not substitute a published or cached Warpctl. Require Warp 217392e or later, preserve §8.11 worker-freshness handling, then rebuild rather than retag affected artifacts.",
-			verify:    "Every target reports start-clean, binary-clean, and source-stable guards present; a synthetic dirty build is rejected before compilation/publication, and the next clean service artifact reports matching executable revision and immutable image digest.",
-			playbook:  "SIGNALS.md §8.13 and §8.12",
-		})
-	} else if observable {
-		findings = append(findings, healthyFinding(
-			"deploy/release-builder", tierWarn, "warpctl-release-guard-missing", "warpctl-control-plane",
 		))
 	}
 
@@ -169,27 +139,11 @@ func releaseBuilderInvalidReasons(sample releaseBuilderSample) []string {
 		reasons = append(reasons, "source-revision")
 	}
 	switch sample.modified {
-	case "false":
-	case "true":
-		reasons = append(reasons, "source-modified")
+	case "false", "true":
 	default:
 		reasons = append(reasons, "source-modified-label")
 	}
 	return reasons
-}
-
-func releaseBuilderMissingGuards(sample releaseBuilderSample) []string {
-	missing := []string{}
-	if !sample.startCleanGuard {
-		missing = append(missing, "start-clean")
-	}
-	if !sample.binaryCleanGuard {
-		missing = append(missing, "binary-clean")
-	}
-	if !sample.sourceStableGuard {
-		missing = append(missing, "source-stable")
-	}
-	return missing
 }
 
 func parseReleaseBuilderSample(output string) (releaseBuilderSample, error) {
@@ -212,28 +166,12 @@ func parseReleaseBuilderSample(output string) (releaseBuilderSample, error) {
 			sample.revision = value
 		case "modified":
 			sample.modified = value
-		case "guard_start_clean", "guard_binary_clean", "guard_source_stable":
-			parsed, err := strconv.Atoi(value)
-			if err != nil || (parsed != 0 && parsed != 1) {
-				return releaseBuilderSample{}, fmt.Errorf("release builder: invalid %s %q", key, value)
-			}
-			switch key {
-			case "guard_start_clean":
-				sample.startCleanGuard = parsed == 1
-			case "guard_binary_clean":
-				sample.binaryCleanGuard = parsed == 1
-			case "guard_source_stable":
-				sample.sourceStableGuard = parsed == 1
-			}
 		default:
 			continue
 		}
 		seen[key] = true
 	}
-	for _, key := range []string{
-		"path", "revision", "modified", "guard_start_clean",
-		"guard_binary_clean", "guard_source_stable",
-	} {
+	for _, key := range []string{"path", "revision", "modified"} {
 		if !seen[key] {
 			return releaseBuilderSample{}, fmt.Errorf("release builder: observation omitted %s", key)
 		}
@@ -260,19 +198,5 @@ revision=$($grep_bin -aEo "build${tab}vcs[.]revision=[0-9a-f]{40}([0-9a-f]{24})?
 modified=$($grep_bin -aEo "build${tab}vcs[.]modified=(true|false)" "$warpctl_path" | sed 's/.*=//' | sort -u | paste -sd, -)
 [ -n "$revision" ] || revision=-
 [ -n "$modified" ] || modified=-
-guard_start_clean=0
-guard_binary_clean=0
-guard_source_stable=0
-if $grep_bin -aFq 'Git worktree is dirty; commit or remove changes before a release build' "$warpctl_path"; then
-  guard_start_clean=1
-fi
-if $grep_bin -aFq 'was built from a modified source tree' "$warpctl_path"; then
-  guard_binary_clean=1
-fi
-if $grep_bin -aFq 'release source changed during build' "$warpctl_path"; then
-  guard_source_stable=1
-fi
 printf 'path %s\nrevision %s\nmodified %s\n' "$warpctl_path" "$revision" "$modified"
-printf 'guard_start_clean %s\nguard_binary_clean %s\nguard_source_stable %s\n' \
-  "$guard_start_clean" "$guard_binary_clean" "$guard_source_stable"
 `

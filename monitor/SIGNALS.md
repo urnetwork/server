@@ -109,9 +109,14 @@ Updated 2026-09-01 after the public stats dashboard exposed matching multi-hour
 holes in live throughput, connected devices, provider counts, and network
 counts. Section 11.20 adds the `mimir-continuity` raw-range control and records
 the lost ephemeral TSDB head root cause plus the clean-shutdown flush fix.
-The same production pass traced dirty, unattributable service executables back
-to older Warpctl copies that predate the fail-closed release builder. Section
-8.13 adds the `release-builder` exact-binary provenance and guard probe.
+The same production pass traced modified, incompletely attributable service
+executables back to the exact Warpctl copies that built and launched them.
+Section 8.13 adds the `release-builder` exact-binary identity probe.
+Operator policy subsequently confirmed that local repository checkouts,
+including deliberate uncommitted changes, are the deployment source; Warp
+commit `8797d48` intentionally removed those release gates. Section 8.13 now
+retains exact executable identity and observation-loss coverage without treating
+`modified=true` or absent withdrawn guard strings as a fault.
 The direct runtime follow-up adds §11.21 (`mimir-shutdown`): all six enabled
 Grafana blocks still rendered shutdown flushing false, proving the source fix
 had not reached production even though it existed in Warp.
@@ -527,14 +532,15 @@ WHERE function_name LIKE '%UpdateClient%'
   connection panic path into that same measured fail-closed error, so it is the
   minimum deployable source for complete §2.14 telemetry.
 
-  The release root fix belongs to Warp: `warpctl build` now fails before
-  publication when the source tree is dirty, when a Linux binary lacks a full
-  clean embedded revision matching the starting HEAD, or when HEAD changes
-  during compilation/scanning. Generic service telemetry also exports the Go
-  revision, dirty bit, and Warp-injected immutable digest so future probes can
-  join the running process without extracting images. Install/use that Warp
-  builder for subsequent artifacts; it does not require redeploying the current
-  Taskworker solely to re-prove the already-present jitter behavior.
+  The first remediation added a fail-closed Warp release gate, but operator
+  policy later established that intentional local checkout state must remain
+  deployable; current Warp commit `8797d48` removes that gate. Generic service
+  telemetry still exports the Go base revision, Boolean modified bit, and
+  Warp-injected immutable digest so future probes can join the running process
+  without extracting images. A modified bit is descriptive rather than a
+  failure; preserve the participating local diff when exact replay matters.
+  None of this requires redeploying the current Taskworker solely to re-prove
+  the already-present jitter behavior.
 
   The first `03:50Z` run of the replacement watcher found the same defect in
   the independent `task-canaries` mixed-family guidance: its current
@@ -1785,8 +1791,8 @@ sample had 15 artifacts totaling 174,100,488,192 bytes: three more siblings
 and 774,709,248 additional bytes were created. Meanwhile `contract_close`
 owned the 18 active-table candidates, all not-ready, totaling 8,122,728,448
 bytes. This is continuing retry creation, not merely a new presentation of the
-old catalog. Deploy Taskworker from a clean server revision containing
-current-main commit `908a8b2c` before another maintenance cycle; focused
+old catalog. Deploy Taskworker from an intentional local server checkout
+containing current-main commit `908a8b2c` before another maintenance cycle; focused
 normal and race tests for the transfer exclusion and
 cleanup-before/rebuild/cleanup-after state machine
 pass. Do not conflate that software deployment with authorization to delete
@@ -1868,8 +1874,8 @@ the empty final progress sample prove this retry advanced through its bounded
 operations; the larger inactive inventory proves that completion was not
 cleanup. One table leaving progress never authorizes an interruption while
 the next table is active. The rollout gate opens only on an empty progress
-sample, and deployment still separately requires the trusted release-builder
-gate in section 8.13.
+sample, and deployment still separately requires readable exact Warpctl identity
+under section 8.13 plus running-artifact verification under section 8.12.
 
 The next lease recovery demonstrated the new progress evidence in the
 authoritative watcher. At 18:30:54Z, the legacy task selected
@@ -3794,8 +3800,9 @@ Current-main server commit `d8e34003` pipelines generic `PTTL` commands and
 reads the signed 64-bit millisecond result directly. Stable patch IDs prove it
 is patch-identical to the former `d9b2e291` hash after main was rewritten. No
 production TTL was changed during this audit. Any authorized cleanup artifact
-must be a clean descendant of the current-main commit; an older typed-duration
-build is unsafe even if it contains the legacy suffix fix.
+must be attributable to a local checkout containing the current-main commit;
+an older typed-duration build is unsafe even if it contains the legacy suffix
+fix. Record any participating diff.
 
 - Do not inspect binary stream keys through shell variables; embedded bytes
   can truncate or corrupt family attribution. The existing
@@ -5687,7 +5694,7 @@ Tier-1 (warn):
 | source-attribution | synthetic+logs | §8.8 dual-stack `/my-ip-info` family/source check plus UR-header resolver warnings | any mismatch for 2 probes, or any legacy untrusted-peer line after rollout |
 | migration-schema-drift / migration-behind | pg | §8.9 successful `migration_audit` head cross-checked against every published schema artifact | page when any artifact at or below the recorded head is absent; warn while the database head trails this source tree |
 | reliability-index-drift | pg catalog | §8.10 exact `client_reliability` parent/partition covering-index shape | warn while the old index remains, the desired index is absent/mis-shaped/invalid, or any partition child is absent/invalid |
-| warpctl-provenance-invalid / warpctl-release-guard-missing | local + managed-host executables | §8.13 exact Warpctl Go provenance plus three fail-closed release gates | any dirty/malformed executable or missing guard; immediate |
+| warpctl-provenance-invalid | local + managed-host executables | §8.13 exact Warpctl local-checkout base revision plus Boolean modified identity | missing/malformed revision or modified label; `modified=true` is valid; immediate |
 | netescrow-reconcile-overrun | task logs+pg | 5.11 live heartbeat or completed ReconcileNetEscrow duration | >= 120s; retain completed precursor 45 min |
 | netescrow-large-drift | task logs | 5.11 reconcile aggregate over/under-reserved correction | either direction >= 256GiB in the last 15 min; payload labels an adjacent opposite-direction quantity within 20% as a matched reversal |
 | netescrow-negative | standing logs | `[netescrow]negative counter after` | any warns; >=100/min/service/site pages; payload includes site (never raw balance/contract ids) |
@@ -5770,14 +5777,14 @@ revision, process start, and drain ancestors. A legacy address table or a
 normal edge's 404 is neither host assignment nor runtime provenance.
 
 The 2026-09-01 post-fix audit found the source closure ready but the tools
-stale. Clean Warp `217392e6` contains `2e13328`; its deterministic transparent
+stale. Warp `217392e6` contains `2e13328`; its deterministic transparent
 sampling tests pass, and a freshly built warpctl returned the explicit
 unavailable-status result in 0.37 seconds without polling. The workstation
 binary was last built on 2026-08-30 and lacked the fix string. The resident
 warpctl binaries on edge-0, edge-1, edge-3, edge-4, Fireside, and Crisp all
 shared one older digest and also lacked it. While edge-5 remains
-operator-declared offline, run from clean Warp `217392e6` or a clean
-descendant:
+operator-declared offline, run from an intentional local Warp checkout
+containing `2e13328`:
 
 ```sh
 xops/main/ansible/run-edges.sh --limit 'edges:!by-us-fmt-5-edge-5'
@@ -6328,7 +6335,9 @@ set; exporters and short commands are not deployment denominators.
 WARN `service-provenance-unobservable` when the newest identity lacks process
 start, build info, or source info. WARN `service-provenance-invalid` when the
 source family has anything other than a full 40- or 64-hex Git object ID,
-Boolean `modified=false`, and `sha256:` plus 64 lowercase hex characters.
+Boolean `modified=true` or `modified=false`, and `sha256:` plus 64 lowercase
+hex characters. The modified bit records intentional local checkout state; it
+is not itself invalid.
 WARN `service-provenance-conflict` when one valid immutable digest maps to more
 than one `(revision, modified)` tuple across fresh identities. The conflict is
 stronger than version skew: one content digest cannot legitimately describe
@@ -6351,19 +6360,20 @@ Its extracted binary reported base revision
 `078d6c1117bd8537a47b1933301e546cf500cf90` with `modified=true`, while the
 image's SLSA Docker context identified `a52392db`. Direct symbols and SQL
 proved the intended retry-jitter change was present, but neither revision
-alone described the binary. Edge-4's two blocks remained provenance-unknown
+alone described the binary. Exact replay of a modified build therefore also
+requires preserving its local diff. Edge-4's two blocks remained provenance-unknown
 because their digest could not be inspected without authorized Docker access;
-they were not silently counted clean. This exposed a shared-worktree race:
-the Linux binary was compiled from one dirty state and copied into an image
-whose later build context described another state.
+they were not silently counted observable. This exposed a shared-worktree
+attribution boundary: the Linux binary was compiled from one modified state
+and copied into an image whose later build context described another state.
 
 **Live pre-gauge audit (2026-09-01 07:05 UTC):** the new signal selected 68
 newest fresh processes through one services gateway: 20 API, 20 Connect, 20
 Proxy, and eight Taskworker identities. All 68 had fresh RSS, process start,
 and build info, and all 68 lacked `urnetwork_source_info`; no current
 Competitionworker entered the denominator. This is a clean legacy-instrumentation
-boundary, not evidence that all 68 binaries are dirty. Deploy each of those
-four service artifacts from the source-gauge commit or a clean descendant
+boundary, not evidence that any binary is malformed. Deploy each of those
+four service artifacts from a local checkout containing the source-gauge commit
 before attempting to classify its revision/digest. The probe contacted no
 disabled edge and does not need direct access to edge-5 for this metric join.
 
@@ -6376,27 +6386,30 @@ version `2026.8.31+1034210530` for every API and Connect block while their
 config annotation had advanced to `2026.9.1-outerwerld+1035001930`. The code
 version maps to server `a52392db`, which predates source-gauge commit
 `236bf0ce`; the newer config cannot add a metric owned by the executable. Build
-and deploy API and Connect from clean `236bf0ce` or a clean descendant. Do not
+and deploy API and Connect from an intentional local checkout containing
+`236bf0ce`. Do not
 redeploy the already-complete Proxy or Taskworker solely for this class.
 
-The software root fix is the fail-closed Warp release builder at commit
-`217392e` or a clean descendant. It rejects a dirty starting tree, requires
-every Linux binary's embedded revision and `modified=false` to equal that
-starting HEAD, rechecks the same clean HEAD after compilation, and checks again
-immediately before publication. This alert is a deployment/operational gate:
-rebuild and roll each affected service normally. Hardware cannot repair dirty,
-missing, or conflicting provenance, and a redeploy is not justified solely by
-the mutable config version when direct behavior already proves a fix present.
+Warp commit `217392e` temporarily enforced a clean-tree release gate. Operator
+policy subsequently confirmed that local repository checkouts, including
+deliberate uncommitted changes, are the deployment source, and current Warp
+commit `8797d48` intentionally removed that gate. The durable monitor contract
+is therefore identity, not cleanliness: require a full base revision, a
+Boolean modified bit, and the executed image digest; preserve the local diff
+when `modified=true`; and alert only on missing, malformed, or conflicting
+identity. Hardware cannot repair those identity failures, and a redeploy is
+not justified solely by the mutable config version when direct behavior already
+proves a fix present.
 
-Recovery requires two consecutive complete clean scrapes, followed by direct
+Recovery requires two consecutive complete identity scrapes, followed by direct
 inspection of the exact running container digest and the binary extracted from
 that digest. SIGNALS.md §8.12 (`provenance`) maps to
 `signal_provenance.go` and `signal_provenance_test.go`; synthetic cases pin a
-clean mixed-service fleet, draining-generation suppression, missing and stale
-source families, a fresh RSS identity without process start, dirty/malformed
-provenance, and a conflicting digest.
+mixed-service fleet, draining-generation suppression, missing and stale source
+families, a fresh RSS identity without process start, accepted modified source,
+malformed provenance, and a conflicting digest.
 
-### 8.13 Warpctl release-builder provenance and fail-closed guards
+### 8.13 Warpctl local-checkout executable identity
 
 Probe: `release-builder`
 
@@ -6409,28 +6422,21 @@ the Go build settings directly from that executable with bounded binary-safe
 a checkout, desired tag, install timestamp, or a different Warpctl copy.
 Disabled inventory hosts are never contacted.
 
-The local repositories are intentionally the authoritative deployment source.
-This control does not require a published, cached, or centrally downloaded
-Warpctl and must not classify use of a local checkout as a defect. It validates
-the executable produced and installed from that checkout: the installed bytes
-must identify one clean revision and contain the release guards below.
+The local repositories are intentionally the authoritative deployment source,
+including deliberate uncommitted changes. This control neither requires nor
+downloads a published or cached Warpctl. Emit `warpctl-provenance-invalid` only
+when the exact executable lacks one full 40- or 64-hex Git base revision or its
+`vcs.modified` field is not the Boolean string `true` or `false`. A missing or
+unreadable executable remains `cannot-observe`. `modified=true` is valid
+identity context and must not produce an alert.
 
-Emit `warpctl-provenance-invalid` if the embedded revision is not one full
-40- or 64-hex Git object ID, or `vcs.modified` is anything except `false`.
-Emit `warpctl-release-guard-missing` unless the executable contains all three
-independent gates introduced by Warp `217392e`:
-
-- reject a dirty source tree before compilation;
-- reject a built Linux binary whose embedded source is dirty or differs from
-  the clean starting revision; and
-- recheck the same clean source before image publication, catching changes
-  during a long build.
-
-One clean bit is not a substitute for another. A clean older Warpctl can still
-publish a dirty service binary, and checking only the Docker/BuildKit context
-does not identify a Go binary compiled outside that context. Guard presence is
-tested from guard-specific error strings in the exact executable; the Warp
-unit regressions test the behavior that owns those strings.
+The modified bit does not name the participating diff. When exact replay or
+incident attribution matters, preserve the owning local checkout and record
+its diff alongside the artifact digest. A desired version, install timestamp,
+checkout HEAD viewed later, or Docker/BuildKit context attestation is not a
+substitute for the exact executable's base/modified tuple. Local and managed
+copies can legitimately identify different checkout generations between
+operator runs, so this probe does not invent a fleet-equality requirement.
 
 The 2026-09-01 production discriminator joined all three boundaries. Running
 Taskworker image digest
@@ -6444,43 +6450,33 @@ repository. Edge-0's exact installed Warpctl was instead a clean
 `42168fe8` executable, but it predated and lacked every `217392e` release
 guard. The workstation Warpctl resolved by the monitor was older still and
 reported `vcs.modified=true`. Thus neither the tag, the later image context,
-nor a clean launcher proved the service executable's source.
+nor a different clean launcher proved the service executable's source. Under
+the current policy, the valid modified tuple was not itself broken; failure to
+retain its diff was the remaining exact-replay limitation.
 
-The later remediation sample separates workflow correctness from rollout
-timing. By 18:31:02Z the workstation executable was a clean descendant at
-Warp `7176ccdc`, with all three guards, while all six enabled managed-services
-hosts still had the clean `42168fe8` executable and lacked all three guards.
-`42168fe8` was committed at 22:38:11-05:00 on August 31; `217392e` landed at
-01:49:21-05:00 on September 1. The earlier `run-edges.sh` invocation therefore
-installed the then-current local checkout; its remaining age is not evidence
-that local checkout deployment is defective. It must be rerun after the guard
-commit. The default playbook also restarts Warp services, so do not run that
-restart across protected PostgreSQL index progress. If operators deliberately
-stage only the on-disk binary with `WARP_SKIP_SERVICES` set, this exact-binary
-probe may become healthy while §8.11 correctly keeps resident pre-install
-workers stale. No service rollout is provenance-cleared until both controls
-are healthy.
+Warp `217392e` temporarily introduced three fail-closed clean-tree guards.
+Operator policy later affirmed local checkout deployment and current Warp
+`8797d48` intentionally removed those guards. The former
+`warpctl-release-guard-missing` class is withdrawn; a new watcher emits a
+healthy compatibility tombstone so persisted state from an older monitor can
+resolve rather than linger.
 
-This is a software deployment and release-operations gate, never a hardware
-alert. Stop new release builds through any listed executable. Use the existing
-local-source workflows: rebuild the workstation copy through the current Warp
-checkout's `warp/warpctl/Makefile`, then rerun
-`xops/main/ansible/run-edges.sh` to build the three target binaries from that
-same local Warp checkout and install the managed-host copies. This is not a
-request to substitute a published or cached Warpctl. The checkout used for the
-rebuild must contain `217392e` or a clean descendant. Preserve §8.11 worker
-freshness when replacing host launchers. Rebuild affected service images from
-clean source; do not retag or reuse the dirty artifacts. Verification requires
-every exact Warpctl path to report one clean revision and all three guards, a
-synthetic dirty build to fail before publication, and the next service's source
-metric to match its extracted running executable and image digest for two
-scrapes.
+This is software identity and release-operations visibility, never a hardware
+alert and never a prohibition on local changes. If identity is malformed,
+rebuild the workstation copy through the current local
+`warp/warpctl/Makefile`, or rerun `xops/main/ansible/run-edges.sh` to build and
+install managed-host copies from the current local Warp checkout. Do not
+substitute a published/cached Warpctl or discard a desired diff merely to clear
+the warning. The playbook can restart resident Warp workers, so retain §8.11's
+separate mutation and worker-freshness gates. Verification requires every exact
+path to report one full revision and either Boolean modified value; §8.12 then
+matches each running service's independently emitted tuple and image digest.
 
 SIGNALS.md §8.13 (`release-builder`) maps to
 `signal_release_builder.go` and `signal_release_builder_test.go`. Synthetic
-coverage pins a clean fleet, a dirty local builder, independently missing
-guards, partial host observation loss, services-role scoping, and parsing of
-the actual executable-string shape.
+coverage pins a parseable fleet, an accepted modified local builder with no
+guard strings, malformed identity, partial host observation loss,
+services-role scoping, and parsing of the actual executable-string shape.
 
 ## 9. Key-event delivery (PEERSSTREAMS2)
 
@@ -7728,7 +7724,7 @@ emit `mimir-ingestion-gap`, preserving all gap ranges and the serving gateway.
 The causal defect is software-owned, but a historical continuity alert does not
 unconditionally request another Grafana deployment. Pair it with the §11.21
 exact-process signal. Any current child rendering false requires a Grafana/Warp
-image from clean `7176ccd` or a clean descendant. When every current child
+image from an intentional local checkout containing `7176ccd`. When every current child
 already renders `blocks_storage.tsdb.flush_blocks_on_shutdown: true`, the old
 hole is expected to remain visible and is not evidence that the fix is absent.
 Preserve the setting through the next ordinary rollout and use that clean
@@ -7790,9 +7786,9 @@ replacement, including a deployment of later Warp `13fcd05`, must preserve the
 true setting and produce no new bounded build-info gap through the following
 block-upload window.
 
-This alert is software-owned. First satisfy the §8.13 fail-closed release
-builder, then build and deploy Grafana from clean Warp `7176ccd` or a clean
-descendant. Keep each generation's TSDB private and ephemeral; never
+This alert is software-owned. First use §8.13 to record the exact local-checkout
+Warpctl identity, then build and deploy Grafana from an intentional local Warp
+checkout containing `7176ccd`. Keep each generation's TSDB private and ephemeral; never
 shared-mount a WAL/TSDB directory into overlapping containers. Retain the
 120-second Mimir child stop allowance and the outer 3,600-second Docker drain.
 The generated systemd unit's separate 60-second timeout applies to the Warpctl
@@ -8809,10 +8805,11 @@ is absent even while §8.12 source metadata is unavailable: current-main Connect
 commit `096414ac` makes the shared minimum 8 KiB, and current-main server commit
 `c1403f16` propagates it through the resident H1 path. Stable patch IDs prove
 they are patch-identical to the former `7e0fcba` and `53780b3e` hashes after
-both histories were rewritten. After §8.13 is healthy, deploy clean artifacts
-containing the current-main commit pair (or clean descendants) to Connect and
-Proxy; deploying only one endpoint leaves the other able to reject the same
-carrier. A mutable version label is not proof of either commit.
+both histories were rewritten. After §8.13 can read the exact Warpctl identity,
+deploy Connect and Proxy artifacts from intentional local checkouts containing
+the current-main commit pair; deploying only one endpoint leaves the other able
+to reject the same carrier. Record participating diffs because a mutable
+version label is not proof of either commit.
 
 Deploy both ends of the H1 path before judging the change: the Connect
 resident must admit/forward the carrier and the H1-only hosted DeviceLocal must
@@ -9442,22 +9439,20 @@ or device ceiling, additional proxy instances on capable hardware (or an
 explicit operational load reduction) are required even after the live set is
 smaller.
 
-Deploy the Proxy service artifact from a clean server descendant of
-`04c40524` (and therefore `a4a8b502` and `a11ae7b1`), built against a clean SDK
-descendant of `e05ec46`. It must contain targeted warmup, the value-only
+Deploy the Proxy service artifact from intentional local server and SDK
+checkouts containing `04c40524` (and therefore `a4a8b502` and `a11ae7b1`) and
+`e05ec46`. It must contain targeted warmup, the value-only
 WireGuard TUN factory, the bounded caller-lock cache, the new owner gauges, the
 generic source/digest gauge, the lifecycle capability gauge, and the complete
 manager/device/RPC ownership joins. No xops deployment is needed for these
-process-memory corrections. The release
-builder must use the Warp provenance
-gate that rejects dirty source, requires every Linux binary's embedded
-revision and `modified=false` to match the starting clean HEAD, and rechecks
-that HEAD immediately before publishing. Require §8.12 to join both
+process-memory corrections. Require §8.13 to record the exact local-checkout
+Warpctl identity and §8.12 to join both
 `urnetwork_build_info` and `urnetwork_source_info` to the exact newest process
 identity and independently match the running container; the release ledger
-must separately record the clean SDK dependency because the server's Go VCS
-stamp alone does not prove that checkout. With that provenance gate separate
-and healthy, the first post-sync sample and repeated post-GC floor must be
+must separately record each checkout base plus any participating local diff,
+especially the SDK dependency because the server's Go VCS stamp alone does not
+prove that checkout. With those identities recorded, the first post-sync sample
+and repeated post-GC floor must be
 materially lower than the legacy 3.6–3.9 GiB
 heap/27.5–30.5-million-object band. Require the conservative residual below 2
 GiB for 15 minutes across multiple GC cycles, improved RSS and host
@@ -11024,13 +11019,15 @@ whole images directory is mirrored. The existing local `astro/dist` and staged
 boundary is therefore an undeployed Web build, not a Cloudflare-only cache,
 nginx Host, or live-edge routing defect.
 
-Build and deploy only the Web service from a clean Mmm descendant of
-`b4b229c5c`, using the fail-closed Warp release builder. Require `sync-public`
+Build and deploy only the Web service from an intentional local Mmm checkout
+containing `b4b229c5c`, using the exact local-checkout Warpctl observed by
+§8.13. Require `sync-public`
 to place both files in staged output before image publication. The Web build
-also consumes the local SDK WASM, so its dependency checkout must be clean and
-attributable. At the 2026-09-02 incident observation that prerequisite was not
-met: the local SDK worktree held unrelated uncommitted device/network changes,
-so no Web release was built. Keep API and Taskworker artifacts containing
+also consumes the local SDK WASM, so record its checkout base and any
+participating diff. At the 2026-09-02 incident observation the local SDK
+worktree held unrelated uncommitted device/network changes; those changes are
+not a monitor fault, but the operator must decide whether they belong in the
+Web artifact and preserve the exact diff if they do. Keep API and Taskworker artifacts containing
 current-main server `ec6e3b92` or later behind this Web gate, then deploy those templates
 only after §19.2 is healthy. Connect, database, Grafana, and Xops deployments
 cannot repair this boundary. Do not copy files into live containers.

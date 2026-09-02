@@ -15,25 +15,15 @@ import (
 const releaseBuilderTestRevision = "0123456789abcdef0123456789abcdef01234567"
 
 func releaseBuilderFixture(sample releaseBuilderSample) string {
-	boolInt := func(value bool) int {
-		if value {
-			return 1
-		}
-		return 0
-	}
 	return fmt.Sprintf(
-		"path %s\nrevision %s\nmodified %s\n"+
-			"guard_start_clean %d\nguard_binary_clean %d\nguard_source_stable %d\n",
+		"path %s\nrevision %s\nmodified %s\n",
 		sample.path, sample.revision, sample.modified,
-		boolInt(sample.startCleanGuard), boolInt(sample.binaryCleanGuard),
-		boolInt(sample.sourceStableGuard),
 	)
 }
 
 func healthyReleaseBuilderSample(path string) releaseBuilderSample {
 	return releaseBuilderSample{
 		path: path, revision: releaseBuilderTestRevision, modified: "false",
-		startCleanGuard: true, binaryCleanGuard: true, sourceStableGuard: true,
 	}
 }
 
@@ -79,17 +69,15 @@ func TestReleaseBuilderSignalSyntheticHealthyFleet(t *testing.T) {
 	}
 }
 
-func TestReleaseBuilderSignalSyntheticDirtyAndUnguarded(t *testing.T) {
+func TestReleaseBuilderSignalSyntheticAllowsIntentionalDirtyLocalCheckout(t *testing.T) {
 	source := &syntheticSource{
 		localFn: func(string, ...string) (string, error) {
 			return releaseBuilderFixture(releaseBuilderSample{
 				path: "/local/warpctl", revision: strings.Repeat("a", 40), modified: "true",
 			}), nil
 		},
-		hostFn: func(host HostSettings, _ string) (string, error) {
-			sample := healthyReleaseBuilderSample("/usr/local/sbin/warpctl")
-			sample.binaryCleanGuard = false
-			return releaseBuilderFixture(sample), nil
+		hostFn: func(HostSettings, string) (string, error) {
+			return releaseBuilderFixture(healthyReleaseBuilderSample("/usr/local/sbin/warpctl")), nil
 		},
 	}
 	settings := syntheticSettings(source)
@@ -99,32 +87,50 @@ func TestReleaseBuilderSignalSyntheticDirtyAndUnguarded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 2 {
-		t.Fatalf("release-builder alerts = %d, want 2: %+v", len(alerts), alerts)
+	if len(alerts) != 0 {
+		t.Fatalf("intentional dirty local checkout alerted: %+v", alerts)
+	}
+
+}
+
+func TestReleaseBuilderSignalSyntheticMalformedIdentity(t *testing.T) {
+	source := &syntheticSource{
+		localFn: func(string, ...string) (string, error) {
+			return releaseBuilderFixture(releaseBuilderSample{
+				path: "/local/warpctl", revision: "short", modified: "unknown",
+			}), nil
+		},
+		hostFn: func(HostSettings, string) (string, error) {
+			return releaseBuilderFixture(healthyReleaseBuilderSample("/usr/local/sbin/warpctl")), nil
+		},
+	}
+	settings := syntheticSettings(source)
+	settings.Hosts = []HostSettings{{Name: "edge-0", Roles: []string{"services"}}}
+
+	alerts, err := NewReleaseBuilderSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("release-builder alerts = %d, want 1: %+v", len(alerts), alerts)
 	}
 	invalid := requireAlertClass(t, alerts, "warpctl-provenance-invalid")
-	missing := requireAlertClass(t, alerts, "warpctl-release-guard-missing")
 	if invalid.SignalNumber != "8.13" || invalid.SignalKey != "release-builder" {
 		t.Fatalf("wrong release-builder identity: %+v", invalid)
 	}
 	for _, want := range []string{
-		"monitor-host", "modified=true", releaseBuilderCommit, "Stop release builds",
+		"monitor-host", "revision=short", "modified=unknown",
 		"warp/warpctl/Makefile", "xops/main/ansible/run-edges.sh",
-		"current local Warp checkout", "Do not substitute a published or cached Warpctl",
-		"urnetwork_source_info",
+		"intentional local-checkout workflow", "Do not substitute a published or cached Warpctl",
+		"modified=true by itself is intentional", "Validate each deployed service artifact independently",
 	} {
 		if !strings.Contains(invalid.Markdown(), want) {
 			t.Errorf("invalid-provenance alert lacks %q: %s", want, invalid.Markdown())
 		}
 	}
-	for _, want := range []string{
-		"monitor-host", "edge-0", "binary-clean", "start-clean", "source-stable",
-		"Do not run another release build", releaseBuilderCommit,
-		"warp/warpctl/Makefile", "xops/main/ansible/run-edges.sh",
-		"current local Warp checkout", "Do not substitute a published or cached Warpctl",
-	} {
-		if !strings.Contains(missing.Markdown(), want) {
-			t.Errorf("missing-guard alert lacks %q: %s", want, missing.Markdown())
+	for _, rejected := range []string{"Stop release builds", "217392e", "release guard"} {
+		if strings.Contains(invalid.Markdown(), rejected) {
+			t.Errorf("invalid-provenance alert retains withdrawn policy %q: %s", rejected, invalid.Markdown())
 		}
 	}
 }
@@ -160,15 +166,12 @@ func TestReleaseBuilderSignalPreservesPartialObservationFailure(t *testing.T) {
 	}
 }
 
-func TestReleaseBuilderScriptReadsEmbeddedBuildAndGuardStrings(t *testing.T) {
+func TestReleaseBuilderScriptReadsEmbeddedLocalCheckoutIdentityWithoutGuards(t *testing.T) {
 	binDir := t.TempDir()
 	warpctlPath := filepath.Join(binDir, "warpctl")
 	body := strings.Join([]string{
 		"build\tvcs.revision=" + releaseBuilderTestRevision,
-		"build\tvcs.modified=false",
-		"Git worktree is dirty; commit or remove changes before a release build",
-		"release binary example was built from a modified source tree",
-		"release source changed during build",
+		"build\tvcs.modified=true",
 	}, "\n") + "\n"
 	if err := os.WriteFile(warpctlPath, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -185,8 +188,7 @@ func TestReleaseBuilderScriptReadsEmbeddedBuildAndGuardStrings(t *testing.T) {
 		t.Fatalf("parse release-builder script: %v\n%s", err, output)
 	}
 	if sample.path != warpctlPath || sample.revision != releaseBuilderTestRevision ||
-		sample.modified != "false" || !sample.startCleanGuard ||
-		!sample.binaryCleanGuard || !sample.sourceStableGuard {
+		sample.modified != "true" {
 		t.Fatalf("release-builder script lost embedded values: %+v\n%s", sample, output)
 	}
 }
