@@ -23,11 +23,9 @@ const (
 const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
 unit_state=$(systemctl is-active github-backup-archive.service 2>/dev/null || true)
 main_pid=$(systemctl show github-backup-archive.service -p MainPID --value 2>/dev/null || true)
-metrics_mtime=$(stat -c %Y /var/lib/fluent-bit/textfile/backup-archive-code.prom 2>/dev/null || true)
 case "${unit_state}" in '') unit_state=unknown ;; esac
 case "${main_pid}" in ''|*[!0-9]*) main_pid=0 ;; esac
-case "${metrics_mtime}" in ''|*[!0-9]*) metrics_mtime=0 ;; esac
-printf '%s %s %s\n' "${unit_state}" "${main_pid}" "${metrics_mtime}"`
+printf '%s %s\n' "${unit_state}" "${main_pid}"`
 
 var backupArchiveNames = []string{
 	"pg",
@@ -58,20 +56,21 @@ type backupArchiveLatestSample struct {
 }
 
 type backupArchiveObservation struct {
-	host            string
-	archive         string
-	latest          []backupArchiveLatestSample
-	progress        []float64
-	invalidLatest   []string
-	invalidProgress []string
-	staleScrapes    int
+	host             string
+	archive          string
+	latest           []backupArchiveLatestSample
+	progress         []float64
+	heartbeats       []time.Time
+	invalidLatest    []string
+	invalidProgress  []string
+	invalidHeartbeat []string
+	staleScrapes     int
 }
 
 type backupArchiveWriterObservation struct {
-	host         string
-	unitState    string
-	mainPID      int64
-	metricsMTime time.Time
+	host      string
+	unitState string
+	mainPID   int64
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -191,6 +190,23 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 				continue
 			}
 			observation.progress = append(observation.progress, value)
+		case "urnetwork_backup_archive_heartbeat_timestamp_seconds":
+			if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+				observation.invalidHeartbeat = append(
+					observation.invalidHeartbeat,
+					fmt.Sprintf("value=%v", value),
+				)
+				continue
+			}
+			heartbeatAt := unixFloatTime(value)
+			if heartbeatAt.After(now.Add(backupArchiveFutureTolerance)) {
+				observation.invalidHeartbeat = append(
+					observation.invalidHeartbeat,
+					fmt.Sprintf("future_heartbeat=%s", heartbeatAt.Format(time.RFC3339)),
+				)
+				continue
+			}
+			observation.heartbeats = append(observation.heartbeats, heartbeatAt)
 		}
 	}
 
@@ -211,8 +227,8 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 
 func parseBackupArchiveWriterObservation(hostName, output string) (backupArchiveWriterObservation, error) {
 	fields := strings.Fields(strings.TrimSpace(output))
-	if len(fields) != 3 {
-		return backupArchiveWriterObservation{}, fmt.Errorf("expected state, main PID, and metrics mtime; got %q", strings.TrimSpace(output))
+	if len(fields) != 2 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("expected state and main PID; got %q", strings.TrimSpace(output))
 	}
 	if matched, _ := regexp.MatchString(`^[a-z-]+$`, fields[0]); !matched {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid unit state %q", fields[0])
@@ -221,15 +237,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if err != nil || mainPID < 0 {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid main PID %q", fields[1])
 	}
-	metricsMTimeUnix, err := strconv.ParseInt(fields[2], 10, 64)
-	if err != nil || metricsMTimeUnix < 0 {
-		return backupArchiveWriterObservation{}, fmt.Errorf("invalid metrics mtime %q", fields[2])
-	}
-	writer := backupArchiveWriterObservation{host: hostName, unitState: fields[0], mainPID: mainPID}
-	if metricsMTimeUnix > 0 {
-		writer.metricsMTime = time.Unix(metricsMTimeUnix, 0).UTC()
-	}
-	return writer, nil
+	return backupArchiveWriterObservation{host: hostName, unitState: fields[0], mainPID: mainPID}, nil
 }
 
 func evaluateBackupArchiveWriter(
@@ -241,23 +249,39 @@ func evaluateBackupArchiveWriter(
 	progressTotal := float64(0)
 	progressSeries := 0
 	progressComplete := true
+	heartbeatSeries := 0
+	heartbeatComplete := true
+	heartbeatAt := time.Time{}
 	for _, archive := range []string{"github-urnetwork", "github-urfoundation"} {
 		observation := observations[backupArchiveKey(writer.host, archive)]
-		if observation == nil || len(observation.progress) != 1 || len(observation.invalidProgress) != 0 {
+		if observation == nil {
 			progressComplete = false
+			heartbeatComplete = false
 			continue
 		}
-		progressSeries++
-		progressTotal += observation.progress[0]
+		if len(observation.progress) != 1 || len(observation.invalidProgress) != 0 {
+			progressComplete = false
+		} else {
+			progressSeries++
+			progressTotal += observation.progress[0]
+		}
+		if len(observation.heartbeats) != 1 || len(observation.invalidHeartbeat) != 0 {
+			heartbeatComplete = false
+		} else {
+			heartbeatSeries++
+			if heartbeatAt.IsZero() || observation.heartbeats[0].Before(heartbeatAt) {
+				heartbeatAt = observation.heartbeats[0]
+			}
+		}
 	}
 
-	metricsMTime := "missing"
-	metricsAge := "unknown"
-	metricsAgeDuration := time.Duration(0)
-	if !writer.metricsMTime.IsZero() {
-		metricsMTime = writer.metricsMTime.Format(time.RFC3339)
-		metricsAgeDuration = now.Sub(writer.metricsMTime)
-		metricsAge = backupArchiveAge(metricsAgeDuration)
+	heartbeatTimestamp := "missing"
+	heartbeatAge := "unknown"
+	heartbeatAgeDuration := time.Duration(0)
+	if !heartbeatAt.IsZero() {
+		heartbeatTimestamp = heartbeatAt.Format(time.RFC3339)
+		heartbeatAgeDuration = now.Sub(heartbeatAt)
+		heartbeatAge = backupArchiveAge(heartbeatAgeDuration)
 	}
 
 	reasons := []string{}
@@ -266,12 +290,12 @@ func evaluateBackupArchiveWriter(
 		if writer.mainPID == 0 {
 			reasons = append(reasons, "active-unit-without-main-pid")
 		}
-		if writer.metricsMTime.IsZero() {
-			reasons = append(reasons, "metrics-textfile-missing")
-		} else if metricsAgeDuration > backupArchiveHeartbeatAge {
+		if !heartbeatComplete {
+			reasons = append(reasons, "github-heartbeat-incomplete")
+		} else if heartbeatAgeDuration > backupArchiveHeartbeatAge {
 			reasons = append(reasons, "metrics-heartbeat-stale")
-		} else if metricsAgeDuration < -30*time.Second {
-			reasons = append(reasons, "metrics-mtime-in-future")
+		} else if heartbeatAgeDuration < -30*time.Second {
+			reasons = append(reasons, "metrics-heartbeat-in-future")
 		}
 		if !progressComplete {
 			reasons = append(reasons, "github-progress-incomplete")
@@ -302,23 +326,25 @@ func evaluateBackupArchiveWriter(
 			"%s writer state and exported in-progress telemetry disagree",
 			target,
 		),
-		mechanism: "Fluent Bit assigns a fresh scrape timestamp each time it rereads a Prometheus textfile, so Mimir sample freshness cannot prove that the file's Boolean phase is current. A standalone refresh overwrote both gauges with zero while the oneshot was active, and the long-running writer only rewrote metrics at organization transitions. The stale source file therefore looked freshly idle throughout a multi-hour compression.",
-		baseline:  "While github-backup-archive.service is active, it has a nonzero MainPID, the code-backup textfile mtime is no more than 90 seconds old, and exactly one of the two fresh organization gauges is 1. When the unit is inactive or failed, both gauges are 0.",
+		mechanism: "Fluent Bit assigns a fresh scrape timestamp each time it rereads a Prometheus textfile, so Mimir sample freshness cannot prove that the file's Boolean phase is current. A standalone refresh overwrote both gauges with zero while the oneshot was active, and the long-running writer only rewrote metrics at organization transitions. The stale source file therefore looked freshly idle throughout a multi-hour compression. The fixed writer carries its own publication timestamp as a metric value so this distinction does not require privileged filesystem access.",
+		baseline:  "While github-backup-archive.service is active, it has a nonzero MainPID, both heartbeat metric values are no more than 90 seconds old, and exactly one of the two fresh organization gauges is 1. When the unit is inactive or failed, both gauges are 0.",
 		observed: fmt.Sprintf(
-			"unit_state=%s main_pid=%d metrics_mtime=%s metrics_age=%s fresh_github_progress_series=%d progress_complete=%t published_progress_total=%s reasons=%s",
+			"unit_state=%s main_pid=%d heartbeat_timestamp=%s heartbeat_age=%s fresh_github_heartbeat_series=%d heartbeat_complete=%t fresh_github_progress_series=%d progress_complete=%t published_progress_total=%s reasons=%s",
 			writer.unitState,
 			writer.mainPID,
-			metricsMTime,
-			metricsAge,
+			heartbeatTimestamp,
+			heartbeatAge,
+			heartbeatSeries,
+			heartbeatComplete,
 			progressSeries,
 			progressComplete,
 			strconv.FormatFloat(progressTotal, 'f', 0, 64),
 			strings.Join(reasons, ","),
 		),
-		evidence: "The unit state, MainPID, and source textfile mtime are read directly on the configured backup host and joined with the two source-timestamp-filtered raw Mimir progress gauges.",
+		evidence: "The unit state and MainPID are read directly on the configured backup host and joined with the source-timestamp-filtered raw Mimir progress gauges plus their producer-owned heartbeat values.",
 		context:  "This is a telemetry-owner defect, not evidence that the active archive stopped and not a completed recovery point. Preserve a healthy active tar/xz generation; changing the installed script does not alter the already-running shell.",
-		action:   "Keep the current archive job running. Install Xops commit 2f22201 or a clean descendant with run-planetoid.sh; its sole owning writer republishes the active phase every 30 seconds and cancels the helper before publishing final zeros. The already-running pre-fix shell will not gain that behavior, so verify it on the next authorized archive generation rather than restarting this one or manually editing the .prom file.",
-		verify:   "On the next generation using the fixed script, require two consecutive direct samples during a long phase with exactly one GitHub gauge at 1 and a source textfile mtime no more than 90 seconds old; after successful atomic completion, require both gauges at 0, the helper gone, and the new tarball and manifest valid.",
+		action:   "Keep the current archive job running. Provenance-check the installed script against Xops commit 2733b0b. If it predates that commit, install a clean descendant with run-planetoid.sh; its sole owning writer republishes the active phase and producer-owned heartbeat timestamp every 30 seconds, then cancels the helper before publishing final zeros. If the installed file is already current, do not rerun the playbook merely to clear this alert. The already-running pre-fix shell will not gain that behavior, so verify it on the next authorized archive generation rather than restarting this one or manually editing the .prom file.",
+		verify:   "On the next generation using the fixed script, require two consecutive raw Mimir samples during a long phase with exactly one GitHub gauge at 1 and both producer heartbeat values no more than 90 seconds old; after successful atomic completion, require both gauges at 0, the helper gone, and the new tarball and manifest valid.",
 		playbook: "SIGNALS.md §11.22",
 	}
 }
@@ -331,7 +357,7 @@ func backupArchivesQuery(environment string, hosts []*host) string {
 	sort.Strings(hostNames)
 	return fmt.Sprintf(
 		`{__name__=~%s,env=%s,host=~%s}`,
-		strconv.Quote(`urnetwork_backup_archive_(latest_timestamp_seconds|in_progress)`),
+		strconv.Quote(`urnetwork_backup_archive_(latest_timestamp_seconds|in_progress|heartbeat_timestamp_seconds)`),
 		strconv.Quote(environment),
 		strconv.Quote(strings.Join(hostNames, "|")),
 	)
@@ -352,21 +378,26 @@ func evaluateBackupArchive(now time.Time, observation *backupArchiveObservation,
 	target := observation.host + "/" + observation.archive
 	findings := []finding{}
 
-	if len(observation.invalidLatest) > 0 || len(observation.invalidProgress) > 0 || len(observation.progress) > 1 {
+	if len(observation.invalidLatest) > 0 || len(observation.invalidProgress) > 0 ||
+		len(observation.invalidHeartbeat) > 0 || len(observation.progress) > 1 || len(observation.heartbeats) > 1 {
 		invalid := append([]string(nil), observation.invalidLatest...)
 		invalid = append(invalid, observation.invalidProgress...)
+		invalid = append(invalid, observation.invalidHeartbeat...)
 		if len(observation.progress) > 1 {
 			invalid = append(invalid, fmt.Sprintf("progress_series=%d", len(observation.progress)))
+		}
+		if len(observation.heartbeats) > 1 {
+			invalid = append(invalid, fmt.Sprintf("heartbeat_series=%d", len(observation.heartbeats)))
 		}
 		findings = append(findings, finding{
 			probeId: "observability/backup-archives", tier: tierPage,
 			class: "backup-archive-metrics-invalid", target: target, sustain: 1,
 			symptom:   fmt.Sprintf("%s publishes an invalid or ambiguous backup archive metric", target),
-			mechanism: "The textfile collector accepted a sample whose timestamp, generation, Boolean domain, or label cardinality cannot describe one completed archive and one active-state gauge. Treating it as fresh could conceal clock skew, a partial writer, or concurrent metric producers.",
-			baseline:  "Each expected archive has exactly one fresh in-progress gauge in {0,1}; every completed-archive sample has a non-empty generation and a finite positive timestamp no more than five minutes in the future.",
+			mechanism: "The textfile collector accepted a sample whose timestamp, generation, Boolean domain, or label cardinality cannot describe one completed archive, one active-state gauge, and at most one producer heartbeat. Treating it as fresh could conceal clock skew, a partial writer, or concurrent metric producers.",
+			baseline:  "Each expected archive has exactly one fresh in-progress gauge in {0,1}; every completed-archive and producer-heartbeat value is finite, positive, and no more than five minutes in the future.",
 			observed: fmt.Sprintf(
-				"invalid=%s fresh_latest_samples=%d fresh_progress_samples=%d stale_scrape_samples=%d metrics_gateway=%s",
-				strings.Join(invalid, ";"), len(observation.latest), len(observation.progress), observation.staleScrapes, gateway,
+				"invalid=%s fresh_latest_samples=%d fresh_progress_samples=%d fresh_heartbeat_samples=%d stale_scrape_samples=%d metrics_gateway=%s",
+				strings.Join(invalid, ";"), len(observation.latest), len(observation.progress), len(observation.heartbeats), observation.staleScrapes, gateway,
 			),
 			evidence: "Raw Mimir samples were source-timestamp filtered before their archive timestamp and Boolean value were validated.",
 			context:  "This is a producer or collector contract failure, not proof that the archive media itself is corrupt.",

@@ -7752,22 +7752,23 @@ no completed backup from a missing collector.
 
 The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
-role. It also reads `github-backup-archive.service` state, MainPID, and the code
-textfile mtime directly on that backup host. It expects exactly the four archive
-names above. Samples older than 90 seconds are observation loss even when their
-archive timestamp value is old. The newest valid generation is selected during
-the short Mimir staleness overlap after a label change. Metric values must be
-finite, generations must be non-empty, archive timestamps may not be more than
-five minutes in the future, and each in-progress gauge must be uniquely present
-and equal to zero or one. The query and direct discriminator carry no
-credentials, repository names, paths beyond the fixed metrics file, or backup
-contents.
+role. It also reads `github-backup-archive.service` state and MainPID directly
+on that backup host, and queries the producer-owned
+`urnetwork_backup_archive_heartbeat_timestamp_seconds` values alongside the
+progress gauges. It expects exactly the four archive names above. Samples older
+than 90 seconds are observation loss even when their archive timestamp value is
+old. The newest valid generation is selected during the short Mimir staleness
+overlap after a label change. Metric values must be finite, generations must be
+non-empty, archive and heartbeat timestamps may not be more than five minutes
+in the future, and each in-progress gauge must be uniquely present and equal to
+zero or one. The query and direct discriminator carry no credentials,
+repository names, paths, or backup contents.
 
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
 at least one complete generation; and each newest completion is no more than
-five days old. While the GitHub unit is active, its MainPID is nonzero, its
-source textfile mtime is no more than 90 seconds old, and exactly one GitHub
-organization gauge is one; while it is inactive or failed both are zero.
+five days old. While the GitHub unit is active, its MainPID is nonzero, both
+producer heartbeat values are no more than 90 seconds old, and exactly one
+GitHub organization gauge is one; while it is inactive or failed both are zero.
 BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
@@ -7785,9 +7786,10 @@ BROKEN:
   path while reporting an expired recovery-point objective.
 - `backup-archive-progress-stale` after two probes means direct systemd state
   and the two exported GitHub phase gauges disagree, the active unit has no
-  MainPID, or its source textfile has not received the 30-second heartbeat for
-  more than 90 seconds. Fluent Bit gives every reread a fresh scrape timestamp,
-  so raw-Mimir freshness alone cannot disprove this source-file staleness.
+  MainPID, or its producer heartbeat value is absent or more than 90 seconds
+  old. Fluent Bit gives every reread a fresh scrape timestamp, so raw-Mimir
+  sample freshness alone cannot disprove source-file staleness; the heartbeat
+  must be checked as a metric value.
 
 The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
 ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both
@@ -7830,13 +7832,16 @@ cannot repair a file that was already overwritten. After the guarded
 activating PID `156738` with live `tar` and two-thread `xz` children, while
 `backup-archive-code.prom` retained mtime `2026-09-01T22:29:50Z` and both
 organization gauges at zero. Mimir kept returning those zeros with fresh
-scrape timestamps. Xops commit `2f22201` fixes that causal gap: the sole owning
-shell atomically republishes its current phase every 30 seconds and cancels the
-heartbeat helper before publishing the transition or final zeros. A running
-pre-fix shell cannot inherit newly installed script behavior. Preserve the
-healthy active compression, install the fixed script for the next generation,
-and never restart the current job or hand-edit the metric merely to change the
-panel.
+scrape timestamps. Xops commit `2733b0b` fixes that causal gap: the sole owning
+shell atomically republishes its current phase and a producer-owned timestamp
+every 30 seconds, then cancels the heartbeat helper before publishing the
+transition or final zeros. Carrying freshness as a metric value avoids requiring
+the unprivileged monitor SSH identity to traverse Fluent Bit's root-owned
+textfile directory. A running pre-fix shell cannot inherit newly installed
+script behavior. Preserve the healthy active compression, install the fixed
+script for the next generation only when deployed provenance predates that
+commit, and never restart the current job, rerun an already-current playbook,
+or hand-edit the metric merely to change the panel.
 
 Ownership is deliberately split. The quote bug, refresh race, atomic writers,
 and monitor detector are software/configuration work. Making the archive disk
@@ -7852,13 +7857,13 @@ as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
 deployed unquoted metrics list; then read the owning systemd unit, mountpoint,
 free space, and bounded journal. On the next fixed long-running GitHub phase,
-require two consecutive samples with exactly one organization gauge at one and
-a textfile mtime no more than 90 seconds old, followed by final zeros and no
-heartbeat helper after exit. Verify archive recovery only after the real unit
-exits successfully, the completed artifact and manifest validate on mounted
-media, and two consecutive direct Mimir reads show the same new generation
-inside the five-day band. The Grafana dashboard must agree with those raw
-inputs, but it is never the proof source.
+require two consecutive raw Mimir samples with exactly one organization gauge
+at one and both producer heartbeat values no more than 90 seconds old, followed
+by final zeros and no heartbeat helper after exit. Verify archive recovery only
+after the real unit exits successfully, the completed artifact and manifest
+validate on mounted media, and two consecutive direct Mimir reads show the same
+new generation inside the five-day band. The Grafana dashboard must agree with
+those raw inputs, but it is never the proof source.
 
 ---
 
