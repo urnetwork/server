@@ -60,6 +60,40 @@ func TestEgressCoverageSignalSyntheticUnarmedRollout(t *testing.T) {
 	}
 }
 
+func TestEgressCoverageSignalSyntheticSchemaArmedTasksAbsent(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "pg_attribute"):
+			return []Row{{"t"}}, nil
+		case strings.Contains(query, "FROM pending_task"):
+			return nil, nil
+		default:
+			t.Fatalf("unexpected query after schema-only rollout: %s", query)
+			return nil, nil
+		}
+	}}
+	alerts, err := NewEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "egress-probe-unarmed")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"tls_integrity_armed=true",
+		"provider_egress_task_rows=0",
+		"schema is already armed",
+		"Deploy the intended Taskworker generation",
+		"let normal task initialization create the shards",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("schema-armed alert missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "Apply the append-only provider-egress migration") {
+		t.Fatalf("schema-armed alert still asks for the completed migration:\n%s", markdown)
+	}
+}
+
 func TestEgressCoverageSignalSyntheticIncompleteShardGeometry(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {

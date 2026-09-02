@@ -4188,8 +4188,11 @@ cadence. Old evidence is healthy when the exact due count is zero.
 - `egress-blackhole-stalled` (PAGE after two samples): a shard has blackhole
   due candidates but no check progress inside the same derived bound.
 - `egress-probe-unarmed` (WARN after two samples): the required schema or all
-  durable tasks are absent. Apply migrations before deploying the Taskworker
-  generation and let normal initialization schedule the rows.
+  durable tasks are absent. When the schema is absent, apply migrations before
+  deploying the Taskworker generation. When the schema is already armed, name
+  the Taskworker rollout as the immediate next boundary instead of asking the
+  operator to repeat the completed migration. In either case, let normal task
+  initialization schedule the rows.
 
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
@@ -4200,9 +4203,10 @@ that the independent Proxy active-client ceiling is adequate.
 
 Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
 `signal_egress_coverage.go` and `signal_egress_coverage_test.go`. Synthetic
-tests cover an unarmed rollout, a missing shard, shard-local full/blackhole
-stalls hidden by a healthy sibling, healthy empty due queues, malformed-secret
-redaction, normalized signed hashing, and ambiguous aggregate rejection.
+tests cover a fully unarmed rollout, the schema-armed/tasks-absent deployment
+boundary, a missing shard, shard-local full/blackhole stalls hidden by a
+healthy sibling, healthy empty due queues, malformed-secret redaction,
+normalized signed hashing, and ambiguous aggregate rejection.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`

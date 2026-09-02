@@ -105,6 +105,10 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if len(taskRows) == 0 {
 			missing = append(missing, "durable ProviderEgressProbe tasks")
 		}
+		action := "Apply the append-only provider-egress migration before deploying the Taskworker generation that schedules ProviderEgressProbe. Let normal task initialization create the shards; do not insert, delete, or hand-edit pending_task rows."
+		if tlsIntegrityArmed {
+			action = "The append-only provider-egress schema is already armed. Deploy the intended Taskworker generation that schedules ProviderEgressProbe, then let normal task initialization create the shards; do not insert, delete, or hand-edit pending_task rows."
+		}
 		return []finding{{
 			probeId: "pg/egress-coverage", tier: tierWarn,
 			class: "egress-probe-unarmed", target: target, frame: "rollout", sustain: 2,
@@ -114,7 +118,7 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			observed:  fmt.Sprintf("tls_integrity_armed=%t provider_egress_task_rows=%d", tlsIntegrityArmed, len(taskRows)),
 			evidence:  "Only schema presence and aggregate task-row count are exported; task IDs, client IDs, credentials, endpoints, and argument JSON remain private.",
 			context:   "This is a software rollout/operational boundary, not a Proxy hardware-capacity alert. The generic task canary remains responsible for individual claim, timeout, and reschedule errors.",
-			action:    "Apply the append-only provider-egress migration before deploying the Taskworker generation that schedules ProviderEgressProbe. Let normal task initialization create the shards; do not insert, delete, or hand-edit pending_task rows.",
+			action:    action,
 			verify:    "The schema is armed, every Taskworker is on the intended generation, all shard rows appear, and this signal observes fresh output or no due work for two cadences.",
 			playbook:  "SIGNALS.md §2.19, §2.10, and §8.9",
 		}}, nil
