@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -521,12 +522,16 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 }
 
 func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
-	line := `[edge-3][taskworker][g2][cid:test][I][2026-08-31T09:00:48-05:00][circle_client_controller.go:142][circlec]error sending payment: wallet 019f77ae-de17-db98-b22d-2642f6f67594: asset amount owned by the wallet is insufficient`
+	lines := []string{}
+	for attempt := 100; attempt < 105; attempt++ {
+		processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T14:00:48", attempt)
+		lines = append(lines, processorLine, evaluatorLine)
+	}
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-taskworker", nil
 		}
-		return strings.Repeat(line+"\n", 5), nil
+		return strings.Join(lines, "\n") + "\n", nil
 	}}
 	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -538,7 +543,12 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 		"one-hour nominal cap",
 		"disperses saturated retries across 30–90 minutes",
 		"older code used only two seconds of jitter",
-		"N parked rows still produce roughly N retry lines per hour on average",
+		"N parked rows still produce roughly N canonical task attempts per hour on average",
+		"both a Circle-client diagnostic and a task-evaluator line",
+		"line rate measures diagnostic amplification",
+		"wallet_insufficient_events=5",
+		"diagnostic_lines=10",
+		"logical event count: 5 exact-replay-deduplicated task evaluator line(s) from 10 diagnostic line(s)",
 		"operational liquidity boundary",
 		"software release cannot fund",
 		"Do not delete or manually replay pending_task rows",
@@ -548,14 +558,17 @@ func TestLogErrorsSignalExplainsPayoutWalletInsufficiency(t *testing.T) {
 		"fewer than four canonical attempts/second",
 		"allow the same window plus ingestion delay",
 		"duplicate Circle transfers",
-		"wallet <id>",
+		"<id>",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("payout-wallet alert missing %q:\n%s", detail, markdown)
 		}
 	}
-	if strings.Contains(markdown, "019f77ae-de17-db98-b22d-2642f6f67594") {
-		t.Fatalf("payout-wallet alert leaked the wallet id:\n%s", markdown)
+	for attempt := 100; attempt < 105; attempt++ {
+		id := fmt.Sprintf("019f77ae-de17-db98-b22d-%012x", attempt)
+		if strings.Contains(markdown, id) {
+			t.Fatalf("payout-wallet alert leaked wallet/task id %s:\n%s", id, markdown)
+		}
 	}
 	if strings.Contains(markdown, "The observed value is outside the SIGNALS.md healthy band") ||
 		strings.Contains(markdown, "Follow SIGNALS.md §4") {
