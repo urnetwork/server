@@ -11843,10 +11843,12 @@ rolls out before the Web dependency is healthy.
 Mmm commit `b4b229c5c` adds both PNGs to
 `ur.io/react/public/images/emails` and the Astro public tree. Their SHA-256
 values match across both trees, and the synthetic `sync-public` test proves the
-whole images directory is mirrored. The existing local `astro/dist` and staged
-`astro/build/main` outputs predate the commit and lack both paths. The causal
-boundary is therefore an undeployed Web build, not a Cloudflare-only cache,
-nginx Host, or live-edge routing defect.
+whole images directory is mirrored. At 2026-09-02 21:53Z, current local
+`astro/dist` contained the same two hashes while staged `astro/build/main`
+still lacked both paths; the independent `sync-public` and `stage-build`
+synthetic tests both passed. The causal boundary is therefore an un-staged,
+undeployed Web build, not missing source bytes, a Cloudflare-only cache, nginx
+Host handling, or live-edge routing.
 
 Build and deploy only the Web service from an intentional local Mmm checkout
 containing `b4b229c5c`, using the exact local-checkout Warpctl observed by
