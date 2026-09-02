@@ -10975,6 +10975,13 @@ each of four enabled edges. All 18 connected and returned the same 24,535-byte
 one stale edge, and the deliberately disabled edge-5. A direct
 `warpctl ls versions main web --sample` then showed both Web blocks (`beta` and
 `g1`) entirely on `2026.8.31+1034210530`, which predates the image addition.
+The same direct sample showed API on `2026.8.31+1034210530` and Taskworker on
+`2026.9.1-outerwerld+1034926970`; both were built before server commit
+`7c852d56` introduced the new template URLs. At this observation boundary the
+404 is therefore a predeployment ordering failure, not evidence that those
+new templates have already reached recipients. It becomes a user-facing
+broken-email regression if an email-sending artifact containing `7c852d56`
+rolls out before the Web dependency is healthy.
 
 Mmm commit `b4b229c5c` adds both PNGs to
 `ur.io/react/public/images/emails` and the Astro public tree. Their SHA-256
@@ -10988,9 +10995,11 @@ Build and deploy only the Web service from a clean Mmm descendant of
 `b4b229c5c`, using the fail-closed Warp release builder. Require `sync-public`
 to place both files in staged output before image publication. The Web build
 also consumes the local SDK WASM, so its dependency checkout must be clean and
-attributable; do not publish from the currently dirty SDK worktree. API,
-Connect, taskworker, database, Grafana, and Xops deployments cannot repair this
-boundary. Do not copy files into live containers.
+attributable; do not publish from the currently dirty SDK worktree. Keep API
+and Taskworker artifacts containing server `7c852d56` or later behind this Web
+gate, then deploy those templates only after §19.2 is healthy. Connect,
+database, Grafana, and Xops deployments cannot repair this boundary. Do not
+copy files into live containers.
 
 This alert can cross from software into operations: any exact-edge semantic
 failure requires the Web image/config repair and full Web rollout. If every
