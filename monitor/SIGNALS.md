@@ -11856,10 +11856,22 @@ also consumes the local SDK WASM, so record its checkout base and any
 participating diff. At the 2026-09-02 incident observation the local SDK
 worktree held unrelated uncommitted device/network changes; those changes are
 not a monitor fault, but the operator must decide whether they belong in the
-Web artifact and preserve the exact diff if they do. Keep API and Taskworker artifacts containing
-current-main server `ec6e3b92` or later behind this Web gate, then deploy those templates
-only after §19.2 is healthy. Connect, database, Grafana, and Xops deployments
-cannot repair this boundary. Do not copy files into live containers.
+Web artifact and preserve the exact diff if they do. Keep API and Taskworker
+artifacts containing current-main server `ec6e3b92` or later behind this Web
+gate when they have not deployed yet. If those senders are already active, do
+not roll them back or redeploy them merely to clear an asset alert; treat the
+404s as a current broken-email dependency and prioritize the Web rollout.
+Connect, database, Grafana, and Xops deployments cannot repair this boundary.
+Do not copy files into live containers.
+
+At 2026-09-02 21:48Z, a fresh direct Mimir query showed every API group and
+both Taskworker groups running server base `2d6f27c` with
+`source_modified=true`. Git ancestry proves `2d6f27c` descends from
+`ec6e3b92`, while both Web groups still run
+`2026.8.31+1034210530`. The release-order gate has therefore already been
+crossed in production: newly rendered shared-layout emails can reference the
+18/18 missing image paths. The root-cause action remains the Mmm Web rollout
+containing `b4b229c5c`, not a sender rollback.
 
 This alert can cross from software into operations: any exact-edge semantic
 failure requires the Web image/config repair and full Web rollout. If every
