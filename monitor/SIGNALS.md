@@ -3998,7 +3998,13 @@ or time-skewed partition is UNKNOWN and must not be converted to zero.
 - UNKNOWN: either initialized partition is absent, duplicated, stale, negative,
   NaN, infinite, labeled outside the fixed Boolean vocabulary, or evaluated at
   a different timestamp. During rollout, absence means the API generation or
-  metrics path cannot expose the guard yet.
+  metrics path cannot expose the guard yet. A schema-valid Mimir vector missing
+  either fixed partition is class `stale-destination-instrumentation`, not
+  generic connection loss: compare every API artifact/start with `c8dfe570`,
+  allow a complete five-minute rate window after the last process converges,
+  and only then investigate CounterVec initialization, scrape freshness,
+  remote-write acceptance, and label retention. Never convert the missing rate
+  to zero.
 
 The durable repair is ordered. First deploy every API instance from server
 commit `c8dfe570` or a descendant so an inactive destination cannot pass mode
@@ -4022,6 +4028,15 @@ cohorts to locate the stale producer. Do not delete Redis provide keys, weaken
 lifecycle checks, lengthen contract timeouts, or restart clients merely to
 clear the graph.
 
+The first live §2.18 monitor run at 18:51Z reached Mimir successfully but
+returned neither initialized partition. The contemporaneous process-start
+range was 15:19–15:21Z for all 20 API processes, independently confirming the
+pre-fix deployment boundary. Generic “restore access” guidance was therefore a
+monitor attribution defect: the observation transport was healthy, while the
+running API generation could not yet publish the new invariant. The dedicated
+instrumentation class preserves that distinction and will automatically move
+to a concrete rate result after the corrected fleet and its rate warmup exist.
+
 This is a software lifecycle-correctness signal, not a Proxy hardware-capacity
 signal. More Proxy hosts raise the active-client ceiling but do not make an
 inactive destination contractible.
@@ -4029,8 +4044,8 @@ inactive destination contractible.
 Implementation convention: SIGNALS.md §2.18 (`stale-destination`) maps to
 `signal_stale_destination.go` and `signal_stale_destination_test.go`. Synthetic
 tests cover the high-rate frame, explicit-zero boundary, missing/duplicate and
-unknown partitions, stale/invalid/skewed samples, query scoping, and detailed
-identifier-free Markdown.
+unknown partitions, stale/invalid/skewed samples, query scoping, rollout-aware
+missing-instrumentation guidance, and detailed identifier-free Markdown.
 
 ---
 
@@ -8480,6 +8495,16 @@ route and resumability fix, but a short throughput sample is not a completed
 recovery point: freshness still closes only after the unit succeeds, validates
 the artifact and manifest, transitions through Redis without a second writer,
 and publishes current completed generations.
+
+A second separated 15-second sample held about 12.5 MiB/s. The direct source
+then contained 757,154,670,694 PostgreSQL bytes across the August 27 and August
+30 generations, while Planetoid's resumable partial held 30,542,826,944 bytes;
+the queued Redis source held another 90,962,003,055 bytes. Holding the measured
+rate would put the remaining PostgreSQL transfer near 15.4 hours and both
+phases near 17.3 hours before validation/rotation overhead, well inside the
+five-day objective. This is a capacity projection, not recovery proof. Continue
+measuring the same socket and PID; only a material sustained-rate drop that
+moves the projection outside the objective reopens the network/hardware branch.
 
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;

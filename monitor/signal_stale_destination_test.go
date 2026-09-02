@@ -44,15 +44,52 @@ func TestStaleDestinationSignalSyntheticHealthyBoundary(t *testing.T) {
 	}
 }
 
-func TestStaleDestinationSignalSyntheticRequiresBothInitializedPartitions(t *testing.T) {
+func TestStaleDestinationSignalSyntheticReportsMissingInitializedPartitions(t *testing.T) {
 	now := time.Date(2026, 9, 2, 18, 32, 0, 0, time.UTC)
-	payload := staleDestinationFixtureJSON(t, now, []staleDestinationFixtureRate{{"false", 0}})
-	_, err := NewStaleDestinationSignal().Run(
-		context.Background(),
-		staleDestinationSyntheticSettings(t, now, payload),
-	)
-	if err == nil || !strings.Contains(err.Error(), `missing companion partition "true"`) {
-		t.Fatalf("missing initialized partition error=%v", err)
+	for _, test := range []struct {
+		name    string
+		rates   []staleDestinationFixtureRate
+		missing string
+		present string
+	}{
+		{name: "partial", rates: []staleDestinationFixtureRate{{"false", 0}}, missing: "true", present: "false"},
+		{name: "empty", missing: "false,true", present: "none"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := staleDestinationFixtureJSON(t, now, test.rates)
+			alerts, err := NewStaleDestinationSignal().Run(
+				context.Background(),
+				staleDestinationSyntheticSettings(t, now, payload),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(alerts) != 1 {
+				t.Fatalf("alerts=%+v, want one instrumentation alert", alerts)
+			}
+			alert := alerts[0]
+			if alert.Class != "stale-destination-instrumentation" ||
+				alert.Target != "api-fleet" || alert.Frame != "initialized-partitions" || alert.Sustain != 2 {
+				t.Fatalf("wrong instrumentation identity: %+v", alert)
+			}
+			for _, want := range []string{
+				"Mimir query completed",
+				"missing_companion_partitions=" + test.missing,
+				"present_companion_partitions=" + test.present,
+				"server commit c8dfe570",
+				"one complete five-minute rate window",
+				"UNKNOWN, not a healthy zero",
+				"No client, network, contract, or destination identifier",
+				"SIGNALS.md §2.18 and §8.12",
+			} {
+				if !strings.Contains(alert.Markdown(), want) {
+					t.Fatalf("instrumentation alert missing %q:\n%s", want, alert.Markdown())
+				}
+			}
+			if strings.Contains(alert.Action, "Restore access") {
+				t.Fatalf("instrumentation alert retained generic access guidance: %s", alert.Action)
+			}
+		})
 	}
 }
 

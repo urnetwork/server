@@ -98,10 +98,19 @@ func (staleDestinationProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		rates[companion] = rate
 		observedTimes = append(observedTimes, observedAt)
 	}
+	missing := []string{}
 	for _, companion := range []string{"false", "true"} {
 		if _, ok := rates[companion]; !ok {
-			return nil, fmt.Errorf("stale destination: missing companion partition %q", companion)
+			missing = append(missing, companion)
 		}
+	}
+	if len(missing) > 0 {
+		present := make([]string, 0, len(rates))
+		for companion := range rates {
+			present = append(present, companion)
+		}
+		sort.Strings(present)
+		return []finding{staleDestinationInstrumentationFinding(missing, present, metricHost.name)}, nil
 	}
 	sort.Slice(observedTimes, func(i, j int) bool { return observedTimes[i].Before(observedTimes[j]) })
 	if !observedTimes[0].Equal(observedTimes[len(observedTimes)-1]) {
@@ -148,4 +157,27 @@ func (staleDestinationProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		verify:   "Every API instance exports both initialized partitions; successful contracts to already-inactive destinations remain zero; the aggregate rejection rate stays at or below 50/min for two complete five-minute windows; and a Reliability result removes only its emitting exit before the window refills.",
 		playbook: "SIGNALS.md §2.18 and §5.9",
 	}}, nil
+}
+
+func staleDestinationInstrumentationFinding(missing, present []string, metricHost string) finding {
+	presentText := "none"
+	if len(present) > 0 {
+		presentText = strings.Join(present, ",")
+	}
+	return finding{
+		probeId: "mimir/stale-destination", tier: tierWarn,
+		class: "stale-destination-instrumentation", target: "api-fleet", frame: "initialized-partitions", sustain: 2,
+		symptom:   "The API fleet does not expose every initialized stale-destination metric partition",
+		mechanism: "The Mimir query completed, but its vector omitted one or both fixed companion partitions. The corrected API initializes both CounterVec children at process startup; absence therefore means the current API rollout predates that instrumentation, the newest processes have not yet accumulated a full rate window, or the scrape/remote-write path discarded the series.",
+		baseline:  "A successful query returns exactly one fresh, same-timestamp rate for companion=false and companion=true, including explicit zeroes when no inactive destination was rejected.",
+		observed: fmt.Sprintf(
+			"missing_companion_partitions=%s present_companion_partitions=%s range=%s metrics_gateway=%s",
+			strings.Join(missing, ","), presentText, staleDestinationRange, metricHost,
+		),
+		evidence: "The loopback Mimir endpoint returned a schema-valid vector, so this is a metric-generation or ingestion boundary rather than a failed host connection. No client, network, contract, or destination identifier enters the query or alert.",
+		context:  "Missing instrumentation is UNKNOWN, not a healthy zero and not proof of a rejection-rate incident. API protects contract correctness; Connect-bearing clients separately consume the Reliability result to retire only the emitting route.",
+		action:   "Compare every running API artifact and process start with server commit c8dfe570. If any predates it, deploy the corrected API fleet and wait one complete five-minute rate window after the last process converges. If every artifact contains the commit and the window has elapsed, inspect CounterVec initialization, scrape freshness, remote-write acceptance, and companion-label retention. Do not restart metrics, fabricate zeroes, or treat a Connect/Proxy rollout as restoring an API-owned series.",
+		verify:   "Every API process contains c8dfe570; after one full five-minute warmup, both initialized partitions are present on two consecutive signal runs and the probe reports either an explicit healthy rate or the concrete stale-destination-rate class.",
+		playbook: "SIGNALS.md §2.18 and §8.12",
+	}
 }
