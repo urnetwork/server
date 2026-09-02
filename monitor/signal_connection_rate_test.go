@@ -62,6 +62,54 @@ func TestConnectionRateSignalSyntheticReconnectStorm(t *testing.T) {
 	}
 }
 
+func TestConnectionRateSignalSyntheticReliabilityWindowChurn(t *testing.T) {
+	stateDir := t.TempDir()
+	values := make([]float64, 30)
+	for i := range values {
+		values[i] = 4000
+	}
+	populateMetric(t, stateDir, connectRateMetric, values...)
+
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "WITH cohorts(label, start_time, end_time)") {
+			return []Row{{
+				"25998", "24411", "1146", "978", "108", "8.76", "24.51",
+				"14501", "6292", "1119", "992", "2249", "70.26", "5379.84",
+				"0", "100737", "0", "0.666203",
+			}}, nil
+		}
+		return []Row{{"25000"}}, nil
+	}}
+	signal := NewConnectionRateSignal()
+	probe := signal.(*signalAdapter).probe.(*pgConnectRateProbe)
+	probe.initialized = true
+	probe.lastCount = 10_000
+	probe.lastTime = time.Now().Add(-time.Minute)
+	settings := syntheticSettings(source)
+	settings.StateDir = stateDir
+
+	alerts, err := signal.Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "connects-storm")
+	if alert.Frame != "reliability-window-churn" {
+		t.Fatalf("frame = %q, want reliability-window-churn", alert.Frame)
+	}
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"provider-window feedback loop",
+		"classification_version=0",
+		"score_passing_12h=0",
+		"current_children_per_parent=21.30",
+		"SIGNALS.md §2.7 and §2.15",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("markdown missing %q:\n%s", want, markdown)
+		}
+	}
+}
+
 func TestConnectionRateSignalCumulativeCounterResetIsWarmup(t *testing.T) {
 	probe := &pgConnectRateProbe{}
 	start := time.Unix(1000, 0)

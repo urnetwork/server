@@ -98,6 +98,155 @@ type pgConnectRateProbe struct {
 
 const connectRateMetric = "pg/connect-rate"
 
+type connectStormDiagnostic struct {
+	currentTotal          int
+	currentChildren       int
+	currentParents        int
+	currentNetworks       int
+	currentSurviving      int
+	currentP50Seconds     float64
+	currentP90Seconds     float64
+	baselineTotal         int
+	baselineChildren      int
+	baselineParents       int
+	baselineNetworks      int
+	baselineSurviving     int
+	baselineP50Seconds    float64
+	baselineP90Seconds    float64
+	classificationVersion int
+	scoreRows             int
+	passingRows           int
+	maxWeight             float64
+}
+
+func readConnectStormDiagnostic(ctx context.Context, env *probeEnv) (connectStormDiagnostic, error) {
+	rows, err := env.runner.pg(ctx, `
+		WITH cohorts(label, start_time, end_time) AS (
+			VALUES
+				('current', now() - interval '5 minutes', now() - interval '3 minutes'),
+				('baseline', now() - interval '185 minutes', now() - interval '183 minutes')
+		), cohort_stats AS (
+			SELECT
+				cohorts.label,
+				COUNT(network_client_connection.*) AS total,
+				COUNT(*) FILTER (WHERE network_client.source_client_id IS NOT NULL) AS children,
+				COUNT(DISTINCT COALESCE(network_client.source_client_id, network_client.client_id)) AS parents,
+				COUNT(DISTINCT network_client.network_id) AS networks,
+				COUNT(*) FILTER (
+					WHERE network_client_connection.client_id IS NOT NULL AND network_client_connection.disconnect_time IS NULL
+				) AS surviving,
+				COALESCE(percentile_cont(0.5) WITHIN GROUP (
+					ORDER BY extract(epoch FROM network_client_connection.disconnect_time - network_client_connection.connect_time)
+				) FILTER (WHERE network_client_connection.disconnect_time IS NOT NULL), 0) AS p50_seconds,
+				COALESCE(percentile_cont(0.9) WITHIN GROUP (
+					ORDER BY extract(epoch FROM network_client_connection.disconnect_time - network_client_connection.connect_time)
+				) FILTER (WHERE network_client_connection.disconnect_time IS NOT NULL), 0) AS p90_seconds
+			FROM cohorts
+			LEFT JOIN network_client_connection ON
+				cohorts.start_time <= network_client_connection.connect_time AND
+				network_client_connection.connect_time < cohorts.end_time
+			LEFT JOIN network_client USING (client_id)
+			GROUP BY cohorts.label
+		), score_stats AS (
+			SELECT
+				COUNT(*) AS score_rows,
+				COUNT(*) FILTER (WHERE independent_reliability_weight >= 0.7) AS passing_rows,
+				COALESCE(MAX(independent_reliability_weight), 0) AS max_weight
+			FROM client_connection_reliability_score
+			WHERE lookback_index = 2
+		), classification AS (
+			SELECT COALESCE((to_jsonb(w)->>'degraded_classification_version')::int, 0) AS version
+			FROM client_reliability_running_window w
+			WHERE lookback_index = 2
+		)
+		SELECT
+			current.total,
+			current.children,
+			current.parents,
+			current.networks,
+			current.surviving,
+			current.p50_seconds,
+			current.p90_seconds,
+			baseline.total,
+			baseline.children,
+			baseline.parents,
+			baseline.networks,
+			baseline.surviving,
+			baseline.p50_seconds,
+			baseline.p90_seconds,
+			classification.version,
+			score_stats.score_rows,
+			score_stats.passing_rows,
+			score_stats.max_weight
+		FROM cohort_stats current
+		CROSS JOIN cohort_stats baseline
+		CROSS JOIN score_stats
+		CROSS JOIN classification
+		WHERE current.label = 'current' AND baseline.label = 'baseline';
+	`)
+	if err != nil {
+		return connectStormDiagnostic{}, err
+	}
+	if len(rows) != 1 || len(rows[0]) < 18 {
+		return connectStormDiagnostic{}, fmt.Errorf("connection storm diagnostic returned %d malformed rows", len(rows))
+	}
+	row := rows[0]
+	return connectStormDiagnostic{
+		currentTotal:          atoiRow(row, 0),
+		currentChildren:       atoiRow(row, 1),
+		currentParents:        atoiRow(row, 2),
+		currentNetworks:       atoiRow(row, 3),
+		currentSurviving:      atoiRow(row, 4),
+		currentP50Seconds:     atof(row.str(5)),
+		currentP90Seconds:     atof(row.str(6)),
+		baselineTotal:         atoiRow(row, 7),
+		baselineChildren:      atoiRow(row, 8),
+		baselineParents:       atoiRow(row, 9),
+		baselineNetworks:      atoiRow(row, 10),
+		baselineSurviving:     atoiRow(row, 11),
+		baselineP50Seconds:    atof(row.str(12)),
+		baselineP90Seconds:    atof(row.str(13)),
+		classificationVersion: atoiRow(row, 14),
+		scoreRows:             atoiRow(row, 15),
+		passingRows:           atoiRow(row, 16),
+		maxWeight:             atof(row.str(17)),
+	}, nil
+}
+
+func (d connectStormDiagnostic) observed() string {
+	currentPerParent := float64(0)
+	if d.currentParents > 0 {
+		currentPerParent = float64(d.currentChildren) / float64(d.currentParents)
+	}
+	baselinePerParent := float64(0)
+	if d.baselineParents > 0 {
+		baselinePerParent = float64(d.baselineChildren) / float64(d.baselineParents)
+	}
+	return fmt.Sprintf(
+		"current_2m_total=%d current_children=%d current_parents=%d current_networks=%d current_surviving=%d current_p50_s=%.2f current_p90_s=%.2f current_children_per_parent=%.2f baseline_3h_ago_total=%d baseline_children=%d baseline_parents=%d baseline_networks=%d baseline_surviving=%d baseline_p50_s=%.2f baseline_p90_s=%.2f baseline_children_per_parent=%.2f classification_version=%d score_rows=%d score_passing_12h=%d score_max_weight=%.6f",
+		d.currentTotal,
+		d.currentChildren,
+		d.currentParents,
+		d.currentNetworks,
+		d.currentSurviving,
+		d.currentP50Seconds,
+		d.currentP90Seconds,
+		currentPerParent,
+		d.baselineTotal,
+		d.baselineChildren,
+		d.baselineParents,
+		d.baselineNetworks,
+		d.baselineSurviving,
+		d.baselineP50Seconds,
+		d.baselineP90Seconds,
+		baselinePerParent,
+		d.classificationVersion,
+		d.scoreRows,
+		d.passingRows,
+		d.maxWeight,
+	)
+}
+
 func (self *pgConnectRateProbe) id() string             { return "pg/connects-rate" }
 func (self *pgConnectRateProbe) tier() string           { return tierWarn }
 func (self *pgConnectRateProbe) cadence() time.Duration { return 60 * time.Second }
@@ -190,16 +339,52 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	// drain burst) with no ticket fired. Connections establish then die
 	// young; median connection lifetime confirms (29s vs 60s that day)
 	case haveBaseline && median >= 500 && float64(rate) > 2.5*median:
+		diagnostic, diagnosticErr := readConnectStormDiagnostic(ctx, env)
+		frame := "reconnect-storm"
+		mechanism := "A sustained high insert rate proves connection churn, but rate alone cannot identify its initiator. A deploy/restart wave, provider-selection contraction, or client-side retry loop can all produce this shape."
+		observed := fmt.Sprintf("connects_last_min=%d median=%.0f ratio=%.1fx", rate, median, float64(rate)/median)
+		evidence := "The cumulative PostgreSQL insert counter supplies the rate. The mature two-minute cohort is deliberately sampled three to five minutes behind now so disconnected lifetimes are no longer dominated by immediate right-censoring."
+		context := "Correlate with deploys AND systemd/ansible unit restarts (8.5). Confirm shortened lifetime with matched disconnect_time cohorts, because a brand-new connect_time cohort right-censors its long-lived survivors; a restart wave should plateau, emit a final drain burst, and decay toward baseline in roughly ten minutes."
+		action := "Identify the initiating boundary before restarting clients or raising connection limits. Preserve the cohort and exact process evidence."
+		verify := "The initiating fault clears, new connections return to the learned band, and two consecutive mature cohorts recover their baseline survival and lifetime distribution."
+		playbook := "SIGNALS.md §2.7"
+		if diagnosticErr != nil {
+			observed += " diagnostic_error=" + diagnosticErr.Error()
+		} else {
+			observed += " " + diagnostic.observed()
+			if diagnostic.classificationVersion < reliabilityDriftClassificationVersion &&
+				diagnostic.scoreRows >= reliabilityDriftMinimumRows &&
+				diagnostic.passingRows == 0 &&
+				diagnostic.maxWeight < reliabilityDriftMinimumWeight {
+				frame = "reliability-window-churn"
+				mechanism = "The surge is a provider-window feedback loop, not a simultaneous service restart: the same parent/network population is minting short-lived child clients while degraded-classification version 0 admits zero scored providers at the 12-hour gate. The moving-median numerator loss narrows provider diversity; window replacement then cycles fresh derived identities against that constrained set."
+				evidence += " PostgreSQL joins the aggregate child/parent/network and mature lifetime cohorts to the complete 12-hour reliability distribution and durable classification version; no client identifiers leave the database."
+				context = "The three-hour comparison distinguishes amplification by the same source population from new account growth. Run the dedicated §2.15 probe for anchor/current degraded-block counts, and correlate its UpdateReliabilities completion with the first subsequent score-cache publication."
+				action = "Apply the §2.15 schema migration, deploy the current Server Taskworker, and let the serialized reliability task perform its mandatory re-anchor and normal score export. Do not restart Connect, manually rotate child identities, edit score rows/Redis blobs, or weaken the reliability gate."
+				verify = "All reliability windows reach classification version 1, a completed re-anchor and score export restore a nonzero 12-hour passing population, destination diversity expands, and two consecutive mature cohorts recover child creation and lifetime bands."
+				playbook = "SIGNALS.md §2.7 and §2.15"
+			} else if diagnostic.currentParents > 0 && diagnostic.baselineParents > 0 &&
+				float64(diagnostic.currentChildren)/float64(diagnostic.currentParents) >
+					2*float64(diagnostic.baselineChildren)/float64(diagnostic.baselineParents) {
+				frame = "window-child-churn"
+				mechanism = "The same-sized parent population is creating more derived window clients per parent, so this is window replacement amplification rather than new-account growth. The reliability signature does not prove the version-0 score corruption; inspect provider removals, selection diversity, and client-side verdicts before assigning a cause."
+				context = "Compare the mature cohort's p50/p90 and survivor count with the three-hour control, then join provider-selection and exact Connect/client versions. Do not infer a fleet restart from aggregate rate alone."
+			}
+		}
 		return []finding{
 			{
 				probeId: "pg/connects-rate", tier: tierWarn,
-				class: "connects-storm", target: target, sustain: 3,
+				class: "connects-storm", target: target, frame: frame, sustain: 3,
 				symptom: fmt.Sprintf("new client connections = %d/min, > 2.5x the trailing median %.0f/min — mass reconnect churn",
 					rate, median),
-				baseline: fmt.Sprintf("trailing median %.0f/min (learned)", median),
-				observed: fmt.Sprintf("connects_last_min=%d median=%.0f ratio=%.1fx", rate, median, float64(rate)/median),
-				context:  "correlate with deploys AND systemd/ansible unit restarts (8.5): simultaneous fleet restart evicts every client at once; confirm shortened lifetime with matched disconnect_time cohorts, because a recent connect_time cohort right-censors its long-lived survivors; expect a plateau while drains walk, a final eviction burst spike, then decay to baseline ~10 min after the burst",
-				playbook: "SIGNALS.md 2.7",
+				mechanism: mechanism,
+				baseline:  fmt.Sprintf("trailing median %.0f/min (learned); mature child/parent, network, survivor, and lifetime cohorts remain in their three-hour comparison band", median),
+				observed:  observed,
+				evidence:  evidence,
+				context:   context,
+				action:    action,
+				verify:    verify,
+				playbook:  playbook,
 			},
 			healthyFinding("pg/connects-rate", tierWarn, "connects-rate", target),
 		}, nil
