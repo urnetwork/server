@@ -911,10 +911,12 @@ const ReliabilityBlockDegradedFraction = 0.95
 const reliabilityDegradedMinBlockCount = 10
 const reliabilityDegradedMinMedian = 20
 
-// block health is a property of the block, not of the window being scored, so
-// the median is taken over a fixed neighborhood rather than the score window:
-// the shortest lookback (`ClientLookbacks[0]`) is only a handful of blocks
-// wide and could never establish a median of its own.
+// Block health is a property of the block, not of the window being scored.
+// Classify each candidate against the fixed trailing neighborhood ending at
+// that candidate (including the candidate), rather than one median selected by
+// the caller's moving score window. Looking only backward makes the result
+// immutable once the sequential rollup has recorded a block: asking about the
+// same block through a later or longer lookback cannot change its answer.
 //
 // KNOWN LIMITATION (do not "fix" by lengthening this window -- it was tried at
 // 24h on 2026-07-15 and made things worse): a LOCAL median tracks gradual and
@@ -944,36 +946,34 @@ func reliabilityDegradedBlocks(ctx context.Context, tx server.PgTx, minBlockNumb
 	// exists to prevent
 	degradedBlockNumbers = []int64{}
 
-	medianMinBlockNumber := min(minBlockNumber, maxBlockNumber-reliabilityDegradedMedianBlockCount)
-
 	result, err := tx.Query(
 		ctx,
 		`
-		WITH neighborhood AS (
-			SELECT block_number, valid_client_count
-			FROM client_reliability_block
-			WHERE $1 <= block_number AND block_number < $3
-		), stat AS (
+		SELECT candidate.block_number
+		FROM client_reliability_block candidate
+		CROSS JOIN LATERAL (
 			SELECT
 				COUNT(*) AS block_count,
-				percentile_cont(0.5) WITHIN GROUP (ORDER BY valid_client_count) AS median_valid_client_count
-			FROM neighborhood
-		)
-		SELECT neighborhood.block_number
-		FROM neighborhood, stat
+				percentile_cont(0.5) WITHIN GROUP (ORDER BY neighborhood.valid_client_count) AS median_valid_client_count
+			FROM client_reliability_block neighborhood
+			WHERE
+				candidate.block_number - ($6::bigint - 1) <= neighborhood.block_number AND
+				neighborhood.block_number <= candidate.block_number
+		) stat
 		WHERE
-			$2 <= neighborhood.block_number AND
+			$1 <= candidate.block_number AND
+			candidate.block_number < $2 AND
 			$4 <= stat.block_count AND
 			$5 <= stat.median_valid_client_count AND
-			neighborhood.valid_client_count < $6 * stat.median_valid_client_count
-		ORDER BY neighborhood.block_number
+			candidate.valid_client_count < $3 * stat.median_valid_client_count
+		ORDER BY candidate.block_number
 		`,
-		medianMinBlockNumber,
 		minBlockNumber,
 		maxBlockNumber,
+		ReliabilityBlockDegradedFraction,
 		reliabilityDegradedMinBlockCount,
 		reliabilityDegradedMinMedian,
-		ReliabilityBlockDegradedFraction,
+		reliabilityDegradedMedianBlockCount,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -1066,9 +1066,18 @@ func ClientReliabilityRollupSynced(ctx context.Context, now time.Time) (synced b
 // each lookback in its own transaction, so a slow later lookback cannot roll
 // back completed earlier work. Optional cadence re-anchors are also deferred
 // while a long VACUUM or concurrent index build is already consuming the
-// maintenance path. Missing state and a backward window still re-anchor
-// immediately because there is no correct rolling alternative.
+// maintenance path. Missing state, a degraded-classification schema change,
+// and a backward window still re-anchor immediately because there is no
+// correct rolling alternative.
 var ReliabilityRunningRecomputeBlocks = int64(4 * time.Hour / ReliabilityBlockDuration)
+
+// Version 1 classifies each block against its own immutable trailing
+// neighborhood. Version 0 running sums were built with a median that depended
+// on the caller's whole moving lookback: when that median adapted after a
+// sustained fleet drop, blocks omitted from the numerator silently re-entered
+// the denominator. The durable version makes the first current-code pass
+// re-anchor rather than rolling that corrupt state forward.
+const reliabilityDegradedClassificationVersion = 1
 
 // A maintenance operation that has already run this long is established work,
 // not a momentary catalog sample. Starting the optional multi-partition
@@ -1098,10 +1107,11 @@ func reliabilityRunningLookbacks() []reliabilityRunningLookback {
 }
 
 type reliabilityRunningWindow struct {
-	minBlockNumber     int64
-	maxBlockNumber     int64
-	lastRecomputeBlock int64
-	exists             bool
+	minBlockNumber                int64
+	maxBlockNumber                int64
+	lastRecomputeBlock            int64
+	degradedClassificationVersion int
+	exists                        bool
 }
 
 func reliabilityRunningNeedsRecompute(
@@ -1110,9 +1120,13 @@ func reliabilityRunningNeedsRecompute(
 	newMax int64,
 	periodicReanchorAllowed bool,
 ) (recompute bool, deferred bool) {
-	// Bootstrap and backwards movement cannot be represented as an entering /
-	// leaving delta, so maintenance pressure must never suppress these repairs.
-	if !prev.exists || newMax < prev.maxBlockNumber || newMin < prev.minBlockNumber {
+	// Bootstrap, a classification-version transition, and backwards movement
+	// cannot be represented as an entering / leaving delta, so maintenance
+	// pressure must never suppress these repairs.
+	if !prev.exists ||
+		prev.degradedClassificationVersion != reliabilityDegradedClassificationVersion ||
+		newMax < prev.maxBlockNumber ||
+		newMin < prev.minBlockNumber {
 		return true, false
 	}
 	if ReliabilityRunningRecomputeBlocks <= newMax-prev.lastRecomputeBlock {
@@ -1159,7 +1173,11 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 	result, err := tx.Query(
 		ctx,
 		`
-		SELECT min_block_number, max_block_number, last_recompute_block
+		SELECT
+			min_block_number,
+			max_block_number,
+			last_recompute_block,
+			degraded_classification_version
 		FROM client_reliability_running_window
 		WHERE lookback_index = $1
 		`,
@@ -1167,7 +1185,12 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&w.minBlockNumber, &w.maxBlockNumber, &w.lastRecomputeBlock))
+			server.Raise(result.Scan(
+				&w.minBlockNumber,
+				&w.maxBlockNumber,
+				&w.lastRecomputeBlock,
+				&w.degradedClassificationVersion,
+			))
 			w.exists = true
 		}
 	})
@@ -1186,19 +1209,25 @@ func writeReliabilityRunningWindow(
 		ctx,
 		`
 		INSERT INTO client_reliability_running_window (
-			lookback_index, min_block_number, max_block_number, last_recompute_block
+			lookback_index,
+			min_block_number,
+			max_block_number,
+			last_recompute_block,
+			degraded_classification_version
 		)
-		VALUES ($1, $2, $3, $4)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (lookback_index) DO UPDATE
 		SET
 			min_block_number = EXCLUDED.min_block_number,
 			max_block_number = EXCLUDED.max_block_number,
-			last_recompute_block = EXCLUDED.last_recompute_block
+			last_recompute_block = EXCLUDED.last_recompute_block,
+			degraded_classification_version = EXCLUDED.degraded_classification_version
 		`,
 		lookbackIndex,
 		minBlockNumber,
 		maxBlockNumber,
 		lastRecomputeBlock,
+		reliabilityDegradedClassificationVersion,
 	))
 }
 

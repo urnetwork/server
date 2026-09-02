@@ -65,6 +65,7 @@ func NewSignals() []Signal {
 		NewWorkerMemorySignal(),
 		NewWorkerChurnSignal(),
 		NewCircleAdmissionSignal(),
+		NewReliabilityDriftSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),

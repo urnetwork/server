@@ -938,6 +938,23 @@ func TestClientReliabilityDegradedLocalMedian(t *testing.T) {
 		connect.AssertEqual(t, len(degraded), 1)
 		connect.AssertEqual(t, degraded[0], base-30)
 
+		// The same early block must keep the same classification when it is
+		// observed through a later, longer score window. The former query used
+		// one median over the caller's whole range; once the sustained low period
+		// became the majority, it retroactively reclassified this sharp drop as
+		// healthy and desynchronized the rolling numerator from its denominator.
+		server.Tx(ctx, func(tx server.PgTx) {
+			degraded = reliabilityDegradedBlocks(ctx, tx, base-60, base+120)
+		})
+		foundSharpDrop := false
+		for _, blockNumber := range degraded {
+			if blockNumber == base-30 {
+				foundSharpDrop = true
+				break
+			}
+		}
+		connect.AssertEqual(t, foundSharpDrop, true)
+
 		// deep inside the sustained collapse the local median has adapted:
 		// nothing is excused (the documented limitation -- these blocks age out
 		// of the lookbacks rather than being excused)

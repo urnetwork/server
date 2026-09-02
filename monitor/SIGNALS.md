@@ -2802,6 +2802,19 @@ GROUP BY 1 ORDER BY 1;
   high-side values were NOT organic demand or proof of health. Use §8.6 to
   distinguish this from a crash loop, then require the rate, lifetime, and open
   set to recover after the last restart.
+- RELIABILITY-WINDOW FEEDBACK VARIANT (2026-09-02): a high rate is not always a
+  restart. The probe now samples a mature two-minute `connect_time` cohort
+  three to five minutes behind now, retains its still-connected survivors, and
+  compares child count, distinct parent/source clients, networks, and
+  disconnected p50/p90 with the same-width cohort three hours earlier. It also
+  joins the durable §2.15 classification version and complete 12-hour score
+  distribution. The incident held roughly the same parent/network population
+  while child creation per parent multiplied, p50 fell from 70.3s to 8.8s,
+  and the provider score gate admitted 0 of 100,737 rows. Frame
+  `reliability-window-churn` therefore identifies a provider-window feedback
+  loop; do not call it a fleet restart or organic account growth. Apply and
+  verify the §2.15 root fix, then require destination diversity and two mature
+  cohorts to recover. Raw client/network ids never leave PostgreSQL.
 
 ### 2.8 Provider-selection freshness — the score-cache staleness canary
 Probe: `selection-freshness`
@@ -3599,6 +3612,90 @@ tests cover a healthy newest generation, a replacement missing two metric
 families, fail-closed errors, excessive per-process wait hidden by a lower
 fleet mean, and invalid counter data. The product-level Redis synthetic covers
 the eight-caller atomic ceiling and replay semantics.
+
+### 2.15 Provider reliability running-sum integrity — immutable degraded blocks
+Probe: `reliability-drift`
+
+Provider-selection freshness and a nonempty cache are not sufficient. A
+completed `UpdateReliabilities` can publish internally inconsistent weights,
+and a completed `UpdateClientScores` can then refresh a catastrophically narrow
+but nonempty market. Check all three durable boundaries:
+
+1. `client_reliability_running_window.degraded_classification_version` is 1
+   for every lookback;
+2. the running numerator and score denominator use the same immutable
+   per-block degraded classification; and
+3. a nonzero established-client population remains at or above the 12-hour
+   `independent_reliability_weight >= 0.70` gate.
+
+Version 0 used one median over whichever moving score window asked the
+question. That made “is block B degraded?” depend on the later window endpoint.
+A full re-anchor could omit B from `client_reliability_running`; hours later,
+after sustained lower fleet volume became the new median, the score writer
+would count B in its denominator without restoring B to the already-materialized
+numerator. Four-hour re-anchors bounded the corruption but did not make rolling
+correct.
+
+Version 1 classifies each block against its own 60-block trailing neighborhood,
+including itself. Because the reliability rollup records blocks sequentially,
+that answer is immutable. Full recompute, entering-block addition,
+leaving-block subtraction, and score normalization therefore use the same set.
+The schema migration adds a durable version column with default 0. A current
+Taskworker treats a mismatch as a mandatory re-anchor even during maintenance;
+an old Taskworker ignores the column and cannot falsely mark the repair
+complete. Do not update the marker manually.
+
+2026-09-02 production root-cause evidence:
+
+- `UpdateReliabilities` completed at 09:39:27Z. The first score export that
+  could read it started at 09:43:07Z; the connection surge began around
+  09:44Z. No API, Connect, Proxy, or Taskworker restart occurred at onset.
+- The 08:16Z version-0 12-hour re-anchor classified 307 of 721 blocks degraded
+  using a whole-window median of 85,955 valid clients. At 10:41Z the moving
+  median had adapted to 76,945 and classified only two of the same-width
+  current blocks degraded.
+- A deterministic sample of 20 clients from the modal score cohort had 716–721
+  valid raw rows in the current window, but every materialized running sum was
+  exactly 414. This directly proves numerator loss; it is not an inference from
+  traffic volume.
+- All 100,737 scored clients failed the 12-hour 0.70 gate. The maximum weight
+  was 0.6662 and the median was 0.5758. Only 1,037 connected/valid providers
+  passed both the reliability and normal quality predicates, while the writer
+  could see hundreds of thousands before minimums.
+- A mature pre-surge two-minute contract cohort used 8,804 destinations and
+  its source connections had p50 70.3s. A matched surge cohort used only 4,393
+  destinations despite 2.7x more contracts; p50 connection lifetime fell to
+  8.8s and only 108 of 25,998 source connections survived the observation.
+  The same roughly 1,100 parent/source clients minted many more window children,
+  ruling out new-account growth. Broad geography and healthy auth traffic rule
+  out one customer, edge, or login failure.
+
+Alert frames:
+
+- `moving-median-v0`: the durable version is absent/zero. Apply the migration,
+  deploy the current Server Taskworker, and let the existing serialized
+  `UpdateReliabilities` attempt perform its one-time checkpointed re-anchor.
+- `gate-collapse`: version 1 is present but no meaningful 12-hour population
+  passes. Treat this as genuine reliability-input failure until the raw block,
+  coverage, and fleet-event evidence proves otherwise; do not weaken 0.70.
+
+Verify all four running-window rows reach version 1, the re-anchor finishes,
+and a subsequent `UpdateClientScores` publication restores a nonzero 12-hour
+passing population. Then require destination diversity, child-creation rate,
+and matched mature connection lifetime to return to their trailing bands for
+two probes. Do not delete score rows, edit Redis blobs, schedule a duplicate
+task, or restart clients to manufacture recovery.
+
+This is a **software root cause**, not a hardware-capacity alert. Proxy memory
+and active-client ceilings remain the separate hardware/operations boundary in
+§16.8 and §16.9.
+
+Implementation convention: SIGNALS.md §2.15 (`reliability-drift`) maps to
+`signal_reliability_drift.go` and `signal_reliability_drift_test.go`.
+Synthetic tests cover the exact version-0 corruption signature, a healthy
+version-1 population, and a post-migration genuine gate collapse. Model tests
+hold one sharp block's classification stable across a later/longer window and
+prove rolling equals full recompute across a deterministic median flip.
 
 ---
 

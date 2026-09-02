@@ -6687,4 +6687,17 @@ var migrations = []any{
 		 INCLUDE (balance_byte_count)
 		 WHERE settled = false`,
 	),
+
+	// Reliability running sums used to omit blocks according to one median over
+	// the caller's moving lookback. When a sustained fleet drop became the new
+	// median, those blocks re-entered the score denominator without re-entering
+	// the already-materialized numerator. Version 1 classifies each block against
+	// its own immutable trailing neighborhood. Existing rows stay at version 0,
+	// causing the first current Taskworker pass to re-anchor every lookback before
+	// it publishes corrected scores. Old Taskworkers ignore this column and leave
+	// zero intact, so applying the migration before the rollout is safe.
+	newSqlMigration(`
+		ALTER TABLE client_reliability_running_window
+		ADD COLUMN degraded_classification_version smallint NOT NULL DEFAULT 0
+	`),
 }

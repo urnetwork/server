@@ -137,11 +137,14 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 	}
 
 	base := reliabilityRunningWindow{
-		exists:             true,
-		minBlockNumber:     1000,
-		maxBlockNumber:     2000,
-		lastRecomputeBlock: 2000,
+		exists:                        true,
+		minBlockNumber:                1000,
+		maxBlockNumber:                2000,
+		lastRecomputeBlock:            2000,
+		degradedClassificationVersion: reliabilityDegradedClassificationVersion,
 	}
+	legacyClassification := base
+	legacyClassification.degradedClassificationVersion = 0
 	tests := []struct {
 		name                    string
 		prev                    reliabilityRunningWindow
@@ -152,6 +155,7 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 		deferred                bool
 	}{
 		{name: "missing state ignores maintenance", prev: reliabilityRunningWindow{}, newMin: 1001, newMax: 2001, recompute: true},
+		{name: "classification upgrade ignores maintenance", prev: legacyClassification, newMin: 1001, newMax: 2001, recompute: true},
 		{name: "one cycle rolls", prev: base, newMin: 1030, newMax: 2030, periodicReanchorAllowed: true},
 		{name: "just below cadence rolls", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks - 1, newMax: 2000 + ReliabilityRunningRecomputeBlocks - 1, periodicReanchorAllowed: true},
 		{name: "cadence boundary reanchors when quiet", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks, newMax: 2000 + ReliabilityRunningRecomputeBlocks, periodicReanchorAllowed: true, recompute: true},
@@ -399,5 +403,121 @@ func TestClientReliabilityRunningRollingEquivalence(t *testing.T) {
 		if math.Abs(b1.ReliabilityScore-b1.IndependentReliabilityScore) > eps {
 			t.Fatalf("clientB1 is alone on its ip so reliability should equal independent: %+v", b1)
 		}
+	})
+}
+
+// A fleet-wide step down can make a moving 12-hour median flip hours after the
+// event. The old classifier then put previously omitted blocks back into the
+// denominator without putting them back into the materialized running sum.
+// This compact 61-block fixture reproduces that boundary: 41 healthy blocks
+// followed by 31 low blocks, with the score first anchored after 20 low blocks
+// and then rolled across the median flip. Rolling and a fresh re-anchor must
+// both retain a perfect provider weight because the one client reported in
+// every non-excused block.
+func TestReliabilityRunningKeepsDegradedClassificationAcrossMedianFlip(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		defer func(previous int64) { ReliabilityRunningRecomputeBlocks = previous }(ReliabilityRunningRecomputeBlocks)
+		ReliabilityRunningRecomputeBlocks = int64(4 * time.Hour / ReliabilityBlockDuration)
+
+		location := &Location{
+			LocationType: LocationTypeCity,
+			City:         "median_flip_city",
+			Region:       "median_flip_region",
+			Country:      "Median Flip Country",
+			CountryCode:  "mf",
+		}
+		CreateLocation(ctx, location)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		clientAddressHash := testingConnectClientWithLocation(
+			ctx,
+			t,
+			networkId,
+			clientId,
+			"10.44.0.1:20001",
+			location,
+		)
+
+		stats := &ClientReliabilityStats{
+			ConnectionEstablishedCount: 1,
+			ProvideEnabledCount:        1,
+			ReceiveMessageCount:        1,
+		}
+		startTime := server.NowUtc().UTC().Truncate(ReliabilityBlockDuration).Add(-24 * time.Hour)
+		blockTime := func(i int) time.Time {
+			return startTime.Add(time.Duration(i) * ReliabilityBlockDuration)
+		}
+
+		const blockCount = 72
+		for i := 0; i < blockCount; i++ {
+			AddClientReliabilityStats(
+				ctx,
+				networkId,
+				clientId,
+				clientAddressHash,
+				blockTime(i),
+				stats,
+			)
+		}
+		UpdateClientLocationReliabilities(ctx, startTime, blockTime(blockCount))
+
+		startBlock := reliabilityBlockNumber(startTime)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+				for i := 0; i < blockCount; i++ {
+					validClientCount := int64(1000)
+					if 41 <= i {
+						validClientCount = 300
+					}
+					batch.Queue(
+						`INSERT INTO client_reliability_block (block_number, client_count, valid_client_count)
+						 VALUES ($1, $2, $3)`,
+						startBlock+int64(i),
+						1200,
+						validClientCount,
+					)
+				}
+			})
+		})
+
+		// [0,61): 41 high blocks and 20 locally degraded blocks.
+		UpdateClientReliabilityScores(ctx, blockTime(60), false)
+		initial := testingSnapshotClientScores(ctx)[fmt.Sprintf("1:%s", clientId)]
+		if math.Abs(initial.IndependentReliabilityWeight-1) > 1e-9 {
+			t.Fatalf("initial anchored weight = %v, want 1: %+v", initial.IndependentReliabilityWeight, initial)
+		}
+
+		// [11,72): 30 high blocks, 30 blocks that retain their degraded
+		// classification, and one low block after the trailing median adapts.
+		UpdateClientReliabilityScores(ctx, blockTime(71), false)
+		rolling := testingSnapshotClientScores(ctx)[fmt.Sprintf("1:%s", clientId)]
+		if math.Abs(rolling.IndependentReliabilityWeight-1) > 1e-9 {
+			t.Fatalf("rolling weight crossed the median flip = %v, want 1: %+v", rolling.IndependentReliabilityWeight, rolling)
+		}
+
+		window := testingReadRunningWindow(ctx, 1)
+		if window.degradedClassificationVersion != reliabilityDegradedClassificationVersion {
+			t.Fatalf("classification version = %d, want %d", window.degradedClassificationVersion, reliabilityDegradedClassificationVersion)
+		}
+		if !(window.lastRecomputeBlock < window.maxBlockNumber) {
+			t.Fatalf("fixture did not exercise rolling state: %+v", window)
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE client_reliability_running_window
+				 SET last_recompute_block = last_recompute_block - $1
+				 WHERE lookback_index = 1`,
+				ReliabilityRunningRecomputeBlocks+1000,
+			))
+		})
+		UpdateClientReliabilityScores(ctx, blockTime(71), false)
+		recomputed := testingSnapshotClientScores(ctx)[fmt.Sprintf("1:%s", clientId)]
+		testingAssertScoreEq(t, "median-flip rolling/recompute", rolling, recomputed)
 	})
 }
