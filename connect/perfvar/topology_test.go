@@ -3293,6 +3293,20 @@ func fullTunMultiClientSettings(path *fullTunPath) *clientconnect.MultiClientSet
 	return settings
 }
 
+// A race-instrumented gVisor SYN can consume half of the fixture's readiness
+// window. Spread redundant attempts across that window so they do not inherit
+// nearly identical retransmission schedules and expire together.
+func applyFullTunApplicationDialSettings(
+	settings *clientconnect.TunSettings,
+	path *fullTunPath,
+) {
+	settings.DialTimeout = fullTunRouteReadinessTimeout(path)
+	if !perfvarRaceEnabled || settings.DialRace <= 1 {
+		return
+	}
+	settings.DialRaceTimeout = settings.DialTimeout / time.Duration(settings.DialRace)
+}
+
 // The complete fixture uses one fixed provider to keep route attribution exact.
 func newFullTunPath(
 	ctx context.Context,
@@ -3848,7 +3862,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		route:       route,
 		p2pHopCount: p2pHopCount,
 	}
-	appSettings.DialTimeout = fullTunRouteReadinessTimeout(readinessPath)
+	applyFullTunApplicationDialSettings(appSettings, readinessPath)
 	applyTunResourceProfile(appSettings, resources)
 	appTun, err := clientconnect.CreateTun(ctx, appSettings)
 	if err != nil {
@@ -5351,6 +5365,39 @@ func fullTunWorkloadTimeout(path *fullTunPath, byteCount int64) time.Duration {
 func fullTunRouteReadinessTimeout(path *fullTunPath) time.Duration {
 	return fullTunDirectionalWorkloadTimeout(path, true, fullTunProbePayloadByteCount) +
 		fullTunDirectionalWorkloadTimeout(path, false, fullTunProbePayloadByteCount)
+}
+
+// The production-shaped two-second stagger remains intact normally. Under the
+// detector, each redundant attempt owns a distinct portion of the enlarged
+// absolute deadline instead of exhausting the same intrinsic SYN window.
+func TestFullTunApplicationDialSettingsDistributeRaceAttempts(t *testing.T) {
+	path := &fullTunPath{
+		environment: &routeEnvironment{
+			profile: initialNetworkProfiles(20260811)["clean-lan"],
+		},
+		route:       fullTunRouteP2pFast,
+		p2pHopCount: 1,
+	}
+	settings := clientconnect.DefaultTunSettings()
+	defaults := clientconnect.DefaultTunSettings()
+	applyFullTunApplicationDialSettings(settings, path)
+	readinessTimeout := fullTunRouteReadinessTimeout(path)
+	if settings.DialTimeout != readinessTimeout {
+		t.Fatalf("application dial timeout=%s, want readiness=%s", settings.DialTimeout, readinessTimeout)
+	}
+	wantStagger := defaults.DialRaceTimeout
+	if perfvarRaceEnabled {
+		wantStagger = readinessTimeout / time.Duration(settings.DialRace)
+	}
+	if settings.DialRace != defaults.DialRace || settings.DialRaceTimeout != wantStagger {
+		t.Fatalf(
+			"application dial race=%d stagger=%s, want race=%d stagger=%s",
+			settings.DialRace,
+			settings.DialRaceTimeout,
+			defaults.DialRace,
+			wantStagger,
+		)
+	}
 }
 
 // The race runtime gets enough liveness headroom to complete a valid route

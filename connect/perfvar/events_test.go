@@ -1173,28 +1173,27 @@ func testFullTunP2pFastMtuCorrectness(
 	})
 }
 
-// The full-TUN race fixture gives route construction a larger allowance than
-// production. Its outer context must cover that allowance plus one directional
-// workload boundary; otherwise a healthy no-drop P2P route is canceled by the
-// fixture's former fixed 90-second deadline before the MTU assertion runs.
+// The P2P constructor opens discovery and forced-direct readiness flows, then
+// the measurement opens a fresh flow before its directional payload. The outer
+// context covers all three independent readiness windows plus that payload.
 func fullTunP2pFastMtuCorrectnessTimeout(
-	routeConstructionAllowance time.Duration,
+	routeReadinessAllowance time.Duration,
 	workloadAllowance time.Duration,
 ) time.Duration {
-	if routeConstructionAllowance == 0 {
+	if routeReadinessAllowance == 0 {
 		return 90 * time.Second
 	}
-	return routeConstructionAllowance + workloadAllowance
+	return 3*routeReadinessAllowance + workloadAllowance
 }
 
-func TestFullTunP2pFastMtuCorrectnessTimeoutCoversRaceRouteAndWorkload(t *testing.T) {
-	const routeConstructionAllowance = 4 * time.Minute
+func TestFullTunP2pFastMtuCorrectnessTimeoutCoversEveryRaceFlow(t *testing.T) {
+	const routeReadinessAllowance = 4 * time.Minute
 	const workloadAllowance = 2 * time.Minute
 	if got := fullTunP2pFastMtuCorrectnessTimeout(
-		routeConstructionAllowance,
+		routeReadinessAllowance,
 		workloadAllowance,
-	); got != 6*time.Minute {
-		t.Fatalf("race correctness timeout=%s, want 6m", got)
+	); got != 14*time.Minute {
+		t.Fatalf("race correctness timeout=%s, want 14m", got)
 	}
 	if got := fullTunP2pFastMtuCorrectnessTimeout(0, 30*time.Second); got != 90*time.Second {
 		t.Fatalf("ordinary correctness timeout=%s, want 90s", got)
