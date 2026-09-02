@@ -16,9 +16,9 @@ const (
 
 // Signal reliability-drift implements SIGNALS.md §2.15. It checks the
 // materialized 12-hour provider reliability gate and the durable degraded-block
-// classification version. The query deliberately reads the optional version
-// through to_jsonb(row): a monitor built with this signal remains compatible
-// with production before the accompanying schema migration is applied.
+// classification generation. The query deliberately reads the optional
+// version/token through to_jsonb(row): a monitor built with this signal remains
+// compatible with production before the accompanying migrations are applied.
 func NewReliabilityDriftSignal() Signal {
 	return &signalAdapter{
 		number: "2.15", key: "reliability-drift", name: "Provider reliability running-sum integrity",
@@ -39,9 +39,22 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 				w.min_block_number,
 				w.max_block_number,
 				w.last_recompute_block,
-				COALESCE((to_jsonb(w)->>'degraded_classification_version')::int, 0) AS classification_version
+				COALESCE((to_jsonb(w)->>'degraded_classification_version')::int, 0) AS classification_version,
+				COALESCE(to_jsonb(w)->>'degraded_classification_write_token', '') <> '' AS classification_write_token_present
 			FROM (VALUES (1)) seed(singleton)
 			LEFT JOIN client_reliability_running_window w ON w.lookback_index = 2
+		), classification_guard AS (
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_trigger t
+				JOIN pg_proc p ON p.oid = t.tgfoid
+				WHERE
+					t.tgrelid = 'client_reliability_running_window'::regclass AND
+					t.tgname = 'client_reliability_running_window_classification_guard' AND
+					p.proname = 'client_reliability_running_window_classification_guard' AND
+					t.tgenabled IN ('O', 'A') AND
+					NOT t.tgisinternal
+			) AS present
 		), score_stats AS (
 			SELECT
 				COUNT(*) AS score_rows,
@@ -129,8 +142,11 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 			c.median_valid_clients,
 			m.block_rows,
 			i.block_rows,
-			a.block_rows
+			a.block_rows,
+			w.classification_write_token_present,
+			g.present
 		FROM target_window w
+		CROSS JOIN classification_guard g
 		CROSS JOIN score_stats s
 		CROSS JOIN running_stats r
 		CROSS JOIN current_block_stats c
@@ -141,7 +157,7 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) != 1 || len(rows[0]) < 15 {
+	if len(rows) != 1 || len(rows[0]) < 17 {
 		return nil, fmt.Errorf("reliability drift query returned %d malformed rows", len(rows))
 	}
 
@@ -151,7 +167,11 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 	passingRows := atoiRow(row, 5)
 	maxWeight := atof(row.str(6))
 	medianWeight := atof(row.str(7))
+	writeTokenPresent := row.str(15) == "t" || row.str(15) == "true"
+	classificationGuardPresent := row.str(16) == "t" || row.str(16) == "true"
 	if classificationVersion >= reliabilityDriftClassificationVersion &&
+		writeTokenPresent &&
+		classificationGuardPresent &&
 		scoreRows > 0 &&
 		(scoreRows < reliabilityDriftMinimumRows || passingRows > 0 || maxWeight >= reliabilityDriftMinimumWeight) {
 		return []finding{healthyFinding("pg/reliability-drift", tierPage, "reliability-classification-drift", pgTarget(env))}, nil
@@ -163,7 +183,16 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 	if classificationVersion < reliabilityDriftClassificationVersion {
 		frame = "moving-median-v0"
 		mechanism = "The running window still uses degraded-classification version 0. That algorithm classified blocks with one median over the moving lookback: after a sustained fleet drop became the new median, previously omitted blocks re-entered the denominator without re-entering the materialized numerator. The resulting artificial weight collapse removes established providers and can drive window clients into rapid replacement churn."
-		action = "Apply the degraded_classification_version schema migration, then deploy the current Server Taskworker and let its existing UpdateReliabilities task perform the mandatory one-time re-anchor. Do not schedule a duplicate task or mutate PostgreSQL/Redis score state by hand."
+		action = "Apply both degraded-classification migrations through schema head 603, then deploy every Taskworker from the current Server revision and let its existing UpdateReliabilities task perform the mandatory one-time re-anchor. Do not schedule a duplicate task or mutate PostgreSQL/Redis score state by hand."
+		if writeTokenPresent && classificationGuardPresent {
+			frame = "legacy-writer-reset"
+			mechanism = "The durable write token and database guard are present, but the classification version is back at 0. This is the fail-safe signature of a legacy Taskworker updating a running-window row after a current writer: because the old UPSERT cannot rotate the token, the trigger atomically revoked trust in the corresponding sums instead of leaving a false version-1 marker."
+			action = "Finish converging every Taskworker on the current Server revision before trusting another repair. Then let the existing serialized UpdateReliabilities task re-anchor every version-0 lookback and rotate its guarded token; do not restart workers, schedule a duplicate task, or edit the marker/sums manually."
+		}
+	} else if !writeTokenPresent || !classificationGuardPresent {
+		frame = "unguarded-version"
+		mechanism = "The row claims degraded-classification version 1 without both a rotated write token and its enabled database trigger. That marker cannot prove which writer last replaced the running sums: a legacy Taskworker can preserve the numeric version while publishing the incompatible moving-window result."
+		action = "Apply schema migration 603 and deploy every Taskworker from the current Server revision. Let the serialized reliability task re-anchor and publish a guarded token; do not trust or manually edit the unguarded version marker."
 	}
 
 	return []finding{{
@@ -177,10 +206,12 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 			reliabilityDriftMinimumWeight,
 		),
 		mechanism: mechanism,
-		baseline:  "Degraded-block membership is immutable for a given block, every running window is classification version 1, and a nonzero established-provider population remains at or above the 12-hour 0.70 gate.",
+		baseline:  "Degraded-block membership is immutable for a given block, every running window is guarded classification version 1 with a current write token, and a nonzero established-provider population remains at or above the 12-hour 0.70 gate.",
 		observed: fmt.Sprintf(
-			"classification_version=%d lookback_index=%d window=[%s,%s) last_recompute_block=%s score_rows=%d passing_rows=%d max_weight=%s median_weight=%s max_running_sum=%s median_running_sum=%s health_blocks=%s median_valid_clients=%s moving_window_degraded=%s immutable_local_degraded=%s anchor_moving_degraded=%s",
+			"classification_version=%d classification_write_token_present=%t classification_guard_present=%t lookback_index=%d window=[%s,%s) last_recompute_block=%s score_rows=%d passing_rows=%d max_weight=%s median_weight=%s max_running_sum=%s median_running_sum=%s health_blocks=%s median_valid_clients=%s moving_window_degraded=%s immutable_local_degraded=%s anchor_moving_degraded=%s",
 			classificationVersion,
+			writeTokenPresent,
+			classificationGuardPresent,
 			reliabilityDriftLookbackIndex,
 			row.str(1),
 			row.str(2),
@@ -197,10 +228,10 @@ func (pgReliabilityDriftProbe) check(ctx context.Context, env *probeEnv) ([]find
 			row.str(13),
 			row.str(14),
 		),
-		evidence: "PostgreSQL supplies the durable running-window bounds/version and the complete 12-hour score distribution. The two block counts apply the former moving-window median and the current per-block trailing median to the same small client_reliability_block range; no client identifiers are exported.",
+		evidence: "PostgreSQL supplies the durable running-window bounds/version, Boolean token presence, enabled trigger identity, and the complete 12-hour score distribution. The two block counts apply the former moving-window median and the current per-block trailing median to the same small client_reliability_block range; no token value or client identifier is exported.",
 		context:  "Correlate the last UpdateReliabilities completion, the first subsequent UpdateClientScores publication, provider destination diversity, and §2.7 child-client lifetime. A cache export can complete successfully while publishing a catastrophically narrowed nonempty market, so freshness and empty-cache checks alone do not clear this incident.",
 		action:   action,
-		verify:   "All four client_reliability_running_window rows reach classification version 1; a completed re-anchor restores a nonzero 12-hour passing population; the next UpdateClientScores publication expands destination diversity; new child creation and connection lifetime return to their trailing bands for two consecutive probes.",
+		verify:   "All Taskworkers have converged; the classification guard is enabled; all four client_reliability_running_window rows reach version 1 with nonempty rotated tokens; a completed re-anchor restores a nonzero 12-hour passing population; the next UpdateClientScores publication expands destination diversity; and child creation plus connection lifetime recover for two consecutive probes.",
 		playbook: "SIGNALS.md §2.15, §2.9, §2.8, and §2.7",
 	}}, nil
 }

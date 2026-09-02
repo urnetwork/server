@@ -102,6 +102,7 @@ func TestConnectionRateSignalSyntheticReliabilityWindowChurn(t *testing.T) {
 		"classification_version=0",
 		"score_passing_12h=0",
 		"current_children_per_parent=21.30",
+		"schema head 603",
 		"SIGNALS.md §2.7 and §2.15",
 	} {
 		if !strings.Contains(markdown, want) {

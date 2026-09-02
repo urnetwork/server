@@ -89,6 +89,24 @@ func testingReadRunningWindow(ctx context.Context, lookbackIndex int) (w reliabi
 	return
 }
 
+func testingReadRunningWindowWriteToken(ctx context.Context, lookbackIndex int) (token string) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COALESCE(degraded_classification_write_token::text, '')
+			 FROM client_reliability_running_window
+			 WHERE lookback_index = $1`,
+			lookbackIndex,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&token))
+			}
+		})
+	})
+	return
+}
+
 func testingAssertScoreEq(t testing.TB, label string, a ReliabilityScore, b ReliabilityScore) {
 	const eps = 1e-9
 	closeEq := func(x float64, y float64) bool {
@@ -138,14 +156,20 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 	}
 
 	base := reliabilityRunningWindow{
-		exists:                        true,
-		minBlockNumber:                1000,
-		maxBlockNumber:                2000,
-		lastRecomputeBlock:            2000,
-		degradedClassificationVersion: reliabilityDegradedClassificationVersion,
+		exists:                                  true,
+		minBlockNumber:                          1000,
+		maxBlockNumber:                          2000,
+		lastRecomputeBlock:                      2000,
+		degradedClassificationVersion:           reliabilityDegradedClassificationVersion,
+		degradedClassificationWriteTokenPresent: true,
+		degradedClassificationGuardPresent:      true,
 	}
 	legacyClassification := base
 	legacyClassification.degradedClassificationVersion = 0
+	missingWriterToken := base
+	missingWriterToken.degradedClassificationWriteTokenPresent = false
+	missingWriterGuard := base
+	missingWriterGuard.degradedClassificationGuardPresent = false
 	tests := []struct {
 		name                    string
 		prev                    reliabilityRunningWindow
@@ -157,6 +181,8 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 	}{
 		{name: "missing state ignores maintenance", prev: reliabilityRunningWindow{}, newMin: 1001, newMax: 2001, recompute: true},
 		{name: "classification upgrade ignores maintenance", prev: legacyClassification, newMin: 1001, newMax: 2001, recompute: true},
+		{name: "missing writer token ignores maintenance", prev: missingWriterToken, newMin: 1001, newMax: 2001, recompute: true},
+		{name: "missing writer guard ignores maintenance", prev: missingWriterGuard, newMin: 1001, newMax: 2001, recompute: true},
 		{name: "one cycle rolls", prev: base, newMin: 1030, newMax: 2030, periodicReanchorAllowed: true},
 		{name: "just below cadence rolls", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks - 1, newMax: 2000 + ReliabilityRunningRecomputeBlocks - 1, periodicReanchorAllowed: true},
 		{name: "cadence boundary reanchors when quiet", prev: base, newMin: 1000 + ReliabilityRunningRecomputeBlocks, newMax: 2000 + ReliabilityRunningRecomputeBlocks, periodicReanchorAllowed: true, recompute: true},
@@ -182,6 +208,102 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A current writer can finish one lookback while older Taskworkers are still
+// eligible to claim the next recurring task. The old UPSERT does not mention
+// either migration column. Prove the database guard resets version 1 even when
+// that legacy write repeats identical bounds, then prove the decision forces a
+// re-anchor and a current writer can publish a fresh token/version again.
+func TestReliabilityRunningVersionGuardDetectsLegacyWriter(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		const lookbackIndex = 2
+		const minBlock = int64(1000)
+		const maxBlock = int64(1721)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			writeReliabilityRunningWindow(
+				ctx,
+				tx,
+				lookbackIndex,
+				minBlock,
+				maxBlock,
+				maxBlock,
+			)
+		})
+		current := testingReadRunningWindow(ctx, lookbackIndex)
+		currentToken := testingReadRunningWindowWriteToken(ctx, lookbackIndex)
+		if current.degradedClassificationVersion != reliabilityDegradedClassificationVersion ||
+			!current.degradedClassificationWriteTokenPresent ||
+			!current.degradedClassificationGuardPresent ||
+			currentToken == "" {
+			t.Fatalf("current writer did not publish guarded version: window=%+v token_present=%t", current, currentToken != "")
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			// This is the exact pre-migration column list and conflict update. The
+			// identical bounds are intentional: value comparison cannot detect it.
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO client_reliability_running_window (
+					lookback_index, min_block_number, max_block_number, last_recompute_block
+				 ) VALUES ($1, $2, $3, $4)
+				 ON CONFLICT (lookback_index) DO UPDATE SET
+					min_block_number = EXCLUDED.min_block_number,
+					max_block_number = EXCLUDED.max_block_number,
+					last_recompute_block = EXCLUDED.last_recompute_block`,
+				lookbackIndex,
+				minBlock,
+				maxBlock,
+				maxBlock,
+			))
+		})
+		legacy := testingReadRunningWindow(ctx, lookbackIndex)
+		legacyToken := testingReadRunningWindowWriteToken(ctx, lookbackIndex)
+		if legacy.degradedClassificationVersion != 0 {
+			t.Fatalf("legacy write retained trusted classification version: %+v", legacy)
+		}
+		if !legacy.degradedClassificationWriteTokenPresent || !legacy.degradedClassificationGuardPresent {
+			t.Fatalf("legacy write removed guard evidence instead of revoking version: %+v", legacy)
+		}
+		if legacyToken != currentToken {
+			t.Fatalf("legacy write unexpectedly rotated token: before=%q after=%q", currentToken, legacyToken)
+		}
+		recompute, deferred := reliabilityRunningNeedsRecompute(
+			legacy,
+			minBlock,
+			maxBlock,
+			false,
+		)
+		if !recompute || deferred {
+			t.Fatalf("legacy marker decision=(recompute=%t deferred=%t), want (true false)", recompute, deferred)
+		}
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			writeReliabilityRunningWindow(
+				ctx,
+				tx,
+				lookbackIndex,
+				minBlock,
+				maxBlock,
+				maxBlock,
+			)
+		})
+		recovered := testingReadRunningWindow(ctx, lookbackIndex)
+		recoveredToken := testingReadRunningWindowWriteToken(ctx, lookbackIndex)
+		if recovered.degradedClassificationVersion != reliabilityDegradedClassificationVersion ||
+			!recovered.degradedClassificationWriteTokenPresent ||
+			!recovered.degradedClassificationGuardPresent ||
+			recoveredToken == "" || recoveredToken == currentToken {
+			t.Fatalf(
+				"current rewrite did not restore guarded generation: window=%+v token_present=%t token_rotated=%t",
+				recovered,
+				recoveredToken != "",
+				recoveredToken != currentToken,
+			)
+		}
+	})
 }
 
 // A task timeout used to roll back every lookback because all four running

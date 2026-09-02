@@ -1107,11 +1107,13 @@ func reliabilityRunningLookbacks() []reliabilityRunningLookback {
 }
 
 type reliabilityRunningWindow struct {
-	minBlockNumber                int64
-	maxBlockNumber                int64
-	lastRecomputeBlock            int64
-	degradedClassificationVersion int
-	exists                        bool
+	minBlockNumber                          int64
+	maxBlockNumber                          int64
+	lastRecomputeBlock                      int64
+	degradedClassificationVersion           int
+	degradedClassificationWriteTokenPresent bool
+	degradedClassificationGuardPresent      bool
+	exists                                  bool
 }
 
 func reliabilityRunningNeedsRecompute(
@@ -1120,11 +1122,14 @@ func reliabilityRunningNeedsRecompute(
 	newMax int64,
 	periodicReanchorAllowed bool,
 ) (recompute bool, deferred bool) {
-	// Bootstrap, a classification-version transition, and backwards movement
-	// cannot be represented as an entering / leaving delta, so maintenance
-	// pressure must never suppress these repairs.
+	// Bootstrap, a classification-generation transition (version, token, or
+	// database guard), and backwards movement cannot be represented as an
+	// entering / leaving delta, so maintenance pressure must never suppress
+	// these repairs.
 	if !prev.exists ||
 		prev.degradedClassificationVersion != reliabilityDegradedClassificationVersion ||
+		!prev.degradedClassificationWriteTokenPresent ||
+		!prev.degradedClassificationGuardPresent ||
 		newMax < prev.maxBlockNumber ||
 		newMin < prev.minBlockNumber {
 		return true, false
@@ -1177,7 +1182,19 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 			min_block_number,
 			max_block_number,
 			last_recompute_block,
-			degraded_classification_version
+			degraded_classification_version,
+			degraded_classification_write_token IS NOT NULL,
+			EXISTS (
+				SELECT 1
+				FROM pg_trigger t
+				JOIN pg_proc p ON p.oid = t.tgfoid
+				WHERE
+					t.tgrelid = 'client_reliability_running_window'::regclass AND
+					t.tgname = 'client_reliability_running_window_classification_guard' AND
+					p.proname = 'client_reliability_running_window_classification_guard' AND
+					t.tgenabled IN ('O', 'A') AND
+					NOT t.tgisinternal
+			)
 		FROM client_reliability_running_window
 		WHERE lookback_index = $1
 		`,
@@ -1190,6 +1207,8 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 				&w.maxBlockNumber,
 				&w.lastRecomputeBlock,
 				&w.degradedClassificationVersion,
+				&w.degradedClassificationWriteTokenPresent,
+				&w.degradedClassificationGuardPresent,
 			))
 			w.exists = true
 		}
@@ -1213,15 +1232,17 @@ func writeReliabilityRunningWindow(
 			min_block_number,
 			max_block_number,
 			last_recompute_block,
-			degraded_classification_version
+			degraded_classification_version,
+			degraded_classification_write_token
 		)
-		VALUES ($1, $2, $3, $4, $5)
+		VALUES ($1, $2, $3, $4, $5, gen_random_uuid())
 		ON CONFLICT (lookback_index) DO UPDATE
 		SET
 			min_block_number = EXCLUDED.min_block_number,
 			max_block_number = EXCLUDED.max_block_number,
 			last_recompute_block = EXCLUDED.last_recompute_block,
-			degraded_classification_version = EXCLUDED.degraded_classification_version
+			degraded_classification_version = EXCLUDED.degraded_classification_version,
+			degraded_classification_write_token = EXCLUDED.degraded_classification_write_token
 		`,
 		lookbackIndex,
 		minBlockNumber,

@@ -6694,10 +6694,47 @@ var migrations = []any{
 	// the already-materialized numerator. Version 1 classifies each block against
 	// its own immutable trailing neighborhood. Existing rows stay at version 0,
 	// causing the first current Taskworker pass to re-anchor every lookback before
-	// it publishes corrected scores. Old Taskworkers ignore this column and leave
-	// zero intact, so applying the migration before the rollout is safe.
+	// it publishes corrected scores. The next migration couples this marker to
+	// each physical write so a mixed rollout cannot let an older Taskworker
+	// preserve false version-1 trust.
 	newSqlMigration(`
 		ALTER TABLE client_reliability_running_window
 		ADD COLUMN degraded_classification_version smallint NOT NULL DEFAULT 0
+	`),
+
+	// A mixed Taskworker rollout must not let a legacy writer silently retain a
+	// version-1 marker while replacing the corresponding running sums with the
+	// old moving-window classification. Current writers rotate an opaque token
+	// in the same UPSERT as the bounds/version. A legacy writer does not know the
+	// token, so this trigger resets its row to version 0 atomically with the
+	// incompatible write. The next current writer must then re-anchor that
+	// lookback before it can publish version 1 again. Keep this guard after the
+	// rollout so an accidental rollback remains fail-safe.
+	newSqlMigration(`
+		ALTER TABLE client_reliability_running_window
+		ADD COLUMN degraded_classification_write_token uuid NULL;
+
+		CREATE FUNCTION client_reliability_running_window_classification_guard()
+		RETURNS trigger
+		LANGUAGE plpgsql
+		AS $client_reliability_running_window_classification_guard$
+		BEGIN
+			IF TG_OP = 'INSERT' THEN
+				IF NEW.degraded_classification_write_token IS NULL THEN
+					NEW.degraded_classification_version = 0;
+				END IF;
+			ELSIF NEW.degraded_classification_write_token IS NULL OR
+				NEW.degraded_classification_write_token IS NOT DISTINCT FROM
+					OLD.degraded_classification_write_token THEN
+				NEW.degraded_classification_version = 0;
+			END IF;
+			RETURN NEW;
+		END
+		$client_reliability_running_window_classification_guard$;
+
+		CREATE TRIGGER client_reliability_running_window_classification_guard
+		BEFORE INSERT OR UPDATE ON client_reliability_running_window
+		FOR EACH ROW
+		EXECUTE FUNCTION client_reliability_running_window_classification_guard()
 	`),
 }

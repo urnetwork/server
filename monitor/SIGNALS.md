@@ -3674,13 +3674,15 @@ Probe: `reliability-drift`
 Provider-selection freshness and a nonempty cache are not sufficient. A
 completed `UpdateReliabilities` can publish internally inconsistent weights,
 and a completed `UpdateClientScores` can then refresh a catastrophically narrow
-but nonempty market. Check all three durable boundaries:
+but nonempty market. Check all four durable boundaries:
 
 1. `client_reliability_running_window.degraded_classification_version` is 1
-   for every lookback;
-2. the running numerator and score denominator use the same immutable
+   and its current-writer token is nonempty for every lookback;
+2. the database classification guard trigger is present and enabled, so a
+   legacy writer atomically revokes version-1 trust;
+3. the running numerator and score denominator use the same immutable
    per-block degraded classification; and
-3. a nonzero established-client population remains at or above the 12-hour
+4. a nonzero established-client population remains at or above the 12-hour
    `independent_reliability_weight >= 0.70` gate.
 
 Version 0 used one median over whichever moving score window asked the
@@ -3695,10 +3697,18 @@ Version 1 classifies each block against its own 60-block trailing neighborhood,
 including itself. Because the reliability rollup records blocks sequentially,
 that answer is immutable. Full recompute, entering-block addition,
 leaving-block subtraction, and score normalization therefore use the same set.
-The schema migration adds a durable version column with default 0. A current
-Taskworker treats a mismatch as a mandatory re-anchor even during maintenance;
-an old Taskworker ignores the column and cannot falsely mark the repair
-complete. Do not update the marker manually.
+
+Migration 602 adds a durable version column with default 0. That column alone
+is not a safe mixed-rollout boundary: after a current writer sets version 1, a
+legacy writer's old UPSERT can replace the bounds and running sums without
+mentioning the new column, accidentally preserving version 1. Migration 603
+therefore adds an opaque write token and a database trigger. Every current
+writer rotates the token in the same UPSERT as its bounds and version. A legacy
+writer leaves the token unchanged, so the trigger atomically resets that row to
+version 0. The next current Taskworker must re-anchor it before version 1 can be
+trusted again. This also makes an accidental future rollback fail safe. Apply
+both migrations through head 603 before deploying the new Taskworkers, converge
+the whole Taskworker fleet, and never update the version or token manually.
 
 2026-09-02 production root-cause evidence:
 
@@ -3730,16 +3740,26 @@ Alert frames:
 - `moving-median-v0`: the durable version is absent/zero. Apply the migration,
   deploy the current Server Taskworker, and let the existing serialized
   `UpdateReliabilities` attempt perform its one-time checkpointed re-anchor.
+- `legacy-writer-reset`: the trigger and a prior current-writer token are
+  present, but the row is back at version 0. This directly proves that a writer
+  which could not rotate the token updated the row during a mixed or rolled-back
+  fleet. Finish Taskworker convergence before allowing the existing task to
+  re-anchor; do not repair the marker manually.
+- `unguarded-version`: a row claims version 1 without both a nonempty write
+  token and the enabled guard trigger. The marker cannot establish writer
+  provenance. Apply migration 603 and let a current writer re-anchor it.
 - `gate-collapse`: version 1 is present but no meaningful 12-hour population
-  passes. Treat this as genuine reliability-input failure until the raw block,
-  coverage, and fleet-event evidence proves otherwise; do not weaken 0.70.
+  passes, with the token and trigger present. Treat this as genuine
+  reliability-input failure until the raw block, coverage, and fleet-event
+  evidence proves otherwise; do not weaken 0.70.
 
-Verify all four running-window rows reach version 1, the re-anchor finishes,
-and a subsequent `UpdateClientScores` publication restores a nonzero 12-hour
-passing population. Then require destination diversity, child-creation rate,
-and matched mature connection lifetime to return to their trailing bands for
-two probes. Do not delete score rows, edit Redis blobs, schedule a duplicate
-task, or restart clients to manufacture recovery.
+Verify every Taskworker has converged, the guard trigger is enabled, all four
+running-window rows reach version 1 with nonempty current-writer tokens, the
+re-anchor finishes, and a subsequent `UpdateClientScores` publication restores
+a nonzero 12-hour passing population. Then require destination diversity,
+child-creation rate, and matched mature connection lifetime to return to their
+trailing bands for two probes. Do not delete score rows, edit Redis blobs,
+schedule a duplicate task, or restart clients to manufacture recovery.
 
 This is a **software root cause**, not a hardware-capacity alert. Proxy memory
 and active-client ceilings remain the separate hardware/operations boundary in
@@ -3748,9 +3768,11 @@ and active-client ceilings remain the separate hardware/operations boundary in
 Implementation convention: SIGNALS.md §2.15 (`reliability-drift`) maps to
 `signal_reliability_drift.go` and `signal_reliability_drift_test.go`.
 Synthetic tests cover the exact version-0 corruption signature, a healthy
-version-1 population, and a post-migration genuine gate collapse. Model tests
-hold one sharp block's classification stable across a later/longer window and
-prove rolling equals full recompute across a deterministic median flip.
+guarded version-1 population, a legacy-writer reset, an unguarded marker, and a
+post-migration genuine gate collapse. Model tests reproduce an identical-bounds
+legacy UPSERT during a mixed rollout, hold one sharp block's classification
+stable across a later/longer window, and prove rolling equals full recompute
+across a deterministic median flip.
 
 ### 2.16 Open connection handler ownership — durable rows need a live owner
 Probe: `connection-orphans`
