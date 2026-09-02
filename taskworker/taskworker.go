@@ -72,6 +72,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredProviderEgressLocations(clientSession, tx)
 		work.ScheduleProberBootstrap(clientSession, tx)
 		work.ScheduleRefreshGeolocationSourcePins(clientSession, tx)
+		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
 		work.ScheduleRemoveExpiredBulkClientRemovalQuota(clientSession, tx)
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
@@ -292,6 +293,10 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RefreshGeolocationSourcePins,
 			work.RefreshGeolocationSourcePinsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.ProviderEgressProbe,
+			work.ProviderEgressProbePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredBulkClientRemovalQuota,

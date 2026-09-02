@@ -252,13 +252,15 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 		limit = min(parsed, maxProviderEgressDueLimit())
 	}
 
-	// shard_index / shard_count partition the queue across independent probers.
+	// shard_index / shard_count partition the queue across independent workers.
 	// Absent (or shard_count=1) is the single-prober case and behaves exactly as
 	// before, so an existing prober needs no change.
 	//
-	// Without this, every prober polling inside the attempt backoff gets the
-	// SAME rows -- the queue hands work out but never claims it -- so N probers
-	// repeat one prober's work instead of dividing it.
+	// Without this, every worker polling inside the attempt backoff gets the
+	// same rows -- the queue hands work out but never claims it -- so N workers
+	// repeat one shard's work instead of dividing it. Main assigns these slices
+	// to durable task rows rather than to hosts, so any taskworker can execute
+	// any slice.
 	shardCount := 1
 	shardIndex := 0
 	if raw := r.URL.Query().Get("shard_count"); raw != "" {

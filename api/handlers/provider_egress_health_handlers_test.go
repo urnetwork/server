@@ -27,10 +27,11 @@ func validEgressHealthBody(clientId server.Id) map[string]any {
 			"cdn":          map[string]any{"ok": 4, "total": 5},
 			"site":         map[string]any{"ok": 12, "total": 12},
 		},
-		"reputation_ok":           1,
-		"reputation_total":        4,
-		"failed_names":            "cachefly",
-		"reputation_failed_names": "akamai,etsy,canva",
+		"reputation_ok":              1,
+		"reputation_total":           4,
+		"failed_names":               "cachefly",
+		"reputation_failed_names":    "akamai,etsy,canva",
+		"tls_authentication_failure": false,
 	}
 }
 
@@ -289,6 +290,9 @@ func TestProviderEgressHealthResultStoresAValidRun(t *testing.T) {
 		if health.FailedNames != "cachefly" {
 			t.Errorf("failed_names = %q, want the scored failures only", health.FailedNames)
 		}
+		if health.TLSAuthenticationFailure {
+			t.Error("tls_authentication_failure = true for a payload that explicitly sent false")
+		}
 		if got := health.ClassResults["cdn"]; got.OK != 4 || got.Total != 5 {
 			t.Errorf("class_results[cdn] = %+v, want 4/5", got)
 		}
@@ -297,6 +301,30 @@ func TestProviderEgressHealthResultStoresAValidRun(t *testing.T) {
 		}
 		if health.MeasuredAt.IsZero() {
 			t.Error("measured_at was not stamped on arrival")
+		}
+	})
+}
+
+// One forged certificate must survive the strict JSON boundary and storage as
+// a first-class hard failure. Treating it as merely one failed destination
+// lets a high aggregate score advertise the intercepting provider.
+func TestProviderEgressHealthResultStoresTLSAuthenticationFailure(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+
+		clientId := server.NewId()
+		body := validEgressHealthBody(clientId)
+		body["tls_authentication_failure"] = true
+		w := postEgressHealth(t, secret, body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+		}
+
+		health := model.GetProviderEgressHealth(context.Background(), clientId)
+		if health == nil || !health.TLSAuthenticationFailure {
+			t.Fatalf("stored health = %+v, want TLSAuthenticationFailure=true", health)
 		}
 	})
 }

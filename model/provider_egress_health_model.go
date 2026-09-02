@@ -66,6 +66,10 @@ type ProviderEgressHealth struct {
 	// ReputationFailedNames is the comma-joined names of the reputation
 	// destinations that refused. Separate from FailedNames, deliberately.
 	ReputationFailedNames string
+	// TLSAuthenticationFailure records that at least one sampled HTTPS peer did
+	// not authenticate the requested hostname. It is not a score component: one
+	// forged identity is sufficient to make the provider unsafe.
+	TLSAuthenticationFailure bool
 }
 
 // SetProviderEgressHealth records a provider's latest egress-health run.
@@ -103,9 +107,10 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 				reputation_ok,
 				reputation_total,
 				failed_names,
-				reputation_failed_names
+				reputation_failed_names,
+				tls_authentication_failure
 			)
-			VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
+			VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
 			ON CONFLICT (client_id) DO UPDATE
 			SET
 				measured_at = $2,
@@ -115,7 +120,8 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 				reputation_ok = $6,
 				reputation_total = $7,
 				failed_names = $8,
-				reputation_failed_names = $9
+				reputation_failed_names = $9,
+				tls_authentication_failure = $10
 			`,
 			health.ClientId,
 			// measured_at is a naive timestamp column holding utc, as
@@ -128,6 +134,7 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 			health.ReputationTotal,
 			health.FailedNames,
 			health.ReputationFailedNames,
+			health.TLSAuthenticationFailure,
 		))
 	})
 }
@@ -228,6 +235,36 @@ func GetAllProviderEgressHealthCounts(ctx context.Context) map[server.Id]Provide
 	return healthCounts
 }
 
+// GetAllProviderEgressTLSAuthenticationFailedClientIds returns every provider
+// whose latest health run observed an unauthenticated TLS identity.
+//
+// There is intentionally no age cutoff. A certificate-authentication failure
+// is positive evidence that the path is unsafe, not a quality sample that
+// gradually becomes unknown. SetProviderEgressHealth replaces the row, so a
+// later clean run clears the bit and restores the provider automatically. This
+// also keeps a stalled prober from silently re-admitting a known interceptor.
+func GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx context.Context) map[server.Id]bool {
+	failed := map[server.Id]bool{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT client_id
+			FROM provider_egress_health
+			WHERE tls_authentication_failure = true
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				server.Raise(result.Scan(&clientId))
+				failed[clientId] = true
+			}
+		})
+	})
+	return failed
+}
+
 // GetProviderEgressHealth reads a provider's latest egress-health run, or nil
 // when the provider has never been measured. Never measured is not the same as
 // measured-unhealthy, so it is a nil result rather than a zero-valued one:
@@ -248,7 +285,8 @@ func GetProviderEgressHealth(ctx context.Context, clientId server.Id) *ProviderE
 				reputation_ok,
 				reputation_total,
 				failed_names,
-				reputation_failed_names
+				reputation_failed_names,
+				tls_authentication_failure
 			FROM provider_egress_health
 			WHERE client_id = $1
 			`,
@@ -267,6 +305,7 @@ func GetProviderEgressHealth(ctx context.Context, clientId server.Id) *ProviderE
 					&h.ReputationTotal,
 					&h.FailedNames,
 					&h.ReputationFailedNames,
+					&h.TLSAuthenticationFailure,
 				))
 				h.ClassResults = map[string]ProviderEgressHealthClassResult{}
 				server.Raise(json.Unmarshal(classResultsJson, &h.ClassResults))

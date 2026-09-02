@@ -135,6 +135,11 @@ func TestRemovedTaskTargetsAreNotRegistered(t *testing.T) {
 		ctx := context.Background()
 
 		taskWorker := InitTaskWorker(ctx)
+		connect.AssertEqual(
+			t,
+			taskWorker.HasTarget("github.com/urnetwork/server/taskworker/work.ProviderEgressProbe"),
+			true,
+		)
 
 		// positive control: a literal alternate name registered in
 		// InitTaskWorkerWithSettings

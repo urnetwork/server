@@ -53,6 +53,10 @@ type SubmitProviderEgressHealthArgs struct {
 	ReputationTotal       int    `json:"reputation_total"`
 	FailedNames           string `json:"failed_names"`
 	ReputationFailedNames string `json:"reputation_failed_names"`
+	// TLSAuthenticationFailure is separate from the score. A single peer that
+	// cannot authenticate the requested HTTPS host is a hard integrity failure,
+	// even when unrelated destinations make ok_count/total_count look healthy.
+	TLSAuthenticationFailure bool `json:"tls_authentication_failure"`
 }
 
 // readStrictOperatorRequestBody reads a bounded operator request body and
@@ -200,15 +204,16 @@ func ProviderEgressHealthResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	model.SetProviderEgressHealth(r.Context(), &model.ProviderEgressHealth{
-		ClientId:              args.ClientId,
-		MeasuredAt:            server.NowUtc(),
-		OKCount:               args.OKCount,
-		Total:                 args.TotalCount,
-		ClassResults:          classResults,
-		ReputationOK:          args.ReputationOK,
-		ReputationTotal:       args.ReputationTotal,
-		FailedNames:           args.FailedNames,
-		ReputationFailedNames: args.ReputationFailedNames,
+		ClientId:                 args.ClientId,
+		MeasuredAt:               server.NowUtc(),
+		OKCount:                  args.OKCount,
+		Total:                    args.TotalCount,
+		ClassResults:             classResults,
+		ReputationOK:             args.ReputationOK,
+		ReputationTotal:          args.ReputationTotal,
+		FailedNames:              args.FailedNames,
+		ReputationFailedNames:    args.ReputationFailedNames,
+		TLSAuthenticationFailure: args.TLSAuthenticationFailure,
 	})
 
 	w.Header().Set("Content-Type", "application/json")

@@ -3180,6 +3180,89 @@ func TestUpdateClientScoresDoesNotRequireEgressHealthWhenDisabled(t *testing.T) 
 	})
 }
 
+// Disabling broad egress qualification must not disable a current, explicit
+// blackhole verdict. The broad sweep is allowed to be absent during rollout;
+// a provider the fast check just proved dark is not unknown.
+func TestUpdateClientScoresExcludesCurrentBlackholeWhenEgressTestDisabled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(
+			providerConfigResourceName,
+			[]byte("enable_egress_test: false\n"),
+		))
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		availableClientId, blackholedClientId := clientIds[0], clientIds[1]
+		SetProviderBlackholeCheck(ctx, &ProviderBlackholeCheck{
+			ClientId:  blackholedClientId,
+			CheckedAt: server.NowUtc(),
+			OK:        false,
+			Failure:   "all_destinations_failed",
+		})
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+		if _, ok := clientScores[availableClientId]; !ok {
+			t.Fatal("a provider without a blackhole verdict was removed while broad egress qualification was disabled")
+		}
+		if _, ok := clientScores[blackholedClientId]; ok {
+			t.Fatal("a provider with a current blackhole verdict remained selectable while broad egress qualification was disabled")
+		}
+	})
+}
+
+// Broad percentage qualification can be disabled during rollout, but a fresh
+// authenticated-TLS failure is conclusive: the provider returned an identity
+// that did not authenticate the requested destination. It must not be diluted
+// by its otherwise passing score or published by the disabled-gate path.
+func TestUpdateClientScoresExcludesTLSAuthenticationFailureWhenEgressTestDisabled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(
+			providerConfigResourceName,
+			[]byte("enable_egress_test: false\n"),
+		))
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		availableClientId, interceptedClientId := clientIds[0], clientIds[1]
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: interceptedClientId, MeasuredAt: server.NowUtc(),
+			OKCount: 130, Total: 131, TLSAuthenticationFailure: true,
+		})
+
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		clientScores := testing_selectableClientScores(ctx, t, city, false)
+		if _, ok := clientScores[availableClientId]; !ok {
+			t.Fatal("a provider without a hard egress failure was removed")
+		}
+		if _, ok := clientScores[interceptedClientId]; ok {
+			t.Fatal("a TLS-intercepting provider remained selectable while broad egress qualification was disabled")
+		}
+	})
+}
+
 // The whole point of the feature. A provider measured 0 of 131 -- every
 // destination blackholed, the exact reading 158 seeded beta proxies gave -- must
 // not be offered to a user, while an identically-configured provider measured
@@ -3886,6 +3969,101 @@ func TestUpdateClientLocationsCountIsUngatedWhenEgressTestDisabled(t *testing.T)
 		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
 		assert.Equal(t, err, nil)
 		assert.Equal(t, clientLocations[countryId].ClientCount, 2)
+	})
+}
+
+func TestUpdateClientLocationsExcludesCurrentBlackholeWhenEgressTestDisabled(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(
+			providerConfigResourceName,
+			[]byte("enable_egress_test: false\n"),
+		))
+
+		networkId := server.NewId()
+		countryId := server.NewId()
+		availableClientId := server.NewId()
+		blackholedClientId := server.NewId()
+		for _, clientId := range []server.Id{availableClientId, blackholedClientId} {
+			Testing_CreateProviderAtLocation(ctx, networkId, clientId, countryId, "US")
+		}
+		SetProviderBlackholeCheck(ctx, &ProviderBlackholeCheck{
+			ClientId:  blackholedClientId,
+			CheckedAt: server.NowUtc(),
+			OK:        false,
+			Failure:   "all_destinations_failed",
+		})
+
+		UpdateClientLocations(ctx, time.Hour)
+
+		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
+		assert.Equal(t, err, nil)
+		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
+	})
+}
+
+func TestUpdateClientLocationsExcludesTLSAuthenticationFailureWhenEgressTestDisabled(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(
+			providerConfigResourceName,
+			[]byte("enable_egress_test: false\n"),
+		))
+
+		networkId := server.NewId()
+		countryId := server.NewId()
+		availableClientId := server.NewId()
+		interceptedClientId := server.NewId()
+		for _, clientId := range []server.Id{availableClientId, interceptedClientId} {
+			Testing_CreateProviderAtLocation(ctx, networkId, clientId, countryId, "US")
+		}
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: interceptedClientId, MeasuredAt: server.NowUtc(),
+			OKCount: 130, Total: 131, TLSAuthenticationFailure: true,
+		})
+
+		UpdateClientLocations(ctx, time.Hour)
+
+		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
+		assert.Equal(t, err, nil)
+		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
+	})
+}
+
+// A gated pass that counts nothing is retried without broad health/location
+// evidence. That safety fallback must still preserve an explicit blackhole
+// verdict instead of resurrecting the provider it just removed.
+func TestUpdateClientLocationsUngatedFallbackDoesNotRestoreCurrentBlackhole(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testing_enableProviderEgressTest(t)
+
+		networkId := server.NewId()
+		countryId := server.NewId()
+		blackholedClientId := server.NewId()
+		Testing_CreateProviderAtLocation(ctx, networkId, blackholedClientId, countryId, "US")
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: blackholedClientId, OKCount: 131, Total: 131,
+			MeasuredAt: server.NowUtc(),
+		})
+		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			ClientId: blackholedClientId, CountryCode: "US",
+			Verdict: "verified", ObservedAt: server.NowUtc(),
+		})
+		SetProviderBlackholeCheck(ctx, &ProviderBlackholeCheck{
+			ClientId:  blackholedClientId,
+			CheckedAt: server.NowUtc(),
+			OK:        false,
+			Failure:   "all_destinations_failed",
+		})
+
+		UpdateClientLocations(ctx, time.Hour)
+
+		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
+		assert.Equal(t, err, nil)
+		if location, ok := clientLocations[countryId]; ok && 0 < location.ClientCount {
+			t.Fatalf("ungated safety fallback restored %d blackholed providers", location.ClientCount)
+		}
 	})
 }
 

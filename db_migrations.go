@@ -6737,4 +6737,18 @@ var migrations = []any{
 		FOR EACH ROW
 		EXECUTE FUNCTION client_reliability_running_window_classification_guard()
 	`),
+
+	// A certificate-authentication failure cannot be represented safely as one
+	// failed destination inside ok_count/total_count: a provider that forged one
+	// TLS identity could still clear the 90% score. Keep the hard integrity bit
+	// beside (but outside) the score. Appended after every published migration;
+	// never insert migrations into the historical slice.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_health
+		ADD COLUMN tls_authentication_failure bool NOT NULL DEFAULT false;
+
+		CREATE INDEX provider_egress_health_tls_authentication_failed
+		ON provider_egress_health (client_id)
+		WHERE tls_authentication_failure = true
+	`),
 }

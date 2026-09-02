@@ -27,10 +27,11 @@ func TestSetProviderEgressHealthStoresAndReadsBack(t *testing.T) {
 				"cdn":          {OK: 4, Total: 5},
 				"site":         {OK: 12, Total: 12},
 			},
-			ReputationOK:          1,
-			ReputationTotal:       4,
-			FailedNames:           "cachefly",
-			ReputationFailedNames: "akamai,etsy,canva",
+			ReputationOK:             1,
+			ReputationTotal:          4,
+			FailedNames:              "cachefly",
+			ReputationFailedNames:    "akamai,etsy,canva",
+			TLSAuthenticationFailure: true,
 		})
 
 		health := GetProviderEgressHealth(ctx, clientId)
@@ -44,6 +45,7 @@ func TestSetProviderEgressHealthStoresAndReadsBack(t *testing.T) {
 		connect.AssertEqual(t, health.ReputationTotal, 4)
 		connect.AssertEqual(t, health.FailedNames, "cachefly")
 		connect.AssertEqual(t, health.ReputationFailedNames, "akamai,etsy,canva")
+		connect.AssertEqual(t, health.TLSAuthenticationFailure, true)
 		if !health.MeasuredAt.UTC().Equal(measuredAt) {
 			t.Errorf("MeasuredAt = %s, want %s", health.MeasuredAt.UTC(), measuredAt)
 		}
@@ -99,10 +101,11 @@ func TestSetProviderEgressHealthUpsertReplaces(t *testing.T) {
 			ClassResults: map[string]ProviderEgressHealthClassResult{
 				"dns": {OK: 0, Total: 26},
 			},
-			ReputationOK:          0,
-			ReputationTotal:       4,
-			FailedNames:           "everything",
-			ReputationFailedNames: "akamai",
+			ReputationOK:             0,
+			ReputationTotal:          4,
+			FailedNames:              "everything",
+			ReputationFailedNames:    "akamai",
+			TLSAuthenticationFailure: true,
 		})
 
 		later := server.NowUtc()
@@ -145,6 +148,7 @@ func TestSetProviderEgressHealthUpsertReplaces(t *testing.T) {
 		connect.AssertEqual(t, health.ReputationOK, 2)
 		connect.AssertEqual(t, health.FailedNames, "")
 		connect.AssertEqual(t, health.ReputationFailedNames, "")
+		connect.AssertEqual(t, health.TLSAuthenticationFailure, false)
 		connect.AssertEqual(t, health.ClassResults["dns"], ProviderEgressHealthClassResult{OK: 26, Total: 26})
 		if health.MeasuredAt.UTC().Before(later.Add(-time.Minute)) {
 			t.Errorf("MeasuredAt = %s, want the later run's %s", health.MeasuredAt.UTC(), later)
@@ -196,7 +200,7 @@ func TestStaleEgressHealthStopsGatingTheProvider(t *testing.T) {
 			OKCount:    100, Total: 100,
 		})
 
-		f := newProviderCountFilter(ctx)
+		f := newProviderCountFilter(ctx, true)
 
 		if !f.passesHealth(fresh) {
 			t.Errorf("a provider measured 100/100 an hour ago must pass the gate")
@@ -206,6 +210,32 @@ func TestStaleEgressHealthStopsGatingTheProvider(t *testing.T) {
 				"the gate. Stale evidence is not evidence: nothing re-measures a provider on the gate's schedule, so a "+
 				"provider that went dark keeps its passing tally and stays advertised until some other sweep reaches it",
 				ProviderEgressHealthMaxAge)
+		}
+	})
+}
+
+// A hard TLS-authenticity failure does not become safe merely because the
+// prober stalls. It remains excluded until a later clean run replaces the row;
+// otherwise an interceptor is silently re-admitted at the age boundary.
+func TestTLSAuthenticationFailurePersistsUntilCleanRun(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientId := server.NewId()
+
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: clientId, MeasuredAt: server.NowUtc().Add(-2 * ProviderEgressHealthMaxAge),
+			OKCount: 130, Total: 131, TLSAuthenticationFailure: true,
+		})
+		if !GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[clientId] {
+			t.Fatal("an aged TLS-authentication failure was silently forgotten before a clean re-test")
+		}
+
+		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+			ClientId: clientId, MeasuredAt: server.NowUtc(),
+			OKCount: 131, Total: 131, TLSAuthenticationFailure: false,
+		})
+		if GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[clientId] {
+			t.Fatal("a later clean run did not restore the provider")
 		}
 	})
 }

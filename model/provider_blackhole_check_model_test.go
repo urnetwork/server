@@ -41,7 +41,7 @@ func TestBlackholedProviderFailsTheHealthGate(t *testing.T) {
 			ClientId: healthy, CheckedAt: now.Add(-time.Minute), OK: true,
 		})
 
-		f := newProviderCountFilter(ctx)
+		f := newProviderCountFilter(ctx, true)
 
 		if !f.passesHealth(healthy) {
 			t.Errorf("a provider measured healthy and checked ok must pass the gate")
@@ -76,7 +76,7 @@ func TestStaleBlackholeCheckDoesNotExclude(t *testing.T) {
 			OK:        false, Failure: "all_destinations_failed",
 		})
 
-		if !newProviderCountFilter(ctx).passesHealth(clientId) {
+		if !newProviderCountFilter(ctx, true).passesHealth(clientId) {
 			t.Errorf("a failing check older than %s must not keep excluding the provider: "+
 				"a stalled sweep would otherwise drain the list", ProviderBlackholeCheckMaxAge)
 		}

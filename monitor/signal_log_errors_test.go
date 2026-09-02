@@ -29,6 +29,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 	}{
 		{"dial timeout", "dial tcp 192.0.2.1:6380: i/o timeout", "dial-io-timeout"},
 		{"connection refused", "connect: connection refused", "connection-refused"},
+		{"Connect TLS disabled", "[c]Could not initialize tls config. Disabling transport. = synthetic loader failure", "connect-tls-disabled"},
 		{"port exhaustion", "connect: cannot assign requested address", "port-exhaustion"},
 		{"pool timeout", "redis: connection pool timeout", "pool-timeout"},
 		{"cluster down", "CLUSTERDOWN Hash slot not served", "clusterdown"},
@@ -81,6 +82,34 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalExplainsConnectTLSDisabled(t *testing.T) {
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-connect", nil
+		}
+		return "[c]Could not initialize tls config. Disabling transport. = synthetic invalid certificate\n", nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "connect-tls-disabled").Markdown()
+	for _, want := range []string{
+		"substituted an empty TLS configuration",
+		"rejecting every QUIC ClientHello",
+		"64366fb5",
+		"before any listener goroutine begins",
+		"not generic provider unresponsiveness",
+		"does not explain that day's provider degradation without a matching line",
+		"Do not restart the same artifact repeatedly",
+		"completes a real QUIC handshake on every enabled carrier",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("Connect TLS-disabled alert missing %q:\n%s", want, markdown)
+		}
 	}
 }
 

@@ -863,6 +863,20 @@ scanner bursts across dozens of nonexistent paths; nginx logs those misses at
 error level, but many one-off paths do not constitute one recurring server
 failure. Keep the total and distinct-shape counts as diagnostic context.
 
+Connect's former TLS-loader fallback is a dedicated page class, not a generic
+panic. Exact line `[c]Could not initialize tls config. Disabling transport. =`
+means a legacy process replaced the failed identity with an empty TLS
+configuration and could bind its UDP sockets while rejecting every QUIC
+ClientHello. Class `connect-tls-disabled` alerts on the first line. Repair the
+identity source and deploy server `64366fb5` or a descendant: its checked
+constructor cancels startup before starting listener goroutines. A bound UDP
+socket or green process unit is not a valid control; require a real handshake
+on each enabled carrier. This is software/configuration correctness, not a
+Proxy hardware-capacity alert. A bounded seven-day main search on 2026-09-02
+found no matching line in Connect or Proxy, so this newly discovered failure
+mode did not explain that day's provider degradation without new affirmative
+evidence.
+
 The 2026-09-01 `17:09:30Z` window supplied the PostgreSQL-capacity
 classification control. Connect's four blocks emitted 16,140 cached
 `too many clients already (server_login_retry)` records, 123 paired route
@@ -4739,6 +4753,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 |---|---|---|
 | `dial tcp <ip>:<port>: i/o timeout` | Node's accept path starving — process alive but event loop wedged (or SYN drop). | PING that port locally on the redis host: hangs → restart that process; fine → network path. |
 | `connect: connection refused` | Port closed: process dead or bound to wrong interface after manual restart. | `ss -lntp` on the host: absent → restart; bound 127.0.0.1-only → restart with correct conf. |
+| `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
 | `connect: cannot assign requested address` | CLIENT-side ephemeral-port exhaustion (redial storm to one dst). | Fix the target node; storm self-drains ≤60s after; do NOT restart the client fleet. |
 | `Proxy protocol header must be UDP` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="transport_family"}` | The UDP backend received a PROXY header whose address family is not UDP, observed when legacy `proxy_protocol on`/PPv1 traffic overlaps PPv2. Pre-hardening Connect returned this error to quic-go and could kill the shared listener; current Connect drops and counts only that datagram. | Inspect the ACTUAL LB generations and require `proxy_protocol v2`. Page if the PP-drop rate is sustained or `h3_listener_up` falls; a legacy error followed by a missing socket means a pre-fix image is still serving. See §16.2/§16.5. |
 | `proxy protocol header required but not found` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="missing_header"}` | A previously unseen LB source tuple sent a headerless datagram: a bypassing/old LB path or broken UDP pseudo-session/header behavior. Current Connect drops it inside `PpPacketConn`; it does not escape as a listener-fatal `ReadFrom` error. | Correlate the exact Connect/LB rollout boundary and remove the incompatible sender. Verify listener gauges and sockets instead of inferring death from one rejected datagram. Do not diagnose JWT/auth or SNAT first. See §16.2/§16.5. |
@@ -6231,6 +6246,7 @@ Tier-1 (warn):
 | client-buffers | redis | used_memory_clients | > 25% of used or > 2G |
 | clients-spike | redis | connected_clients own-node step and fleet shape; trip battery groups `CLIENT LIST` cohorts | +50% in 10 min or >3× fleet median for 2 probes |
 | pubsub-drops | logs | channel-is-full rate | > 10/min/service |
+| connect-tls-disabled | logs | exact legacy Connect TLS-loader fallback that binds transport with no usable identity | any |
 | tls-key-mitm | logs | 15.2 identity cross-check mismatch class | any |
 | e2e-key-coverage | pg | 15.1 coverage vs trailing 24h median (armed ≥ 5%) | < 50% of median, 3 probes |
 | port-exhaustion | logs | cannot-assign rate | any burst > 100/min |

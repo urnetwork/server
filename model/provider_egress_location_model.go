@@ -916,19 +916,19 @@ func GetProviderEgressLocationDue(
 }
 
 // GetProviderEgressLocationDueSharded partitions the queue across independent
-// probers via shardIndex/shardCount.
+// workers via shardIndex/shardCount.
 //
-// Without partitioning, every prober polling inside the attempt-backoff window
+// Without partitioning, every worker polling inside the attempt-backoff window
 // receives the SAME rows. The queue hands work out but never claims it, and the
 // deduplicating NOT EXISTS on provider_egress_probe_attempt only bites once an
 // attempt row lands -- at submit time, minutes after the batch went out, which
-// is exactly when the other probers are polling. N probers therefore repeat the
-// same work, and throughput does not rise as hosts are added.
+// is exactly when the other workers are polling. N workers therefore repeat the
+// same work instead of dividing it.
 //
-// Hashing client_id gives each prober a disjoint slice with no locks, no leases
-// and no new columns, which suits a fixed set of hosts. A prober that goes away
-// leaves its slice unprobed until it returns, rather than stranding a claim
-// that something then has to reap.
+// Hashing client_id gives each task a disjoint slice with no per-provider locks,
+// leases, or new columns. Main stores exactly one recurring task per slice in
+// the shared task queue, so a worker that goes away does not own or strand its
+// slice; another taskworker can claim the same durable task.
 //
 // shardCount <= 1 disables sharding, which is the single-prober case.
 func GetProviderEgressLocationDueSharded(

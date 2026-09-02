@@ -24,6 +24,8 @@ require (
 	github.com/mr-tron/base58 v1.3.0
 	github.com/nyaruka/phonenumbers v1.6.5
 	github.com/oschwald/maxminddb-golang/v2 v2.4.1
+	github.com/pion/logging v0.2.4
+	github.com/pion/transport/v4 v4.1.0
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
@@ -36,6 +38,7 @@ require (
 	github.com/urfoundation/sn v0.0.0
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
+	github.com/urnetwork/operator-proxy v0.0.0
 	github.com/urnetwork/proxy v0.0.0
 	github.com/urnetwork/sdk v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
@@ -64,8 +67,8 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/base58 v1.0.4 // indirect
-	github.com/decred/dcrd/crypto/blake256 v1.0.0 // indirect
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
+	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.5 // indirect
 	github.com/fatih/color v1.19.0 // indirect
@@ -104,7 +107,6 @@ require (
 	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/ice/v4 v4.4.1 // indirect
 	github.com/pion/interceptor v0.1.47 // indirect
-	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.17 // indirect
@@ -113,7 +115,6 @@ require (
 	github.com/pion/sdp/v3 v3.0.19 // indirect
 	github.com/pion/srtp/v3 v3.0.13 // indirect
 	github.com/pion/stun/v3 v3.1.6 // indirect
-	github.com/pion/transport/v4 v4.1.0 // indirect
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/pion/webrtc/v4 v4.2.18 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -158,6 +159,8 @@ replace github.com/urnetwork/proxy => ../proxy
 replace github.com/urnetwork/sdk => ../sdk
 
 replace github.com/urnetwork/glog => ../glog
+
+replace github.com/urnetwork/operator-proxy => ../operator-proxy
 
 replace github.com/urnetwork/goidenticons => ../goidenticons
 

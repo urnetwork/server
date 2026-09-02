@@ -14,23 +14,29 @@ import (
 // ProberBootstrapTimeout is the cadence of the credential refresh.
 //
 // Six hours is far shorter than the jwt refresh age it is keeping ahead of (see
-// model.ProberJwtRefreshAge), so a missed pass or two costs nothing, and short
-// enough that a deployment brought up from empty has a working prober
-// credential within the same day rather than waiting a full cycle.
+// model.ProberJwtRefreshAge), so a missed pass or two costs nothing. The first
+// task is immediate; only the post-step uses this recurring cadence.
 const ProberBootstrapTimeout = 6 * time.Hour
 
 type ProberBootstrapArgs struct{}
 
 type ProberBootstrapResult struct{}
 
+// ScheduleProberBootstrap arms the first pass immediately. Probe shard tasks
+// start at the same deployment boundary and must not wait six hours for their
+// only usable identity.
 func ScheduleProberBootstrap(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleProberBootstrapAt(clientSession, tx, server.NowUtc())
+}
+
+func scheduleProberBootstrapAt(clientSession *session.ClientSession, tx server.PgTx, runAt time.Time) {
 	task.ScheduleTaskInTx(
 		tx,
 		ProberBootstrap,
 		&ProberBootstrapArgs{},
 		clientSession,
 		task.RunOnce("prober_bootstrap"),
-		task.RunAt(server.NowUtc().Add(ProberBootstrapTimeout)),
+		task.RunAt(runAt),
 	)
 }
 
@@ -85,6 +91,6 @@ func ProberBootstrapPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleProberBootstrap(clientSession, tx)
+	scheduleProberBootstrapAt(clientSession, tx, server.NowUtc().Add(ProberBootstrapTimeout))
 	return nil
 }

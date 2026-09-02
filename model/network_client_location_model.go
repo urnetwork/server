@@ -51,6 +51,11 @@ const (
 	clientScoreAliasBaselineValue = "1"
 	clientScoreAliasCallerValue   = "0"
 	clientScoreAliasReadyKey      = "client_score_alias_v1_ready"
+	// The score writer only visits targets present in its current SQL result.
+	// Persist the last complete target set so a location that loses its final
+	// eligible provider receives an explicit empty payload instead of leaving
+	// its prior providers selectable for the cache TTL.
+	clientScoreTargetManifestKey = "client_score_target_manifest_v1"
 	// Published only after a complete score export whose SQL excludes derived
 	// window clients and inactive top-level clients. Monitoring uses this
 	// durable boundary to distinguish harmless raw candidate rows from caches
@@ -62,6 +67,16 @@ const (
 type clientScoreRedisSet struct {
 	key   string
 	value []byte
+}
+
+type clientScoreTargetManifestDocument struct {
+	LocationIds      []string `json:"location_ids"`
+	LocationGroupIds []string `json:"location_group_ids"`
+}
+
+type clientScoreTargetManifest struct {
+	locationIds      map[server.Id]bool
+	locationGroupIds map[server.Id]bool
 }
 
 // clientScoreTargetKeys builds the payload and alias key families for one
@@ -2351,9 +2366,10 @@ const minEgressHealthOKDenominator = 10
 
 const providerConfigResourceName = "provider.yml"
 
-// providerEgressTestEnabled controls whether egress-test evidence is an
-// eligibility requirement. The probe pipeline can still run while this is
-// false; its results simply do not gate provider discovery or public counts.
+// providerEgressTestEnabled controls whether broad egress health and observed-
+// country evidence are eligibility requirements. The probe pipeline can still
+// run while this is false. A current explicit blackhole verdict remains an
+// eligibility requirement independently of this rollout switch.
 //
 // Defaulting to false is deliberate. A deployment can introduce the server
 // side of the probe pipeline before any prober has populated its tables. In
@@ -2383,8 +2399,12 @@ func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err 
 // was not, so a location could survive the gate and still advertise providers
 // that no probe had ever reached.
 //
-// Both maps are loaded once per pass. These loops run over the entire provider
-// population, so a per-provider query here is one round trip per provider.
+// Current hard-failure evidence is always loaded: an explicit blackhole verdict
+// or an unauthenticated TLS identity is conclusive per-provider evidence, not a
+// dependency on broad fleet probe coverage. Health and observed-country
+// evidence are loaded only when the broad egress qualification gate is enabled.
+// These loops run over the entire provider population, so a per-provider query
+// here is one round trip per provider.
 type providerCountFilter struct {
 	healthCounts map[server.Id]ProviderEgressHealthCounts
 	countryCodes map[server.Id]string
@@ -2393,14 +2413,30 @@ type providerCountFilter struct {
 	// both a passing check and no check at all. See
 	// GetAllProviderBlackholedClientIds for why it fails in that direction.
 	blackholed map[server.Id]bool
+	// tlsAuthenticationFailed is positive integrity-failure evidence. It is
+	// loaded and enforced even while broad percentage/location qualification is
+	// disabled, just like a current explicit blackhole verdict.
+	tlsAuthenticationFailed map[server.Id]bool
 }
 
-func newProviderCountFilter(ctx context.Context) providerCountFilter {
-	return providerCountFilter{
-		healthCounts: GetAllProviderEgressHealthCounts(ctx),
-		countryCodes: GetAllProviderEgressCountryCodes(ctx),
-		blackholed:   GetAllProviderBlackholedClientIds(ctx),
+func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) providerCountFilter {
+	f := providerCountFilter{
+		blackholed:              GetAllProviderBlackholedClientIds(ctx),
+		tlsAuthenticationFailed: GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx),
 	}
+	if loadEgressEvidence {
+		f.healthCounts = GetAllProviderEgressHealthCounts(ctx)
+		f.countryCodes = GetAllProviderEgressCountryCodes(ctx)
+	}
+	return f
+}
+
+func (f providerCountFilter) isBlackholed(clientId server.Id) bool {
+	return f.blackholed[clientId]
+}
+
+func (f providerCountFilter) hasHardEgressFailure(clientId server.Id) bool {
+	return f.isBlackholed(clientId) || f.tlsAuthenticationFailed[clientId]
 }
 
 // passesHealth reports whether a probe has MEASURED this provider healthy.
@@ -2411,14 +2447,12 @@ func newProviderCountFilter(ctx context.Context) providerCountFilter {
 // Compared exactly as 10*ok >= 9*total rather than through a float, so the 90%
 // boundary cannot drift with rounding.
 func (f providerCountFilter) passesHealth(clientId server.Id) bool {
-	// The hourly blackhole check overrides a passing health measurement, and
-	// only ever in the removing direction. The two run on very different
-	// cadences -- health sweeps the fleet over hours to days, the blackhole
-	// check over an hour -- so a provider that went dark since its last health
-	// measurement is caught here rather than at the next health sweep. A
-	// provider is only in this set when a CURRENT check says nothing got
-	// through; see GetAllProviderBlackholedClientIds.
-	if f.blackholed[clientId] {
+	// Hard failures override a passing percentage. The hourly blackhole check
+	// catches a provider that went dark after its last health sweep; the TLS bit
+	// catches a provider for which one authenticated destination failed even if
+	// enough unrelated destinations passed to clear 90%. Neither is a ranking
+	// input: both only remove unsafe/unusable supply.
+	if f.hasHardEgressFailure(clientId) {
 		return false
 	}
 
@@ -2430,6 +2464,17 @@ func (f providerCountFilter) passesHealth(clientId server.Id) bool {
 		return false
 	}
 	return minEgressHealthOKDenominator*counts.OKCount >= minEgressHealthOKNumerator*counts.Total
+}
+
+// passesEligibility always honors hard per-provider failures, then optionally
+// applies the broader health qualification. This distinction lets a rollout
+// leave broad egress testing disabled without publishing a provider that a
+// current fast check proved dark or a health check proved TLS-intercepting.
+func (f providerCountFilter) passesEligibility(clientId server.Id, requireEgressEvidence bool) bool {
+	if f.hasHardEgressFailure(clientId) {
+		return false
+	}
+	return !requireEgressEvidence || f.passesHealth(clientId)
 }
 
 // countsTowardCountry reports whether this provider counts as supply for
@@ -2455,9 +2500,9 @@ func (f providerCountFilter) countsTowardCountry(clientId server.Id, countryCode
 	return observed == strings.ToLower(countryCode)
 }
 
-// shouldSkipCountGate reports whether the count gate should be skipped
-// entirely for this pass, falling back to the pre-gate behavior (connected +
-// valid + Public key only) instead of fail-closed per provider.
+// shouldSkipCountGate reports whether broad health/location qualification
+// should be skipped for this pass, falling back to connected + valid + Public
+// key supply after still excluding current blackholes.
 //
 // Both maps are checked, not just healthCounts, because they are fed by two
 // INDEPENDENT pipelines that can stall separately: health arrives over the
@@ -2514,8 +2559,9 @@ func shouldRecountUngated(gated bool, providerRows int, countedLocations int) bo
 }
 
 // providerCountRow is one connected + valid + Public provider row from the
-// count query, held in memory so the pass can be counted twice (gated, then
-// ungated if the gated pass came out empty) without issuing a second query.
+// count query, held in memory so the pass can be counted twice (with broad
+// qualification, then without it if the first pass came out empty) without
+// issuing a second query. Both passes exclude current blackholes.
 type providerCountRow struct {
 	clientId          server.Id
 	cityLocationId    server.Id
@@ -2536,14 +2582,12 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	initialClientLocations := &InitialClientLocations{}
 
-	// one bulk load per pass, outside the tx: this loop runs over the whole
-	// provider population. Do not query the probe tables when their result is
-	// not an eligibility requirement.
+	// One bulk load per pass, outside the tx: this loop runs over the whole
+	// provider population. Current blackhole and TLS-authentication verdicts are
+	// always eligibility evidence. The broader health and observed-country
+	// tables are queried only when their gate is enabled.
 	egressTestEnabled := providerEgressTestEnabled()
-	countFilter := providerCountFilter{}
-	if egressTestEnabled {
-		countFilter = newProviderCountFilter(ctx)
-	}
+	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
 
 	// An empty health OR countryCodes map means one of the two probe
 	// pipelines has told us nothing yet -- stalled job, truncated table, cold
@@ -2567,9 +2611,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	skipCountGate := !egressTestEnabled || countFilter.shouldSkipCountGate()
 	if skipCountGate {
 		if egressTestEnabled {
-			glog.Infof("[nclm]egress health or location records are empty; skipping the provider count gate for this pass\n")
+			glog.Infof("[nclm]egress health or location records are empty; skipping broad provider count qualification for this pass; hard egress exclusions remain enabled\n")
 		} else {
-			glog.Infof("[nclm]provider egress test is disabled; skipping the provider count gate for this pass\n")
+			glog.Infof("[nclm]provider egress test is disabled; skipping broad provider count qualification for this pass; hard egress exclusions remain enabled\n")
 		}
 	}
 
@@ -2673,6 +2717,14 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		countProviderRows := func(gated bool) map[server.Id]int {
 			locationClientCounts := map[server.Id]int{}
 			for _, row := range providerCountRows {
+				// A current blackhole or TLS-authentication verdict is conclusive
+				// per-provider evidence and is never part of the fleet-wide
+				// health/location fallback. Otherwise that fallback would
+				// immediately resurrect the exact unsafe provider.
+				if countFilter.hasHardEgressFailure(row.clientId) {
+					continue
+				}
+
 				// This is the number every app shows when a user picks a
 				// location, so count only providers a probe has MEASURED
 				// healthy and OBSERVED egressing from the country they claim.
@@ -2729,7 +2781,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 		// be collapsed.
 		if shouldRecountUngated(gated, len(providerCountRows), len(locationClientCounts)) {
 			glog.Infof(
-				"[nclm]the count gate emptied all %d connected provider rows fleet-wide; recounting ungated for this pass\n",
+				"[nclm]broad count qualification emptied all %d connected provider rows fleet-wide; recounting without health/location qualification; hard egress exclusions remain enabled\n",
 				len(providerCountRows),
 			)
 			locationClientCounts = countProviderRows(false)
@@ -4007,14 +4059,13 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// provider can never be re-measured and is stuck out permanently.
 	// Shared with UpdateClientLocations so the gated membership and the
 	// advertised count can never disagree about what "healthy" means.
-	// UpdateClientScores uses passesHealth ONLY: its candidate pool is not
-	// country-scoped, so the observed-country check does not apply here.
+	// UpdateClientScores uses health but not observed country: its candidate
+	// pool is not country-scoped. Current blackholes and TLS-authentication
+	// failures apply regardless of the broad egress-test rollout switch.
 	egressTestEnabled := providerEgressTestEnabled()
-	countFilter := providerCountFilter{}
-	if egressTestEnabled {
-		countFilter = newProviderCountFilter(ctx)
-	} else {
-		glog.Infof("[nclm]provider egress test is disabled; skipping the provider score gate for this pass\n")
+	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
+	if !egressTestEnabled {
+		glog.Infof("[nclm]provider egress test is disabled; skipping broad provider score qualification for this pass; hard egress exclusions remain enabled\n")
 	}
 
 	// migration: set each client score to the lowest lookback index index
@@ -4037,15 +4088,15 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		clientScore.ScaledWeights = map[string]float32{}
 		clientScore.PassesMinimums = map[string]bool{}
 
-		// measured egress health does not vary by rank mode, so it is evaluated
+		// Provider eligibility does not vary by rank mode, so it is evaluated
 		// once per client and seeds every mode's minimum. It is a gate and
 		// nothing else: it can only take a provider out of the pool, and the
 		// scaled-weight arithmetic below is untouched, so every provider that
 		// still qualifies keeps exactly the weight and ordering it has today.
-		passesHealth := !egressTestEnabled || countFilter.passesHealth(clientScore.ClientId)
+		passesEligibility := countFilter.passesEligibility(clientScore.ClientId, egressTestEnabled)
 
 		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
-			passesMinimum := passesHealth
+			passesMinimum := passesEligibility
 			// all lookback thresholds must pass
 			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
 				if lookbackClientScore.IndependentReliabilityWeight < minFilter.minIndependentReliabilityWeights[lookbackIndex] {
