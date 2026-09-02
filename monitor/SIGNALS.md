@@ -9412,6 +9412,18 @@ absence of the lifecycle capability on that older clean revision keeps the
 teardown/overlap rollout open; a healthy steady heap is not proof that close
 joins retired ownership.
 
+A later `09:24Z` host and process control showed that reduction holding rather
+than merely catching every process just after a collection. Current per-process
+RSS was 0.58--0.96 GiB and `HeapAlloc` was 0.45--0.72 GiB with roughly
+12,864--13,375 peers. Fireside's ten proxies used 6.80 GiB RSS in aggregate
+with 79.1 GiB `MemAvailable`; Crisp's used 7.13 GiB with 109.7 GiB available.
+Both hosts retained all 8 GiB of swap and had no proxy OOM in the preceding
+hour. Across an adjacent sample, Fireside accepted 1,077 additional UDP
+datagrams and Crisp 3,954 while neither host added an `Udp.RcvbufErrors` event.
+This independently verifies the scoped-warmup memory result and current UDP
+health, but it still does not close the missing lifecycle-join capability or
+prove a future old/candidate drain safe.
+
 The scoped warmup path is the first root-cause fix to verify. If a deployed
 Proxy build that selects no targets still retains the §14.7b floor, capture an
 aggregate heap allocation profile or add identity-free owner gauges on that
