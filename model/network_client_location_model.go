@@ -51,6 +51,12 @@ const (
 	clientScoreAliasBaselineValue = "1"
 	clientScoreAliasCallerValue   = "0"
 	clientScoreAliasReadyKey      = "client_score_alias_v1_ready"
+	// Published only after a complete score export whose SQL excludes derived
+	// window clients and inactive top-level clients. Monitoring uses this
+	// durable boundary to distinguish harmless raw candidate rows from caches
+	// written by the legacy unfiltered query.
+	clientScoreProviderEligibilityReadyKey   = "client_score_provider_eligibility_v1_ready"
+	clientScoreProviderEligibilityReadyValue = "1"
 )
 
 type clientScoreRedisSet struct {
@@ -437,6 +443,28 @@ func clientScoreAliasReady(ctx context.Context) (ready bool, returnErr error) {
 func markClientScoreAliasReady(ctx context.Context) (returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		returnErr = r.Set(ctx, clientScoreAliasReadyKey, clientScoreAliasBaselineValue, 0).Err()
+	})
+	return
+}
+
+func clientScoreProviderEligibilityReady(ctx context.Context) (ready bool, returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		value, err := r.Get(ctx, clientScoreProviderEligibilityReadyKey).Result()
+		if err == redis.Nil {
+			return
+		}
+		if err != nil {
+			returnErr = err
+			return
+		}
+		ready = value == clientScoreProviderEligibilityReadyValue
+	})
+	return
+}
+
+func markClientScoreProviderEligibilityReady(ctx context.Context) (returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		returnErr = r.Set(ctx, clientScoreProviderEligibilityReadyKey, clientScoreProviderEligibilityReadyValue, 0).Err()
 	})
 	return
 }
@@ -4322,6 +4350,10 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			}
 			glog.Infof("[nclm]client score alias schema ready; legacy duplicate payloads will expire naturally\n")
 		}
+		if err := markClientScoreProviderEligibilityReady(ctx); err != nil {
+			return fmt.Errorf("publish client score provider eligibility state: %w", err)
+		}
+		glog.Infof("[nclm]client score provider eligibility ready; derived and inactive clients excluded\n")
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores\n",
 			len(clientLocationIds),

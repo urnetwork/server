@@ -2955,22 +2955,29 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
 Probe: `selection-population`
 
 Freshness is necessary but NOT sufficient. `UpdateClientScores` can complete
-successfully, refresh every ttl, and publish an empty provider market. Check the
-database supply and the exported cache as separate stages:
+successfully, refresh every ttl, and publish either an empty provider market or
+a large market made from the wrong lifecycle class. Check the database supply,
+the writer-generation marker, and the exported cache as separate stages:
 ```sql
+WITH supply AS MATERIALIZED (
+  SELECT nc.active, nc.source_client_id
+  FROM network_client_location_reliability nclr
+  JOIN network_client nc USING (client_id)
+  WHERE nclr.connected AND nclr.valid
+    AND EXISTS (
+      SELECT 1 FROM provide_key pk
+      WHERE pk.client_id = nclr.client_id
+        AND pk.provide_mode IN (1, 3) -- Network or Public
+    )
+)
 SELECT
-  (SELECT count(DISTINCT ncc.client_id)
-   FROM network_client_connection ncc
-   WHERE ncc.connected AND EXISTS (
-     SELECT 1 FROM provide_key pk
-     WHERE pk.client_id = ncc.client_id AND pk.provide_mode = 3
-   )) AS connected_public_clients,
-  (SELECT count(DISTINCT nclr.client_id)
-   FROM network_client_location_reliability nclr
-   WHERE nclr.connected AND nclr.valid AND EXISTS (
-     SELECT 1 FROM provide_key pk
-     WHERE pk.client_id = nclr.client_id AND pk.provide_mode = 3
-   )) AS eligible_public_providers,
+  (SELECT count(*) FROM supply) AS raw_score_candidates,
+  (SELECT count(*) FROM supply
+   WHERE active AND source_client_id IS NULL) AS eligible_score_candidates,
+  (SELECT count(*) FROM supply
+   WHERE source_client_id IS NOT NULL) AS derived_candidates,
+  (SELECT count(*) FROM supply
+   WHERE NOT active AND source_client_id IS NULL) AS inactive_top_level_candidates,
   (SELECT count(*) FROM provider_egress_health) AS egress_health_rows,
   (SELECT count(*) FROM provider_egress_health
    WHERE measured_at >= now() - interval '24 hours'
@@ -2978,6 +2985,24 @@ SELECT
   ) AS fresh_passing_health_rows,
   (SELECT count(*) FROM provider_egress_location) AS egress_location_rows;
 ```
+The raw count is diagnostic only. The score writer must join `network_client`
+and admit only `active = true AND source_client_id IS NULL`. A derived window
+identity is a consumer-side child of a durable source client, not independent
+provider capacity. Feeding those short-lived identities back into destination
+selection makes replacement churn look like supply and can amplify the churn.
+An inactive top-level client is likewise not live supply even when a legacy
+location row remains connected.
+
+After a completely successful filtered export, the current writer publishes
+`client_score_provider_eligibility_v1_ready=1` in Redis. Absence of that marker
+while derived or inactive candidates exist is `provider-supply-ineligible`.
+Never set it manually: it is a completion boundary, not a feature flag. Raw
+historical rows may remain after repair, so their existence is harmless once
+all Taskworkers have converged and a current writer has published the marker.
+During a partial rollout, an old writer can still replace score caches after a
+new writer sets the marker; deployment provenance must therefore be healthy as
+well.
+
 Then inspect the SAME target/caller pair in the normal and ForceMinimum score
 caches. Resolve a country target first; `00000000-0000-0000-0000-000000000000`
 is the no-caller-location key:
@@ -3003,8 +3028,13 @@ ForceMinimum value was 1,142 bytes. Compare the pair rather than making 18 a
 permanent encoding contract. Repeat with rank `s` and caller=`target` if the
 incident is caller/rank-specific.
 
-- HEALTHY: normal decoded sum is nonzero and tracks the eligible supply band;
+- HEALTHY: normal decoded sum is nonzero and tracks the eligible active
+  top-level supply band;
   ForceMinimum is normally larger because it bypasses reliability/score gates.
+- INELIGIBLE SUPPLY: the ready marker is absent and the raw pool contains
+  derived or inactive clients. Deploy the filtered writer and let the existing
+  serialized score task finish. Do not delete client, location, provide-key, or
+  cache state manually.
 - GATE WIPE: connected/eligible are large, normal sum is 0, ForceMinimum is
   large. Provider connectivity is healthy; a minimum predicate ate the market.
   Split the predicates: reliability lookbacks, score cutoff, then egress health.
@@ -3025,6 +3055,24 @@ quality+speed caches decoded to 0, ForceMinimum held ~74.6k, and BOTH egress
 probe tables held 0 rows. The score writer had activated a fail-closed egress
 gate before the probe pipeline was populated. This signal, not 2.8 alone,
 localized the outage.
+
+2026-09-02 signature: the live raw Network/Public score pool held 390,110
+connected/valid candidates, but only 90,298 were active top-level clients.
+297,776 were derived identities and another 2,036 were inactive top-level
+clients. The same incident contained 64,194 mature open connection rows with no
+handler (§2.16). The source fix joins the durable lifecycle in every location
+and location-group score query; the completion marker makes that semantic
+change observable. This is a **software root cause**. Deploy every Taskworker
+from a descendant of Server commit `b7599962` that contains the marker, allow
+one post-convergence `UpdateClientScores` run to complete, and require the marker,
+bounded cache inspection, destination diversity, and child-churn recovery. It
+does not require hardware and must not be repaired with manual data deletion.
+
+Implementation convention: SIGNALS.md §2.9 (`selection-population`) maps to
+`signal_selection_population.go` and
+`signal_selection_population_test.go`. Synthetic tests cover a fresh empty
+normal cache, a legacy export with derived/inactive supply, and harmless raw
+residue after a completed filtered export.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
@@ -3703,6 +3751,75 @@ Synthetic tests cover the exact version-0 corruption signature, a healthy
 version-1 population, and a post-migration genuine gate collapse. Model tests
 hold one sharp block's classification stable across a later/longer window and
 prove rolling equals full recompute across a deterministic median flip.
+
+### 2.16 Open connection handler ownership — durable rows need a live owner
+Probe: `connection-orphans`
+
+`network_client_connection` is durable history; `network_client_handler` is an
+ephemeral lease owned by a live Connect handler. An open connection may briefly
+precede or outlive its handler across normal task cadence, but every connection
+older than two handler-heartbeat intervals must still join an existing handler.
+Aggregate the current open set without exporting identifiers:
+
+```sql
+WITH connection_state AS MATERIALIZED (
+  SELECT c.connect_time, h.handler_id IS NULL AS orphan
+  FROM network_client_connection c
+  LEFT JOIN network_client_handler h USING (handler_id)
+  WHERE c.connected = true
+)
+SELECT
+  count(*) AS connected_count,
+  count(*) FILTER (WHERE orphan) AS orphan_count,
+  count(*) FILTER (
+    WHERE orphan AND connect_time < now() - interval '2 minutes'
+  ) AS mature_orphan_count,
+  extract(epoch FROM now() - min(connect_time) FILTER (WHERE orphan))::bigint
+    AS oldest_orphan_age_seconds
+FROM connection_state;
+```
+
+- HEALTHY: mature orphan count is zero. A small younger set can be a normal
+  cleanup race and must not page.
+- MISSING HANDLER: mature orphans remain on two probes. These rows are not live
+  clients even though `connected = true`; they inflate connection and provider
+  supply, preserve stale locations, and obscure the real fleet ceiling.
+
+The legacy cleanup first selected expired handler IDs and then closed only
+connections carrying one of those IDs. That works while the handler row still
+exists. A process loss, earlier handler deletion, or insertion race can remove
+the ephemeral row first, leaving its durable connection permanently invisible
+to every later cleanup. There is intentionally no foreign key between the two
+lifecycle tiers, so this is possible without a database integrity error.
+
+2026-09-02 production evidence: 150,544 rows claimed to be connected; 64,194
+had no handler, every orphan was older than two minutes, and the oldest was
+38,493,728 seconds (about 445.5 days) old. Only 20 handler rows existed and none
+had a stale heartbeat. This is direct state evidence, not an inference from
+traffic counters.
+
+This is a **software root cause**. Server commit `b7599962` changes the singleton
+Taskworker cleanup into two ordered operations: delete expired handlers, then
+sweep every open connection whose handler is absent. The location-reliability
+writer also requires a live handler and keeps disconnected fallback rows
+disconnected. Deploy every Taskworker from that commit or a descendant, then
+let the existing singleton tasks repair state naturally. Do not update
+connection rows, delete handlers, clear score caches, or schedule duplicate
+tasks manually.
+
+Verification requires all active Taskworkers to have the fixed ancestry, two
+consecutive probes with zero mature orphans, a later location-reliability pass
+that removes former orphan supply, the §2.9 provider-eligibility completion
+marker, and recovery in open-set size, destination diversity, and child churn.
+This fix needs no hardware. It does not change the separate proxy active-client
+ceiling or the hardware/operations capacity guidance in §16.8 and §16.9.
+
+Implementation convention: SIGNALS.md §2.16 (`connection-orphans`) maps to
+`signal_connection_orphans.go` and
+`signal_connection_orphans_test.go`. Synthetic tests cover the 445.5-day
+legacy leak and a harmless sub-two-minute cleanup race. Model regressions cover
+orphan sweeping, handler-qualified location reliability, and disconnected
+fallback semantics.
 
 ---
 

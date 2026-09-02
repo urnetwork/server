@@ -2806,6 +2806,9 @@ func TestUpdateClientScoresExcludesDerivedAndInactiveClients(t *testing.T) {
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
+		eligibilityReady, err := clientScoreProviderEligibilityReady(ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, eligibilityReady, true)
 
 		for _, source := range []struct {
 			name             string
