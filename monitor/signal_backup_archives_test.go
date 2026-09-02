@@ -26,6 +26,10 @@ type backupArchiveWriterFixture struct {
 	remoteRestart      string
 	remoteRestartDelay string
 	remoteExitStatus   int64
+	remotePGSource     string
+	remotePGPort       int64
+	remoteRedisSource  string
+	remoteRedisPort    int64
 }
 
 func TestBackupArchivesSignalSyntheticHealthy(t *testing.T) {
@@ -154,7 +158,7 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 7 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 11 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
@@ -203,6 +207,42 @@ func TestBackupArchivesSignalSyntheticDetectsDisabledPullRetry(t *testing.T) {
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("disabled retry alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestBackupArchivesSignalSyntheticDetectsPublicSourceRouting(t *testing.T) {
+	now := time.Date(2026, 9, 2, 4, 45, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remotePGSource:    "by@65.49.70.73",
+		remotePGPort:      8022,
+		remoteRedisSource: "by@65.49.70.73",
+		remoteRedisPort:   8023,
+	}, fixtures...)
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-source-route", "backup-1/remote-sources")
+	if alert.Sustain != 1 {
+		t.Fatalf("source route sustain=%d, want 1", alert.Sustain)
+	}
+	for _, want := range []string{
+		"pg_source=by@65.49.70.73 pg_port=8022",
+		"redis_source=by@65.49.70.73 redis_port=8023",
+		"PostgreSQL by@172.28.0.2:22",
+		"Redis by@172.28.0.3:22",
+		"Xops descendant of fbd291a",
+		"Do not add a public-router fallback",
+		"routes to use tun0",
+		"separate operator authorization",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("source route alert missing %q:\n%s", want, alert.Markdown())
 		}
 	}
 }
@@ -271,6 +311,14 @@ func runBackupArchiveFixturesWithWriter(
 	}}
 	settings := syntheticSettings(source)
 	settings.Now = func() time.Time { return now }
+	for index := range settings.Hosts {
+		switch settings.Hosts[index].Name {
+		case "pg-1":
+			settings.Hosts[index].OverlayAddress = "172.28.0.2"
+		case "redis-1":
+			settings.Hosts[index].OverlayAddress = "172.28.0.3"
+		}
+	}
 	settings.Hosts = append(settings.Hosts,
 		HostSettings{Name: "backup-1", Roles: []string{"backup"}},
 		HostSettings{Name: "metrics-1", Roles: []string{"services"}},
@@ -298,6 +346,18 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.remoteRestartDelay == "" {
 		fixture.remoteRestartDelay = "30min"
 	}
+	if fixture.remotePGSource == "" {
+		fixture.remotePGSource = "by@172.28.0.2"
+	}
+	if fixture.remotePGPort == 0 {
+		fixture.remotePGPort = 22
+	}
+	if fixture.remoteRedisSource == "" {
+		fixture.remoteRedisSource = "by@172.28.0.3"
+	}
+	if fixture.remoteRedisPort == 0 {
+		fixture.remoteRedisPort = 22
+	}
 	return fmt.Sprintf(
 		"github_unit_state=%s\n"+
 			"github_main_pid=%d\n"+
@@ -305,7 +365,11 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_result=%s\n"+
 			"remote_restart=%s\n"+
 			"remote_restart_delay=%s\n"+
-			"remote_exit_status=%d\n",
+			"remote_exit_status=%d\n"+
+			"remote_pg_source=%s\n"+
+			"remote_pg_port=%d\n"+
+			"remote_redis_source=%s\n"+
+			"remote_redis_port=%d\n",
 		fixture.unitState,
 		fixture.mainPID,
 		fixture.remoteUnitState,
@@ -313,6 +377,10 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteRestart,
 		fixture.remoteRestartDelay,
 		fixture.remoteExitStatus,
+		fixture.remotePGSource,
+		fixture.remotePGPort,
+		fixture.remoteRedisSource,
+		fixture.remoteRedisPort,
 	)
 }
 

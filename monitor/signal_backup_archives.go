@@ -28,6 +28,11 @@ remote_result=$(systemctl show remote-backup-archive.service -p Result --value 2
 remote_restart=$(systemctl show remote-backup-archive.service -p Restart --value 2>/dev/null || true)
 remote_restart_delay=$(systemctl show remote-backup-archive.service -p RestartUSec --value 2>/dev/null || true)
 remote_exit_status=$(systemctl show remote-backup-archive.service -p ExecMainStatus --value 2>/dev/null || true)
+remote_environment=$(systemctl show remote-backup-archive.service -p Environment --value 2>/dev/null || true)
+remote_pg_source=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_PG_REMOTE=//p' | tail -n 1)
+remote_pg_port=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_PG_PORT=//p' | tail -n 1)
+remote_redis_source=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_REDIS_REMOTE=//p' | tail -n 1)
+remote_redis_port=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_REDIS_PORT=//p' | tail -n 1)
 case "${github_unit_state}" in '') github_unit_state=unknown ;; esac
 case "${github_main_pid}" in ''|*[!0-9]*) github_main_pid=0 ;; esac
 case "${remote_unit_state}" in '') remote_unit_state=unknown ;; esac
@@ -35,13 +40,21 @@ case "${remote_result}" in '') remote_result=unknown ;; esac
 case "${remote_restart}" in '') remote_restart=unknown ;; esac
 case "${remote_restart_delay}" in ''|*[!0-9a-z]*) remote_restart_delay=unknown ;; esac
 case "${remote_exit_status}" in ''|*[!0-9]*) remote_exit_status=0 ;; esac
+case "${remote_pg_source}" in '') remote_pg_source=unknown ;; esac
+case "${remote_pg_port}" in ''|*[!0-9]*) remote_pg_port=0 ;; esac
+case "${remote_redis_source}" in '') remote_redis_source=unknown ;; esac
+case "${remote_redis_port}" in ''|*[!0-9]*) remote_redis_port=0 ;; esac
 printf 'github_unit_state=%s\n' "${github_unit_state}"
 printf 'github_main_pid=%s\n' "${github_main_pid}"
 printf 'remote_unit_state=%s\n' "${remote_unit_state}"
 printf 'remote_result=%s\n' "${remote_result}"
 printf 'remote_restart=%s\n' "${remote_restart}"
 printf 'remote_restart_delay=%s\n' "${remote_restart_delay}"
-printf 'remote_exit_status=%s\n' "${remote_exit_status}"`
+printf 'remote_exit_status=%s\n' "${remote_exit_status}"
+printf 'remote_pg_source=%s\n' "${remote_pg_source}"
+printf 'remote_pg_port=%s\n' "${remote_pg_port}"
+printf 'remote_redis_source=%s\n' "${remote_redis_source}"
+printf 'remote_redis_port=%s\n' "${remote_redis_port}"`
 
 var backupArchiveNames = []string{
 	"pg",
@@ -92,6 +105,10 @@ type backupArchiveWriterObservation struct {
 	remoteRestart      string
 	remoteRestartDelay string
 	remoteExitStatus   int64
+	remotePGSource     string
+	remotePGPort       int64
+	remoteRedisSource  string
+	remoteRedisPort    int64
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -102,6 +119,11 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	metricHosts := env.cfg.hostsWithRole("services")
 	if len(metricHosts) == 0 {
 		return nil, fmt.Errorf("backup archives: no services host in inventory for the loopback Mimir query")
+	}
+	pgSource := env.cfg.hostByRole("pg-primary")
+	redisSource := env.cfg.hostByRole("redis-cluster")
+	if pgSource == nil || redisSource == nil || pgSource.overlayIp == "" || redisSource.overlayIp == "" {
+		return nil, fmt.Errorf("backup archives: PostgreSQL and Redis management-VPN source identities are required")
 	}
 
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
@@ -243,6 +265,11 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	for _, host := range backupHosts {
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
 		findings = append(findings, evaluateBackupArchiveRetry(writers[host.name]))
+		findings = append(findings, evaluateBackupArchiveSourceRoute(
+			writers[host.name],
+			"by@"+pgSource.overlayIp,
+			"by@"+redisSource.overlayIp,
+		))
 	}
 	return findings, nil
 }
@@ -267,6 +294,10 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_restart",
 		"remote_restart_delay",
 		"remote_exit_status",
+		"remote_pg_source",
+		"remote_pg_port",
+		"remote_redis_source",
+		"remote_redis_port",
 	}
 	if len(values) != len(required) {
 		return backupArchiveWriterObservation{}, fmt.Errorf("expected %d properties; got %q", len(required), strings.TrimSpace(output))
@@ -292,6 +323,19 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if err != nil || remoteExitStatus < 0 {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote exit status %q", values["remote_exit_status"])
 	}
+	for _, key := range []string{"remote_pg_source", "remote_redis_source"} {
+		if matched, _ := regexp.MatchString(`^(unknown|[a-z][a-z0-9_-]{0,31}@[A-Za-z0-9][A-Za-z0-9.:-]{0,252})$`, values[key]); !matched {
+			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
+		}
+	}
+	remotePGPort, err := strconv.ParseInt(values["remote_pg_port"], 10, 64)
+	if err != nil || remotePGPort < 0 || remotePGPort > 65535 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote PostgreSQL port %q", values["remote_pg_port"])
+	}
+	remoteRedisPort, err := strconv.ParseInt(values["remote_redis_port"], 10, 64)
+	if err != nil || remoteRedisPort < 0 || remoteRedisPort > 65535 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote Redis port %q", values["remote_redis_port"])
+	}
 	return backupArchiveWriterObservation{
 		host:               hostName,
 		unitState:          values["github_unit_state"],
@@ -301,7 +345,45 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		remoteRestart:      values["remote_restart"],
 		remoteRestartDelay: values["remote_restart_delay"],
 		remoteExitStatus:   remoteExitStatus,
+		remotePGSource:     values["remote_pg_source"],
+		remotePGPort:       remotePGPort,
+		remoteRedisSource:  values["remote_redis_source"],
+		remoteRedisPort:    remoteRedisPort,
 	}, nil
+}
+
+func evaluateBackupArchiveSourceRoute(
+	observation backupArchiveWriterObservation,
+	expectedPGSource string,
+	expectedRedisSource string,
+) finding {
+	target := observation.host + "/remote-sources"
+	if observation.remotePGSource == expectedPGSource && observation.remotePGPort == 22 &&
+		observation.remoteRedisSource == expectedRedisSource && observation.remoteRedisPort == 22 {
+		return healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-source-route", target,
+		)
+	}
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: "backup-archive-source-route", target: target,
+		frame: "unit=remote-backup-archive.service", sustain: 1,
+		symptom:   fmt.Sprintf("%s is not configured to pull both backup sources over their management-VPN identities", observation.host),
+		mechanism: "Planetoid is offsite. A shared public address plus router-specific forwarded SSH ports couples recovery to an unrelated NAT boundary and can silently retain obsolete source routing after the rest of Planetoid moves to the VPN. Distinct inventory-derived overlay targets keep PostgreSQL and Redis source identity explicit.",
+		baseline:  fmt.Sprintf("The effective unit uses PostgreSQL %s:22 and Redis %s:22, matching the monitor inventory exactly.", expectedPGSource, expectedRedisSource),
+		observed: fmt.Sprintf(
+			"pg_source=%s pg_port=%d redis_source=%s redis_port=%d",
+			observation.remotePGSource,
+			observation.remotePGPort,
+			observation.remoteRedisSource,
+			observation.remoteRedisPort,
+		),
+		evidence: "The monitor reads only the four non-secret BRINGYOUR_BACKUP_*_REMOTE/PORT values from the effective systemd Environment and compares them with the configured PostgreSQL and Redis overlay addresses.",
+		context:  "This is deployment/routing identity, not proof that a copy completed. Changing the unit does not authorize an unscheduled transfer and cannot make absent media or insufficient capacity healthy.",
+		action:   "Deploy a clean Xops descendant of fbd291a with main/ansible/run-planetoid.sh. Do not add a public-router fallback. Before the next scheduled pull, require both overlay routes to use tun0, TCP/22 to accept connections, and the installed fleet key to authenticate read-only to both source hosts. Obtain separate operator authorization for any unscheduled catch-up run.",
+		verify:   "The effective unit matches both exact VPN targets on port 22; authenticated source listings succeed through tun0; the next scheduled oneshot exits successfully; and the completed artifacts, manifests, and two direct Mimir samples expose the new generations.",
+		playbook: "SIGNALS.md §11.22",
+	}
 }
 
 func evaluateBackupArchiveRetry(observation backupArchiveWriterObservation) finding {

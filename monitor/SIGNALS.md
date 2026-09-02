@@ -7827,7 +7827,8 @@ The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
 role. It also reads `github-backup-archive.service` state and MainPID plus the
 effective `remote-backup-archive.service` state, result, exit status, restart
-policy, and restart delay directly on that backup host, and queries the
+policy, restart delay, and its four non-secret PostgreSQL/Redis source endpoint
+values directly on that backup host, and queries the
 producer-owned `urnetwork_backup_archive_heartbeat_timestamp_seconds` values
 alongside the progress gauges. It expects exactly the four archive names above.
 Samples older than 90 seconds are observation loss even when their archive
@@ -7845,7 +7846,10 @@ producer heartbeat values are no more than 90 seconds old, and exactly one
 GitHub organization gauge is one; while it is inactive or failed both are zero.
 The data-pull oneshot has effective `Restart=on-failure` and
 `RestartUSec=30min`, so a late encrypted-disk mount can recover without making
-successful pulls repeat.
+successful pulls repeat. The effective data-pull unit resolves the inventory
+`pg-primary` and `redis-cluster` overlay addresses independently as
+`by@172.28.*:22`; a public router/NAT endpoint is not a recovery path for this
+offsite host.
 BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
@@ -7871,6 +7875,10 @@ BROKEN:
   unit is not configured with the bounded on-failure retry above. This is a
   software policy failure even when its precipitating missing mount needs an
   operator or hardware repair.
+- `backup-archive-source-route` is immediate when either effective source
+  target or port differs from the exact monitor-inventory overlay identity and
+  SSH/22. This is a configuration failure even when the stale public forward
+  remains reachable; do not preserve it as a fallback.
 
 The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
 ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both
@@ -7904,6 +7912,20 @@ for 04:00, while that session mount is not guaranteed at boot. The first GitHub 
 GB) and remained in its atomic compression phase with no final organization
 tarball at the observation boundary. Preserve that job rather than restarting
 it merely to make the panel change.
+
+A 2026-09-02 preflight found another independent configuration residue before
+the next scheduled pull: the installed script still used the shared public
+`65.49.70.73` endpoint on forwarded ports 8022 and 8023. Planetoid is offsite,
+and both intended sources were already directly routable through `tun0` at
+`172.28.208.182:22` and `172.28.208.177:22`; the installed fleet key
+authenticated to each address. Xops commit `fbd291a` splits the two source
+identities, derives them from inventory, requires `by@172.28.*`, and removes
+the public-router fallback. `run-planetoid.sh` deployed the script and unit;
+the effective environment now matches both VPN targets. Read-only source
+listings expose complete August 30 PostgreSQL and Redis generations while the
+archive still exposes August 20, so only the next scheduled oneshot and
+artifact/manifest validation can close freshness. Installing the route does
+not authorize an unscheduled 430-plus-GiB catch-up transfer.
 
 An additional metrics-writer race can falsely show an active GitHub job as
 idle: the standalone `--refresh-metrics` process initializes both shell-local
