@@ -54,9 +54,9 @@ func TestEmailAssetsSignalSyntheticHealthyPublicAndEdges(t *testing.T) {
 		if asset == "" {
 			return "", fmt.Errorf("request omitted a tracked email asset: %s", joined)
 		}
-		scope := "cdn"
+		scope := "public"
 		if strings.Contains(joined, "--resolve") {
-			scope = "origin"
+			scope = "edge"
 			// the edge check keeps the site's own Host, pinned to the exact address
 			if !strings.Contains(joined, "ur.io:443:["+address+"]") ||
 				!strings.Contains(joined, "https://ur.io"+asset) {
@@ -87,7 +87,7 @@ func TestEmailAssetsSignalSyntheticHealthyPublicAndEdges(t *testing.T) {
 		t.Fatalf("distinct public/edge requests = %d, want %d: %v", len(calls), 2*len(emailAssets), calls)
 	}
 	for _, asset := range emailAssets {
-		for _, scope := range []string{"cdn", "origin"} {
+		for _, scope := range []string{"public", "edge"} {
 			if calls[scope+":"+asset.path] != 1 {
 				t.Errorf("%s %s calls = %d, want one", scope, asset.path, calls[scope+":"+asset.path])
 			}
@@ -136,14 +136,16 @@ func TestEmailAssetsSignalSyntheticStaleSiteBundleRootCause(t *testing.T) {
 	}
 	markdown := alert.Markdown()
 	for _, want := range []string{
-		"cdn_failed=2",
-		"origin_failed=2",
+		"public_failed=2",
+		"edge_failed=2",
 		"missing_404=4",
 		"ur.io",
 		address,
 		"/images/emails/ur-wordmark-white-320.png",
 		"controller/email_templates",
 		"sync-public",
+		"Mmm descendant of b4b229c5c",
+		"Web service",
 		"deployed build predates the assets",
 		"functional product regression",
 		"SIGNALS.md §19.2",
@@ -259,8 +261,8 @@ func TestEmailAssetsSignalClassifiesTransientPublicTransport(t *testing.T) {
 	for _, want := range []string{
 		"transport_failures=1",
 		"other_response_failures=0",
-		"cdn_failed=1",
-		"origin_failed=0",
+		"public_failed=1",
+		"edge_failed=0",
 		"problem=curl exit 35",
 		"before receiving any HTTP response",
 		"two consecutive five-minute cadences",

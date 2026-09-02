@@ -10951,78 +10951,58 @@ association files. The second check detects one stale site generation and
 distinguishes an edge fault from DNS selection, TLS, or a cache in front of the
 edges.
 Curl exit 7/28 on an exact edge remains owned by §18.1; failure of the public
-CDN path remains user-facing and is always measured. An affirmative HTTP or
+path remains user-facing and is always measured. An affirmative HTTP or
 content failure is class `web-email-assets` on the first cadence. A request
 that ends before any HTTP response is instead class
 `web-email-assets-transport`: retain its selected address and curl exit as
 evidence, but require two consecutive five-minute cadences before alerting.
-One transport miss cannot establish missing bytes, origin-Host drift, or a
+One transport miss cannot establish missing bytes, edge bundle drift, or a
 cached error and must not prescribe invalidation. A one-shot diagnostic still
 returns the first sample.
 
-History, before the 2026-09-01 move of the images into the site bundle (they were `https://bringyour.com/res/emails/...` until then): at 2026-08-31 20:10Z all six then-current recipient-facing URLs returned HTTP 404
-`text/html` with the same 146-byte error body. Bounded web logs independently
-showed nginx `open()` failures for current email-template paths. The files were
-present in the source/build asset tree and current image contents, ruling out a
-missing-artifact build as the immediate cause.
+Retired contract history: before 2026-09-01 the templates referenced six
+`https://bringyour.com/res/emails/...` assets through a CloudFront
+`main-web.bringyour.com` origin. A fleet-wide 54/54 HTTP 404 incident was caused
+by that origin Host falling into nginx's empty default root and was repaired by
+Web commit `2b410faa`. A later one-cadence TLS exit 35 was disproved by direct
+IPv4/IPv6 controls. Those six paths, the `main-web` Host, and their 54-check
+denominator are historical and must not be used as current alert guidance.
 
-The focused signal's first live run at 2026-08-31 20:13:31Z completed 54
-application checks: six public-CDN requests plus four enabled edges × two exact
-IPv6 interfaces × six origin requests. Every check connected, returned HTTP
-404 `text/html`, and downloaded the same 146-byte body; none was a §18.1
-transport exclusion. This proves the failure is fleet-wide at the shared
-Host/path contract rather than DNS rotation, one stale edge, IPv6 routing, or
-the deliberately absent edge-5.
+At 2026-09-02 05:21:58Z, the first run of the current contract completed 18
+checks: two public requests plus two images pinned to both IPv6 interfaces on
+each of four enabled edges. All 18 connected and returned the same 24,535-byte
+`text/html` HTTP 404 response. This rules out edge IPv6 transport, DNS rotation,
+one stale edge, and the deliberately disabled edge-5. A direct
+`warpctl ls versions main web --sample` then showed both Web blocks (`beta` and
+`g1`) entirely on `2026.8.31+1034210530`, which predates the image addition.
 
-Root cause: CloudFront deliberately sends origin requests with
-`Host: main-web.bringyour.com`, as recorded in the generated LB/CDN
-configuration. Web commit `dc8fd20c` retired legacy domains by narrowing the
-old wildcard static server to the `bringyour.com` apex redirect. The CDN origin
-Host no longer matched that server and therefore fell into nginx's empty
-default `/etc/nginx/html` root, returning 404 even though the asset files were
-inside the image. Apex page and `/status` checks did not exercise this Host/path
-combination and stayed misleadingly healthy.
+Mmm commit `b4b229c5c` adds both PNGs to
+`ur.io/react/public/images/emails` and the Astro public tree. Their SHA-256
+values match across both trees, and the synthetic `sync-public` test proves the
+whole images directory is mirrored. The existing local `astro/dist` and staged
+`astro/build/main` outputs predate the commit and lack both paths. The causal
+boundary is therefore an undeployed Web build, not a Cloudflare-only cache,
+nginx Host, or live-edge routing defect.
 
-The software fix is web commit `2b410faa`. It explicitly serves only
-`/res/emails/` from the BringYour asset tree for the apex and both expected
-`main-web` origin identities, while retaining the `ur.io` redirect for every
-other legacy path. Its deterministic nginx smoke gate requests every embedded
-asset through both the public and origin identities, requires a missing asset
-to remain 404, and confirms legacy page redirects. Deploy a web image containing
-that commit or later; API, Connect, taskworker, database, and Grafana deployments
-cannot repair this boundary.
+Build and deploy only the Web service from a clean Mmm descendant of
+`b4b229c5c`, using the fail-closed Warp release builder. Require `sync-public`
+to place both files in staged output before image publication. The Web build
+also consumes the local SDK WASM, so its dependency checkout must be clean and
+attributable; do not publish from the currently dirty SDK worktree. API,
+Connect, taskworker, database, Grafana, and Xops deployments cannot repair this
+boundary. Do not copy files into live containers.
 
-The standing watcher was promoted at 2026-08-31 20:13:29Z to binary v154,
-built from server commit `651d22b4` (SHA-256
-`da10b98233228e645d98f4f70ffa3d68bc47efff21f564e5f7f49608ea3d4148`).
-All eight configured Loki tails remained alive, the initial catalog pass
-emitted the 54/54 aggregate above, and the first one-minute log cadence emitted
-a current Grafana EOF finding without a visibility error. Only after those
-gates did v153 receive SIGTERM; v154 remained the sole standing watcher.
+This alert can cross from software into operations: any exact-edge semantic
+failure requires the Web image/config repair and full Web rollout. If every
+exact edge is healthy while only the public URL returns an HTTP error,
+ownership moves to DNS/TLS or a public cache, and a path-scoped invalidation is
+allowed only after that response proves the boundary. A transport-only failure
+instead needs IPv4/IPv6, resolver, TLS, selected-address, and exact-edge
+controls; it does not justify cache mutation. This signal does not require
+hardware.
 
-At 2026-09-01 04:17:20Z, watcher v170 provided the transport negative control:
-53 of 54 checks were healthy and every exact origin passed, while one public
-GIF request ended with curl TLS exit 35 before an HTTP response. Five immediate
-IPv4 and five IPv6 repeats all returned the full 4,935,604-byte `image/gif`
-with HTTP 200, and a direct handshake to the previously selected CloudFront
-IPv6 address also verified successfully. The next scheduled signal run at
-04:22:20Z emitted no email-asset alert while other monitor observations
-continued. This was transient transport, not evidence for cache invalidation
-or another web deployment, and is the production discriminator for the
-separate two-cadence `web-email-assets-transport` class.
-
-This alert can cross from software into operations: exact-origin failures need
-the web image/config repair and full edge rollout; if every exact origin is
-healthy while only the public URL fails, ownership moves to CDN origin settings
-or stale negative-cache invalidation **only after an HTTP error response proves
-that boundary**. A transport-only failure instead needs IPv4/IPv6, resolver,
-TLS, selected-CDN-address, and exact-origin controls; it does not justify cache
-mutation. This signal does not require hardware. Do not copy assets into live
-containers, broaden the default nginx server, or invalidate CDN objects before
-the exact origins are proven healthy.
-
-Verification requires all six public paths and every enabled exact-origin
-path to return HTTP 200 `image/*` with nonzero bytes, the public and
-`main-web` legacy page roots to retain their 301 redirect to `ur.io`, a missing
-asset to remain 404, and zero new nginx ENOENT lines for these exact paths for
-ten minutes.
+Verification starts only after both `beta` and `g1` run the new Web artifact.
+Every cataloged public path and every enabled exact-edge path must return HTTP
+200 `image/*` with nonzero bytes, a deliberately missing image must remain 404,
+and bounded Web logs must contain zero new exact-path 404/ENOENT records for ten
+minutes.
