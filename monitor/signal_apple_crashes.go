@@ -676,14 +676,21 @@ func (s *appleCrashesSignal) downloadAppleInstance(
 	partitions := map[string]appleCrashPartition{}
 	rows := 0
 	seenSegments := map[string]struct{}{}
-	for _, segment := range segments {
-		if segment.Type != "analyticsReportSegments" || !validAppleResourceID(segment.ID) {
+	for _, listed := range segments {
+		if listed.Type != "analyticsReportSegments" || !validAppleResourceID(listed.ID) {
 			return nil, 0, fmt.Errorf("apple crash report returned an invalid segment")
 		}
-		if _, exists := seenSegments[segment.ID]; exists {
+		if _, exists := seenSegments[listed.ID]; exists {
 			return nil, 0, fmt.Errorf("apple crash report repeated a segment identifier")
 		}
-		seenSegments[segment.ID] = struct{}{}
+		seenSegments[listed.ID] = struct{}{}
+		// Apple says list-generated download URLs expire after five minutes.
+		// Pagination can be large, so treat that catalog only as a stable set of
+		// IDs and refresh each segment's details immediately before downloading.
+		segment, err := s.appleSegment(ctx, clients.api, listed.ID)
+		if err != nil {
+			return nil, 0, err
+		}
 		if segment.Attributes.SizeInBytes < 0 || segment.Attributes.SizeInBytes > providerSegmentLimit {
 			return nil, 0, fmt.Errorf("apple crash report segment has invalid size")
 		}
@@ -715,6 +722,20 @@ func (s *appleCrashesSignal) downloadAppleInstance(
 		}
 	}
 	return partitions, rows, nil
+}
+
+func (s *appleCrashesSignal) appleSegment(ctx context.Context, client *providerHTTP, segmentID string) (appleReportSegment, error) {
+	var response struct {
+		Data appleReportSegment `json:"data"`
+	}
+	endpoint := s.apiBaseURL + "/v1/analyticsReportSegments/" + url.PathEscape(segmentID)
+	if err := client.json(ctx, http.MethodGet, endpoint, "apple crash report segment details", nil, nil, &response); err != nil {
+		return appleReportSegment{}, err
+	}
+	if response.Data.Type != "analyticsReportSegments" || response.Data.ID != segmentID {
+		return appleReportSegment{}, fmt.Errorf("apple crash report returned mismatched segment details")
+	}
+	return response.Data, nil
 }
 
 func validateAppleSegmentURL(apiBaseURL, raw string) error {

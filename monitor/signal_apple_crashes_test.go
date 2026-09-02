@@ -97,6 +97,7 @@ func TestAppleCrashesPaginatesRetriesReplacesCorrectionsAndOmitsDownloadAuth(t *
 	badCorrectionChecksum := false
 	requestAttempts := 0
 	downloadCalls := 0
+	detailCalls := 0
 	apiCalls := 0
 	key := appleSyntheticPrivateKey()
 
@@ -166,12 +167,18 @@ func TestAppleCrashesPaginatesRetriesReplacesCorrectionsAndOmitsDownloadAuth(t *
 			}
 			writeTestJSON(t, writer, map[string]any{"data": instances, "links": map[string]any{}})
 		case "/v1/analyticsReportInstances/instance-old/segments":
-			writeTestJSON(t, writer, appleSegmentsFixture(server.URL, []string{"old"}, false))
+			writeTestJSON(t, writer, appleSegmentIDsFixture([]string{"old"}))
 		case "/v1/analyticsReportInstances/instance-current/segments":
-			writeTestJSON(t, writer, appleSegmentsFixture(server.URL, []string{"current-a", "current-b"}, false))
+			writeTestJSON(t, writer, appleSegmentIDsFixture([]string{"current-a", "current-b"}))
 		case "/v1/analyticsReportInstances/instance-correction/segments":
-			writeTestJSON(t, writer, appleSegmentsFixture(server.URL, []string{"correction"}, badCorrectionChecksum))
+			writeTestJSON(t, writer, appleSegmentIDsFixture([]string{"correction"}))
 		default:
+			if strings.HasPrefix(request.URL.Path, "/v1/analyticsReportSegments/segment-") {
+				detailCalls++
+				id := strings.TrimPrefix(request.URL.Path, "/v1/analyticsReportSegments/")
+				writeTestJSON(t, writer, appleSegmentDetailFixture(server.URL, id, badCorrectionChecksum && id == "segment-correction"))
+				return
+			}
 			t.Errorf("unexpected API request %s", request.URL.String())
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -207,8 +214,8 @@ func TestAppleCrashesPaginatesRetriesReplacesCorrectionsAndOmitsDownloadAuth(t *
 		t.Fatalf("request retry/pagination attempts=%d, want 3", requestAttempts)
 	}
 	firstDownloads := downloadCalls
-	if firstDownloads != 3 {
-		t.Fatalf("downloaded segments=%d, want all 3", firstDownloads)
+	if firstDownloads != 3 || detailCalls != 3 {
+		t.Fatalf("downloaded/refreshed segments=%d/%d, want all 3", firstDownloads, detailCalls)
 	}
 
 	alerts, err = signal.Run(context.Background(), settings)
@@ -263,11 +270,13 @@ func TestAppleCrashesPrivacySuppressedInstanceRemainsObservable(t *testing.T) {
 		case "/v1/analyticsReports/crash-report/instances":
 			writeTestJSON(t, writer, map[string]any{"data": []any{appleInstanceFixture("empty-instance", "2026-09-02")}})
 		case "/v1/analyticsReportInstances/empty-instance/segments":
-			writeTestJSON(t, writer, map[string]any{"data": []any{map[string]any{
-				"type": "analyticsReportSegments", "id": "empty-segment", "attributes": map[string]any{
+			writeTestJSON(t, writer, appleSegmentIDsFixture([]string{"empty"}))
+		case "/v1/analyticsReportSegments/segment-empty":
+			writeTestJSON(t, writer, map[string]any{"data": map[string]any{
+				"type": "analyticsReportSegments", "id": "segment-empty", "attributes": map[string]any{
 					"checksum": hex.EncodeToString(checksum[:]), "sizeInBytes": len(headerOnly), "url": server.URL + "/empty-download?signature=private",
 				},
-			}}})
+			}})
 		case "/empty-download":
 			if request.Header.Get("Authorization") != "" {
 				t.Errorf("Authorization forwarded to signed URL")
@@ -397,23 +406,30 @@ func appleInstanceFixture(id, processingDate string) map[string]any {
 	}
 }
 
-func appleSegmentsFixture(baseURL string, ids []string, badChecksum bool) map[string]any {
+func appleSegmentIDsFixture(ids []string) map[string]any {
 	data := make([]any, 0, len(ids))
 	for _, id := range ids {
-		compressed, _ := appleFixtureSegment(id)
-		digest := md5.Sum(compressed) // #nosec G401 -- mirrors Apple's documented report checksum.
-		checksum := hex.EncodeToString(digest[:])
-		if badChecksum {
-			checksum = strings.Repeat("0", md5.Size*2)
-		}
 		data = append(data, map[string]any{
 			"type": "analyticsReportSegments", "id": "segment-" + id,
-			"attributes": map[string]any{
-				"checksum": checksum, "sizeInBytes": len(compressed), "url": baseURL + "/download/" + id + "?signature=archive-secret",
-			},
 		})
 	}
 	return map[string]any{"data": data, "links": map[string]any{}}
+}
+
+func appleSegmentDetailFixture(baseURL, segmentID string, badChecksum bool) map[string]any {
+	id := strings.TrimPrefix(segmentID, "segment-")
+	compressed, _ := appleFixtureSegment(id)
+	digest := md5.Sum(compressed) // #nosec G401 -- mirrors Apple's documented report checksum.
+	checksum := hex.EncodeToString(digest[:])
+	if badChecksum {
+		checksum = strings.Repeat("0", md5.Size*2)
+	}
+	return map[string]any{"data": map[string]any{
+		"type": "analyticsReportSegments", "id": segmentID,
+		"attributes": map[string]any{
+			"checksum": checksum, "sizeInBytes": len(compressed), "url": baseURL + "/download/" + id + "?signature=archive-secret",
+		},
+	}}
 }
 
 func appleFixtureSegment(id string) ([]byte, bool) {

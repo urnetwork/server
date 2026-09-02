@@ -11157,11 +11157,14 @@ Connect bearer token is never forwarded to Apple's storage host.
 
 Every six hours, find the active ongoing request, the report whose name begins
 with `App Crashes`, and every DAILY instance in the seven-day processing
-overlap. Download every segment immediately, cap compressed and expanded
-bytes, verify Apple's declared size and MD5 checksum, expand gzip, and parse
-the tab-delimited schema by header name. Reject foreign App Apple Identifiers,
-negative/non-numeric counts, missing headers, duplicate resources or page
-tokens, and pagination that leaves the App Store Connect API origin.
+overlap. Treat the paginated segment catalog as stable IDs, then read each
+segment's details immediately before downloading it; Apple's signed URLs are
+valid for only five minutes and must not age while later catalog pages are
+collected. Cap compressed and expanded bytes, verify Apple's declared size and
+MD5 checksum, expand gzip, and parse the tab-delimited schema by header name.
+Reject foreign App Apple Identifiers, negative/non-numeric counts, missing
+headers, duplicate resources or page tokens, mismatched detail resources, and
+pagination that leaves the App Store Connect API origin.
 
 Apple processing instances are replacement sets, not deltas. For each event
 `Date`, rows from a newer `processingDate` replace the older partition; never
