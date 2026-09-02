@@ -109,6 +109,32 @@ type GrafanaSettings struct {
 	AdminPassword string
 }
 
+// GooglePlayReportingSettings carries the dedicated, read-only service-account
+// identity used by SIGNALS.md §20.1. Enabled distinguishes an intentionally
+// absent optional Vault resource from a present but incomplete credential. The
+// latter must remain observable instead of silently disabling the probe.
+type GooglePlayReportingSettings struct {
+	Enabled      bool
+	PackageName  string
+	ClientEmail  string
+	PrivateKey   string
+	PrivateKeyID string
+	TokenURL     string
+	LoadError    error
+}
+
+// AppleReportingSettings carries the App Store Connect team key used by
+// SIGNALS.md §20.2. The App ID comes from the existing apple.yml application
+// identity; only the reporting key lives in the optional dedicated resource.
+type AppleReportingSettings struct {
+	Enabled    bool
+	AppID      string
+	IssuerID   string
+	KeyID      string
+	PrivateKey string
+	LoadError  error
+}
+
 // SourceAttributionSettings arms SIGNALS.md §8.8. Each configured expected
 // address is checked through its family-specific endpoint from the monitor
 // runner itself, so a healthy API process cannot hide lost client identity.
@@ -191,6 +217,8 @@ type SignalSettings struct {
 	Hosts             []HostSettings
 	PostgreSQL        PostgreSQLSettings
 	Grafana           GrafanaSettings
+	GooglePlay        GooglePlayReportingSettings
+	AppleReporting    AppleReportingSettings
 	SourceAttribution SourceAttributionSettings
 	StateDir          string
 

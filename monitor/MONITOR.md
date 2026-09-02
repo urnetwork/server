@@ -113,7 +113,9 @@ The monitor has full vault + config access (the standard WARP_HOME
 resolvers) and reads every shared fact from its source of truth rather than
 duplicating it: pg credentials from `vault/<env>/pg.yml`, redis credentials
 from `vault/<env>/redis.yml`, the Grafana datasource-probe credential from
-`vault/<env>/grafana.yml`, and host LAN IPs from
+`vault/<env>/grafana.yml`, optional read-only mobile-reporting credentials from
+`vault/<env>/google-play-reporting.json` and
+`vault/<env>/apple-reporting.yml`, and host LAN IPs from
 `config/<env>/settings.yml` routes. Public edge IPv6 identities come from the
 first active version in `vault/<env>/services.yml`; historical versions are
 never probe targets.
@@ -362,7 +364,9 @@ Escalation batteries pull incident windows non-interactively with
 | 5m | open-set count 2.6; per-node INFO memory 3.1/3.2; connected_clients 3.5; parked tasks 1.2; pgbouncer 6432 reachability; control-plane clock (journalctl warp logs + docker container status per host — feeds every ticket's CONTEXT line) |
 | continuous | log tailers §3.7: one `warpctl logs <service> -f` per service plus a 45s bounded overlap reconciliation, §4 classification per line, per-minute rate findings |
 | 15m | pg_stat_statements top-20 mean drift 2.3 |
+| 30m | Google Play crash issue/version advances plus explicit vitals freshness 20.1 |
 | 1h | vacuum health 2.4; task duration percentiles 2.5; phantom/replica topology 3.6; zombie-tx 1.3 |
+| 6h | Apple App Crashes daily instances, privacy visibility, and replacement corrections 20.2 |
 | 24h | stats-landmine check (pg_stats n_distinct on transfer_contract.open + open-partial reltuples) §7; keyspace family histogram on fullest node 3.3; dmesg OOM scan 3.4 |
 
 The log tailers are always-on (a standing `warpctl logs -f` per service),
@@ -383,6 +387,8 @@ server/monitor/
   signal.go             Signal interface and common adapter
   registry.go           Monitor constructor and explicit signal registry
   run.go                run-all, one-signal, and cadence scheduling utilities
+  provider_reports.go   bounded provider HTTP/auth-adjacent, cursor, checksum,
+                        gzip, pagination, locking, and evidence utilities
   signal_short_key.go       focused implementation linked to SIGNALS.md §X.Y
   signal_short_key_test.go  synthetic broken-state test for that probe
   config.go             monitor/shared vault + settings.yml routes assembly
@@ -462,7 +468,13 @@ credentials from `vault/<env>/redis.yml`, LAN routes from
 `config/<env>/settings.yml`, the Grafana admin credential used only for the
 authenticated datasource control from `vault/<env>/grafana.yml`, and active
 nontransparent edge IPv6 interfaces from the first
-`vault/<env>/services.yml` version.
+`vault/<env>/services.yml` version. The Google package and Apple numeric app ID
+remain authoritative in `google.yml` and `apple.yml`; the dedicated reporting
+resources contain only provider identities. Either reporting resource may be
+absent, in which case its corresponding §20 signal performs no validation,
+opens no network connection, and returns no alert. Once a resource exists,
+malformed or incomplete content is a visibility failure rather than an
+implicit disable.
 
 ## 8. Development plan
 

@@ -11033,3 +11033,160 @@ Every cataloged public path and every enabled exact-edge path must return HTTP
 200 `image/*` with nonzero bytes, a deliberately missing image must remain 404,
 and bounded Web logs must contain zero new exact-path 404/ENOENT records for ten
 minutes.
+
+## 20. Mobile store crash reports
+
+Mobile-store reporting is an optional external observation plane. Each
+provider has a dedicated least-privilege Vault resource. If that resource does
+not exist, its probe is intentionally unarmed: it validates nothing, performs
+no OAuth/JWT work, opens no network connection, and returns no alert. This is
+the credential-bootstrap state, not proof of zero crashes. Once the resource
+exists, incomplete credentials, authentication/authorization failure, API
+errors, malformed or oversized results, unsafe pagination, checksum failure,
+or an unreadable cursor are visibility failures. Authentication and role
+failures use `provider-authentication`, exhausted provider HTTP/transport
+failures use `provider-api`, and rejected response contracts use
+`provider-data-invalid`; their `SignalID` remains `monitor/visibility` and the
+monitor run remains non-zero. Do not silently disable a configured provider to
+clear one of those failures.
+
+Both probes persist versioned atomic cursors under
+`StateDir/provider-reports/`, retain an overlapping lookback, and commit state
+only after every response needed by that run has validated. The overlap is
+what captures late store processing and corrections; the cursor prevents the
+same provider record from opening a duplicate alert. Transport errors never
+include provider response bodies, OAuth assertions, bearer tokens, or Apple
+signed download URLs. Bounded provider evidence removes email addresses,
+tokens, opaque identifiers, URL query strings, controls, and Markdown fence
+characters before an `Alert` can render it.
+
+### 20.1 Google Play crash issues and vitals visibility
+
+Probe: `play-crashes`
+
+Read the Play Developer Reporting API v1beta1 for the package named by the
+existing `vault/<env>/google.yml` `webhook.package_name` value. The dedicated
+optional `vault/<env>/google-play-reporting.json` is an ordinary Google service
+account credential with at least these fields:
+
+```json
+{
+  "client_email": "...",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...",
+  "private_key_id": "...",
+  "token_uri": "https://oauth2.googleapis.com/token"
+}
+```
+
+Enable the Play Developer Reporting API, grant this service account the app's
+`View app information (read-only)` permission in Play Console, and use only
+the `https://www.googleapis.com/auth/playdeveloperreporting` OAuth scope. It
+does not need release, financial, user, or write permissions. The probe obtains
+short-lived OAuth tokens and never copies the service-account document into an
+alert or its cursor.
+
+Every 30 minutes, query DAILY `crashRate`, `userPerceivedCrashRate`, and
+`distinctUsers` through the provider's advertised freshness boundary, then
+search crash-only ErrorIssues across a rolling 48-hour UTC interval. Paginate
+both sources with exact original parameters. A new issue/version group, a
+later `lastErrorReportTime`, or a larger report count at the same report hour
+is class `play-crash-issue`. The alert carries the issue cause, likely method,
+latest version code and OS API, 48-hour report/user counts, current aggregate
+metric context, and at most one provider-sanitized sample report. Evidence is
+bounded again locally. The per-run sample-download cap is 50 advancing groups;
+`play-crash-overflow` makes any excess explicit while cursors still prevent a
+later duplicate flood. A lower replacement count, moved report hour, or changed
+root-cause fingerprint without a forward occurrence is the one-shot class
+`play-crash-correction`, not a fabricated new crash.
+
+The aggregate decimal rates are retained as provider values and context; do
+not invent a percentage scale or page threshold that the response itself does
+not establish. The issue/version advance is the actionable crash signal. Use
+Play Console's current core-vital threshold independently when prioritizing a
+release. If DAILY freshness is absent, older than 72 hours, or the matching
+metric query contains no row, emit `play-crash-data-unobservable` or
+`play-crash-data-stale`. An empty issue list is quiet only when an explicit
+metric row (including explicit zero values) establishes visibility. Empty
+metadata or rows never means zero crashes.
+
+This alert normally needs a software root-cause fix in the Android client, an
+embedded SDK, or a server contract used by that client. A device/OS-specific
+cluster can instead require an operational release exclusion or an upstream
+vendor repair; neither is fixed by deploying the monitor. Verify a software
+fix by shipping the owning Android artifact or server dependency, confirming
+the named issue/version stops advancing throughout the 48-hour overlap, and
+keeping provider freshness current. Credentials and API enablement require
+only Vault/Play Console operations and a monitor restart or watcher promotion;
+they do not require an API, Connect, Proxy, Grafana, or database deployment.
+
+### 20.2 Apple App Crashes aggregate and corrections
+
+Probe: `apple-crashes`
+
+Read App Store Connect Analytics for the numeric app ID already stored at
+`vault/<env>/apple.yml` `app_store_notifications.app_apple_id`. Keep the team
+reporting key separate from Sign in with Apple and App Store Server API keys in
+optional `vault/<env>/apple-reporting.yml`:
+
+```yaml
+issuer_id: "..."
+key_id: "..."
+private_key: |
+  -----BEGIN PRIVATE KEY-----
+  ...
+  -----END PRIVATE KEY-----
+```
+
+An App Store Connect Admin must create one `ONGOING` Analytics Report request
+for the app once. The monitor key itself should have the `Sales and Reports`
+role, which can list and download generated reports without managing the
+request. The probe signs a fresh ES256 JWT for API reads (`kid`, `iss`,
+`aud=appstoreconnect-v1`, 15-minute lifetime). It deliberately uses a separate
+unauthenticated HTTP client for each short-lived segment URL, so the App Store
+Connect bearer token is never forwarded to Apple's storage host.
+
+Every six hours, find the active ongoing request, the report whose name begins
+with `App Crashes`, and every DAILY instance in the seven-day processing
+overlap. Download every segment immediately, cap compressed and expanded
+bytes, verify Apple's declared size and MD5 checksum, expand gzip, and parse
+the tab-delimited schema by header name. Reject foreign App Apple Identifiers,
+negative/non-numeric counts, missing headers, duplicate resources or page
+tokens, and pagination that leaves the App Store Connect API origin.
+
+Apple processing instances are replacement sets, not deltas. For each event
+`Date`, rows from a newer `processingDate` replace the older partition; never
+merge or sum the same Date across instances. This matters because a daily
+instance can contain multiple event dates, late arrivals, and rare historical
+corrections. Compare the final replacement partition with the committed one
+and alert per Date/app-version group. A first observation or increase is
+`apple-crash-group`; any changed or disappearing group in a newer replacement
+is `apple-crash-correction`. The alert includes total crashes and a bounded
+top-device/platform breakdown. `Unique Devices` is labeled as a row sum because
+a device can appear in more than one dimension row and must not be presented
+as a globally distinct count. The monitor processes at most 60 chronological
+instances per run and emits `apple-crash-backlog` until a longer outage is
+drained.
+
+The App Crashes report contains aggregates, not crash stacks. It covers only
+users who opted to share diagnostics, is complete within five days, and omits
+privacy groups below Apple's reporting threshold. Therefore an absent active
+request, stopped-due-to-inactivity request, missing App Crashes report, empty
+instance list, an instance with no observable rows, or a newest processing date
+older than 72 hours is never zero crashes. Emit the explicit classes
+`apple-crash-request-missing`, `apple-crash-request-stopped`,
+`apple-crash-report-missing`, `apple-crash-data-unobservable`,
+`apple-crash-privacy-suppressed`, or `apple-crash-data-stale`, as applicable.
+The privacy-suppressed class remains active from the cursor until a later
+non-empty instance supersedes it.
+
+Aggregate integration requires only the credential, the one-time ongoing
+request, and the monitor code. Fixing an aggregate crash usually requires an
+iOS app, SDK, or server-contract deployment; an OS/device boundary may instead
+need an operational rollout exclusion or Apple/vendor resolution. Detailed,
+symbolicated stacks are not available from this report. Adding that evidence
+requires a separately consented client crash/MetricKit collection path and its
+server ingestion deployment; do not claim a stack-level root cause from these
+counts. Verify by shipping the owning fix, observing replacement rather than
+summation for late instances, confirming the affected version stops gaining
+crashes through the five-day completeness window, and retaining a current
+processing date.

@@ -101,6 +101,8 @@ func NewSignals() []Signal {
 		NewBackupArchivesSignal(),
 		NewAssociationFilesSignal(),
 		NewEmailAssetsSignal(),
+		NewPlayCrashesSignal(),
+		NewAppleCrashesSignal(),
 	}
 }
 
@@ -163,6 +165,10 @@ func (m *Monitor) Run(ctx context.Context) (Alerts, error) {
 }
 
 func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
+	var providerFailure interface{ monitorVisibilityClass() string }
+	if errors.As(err, &providerFailure) {
+		return providerFailureAlert(settings, signal, err, providerFailure.monitorVisibilityClass())
+	}
 	if target, ok := sshAdmissionResetTarget(err); ok {
 		return Alert{
 			SignalNumber: signal.Number(),
@@ -203,6 +209,34 @@ func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 		Action:       "Restore access to the signal source, then rerun the failed signal; also check whether the unreachable target is itself the incident.",
 		Verify:       "The signal completes and reports either no alert or a concrete target alert.",
 		Playbook:     "SIGNALS.md §1.4 and MONITOR.md §3.6",
+	}
+}
+
+func providerFailureAlert(settings SignalSettings, signal Signal, err error, class string) Alert {
+	symptom := fmt.Sprintf("Signal %s (%s) lost provider visibility: %s", signal.Number(), signal.ID(), err)
+	mechanism := "The external reporting provider could not complete a bounded API request, so the associated crash condition is unknown rather than healthy."
+	action := "Check provider availability, rate limits, and the request contract; preserve the last committed cursor and rerun without bypassing validation."
+	verify := "The provider API completes every page and the signal returns either explicit current data or a concrete crash alert."
+	switch class {
+	case providerAuthenticationClass:
+		symptom = fmt.Sprintf("Signal %s (%s) could not authenticate to its reporting provider: %s", signal.Number(), signal.ID(), err)
+		mechanism = "The reporting credential could not obtain or use its short-lived token, so no crash response is authoritative. A 401/403 can mean a revoked key, clock error, disabled API, wrong app access, or insufficient read-only role."
+		action = "Validate the dedicated Vault resource, local clock, provider API enablement, and least-privilege app role. Rotate a revoked key through Vault; do not paste tokens into logs or disable the probe."
+		verify = "A fresh OAuth/JWT token authenticates, the configured app is readable, and the next signal run reaches an explicit provider freshness/data boundary."
+	case providerDataClass:
+		symptom = fmt.Sprintf("Signal %s (%s) rejected invalid provider report data: %s", signal.Number(), signal.ID(), err)
+		mechanism = "The provider response violated its bounded schema, pagination, size, checksum, compression, or app-identity contract. Advancing the cursor would lose or double-count crash evidence."
+		action = "Compare the response shape with the current provider contract and status page. Fix the parser only after a sanitized fixture reproduces a legitimate schema change; otherwise retry after the provider repairs the data."
+		verify = "Every response page and segment validates, the cursor advances exactly once, and the deterministic malformed-data fixture still fails closed."
+	}
+	return Alert{
+		SignalNumber: signal.Number(), SignalKey: signal.Key(), SignalID: "monitor/visibility", SignalName: signal.Name(),
+		Severity: SeverityWarn, Class: class, Target: signal.ID(), Environment: settings.Environment,
+		ObservedAt: settings.Now(), Sustain: 1,
+		Symptom: symptom, Mechanism: mechanism,
+		Baseline: "The configured external provider authenticates and publishes a complete, bounded, schema-valid observation on every signal cadence.",
+		Observed: err.Error(), Action: action, Verify: verify,
+		Playbook: "SIGNALS.md §" + signal.Number(),
 	}
 }
 

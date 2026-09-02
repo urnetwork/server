@@ -109,6 +109,31 @@ type grafanaVaultYaml struct {
 	} `yaml:"grafana"`
 }
 
+type googleAppVaultYaml struct {
+	Webhook struct {
+		PackageName string `yaml:"package_name"`
+	} `yaml:"webhook"`
+}
+
+type googlePlayReportingVault struct {
+	ClientEmail  string `yaml:"client_email"`
+	PrivateKey   string `yaml:"private_key"`
+	PrivateKeyID string `yaml:"private_key_id"`
+	TokenURL     string `yaml:"token_uri"`
+}
+
+type appleAppVaultYaml struct {
+	AppStoreNotifications struct {
+		AppAppleID int64 `yaml:"app_apple_id"`
+	} `yaml:"app_store_notifications"`
+}
+
+type appleReportingVault struct {
+	IssuerID   string `yaml:"issuer_id"`
+	KeyID      string `yaml:"key_id"`
+	PrivateKey string `yaml:"private_key"`
+}
+
 // LoadSignalSettings loads production settings from the standard WARP_HOME
 // config/vault resolvers. Keeping this here makes cli/monitor a thin wrapper.
 func LoadSignalSettings() (SignalSettings, error) {
@@ -205,6 +230,8 @@ func LoadSignalSettings() (SignalSettings, error) {
 			ExpectedIPv4: y.SourceAttribution.ExpectedIPv4,
 			ExpectedIPv6: y.SourceAttribution.ExpectedIPv6,
 		},
+		GooglePlay:     loadGooglePlayReportingSettings(),
+		AppleReporting: loadAppleReportingSettings(),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -268,6 +295,77 @@ func LoadSignalSettings() (SignalSettings, error) {
 		return SignalSettings{}, err
 	}
 	return settings, nil
+}
+
+// loadGooglePlayReportingSettings is deliberately fail-soft only when the
+// optional credential is absent. Once google-play-reporting.json exists, a
+// malformed credential or missing application identity is retained on the
+// provider settings so only §20.1 emits a visibility failure; it must not stop
+// unrelated production probes from starting.
+func loadGooglePlayReportingSettings() GooglePlayReportingSettings {
+	credentialResource, err := server.Vault.SimpleResource("google-play-reporting.json")
+	if err != nil {
+		return GooglePlayReportingSettings{}
+	}
+	settings := GooglePlayReportingSettings{Enabled: true}
+	var credential googlePlayReportingVault
+	if err := credentialResource.UnmarshalYamlE(&credential); err != nil {
+		// A YAML/JSON decoder error can quote the offending scalar. Never carry
+		// credential-file contents into the monitor's Markdown visibility alert.
+		settings.LoadError = fmt.Errorf("google-play-reporting.json is unreadable or malformed")
+		return settings
+	}
+	settings.ClientEmail = strings.TrimSpace(credential.ClientEmail)
+	settings.PrivateKey = credential.PrivateKey
+	settings.PrivateKeyID = strings.TrimSpace(credential.PrivateKeyID)
+	settings.TokenURL = strings.TrimSpace(credential.TokenURL)
+
+	appResource, err := server.Vault.SimpleResource("google.yml")
+	if err != nil {
+		settings.LoadError = fmt.Errorf("google.yml: %w", err)
+		return settings
+	}
+	var app googleAppVaultYaml
+	if err := appResource.UnmarshalYamlE(&app); err != nil {
+		settings.LoadError = fmt.Errorf("google.yml is unreadable or malformed")
+		return settings
+	}
+	settings.PackageName = strings.TrimSpace(app.Webhook.PackageName)
+	return settings
+}
+
+// loadAppleReportingSettings follows the same optional-resource contract as
+// Google Play. App Store Connect authentication is isolated from the existing
+// Sign in with Apple and App Store Server API credentials.
+func loadAppleReportingSettings() AppleReportingSettings {
+	credentialResource, err := server.Vault.SimpleResource("apple-reporting.yml")
+	if err != nil {
+		return AppleReportingSettings{}
+	}
+	settings := AppleReportingSettings{Enabled: true}
+	var credential appleReportingVault
+	if err := credentialResource.UnmarshalYamlE(&credential); err != nil {
+		settings.LoadError = fmt.Errorf("apple-reporting.yml is unreadable or malformed")
+		return settings
+	}
+	settings.IssuerID = strings.TrimSpace(credential.IssuerID)
+	settings.KeyID = strings.TrimSpace(credential.KeyID)
+	settings.PrivateKey = credential.PrivateKey
+
+	appResource, err := server.Vault.SimpleResource("apple.yml")
+	if err != nil {
+		settings.LoadError = fmt.Errorf("apple.yml: %w", err)
+		return settings
+	}
+	var app appleAppVaultYaml
+	if err := appResource.UnmarshalYamlE(&app); err != nil {
+		settings.LoadError = fmt.Errorf("apple.yml is unreadable or malformed")
+		return settings
+	}
+	if app.AppStoreNotifications.AppAppleID != 0 {
+		settings.AppID = fmt.Sprintf("%d", app.AppStoreNotifications.AppAppleID)
+	}
+	return settings
 }
 
 // activeServiceHostsFromServices returns the active host-service placement
