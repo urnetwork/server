@@ -406,6 +406,12 @@ type StEpochSummary struct {
 	TEpochBlocks        uint64 `json:"t_epoch_blocks"`
 	ChainId             uint64 `json:"chain_id"`
 	ContractAddress     string `json:"contract_address"`
+	// release chain settings for direct claims (SDK/web overlay; empty or
+	// zero means unset and the client default wins)
+	SettlementVaultAddress string `json:"settlement_vault_address,omitempty"`
+	NoId                   string `json:"no_id,omitempty"`
+	Netuid                 uint64 `json:"netuid,omitempty"`
+	RpcUrl                 string `json:"rpc_url,omitempty"`
 }
 
 // SetStEpochSummaryCache writes the hot epoch summary to Redis with a ttl.

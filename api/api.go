@@ -185,6 +185,10 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/verify/proofs", handlers.GetVerifyProofs),
 		// subnet control plane (sn/PLAN.md §5, D-13)
 		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
+		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
+		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
+		router.NewRoute("GET", "/sn/head", handlers.SnHead),
+		router.NewRoute("POST", "/sn/head/binding", handlers.SnHeadBinding),
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
@@ -211,6 +215,7 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/account/change-name", handlers.ChangeNetworkName),
 		router.NewRoute("POST", "/account/claim-name", handlers.ClaimNetworkName),
 		router.NewRoute("GET", "/account/points", handlers.GetAccountPoints),
+		router.NewRoute("GET", "/account/epochs", handlers.GetAccountEpochs),
 		router.NewRoute("GET", "/account/balance-codes", handlers.GetNetworkRedeemedBalanceCodes),
 		router.NewRoute("POST", "/referral-code/validate", handlers.ValidateReferralCode),
 		router.NewRoute("GET", "/transfer/stats", handlers.TransferStats),

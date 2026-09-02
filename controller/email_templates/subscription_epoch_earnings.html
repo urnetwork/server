@@ -1,0 +1,49 @@
+{{define "title"}}Your network earned{{end}}
+{{define "preheader"}}Epoch {{.Epoch}}: {{.PointsText}} points, {{.SharePercent}} of the block, {{.RankText}} on the leaderboard.{{end}}
+{{define "eyebrow"}}Epoch {{.Epoch}} earnings{{end}}
+{{define "accent"}}#87fb67{{end}}
+{{define "headline"}}Your network earned{{end}}
+{{define "why"}}You received this because your network earned on URnetwork in epoch {{.Epoch}}.{{end}}
+{{define "content"}}
+<div class="ur-big ur-ink" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:40px; line-height:44px; font-weight:700; letter-spacing:-0.02em; color:#101010; font-variant-numeric:tabular-nums;">{{.PointsText}} points</div>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Earnings for providing on URnetwork in epoch {{.Epoch}}, through {{.EpochEndText}} UTC.</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Points this epoch</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; font-variant-numeric:tabular-nums;">{{.PointsText}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Share of current block</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; font-variant-numeric:tabular-nums;">{{.SharePercent}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Leaderboard rank</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; font-variant-numeric:tabular-nums;">{{.RankText}}</td>
+</tr></table>
+{{if .Top200Text}}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-tile" style="border:1px solid #e1e5e9; border-radius:12px; padding:16px 20px; background-color:#fff9e0;">
+<div class="ur-ink" style="font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:14px; line-height:20px; font-weight:600; letter-spacing:0.04em; color:#101010;">{{.Top200Text}}</div>
+{{if .Top200Bound}}
+<p class="ur-text" style="margin:8px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:14px; line-height:22px; color:#2b3036;">Your network holds a head mining spot on the UR protocol.</p>
+{{else}}
+<p class="ur-text" style="margin:8px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:14px; line-height:22px; color:#2b3036;">Your network qualifies for a Top 200 head mining spot.</p>
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:12px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:12px 24px;"><a class="ur-btn-a" href="https://ur.io/app/account/top200" style="display:inline-block; padding:12px 24px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Claim your head spot</a></td>
+</tr></table>
+{{end}}
+</td></tr></table>
+{{end}}
+{{if .HasWallet}}
+{{if .HasUnclaimed}}
+<p class="ur-text" style="margin:24px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{if .AlphaText}}Unclaimed: <strong class="ur-ink" style="color:#101010; font-variant-numeric:tabular-nums;">{{.AlphaText}}</strong>{{else}}Unclaimed SN25α{{end}} is ready to claim for epoch {{.Epoch}}.</p>
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:16px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="https://ur.io/app/account/claim" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Claim your SN25α</a></td>
+</tr></table>
+{{else}}
+<p class="ur-text" style="margin:24px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Nothing to claim for epoch {{.Epoch}} yet. Keep providing and your next epoch settles as SN25α. <a class="ur-link" href="https://ur.io/app/account/claim" style="color:#0039de; text-decoration:underline;">See your claims</a>.</p>
+{{end}}
+{{else}}
+<p class="ur-text" style="margin:24px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;"><a class="ur-link" href="https://ur.io/app/account/claim" style="color:#0039de; text-decoration:underline;">Connect a Bittensor wallet</a> to settle your points as SN25α.</p>
+{{end}}
+<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">Earnings come from the UR protocol. Learn how it works at <a class="ur-link" href="https://ur.xyz" style="color:#0039de; text-decoration:underline;">ur.xyz</a>.</p>
+<p class="ur-muted" style="margin:12px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">Questions about earlier payouts? Email <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a>.</p>
+{{end}}

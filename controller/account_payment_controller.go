@@ -384,32 +384,8 @@ func advancePayment(
 				return
 			}
 			complete = true
-
-			userAuth, err := model.GetUserAuth(clientSession.Ctx, payment.NetworkId)
-			if err != nil {
-				returnErr = fmt.Errorf("[%s]Payment auth error = %s", payment.PaymentId, err)
-				return
-			}
-
-			awsMessageSender := GetAWSMessageSender()
-			// TODO handler error
-
-			explorerBasePath := getExplorerTxPath(tx.Blockchain)
-
-			networkReferralCode := model.GetNetworkReferralCode(clientSession.Ctx, payment.NetworkId)
-
-			if networkReferralCode != nil {
-				awsMessageSender.SendAccountMessageTemplate(userAuth, &SendPaymentTemplate{
-					PaymentId:          payment.PaymentId,
-					ExplorerBasePath:   *explorerBasePath,
-					TxHash:             tx.TxHash,
-					ReferralCode:       networkReferralCode.ReferralCode,
-					Blockchain:         tx.Blockchain,
-					DestinationAddress: tx.DestinationAddress,
-					AmountUsd:          tx.AmountInUSD,
-					PaymentCreatedAt:   payment.CreateTime,
-				})
-			}
+			// no per-payment email: earnings are reported once per finalized
+			// epoch by the epoch earnings email (controller/epoch_earnings_email.go)
 
 			return
 
@@ -626,21 +602,6 @@ func ConvertFeeToUSDC(ctx context.Context, currencyTicker string, fee float64) (
 	feeUsdc := fee * rate
 
 	return feeUsdc, nil
-}
-
-func getExplorerTxPath(network string) *string {
-	network = strings.ToUpper(network)
-
-	switch network {
-	case "SOL", "SOLANA":
-		explorerPath := "https://explorer.solana.com/tx"
-		return &explorerPath
-	case "MATIC", "POLY", "POLYGON":
-		explorerPath := "https://polygonscan.com/tx"
-		return &explorerPath
-	}
-
-	return nil
 }
 
 func formatBlockchain(network string) (string, error) {

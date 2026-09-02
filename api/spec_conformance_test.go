@@ -165,6 +165,11 @@ func registry() []specEndpoint {
 		{"POST", "/sn/wallet", rt(controller.SnSetWalletArgs{}), rt(controller.SnSetWalletResult{})},
 		{"GET", "/sn/pool/claim", nil, rt(controller.SnPoolClaimResult{})},
 		{"GET", "/sn/epoch", nil, rt(model.StEpochSummary{})},
+		{"GET", "/sn/wallet", nil, rt(controller.SnGetWalletResult{})},
+		{"POST", "/sn/wallet/validate", rt(controller.SnValidateWalletArgs{}), rt(controller.SnValidateWalletResult{})},
+		{"GET", "/sn/head", nil, rt(controller.SnHeadResult{})},
+		{"POST", "/sn/head/binding", rt(controller.SnHeadBindingArgs{}), rt(controller.SnHeadBindingResult{})},
+		{"GET", "/account/epochs", nil, rt(controller.AccountEpochsResult{})},
 	}
 }
 

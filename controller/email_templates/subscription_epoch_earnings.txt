@@ -1,0 +1,29 @@
+{{define "headline"}}YOUR NETWORK EARNED{{end}}
+{{define "why"}}You received this because your network earned on URnetwork in
+epoch {{.Epoch}}.{{end}}
+{{define "content"}}
+{{.PointsText}} points
+
+Earnings for providing on URnetwork in epoch {{.Epoch}}, through
+{{.EpochEndText}} UTC.
+
+Points this epoch: {{.PointsText}}
+Share of current block: {{.SharePercent}}
+Leaderboard rank: {{.RankText}}
+{{if .Top200Text}}
+{{.Top200Text}}
+{{if .Top200Bound}}Your network holds a head mining spot on the UR protocol.{{else}}Your network qualifies for a Top 200 head mining spot.
+Claim your head spot: https://ur.io/app/account/top200{{end}}
+{{end}}
+{{if .HasWallet}}{{if .HasUnclaimed}}{{if .AlphaText}}Unclaimed: {{.AlphaText}}{{else}}Unclaimed SN25α{{end}} is ready to claim for
+epoch {{.Epoch}}.
+
+Claim your SN25α: https://ur.io/app/account/claim{{else}}Nothing to claim for epoch {{.Epoch}} yet. Keep providing and your
+next epoch settles as SN25α: https://ur.io/app/account/claim{{end}}{{else}}Connect a Bittensor wallet to settle your points as SN25α:
+https://ur.io/app/account/claim{{end}}
+
+Earnings come from the UR protocol. Learn how it works at ur.xyz
+(https://ur.xyz).
+
+Questions about earlier payouts? Email support@ur.io.
+{{end}}

@@ -129,6 +129,8 @@ const (
 type StConfig struct {
 	Profile                string
 	Enabled                bool
+	WalletAllowUnsigned    bool
+	PublicRpcUrl           string
 	RpcUrls                []string
 	ChainId                uint64
 	GenesisHash            [32]byte
@@ -165,6 +167,14 @@ type StDepositTier struct {
 // is copied into StConfig without any fallback between namespaces.
 type stVaultFile struct {
 	Profile string `yaml:"profile"`
+	// wallet_allow_unsigned keeps the pre-signature `POST /sn/wallet` path
+	// open for CLIs that set a coldkey without a challenge signature. Off by
+	// default; apps always sign.
+	WalletAllowUnsigned bool `yaml:"wallet_allow_unsigned"`
+	// public_rpc_url is the subtensor EVM JSON-RPC url clients (SDK claims,
+	// web) should use; the gateway rpc_urls are LAN-only. Published through
+	// GET /sn/epoch as rpc_url when set.
+	PublicRpcUrl string `yaml:"public_rpc_url"`
 
 	Enabled                bool            `yaml:"enabled"`
 	RpcUrls                []string        `yaml:"rpc_urls"`
@@ -326,7 +336,7 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	if err != nil {
 		return nil, err
 	}
-	cfg := &StConfig{Profile: profile, Enabled: s.Enabled, RpcUrls: append([]string(nil), rpcUrls...), ChainId: s.ChainId,
+	cfg := &StConfig{Profile: profile, Enabled: s.Enabled, WalletAllowUnsigned: file.WalletAllowUnsigned, PublicRpcUrl: file.PublicRpcUrl, RpcUrls: append([]string(nil), rpcUrls...), ChainId: s.ChainId,
 		DeploymentId: s.DeploymentId, Netuid: s.Netuid, NoId: s.NoId,
 		DepositAlphaRaoPerGib: s.DepositAlphaRaoPerGib, DepositRateNumerator: s.DepositRateNumerator,
 		DepositRateDenominator: s.DepositRateDenominator, DepositEpochCapRao: s.DepositEpochCapRao,
@@ -2774,7 +2784,7 @@ func StFinalizeEpochPoke(ctx context.Context, epoch uint64) (*StPublishOutcome, 
 		return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
 	}
 	if pool.Finalized {
-		model.SetStEpochStatus(ctx, epoch, model.StEpochStatusFinalized)
+		stMarkEpochFinalized(ctx, epoch)
 		outcome := &StPublishOutcome{
 			Status: model.StPublishStatusSkipped,
 			Reason: "epoch already finalized on chain",
@@ -2825,7 +2835,7 @@ func StFinalizeEpochPoke(ctx context.Context, epoch uint64) (*StPublishOutcome, 
 		}
 		outcome := &StPublishOutcome{Status: model.StPublishStatusConfirmed, TxHash: txHash}
 		stResolvePublish(ctx, publishId, outcome)
-		model.SetStEpochStatus(ctx, epoch, model.StEpochStatusFinalized)
+		stMarkEpochFinalized(ctx, epoch)
 		return outcome, nil
 	}
 
@@ -2836,7 +2846,7 @@ func StFinalizeEpochPoke(ctx context.Context, epoch uint64) (*StPublishOutcome, 
 	}
 	if epoch < next {
 		// raced with another finalizer
-		model.SetStEpochStatus(ctx, epoch, model.StEpochStatusFinalized)
+		stMarkEpochFinalized(ctx, epoch)
 		return &StPublishOutcome{
 			Status: model.StPublishStatusSkipped,
 			Reason: "epoch already finalized on chain",
@@ -2865,7 +2875,7 @@ func StFinalizeEpochPoke(ctx context.Context, epoch uint64) (*StPublishOutcome, 
 			Status: model.StPublishStatusConfirmed,
 			TxHash: txHash,
 		})
-		model.SetStEpochStatus(ctx, e, model.StEpochStatusFinalized)
+		stMarkEpochFinalized(ctx, e)
 		glog.Infof("[st]epoch %d finalize confirmed: tx %s\n", e, txHash)
 		lastOutcome = &StPublishOutcome{
 			Status: model.StPublishStatusConfirmed,
@@ -2907,7 +2917,7 @@ func StSyncChainState(ctx context.Context) (*StEpochState, error) {
 	}
 
 	model.UpsertStEpoch(ctx, stEpochRowFromState(state))
-	model.SetStEpochSummaryCache(ctx, &model.StEpochSummary{
+	model.SetStEpochSummaryCache(ctx, snEpochSummaryWithChainSettings(cfg, &model.StEpochSummary{
 		Epoch:               state.Epoch,
 		StartBlock:          state.EpochStartBlock,
 		CommitDeadlineBlock: state.EpochStartBlock + state.TEpochBlocks + state.CommitWindowBlocks,
@@ -2916,7 +2926,7 @@ func StSyncChainState(ctx context.Context) (*StEpochState, error) {
 		TEpochBlocks:        state.TEpochBlocks,
 		ChainId:             cfg.ChainId,
 		ContractAddress:     cfg.ContractAddress.Hex(),
-	}, stEpochSummaryTtl)
+	}), stEpochSummaryTtl)
 	return state, nil
 }
 
@@ -3072,7 +3082,7 @@ func stApplyEventStatuses(ctx context.Context, cfg *StConfig, events []*model.St
 					continue
 				}
 			}
-			model.SetStEpochStatus(ctx, epoch, model.StEpochStatusFinalized)
+			stMarkEpochFinalized(ctx, epoch)
 		}
 	}
 }

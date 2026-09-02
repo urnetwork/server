@@ -1191,15 +1191,17 @@ func sendPayoutEmail(opts docopt.Opts) {
 
 	err := awsMessageSender.SendAccountMessageTemplate(
 		userAuth,
-		&controller.SendPaymentTemplate{
-			PaymentId:          server.NewId(),
-			TxHash:             "0x1234567890",
-			ExplorerBasePath:   "https://explorer.solana.com/tx",
-			ReferralCode:       server.NewId().String(),
-			Blockchain:         "Solana",
-			DestinationAddress: "0x1234567890",
-			AmountUsd:          "5.00",
-			PaymentCreatedAt:   time.Now().UTC(),
+		&controller.EpochEarningsTemplate{
+			Epoch:          42,
+			Points:         1234.5,
+			ShareBps:       71,
+			Rank:           17,
+			Total:          5210,
+			Top200Eligible: true,
+			Top200Rank:     143,
+			HasWallet:      true,
+			UnclaimedRao:   big.NewInt(3_241_000_000),
+			EpochEnd:       time.Now().UTC(),
 		},
 	)
 	if err != nil {

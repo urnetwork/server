@@ -16,8 +16,13 @@ type Earner struct {
 }
 
 type LeaderboardResult struct {
-	Earners []Earner         `json:"earners"`
-	Error   *TopEarnersError `json:"error,omitempty"`
+	Earners []Earner `json:"earners"`
+	// Rank is the caller network's leaderboard position (1 = top earner), 0
+	// when the network has no ranked payouts; Total is the number of ranked
+	// networks. Both come from the same ranking the leaderboard is cut from.
+	Rank  int              `json:"rank"`
+	Total int              `json:"total"`
+	Error *TopEarnersError `json:"error,omitempty"`
 }
 
 type TopEarnersError struct {

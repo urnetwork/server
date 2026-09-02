@@ -3,7 +3,6 @@ package controller
 import (
 	htmltemplate "html/template"
 	texttemplate "text/template"
-	"time"
 
 	// "net/url"
 	"embed"
@@ -176,31 +175,6 @@ type SubscriptionEndedTemplate struct {
 
 func (self *SubscriptionEndedTemplate) Name() string {
 	return "subscription_ended"
-}
-
-type SendPaymentTemplate struct {
-	PaymentId          server.Id
-	TxHash             string
-	ExplorerBasePath   string
-	ReferralCode       string
-	Blockchain         string
-	DestinationAddress string
-	AmountUsd          string
-	PaymentCreatedAt   time.Time
-	BaseTemplate
-}
-
-func (self *SendPaymentTemplate) Name() string {
-	return "subscription_send_payment"
-}
-
-func (self *SendPaymentTemplate) CreatedAt() string {
-	return self.PaymentCreatedAt.Format("1/2 15:04")
-}
-
-func (self *SendPaymentTemplate) Funcs(funcs texttemplate.FuncMap) {
-	self.BaseTemplate.Funcs(funcs)
-	funcs["CreatedAt"] = self.CreatedAt
 }
 
 type MissingWalletTemplate struct {

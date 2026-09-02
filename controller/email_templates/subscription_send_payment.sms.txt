@@ -1,1 +1,0 @@
-URnetwork: you got paid {{.AmountUsd}} USDC. Details at https://ur.io/app/account/payouts?id={{.PaymentId}}

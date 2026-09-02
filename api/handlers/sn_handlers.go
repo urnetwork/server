@@ -251,3 +251,48 @@ func cleanArtifactSegment(v string) string {
 	}
 	return v
 }
+
+// SnGetWallet backs `GET /sn/wallet`: every coldkey attached inside the
+// caller's network (network-level and per provider client) and the
+// session's effective wallet.
+func SnGetWallet(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.SnGetWallet, w, r)
+}
+
+// SnValidateWallet backs `POST /sn/wallet/validate`: syntax, chain existence
+// and ban-list checks for an address the user is about to attach. No auth —
+// the connect flow runs it before the account has a wallet, and the answer
+// carries nothing per-account.
+func SnValidateWallet(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.SnValidateWallet, w, r)
+}
+
+// SnHead backs `GET /sn/head`: the caller network's Top 200 head-tier
+// standing (server estimate + binding status).
+func SnHead(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.SnHead, w, r)
+}
+
+// SnHeadBinding backs `POST /sn/head/binding`: stores a device's fleet
+// binding consent and returns the calldata the operator submits themselves.
+func SnHeadBinding(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SnHeadBinding, w, r)
+}
+
+// GetAccountEpochs backs `GET /account/epochs?limit=N`: the caller network's
+// finalized epochs, newest first, with points and pool share.
+func GetAccountEpochs(w http.ResponseWriter, r *http.Request) {
+	args := &controller.AccountEpochsArgs{}
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil || limit < 0 {
+			http.Error(w, "Bad limit.", http.StatusBadRequest)
+			return
+		}
+		args.Limit = limit
+	}
+	impl := func(clientSession *session.ClientSession) (*controller.AccountEpochsResult, error) {
+		return controller.AccountEpochs(args, clientSession)
+	}
+	router.WrapRequireAuth(impl, w, r)
+}

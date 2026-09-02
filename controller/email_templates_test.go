@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"math/big"
 	"regexp"
 	"strings"
 	"testing"
@@ -15,9 +16,9 @@ import (
 // domain, every link on ur.io, a plain-text part without markup, escaped sample
 // values, and an SMS body short enough to be one or two messages.
 func TestEmailTemplatesRender(t *testing.T) {
-	// the one link that legitimately leaves ur.io is the payout's on-chain
-	// transaction, whose base comes from the payment data (ExplorerBasePath)
-	const explorerBasePath = "https://explorer.solana.com/tx"
+	// the one link that legitimately leaves ur.io is the UR protocol site the
+	// epoch earnings email points at
+	const protocolSite = "https://ur.xyz"
 	samples := []struct {
 		template Template
 		// sms is whether the template carries its own short body for phone accounts
@@ -27,14 +28,25 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{&AuthPasswordResetTemplate{ResetCode: strings.Repeat("ab", 64)}, true},
 		{&AuthPasswordSetTemplate{}, true},
 		{&NetworkWelcomeTemplate{}, true},
-		{&SendPaymentTemplate{
-			PaymentId:          server.NewId(),
-			TxHash:             "5UyQnJf4h2Lw9xkT7ZbA3vRcPmN6sDqE1yG8tHrK2oXbVjW4eLpSa9dCz3nMfQ7u",
-			ExplorerBasePath:   explorerBasePath,
-			Blockchain:         "Solana",
-			DestinationAddress: "7Gx4kQ9pT2nVb8sLmR3wYcJ6dHfA5eN1zK2uP9tXq4Wb",
-			AmountUsd:          "5.00",
-			PaymentCreatedAt:   server.NowUtc(),
+		{&EpochEarningsTemplate{
+			Epoch:          42,
+			Points:         1234.5,
+			ShareBps:       71,
+			Rank:           17,
+			Total:          5210,
+			Top200Eligible: true,
+			Top200Rank:     143,
+			HasWallet:      true,
+			UnclaimedRao:   big.NewInt(3_241_000_000),
+			EpochEnd:       server.NowUtc(),
+		}, true},
+		{&EpochEarningsTemplate{
+			Epoch:       43,
+			Points:      2,
+			Top200Bound: true,
+			Top200Uid:   17,
+			Top200Rank:  9,
+			EpochEnd:    server.NowUtc(),
 		}, true},
 		{&MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "5.00"}, true},
 		{&SubscriptionTransferBalanceCodeTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 10 * model.Tib}, false},
@@ -59,7 +71,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 		if href == "https://ur.io" || strings.HasPrefix(href, "https://ur.io/") {
 			return true
 		}
-		if strings.HasPrefix(href, explorerBasePath+"/") {
+		if href == protocolSite || strings.HasPrefix(href, protocolSite+"/") {
 			return true
 		}
 		return strings.HasPrefix(href, "mailto:") && strings.HasSuffix(href, "@ur.io")
@@ -134,19 +146,50 @@ func TestEmailTemplatesEscapeSampleValues(t *testing.T) {
 }
 
 func TestEmailTemplatesDeepLinks(t *testing.T) {
-	paymentId := server.NewId()
-	_, bodyHtml, bodyText, err := RenderEmailTemplate(&SendPaymentTemplate{
-		PaymentId: paymentId, TxHash: "tx", ExplorerBasePath: "https://explorer.solana.com/tx",
-		Blockchain: "Solana", DestinationAddress: "addr", AmountUsd: "5.00", PaymentCreatedAt: server.NowUtc(),
+	// with a wallet and a leaf: the claim route; eligible: the top200 route
+	_, bodyHtml, bodyText, err := RenderEmailTemplate(&EpochEarningsTemplate{
+		Epoch: 42, Points: 12.5, ShareBps: 71, Rank: 3, Total: 100,
+		Top200Eligible: true, Top200Rank: 5, HasWallet: true,
+		UnclaimedRao: big.NewInt(3_241_000_000), EpochEnd: server.NowUtc(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// PayoutDetail on ur.io reads ?id= and matches it against payment_id in
-	// /account/payments, which prints server.Id the same way
-	payoutLink := "https://ur.io/app/account/payouts?id=" + paymentId.String()
-	if !strings.Contains(bodyHtml, `href="`+payoutLink+`"`) || !strings.Contains(bodyText, payoutLink) {
-		t.Errorf("payout deep link missing: want %s", payoutLink)
+	for _, want := range []string{
+		"https://ur.io/app/account/claim",
+		"https://ur.io/app/account/top200",
+		"https://ur.xyz",
+		"3.2410 SN25α",
+		"#3 of 100",
+		"0.71%",
+		"Top 200 · you qualify",
+	} {
+		if !strings.Contains(bodyHtml, want) || !strings.Contains(bodyText, want) {
+			t.Errorf("epoch earnings email missing %q", want)
+		}
+	}
+	// no wallet: the connect prompt links the claim route, no claim button
+	_, bodyHtml, bodyText, err = RenderEmailTemplate(&EpochEarningsTemplate{
+		Epoch: 42, Points: 12.5, Rank: 3, Total: 100, EpochEnd: server.NowUtc(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(bodyText, "Connect a Bittensor wallet") || strings.Contains(bodyText, "Claim your SN25α") {
+		t.Errorf("no-wallet epoch earnings email should prompt for a wallet, not a claim")
+	}
+	if strings.Contains(bodyHtml, "Top 200") {
+		t.Errorf("a network outside the cutoff must not get the Top 200 badge")
+	}
+	// bound: the uid line, no claim-your-spot button
+	_, bodyHtml, _, err = RenderEmailTemplate(&EpochEarningsTemplate{
+		Epoch: 42, Points: 1, Top200Bound: true, Top200Uid: 17, Top200Rank: 9, EpochEnd: server.NowUtc(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(bodyHtml, "Top 200 · UID 17 · rank #9") || strings.Contains(bodyHtml, "Claim your head spot") {
+		t.Errorf("bound network should show its uid line only")
 	}
 
 	_, bodyHtml, bodyText, err = RenderEmailTemplate(&SubscriptionTransferBalanceCodeTemplate{

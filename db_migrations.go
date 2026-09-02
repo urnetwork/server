@@ -6751,4 +6751,39 @@ var migrations = []any{
 		ON provider_egress_health (client_id)
 		WHERE tls_authentication_failure = true
 	`),
+
+	// Earnings phase: a device's stored consent for one fleet-binding
+	// generation (WHITEPAPER §11.4). The operator fetches the assembled
+	// calldata and submits it from their own key; the server sends nothing on
+	// chain. Appended after every published migration.
+	newSqlMigration(`
+		CREATE TABLE st_fleet_binding_signature (
+			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			generation bigint NOT NULL,
+			hotkey bytea NOT NULL,
+			digest bytea NOT NULL,
+			binding_json text NOT NULL,
+			client_signature bytea NOT NULL,
+			hotkey_signature bytea NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (client_id, generation)
+		);
+
+		CREATE INDEX st_fleet_binding_signature_network
+		ON st_fleet_binding_signature (network_id, create_time DESC)
+	`),
+
+	// Once-per-epoch earnings notification claim: the first finalize path to
+	// insert the epoch row sends the email; every other path and worker sees
+	// the conflict and skips.
+	newSqlMigration(`
+		CREATE TABLE st_epoch_notification (
+			epoch bigint NOT NULL,
+			notify_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (epoch)
+		)
+	`),
 }

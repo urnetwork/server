@@ -8678,6 +8678,21 @@ writer or abandon the direct path: observe the scheduled retry, preserve the
 partial, and escalate the shared router/network boundary if progress cannot be
 sustained.
 
+The scheduled recovery then exercised the intended policy without operator
+intervention. At `2026-09-02T21:03:18Z`, exactly 30 minutes after the failed
+unit entered backoff, systemd started one new main process (PID `292560`) and
+one PostgreSQL rsync/SSH chain to the direct `65.49.70.73:8022` endpoint; the
+restart counter was one and no duplicate writer existed. From
+`21:08:58Z` to `21:09:13Z`, that socket's `bytes_received` rose from
+21,686,350 to 203,844,282, about 11.6 MiB/s (97 Mbit/s), while the connection
+remained established. This clears the failed-attempt class and proves both the
+bounded retry and partial-resume route can make progress. It does not close
+archive freshness or the unresolved shared-forward reset cause. Keep the same
+PID under observation through PostgreSQL validation/rotation and the serial
+transition to direct Redis port 8023; another reset must retain the partial and
+reopen the router, conntrack, or upstream-network discriminator rather than
+falling back to the VPN.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the

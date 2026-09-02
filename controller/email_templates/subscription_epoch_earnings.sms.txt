@@ -1,0 +1,1 @@
+URnetwork: your network earned {{.PointsText}} points in epoch {{.Epoch}} ({{.RankText}} on the leaderboard). Details at https://ur.io/app/account

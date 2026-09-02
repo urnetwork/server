@@ -18,12 +18,14 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/urfoundation/sn/merkle"
 	"github.com/urfoundation/sn/ss58"
 
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -37,6 +39,14 @@ type SnSetWalletArgs struct {
 	// the caller's network. Release 1.0 settlement uses this provider-level
 	// history, while the network wallet remains available for old epochs.
 	ClientId *server.Id `json:"client_id,omitempty"`
+	// Signature is the coldkey's sr25519 signature (hex) over Message, and
+	// Message is the exact single-use challenge text issued by
+	// `POST /auth/wallet-challenge` for blockchain TAO (the ur.io wallet
+	// bridge signs it with purpose "connect"). Both are required unless the
+	// deployment keeps the CLI compatibility gate open (st.yml
+	// `wallet_allow_unsigned`).
+	Signature string `json:"signature,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 type SnSetWalletError struct {
@@ -56,14 +66,44 @@ func SnSetWallet(
 	setWallet *SnSetWalletArgs,
 	clientSession *session.ClientSession,
 ) (*SnSetWalletResult, error) {
-	coldkeyPubkey, err := ss58.DecodeWithPrefix(setWallet.ColdkeySs58, ss58.BittensorPrefix)
-	if err != nil {
-		return &SnSetWalletResult{
-			Error: &SnSetWalletError{
-				Message: fmt.Sprintf("Invalid ss58 coldkey: %s", err),
-			},
-		}, nil
+	fail := func(message string) (*SnSetWalletResult, error) {
+		return &SnSetWalletResult{Error: &SnSetWalletError{Message: message}}, nil
 	}
+	coldkeySs58 := strings.TrimSpace(setWallet.ColdkeySs58)
+	coldkeyPubkey, err := ss58.DecodeWithPrefix(coldkeySs58, ss58.BittensorPrefix)
+	if err != nil {
+		return fail(fmt.Sprintf("Invalid ss58 coldkey: %s", err))
+	}
+	if SnWalletBanned(coldkeyPubkey) {
+		return fail("This wallet address cannot be used.")
+	}
+	// proof of key possession: the coldkey signs the single-use login
+	// challenge, so a pasted address alone can never redirect a payout and
+	// a captured signature cannot be replayed
+	if strings.TrimSpace(setWallet.Signature) == "" || setWallet.Message == "" {
+		if !snUnsignedWalletSetAllowed() {
+			return fail("A coldkey signature over the wallet challenge is required.")
+		}
+		glog.Infof("[sn]unsigned wallet set for network %s (wallet_allow_unsigned)\n", clientSession.ByJwt.NetworkId)
+	} else {
+		use, useErr := model.UseWalletAuthChallenge(&model.UseWalletAuthChallengeArgs{
+			Blockchain: model.TAO.String(),
+			PublicKey:  coldkeySs58,
+			Message:    setWallet.Message,
+			Signature:  setWallet.Signature,
+		}, clientSession.Ctx)
+		if useErr != nil {
+			return nil, useErr
+		}
+		if !use.Valid {
+			message := "Invalid wallet signature."
+			if use.Error != nil {
+				message = use.Error.Message
+			}
+			return fail(message)
+		}
+	}
+	setWallet.ColdkeySs58 = coldkeySs58
 
 	clientId := setWallet.ClientId
 	if clientId == nil {
@@ -341,13 +381,13 @@ func SnEpoch(clientSession *session.ClientSession) (*model.StEpochSummary, error
 	}
 
 	if stEpoch := model.GetLatestStEpoch(ctx); stEpoch != nil {
-		return &model.StEpochSummary{
+		return snEpochSummaryWithChainSettings(stConfig(), &model.StEpochSummary{
 			Epoch:               stEpoch.Epoch,
 			StartBlock:          stEpoch.StartBlock,
 			CommitDeadlineBlock: stEpoch.CommitDeadlineBlock,
 			TrailsDeadlineBlock: stEpoch.TrailsDeadlineBlock,
 			FinalizeBlock:       stEpoch.FinalizeBlock,
-		}, nil
+		}), nil
 	}
 
 	return nil, fmt.Errorf("%d Subnet epoch state is not synced yet.", http.StatusServiceUnavailable)
