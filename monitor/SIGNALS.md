@@ -740,11 +740,14 @@ WHERE backend_type = 'client backend';
   floor when a nonzero idle timeout is active.
 - ROOT-CAUSE ORDER: first read the selected settings from every live shard and
   take one root socket census. If the timeout is zero, apply the isolated
-  `xops/main/ansible/run-pgbouncer.sh` change only after protected database
-  maintenance is empty and with explicit operational authorization. It sets
-  the documented 600-second PgBouncer default, reloads only changed pooler
-  units, and fails if any PID changes across reload. If 600 is already
-  effective but the reserve remains consumed, use `SHOW POOLS`/`SHOW STATS`
+  Xops commit `31ae1e7` only after protected database maintenance is empty and
+  with explicit operational authorization. The supported consolidated runner
+  is `xops/main/ansible/run-dbs.sh --pgbouncer-only`; there is no separate
+  `run-pgbouncer.sh`. It sets the documented 600-second PgBouncer default,
+  reloads only changed pooler units, and fails if any PID changes across
+  reload. If 600 is already effective and the cohort is younger than 600
+  seconds, make no change and observe one complete timeout interval. If the
+  reserve remains consumed after that interval, use `SHOW POOLS`/`SHOW STATS`
   and wait metrics to decide whether the per-shard pool size is justified.
   Do not restart PostgreSQL/PgBouncer, terminate sessions, or raise
   `max_connections` to silence this signal.
@@ -772,6 +775,20 @@ toward the 256-connection warm floor. This is a real post-incident reserve
 defect, but it did not initiate the earlier capacity burst: §1.3a proved that
 legacy reindex WAL/storage stalls and deadline-driven replacement overlap did.
 Both root fixes are required at their own boundaries.
+
+The 2026-09-02 edge-3 scheduled reboot supplied the post-fix timeout control.
+Immediately before the reboot PostgreSQL had 285 idle loopback backends. When
+all service blocks returned, the 32 PgBouncer shards refilled together and the
+count reached 636 at `01:26:48Z`; the oldest member was only 25 seconds idle and
+none had crossed 600 seconds. The isolated
+`run-dbs.sh --pgbouncer-only --check` then proved all 32 live files and process
+identities current with `changed=0`. At `01:37:22Z`, after one configured
+timeout interval, idle loopback backends had fallen to 481 (47.1% of the
+ordinary-role ceiling) without any reload, restart, or session termination.
+That clears the reserve threshold and validates `server_idle_timeout=600` as
+the active drain mechanism. Continue the ten-minute headroom control and let
+the cohort contract; do not redeploy merely because the expected post-reboot
+warmup briefly crossed the warning band.
 
 ### 1.4 redis cluster state + per-node liveness
 Probe: `redis-cluster`

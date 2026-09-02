@@ -39,8 +39,10 @@ func TestPoolRetentionSignalSyntheticRetainedFleet(t *testing.T) {
 		"server_idle_timeout=0",
 		"608 total",
 		"Zero disables idle draining",
-		"run-pgbouncer.sh",
-		"requiring their PIDs to remain unchanged",
+		"Xops descendant of 31ae1e7",
+		"run-dbs.sh --pgbouncer-only",
+		"there is no separate run-pgbouncer.sh",
+		"requires their PIDs to remain unchanged",
 		"add database hardware",
 		"Do not restart PostgreSQL/PgBouncer",
 		"server_idle_timeout=600",
@@ -64,10 +66,11 @@ func TestPoolRetentionSignalSyntheticYoungCohortPreservesDiscriminator(t *testin
 	for _, want := range []string{
 		"No loopback idle backend in this snapshot is yet continuously idle for 600 seconds",
 		"young post-peak or recurring-demand cohort",
+		"observe one complete timeout interval",
 		"not an assumption",
 	} {
-		if !strings.Contains(alert.Context, want) {
-			t.Fatalf("young-cohort context missing %q: %s", want, alert.Context)
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("young-cohort alert missing %q: %s", want, alert.Markdown())
 		}
 	}
 }

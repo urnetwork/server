@@ -132,6 +132,7 @@ func poolRetentionContext(state poolRetentionState) string {
 		aged,
 		"Loopback is an attribution candidate, not an assumption: confirm owners with one privileged socket census or PgBouncer SHOW POOLS before changing the envelope.",
 		"The 2026-09-01 production control found 32 live PgBouncer shards, every live file set to default_pool_size=20, min_pool_size=8, server_lifetime=3600, and server_idle_timeout=0, with 16-20 established PostgreSQL backends per shard and 608 total. Zero disables idle draining; 32*20 permits 640 retained server connections while the warm floor is 32*8=256.",
+		"Xops commit 31ae1e7 sets server_idle_timeout=600 through the consolidated run-dbs.sh --pgbouncer-only path; there is no separate run-pgbouncer.sh. A young post-reboot refill must first receive one complete idle-timeout interval before another deployment or pool-size change is justified.",
 	}, " ")
 }
 
@@ -172,7 +173,7 @@ func (poolRetentionProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 			state.totalClients, state.normalCeiling,
 		),
 		context:  poolRetentionContext(state),
-		action:   "First read the selected pool settings from every live shard and take one privileged socket census; do not infer PgBouncer ownership from loopback alone. If server_idle_timeout is zero, after protected database maintenance is empty and with explicit operational authorization, apply the isolated xops/main/ansible/run-pgbouncer.sh change that sets 600 seconds and reloads only changed PgBouncer units while requiring their PIDs to remain unchanged. If 600 is already effective but the reserve remains consumed, use SHOW POOLS/STATS and wait metrics to bound default_pool_size, or add database hardware as part of an explicit connection-and-memory budget. Do not restart PostgreSQL/PgBouncer, terminate sessions, or raise max_connections to silence this alert.",
+		action:   "First read the selected pool settings from every live shard and take one privileged socket census; do not infer PgBouncer ownership from loopback alone. If server_idle_timeout is zero, after protected database maintenance is empty and with explicit operational authorization, deploy a clean Xops descendant of 31ae1e7 with xops/main/ansible/run-dbs.sh --pgbouncer-only; it reloads only changed PgBouncer units and requires their PIDs to remain unchanged. If 600 is already effective and no idle backend is yet 600 seconds old, make no change and observe one complete timeout interval. If the reserve remains consumed after that interval, use SHOW POOLS/STATS and wait metrics to bound default_pool_size, or add database hardware as part of an explicit connection-and-memory budget. Do not restart PostgreSQL/PgBouncer, terminate sessions, or raise max_connections to silence this alert.",
 		verify:   "All 32 live shard files report server_idle_timeout=600; the isolated deployment proves every PgBouncer PID is unchanged across reload; after more than 600 seconds outside a demand peak, excess pools contract toward the 256-connection warm floor, ordinary-role headroom stays above 25% for ten minutes, and neither query_wait_timeout nor rejected server login recurs.",
 		playbook: "SIGNALS.md §1.3b and §1.3a",
 	}}, nil
