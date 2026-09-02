@@ -129,7 +129,7 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 		if err != nil {
 			return nil, providerDataError("google play crash issue", err)
 		}
-		if parsed.at.Before(issueStart) || parsed.at.After(issueEnd) {
+		if parsed.at.Before(issueStart) || !parsed.at.Before(issueEnd) {
 			return nil, providerDataError("google play crash issue", fmt.Errorf("report hour is outside the requested interval"))
 		}
 		if _, exists := seenIssueGroups[parsed.key]; exists {
@@ -140,13 +140,20 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 			LastReportTime: parsed.at,
 			ReportCount:    parsed.count,
 			Fingerprint:    playIssueFingerprint(issue),
+			WindowEnd:      issueEnd,
 		}
 		previous, exists := state.Groups[parsed.key]
 		next.Groups[parsed.key] = cursor
 		advanced := !exists || parsed.at.After(previous.LastReportTime) ||
 			(parsed.at.Equal(previous.LastReportTime) && parsed.count > previous.ReportCount)
-		corrected := exists && !advanced &&
-			(!parsed.at.Equal(previous.LastReportTime) || parsed.count != previous.ReportCount || cursor.Fingerprint != previous.Fingerprint)
+		// Counts and even the latest included report hour can fall naturally
+		// when the next whole-hour query boundary ages data out of this moving
+		// window. A backward replacement is a correction only when it revises
+		// the exact same query window; root-cause metadata changes remain visible
+		// across windows because they cannot be explained by ordinary aging.
+		sameWindow := !previous.WindowEnd.IsZero() && issueEnd.Equal(previous.WindowEnd)
+		corrected := exists && !advanced && (cursor.Fingerprint != previous.Fingerprint ||
+			(sameWindow && (!parsed.at.Equal(previous.LastReportTime) || parsed.count != previous.ReportCount)))
 		if advanced || corrected {
 			advancing = append(advancing, advancingIssue{
 				issue: issue, key: parsed.key, count: parsed.count, users: parsed.users, at: parsed.at, correction: corrected,
@@ -250,12 +257,21 @@ type playCrashCursor struct {
 	LastReportTime time.Time `json:"last_report_time"`
 	ReportCount    int64     `json:"report_count"`
 	Fingerprint    string    `json:"fingerprint"`
+	// WindowEnd distinguishes a provider correction from ordinary aging of
+	// the moving 48-hour query. It is optional for compatibility with cursors
+	// written before the monitor recorded the exact search boundary.
+	WindowEnd time.Time `json:"window_end,omitempty"`
 }
 
 func validatePlayCrashState(state playCrashState) error {
 	for key, cursor := range state.Groups {
 		if strings.TrimSpace(key) == "" || cursor.LastReportTime.IsZero() || cursor.ReportCount < 0 {
 			return fmt.Errorf("load play-crashes cursor data: invalid issue watermark")
+		}
+		if !cursor.WindowEnd.IsZero() &&
+			(cursor.WindowEnd.Minute() != 0 || cursor.WindowEnd.Second() != 0 || cursor.WindowEnd.Nanosecond() != 0 ||
+				!cursor.LastReportTime.Before(cursor.WindowEnd)) {
+			return fmt.Errorf("load play-crashes cursor data: invalid issue window")
 		}
 		if cursor.Fingerprint != "" {
 			decoded, err := hex.DecodeString(cursor.Fingerprint)

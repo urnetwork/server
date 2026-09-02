@@ -11102,9 +11102,12 @@ latest version code and OS API, 48-hour report/user counts, current aggregate
 metric context, and at most one provider-sanitized sample report. Evidence is
 bounded again locally. The per-run sample-download cap is 50 advancing groups;
 `play-crash-overflow` makes any excess explicit while cursors still prevent a
-later duplicate flood. A lower replacement count, moved report hour, or changed
-root-cause fingerprint without a forward occurrence is the one-shot class
-`play-crash-correction`, not a fabricated new crash.
+later duplicate flood. A lower replacement count or moved report hour for the
+exact same whole-hour query window, or a changed root-cause fingerprint without
+a forward occurrence, is the one-shot class `play-crash-correction`, not a
+fabricated new crash. The cursor also records the query boundary: a count or
+last-report hour that falls only after the moving 48-hour window advances is
+ordinary aging, not a provider correction, and updates quietly.
 
 The aggregate decimal rates are retained as provider values and context; do
 not invent a percentage scale or page threshold that the response itself does

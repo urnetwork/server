@@ -168,6 +168,7 @@ func TestPlayCrashesPaginatesRetriesDeduplicatesAndRedacts(t *testing.T) {
 		return client, nil
 	})
 	settings := playCrashTestSettings(now, t.TempDir())
+	settings.Now = func() time.Time { return now }
 
 	alerts, err := signal.Run(context.Background(), settings)
 	if err != nil {
@@ -221,6 +222,21 @@ func TestPlayCrashesPaginatesRetriesDeduplicatesAndRedacts(t *testing.T) {
 	replacement := requireAlertClass(t, alerts, "play-crash-correction")
 	if !strings.Contains(replacement.Observed, "reports_in_48h=2") || sampleCalls != 3 {
 		t.Fatalf("provider replacement correction was not observed once: alert=%+v samples=%d", replacement, sampleCalls)
+	}
+
+	// Moving the query into the next whole-hour window can legitimately age
+	// older occurrences out while the newest report hour remains unchanged.
+	// That decline updates the cursor quietly instead of fabricating a Google
+	// correction on every hourly boundary.
+	now = time.Date(2026, 9, 2, 13, 5, 0, 0, time.UTC)
+	issueStart, issueEnd = playCrashInterval(now)
+	issueCount = 1
+	alerts, err = signal.Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 || sampleCalls != 3 {
+		t.Fatalf("ordinary rolling-window aging emitted an alert: alerts=%+v samples=%d", alerts, sampleCalls)
 	}
 }
 
