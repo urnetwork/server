@@ -23,6 +23,12 @@ and scorer-input copies when the original evidence manifest binds both. The
 small `lineage` directory also brings the terminal audit records that previously
 lived only on the finalization-evidence branch into this self-contained package.
 
+This archive has its own minimal [`go.mod`](go.mod) boundary. Some preserved
+measurement inputs are Go test source files that were applied to the live
+package during calibration; the boundary prevents repository-wide Go commands
+from treating those immutable inputs as a standalone package. It does not
+change any file under `v1`, and the module file is covered by the manifest.
+
 [`final-baseline.html`](final-baseline.html) is the human-readable visual report
 for this evidence. It is covered by the directory manifest alongside this
 README, the index, verifier, and immutable `v1` data.
