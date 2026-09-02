@@ -210,11 +210,12 @@ var logClasses = []logClass{
 	},
 	{name: "grafana-plugin-unregistered", re: regexp.MustCompile(`plugin\.notRegistered|plugin not registered`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 11.15",
-		meaning:   "Grafana accepted a provisioned datasource but cannot load its native datasource plugin; dashboards, Logs Drilldown, and every rule using that datasource fail even while Grafana and the Loki/Mimir storage plane stay green",
-		mechanism: "Grafana 13 packages the formerly core Prometheus and Loki datasource implementations as standalone native plugins. Provisioned warp-mimir and warp-loki rows can still exist while an image missing prometheus or loki returns plugin.notRegistered for every affected query. The Logs Drilldown app is a frontend and does not register datasource type loki.",
-		context:   "A direct Mimir or Loki query, Grafana /api/health, or the datasource database row cannot exercise plugin loading. Correlate the sample's exact Grafana generation and image: a newer generation that independently fails provisioning must not be mistaken for evidence that the older serving generation has both plugins.",
-		action:    "Publish a corrected Grafana image with the pinned Prometheus and Loki plugins and catalog SHA-256 for every supported architecture, together with any independently required provisioning fix. Run Warp's datasource-plugin packaging, Logs Drilldown provisioning, and provisioned-alert interval tests before release. Do not recreate either datasource, install plugins from the network at startup, silence the query errors, or restart the same image.",
-		verify:    "Query vector(1) through warp-mimir and a bounded count_over_time query through warp-loki via Grafana /api/ds/query on every active exact-edge generation, confirm Logs Drilldown selects var-ds=warp-loki, observe a successful provisioned-rule evaluation, and require zero new grafana-plugin-unregistered lines after log-ingestion delay.",
+		sample:    grafanaPluginUnregisteredLogSample,
+		meaning:   "one Grafana request asked this process to resolve a plugin type that was not registered; this is a request-level failure until exact datasource controls distinguish a missing native plugin from a stale or unsupported request payload",
+		mechanism: "Grafana returns plugin.notRegistered whenever the request names a plugin type absent from that process's registry. Grafana 13 packages the formerly core Prometheus and Loki datasource implementations as standalone native plugins, so an image omission is one cause; a stale browser/dashboard payload or another unsupported request plugin type can produce the same generic line while warp-mimir and warp-loki controls both succeed. The Logs Drilldown app is a frontend and does not register datasource type loki.",
+		context:   "A direct Mimir or Loki query, Grafana /api/health, or the datasource database row cannot exercise plugin loading. Correlate the bounded referer and request path with the exact Grafana generation, then run both authenticated /api/ds/query controls on that same generation. The dedicated grafana-datasources probe owns the native-plugin packaging diagnosis.",
+		action:    "If vector(1) through warp-mimir or bounded count_over_time through warp-loki fails on the same generation, publish a corrected image with the pinned native plugin and catalog SHA-256 and run Warp's packaging and provisioning tests. If both controls succeed and both plugin processes remain present, inspect the retained referer and request payload for a stale dashboard/browser state or another unsupported plugin type and correct that caller. Do not recreate a healthy datasource, install plugins from the network at startup, silence the query error, or restart an unchanged image.",
+		verify:    "Query vector(1) through warp-mimir and a bounded count_over_time query through warp-loki via Grafana /api/ds/query on every active exact-edge generation, confirm the request's dashboard or client now names a registered type and Logs Drilldown selects var-ds=warp-loki, observe a successful provisioned-rule evaluation, and require zero new grafana-plugin-unregistered lines after log-ingestion delay.",
 	},
 	{name: "source-attribution", re: regexp.MustCompile(`X-UR-Forwarded-For .*was not one ip:port value|X-UR-Forwarded-For from untrusted peer`),
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md 8.8",
@@ -552,6 +553,36 @@ func httpHijackWriteLogSample(line string) string {
 		return truncateLine(line)
 	}
 	return truncateLinePreservingSuffix(line, line[markerIndex:])
+}
+
+var (
+	grafanaPluginRequestRe = regexp.MustCompile(`\bmethod=[^[:space:]]+[[:space:]]+path=[^[:space:]]+[[:space:]]+status=[0-9]+`)
+	grafanaPluginRefererRe = regexp.MustCompile(`\breferer=(?:"[^"]*"|[^[:space:]]+)`)
+	grafanaPluginMarkerRe  = regexp.MustCompile(`errorMessageID=plugin\.notRegistered|\[plugin\.notRegistered\]|plugin\.notRegistered|plugin not registered`)
+)
+
+// grafanaPluginUnregisteredLogSample retains the request discriminator rather
+// than only the long Warp/Grafana identity prefix. A generic
+// plugin.notRegistered line is not enough to name the missing plugin: the
+// request path and referer tell an operator which caller must be compared with
+// the dedicated warp-mimir and warp-loki controls.
+func grafanaPluginUnregisteredLogSample(line string) string {
+	marker := grafanaPluginMarkerRe.FindString(line)
+	if marker == "" {
+		marker = "plugin_marker=absent"
+	}
+	parts := make([]string, 0, 3)
+	if request := grafanaPluginRequestRe.FindString(line); request != "" {
+		parts = append(parts, request)
+	}
+	if referer := grafanaPluginRefererRe.FindString(line); referer != "" {
+		parts = append(parts, referer)
+	}
+	parts = append(parts, marker)
+	if len(parts) == 1 {
+		return truncateLinePreservingSuffix(line, marker)
+	}
+	return truncateLinePreservingSuffix(strings.Join(parts, " "), marker)
 }
 
 var mimirBucketIndexLagSampleRe = regexp.MustCompile(`caller=bucket\.go:[0-9]+\b.*?\bours=[^[:space:]]+[[:space:]]+requested=[^[:space:]]+[[:space:]]+diff=-[0-9]+[[:space:]]+msg="bucket index version \(updated_at\) is older than requested"`)

@@ -676,8 +676,8 @@ func TestLogErrorsSignalExplainsLongLivedNetEscrowMirror(t *testing.T) {
 	}
 }
 
-func TestLogErrorsSignalExplainsGrafanaDatasourcePluginFailure(t *testing.T) {
-	line := `logger=ngalert.scheduler rule_uid=redis-node-down error="the result-set has errors that can be retried: [plugin.notRegistered] plugin not registered"`
+func TestLogErrorsSignalDiscriminatesGrafanaPluginRequestFailure(t *testing.T) {
+	line := `logger=context userId=1 orgId=1 uname=admin padding=` + strings.Repeat("x", 240) + ` method=POST path=/api/ds/query status=404 remote_addr=192.0.2.1 referer="https://grafana.example/d/urnetwork-connect/urnetwork-connect?refresh=30s" handler=/api/ds/query status_source=server errorReason=NotFound errorMessageID=plugin.notRegistered error="plugin not registered"`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-grafana", nil
@@ -690,17 +690,21 @@ func TestLogErrorsSignalExplainsGrafanaDatasourcePluginFailure(t *testing.T) {
 	}
 	markdown := requireAlertClass(t, alerts, "grafana-plugin-unregistered").Markdown()
 	for _, detail := range []string{
+		"request-level failure",
 		"Prometheus and Loki datasource implementations as standalone native plugins",
-		"warp-mimir and warp-loki rows",
+		"stale browser/dashboard payload",
 		"Logs Drilldown app is a frontend",
-		"direct Mimir or Loki query",
-		"exact Grafana generation and image",
-		"pinned Prometheus and Loki plugins and catalog SHA-256",
-		"datasource-plugin packaging, Logs Drilldown provisioning",
-		"Do not recreate either datasource",
+		"dedicated grafana-datasources probe",
+		"same generation",
+		"pinned native plugin and catalog SHA-256",
+		"If both controls succeed",
+		"Do not recreate a healthy datasource",
 		"count_over_time query through warp-loki via Grafana /api/ds/query",
 		"var-ds=warp-loki",
 		"every active exact-edge generation",
+		"method=POST path=/api/ds/query status=404",
+		"urnetwork-connect",
+		"errorMessageID=plugin.notRegistered",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("Grafana plugin alert missing %q:\n%s", detail, markdown)
