@@ -17,7 +17,11 @@ const (
 	hostedDevicePollInterval      = time.Second
 	hostedDeviceHistorySize       = 64
 	hostedDeviceCausalHistorySize = 32
-	hostedDeviceDiagnosticMaxSize = 768
+	// This is a private root-cause artifact, not the concise console result.
+	// Eight active exits with provider build/block evidence plus six causal
+	// transitions fit below 4 KiB; the former 768-byte cap routinely stopped at
+	// the packet boundary and erased the carrier that owned the failed flow.
+	hostedDeviceDiagnosticMaxSize = 4 * 1024
 )
 
 // hostedDeviceTracker retains a credential-free timeline around a data-plane

@@ -347,6 +347,7 @@ func TestHostedDeviceDiagnosticRetainsPacketBoundaryAfterLongCausalHistory(t *te
 		"events=[",
 		"window={9/9 min=true}",
 		"packets={out=60/3820B in=0/0B last_in=07:29:59.000Z",
+		"active=[p7(flow=16 warn=true)",
 	} {
 		if !strings.Contains(diagnostic, want) {
 			t.Fatalf("long causal history erased %q from %q", want, diagnostic)
