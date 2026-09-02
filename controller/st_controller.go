@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"strings"
@@ -44,6 +45,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	bind "github.com/ethereum/go-ethereum/accounts/abi/bind/v2"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -76,6 +78,9 @@ const (
 	stTxReplacementDelay   = 2 * time.Minute
 	stTxPollInterval       = 2 * time.Second
 	stTxMaxAttempts        = 3
+	// stMaximumEVMRPCBatchCalls matches the official public testnet endpoint's
+	// enforced JSON-RPC batch ceiling.
+	stMaximumEVMRPCBatchCalls = 50
 
 	// stDefaultBlockSeconds is the subtensor block cadence used for
 	// block <-> wall-clock estimates when st.yml does not override it.
@@ -558,6 +563,10 @@ type StClient interface {
 	// scheduler. The hash is persisted with the next-block checkpoint.
 	FinalizedHead(ctx context.Context) (number uint64, hash [32]byte, blockTime time.Time, err error)
 	BlockHash(ctx context.Context, block uint64) ([32]byte, error)
+	// BlockHashes reads exact EVM-RPC block identities in bounded batches and
+	// preserves input order. Local Ethereum header recomputation is not an
+	// accepted substitute on Subtensor's synthetic EVM.
+	BlockHashes(ctx context.Context, blocks []uint64) ([][32]byte, error)
 	// RollEpochs pokes the permissionless rollEpochs() (ops key).
 	RollEpochs(ctx context.Context) (txHash string, err error)
 	CloseOperatorEpoch(ctx context.Context, epoch uint64, noId uint64) (txHash string, err error)
@@ -730,31 +739,87 @@ func stView[T any](self *CoreStClient, ctx context.Context, calldata []byte, unp
 
 // Selects one finalized block before delegating the actual contract read.
 func stViewAt[T any](self *CoreStClient, ctx context.Context, address common.Address, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
-	finalized, err := self.finalizedHeader(ctx)
+	finalized, err := self.finalizedBlock(ctx)
 	if err != nil {
 		var out T
 		return out, fmt.Errorf("finalized read head: %w", err)
 	}
-	return stViewAtBlock(self, ctx, address, finalized.Number.Uint64(), calldata, unpack)
+	return stViewAtBlock(self, ctx, address, finalized.Number, calldata, unpack)
 }
 
-// Reads the latest finalized header with RPC failover.
-func (self *CoreStClient) finalizedHeader(ctx context.Context) (*types.Header, error) {
-	var header *types.Header
+// stRPCBlockIdentity is the explicit identity domain returned by
+// eth_getBlockByNumber. go-ethereum's Header.Hash recomputes a different hash
+// on Subtensor's synthetic EVM and therefore must not be used for canonical
+// receipt, log, or checkpoint comparisons.
+type stRPCBlockIdentity struct {
+	Number    string `json:"number"`
+	Hash      string `json:"hash"`
+	Timestamp string `json:"timestamp"`
+}
+
+// stBlockIdentity is one decoded EVM-RPC block number/hash/time tuple.
+type stBlockIdentity struct {
+	Number uint64
+	Hash   [32]byte
+	Time   time.Time
+}
+
+// decodeStRPCBlockIdentity validates an explicit RPC block and, when given,
+// its requested numbered selector.
+func decodeStRPCBlockIdentity(block *stRPCBlockIdentity, requested *uint64) (*stBlockIdentity, error) {
+	if block == nil {
+		return nil, errors.New("empty EVM RPC block")
+	}
+	number, err := hexutil.DecodeUint64(block.Number)
+	if err != nil {
+		return nil, fmt.Errorf("invalid EVM RPC block number %q: %w", block.Number, err)
+	}
+	if requested != nil && number != *requested {
+		return nil, fmt.Errorf("EVM RPC block number %d does not match requested %d", number, *requested)
+	}
+	hashBytes, err := hexutil.Decode(block.Hash)
+	if err != nil || len(hashBytes) != 32 {
+		return nil, fmt.Errorf("invalid EVM RPC block hash %q", block.Hash)
+	}
+	var hash [32]byte
+	copy(hash[:], hashBytes)
+	if hash == ([32]byte{}) {
+		return nil, errors.New("EVM RPC block hash is zero")
+	}
+	timestamp, err := hexutil.DecodeUint64(block.Timestamp)
+	if err != nil || timestamp > math.MaxInt64 {
+		return nil, fmt.Errorf("invalid EVM RPC block timestamp %q", block.Timestamp)
+	}
+	return &stBlockIdentity{Number: number, Hash: hash, Time: time.Unix(int64(timestamp), 0).UTC()}, nil
+}
+
+// readStRPCBlockIdentity reads one explicit block identity from an already
+// selected endpoint.
+func readStRPCBlockIdentity(ctx context.Context, client *ethclient.Client, selector string, requested *uint64) (*stBlockIdentity, error) {
+	if client == nil || strings.TrimSpace(selector) == "" {
+		return nil, errors.New("EVM RPC block reader is unavailable")
+	}
+	var block *stRPCBlockIdentity
+	if err := client.Client().CallContext(ctx, &block, "eth_getBlockByNumber", selector, false); err != nil {
+		return nil, err
+	}
+	return decodeStRPCBlockIdentity(block, requested)
+}
+
+// Reads the latest finalized block identity with RPC failover.
+func (self *CoreStClient) finalizedBlock(ctx context.Context) (*stBlockIdentity, error) {
+	var block *stBlockIdentity
 	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
-		h, err := client.HeaderByNumber(callCtx, big.NewInt(int64(rpc.FinalizedBlockNumber)))
-		if err != nil || h == nil || h.Number == nil {
-			if err == nil {
-				err = errors.New("empty finalized header")
-			}
+		value, err := readStRPCBlockIdentity(callCtx, client, rpc.FinalizedBlockNumber.String(), nil)
+		if err != nil {
 			return err
 		}
-		header = h
+		block = value
 		return nil
 	})
-	return header, err
+	return block, err
 }
 
 var errStReplaceTransaction = errors.New("st: replace transaction")
@@ -943,7 +1008,9 @@ func (self *CoreStClient) waitFinalizedAttempt(
 	for {
 		for _, attempt := range attempts {
 			hash := common.HexToHash(attempt.TxHash)
-			receipt, err := client.TransactionReceipt(ctx, hash)
+			callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
+			receipt, err := client.TransactionReceipt(callCtx, hash)
+			cancel()
 			if errors.Is(err, ethereum.NotFound) {
 				continue
 			}
@@ -953,20 +1020,23 @@ func (self *CoreStClient) waitFinalizedAttempt(
 			}
 			model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 				receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()))
-			finalized, err := self.finalizedHeader(ctx)
+			finalized, err := self.finalizedBlock(ctx)
 			if err != nil {
 				lastErr = err
 				continue
 			}
-			if finalized.Number.Cmp(receipt.BlockNumber) < 0 {
+			if finalized.Number < receipt.BlockNumber.Uint64() {
 				continue
 			}
-			canonical, err := client.HeaderByNumber(ctx, receipt.BlockNumber)
+			canonicalNumber := receipt.BlockNumber.Uint64()
+			callCtx, cancel = context.WithTimeout(ctx, stCallTimeout)
+			canonical, err := readStRPCBlockIdentity(callCtx, client, hexutil.EncodeUint64(canonicalNumber), &canonicalNumber)
+			cancel()
 			if err != nil {
 				lastErr = err
 				continue
 			}
-			if canonical.Hash() != receipt.BlockHash {
+			if canonical.Hash != [32]byte(receipt.BlockHash) {
 				err = fmt.Errorf("st: receipt %s was orphaned before finality", attempt.TxHash)
 				model.MarkStTransactionUncertain(ctx, intent.IntentId, attempt.Attempt, err)
 				return attempt.TxHash, err
@@ -977,7 +1047,7 @@ func (self *CoreStClient) waitFinalizedAttempt(
 				return attempt.TxHash, err
 			}
 			model.MarkStTransactionFinalized(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
-				finalized.Number.Uint64(), strings.ToLower(finalized.Hash().Hex()))
+				finalized.Number, strings.ToLower(common.BytesToHash(finalized.Hash[:]).Hex()))
 			return attempt.TxHash, nil
 		}
 
@@ -1077,11 +1147,11 @@ func (self *CoreStClient) send(ctx context.Context, operation string, key *ecdsa
 
 func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
 	if self.coordinator != nil {
-		head, err := self.finalizedHeader(ctx)
+		head, err := self.finalizedBlock(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("finalized head: %w", err)
 		}
-		block := head.Number.Uint64()
+		block := head.Number
 		epoch, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.coordinator.PackCurrentEpoch(), self.coordinator.UnpackCurrentEpoch)
 		if err != nil {
 			return nil, fmt.Errorf("currentEpoch(): %w", err)
@@ -1098,7 +1168,7 @@ func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
 			TEpochBlocks: policy.EpochBlocks, CommitWindowBlocks: policy.RootCommitWindowBlocks,
 			TrailsWindowBlocks: policy.RootCommitWindowBlocks, FinalizeOffsetBlocks: policy.FinalizeOffsetBlocks,
 			CloseGraceBlocks: policy.CloseGraceBlocks,
-			HeadBlock:        head.Number.Uint64(), HeadBlockTime: time.Unix(int64(head.Time), 0).UTC()}, nil
+			HeadBlock:        head.Number, HeadBlockTime: head.Time}, nil
 	}
 	state := &StEpochState{}
 
@@ -1176,37 +1246,105 @@ func (self *CoreStClient) BlockTime(ctx context.Context, block uint64) (time.Tim
 	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
-		header, err := client.HeaderByNumber(callCtx, new(big.Int).SetUint64(block))
+		identity, err := readStRPCBlockIdentity(callCtx, client, hexutil.EncodeUint64(block), &block)
 		if err != nil {
 			return err
 		}
-		blockTime = time.Unix(int64(header.Time), 0).UTC()
+		blockTime = identity.Time
 		return nil
 	})
 	return blockTime, err
 }
 
 func (self *CoreStClient) FinalizedHead(ctx context.Context) (uint64, [32]byte, time.Time, error) {
-	header, err := self.finalizedHeader(ctx)
+	header, err := self.finalizedBlock(ctx)
 	if err != nil {
 		return 0, [32]byte{}, time.Time{}, err
 	}
-	return header.Number.Uint64(), [32]byte(header.Hash()), time.Unix(int64(header.Time), 0).UTC(), nil
+	return header.Number, header.Hash, header.Time, nil
 }
 
 func (self *CoreStClient) BlockHash(ctx context.Context, block uint64) ([32]byte, error) {
-	var hash [32]byte
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	hashes, err := self.BlockHashes(ctx, []uint64{block})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return hashes[0], nil
+}
+
+// readStRPCBlockIdentities reads numbered blocks in bounded JSON-RPC batches,
+// then checks every embedded number/hash/time tuple against its input position.
+func readStRPCBlockIdentities(ctx context.Context, client *ethclient.Client, blocks []uint64) ([]*stBlockIdentity, error) {
+	if client == nil || len(blocks) == 0 {
+		return nil, errors.New("EVM RPC block batch is unavailable")
+	}
+	seen := make(map[uint64]bool, len(blocks))
+	for _, block := range blocks {
+		if seen[block] {
+			return nil, fmt.Errorf("EVM RPC block batch contains duplicate block %d", block)
+		}
+		seen[block] = true
+	}
+	identities := make([]*stBlockIdentity, len(blocks))
+	for start := 0; start < len(blocks); start += stMaximumEVMRPCBatchCalls {
+		end := min(start+stMaximumEVMRPCBatchCalls, len(blocks))
+		raw := make([]*stRPCBlockIdentity, end-start)
+		batch := make([]rpc.BatchElem, end-start)
+		for index := start; index < end; index++ {
+			block := blocks[index]
+			batch[index-start] = rpc.BatchElem{
+				Method: "eth_getBlockByNumber",
+				Args:   []any{hexutil.EncodeUint64(block), false},
+				Result: &raw[index-start],
+			}
+		}
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-		defer cancel()
-		header, err := client.HeaderByNumber(callCtx, new(big.Int).SetUint64(block))
+		err := client.Client().BatchCallContext(callCtx, batch)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		for index := range batch {
+			absolute := start + index
+			if batch[index].Error != nil {
+				return nil, fmt.Errorf("EVM RPC block batch element %d: %w", absolute, batch[index].Error)
+			}
+			identity, err := decodeStRPCBlockIdentity(raw[index], &blocks[absolute])
+			if err != nil {
+				return nil, fmt.Errorf("EVM RPC block batch element %d: %w", absolute, err)
+			}
+			identities[absolute] = identity
+		}
+	}
+	return identities, nil
+}
+
+// BlockHashes returns explicit EVM-RPC hashes in the same order as the
+// requested unique block numbers.
+func (self *CoreStClient) BlockHashes(ctx context.Context, blocks []uint64) ([][32]byte, error) {
+	if len(blocks) == 0 {
+		return nil, errors.New("EVM RPC block batch is empty")
+	}
+	var identities []*stBlockIdentity
+	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+		values, err := readStRPCBlockIdentities(ctx, client, blocks)
 		if err != nil {
 			return err
 		}
-		hash = [32]byte(header.Hash())
+		identities = values
 		return nil
 	})
-	return hash, err
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([][32]byte, len(identities))
+	for index, identity := range identities {
+		if identity == nil {
+			return nil, fmt.Errorf("EVM RPC block batch element %d is empty", index)
+		}
+		hashes[index] = identity.Hash
+	}
+	return hashes, nil
 }
 
 func (self *CoreStClient) RollEpochs(ctx context.Context) (string, error) {
@@ -1318,11 +1456,11 @@ func (self *CoreStClient) DepositCredit(ctx context.Context, noId uint64, alphaR
 		if err != nil {
 			return "", fmt.Errorf("nextDepositNonce(): %w", err)
 		}
-		head, err := self.finalizedHeader(ctx)
+		head, err := self.finalizedBlock(ctx)
 		if err != nil {
 			return "", err
 		}
-		deadline := head.Number.Uint64() + 128
+		deadline := head.Number + 128
 		return self.send(ctx, fmt.Sprintf("deposit:%d:%s", noId, nonce), self.cfg.DepositKey, self.cfg.ContractAddress, self.coordinator.PackDeposit(n, alphaRao, nonce, deadline))
 	}
 	calldata := self.st.PackDeposit(new(big.Int).SetUint64(noId), alphaRao)
@@ -1390,7 +1528,7 @@ func (self *CoreStClient) stakeAt(ctx context.Context, hotkey [32]byte, coldkey 
 	if err != nil {
 		return nil, err
 	}
-	header, err := self.finalizedHeader(ctx)
+	header, err := self.finalizedBlock(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1398,7 +1536,7 @@ func (self *CoreStClient) stakeAt(ctx context.Context, hotkey [32]byte, coldkey 
 	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
-		out, callErr := client.CallContract(callCtx, ethereum.CallMsg{To: &stStakingPrecompileAddress, Data: calldata}, header.Number)
+		out, callErr := client.CallContract(callCtx, ethereum.CallMsg{To: &stStakingPrecompileAddress, Data: calldata}, new(big.Int).SetUint64(header.Number))
 		if callErr != nil {
 			return callErr
 		}
@@ -2990,17 +3128,36 @@ func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 		if err != nil {
 			return synced, err
 		}
-		canonicalHashes := map[uint64]string{}
+		if toBlock == math.MaxUint64 || nextBlock != toBlock+1 {
+			return synced, fmt.Errorf("st event sync range %d..%d returned next block %d", fromBlock, toBlock, nextBlock)
+		}
+		blockNumbers := make([]uint64, 0, len(events)+1)
+		seenBlockNumbers := make(map[uint64]bool, len(events)+1)
+		for _, event := range events {
+			if event == nil || event.BlockNumber < fromBlock || event.BlockNumber > toBlock {
+				return synced, fmt.Errorf("st event sync range %d..%d returned an event outside the requested range", fromBlock, toBlock)
+			}
+			if !seenBlockNumbers[event.BlockNumber] {
+				seenBlockNumbers[event.BlockNumber] = true
+				blockNumbers = append(blockNumbers, event.BlockNumber)
+			}
+		}
+		if !seenBlockNumbers[toBlock] {
+			blockNumbers = append(blockNumbers, toBlock)
+		}
+		blockHashes, hashErr := client.BlockHashes(ctx, blockNumbers)
+		if hashErr != nil {
+			return synced, hashErr
+		}
+		if len(blockHashes) != len(blockNumbers) {
+			return synced, fmt.Errorf("st canonical block batch returned %d hashes, want %d", len(blockHashes), len(blockNumbers))
+		}
+		canonicalHashes := make(map[uint64]string, len(blockNumbers))
+		for index, blockNumber := range blockNumbers {
+			canonicalHashes[blockNumber] = common.BytesToHash(blockHashes[index][:]).Hex()
+		}
 		for _, event := range events {
 			canonical := canonicalHashes[event.BlockNumber]
-			if canonical == "" {
-				h, hashErr := client.BlockHash(ctx, event.BlockNumber)
-				if hashErr != nil {
-					return synced, hashErr
-				}
-				canonical = common.BytesToHash(h[:]).Hex()
-				canonicalHashes[event.BlockNumber] = canonical
-			}
 			if !strings.EqualFold(event.BlockHash, canonical) {
 				return synced, fmt.Errorf("st log block hash mismatch at %d: log %s canonical %s", event.BlockNumber, event.BlockHash, canonical)
 			}
@@ -3008,11 +3165,7 @@ func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 		model.UpsertStEvents(ctx, events)
 		stApplyEventStatuses(ctx, cfg, events)
 		stApplyHeadBindings(ctx, events)
-		endHash, hashErr := client.BlockHash(ctx, toBlock)
-		if hashErr != nil {
-			return synced, hashErr
-		}
-		model.SetStChainCheckpoint(ctx, model.StChainCheckpoint{NextBlock: nextBlock, BlockHash: common.BytesToHash(endHash[:]).Hex()})
+		model.SetStChainCheckpoint(ctx, model.StChainCheckpoint{NextBlock: nextBlock, BlockHash: canonicalHashes[toBlock]})
 		synced += len(events)
 		fromBlock = nextBlock
 	}

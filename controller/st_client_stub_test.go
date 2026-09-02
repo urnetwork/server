@@ -68,6 +68,16 @@ func (self *stubStClient) BlockHash(context.Context, uint64) ([32]byte, error) {
 	return [32]byte{1}, nil
 }
 
+// BlockHashes returns one deterministic canonical hash for each requested
+// block while preserving input order.
+func (self *stubStClient) BlockHashes(_ context.Context, blocks []uint64) ([][32]byte, error) {
+	hashes := make([][32]byte, len(blocks))
+	for index := range hashes {
+		hashes[index] = [32]byte{1}
+	}
+	return hashes, nil
+}
+
 func (self *stubStClient) RollEpochs(ctx context.Context) (string, error) {
 	self.rollCount += 1
 	return "0xstubroll", nil
