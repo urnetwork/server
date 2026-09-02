@@ -95,7 +95,8 @@ func TestSubtensorSignalDetectsRevokedRuntimeDataPermission(t *testing.T) {
 		"data_uid=0",
 		"data_mode=0750",
 		"runtime_writable=false",
-		"recent_database_permission_error=true",
+		"current_generation_database_permission_error=true",
+		"head_advanced=true",
 		"run-subtensor.sh",
 		"preserve both container identities",
 		"two further bounded samples",
@@ -104,6 +105,48 @@ func TestSubtensorSignalDetectsRevokedRuntimeDataPermission(t *testing.T) {
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("data permission alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestSubtensorSignalRetainsPermissionRootCauseAfterOwnershipRepair(t *testing.T) {
+	observation := healthySubtensorObservation()
+	node := &observation.Nodes[1]
+	node.DataPermissionError = true
+	node.SecondHead = node.FirstHead
+	node.Direct.Sync.CurrentBlock, _ = subtensorHex(node.FirstHead)
+	node.Direct.Sync.HighestBlock = node.Direct.Sync.CurrentBlock
+	node.Direct.Head = node.FirstHead
+	node.Gateway.Head = node.FirstHead
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "subtensor-data-permission")
+	for _, want := range []string{
+		"runtime_writable=true",
+		"current_generation_database_permission_error=true",
+		"head_advanced=false",
+		"started_at=2026-09-01T20:00:00Z",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("latched permission alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
+func TestSubtensorSignalClearsRetainedPermissionRootCauseOnExactProcessProgress(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Nodes[1].DataPermissionError = true
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-data-permission" {
+			t.Fatalf("advancing exact process retained stale permission alert: %+v", alert)
 		}
 	}
 }

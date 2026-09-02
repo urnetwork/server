@@ -10694,12 +10694,15 @@ merely to clear EACCES.
 
 Class `subtensor-data-permission` is immediate. The restricted helper reports
 the live process UID/GID, bind-source UID/GID/mode, whether that exact account
-has write plus traverse permission, and a Boolean for the bounded recent
-RocksDB permission signature. HEALTHY requires permission observation to be
-present, `data_runtime_writable=true`, no new permission signature, unchanged
-container identity through ownership reconciliation, and advancing best heads
-across two post-repair samples. Missing permission facts are observation loss,
-not a healthy default.
+has write plus traverse permission, and a Boolean from the bounded 5,000-line
+tail of that exact container generation for the RocksDB permission signature.
+The generation scope is intentional: a fatal background error must not age out
+after 30 minutes while the same process remains alive and frozen. HEALTHY
+requires permission observation to be present, `data_runtime_writable=true`,
+and either no retained permission signature or head advancement by that exact
+process. Recovery requires advancing best heads across two post-repair samples;
+container replacement changes the evidence generation and must retain the same
+data path. Missing permission facts are observation loss, not a healthy default.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 

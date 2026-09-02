@@ -394,22 +394,23 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		} else {
 			if !node.DataPermissionObserved {
 				findings = append(findings, cannotObserveFinding(identity+"/data-permission", fmt.Errorf("runtime and bind-mount ownership are unavailable")))
-			} else if !node.DataRuntimeWritable || node.DataPermissionError {
+			} else if !node.DataRuntimeWritable || (node.DataPermissionError && secondHead <= firstHead) {
+				headAdvanced := secondHead > firstHead
 				findings = append(findings, finding{
 					probeId: "subtensor/node-health", tier: tierPage, class: "subtensor-data-permission",
 					target: target.name, frame: configured.Name, sustain: 1,
 					symptom:   fmt.Sprintf("%s cannot safely continue writing its mounted Subtensor database", identity),
 					mechanism: "The pinned image starts as root, assigns /data to its UID/GID 10001 runtime account, and then drops privilege. A later host reconciliation that resets the active bind-mount root to root:root 0750 removes traverse/write permission; a RocksDB background reopen then fails with EACCES and block import freezes even though the original process and RPC remain live.",
-					baseline:  "The running node's exact runtime UID/GID has write plus traverse permission on its sole read-write /data bind mount, and recent logs contain no RocksDB permission error.",
+					baseline:  "The running node's exact runtime UID/GID has write plus traverse permission on its sole read-write /data bind mount, and the exact container generation either has no retained RocksDB permission error or advances after it.",
 					observed: fmt.Sprintf(
-						"runtime_uid=%d runtime_gid=%d data_uid=%d data_gid=%d data_mode=%#o runtime_writable=%t recent_database_permission_error=%t",
+						"runtime_uid=%d runtime_gid=%d data_uid=%d data_gid=%d data_mode=%#o runtime_writable=%t current_generation_database_permission_error=%t head_advanced=%t",
 						node.RuntimeUID, node.RuntimeGID, node.DataPathUID, node.DataPathGID, node.DataPathMode,
-						node.DataRuntimeWritable, node.DataPermissionError,
+						node.DataRuntimeWritable, node.DataPermissionError, headAdvanced,
 					),
 					evidence: fmt.Sprintf("container=%s data_path=%s started_at=%s", configured.ContainerName, node.DataPath, firstNonempty(node.ContainerStarted, "unknown")),
 					context:  "This is an Xops ownership regression, not peer starvation, disk exhaustion, or evidence that the preserved database must be discarded. An already-open database can continue temporarily after path access is revoked, so RPC health is not a negative control.",
 					action:   "Apply the committed Xops runtime-ownership repair with run-subtensor.sh and require Compose to preserve both container identities. Restore access before considering a restart. If the same framed process remains frozen for two further bounded samples after access is restored, preserve its generation and obtain explicit authorization for a service-scoped same-generation restart; recover one node at a time and do not erase it or select a new generation solely for EACCES.",
-					verify:   "The runtime account passes test -w /data in both containers, their IDs and start times remain unchanged during permission repair, no new database permission error appears, and both best heads advance across two samples. A restart, if separately authorized, must replace only the framed container and retain its data path plus the archive identity.",
+					verify:   "The runtime account passes test -w /data in both containers, their IDs and start times remain unchanged during permission repair, and both best heads advance across two samples. A retained permission signature clears this class only when that exact process advances; a restart, if separately authorized, must replace only the framed container and retain its data path plus the archive identity.",
 					playbook: "SIGNALS.md §17.4",
 				})
 			}
