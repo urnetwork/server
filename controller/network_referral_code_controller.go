@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -10,6 +11,14 @@ import (
 type NetworkReferralResult struct {
 	ReferralCode   *string `json:"referral_code"`
 	TotalReferrals int     `json:"total_referrals"`
+	// The referral program terms from pro.yml (the single source of truth for
+	// these numbers), so every app and the site show the same cap and bonus
+	// instead of hardcoding their own. All zero when pro.yml is absent (no cap,
+	// no grant); clients treat zero as "unknown" and keep their display defaults.
+	MaxReferrals          int   `json:"max_referrals"`
+	BonusPerReferralBytes int64 `json:"bonus_per_referral_bytes"`
+	ReferredBonusBytes    int64 `json:"referred_bonus_bytes"`
+	BonusPeriodSeconds    int64 `json:"bonus_period_seconds"`
 }
 
 func GetNetworkReferralCode(
@@ -23,9 +32,15 @@ func GetNetworkReferralCode(
 
 	networkReferralsResult := model.GetReferralsByReferralNetworkId(session.Ctx, session.ByJwt.NetworkId)
 
+	pro := model.Pro()
+
 	return &NetworkReferralResult{
-		ReferralCode:   &res.ReferralCode,
-		TotalReferrals: len(networkReferralsResult),
+		ReferralCode:          &res.ReferralCode,
+		TotalReferrals:        len(networkReferralsResult),
+		MaxReferrals:          pro.MaxReferrals,
+		BonusPerReferralBytes: pro.ReferralBonus,
+		ReferredBonusBytes:    pro.ReferredBonus,
+		BonusPeriodSeconds:    int64(pro.ReferralPeriod / time.Second),
 	}, nil
 
 }

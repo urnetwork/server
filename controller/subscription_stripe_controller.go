@@ -1696,6 +1696,15 @@ func stripeCheckoutApplyUiMode(
 // The session carries client_reference_id = networkId. That is how BOTH webhooks find
 // the network to fulfil (stripeHandleInvoicePaid for Pro, and the checkout-complete
 // handler for data packs). Removing it would take the money and deliver nothing.
+// StripeSubscriptionTrialDays is the free trial the YEARLY Stripe Pro
+// subscription starts with, in days; the monthly plan has no trial. It is the
+// ONE number for the trial across the products sold through this endpoint; the
+// offers configured elsewhere must match it: the Android app's FREE_TRIAL_DAYS
+// and the yearly Stripe payment link it opens, the Play Console yearly offer,
+// and the App Store yearly introductory offer (which only allows fixed
+// durations, so iOS shows the nearest one StoreKit reports).
+const StripeSubscriptionTrialDays = 15
+
 func StripeCreateCheckoutSession(
 	args *StripeCreateCheckoutSessionArgs,
 	clientSession *session.ClientSession,
@@ -1766,6 +1775,11 @@ func StripeCreateCheckoutSession(
 			Metadata: map[string]string{
 				"network_id": networkId.String(),
 			},
+		}
+		// only the yearly plan starts with the free trial (the web app, windows
+		// and linux sell Pro through these sessions)
+		if args.ItemId == StripeItemProYearly {
+			params.SubscriptionData.TrialPeriodDays = stripe.Int64(StripeSubscriptionTrialDays)
 		}
 
 	case StripeItemData1Tib, StripeItemData10Tib:
