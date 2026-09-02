@@ -141,7 +141,8 @@ func TestRunRouterDirectH3LoopbackCompletesHandshake(t *testing.T) {
 		t.Fatalf("H3 listener exited before readiness: %v", err)
 	}
 
-	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	const dialTimeout = 5 * time.Second
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), dialTimeout)
 	connection, err := quic.DialAddr(
 		dialCtx,
 		packetConn.LocalAddr().String(),
@@ -150,7 +151,12 @@ func TestRunRouterDirectH3LoopbackCompletesHandshake(t *testing.T) {
 			MinVersion:         tls.VersionTLS13,
 			ServerName:         "127.0.0.1",
 		},
-		&quic.Config{HandshakeIdleTimeout: time.Second},
+		&quic.Config{
+			// Keep the context above as the single dial deadline. A shorter
+			// QUIC idle timer makes on-demand test certificate generation and
+			// race-instrumented scheduling fail before that declared budget.
+			HandshakeIdleTimeout: dialTimeout,
+		},
 	)
 	dialCancel()
 	if err != nil {
