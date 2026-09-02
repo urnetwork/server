@@ -875,6 +875,7 @@ func waitForCurrentGeneratedDeviceClient(
 type fullTunRouteReadinessObservation struct {
 	Budget                 time.Duration
 	DialDuration           time.Duration
+	DialRetryCount         int
 	WarmupDuration         time.Duration
 	WriteDuration          time.Duration
 	ReadDuration           time.Duration
@@ -883,6 +884,34 @@ type fullTunRouteReadinessObservation struct {
 	ServerResponseDuration time.Duration
 	ServerStage            int32
 	TotalDuration          time.Duration
+}
+
+// A race-instrumented route can finish its forward half after gVisor's
+// intrinsic SYN budget but before the outer readiness budget expires. Server
+// acceptance proves that construction succeeded, so one fresh dial may use the
+// now-published route while retaining the original absolute context deadline.
+func dialFullTunReadiness(
+	ctx context.Context,
+	allowAcceptedRetry bool,
+	serverStage *atomic.Int32,
+	dial func(context.Context) (net.Conn, error),
+) (net.Conn, int, error) {
+	connection, err := dial(ctx)
+	if err == nil {
+		return connection, 0, nil
+	}
+	if !allowAcceptedRetry || serverStage.Load() == 0 || ctx.Err() != nil {
+		return nil, 0, err
+	}
+	retryConnection, retryErr := dial(ctx)
+	if retryErr != nil {
+		return nil, 1, fmt.Errorf(
+			"retry readiness dial after accepted attempt (first error: %v): %w",
+			err,
+			retryErr,
+		)
+	}
+	return retryConnection, 1, nil
 }
 
 const p2pProbeTraceEventCapacity = 512
@@ -4116,9 +4145,21 @@ func probeFullTunPath(
 	observation.Budget = probeTimeout
 	dialStartTime := time.Now()
 	dialCtx, dialCancel := context.WithTimeout(ctx, probeTimeout)
-	connection, err := path.appTun.DialContext(dialCtx, "tcp", listener.Addr().String())
+	connection, dialRetryCount, err := dialFullTunReadiness(
+		dialCtx,
+		perfvarRaceEnabled,
+		&serverStage,
+		func(attemptCtx context.Context) (net.Conn, error) {
+			return path.appTun.DialContext(
+				attemptCtx,
+				"tcp",
+				listener.Addr().String(),
+			)
+		},
+	)
 	dialCancel()
 	observation.DialDuration = time.Since(dialStartTime)
+	observation.DialRetryCount = dialRetryCount
 	if err != nil {
 		return failure("dial readiness path", err)
 	}

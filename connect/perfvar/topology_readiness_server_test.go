@@ -368,3 +368,86 @@ func TestReadinessEchoServerServesWinnerAfterAcceptedLoser(t *testing.T) {
 		t.Fatalf("dormant loser was not closed: %v", ctx.Err())
 	}
 }
+
+// A forward route accepted just before the first gVisor SYN budget expires is
+// reused by one fresh attempt inside the unchanged outer readiness deadline.
+func TestFullTunReadinessDialRetriesAfterAcceptedRaceAttempt(t *testing.T) {
+	firstErr := errors.New("first SYN budget expired")
+	var serverStage atomic.Int32
+	dialCount := 0
+	winner, peer := net.Pipe()
+	defer peer.Close()
+	connection, retryCount, err := dialFullTunReadiness(
+		t.Context(),
+		true,
+		&serverStage,
+		func(context.Context) (net.Conn, error) {
+			dialCount++
+			if dialCount == 1 {
+				serverStage.Store(1)
+				return nil, firstErr
+			}
+			return winner, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if connection != winner {
+		t.Fatal("readiness retry did not return its winning connection")
+	}
+	if retryCount != 1 || dialCount != 2 {
+		t.Fatalf("readiness retry count=%d dial count=%d, want 1/2", retryCount, dialCount)
+	}
+}
+
+// Retry requires all three boundaries: race instrumentation, observed server
+// acceptance, and a live absolute context budget.
+func TestFullTunReadinessDialRequiresAcceptedLiveRaceAttempt(t *testing.T) {
+	firstErr := errors.New("first dial failed")
+	testCases := []struct {
+		name                 string
+		allowAcceptedRetry   bool
+		serverStage          int32
+		cancelBeforeDialEnds bool
+	}{
+		{name: "ordinary runtime", allowAcceptedRetry: false, serverStage: 1},
+		{name: "no server acceptance", allowAcceptedRetry: true, serverStage: 0},
+		{name: "exhausted outer budget", allowAcceptedRetry: true, serverStage: 1, cancelBeforeDialEnds: true},
+	}
+	for _, testCase := range testCases {
+		ctx, cancel := context.WithCancel(t.Context())
+		var serverStage atomic.Int32
+		serverStage.Store(testCase.serverStage)
+		dialCount := 0
+		connection, retryCount, err := dialFullTunReadiness(
+			ctx,
+			testCase.allowAcceptedRetry,
+			&serverStage,
+			func(context.Context) (net.Conn, error) {
+				dialCount++
+				if testCase.cancelBeforeDialEnds {
+					cancel()
+				}
+				return nil, firstErr
+			},
+		)
+		cancel()
+		if connection != nil {
+			connection.Close()
+			t.Errorf("%s returned a connection", testCase.name)
+		}
+		if !errors.Is(err, firstErr) {
+			t.Errorf("%s error=%v, want=%v", testCase.name, err, firstErr)
+		}
+		if retryCount != 0 || dialCount != 1 {
+			t.Errorf(
+				"%s retry count=%d dial count=%d, want 0/1",
+				testCase.name,
+				retryCount,
+				dialCount,
+			)
+		}
+	}
+}

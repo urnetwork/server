@@ -656,6 +656,16 @@ func calibrationWorkloadTimeout(profile networkProfile, byteCount int64) time.Du
 	return max(minimumTimeout, 60*roundTrip, 60*rateDuration)
 }
 
+// A test-level liveness cap preserves its ordinary allowance while inheriting
+// the calibrated race-runtime budget used by the workload it encloses.
+func calibrationWorkloadTestTimeout(
+	profile networkProfile,
+	byteCount int64,
+	ordinaryTimeout time.Duration,
+) time.Duration {
+	return max(ordinaryTimeout, calibrationWorkloadTimeout(profile, byteCount))
+}
+
 // One or more inner TCP flows verify exact bytes and content in one direction.
 func measureTCPWorkload(
 	ctx context.Context,
@@ -2881,9 +2891,13 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 // A dormant first bulk candidate cannot consume the one-flow receiver quota or
 // fire the post-handshake hook reserved for the later identified winner.
 func TestLatencyUnderLoadUsesWinnerAfterDormantAcceptedCandidate(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
 	const bulkByteCount = 1024 * 1024
+	profile := initialNetworkProfiles(20260811)["clean-lan"]
+	ctx, cancel := context.WithTimeout(
+		t.Context(),
+		calibrationWorkloadTestTimeout(profile, bulkByteCount, 45*time.Second),
+	)
+	defer cancel()
 	harness := newWorkloadDormantCandidateHarness(1)
 	defer harness.close()
 	var startHookCount atomic.Int64
@@ -2891,7 +2905,7 @@ func TestLatencyUnderLoadUsesWinnerAfterDormantAcceptedCandidate(t *testing.T) {
 	resources.TcpBufferDefault = 128 * 1024
 	result, err := measureLatencyUnderLoadWithFlowTestSettings(
 		ctx,
-		initialNetworkProfiles(20260811)["clean-lan"],
+		profile,
 		resources,
 		bulkByteCount,
 		func(*tunPath) error {
@@ -2922,7 +2936,12 @@ func TestLatencyUnderLoadUsesWinnerAfterDormantAcceptedCandidate(t *testing.T) {
 // An error after bulk readiness closes the UDP listener but cannot return
 // while the probe server retains its final goroutine lifecycle credit.
 func TestLatencyUnderLoadEarlyErrorJoinsProbeServer(t *testing.T) {
-	safetyCtx, safetyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	const bulkByteCount = 1024 * 1024
+	profile := initialNetworkProfiles(20260811)["clean-lan"]
+	safetyCtx, safetyCancel := context.WithTimeout(
+		t.Context(),
+		calibrationWorkloadTestTimeout(profile, bulkByteCount, 30*time.Second),
+	)
 	defer safetyCancel()
 	expectedErr := errors.New("stop after latency bulk readiness")
 	probeServerHeld := make(chan struct{})
@@ -2948,9 +2967,9 @@ func TestLatencyUnderLoadEarlyErrorJoinsProbeServer(t *testing.T) {
 	go func() {
 		_, err := measureLatencyUnderLoadWithFlowTestSettings(
 			safetyCtx,
-			initialNetworkProfiles(20260811)["clean-lan"],
+			profile,
 			defaultTunResourceProfile(),
-			1024*1024,
+			bulkByteCount,
 			func(*tunPath) error {
 				return expectedErr
 			},
@@ -2989,7 +3008,12 @@ func TestLatencyUnderLoadEarlyErrorJoinsProbeServer(t *testing.T) {
 // Loaded probes remain active after the sender fills its socket until the
 // receiver has consumed the complete bulk payload.
 func TestLatencyUnderLoadLoadedProbesFollowReceiverCompletion(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	const bulkByteCount = 64 * 1024
+	profile := initialNetworkProfiles(20260818)["clean-lan"]
+	ctx, cancel := context.WithTimeout(
+		t.Context(),
+		calibrationWorkloadTestTimeout(profile, bulkByteCount, 45*time.Second),
+	)
 	defer cancel()
 	bulkSenderDone := make(chan struct{})
 	bulkReceiverHeld := make(chan struct{})
@@ -3023,9 +3047,9 @@ func TestLatencyUnderLoadLoadedProbesFollowReceiverCompletion(t *testing.T) {
 	go func() {
 		result, err := measureLatencyUnderLoadWithFlowTestSettings(
 			ctx,
-			initialNetworkProfiles(20260818)["clean-lan"],
+			profile,
 			defaultTunResourceProfile(),
-			64*1024,
+			bulkByteCount,
 			nil,
 			testSettings,
 		)
@@ -3067,7 +3091,12 @@ func TestLatencyUnderLoadLoadedProbesFollowReceiverCompletion(t *testing.T) {
 // Cancellation after the final bulk write cannot return while the sender is
 // held immediately before publishing its result and releasing its lifecycle.
 func TestLatencyUnderLoadCancellationJoinsBulkSender(t *testing.T) {
-	safetyCtx, safetyCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	const bulkByteCount = 1024 * 1024
+	profile := initialNetworkProfiles(20260811)["clean-lan"]
+	safetyCtx, safetyCancel := context.WithTimeout(
+		t.Context(),
+		calibrationWorkloadTestTimeout(profile, bulkByteCount, 45*time.Second),
+	)
 	defer safetyCancel()
 	workloadCtx, workloadCancel := context.WithCancel(safetyCtx)
 	defer workloadCancel()
@@ -3096,9 +3125,9 @@ func TestLatencyUnderLoadCancellationJoinsBulkSender(t *testing.T) {
 	go func() {
 		_, err := measureLatencyUnderLoadWithFlowTestSettings(
 			workloadCtx,
-			initialNetworkProfiles(20260811)["clean-lan"],
+			profile,
 			resources,
-			1024*1024,
+			bulkByteCount,
 			nil,
 			testSettings,
 		)
@@ -3478,6 +3507,23 @@ func TestCalibrationWorkloadTimeoutPreservesRaceInstrumentationAllowance(t *test
 	}
 	if timeout := calibrationWorkloadTimeout(profile, byteCount); timeout != expected {
 		t.Fatalf("clean 32 MiB calibration timeout=%s want=%s", timeout, expected)
+	}
+}
+
+// The outer test context cannot truncate a valid inner calibration budget, and
+// a deliberately larger ordinary liveness cap remains authoritative.
+func TestCalibrationWorkloadTestTimeoutIncludesInnerBudget(t *testing.T) {
+	profile := initialNetworkProfiles(5005)["clean-lan"]
+	const byteCount = 1024 * 1024
+	expected := 45 * time.Second
+	if perfvarRaceEnabled {
+		expected = 4 * time.Minute
+	}
+	if timeout := calibrationWorkloadTestTimeout(profile, byteCount, 45*time.Second); timeout != expected {
+		t.Fatalf("calibration test timeout=%s want=%s", timeout, expected)
+	}
+	if timeout := calibrationWorkloadTestTimeout(profile, byteCount, 5*time.Minute); timeout != 5*time.Minute {
+		t.Fatalf("larger outer liveness timeout=%s want=5m", timeout)
 	}
 }
 
