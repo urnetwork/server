@@ -79,7 +79,8 @@ func TestStSyncChainEventsBatchesCanonicalEventBlocks(t *testing.T) {
 				TxHash: fmt.Sprintf("0x%064x", index+1), Kind: "FixtureEvent", DataJson: "{}",
 			})
 		}
-		SetStConfig(&StConfig{Enabled: true, DeployBlock: 100})
+		cfg := &StConfig{Enabled: true, DeployBlock: 100, ChainId: 945, ContractAddress: common.HexToAddress("0x2000000000000000000000000000000000000002")}
+		SetStConfig(cfg)
 		SetStClient(client)
 		t.Cleanup(func() {
 			SetStClient(nil)
@@ -92,7 +93,7 @@ func TestStSyncChainEventsBatchesCanonicalEventBlocks(t *testing.T) {
 		if synced != 3 || client.singleHashCalls != 0 || len(client.blockHashBatches) != 1 || !slices.Equal(client.blockHashBatches[0], []uint64{101, 1_099}) {
 			t.Fatalf("synced/single/batches=%d/%d/%v", synced, client.singleHashCalls, client.blockHashBatches)
 		}
-		checkpoint := model.GetStChainCheckpoint(ctx)
+		checkpoint := model.GetStChainCheckpoint(ctx, cfg.DeploymentKey())
 		endHash := eventSyncTestHash(1_099)
 		if checkpoint.NextBlock != 1_100 || checkpoint.BlockHash != common.BytesToHash(endHash[:]).Hex() {
 			t.Fatalf("checkpoint=%+v", checkpoint)
@@ -129,7 +130,8 @@ func TestStSyncChainEventsRejectsIncompleteCanonicalBatchBeforeMutation(t *testi
 			{label: "hash mismatch", events: []*model.StChainEvent{&mismatchedEvent}, want: "log block hash mismatch"},
 			{label: "batch cardinality", events: []*model.StChainEvent{validEvent}, truncateHashes: true, want: "returned 1 hashes, want 2"},
 		}
-		SetStConfig(&StConfig{Enabled: true, DeployBlock: 100})
+		cfg := &StConfig{Enabled: true, DeployBlock: 100, ChainId: 945, ContractAddress: common.HexToAddress("0x2000000000000000000000000000000000000002")}
+		SetStConfig(cfg)
 		t.Cleanup(func() {
 			SetStClient(nil)
 			SetStConfig(nil)
@@ -143,8 +145,8 @@ func TestStSyncChainEventsRejectsIncompleteCanonicalBatchBeforeMutation(t *testi
 			if synced, err := StSyncChainEvents(ctx, 0); err == nil || !strings.Contains(err.Error(), testCase.want) || synced != 0 {
 				t.Errorf("%s synced/error=%d/%v", testCase.label, synced, err)
 			}
-			checkpoint := model.GetStChainCheckpoint(ctx)
-			if checkpoint.NextBlock != 0 || checkpoint.BlockHash != "" || len(model.GetStEvents(ctx, 100, 1_099)) != 0 {
+			checkpoint := model.GetStChainCheckpoint(ctx, cfg.DeploymentKey())
+			if checkpoint.NextBlock != 0 || checkpoint.BlockHash != "" || len(model.GetStEvents(ctx, cfg.DeploymentKey(), 100, 1_099)) != 0 {
 				t.Fatalf("%s mutated checkpoint/events: %+v", testCase.label, checkpoint)
 			}
 		}

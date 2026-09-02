@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -276,6 +277,80 @@ func TestVerifyControllerFullTrailFlow(t *testing.T) {
 			if assignments != 1 || confirmations != 1 {
 				t.Fatalf("provider %s stats = %+v, want 1/1", providerId, rows)
 			}
+		}
+	})
+}
+
+// Reproduces the live top-200 evidence gap: an operator must be able to expose
+// one bounded route failure to exactly one validator in sim-testnet without
+// leaking the exclusion into another validator's view. Already assigned hops
+// are fenced too, so a filter activation cannot complete one last proof for
+// the withheld fleet and make the boundary transition probabilistic.
+func TestVerifySimulationAssignmentFilterBlocksSeedPendingAndFutureAssignments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "assignment-filter.json")
+	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
+	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
+	t.Setenv(VerifySimulationModeEnv, "1")
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		testVerifyInstallServerKey()
+		settings := model.DefaultVerifySettings()
+		SetVerifySettings(settings)
+		seedProvider := testVerifyProvider(ctx, netip.MustParseAddr("203.0.113.10"), settings)
+		targetProvider := testVerifyProvider(ctx, netip.MustParseAddr("203.0.113.20"), settings)
+		validatorID, vpk, vpkKey := testVerifyValidator(ctx)
+
+		result, err := Verify(testVerifySeedArgs(tb, validatorID, vpk, vpkKey, connect.VerifyMMin), testVerifySession(ctx, "203.0.113.10"))
+		if err != nil {
+			tb.Fatal(err)
+		}
+		assign, ok := result.(*connect.VerifyAssignResult)
+		if !ok || server.Id(assign.NextHop) != targetProvider {
+			tb.Fatalf("unfiltered deterministic assignment=%+v, want target %s", result, targetProvider)
+		}
+		writeVerifySimulationAssignmentFilter(t, path, vpk, []server.Id{targetProvider})
+		if _, err := Verify(testVerifyExtendArgs(tb, validatorID, vpk, vpkKey, assign), testVerifySession(ctx, "203.0.113.20")); err == nil || !strings.Contains(err.Error(), "validator-local simulated route unavailable") {
+			tb.Fatalf("already pending filtered hop was accepted: %v", err)
+		}
+		if _, err := Verify(testVerifySeedArgs(tb, validatorID, vpk, vpkKey, connect.VerifyMMin), testVerifySession(ctx, "203.0.113.20")); err == nil || !strings.Contains(err.Error(), "validator-local simulated route unavailable") {
+			tb.Fatalf("filtered seed hop was accepted: %v", err)
+		}
+
+		alternate := testVerifyProvider(ctx, netip.MustParseAddr("203.0.113.30"), settings)
+		result, err = Verify(testVerifySeedArgs(tb, validatorID, vpk, vpkKey, connect.VerifyMMin), testVerifySession(ctx, "203.0.113.10"))
+		if err != nil {
+			tb.Fatal(err)
+		}
+		assign, ok = result.(*connect.VerifyAssignResult)
+		if !ok || server.Id(assign.NextHop) != alternate || server.Id(assign.NextHop) == targetProvider || seedProvider == targetProvider {
+			tb.Fatalf("filtered future assignment=%+v, want alternate %s", result, alternate)
+		}
+	})
+}
+
+func TestVerifySimulationAssignmentFilterDoesNotAffectAnotherValidator(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "assignment-filter.json")
+	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
+	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
+	t.Setenv(VerifySimulationModeEnv, "1")
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		testVerifyInstallServerKey()
+		settings := model.DefaultVerifySettings()
+		SetVerifySettings(settings)
+		testVerifyProvider(ctx, netip.MustParseAddr("198.51.100.10"), settings)
+		target := testVerifyProvider(ctx, netip.MustParseAddr("198.51.100.20"), settings)
+		_, filteredVPK, _ := testVerifyValidator(ctx)
+		validatorID, independentVPK, independentKey := testVerifyValidator(ctx)
+		writeVerifySimulationAssignmentFilter(t, path, filteredVPK, []server.Id{target})
+
+		result, err := Verify(testVerifySeedArgs(tb, validatorID, independentVPK, independentKey, connect.VerifyMMin), testVerifySession(ctx, "198.51.100.10"))
+		if err != nil {
+			tb.Fatal(err)
+		}
+		assign, ok := result.(*connect.VerifyAssignResult)
+		if !ok || server.Id(assign.NextHop) != target {
+			tb.Fatalf("independent validator assignment=%+v, want target %s", result, target)
 		}
 	})
 }

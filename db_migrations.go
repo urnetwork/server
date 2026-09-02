@@ -6687,4 +6687,183 @@ var migrations = []any{
 		 INCLUDE (balance_byte_count)
 		 WHERE settled = false`,
 	),
+
+	// Every ST mirror row must belong to one exact EVM chain/coordinator
+	// identity. Reusing a human deployment label while replacing a failed
+	// testnet coordinator previously let old open epochs and checkpoints drive
+	// writes against the new contract. Preserve those historical rows under a
+	// non-active legacy namespace, replace collision-prone primary keys, and
+	// remove defaults so all future writers must name their deployment.
+	newSqlMigration(`
+		ALTER TABLE st_epoch ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy';
+		ALTER TABLE st_payout_leaf ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy';
+		ALTER TABLE st_publish ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy';
+		ALTER TABLE st_event ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy';
+		ALTER TABLE st_chain_sync ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy';
+		ALTER TABLE st_head_binding ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy';
+		ALTER TABLE st_payout_artifact ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy';
+
+		ALTER TABLE st_epoch DROP CONSTRAINT st_epoch_pkey;
+		ALTER TABLE st_epoch ADD PRIMARY KEY (deployment_key, epoch);
+
+		ALTER TABLE st_payout_leaf DROP CONSTRAINT st_payout_leaf_pkey;
+		ALTER TABLE st_payout_leaf DROP CONSTRAINT st_payout_leaf_epoch_no_id_coldkey_key;
+		ALTER TABLE st_payout_leaf ADD PRIMARY KEY (deployment_key, epoch, no_id, leaf_index);
+		ALTER TABLE st_payout_leaf ADD UNIQUE (deployment_key, epoch, no_id, coldkey);
+
+		ALTER TABLE st_event DROP CONSTRAINT st_event_pkey;
+		ALTER TABLE st_event ADD PRIMARY KEY (deployment_key, block_number, log_index);
+
+		ALTER TABLE st_chain_sync DROP CONSTRAINT st_chain_sync_pkey;
+		ALTER TABLE st_chain_sync ADD PRIMARY KEY (deployment_key, singleton_id);
+
+		ALTER TABLE st_head_binding DROP CONSTRAINT st_head_binding_pkey;
+		ALTER TABLE st_head_binding ADD PRIMARY KEY (deployment_key, ckey);
+
+		ALTER TABLE st_payout_artifact DROP CONSTRAINT st_payout_artifact_pkey;
+		ALTER TABLE st_payout_artifact ADD PRIMARY KEY (deployment_key, epoch, no_id);
+
+		DROP INDEX st_epoch_status;
+		CREATE INDEX st_epoch_status ON st_epoch (deployment_key, status, epoch);
+		DROP INDEX st_publish_epoch_kind;
+		CREATE INDEX st_publish_epoch_kind ON st_publish (deployment_key, epoch, kind, create_time);
+		DROP INDEX st_event_kind_block;
+		CREATE INDEX st_event_kind_block ON st_event (deployment_key, kind, block_number, log_index);
+		DROP INDEX st_payout_leaf_client_epoch;
+		CREATE INDEX st_payout_leaf_client_epoch ON st_payout_leaf (deployment_key, client_id, epoch, no_id);
+
+		ALTER TABLE st_epoch ALTER COLUMN deployment_key DROP DEFAULT;
+		ALTER TABLE st_payout_leaf ALTER COLUMN deployment_key DROP DEFAULT;
+		ALTER TABLE st_publish ALTER COLUMN deployment_key DROP DEFAULT;
+		ALTER TABLE st_event ALTER COLUMN deployment_key DROP DEFAULT;
+		ALTER TABLE st_chain_sync ALTER COLUMN deployment_key DROP DEFAULT;
+		ALTER TABLE st_head_binding ALTER COLUMN deployment_key DROP DEFAULT;
+		ALTER TABLE st_payout_artifact ALTER COLUMN deployment_key DROP DEFAULT;
+	`),
+
+	// EVM nonces belong to one chain account, not to a human profile or
+	// deployment label. Persist the exact coordinator identity beside every
+	// intent and split the stable logical operation from its retry generation.
+	// Existing rows remain auditable under the inactive legacy namespace.
+	newSqlMigration(`
+		ALTER TABLE st_transaction_intent
+			ADD COLUMN deployment_key varchar(96) NOT NULL DEFAULT 'legacy',
+			ADD COLUMN logical_key varchar(255) NULL,
+			ADD COLUMN generation int NOT NULL DEFAULT 0 CHECK (generation >= 0);
+
+		UPDATE st_transaction_intent SET logical_key = intent_key;
+
+		ALTER TABLE st_transaction_intent
+			ALTER COLUMN deployment_key DROP DEFAULT,
+			ALTER COLUMN logical_key SET NOT NULL,
+			ALTER COLUMN generation DROP DEFAULT;
+	`),
+
+	// Fail closed if historical labels ever allocated the same Ethereum nonce:
+	// silently choosing one signed transaction would strand or double-apply a
+	// custody operation. Build online so unrelated service writes continue.
+	newOnlineSqlMigration(
+		`CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS st_transaction_intent_chain_account_nonce
+		 ON st_transaction_intent (chain_id, from_address, nonce)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS st_transaction_intent_chain_account_nonce
+		 ON st_transaction_intent (chain_id, from_address, nonce)`,
+	),
+
+	newOnlineSqlMigration(
+		`CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS st_transaction_intent_logical_generation
+		 ON st_transaction_intent (logical_key, generation)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS st_transaction_intent_logical_generation
+		 ON st_transaction_intent (logical_key, generation)`,
+	),
+
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS st_transaction_intent_account_reconcile
+		 ON st_transaction_intent (chain_id, from_address, nonce)
+		 WHERE status IN ('prepared', 'signed', 'broadcast', 'mined', 'uncertain')`,
+		`CREATE INDEX IF NOT EXISTS st_transaction_intent_account_reconcile
+		 ON st_transaction_intent (chain_id, from_address, nonce)
+		 WHERE status IN ('prepared', 'signed', 'broadcast', 'mined', 'uncertain')`,
+	),
+
+	// A configured genesis hash distinguishes a deliberate testnet reset that
+	// reuses its EVM chain id. Without this final namespace component, durable
+	// nonces from the old chain would strand every transaction on the reset.
+	newSqlMigration(`
+		ALTER TABLE st_transaction_intent
+			ADD COLUMN genesis_hash varchar(66) NOT NULL DEFAULT 'legacy';
+		ALTER TABLE st_transaction_intent
+			ALTER COLUMN genesis_hash DROP DEFAULT;
+	`),
+
+	newOnlineSqlMigration(
+		`CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS st_transaction_intent_genesis_account_nonce
+		 ON st_transaction_intent (chain_id, genesis_hash, from_address, nonce)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS st_transaction_intent_genesis_account_nonce
+		 ON st_transaction_intent (chain_id, genesis_hash, from_address, nonce)`,
+	),
+
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS st_transaction_intent_chain_account_nonce`,
+		`DROP INDEX IF EXISTS st_transaction_intent_chain_account_nonce`,
+	),
+
+	newOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS st_transaction_intent_account_reconcile`,
+		`DROP INDEX IF EXISTS st_transaction_intent_account_reconcile`,
+	),
+
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS st_transaction_intent_account_reconcile_v2
+		 ON st_transaction_intent (chain_id, genesis_hash, from_address, nonce)
+		 WHERE status IN ('prepared', 'signed', 'broadcast', 'mined', 'uncertain')`,
+		`CREATE INDEX IF NOT EXISTS st_transaction_intent_account_reconcile_v2
+		 ON st_transaction_intent (chain_id, genesis_hash, from_address, nonce)
+		 WHERE status IN ('prepared', 'signed', 'broadcast', 'mined', 'uncertain')`,
+	),
+
+	// Separate canonical chain outcomes from local integrity failures. Only a
+	// finalized revert consumes the nonce while proving the requested contract
+	// transition did not occur; cancellation and external consumption are also
+	// terminal nonce outcomes used by account reconciliation.
+	newSqlMigration(`
+		ALTER TABLE st_transaction_intent
+			DROP CONSTRAINT st_transaction_intent_status_check;
+		ALTER TABLE st_transaction_intent
+			ADD CONSTRAINT st_transaction_intent_status_check CHECK (
+				status IN (
+					'prepared', 'signed', 'broadcast', 'mined', 'finalized',
+					'failed', 'uncertain', 'reverted', 'invalid', 'canceled', 'superseded'
+				)
+			);
+
+		ALTER TABLE st_transaction_attempt
+			DROP CONSTRAINT st_transaction_attempt_status_check;
+		ALTER TABLE st_transaction_attempt
+			ADD CONSTRAINT st_transaction_attempt_status_check CHECK (
+				status IN (
+					'signed', 'broadcast', 'mined', 'finalized', 'failed',
+					'uncertain', 'replaced', 'reverted', 'invalid', 'canceled', 'superseded'
+				)
+			);
+	`),
+
+	// A stale-deployment nonce is retired with a signed self-transaction, never
+	// by replaying its obsolete coordinator calldata. Keep that cancellation in
+	// the same append-only attempt history so whichever same-nonce transaction
+	// becomes canonical remains independently auditable.
+	newSqlMigration(`
+		ALTER TABLE st_transaction_attempt
+			ADD COLUMN kind varchar(16) NOT NULL DEFAULT 'execution' CHECK (
+				kind IN ('execution', 'cancellation')
+			);
+		ALTER TABLE st_transaction_attempt ALTER COLUMN kind DROP DEFAULT;
+	`),
+
+	// The original label-scoped nonce constraint is now both redundant and
+	// wrong across a deliberate same-chain-id genesis reset. The exact genesis
+	// account index above is the sole durable nonce uniqueness boundary.
+	newSqlMigration(`
+		ALTER TABLE st_transaction_intent
+			DROP CONSTRAINT IF EXISTS st_transaction_intent_profile_deployment_id_chain_id_from_a_key;
+	`),
 }

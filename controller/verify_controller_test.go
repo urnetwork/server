@@ -8,7 +8,12 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +23,24 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
+
+func writeVerifySimulationAssignmentFilter(t *testing.T, path string, vpk ed25519.PublicKey, clientIDs []server.Id) {
+	t.Helper()
+	encodedIDs := make([]string, len(clientIDs))
+	for index, clientID := range clientIDs {
+		encodedIDs[index] = clientID.String()
+	}
+	slices.Sort(encodedIDs)
+	encoded, err := json.Marshal(verifySimulationAssignmentFilter{
+		Schema: verifySimulationAssignmentFilterSchema, ValidatorVPK: hex.EncodeToString(vpk), ExcludedClientIDs: encodedIDs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // makeTestVerifyKey builds a deterministic server signing key from a repeated
 // seed byte, for the pure-logic tests (no vault).
@@ -48,6 +71,91 @@ func TestVerifySeedRejectsMissingSignatureBeforeState(t *testing.T) {
 	clientSession := session.NewLocalClientSession(context.Background(), "127.0.0.1:40000", nil)
 	if _, err := verifySeed(args, clientSession); err == nil || !strings.Contains(err.Error(), "seed_sig must be 64 bytes") {
 		t.Fatalf("missing seed signature did not fail closed at input shape: %v", err)
+	}
+}
+
+func TestVerifySimulationAssignmentFilterIsValidatorLocalAndFailClosed(t *testing.T) {
+	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
+	t.Setenv(VerifySimulationModeEnv, "1")
+	path := filepath.Join(t.TempDir(), "assignment-filter.json")
+	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
+	matching, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := server.NewId(), server.NewId()
+	writeVerifySimulationAssignmentFilter(t, path, matching, []server.Id{second, first})
+
+	exclusions, err := verifySimulationAssignmentExclusions(matching)
+	if err != nil || len(exclusions) != 2 || !verifySimulationAssignmentExcluded(exclusions, first) || !verifySimulationAssignmentExcluded(exclusions, second) {
+		t.Fatalf("matching validator exclusions=%v error=%v", exclusions, err)
+	}
+	if exclusions, err := verifySimulationAssignmentExclusions(other); err != nil || len(exclusions) != 0 {
+		t.Fatalf("unrelated validator inherited exclusions=%v error=%v", exclusions, err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifySimulationAssignmentExclusions(matching); err == nil {
+		t.Fatal("publicly readable simulation filter was accepted")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(VerifySimulationModeEnv, "")
+	if _, err := verifySimulationAssignmentExclusions(matching); err == nil {
+		t.Fatal("ordinary testnet process accepted a simulation assignment filter")
+	}
+	t.Setenv(VerifySimulationModeEnv, "1")
+	t.Setenv("URNETWORK_ST_PROFILE", "mainnet")
+	if _, err := verifySimulationAssignmentExclusions(matching); err == nil {
+		t.Fatal("mainnet process accepted a simulation assignment filter")
+	}
+}
+
+func TestVerifySimulationAssignmentFilterRejectsAmbiguousFiles(t *testing.T) {
+	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
+	t.Setenv(VerifySimulationModeEnv, "1")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "assignment-filter.json")
+	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
+	public, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientID := server.NewId()
+	writeVerifySimulationAssignmentFilter(t, path, public, []server.Id{clientID})
+	valid, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := [][]byte{
+		[]byte(`{"schema":"wrong","validator_vpk":"` + hex.EncodeToString(public) + `","excluded_client_ids":["` + clientID.String() + `"]}`),
+		[]byte(`{"schema":"` + verifySimulationAssignmentFilterSchema + `","validator_vpk":"` + strings.ToUpper(hex.EncodeToString(public)) + `","excluded_client_ids":["` + clientID.String() + `"]}`),
+		[]byte(`{"schema":"` + verifySimulationAssignmentFilterSchema + `","validator_vpk":"` + hex.EncodeToString(public) + `","excluded_client_ids":["` + clientID.String() + `","` + clientID.String() + `"]}`),
+		append(append([]byte(nil), valid...), []byte(` {}`)...),
+	}
+	for index, encoded := range cases {
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := verifySimulationAssignmentExclusions(public); err == nil {
+			t.Fatalf("ambiguous filter case %d was accepted", index)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if exclusions, err := verifySimulationAssignmentExclusions(public); err != nil || len(exclusions) != 0 {
+		t.Fatalf("absent inactive filter exclusions=%v error=%v", exclusions, err)
+	}
+	t.Setenv(VerifySimulationAssignmentFilterFileEnv, "relative.json")
+	if _, err := verifySimulationAssignmentExclusions(public); err == nil {
+		t.Fatal("relative simulation filter path was accepted")
 	}
 }
 

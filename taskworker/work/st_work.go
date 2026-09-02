@@ -57,18 +57,20 @@ const (
 // StSyncChain (periodic)
 
 type StSyncChainArgs struct {
+	DeploymentKey string `json:"deployment_key"`
 }
 
 type StSyncChainResult struct {
 }
 
 func ScheduleStSyncChain(clientSession *session.ClientSession, tx server.PgTx) {
+	deploymentKey, _ := controller.StDeploymentKey()
 	task.ScheduleTaskInTx(
 		tx,
 		StSyncChain,
-		&StSyncChainArgs{},
+		&StSyncChainArgs{DeploymentKey: string(deploymentKey)},
 		clientSession,
-		task.RunOnce("st_sync_chain"),
+		task.RunOnce("st_sync_chain", deploymentKey),
 		task.RunAt(server.NowUtc().Add(stSyncChainInterval)),
 		task.MaxTime(15*time.Minute),
 	)
@@ -78,7 +80,8 @@ func StSyncChain(
 	stSyncChain *StSyncChainArgs,
 	clientSession *session.ClientSession,
 ) (*StSyncChainResult, error) {
-	if !controller.StEnabled() {
+	deploymentKey, current := stTaskDeploymentCurrent(stSyncChain.DeploymentKey)
+	if !current {
 		return &StSyncChainResult{}, nil
 	}
 	ctx := clientSession.Ctx
@@ -101,28 +104,28 @@ func StSyncChain(
 	}
 
 	// closed-but-still-open rows -> compute leaves + root
-	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, model.StEpochStatusOpen) {
+	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, deploymentKey, model.StEpochStatusOpen) {
 		if stEpoch.Epoch < state.Epoch {
-			scheduleStEpochClose(clientSession, stEpoch.Epoch, 0, server.NowUtc())
+			scheduleStEpochClose(clientSession, deploymentKey, stEpoch.Epoch, 0, server.NowUtc())
 		}
 	}
 
 	// closed rows -> commit within the window; finalize poke at the
 	// finalize block either way (a missed commit still finalizes — the
 	// pool total carries, D-11)
-	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, model.StEpochStatusClosed) {
+	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, deploymentKey, model.StEpochStatusClosed) {
 		if state.HeadBlock <= stEpoch.CommitDeadlineBlock {
-			scheduleStCommitRoot(clientSession, stEpoch.Epoch, 0, server.NowUtc())
+			scheduleStCommitRoot(clientSession, deploymentKey, stEpoch.Epoch, 0, server.NowUtc())
 		}
-		scheduleStFinalizePoke(clientSession, stEpoch.Epoch, 0, stBlockRunAt(state, stEpoch.FinalizeBlock))
+		scheduleStFinalizePoke(clientSession, deploymentKey, stEpoch.Epoch, 0, stBlockRunAt(state, stEpoch.FinalizeBlock))
 	}
-	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, model.StEpochStatusCommitted) {
-		scheduleStFinalizePoke(clientSession, stEpoch.Epoch, 0, stBlockRunAt(state, stEpoch.FinalizeBlock))
+	for _, stEpoch := range model.GetStEpochsWithStatus(ctx, deploymentKey, model.StEpochStatusCommitted) {
+		scheduleStFinalizePoke(clientSession, deploymentKey, stEpoch.Epoch, 0, stBlockRunAt(state, stEpoch.FinalizeBlock))
 	}
 
 	// one automated deposit chain per (current) epoch
-	if !stHasPublishKind(ctx, state.Epoch, model.StPublishKindDeposit) {
-		scheduleStDeposit(clientSession, state.Epoch, 0, server.NowUtc())
+	if !stHasPublishKind(ctx, deploymentKey, state.Epoch, model.StPublishKindDeposit) {
+		scheduleStDeposit(clientSession, deploymentKey, state.Epoch, 0, server.NowUtc())
 	}
 
 	return &StSyncChainResult{}, nil
@@ -154,8 +157,8 @@ func stBlockRunAt(state *controller.StEpochState, block uint64) time.Time {
 // the epoch (used to issue exactly one automated deposit chain per epoch —
 // retries beyond the first chain go through StDepositPost or the
 // `bringyourctl st deposit` manual fallback, D-3).
-func stHasPublishKind(ctx context.Context, epoch uint64, kind string) bool {
-	for _, publish := range model.GetStPublishes(ctx, epoch) {
+func stHasPublishKind(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64, kind string) bool {
+	for _, publish := range model.GetStPublishes(ctx, deploymentKey, epoch) {
 		if publish.Kind == kind {
 			return true
 		}
@@ -163,23 +166,38 @@ func stHasPublishKind(ctx context.Context, epoch uint64, kind string) bool {
 	return false
 }
 
+// stTaskDeploymentCurrent rejects persisted work from an earlier coordinator
+// before it can read or write the active chain. Old JSON payloads have an empty
+// key and therefore fail closed after an upgrade.
+func stTaskDeploymentCurrent(taskDeploymentKey string) (model.StDeploymentKey, bool) {
+	if !controller.StEnabled() || taskDeploymentKey == "" {
+		return "", false
+	}
+	deploymentKey, ok := controller.StDeploymentKey()
+	if !ok || taskDeploymentKey != string(deploymentKey) {
+		return "", false
+	}
+	return deploymentKey, true
+}
+
 // StEpochClose(epoch)
 
 type StEpochCloseArgs struct {
-	Epoch   uint64 `json:"epoch"`
-	Attempt int    `json:"attempt"`
+	DeploymentKey string `json:"deployment_key"`
+	Epoch         uint64 `json:"epoch"`
+	Attempt       int    `json:"attempt"`
 }
 
 type StEpochCloseResult struct {
 	Retry bool `json:"retry"`
 }
 
-func scheduleStEpochClose(clientSession *session.ClientSession, epoch uint64, attempt int, runAt time.Time) {
+func scheduleStEpochClose(clientSession *session.ClientSession, deploymentKey model.StDeploymentKey, epoch uint64, attempt int, runAt time.Time) {
 	task.ScheduleTask(
 		StEpochClose,
-		&StEpochCloseArgs{Epoch: epoch, Attempt: attempt},
+		&StEpochCloseArgs{DeploymentKey: string(deploymentKey), Epoch: epoch, Attempt: attempt},
 		clientSession,
-		task.RunOnce("st_epoch_close", epoch),
+		task.RunOnce("st_epoch_close", deploymentKey, epoch),
 		task.RunAt(runAt),
 		task.MaxTime(1*time.Hour),
 	)
@@ -189,7 +207,8 @@ func StEpochClose(
 	stEpochClose *StEpochCloseArgs,
 	clientSession *session.ClientSession,
 ) (*StEpochCloseResult, error) {
-	if !controller.StEnabled() {
+	deploymentKey, current := stTaskDeploymentCurrent(stEpochClose.DeploymentKey)
+	if !current {
 		return &StEpochCloseResult{}, nil
 	}
 	ctx := clientSession.Ctx
@@ -199,7 +218,7 @@ func StEpochClose(
 		glog.Infof("[st]epoch %d close failed (attempt %d): %s\n", stEpochClose.Epoch, stEpochClose.Attempt, err)
 		return &StEpochCloseResult{Retry: true}, nil
 	}
-	model.SetStEpochStatus(ctx, stEpochClose.Epoch, model.StEpochStatusClosed)
+	model.SetStEpochStatus(ctx, deploymentKey, stEpochClose.Epoch, model.StEpochStatusClosed)
 	glog.Infof("[st]epoch %d closed: %d leaves root 0x%x\n", stEpochClose.Epoch, leafCount, root)
 	return &StEpochCloseResult{}, nil
 }
@@ -210,14 +229,17 @@ func StEpochClosePost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if _, current := stTaskDeploymentCurrent(stEpochClose.DeploymentKey); !current {
+		return nil
+	}
 	if stEpochCloseResult.Retry {
 		if stEpochClose.Attempt+1 < stEpochCloseMaxAttempts {
 			task.ScheduleTaskInTx(
 				tx,
 				StEpochClose,
-				&StEpochCloseArgs{Epoch: stEpochClose.Epoch, Attempt: stEpochClose.Attempt + 1},
+				&StEpochCloseArgs{DeploymentKey: stEpochClose.DeploymentKey, Epoch: stEpochClose.Epoch, Attempt: stEpochClose.Attempt + 1},
 				clientSession,
-				task.RunOnce("st_epoch_close", stEpochClose.Epoch),
+				task.RunOnce("st_epoch_close", stEpochClose.DeploymentKey, stEpochClose.Epoch),
 				task.RunAt(server.NowUtc().Add(stEpochCloseRetryDelay)),
 				task.MaxTime(1*time.Hour),
 			)
@@ -228,9 +250,9 @@ func StEpochClosePost(
 	task.ScheduleTaskInTx(
 		tx,
 		StCommitRoot,
-		&StCommitRootArgs{Epoch: stEpochClose.Epoch},
+		&StCommitRootArgs{DeploymentKey: stEpochClose.DeploymentKey, Epoch: stEpochClose.Epoch},
 		clientSession,
-		task.RunOnce("st_commit_root", stEpochClose.Epoch),
+		task.RunOnce("st_commit_root", stEpochClose.DeploymentKey, stEpochClose.Epoch),
 		task.MaxTime(30*time.Minute),
 	)
 	return nil
@@ -239,20 +261,21 @@ func StEpochClosePost(
 // StCommitRoot(epoch)
 
 type StCommitRootArgs struct {
-	Epoch   uint64 `json:"epoch"`
-	Attempt int    `json:"attempt"`
+	DeploymentKey string `json:"deployment_key"`
+	Epoch         uint64 `json:"epoch"`
+	Attempt       int    `json:"attempt"`
 }
 
 type StCommitRootResult struct {
 	Retry bool `json:"retry"`
 }
 
-func scheduleStCommitRoot(clientSession *session.ClientSession, epoch uint64, attempt int, runAt time.Time) {
+func scheduleStCommitRoot(clientSession *session.ClientSession, deploymentKey model.StDeploymentKey, epoch uint64, attempt int, runAt time.Time) {
 	task.ScheduleTask(
 		StCommitRoot,
-		&StCommitRootArgs{Epoch: epoch, Attempt: attempt},
+		&StCommitRootArgs{DeploymentKey: string(deploymentKey), Epoch: epoch, Attempt: attempt},
 		clientSession,
-		task.RunOnce("st_commit_root", epoch),
+		task.RunOnce("st_commit_root", deploymentKey, epoch),
 		task.RunAt(runAt),
 		task.MaxTime(30*time.Minute),
 	)
@@ -262,7 +285,7 @@ func StCommitRoot(
 	stCommitRoot *StCommitRootArgs,
 	clientSession *session.ClientSession,
 ) (*StCommitRootResult, error) {
-	if !controller.StEnabled() {
+	if _, current := stTaskDeploymentCurrent(stCommitRoot.DeploymentKey); !current {
 		return &StCommitRootResult{}, nil
 	}
 	ctx := clientSession.Ctx
@@ -284,13 +307,16 @@ func StCommitRootPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if _, current := stTaskDeploymentCurrent(stCommitRoot.DeploymentKey); !current {
+		return nil
+	}
 	if stCommitRootResult.Retry && stCommitRoot.Attempt+1 < stCommitRootMaxAttempts {
 		task.ScheduleTaskInTx(
 			tx,
 			StCommitRoot,
-			&StCommitRootArgs{Epoch: stCommitRoot.Epoch, Attempt: stCommitRoot.Attempt + 1},
+			&StCommitRootArgs{DeploymentKey: stCommitRoot.DeploymentKey, Epoch: stCommitRoot.Epoch, Attempt: stCommitRoot.Attempt + 1},
 			clientSession,
-			task.RunOnce("st_commit_root", stCommitRoot.Epoch),
+			task.RunOnce("st_commit_root", stCommitRoot.DeploymentKey, stCommitRoot.Epoch),
 			task.RunAt(server.NowUtc().Add(stCommitRootRetryDelay)),
 			task.MaxTime(30*time.Minute),
 		)
@@ -301,20 +327,21 @@ func StCommitRootPost(
 // StDeposit(epoch)
 
 type StDepositArgs struct {
-	Epoch   uint64 `json:"epoch"`
-	Attempt int    `json:"attempt"`
+	DeploymentKey string `json:"deployment_key"`
+	Epoch         uint64 `json:"epoch"`
+	Attempt       int    `json:"attempt"`
 }
 
 type StDepositResult struct {
 	Retry bool `json:"retry"`
 }
 
-func scheduleStDeposit(clientSession *session.ClientSession, epoch uint64, attempt int, runAt time.Time) {
+func scheduleStDeposit(clientSession *session.ClientSession, deploymentKey model.StDeploymentKey, epoch uint64, attempt int, runAt time.Time) {
 	task.ScheduleTask(
 		StDeposit,
-		&StDepositArgs{Epoch: epoch, Attempt: attempt},
+		&StDepositArgs{DeploymentKey: string(deploymentKey), Epoch: epoch, Attempt: attempt},
 		clientSession,
-		task.RunOnce("st_deposit", epoch),
+		task.RunOnce("st_deposit", deploymentKey, epoch),
 		task.RunAt(runAt),
 		task.MaxTime(30*time.Minute),
 	)
@@ -324,7 +351,7 @@ func StDeposit(
 	stDeposit *StDepositArgs,
 	clientSession *session.ClientSession,
 ) (*StDepositResult, error) {
-	if !controller.StEnabled() {
+	if _, current := stTaskDeploymentCurrent(stDeposit.DeploymentKey); !current {
 		return &StDepositResult{}, nil
 	}
 	ctx := clientSession.Ctx
@@ -346,13 +373,16 @@ func StDepositPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if _, current := stTaskDeploymentCurrent(stDeposit.DeploymentKey); !current {
+		return nil
+	}
 	if stDepositResult.Retry && stDeposit.Attempt+1 < stDepositMaxAttempts {
 		task.ScheduleTaskInTx(
 			tx,
 			StDeposit,
-			&StDepositArgs{Epoch: stDeposit.Epoch, Attempt: stDeposit.Attempt + 1},
+			&StDepositArgs{DeploymentKey: stDeposit.DeploymentKey, Epoch: stDeposit.Epoch, Attempt: stDeposit.Attempt + 1},
 			clientSession,
-			task.RunOnce("st_deposit", stDeposit.Epoch),
+			task.RunOnce("st_deposit", stDeposit.DeploymentKey, stDeposit.Epoch),
 			task.RunAt(server.NowUtc().Add(stDepositRetryDelay)),
 			task.MaxTime(30*time.Minute),
 		)
@@ -363,8 +393,9 @@ func StDepositPost(
 // StFinalizePoke(epoch)
 
 type StFinalizePokeArgs struct {
-	Epoch   uint64 `json:"epoch"`
-	Attempt int    `json:"attempt"`
+	DeploymentKey string `json:"deployment_key"`
+	Epoch         uint64 `json:"epoch"`
+	Attempt       int    `json:"attempt"`
 }
 
 type StFinalizePokeResult struct {
@@ -372,12 +403,12 @@ type StFinalizePokeResult struct {
 	RetryAt *time.Time `json:"retry_at,omitempty"`
 }
 
-func scheduleStFinalizePoke(clientSession *session.ClientSession, epoch uint64, attempt int, runAt time.Time) {
+func scheduleStFinalizePoke(clientSession *session.ClientSession, deploymentKey model.StDeploymentKey, epoch uint64, attempt int, runAt time.Time) {
 	task.ScheduleTask(
 		StFinalizePoke,
-		&StFinalizePokeArgs{Epoch: epoch, Attempt: attempt},
+		&StFinalizePokeArgs{DeploymentKey: string(deploymentKey), Epoch: epoch, Attempt: attempt},
 		clientSession,
-		task.RunOnce("st_finalize_poke", epoch),
+		task.RunOnce("st_finalize_poke", deploymentKey, epoch),
 		task.RunAt(runAt),
 		task.MaxTime(30*time.Minute),
 	)
@@ -387,7 +418,7 @@ func StFinalizePoke(
 	stFinalizePoke *StFinalizePokeArgs,
 	clientSession *session.ClientSession,
 ) (*StFinalizePokeResult, error) {
-	if !controller.StEnabled() {
+	if _, current := stTaskDeploymentCurrent(stFinalizePoke.DeploymentKey); !current {
 		return &StFinalizePokeResult{}, nil
 	}
 	ctx := clientSession.Ctx
@@ -414,6 +445,9 @@ func StFinalizePokePost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if _, current := stTaskDeploymentCurrent(stFinalizePoke.DeploymentKey); !current {
+		return nil
+	}
 	if stFinalizePokeResult.Retry && stFinalizePoke.Attempt+1 < stFinalizePokeMaxAttempts {
 		runAt := server.NowUtc().Add(stFinalizePokeRetryDelay)
 		if stFinalizePokeResult.RetryAt != nil && runAt.Before(*stFinalizePokeResult.RetryAt) {
@@ -422,9 +456,9 @@ func StFinalizePokePost(
 		task.ScheduleTaskInTx(
 			tx,
 			StFinalizePoke,
-			&StFinalizePokeArgs{Epoch: stFinalizePoke.Epoch, Attempt: stFinalizePoke.Attempt + 1},
+			&StFinalizePokeArgs{DeploymentKey: stFinalizePoke.DeploymentKey, Epoch: stFinalizePoke.Epoch, Attempt: stFinalizePoke.Attempt + 1},
 			clientSession,
-			task.RunOnce("st_finalize_poke", stFinalizePoke.Epoch),
+			task.RunOnce("st_finalize_poke", stFinalizePoke.DeploymentKey, stFinalizePoke.Epoch),
 			task.RunAt(runAt),
 			task.MaxTime(30*time.Minute),
 		)

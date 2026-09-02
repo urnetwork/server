@@ -2200,6 +2200,10 @@ func modelUpgradeClientReliabilityIndex(opts docopt.Opts) {
 
 func stStatus(opts docopt.Opts) {
 	ctx := context.Background()
+	deploymentKey, ok := controller.StDeploymentKey()
+	if !ok {
+		panic("st deployment is not configured")
+	}
 
 	state, err := controller.StGetEpochState(ctx)
 	if err != nil {
@@ -2244,17 +2248,17 @@ func stStatus(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("  deposits:        %s rao (Deposited events)\n", model.SumStDepositedRao(ctx, epoch, depositNoId))
+	fmt.Printf("  deposits:        %s rao (Deposited events)\n", model.SumStDepositedRao(ctx, deploymentKey, epoch, depositNoId))
 	fmt.Printf("  pool total:      %s rao\n", pool.PoolTotalRao)
 	fmt.Printf("  claimed:         %s rao\n", pool.ClaimedRao)
 
-	if stEpoch := model.GetStEpoch(ctx, epoch); stEpoch != nil {
+	if stEpoch := model.GetStEpoch(ctx, deploymentKey, epoch); stEpoch != nil {
 		fmt.Printf("epoch %d mirror:\n", epoch)
 		fmt.Printf("  status:          %s\n", stEpoch.Status)
 		fmt.Printf("  start block:     %d\n", stEpoch.StartBlock)
 		fmt.Printf("  commit deadline: block %d\n", stEpoch.CommitDeadlineBlock)
 		fmt.Printf("  finalize block:  %d\n", stEpoch.FinalizeBlock)
-		leaves := model.GetStPayoutLeaves(ctx, epoch, func() uint64 {
+		leaves := model.GetStPayoutLeaves(ctx, deploymentKey, epoch, func() uint64 {
 			noId, err := controller.StNoId()
 			if err != nil {
 				panic(err)
@@ -2266,7 +2270,7 @@ func stStatus(opts docopt.Opts) {
 		fmt.Printf("epoch %d mirror:   (no st_epoch row)\n", epoch)
 	}
 
-	publishes := model.GetStPublishes(ctx, epoch)
+	publishes := model.GetStPublishes(ctx, deploymentKey, epoch)
 	fmt.Printf("epoch %d publishes: %d\n", epoch, len(publishes))
 	for _, publish := range publishes {
 		txHash := ""
@@ -2310,6 +2314,10 @@ func stDeposit(opts docopt.Opts) {
 
 func stCommit(opts docopt.Opts) {
 	ctx := context.Background()
+	deploymentKey, ok := controller.StDeploymentKey()
+	if !ok {
+		panic("st deployment is not configured")
+	}
 
 	epochStr, _ := opts.String("--epoch")
 	epoch, err := strconv.ParseUint(epochStr, 10, 64)
@@ -2322,13 +2330,13 @@ func stCommit(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	if leaves := model.GetStPayoutLeaves(ctx, epoch, noId); len(leaves) == 0 {
+	if leaves := model.GetStPayoutLeaves(ctx, deploymentKey, epoch, noId); len(leaves) == 0 {
 		fmt.Printf("no stored leaves for epoch %d; computing\n", epoch)
 		root, leafCount, err := controller.StComputeEpochPayout(ctx, epoch)
 		if err != nil {
 			panic(err)
 		}
-		model.SetStEpochStatus(ctx, epoch, model.StEpochStatusClosed)
+		model.SetStEpochStatus(ctx, deploymentKey, epoch, model.StEpochStatusClosed)
 		fmt.Printf("computed %d leaves, root 0x%x\n", leafCount, root)
 	}
 

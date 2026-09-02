@@ -59,9 +59,25 @@ const (
 	StPublishStatusSkipped = "skipped"
 )
 
-// the Redis key for the hot epoch summary (hash-tagged so any future
-// multi-key operations shard together)
-const stEpochSummaryRedisKey = "{st_epoch}state"
+// StDeploymentKey is the durable chain identity for coordinator-owned mirror
+// and settlement rows. It is deliberately based on chain id + coordinator
+// address rather than a reusable deployment label, so a replacement testnet
+// contract can never inherit another contract's epochs, checkpoints, events,
+// artifacts, or task decisions.
+type StDeploymentKey string
+
+func requireStDeploymentKey(deploymentKey StDeploymentKey) string {
+	if deploymentKey == "" {
+		panic("st deployment key is empty")
+	}
+	return string(deploymentKey)
+}
+
+// The Redis key is deployment-scoped for the same reason as PostgreSQL. The
+// hash tag keeps each deployment's summary stable under Redis clustering.
+func stEpochSummaryRedisKey(deploymentKey StDeploymentKey) string {
+	return fmt.Sprintf("{st_epoch:%s}state", requireStDeploymentKey(deploymentKey))
+}
 
 // StWallet is a network's subtensor claim wallet (ss58 coldkey).
 type StWallet struct {
@@ -224,12 +240,14 @@ type StEpoch struct {
 // UpsertStEpoch inserts or refreshes an epoch row. The status is only
 // advanced, never regressed (open < closed < committed < finalized), so a
 // late window refresh cannot un-finalize an epoch.
-func UpsertStEpoch(ctx context.Context, epoch *StEpoch) {
+func UpsertStEpoch(ctx context.Context, deploymentKey StDeploymentKey, epoch *StEpoch) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
                 INSERT INTO st_epoch (
+					deployment_key,
                     epoch,
                     start_block,
                     commit_deadline_block,
@@ -237,13 +255,13 @@ func UpsertStEpoch(ctx context.Context, epoch *StEpoch) {
                     finalize_block,
                     status
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (epoch) DO UPDATE
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (deployment_key, epoch) DO UPDATE
                 SET
-                    start_block = $2,
-                    commit_deadline_block = $3,
-                    trails_deadline_block = $4,
-                    finalize_block = $5,
+                    start_block = EXCLUDED.start_block,
+                    commit_deadline_block = EXCLUDED.commit_deadline_block,
+                    trails_deadline_block = EXCLUDED.trails_deadline_block,
+                    finalize_block = EXCLUDED.finalize_block,
                     status = CASE
                         WHEN array_position(ARRAY['open','closed','committed','finalized'], st_epoch.status) <
                              array_position(ARRAY['open','closed','committed','finalized'], EXCLUDED.status)
@@ -251,6 +269,7 @@ func UpsertStEpoch(ctx context.Context, epoch *StEpoch) {
                         ELSE st_epoch.status
                     END
             `,
+			key,
 			int64(epoch.Epoch),
 			int64(epoch.StartBlock),
 			int64(epoch.CommitDeadlineBlock),
@@ -263,23 +282,25 @@ func UpsertStEpoch(ctx context.Context, epoch *StEpoch) {
 
 // SetStEpochStatus advances the status of an epoch (never regresses; see
 // UpsertStEpoch). Setting finalized records `finalized_time` once.
-func SetStEpochStatus(ctx context.Context, epoch uint64, status string) {
+func SetStEpochStatus(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, status string) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
                 UPDATE st_epoch
                 SET
-                    status = $2,
+                    status = $3,
                     finalized_time = CASE
-                        WHEN $2 = 'finalized' AND finalized_time IS NULL THEN $3
+                        WHEN $3 = 'finalized' AND finalized_time IS NULL THEN $4
                         ELSE finalized_time
                     END
                 WHERE
-                    epoch = $1 AND
+					deployment_key = $1 AND epoch = $2 AND
                     array_position(ARRAY['open','closed','committed','finalized'], status) <
-                    array_position(ARRAY['open','closed','committed','finalized'], $2)
+					array_position(ARRAY['open','closed','committed','finalized'], $3)
             `,
+			key,
 			int64(epoch),
 			status,
 			server.NowUtc(),
@@ -318,12 +339,14 @@ const stEpochSelectColumns = `
 `
 
 // GetStEpoch returns one epoch row, or nil.
-func GetStEpoch(ctx context.Context, epoch uint64) *StEpoch {
+func GetStEpoch(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64) *StEpoch {
+	key := requireStDeploymentKey(deploymentKey)
 	var stEpoch *StEpoch
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT `+stEpochSelectColumns+` FROM st_epoch WHERE epoch = $1`,
+			`SELECT `+stEpochSelectColumns+` FROM st_epoch WHERE deployment_key = $1 AND epoch = $2`,
+			key,
 			int64(epoch),
 		)
 		server.WithPgResult(result, err, func() {
@@ -336,12 +359,14 @@ func GetStEpoch(ctx context.Context, epoch uint64) *StEpoch {
 }
 
 // GetLatestStEpoch returns the highest-numbered epoch row, or nil.
-func GetLatestStEpoch(ctx context.Context) *StEpoch {
+func GetLatestStEpoch(ctx context.Context, deploymentKey StDeploymentKey) *StEpoch {
+	key := requireStDeploymentKey(deploymentKey)
 	var stEpoch *StEpoch
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT `+stEpochSelectColumns+` FROM st_epoch ORDER BY epoch DESC LIMIT 1`,
+			`SELECT `+stEpochSelectColumns+` FROM st_epoch WHERE deployment_key = $1 ORDER BY epoch DESC LIMIT 1`,
+			key,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -354,7 +379,8 @@ func GetLatestStEpoch(ctx context.Context) *StEpoch {
 
 // GetLatestFinalizedStEpoch returns the highest finalized epoch, or nil.
 // Claims are served against finalized epochs by default.
-func GetLatestFinalizedStEpoch(ctx context.Context) *StEpoch {
+func GetLatestFinalizedStEpoch(ctx context.Context, deploymentKey StDeploymentKey) *StEpoch {
+	key := requireStDeploymentKey(deploymentKey)
 	var stEpoch *StEpoch
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -362,10 +388,11 @@ func GetLatestFinalizedStEpoch(ctx context.Context) *StEpoch {
 			`
                 SELECT `+stEpochSelectColumns+`
                 FROM st_epoch
-                WHERE status = 'finalized'
+				WHERE deployment_key = $1 AND status = 'finalized'
                 ORDER BY epoch DESC
                 LIMIT 1
             `,
+			key,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -378,12 +405,14 @@ func GetLatestFinalizedStEpoch(ctx context.Context) *StEpoch {
 
 // GetStEpochsWithStatus returns epochs in a given status, ascending.
 // Used by the sync task to catch up missed per-epoch pipeline steps.
-func GetStEpochsWithStatus(ctx context.Context, status string) []*StEpoch {
+func GetStEpochsWithStatus(ctx context.Context, deploymentKey StDeploymentKey, status string) []*StEpoch {
+	key := requireStDeploymentKey(deploymentKey)
 	stEpochs := []*StEpoch{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT `+stEpochSelectColumns+` FROM st_epoch WHERE status = $1 ORDER BY epoch ASC`,
+			`SELECT `+stEpochSelectColumns+` FROM st_epoch WHERE deployment_key = $1 AND status = $2 ORDER BY epoch ASC`,
+			key,
 			status,
 		)
 		server.WithPgResult(result, err, func() {
@@ -411,22 +440,22 @@ type StEpochSummary struct {
 // SetStEpochSummaryCache writes the hot epoch summary to Redis with a ttl.
 // The sync task refreshes it about every minute; the ttl only bounds
 // staleness if the task stalls.
-func SetStEpochSummaryCache(ctx context.Context, summary *StEpochSummary, ttl time.Duration) {
+func SetStEpochSummaryCache(ctx context.Context, deploymentKey StDeploymentKey, summary *StEpochSummary, ttl time.Duration) {
 	summaryJson, err := json.Marshal(summary)
 	if err != nil {
 		panic(err)
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		server.Raise(r.Set(ctx, stEpochSummaryRedisKey, string(summaryJson), ttl).Err())
+		server.Raise(r.Set(ctx, stEpochSummaryRedisKey(deploymentKey), string(summaryJson), ttl).Err())
 	})
 }
 
 // GetStEpochSummaryCache reads the hot epoch summary from Redis, or nil on
 // miss.
-func GetStEpochSummaryCache(ctx context.Context) *StEpochSummary {
+func GetStEpochSummaryCache(ctx context.Context, deploymentKey StDeploymentKey) *StEpochSummary {
 	var summary *StEpochSummary
 	server.Redis(ctx, func(r server.RedisClient) {
-		summaryJson, err := r.Get(ctx, stEpochSummaryRedisKey).Result()
+		summaryJson, err := r.Get(ctx, stEpochSummaryRedisKey(deploymentKey)).Result()
 		if err == redis.Nil {
 			return
 		}
@@ -453,11 +482,13 @@ type StPayoutLeaf struct {
 // SetStPayoutLeaves replaces the full leaf set for (epoch, noId). The
 // replace makes epoch-close recomputation idempotent before the root is
 // committed on chain.
-func SetStPayoutLeaves(ctx context.Context, epoch uint64, noId uint64, leaves []*StPayoutLeaf) {
+func SetStPayoutLeaves(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, noId uint64, leaves []*StPayoutLeaf) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
-			`DELETE FROM st_payout_leaf WHERE epoch = $1 AND no_id = $2`,
+			`DELETE FROM st_payout_leaf WHERE deployment_key = $1 AND epoch = $2 AND no_id = $3`,
+			key,
 			int64(epoch),
 			int64(noId),
 		))
@@ -466,6 +497,7 @@ func SetStPayoutLeaves(ctx context.Context, epoch uint64, noId uint64, leaves []
 				batch.Queue(
 					`
                         INSERT INTO st_payout_leaf (
+							deployment_key,
                             epoch,
                             no_id,
 							client_id,
@@ -474,8 +506,9 @@ func SetStPayoutLeaves(ctx context.Context, epoch uint64, noId uint64, leaves []
                             share_bps,
                             leaf_index
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+						VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     `,
+					key,
 					int64(epoch),
 					int64(noId),
 					leaf.ClientId,
@@ -491,7 +524,8 @@ func SetStPayoutLeaves(ctx context.Context, epoch uint64, noId uint64, leaves []
 
 // GetStPayoutLeaves returns the leaf set for (epoch, noId) ordered by
 // leaf index — the exact input order for rebuilding the Merkle tree.
-func GetStPayoutLeaves(ctx context.Context, epoch uint64, noId uint64) []*StPayoutLeaf {
+func GetStPayoutLeaves(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, noId uint64) []*StPayoutLeaf {
+	key := requireStDeploymentKey(deploymentKey)
 	leaves := []*StPayoutLeaf{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -504,9 +538,10 @@ func GetStPayoutLeaves(ctx context.Context, epoch uint64, noId uint64) []*StPayo
                     share_bps,
                     leaf_index
                 FROM st_payout_leaf
-                WHERE epoch = $1 AND no_id = $2
+				WHERE deployment_key = $1 AND epoch = $2 AND no_id = $3
                 ORDER BY leaf_index ASC
             `,
+			key,
 			int64(epoch),
 			int64(noId),
 		)
@@ -532,15 +567,16 @@ func GetStPayoutLeaves(ctx context.Context, epoch uint64, noId uint64) []*StPayo
 	return leaves
 }
 
-func GetStPayoutLeafForClient(ctx context.Context, epoch uint64, clientId server.Id) *StPayoutLeaf {
+func GetStPayoutLeafForClient(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, clientId server.Id) *StPayoutLeaf {
+	key := requireStDeploymentKey(deploymentKey)
 	var leaf *StPayoutLeaf
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
 			SELECT no_id, network_id, coldkey, share_bps, leaf_index
 			FROM st_payout_leaf
-			WHERE epoch = $1 AND client_id = $2
+			WHERE deployment_key = $1 AND epoch = $2 AND client_id = $3
 			ORDER BY no_id ASC LIMIT 1
-		`, int64(epoch), clientId)
+		`, key, int64(epoch), clientId)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				leaf = &StPayoutLeaf{Epoch: epoch, ClientId: &clientId}
@@ -565,25 +601,27 @@ type StPayoutArtifact struct {
 	CreateTime  time.Time
 }
 
-func AddStPayoutArtifact(ctx context.Context, artifact *StPayoutArtifact) {
+func AddStPayoutArtifact(ctx context.Context, deploymentKey StDeploymentKey, artifact *StPayoutArtifact) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO st_payout_artifact (
-				epoch, no_id, content_hash, content_key, history_key, payout_root, create_time
-			) VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (epoch, no_id) DO NOTHING
-		`, int64(artifact.Epoch), int64(artifact.NoId), artifact.ContentHash, artifact.ContentKey,
+				deployment_key, epoch, no_id, content_hash, content_key, history_key, payout_root, create_time
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (deployment_key, epoch, no_id) DO NOTHING
+		`, key, int64(artifact.Epoch), int64(artifact.NoId), artifact.ContentHash, artifact.ContentKey,
 			artifact.HistoryKey, artifact.PayoutRoot[:], artifact.CreateTime))
 	})
 }
 
-func GetStPayoutArtifact(ctx context.Context, epoch uint64, noId uint64) *StPayoutArtifact {
+func GetStPayoutArtifact(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, noId uint64) *StPayoutArtifact {
+	key := requireStDeploymentKey(deploymentKey)
 	var artifact *StPayoutArtifact
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
 			SELECT content_hash, content_key, history_key, payout_root, create_time
-			FROM st_payout_artifact WHERE epoch = $1 AND no_id = $2
-		`, int64(epoch), int64(noId))
+			FROM st_payout_artifact WHERE deployment_key = $1 AND epoch = $2 AND no_id = $3
+		`, key, int64(epoch), int64(noId))
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				artifact = &StPayoutArtifact{Epoch: epoch, NoId: noId}
@@ -599,7 +637,8 @@ func GetStPayoutArtifact(ctx context.Context, epoch uint64, noId uint64) *StPayo
 // GetStPayoutLeafForColdkey returns the single leaf for a coldkey in
 // (epoch, noId), or nil. This is the claim-proof lookup for one network's
 // wallet.
-func GetStPayoutLeafForColdkey(ctx context.Context, epoch uint64, noId uint64, coldkey [32]byte) *StPayoutLeaf {
+func GetStPayoutLeafForColdkey(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, noId uint64, coldkey [32]byte) *StPayoutLeaf {
+	key := requireStDeploymentKey(deploymentKey)
 	var leaf *StPayoutLeaf
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -610,8 +649,9 @@ func GetStPayoutLeafForColdkey(ctx context.Context, epoch uint64, noId uint64, c
                     share_bps,
                     leaf_index
                 FROM st_payout_leaf
-                WHERE epoch = $1 AND no_id = $2 AND coldkey = $3
+				WHERE deployment_key = $1 AND epoch = $2 AND no_id = $3 AND coldkey = $4
             `,
+			key,
 			int64(epoch),
 			int64(noId),
 			coldkey[:],
@@ -648,7 +688,8 @@ type StPublish struct {
 }
 
 // AddStPublish records a new pending publish and returns its id.
-func AddStPublish(ctx context.Context, epoch uint64, kind string) server.Id {
+func AddStPublish(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, kind string) server.Id {
+	key := requireStDeploymentKey(deploymentKey)
 	publishId := server.NewId()
 	server.Tx(ctx, func(tx server.PgTx) {
 		now := server.NowUtc()
@@ -657,15 +698,17 @@ func AddStPublish(ctx context.Context, epoch uint64, kind string) server.Id {
 			`
                 INSERT INTO st_publish (
                     publish_id,
+					deployment_key,
                     epoch,
                     kind,
                     status,
                     create_time,
                     update_time
                 )
-                VALUES ($1, $2, $3, $4, $5, $5)
+				VALUES ($1, $2, $3, $4, $5, $6, $6)
             `,
 			publishId,
+			key,
 			int64(epoch),
 			kind,
 			StPublishStatusPending,
@@ -700,7 +743,8 @@ func UpdateStPublish(ctx context.Context, publishId server.Id, status string, tx
 }
 
 // GetStPublishes returns all publish records for an epoch, oldest first.
-func GetStPublishes(ctx context.Context, epoch uint64) []*StPublish {
+func GetStPublishes(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64) []*StPublish {
+	key := requireStDeploymentKey(deploymentKey)
 	publishes := []*StPublish{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -715,9 +759,10 @@ func GetStPublishes(ctx context.Context, epoch uint64) []*StPublish {
                     create_time,
                     update_time
                 FROM st_publish
-                WHERE epoch = $1
+				WHERE deployment_key = $1 AND epoch = $2
                 ORDER BY create_time ASC
             `,
+			key,
 			int64(epoch),
 		)
 		server.WithPgResult(result, err, func() {
@@ -744,23 +789,36 @@ func GetStPublishes(ctx context.Context, epoch uint64) []*StPublish {
 // Durable transaction intent statuses.  An intent is the logical operation;
 // fee replacements are attempts beneath the same intent and nonce.
 const (
-	StTxPrepared  = "prepared"
-	StTxSigned    = "signed"
-	StTxBroadcast = "broadcast"
-	StTxMined     = "mined"
-	StTxFinalized = "finalized"
+	StTxPrepared   = "prepared"
+	StTxSigned     = "signed"
+	StTxBroadcast  = "broadcast"
+	StTxMined      = "mined"
+	StTxFinalized  = "finalized"
+	StTxReverted   = "reverted"
+	StTxInvalid    = "invalid"
+	StTxCanceled   = "canceled"
+	StTxSuperseded = "superseded"
+	// Legacy-only ambiguous terminal state. New code records a canonical EVM
+	// revert separately and leaves local corruption nonterminal for repair.
 	StTxFailed    = "failed"
 	StTxUncertain = "uncertain"
 
 	StTxAttemptReplaced = "replaced"
+
+	StTxAttemptExecution    = "execution"
+	StTxAttemptCancellation = "cancellation"
 )
 
 type StTransactionIntent struct {
 	IntentId      server.Id
 	IntentKey     string
+	LogicalKey    string
+	Generation    int
 	Profile       string
 	DeploymentId  string
+	DeploymentKey StDeploymentKey
 	ChainId       uint64
+	GenesisHash   string
 	FromAddress   string
 	ToAddress     string
 	CalldataHash  string
@@ -777,6 +835,7 @@ type StTransactionIntent struct {
 type StTransactionAttempt struct {
 	IntentId       server.Id
 	Attempt        int
+	Kind           string
 	TxHash         string
 	RawTransaction []byte
 	GasLimit       uint64
@@ -793,11 +852,47 @@ type StTransactionAttempt struct {
 	UpdateTime     time.Time
 }
 
+const stTransactionAttemptColumns = `
+	intent_id, attempt, kind, tx_hash, raw_transaction, gas_limit,
+	gas_price, gas_tip_cap, gas_fee_cap, status,
+	inclusion_block, inclusion_hash, finalized_block, finalized_hash,
+	error, create_time, update_time`
+
+// Decodes one durable signed attempt and preserves nullable chain observations.
+func scanStTransactionAttempt(row interface{ Scan(...any) error }) (*StTransactionAttempt, error) {
+	var attempt StTransactionAttempt
+	var gasLimit int64
+	var inclusionBlock, finalizedBlock *int64
+	err := row.Scan(
+		&attempt.IntentId, &attempt.Attempt, &attempt.Kind, &attempt.TxHash, &attempt.RawTransaction, &gasLimit,
+		&attempt.GasPrice, &attempt.GasTipCap, &attempt.GasFeeCap, &attempt.Status,
+		&inclusionBlock, &attempt.InclusionHash, &finalizedBlock, &attempt.FinalizedHash,
+		&attempt.Error, &attempt.CreateTime, &attempt.UpdateTime,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if gasLimit <= 0 {
+		return nil, fmt.Errorf("invalid stored st transaction gas limit: %d", gasLimit)
+	}
+	attempt.GasLimit = uint64(gasLimit)
+	if inclusionBlock != nil {
+		block := uint64(*inclusionBlock)
+		attempt.InclusionBlock = &block
+	}
+	if finalizedBlock != nil {
+		block := uint64(*finalizedBlock)
+		attempt.FinalizedBlock = &block
+	}
+	return &attempt, nil
+}
+
 func scanStTransactionIntent(row interface{ Scan(...any) error }) *StTransactionIntent {
 	var v StTransactionIntent
 	var chainId, nonce int64
 	server.Raise(row.Scan(
-		&v.IntentId, &v.IntentKey, &v.Profile, &v.DeploymentId, &chainId,
+		&v.IntentId, &v.IntentKey, &v.LogicalKey, &v.Generation,
+		&v.Profile, &v.DeploymentId, &v.DeploymentKey, &chainId, &v.GenesisHash,
 		&v.FromAddress, &v.ToAddress, &v.CalldataHash, &v.Calldata, &nonce,
 		&v.Status, &v.CurrentTxHash, &v.AttemptCount, &v.Error,
 		&v.CreateTime, &v.UpdateTime,
@@ -810,36 +905,40 @@ func scanStTransactionIntent(row interface{ Scan(...any) error }) *StTransaction
 }
 
 const stTransactionIntentColumns = `
-	intent_id, intent_key, profile, deployment_id, chain_id,
+	intent_id, intent_key, logical_key, generation,
+	profile, deployment_id, deployment_key, chain_id, genesis_hash,
 	from_address, to_address, calldata_hash, calldata, nonce,
 	status, current_tx_hash, attempt_count, error, create_time, update_time`
 
-// Frames the advisory-lock identity as printable, length-prefixed hex. Raw NUL
-// separators are invalid PostgreSQL text, and delimiter concatenation is
-// ambiguous when a component itself contains that delimiter.
-func stTransactionAdvisoryLockKey(profile string, deploymentId string, fromAddress string) string {
-	var builder strings.Builder
-	builder.WriteString("st-transaction-v1:")
-	for _, value := range []string{profile, deploymentId, fromAddress} {
-		encoded := hex.EncodeToString([]byte(value))
-		builder.WriteString(strconv.Itoa(len(encoded)))
-		builder.WriteByte(':')
-		builder.WriteString(encoded)
+// The lock follows Ethereum's actual nonce namespace. Human environment and
+// deployment labels are metadata and must never create another nonce lane.
+func stTransactionAdvisoryLockKey(chainId uint64, genesisHash string, fromAddress string) string {
+	return fmt.Sprintf("st-transaction-v2:%d:%s:%s", chainId, strings.ToLower(genesisHash), strings.ToLower(fromAddress))
+}
+
+// A logical operation can have another account nonce only after a canonical
+// revert consumed the preceding generation without changing contract state.
+func stTransactionIntentKey(logicalKey string, generation int) string {
+	intentKey := fmt.Sprintf("%s:%d", logicalKey, generation)
+	if logicalKey == "" || len(intentKey) > 255 || generation < 0 {
+		panic("invalid st transaction logical key or generation")
 	}
-	return builder.String()
+	return intentKey
 }
 
 // ReserveStTransactionIntent atomically reserves the next usable nonce for an
-// account and persists the immutable operation before any signing occurs.  A
-// repeated intentKey returns the original row after byte-for-byte validation.
-// The advisory transaction lock serializes all server processes using the same
-// profile/deployment/account; the database, not process memory, owns nonces.
+// account and persists the immutable operation before any signing occurs. A
+// repeated logical key returns the active generation after byte-for-byte
+// validation. Only a canonically reverted generation may create one successor.
+// The database, not a process or human deployment label, owns account nonces.
 func ReserveStTransactionIntent(
 	ctx context.Context,
-	intentKey string,
+	logicalKey string,
 	profile string,
 	deploymentId string,
+	deploymentKey StDeploymentKey,
 	chainId uint64,
+	genesisHash string,
 	fromAddress string,
 	toAddress string,
 	calldataHash string,
@@ -849,64 +948,82 @@ func ReserveStTransactionIntent(
 	if chainId > uint64(^uint64(0)>>1) || pendingNonce > uint64(^uint64(0)>>1) {
 		panic(fmt.Errorf("st transaction chain id or nonce exceeds postgres bigint"))
 	}
+	key := requireStDeploymentKey(deploymentKey)
+	genesisBytes, genesisErr := hex.DecodeString(strings.TrimPrefix(genesisHash, "0x"))
+	if fromAddress != strings.ToLower(fromAddress) || toAddress != strings.ToLower(toAddress) ||
+		genesisHash != strings.ToLower(genesisHash) || !strings.HasPrefix(genesisHash, "0x") ||
+		genesisErr != nil || len(genesisBytes) != 32 {
+		panic("st transaction chain identity and addresses must be canonical lowercase")
+	}
 	var intent *StTransactionIntent
 	server.Tx(ctx, func(tx server.PgTx) {
 		var ignored any
 		server.Raise(tx.QueryRow(ctx,
 			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-			stTransactionAdvisoryLockKey(profile, deploymentId, fromAddress),
+			stTransactionAdvisoryLockKey(chainId, genesisHash, fromAddress),
 		).Scan(&ignored))
 
 		row := tx.QueryRow(ctx,
-			`SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_key = $1`,
-			intentKey,
+			`SELECT `+stTransactionIntentColumns+`
+			 FROM st_transaction_intent WHERE logical_key = $1
+			 ORDER BY generation DESC LIMIT 1`,
+			logicalKey,
 		)
 		var existing StTransactionIntent
 		var existingChain, existingNonce int64
 		err := row.Scan(
-			&existing.IntentId, &existing.IntentKey, &existing.Profile, &existing.DeploymentId,
-			&existingChain, &existing.FromAddress, &existing.ToAddress, &existing.CalldataHash,
+			&existing.IntentId, &existing.IntentKey, &existing.LogicalKey, &existing.Generation,
+			&existing.Profile, &existing.DeploymentId, &existing.DeploymentKey, &existingChain, &existing.GenesisHash,
+			&existing.FromAddress, &existing.ToAddress, &existing.CalldataHash,
 			&existing.Calldata, &existingNonce, &existing.Status, &existing.CurrentTxHash,
 			&existing.AttemptCount, &existing.Error, &existing.CreateTime, &existing.UpdateTime,
 		)
+		generation := 0
 		if err == nil {
 			existing.ChainId, existing.Nonce = uint64(existingChain), uint64(existingNonce)
-			if existing.Profile != profile || existing.DeploymentId != deploymentId || existing.ChainId != chainId ||
+			if existing.DeploymentKey != deploymentKey || existing.ChainId != chainId || existing.GenesisHash != genesisHash ||
 				existing.FromAddress != fromAddress || existing.ToAddress != toAddress ||
 				existing.CalldataHash != calldataHash || !bytes.Equal(existing.Calldata, calldata) {
-				panic(fmt.Errorf("st transaction intent %q was reused with different immutable data", intentKey))
+				panic(fmt.Errorf("st transaction intent %q was reused with different immutable data", logicalKey))
 			}
-			intent = &existing
-			return
+			if existing.Status != StTxReverted {
+				intent = &existing
+				return
+			}
+			generation = existing.Generation + 1
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			server.Raise(err)
+			if err != nil {
+				server.Raise(err)
+			}
 		}
 
 		var nonce int64
 		server.Raise(tx.QueryRow(ctx, `
 			SELECT GREATEST(
-				$5::bigint,
-				COALESCE(MAX(nonce) + 1, $5::bigint)
+				$4::bigint,
+				COALESCE(MAX(nonce) + 1, $4::bigint)
 			)
 			FROM st_transaction_intent
-			WHERE profile = $1 AND deployment_id = $2 AND chain_id = $3
-				AND from_address = $4
-		`, profile, deploymentId, int64(chainId), fromAddress, int64(pendingNonce)).Scan(&nonce))
+			WHERE chain_id = $1 AND genesis_hash = $2 AND from_address = $3
+		`, int64(chainId), genesisHash, fromAddress, int64(pendingNonce)).Scan(&nonce))
 
 		now := server.NowUtc()
 		intentId := server.NewId()
+		intentKey := stTransactionIntentKey(logicalKey, generation)
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO st_transaction_intent (
-				intent_id, intent_key, profile, deployment_id, chain_id,
+				intent_id, intent_key, logical_key, generation,
+				profile, deployment_id, deployment_key, chain_id, genesis_hash,
 				from_address, to_address, calldata_hash, calldata, nonce,
 				status, create_time, update_time
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
-		`, intentId, intentKey, profile, deploymentId, int64(chainId), fromAddress,
-			toAddress, calldataHash, calldata, nonce, StTxPrepared, now))
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)
+		`, intentId, intentKey, logicalKey, generation, profile, deploymentId, key,
+			int64(chainId), genesisHash, fromAddress, toAddress, calldataHash, calldata, nonce, StTxPrepared, now))
 		intent = &StTransactionIntent{
-			IntentId: intentId, IntentKey: intentKey, Profile: profile,
-			DeploymentId: deploymentId, ChainId: chainId, FromAddress: fromAddress,
+			IntentId: intentId, IntentKey: intentKey, LogicalKey: logicalKey, Generation: generation,
+			Profile: profile, DeploymentId: deploymentId, DeploymentKey: deploymentKey,
+			ChainId: chainId, GenesisHash: genesisHash, FromAddress: fromAddress,
 			ToAddress: toAddress, CalldataHash: calldataHash, Calldata: append([]byte(nil), calldata...),
 			Nonce: uint64(nonce), Status: StTxPrepared, CreateTime: now, UpdateTime: now,
 		}
@@ -914,17 +1031,20 @@ func ReserveStTransactionIntent(
 	return intent
 }
 
-// GetStTransactionIntent returns nil when no such logical operation exists.
-func GetStTransactionIntent(ctx context.Context, intentKey string) *StTransactionIntent {
+// Returns the latest generation, or nil when no such logical operation exists.
+func GetStTransactionIntent(ctx context.Context, logicalKey string) *StTransactionIntent {
 	var intent *StTransactionIntent
 	server.Db(ctx, func(conn server.PgConn) {
 		row := conn.QueryRow(ctx,
-			`SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_key = $1`,
-			intentKey,
+			`SELECT `+stTransactionIntentColumns+`
+			 FROM st_transaction_intent WHERE logical_key = $1
+			 ORDER BY generation DESC LIMIT 1`,
+			logicalKey,
 		)
 		var v StTransactionIntent
 		var chainId, nonce int64
-		err := row.Scan(&v.IntentId, &v.IntentKey, &v.Profile, &v.DeploymentId, &chainId,
+		err := row.Scan(&v.IntentId, &v.IntentKey, &v.LogicalKey, &v.Generation,
+			&v.Profile, &v.DeploymentId, &v.DeploymentKey, &chainId, &v.GenesisHash,
 			&v.FromAddress, &v.ToAddress, &v.CalldataHash, &v.Calldata, &nonce,
 			&v.Status, &v.CurrentTxHash, &v.AttemptCount, &v.Error, &v.CreateTime, &v.UpdateTime)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -937,30 +1057,97 @@ func GetStTransactionIntent(ctx context.Context, intentKey string) *StTransactio
 	return intent
 }
 
-// AddStTransactionAttempt records exact signed bytes before the first RPC
-// broadcast.  Adding an attempt also marks the preceding one replaced.
-func AddStTransactionAttempt(ctx context.Context, attempt *StTransactionAttempt) {
+// Returns every nonce whose canonical outcome is still unresolved, ordered so
+// callers drain gaps before allocating or broadcasting later account nonces.
+func GetUnresolvedStTransactionIntents(ctx context.Context, chainId uint64, genesisHash string, fromAddress string) []*StTransactionIntent {
+	intents := []*StTransactionIntent{}
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `
+			SELECT `+stTransactionIntentColumns+`
+			FROM st_transaction_intent
+			WHERE chain_id=$1 AND genesis_hash=$2 AND from_address=$3
+				AND status NOT IN ($4,$5,$6,$7)
+			ORDER BY nonce, generation
+		`, int64(chainId), genesisHash, fromAddress,
+			StTxFinalized, StTxReverted, StTxCanceled, StTxSuperseded)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				intents = append(intents, scanStTransactionIntent(rows))
+			}
+		})
+	})
+	return intents
+}
+
+// Atomically elects one signed candidate for the next attempt number. A stale
+// concurrent caller receives the already-persisted winner and must broadcast
+// those bytes. No database lock is held while callers perform RPC or signing.
+func AddStTransactionAttempt(ctx context.Context, candidate *StTransactionAttempt) *StTransactionAttempt {
+	if candidate == nil || candidate.Attempt <= 0 ||
+		(candidate.Kind != StTxAttemptExecution && candidate.Kind != StTxAttemptCancellation) {
+		panic("invalid st transaction attempt candidate")
+	}
+	var stored *StTransactionAttempt
 	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		var attemptCount int
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status, attempt_count FROM st_transaction_intent
+			WHERE intent_id=$1 FOR UPDATE
+		`, candidate.IntentId).Scan(&intentStatus, &attemptCount))
+
+		if candidate.Attempt <= attemptCount || stTransactionIntentTerminal(intentStatus) || intentStatus == StTxMined {
+			if attemptCount == 0 {
+				return
+			}
+			var err error
+			stored, err = scanStTransactionAttempt(tx.QueryRow(ctx, `
+				SELECT `+stTransactionAttemptColumns+` FROM st_transaction_attempt
+				WHERE intent_id=$1 AND attempt=$2
+			`, candidate.IntentId, attemptCount))
+			server.Raise(err)
+			return
+		}
+		if candidate.Attempt != attemptCount+1 {
+			panic(fmt.Errorf("st transaction attempt %d skips durable predecessor %d", candidate.Attempt, attemptCount))
+		}
+		if intentStatus != StTxPrepared && intentStatus != StTxSigned && intentStatus != StTxBroadcast && intentStatus != StTxUncertain {
+			panic(fmt.Errorf("st transaction intent has invalid signing state %q", intentStatus))
+		}
 		now := server.NowUtc()
-		server.RaisePgResult(tx.Exec(ctx, `
-			UPDATE st_transaction_attempt SET status = $3, update_time = $4
-			WHERE intent_id = $1 AND attempt = $2 - 1
-				AND status IN ($5,$6,$7,$8)
-		`, attempt.IntentId, attempt.Attempt, StTxAttemptReplaced, now,
-			StTxSigned, StTxBroadcast, StTxMined, StTxUncertain))
+		if attemptCount > 0 {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE st_transaction_attempt SET status = $3, update_time = $4
+				WHERE intent_id = $1 AND attempt = $2
+					AND status IN ($5,$6,$7)
+			`, candidate.IntentId, attemptCount, StTxAttemptReplaced, now,
+				StTxSigned, StTxBroadcast, StTxUncertain))
+		}
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO st_transaction_attempt (
-				intent_id, attempt, tx_hash, raw_transaction, gas_limit,
+				intent_id, attempt, kind, tx_hash, raw_transaction, gas_limit,
 				gas_price, gas_tip_cap, gas_fee_cap, status, create_time, update_time
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)
-		`, attempt.IntentId, attempt.Attempt, attempt.TxHash, attempt.RawTransaction,
-			int64(attempt.GasLimit), attempt.GasPrice, attempt.GasTipCap, attempt.GasFeeCap,
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
+		`, candidate.IntentId, candidate.Attempt, candidate.Kind, candidate.TxHash, candidate.RawTransaction,
+			int64(candidate.GasLimit), candidate.GasPrice, candidate.GasTipCap, candidate.GasFeeCap,
 			StTxSigned, now))
 		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE st_transaction_intent SET status=$2, current_tx_hash=$3,
 				attempt_count=$4, error=NULL, update_time=$5 WHERE intent_id=$1
-		`, attempt.IntentId, StTxSigned, attempt.TxHash, attempt.Attempt, now))
+		`, candidate.IntentId, StTxSigned, candidate.TxHash, candidate.Attempt, now))
+		stored = &StTransactionAttempt{
+			IntentId: candidate.IntentId, Attempt: candidate.Attempt, Kind: candidate.Kind, TxHash: candidate.TxHash,
+			RawTransaction: append([]byte(nil), candidate.RawTransaction...), GasLimit: candidate.GasLimit,
+			GasPrice: candidate.GasPrice, GasTipCap: candidate.GasTipCap, GasFeeCap: candidate.GasFeeCap,
+			Status: StTxSigned, CreateTime: now, UpdateTime: now,
+		}
 	})
+	return stored
+}
+
+// Chain-terminal outcomes absorb every weaker or late observation.
+func stTransactionIntentTerminal(status string) bool {
+	return status == StTxFinalized || status == StTxReverted || status == StTxCanceled || status == StTxSuperseded || status == StTxFailed
 }
 
 func GetCurrentStTransactionAttempt(ctx context.Context, intentId server.Id) *StTransactionAttempt {
@@ -978,31 +1165,14 @@ func GetStTransactionAttempts(ctx context.Context, intentId server.Id) []*StTran
 	attempts := []*StTransactionAttempt{}
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `
-			SELECT intent_id, attempt, tx_hash, raw_transaction, gas_limit,
-				gas_price, gas_tip_cap, gas_fee_cap, status,
-				inclusion_block, inclusion_hash, finalized_block, finalized_hash,
-				error, create_time, update_time
+			SELECT `+stTransactionAttemptColumns+`
 			FROM st_transaction_attempt WHERE intent_id=$1 ORDER BY attempt DESC
 		`, intentId)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
-				var v StTransactionAttempt
-				var gasLimit int64
-				var inclusionBlock, finalizedBlock *int64
-				server.Raise(rows.Scan(&v.IntentId, &v.Attempt, &v.TxHash, &v.RawTransaction, &gasLimit,
-					&v.GasPrice, &v.GasTipCap, &v.GasFeeCap, &v.Status,
-					&inclusionBlock, &v.InclusionHash, &finalizedBlock, &v.FinalizedHash,
-					&v.Error, &v.CreateTime, &v.UpdateTime))
-				v.GasLimit = uint64(gasLimit)
-				if inclusionBlock != nil {
-					n := uint64(*inclusionBlock)
-					v.InclusionBlock = &n
-				}
-				if finalizedBlock != nil {
-					n := uint64(*finalizedBlock)
-					v.FinalizedBlock = &n
-				}
-				attempts = append(attempts, &v)
+				attempt, scanErr := scanStTransactionAttempt(rows)
+				server.Raise(scanErr)
+				attempts = append(attempts, attempt)
 			}
 		})
 	})
@@ -1011,15 +1181,28 @@ func GetStTransactionAttempts(ctx context.Context, intentId server.Id) []*StTran
 
 func updateStTransactionState(ctx context.Context, intentId server.Id, attempt int, status string, errorMessage *string) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		var attemptCount int
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status, attempt_count FROM st_transaction_intent
+			WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus, &attemptCount))
+		if stTransactionIntentTerminal(intentStatus) {
+			return
+		}
 		now := server.NowUtc()
 		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE st_transaction_attempt SET status=$3, error=$4, update_time=$5
 			WHERE intent_id=$1 AND attempt=$2
-		`, intentId, attempt, status, errorMessage, now))
-		server.RaisePgResult(tx.Exec(ctx, `
-			UPDATE st_transaction_intent SET status=$2, error=$3, update_time=$4
-			WHERE intent_id=$1
-		`, intentId, status, errorMessage, now))
+				AND status IN ($6,$7,$8)
+		`, intentId, attempt, status, errorMessage, now,
+			StTxSigned, StTxBroadcast, StTxUncertain))
+		if attempt == attemptCount && intentStatus != StTxMined {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE st_transaction_intent SET status=$2, error=$3, update_time=$4
+				WHERE intent_id=$1
+			`, intentId, status, errorMessage, now))
+		}
 	})
 }
 
@@ -1037,12 +1220,20 @@ func MarkStTransactionUncertain(ctx context.Context, intentId server.Id, attempt
 
 func MarkStTransactionMined(ctx context.Context, intentId server.Id, attempt int, txHash string, block uint64, hash string) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus))
+		if stTransactionIntentTerminal(intentStatus) {
+			return
+		}
 		now := server.NowUtc()
 		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE st_transaction_attempt SET status=$3, inclusion_block=$4,
 				inclusion_hash=$5, error=NULL, update_time=$6
-			WHERE intent_id=$1 AND attempt=$2
-		`, intentId, attempt, StTxMined, int64(block), hash, now))
+			WHERE intent_id=$1 AND attempt=$2 AND status NOT IN ($7,$8)
+		`, intentId, attempt, StTxMined, int64(block), hash, now,
+			StTxFinalized, StTxFailed))
 		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE st_transaction_intent SET status=$2, current_tx_hash=$3, error=NULL, update_time=$4
 			WHERE intent_id=$1
@@ -1050,14 +1241,56 @@ func MarkStTransactionMined(ctx context.Context, intentId server.Id, attempt int
 	})
 }
 
+// Invalidates only the exact non-final inclusion previously observed. A late
+// timeout cannot use this transition to erase another goroutine's newer mined
+// or finalized evidence.
+func MarkStTransactionOrphaned(ctx context.Context, intentId server.Id, attempt int, txHash string, block uint64, hash string, err error) {
+	message := "canonical inclusion was orphaned"
+	if err != nil {
+		message = err.Error()
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		var currentTxHash *string
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status, current_tx_hash FROM st_transaction_intent
+			WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus, &currentTxHash))
+		if stTransactionIntentTerminal(intentStatus) {
+			return
+		}
+		now := server.NowUtc()
+		result, updateErr := tx.Exec(ctx, `
+			UPDATE st_transaction_attempt
+			SET status=$6, inclusion_block=NULL, inclusion_hash=NULL, error=$7, update_time=$8
+			WHERE intent_id=$1 AND attempt=$2 AND status=$3
+				AND inclusion_block=$4 AND inclusion_hash=$5
+		`, intentId, attempt, StTxMined, int64(block), hash, StTxUncertain, message, now)
+		server.Raise(updateErr)
+		if result.RowsAffected() == 1 && currentTxHash != nil && *currentTxHash == txHash {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE st_transaction_intent SET status=$2, error=$3, update_time=$4
+				WHERE intent_id=$1
+			`, intentId, StTxUncertain, message, now))
+		}
+	})
+}
+
 func MarkStTransactionFinalized(ctx context.Context, intentId server.Id, attempt int, txHash string, block uint64, hash string) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus))
+		if stTransactionIntentTerminal(intentStatus) {
+			return
+		}
 		now := server.NowUtc()
 		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE st_transaction_attempt SET status=$3, finalized_block=$4,
 				finalized_hash=$5, error=NULL, update_time=$6
-			WHERE intent_id=$1 AND attempt=$2
-		`, intentId, attempt, StTxFinalized, int64(block), hash, now))
+			WHERE intent_id=$1 AND attempt=$2 AND status <> $7
+		`, intentId, attempt, StTxFinalized, int64(block), hash, now, StTxReverted))
 		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE st_transaction_intent SET status=$2, current_tx_hash=$3, error=NULL, update_time=$4
 			WHERE intent_id=$1
@@ -1065,12 +1298,85 @@ func MarkStTransactionFinalized(ctx context.Context, intentId server.Id, attempt
 	})
 }
 
-func MarkStTransactionFailed(ctx context.Context, intentId server.Id, attempt int, err error) {
-	message := "transaction failed"
+func MarkStTransactionReverted(ctx context.Context, intentId server.Id, attempt int, err error) {
+	message := "transaction reverted"
 	if err != nil {
 		message = err.Error()
 	}
-	updateStTransactionState(ctx, intentId, attempt, StTxFailed, &message)
+	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus))
+		if stTransactionIntentTerminal(intentStatus) {
+			return
+		}
+		now := server.NowUtc()
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE st_transaction_attempt SET status=$3, error=$4, update_time=$5
+			WHERE intent_id=$1 AND attempt=$2 AND status <> $6
+		`, intentId, attempt, StTxReverted, message, now, StTxFinalized))
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE st_transaction_intent SET status=$2, error=$3, update_time=$4
+			WHERE intent_id=$1
+		`, intentId, StTxReverted, message, now))
+	})
+}
+
+// Records that a finalized self-transaction consumed the obsolete nonce
+// without executing the intent's coordinator calldata.
+func MarkStTransactionCanceled(ctx context.Context, intentId server.Id, attempt int, txHash string, block uint64, hash string, err error) {
+	var errorMessage *string
+	if err != nil {
+		message := err.Error()
+		errorMessage = &message
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus))
+		if stTransactionIntentTerminal(intentStatus) {
+			return
+		}
+		now := server.NowUtc()
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE st_transaction_attempt SET status=$3, finalized_block=$4,
+				finalized_hash=$5, error=$6, update_time=$7
+			WHERE intent_id=$1 AND attempt=$2
+		`, intentId, attempt, StTxCanceled, int64(block), hash, errorMessage, now))
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE st_transaction_intent SET status=$2, current_tx_hash=$3,
+				error=$4, update_time=$5 WHERE intent_id=$1
+		`, intentId, StTxCanceled, txHash, errorMessage, now))
+	})
+}
+
+// Records finalized account-nonce consumption for which none of the durable
+// attempt hashes is canonical. The unknown transaction cannot be overwritten.
+func MarkStTransactionSuperseded(ctx context.Context, intentId server.Id, err error) {
+	message := "account nonce was consumed by an unknown transaction"
+	if err != nil {
+		message = err.Error()
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		var intentStatus string
+		server.Raise(tx.QueryRow(ctx, `
+			SELECT status FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus))
+		if stTransactionIntentTerminal(intentStatus) {
+			return
+		}
+		now := server.NowUtc()
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE st_transaction_attempt SET status=$2, error=$3, update_time=$4
+			WHERE intent_id=$1 AND status NOT IN ($5,$6)
+		`, intentId, StTxSuperseded, message, now, StTxFinalized, StTxReverted))
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE st_transaction_intent SET status=$2, error=$3, update_time=$4
+			WHERE intent_id=$1
+		`, intentId, StTxSuperseded, message, now))
+	})
 }
 
 // StChainEvent is one mirrored contract log, unique on
@@ -1086,16 +1392,18 @@ type StChainEvent struct {
 
 // UpsertStEvents inserts events, ignoring rows already mirrored (log ranges
 // are re-scanned conservatively, so duplicates are expected).
-func UpsertStEvents(ctx context.Context, events []*StChainEvent) {
+func UpsertStEvents(ctx context.Context, deploymentKey StDeploymentKey, events []*StChainEvent) {
 	if len(events) == 0 {
 		return
 	}
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, event := range events {
 				batch.Queue(
 					`
                         INSERT INTO st_event (
+							deployment_key,
                             block_number,
 							block_hash,
                             log_index,
@@ -1103,9 +1411,10 @@ func UpsertStEvents(ctx context.Context, events []*StChainEvent) {
                             kind,
                             data_json
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6)
-                        ON CONFLICT (block_number, log_index) DO NOTHING
+						VALUES ($1, $2, $3, $4, $5, $6, $7)
+						ON CONFLICT (deployment_key, block_number, log_index) DO NOTHING
                     `,
+					key,
 					int64(event.BlockNumber),
 					event.BlockHash,
 					event.LogIndex,
@@ -1119,7 +1428,8 @@ func UpsertStEvents(ctx context.Context, events []*StChainEvent) {
 }
 
 // GetStEvents returns mirrored events in [minBlock, maxBlock], ordered.
-func GetStEvents(ctx context.Context, minBlock uint64, maxBlock uint64) []*StChainEvent {
+func GetStEvents(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) []*StChainEvent {
+	key := requireStDeploymentKey(deploymentKey)
 	events := []*StChainEvent{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1133,9 +1443,10 @@ func GetStEvents(ctx context.Context, minBlock uint64, maxBlock uint64) []*StCha
                     kind,
                     data_json
                 FROM st_event
-                WHERE $1 <= block_number AND block_number <= $2
+				WHERE deployment_key = $1 AND $2 <= block_number AND block_number <= $3
                 ORDER BY block_number ASC, log_index ASC
             `,
+			key,
 			int64(minBlock),
 			int64(maxBlock),
 		)
@@ -1164,10 +1475,11 @@ type StChainCheckpoint struct {
 	BlockHash string // canonical hash of NextBlock-1; empty only before first scan
 }
 
-func GetStChainCheckpoint(ctx context.Context) StChainCheckpoint {
+func GetStChainCheckpoint(ctx context.Context, deploymentKey StDeploymentKey) StChainCheckpoint {
+	key := requireStDeploymentKey(deploymentKey)
 	checkpoint := StChainCheckpoint{}
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `SELECT high_water_block, block_hash FROM st_chain_sync WHERE singleton_id = 1`)
+		result, err := conn.Query(ctx, `SELECT high_water_block, block_hash FROM st_chain_sync WHERE deployment_key = $1 AND singleton_id = 1`, key)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				var block int64
@@ -1215,7 +1527,8 @@ func parseDepositedEvent(dataJson string) (epoch uint64, noId uint64, amount *bi
 // reading contract state. The event carries its own epoch `e`, so this filters
 // on that field (deposits are infrequent, so the full scan by kind is cheap and
 // matches the GetHeadBoundCkeysInEpoch precedent).
-func SumStDepositedRao(ctx context.Context, epoch uint64, noId uint64) *big.Int {
+func SumStDepositedRao(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, noId uint64) *big.Int {
+	key := requireStDeploymentKey(deploymentKey)
 	total := big.NewInt(0)
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1223,8 +1536,9 @@ func SumStDepositedRao(ctx context.Context, epoch uint64, noId uint64) *big.Int 
 			`
                 SELECT data_json
                 FROM st_event
-                WHERE kind = 'Deposited'
+				WHERE deployment_key = $1 AND kind = 'Deposited'
             `,
+			key,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1244,7 +1558,8 @@ func SumStDepositedRao(ctx context.Context, epoch uint64, noId uint64) *big.Int 
 // and NOs — the demand deposits inside a wall-clock window mapped to chain
 // blocks (the public stats collector, controller/stats_collector.go). The
 // kind+block index covers the scan.
-func SumStDepositedInBlockRangeRao(ctx context.Context, minBlock uint64, maxBlock uint64) *big.Int {
+func SumStDepositedInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
+	key := requireStDeploymentKey(deploymentKey)
 	total := big.NewInt(0)
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1252,8 +1567,9 @@ func SumStDepositedInBlockRangeRao(ctx context.Context, minBlock uint64, maxBloc
 			`
                 SELECT data_json
                 FROM st_event
-                WHERE kind = 'Deposited' AND $1 <= block_number AND block_number < $2
+				WHERE deployment_key = $1 AND kind = 'Deposited' AND $2 <= block_number AND block_number < $3
             `,
+			key,
 			int64(minBlock),
 			int64(maxBlock),
 		)
@@ -1293,7 +1609,8 @@ func parsePoolSweptEvent(dataJson string) (measured *big.Int, ok bool) {
 // miner emission captured by the D-4 sweeps inside a wall-clock window
 // mapped to chain blocks (the public stats collector,
 // controller/stats_collector.go).
-func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, minBlock uint64, maxBlock uint64) *big.Int {
+func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) *big.Int {
+	key := requireStDeploymentKey(deploymentKey)
 	total := big.NewInt(0)
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1301,8 +1618,9 @@ func SumStPoolSweptMeasuredInBlockRangeRao(ctx context.Context, minBlock uint64,
 			`
                 SELECT data_json
                 FROM st_event
-                WHERE kind = 'PoolSwept' AND $1 <= block_number AND block_number < $2
+				WHERE deployment_key = $1 AND kind = 'PoolSwept' AND $2 <= block_number AND block_number < $3
             `,
+			key,
 			int64(minBlock),
 			int64(maxBlock),
 		)
@@ -1346,7 +1664,8 @@ func parseMinerClaimedEvent(dataJson string) (coldkey string, amount *big.Int, o
 // the distinct claiming coldkeys — the miner payouts claimed inside a
 // wall-clock window mapped to chain blocks (the public stats collector,
 // controller/stats_collector.go). The kind+block index covers the scan.
-func SumStMinerClaimedInBlockRange(ctx context.Context, minBlock uint64, maxBlock uint64) (amountRao *big.Int, minerCount int64) {
+func SumStMinerClaimedInBlockRange(ctx context.Context, deploymentKey StDeploymentKey, minBlock uint64, maxBlock uint64) (amountRao *big.Int, minerCount int64) {
+	key := requireStDeploymentKey(deploymentKey)
 	amountRao = big.NewInt(0)
 	coldkeys := map[string]bool{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -1355,8 +1674,9 @@ func SumStMinerClaimedInBlockRange(ctx context.Context, minBlock uint64, maxBloc
 			`
                 SELECT data_json
                 FROM st_event
-                WHERE kind = 'MinerClaimed' AND $1 <= block_number AND block_number < $2
+				WHERE deployment_key = $1 AND kind = 'MinerClaimed' AND $2 <= block_number AND block_number < $3
             `,
+			key,
 			int64(minBlock),
 			int64(maxBlock),
 		)
@@ -1376,26 +1696,28 @@ func SumStMinerClaimedInBlockRange(ctx context.Context, minBlock uint64, maxBloc
 
 // GetStHighWaterBlock returns the next block the event sync should scan
 // from (0 when never synced).
-func GetStHighWaterBlock(ctx context.Context) uint64 {
-	return GetStChainCheckpoint(ctx).NextBlock
+func GetStHighWaterBlock(ctx context.Context, deploymentKey StDeploymentKey) uint64 {
+	return GetStChainCheckpoint(ctx, deploymentKey).NextBlock
 }
 
 // SetStHighWaterBlock advances the event sync high-water mark. The mark
 // never moves backward (re-scans are idempotent but pointless).
-func SetStHighWaterBlock(ctx context.Context, block uint64) {
+func SetStHighWaterBlock(ctx context.Context, deploymentKey StDeploymentKey, block uint64) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-                INSERT INTO st_chain_sync (singleton_id, high_water_block, block_hash, update_time)
-                VALUES (1, $1, '', $2)
-                ON CONFLICT (singleton_id) DO UPDATE
+				INSERT INTO st_chain_sync (deployment_key, singleton_id, high_water_block, block_hash, update_time)
+				VALUES ($1, 1, $2, '', $3)
+				ON CONFLICT (deployment_key, singleton_id) DO UPDATE
                 SET
 					high_water_block = EXCLUDED.high_water_block,
 					block_hash = EXCLUDED.block_hash,
 					update_time = EXCLUDED.update_time
 				WHERE st_chain_sync.high_water_block < EXCLUDED.high_water_block
             `,
+			key,
 			int64(block),
 			server.NowUtc(),
 		))
@@ -1405,19 +1727,21 @@ func SetStHighWaterBlock(ctx context.Context, block uint64) {
 // SetStChainCheckpoint records the exact canonical boundary. It intentionally
 // does not use GREATEST: a reconciler may explicitly rewind after operator
 // review, while normal callers verify monotonicity and parent hashes first.
-func SetStChainCheckpoint(ctx context.Context, checkpoint StChainCheckpoint) {
+func SetStChainCheckpoint(ctx context.Context, deploymentKey StDeploymentKey, checkpoint StChainCheckpoint) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-                INSERT INTO st_chain_sync (singleton_id, high_water_block, block_hash, update_time)
-                VALUES (1, $1, $2, $3)
-                ON CONFLICT (singleton_id) DO UPDATE
+				INSERT INTO st_chain_sync (deployment_key, singleton_id, high_water_block, block_hash, update_time)
+				VALUES ($1, 1, $2, $3, $4)
+				ON CONFLICT (deployment_key, singleton_id) DO UPDATE
                 SET
-					high_water_block = $1,
-					block_hash = $2,
-					update_time = $3
+					high_water_block = EXCLUDED.high_water_block,
+					block_hash = EXCLUDED.block_hash,
+					update_time = EXCLUDED.update_time
             `,
+			key,
 			int64(checkpoint.NextBlock),
 			checkpoint.BlockHash,
 			server.NowUtc(),
@@ -1561,12 +1885,14 @@ type StHeadBinding struct {
 // these in block/log order; the update_block guard makes a conservative
 // re-scan idempotent — an older event never regresses a newer state, and a
 // same-block later log (applied last) wins.
-func UpsertStHeadBinding(ctx context.Context, ckey [32]byte, hotkey [32]byte, uid uint64, active bool, updateBlock uint64) {
+func UpsertStHeadBinding(ctx context.Context, deploymentKey StDeploymentKey, ckey [32]byte, hotkey [32]byte, uid uint64, active bool, updateBlock uint64) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
                 INSERT INTO st_head_binding (
+					deployment_key,
                     ckey,
                     hotkey,
                     uid,
@@ -1574,16 +1900,17 @@ func UpsertStHeadBinding(ctx context.Context, ckey [32]byte, hotkey [32]byte, ui
                     update_block,
                     update_time
                 )
-                VALUES ($1, $2, $3, $4, $5, $6)
-                ON CONFLICT (ckey) DO UPDATE
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+				ON CONFLICT (deployment_key, ckey) DO UPDATE
                 SET
-                    hotkey = $2,
-                    uid = $3,
-                    active = $4,
-                    update_block = $5,
-                    update_time = $6
-                WHERE st_head_binding.update_block <= $5
+					hotkey = EXCLUDED.hotkey,
+					uid = EXCLUDED.uid,
+					active = EXCLUDED.active,
+					update_block = EXCLUDED.update_block,
+					update_time = EXCLUDED.update_time
+				WHERE st_head_binding.update_block <= EXCLUDED.update_block
             `,
+			key,
 			ckey[:],
 			hotkey[:],
 			int64(uid),
@@ -1627,7 +1954,8 @@ func parseHeadEventCkey(dataJson string) ([32]byte, bool) {
 // block before close while keeping ~all its head emission. The event-log
 // interval reconstruction is fully correct, including multiple bind/unbind
 // cycles within one epoch.
-func GetHeadBoundCkeysInEpoch(ctx context.Context, startBlock uint64, closeBlock uint64) map[[32]byte]bool {
+func GetHeadBoundCkeysInEpoch(ctx context.Context, deploymentKey StDeploymentKey, startBlock uint64, closeBlock uint64) map[[32]byte]bool {
+	key := requireStDeploymentKey(deploymentKey)
 	events := []StHeadEvent{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1635,9 +1963,10 @@ func GetHeadBoundCkeysInEpoch(ctx context.Context, startBlock uint64, closeBlock
 			`
                 SELECT kind, data_json, block_number
                 FROM st_event
-                WHERE kind IN ('HeadBound', 'HeadUnbound') AND block_number <= $1
+				WHERE deployment_key = $1 AND kind IN ('HeadBound', 'HeadUnbound') AND block_number <= $2
                 ORDER BY block_number ASC, log_index ASC
             `,
+			key,
 			int64(closeBlock),
 		)
 		server.WithPgResult(result, err, func() {

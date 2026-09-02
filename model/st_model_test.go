@@ -17,32 +17,22 @@ func testStCkey(marker byte) [32]byte {
 	return ckey
 }
 
-// Lock identities are deterministic, printable and injective across tuples
-// that collide under delimiter concatenation. NUL-bearing values exercise the
-// exact character PostgreSQL rejected in the former key.
-func TestStTransactionAdvisoryLockKeyFramesAdversarialTuples(t *testing.T) {
-	tuples := [][3]string{
-		{"testnet", "release", "0xabc"},
-		{"testnet:", "release", "0xabc"},
-		{"testnet", ":release", "0xabc"},
-		{"a\x00b", "c", "d"},
-		{"a", "b", "c\x00d"},
-		{"", "", ""},
-		{"测试", "deployment/with:delimiters", "address"},
+// Human labels do not create nonce lanes; only the chain account does.
+func TestStTransactionAdvisoryLockKeyUsesEthereumNonceScope(t *testing.T) {
+	address := "0x" + strings.Repeat("a", 40)
+	genesisHash := "0x" + strings.Repeat("1", 64)
+	key := stTransactionAdvisoryLockKey(945, genesisHash, address)
+	if strings.ContainsRune(key, '\x00') {
+		t.Fatalf("lock key contains a PostgreSQL-invalid NUL: %q", key)
 	}
-	seen := map[string][3]string{}
-	for _, tuple := range tuples {
-		key := stTransactionAdvisoryLockKey(tuple[0], tuple[1], tuple[2])
-		if strings.ContainsRune(key, '\x00') {
-			t.Errorf("tuple %q produced a PostgreSQL-invalid NUL key", tuple)
-		}
-		if previous, ok := seen[key]; ok {
-			t.Errorf("tuples %q and %q produced the same lock key", previous, tuple)
-		}
-		seen[key] = tuple
-		if repeated := stTransactionAdvisoryLockKey(tuple[0], tuple[1], tuple[2]); repeated != key {
-			t.Errorf("tuple %q produced nondeterministic keys", tuple)
-		}
+	if repeated := stTransactionAdvisoryLockKey(945, strings.ToUpper(genesisHash), strings.ToUpper(address)); repeated != key {
+		t.Fatalf("address case created another nonce lane: %q != %q", repeated, key)
+	}
+	if other := stTransactionAdvisoryLockKey(964, genesisHash, address); other == key {
+		t.Fatal("different chains shared one nonce lock")
+	}
+	if other := stTransactionAdvisoryLockKey(945, genesisHash, "0x"+strings.Repeat("b", 40)); other == key {
+		t.Fatal("different accounts shared one nonce lock")
 	}
 }
 
