@@ -69,6 +69,7 @@ func NewSignals() []Signal {
 		NewConnectionOrphansSignal(),
 		NewMissingOriginSignal(),
 		NewStaleDestinationSignal(),
+		NewEgressCoverageSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),

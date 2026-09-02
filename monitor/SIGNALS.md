@@ -4090,6 +4090,93 @@ tests cover the high-rate frame, explicit-zero boundary, missing/duplicate and
 unknown partitions, stale/invalid/skewed samples, query scoping, rollout-aware
 missing-instrumentation guidance, and detailed identifier-free Markdown.
 
+### 2.19 Provider egress probe coverage — every durable shard must advance
+Probe: `egress-coverage`
+
+The provider-egress pipeline now runs as recurring `pending_task` shards rather
+than as host-owned edge services. Generic task health (§1.2/§8.9) can detect a
+row that is parked, overdue, or failing, but cannot prove that every hash slice
+exists. A healthy shard can also keep a fleet-wide maximum timestamp fresh
+while another slice is absent or frozen. Observe the durable geometry first:
+
+```sql
+SELECT run_once_key, args_json, run_max_time_seconds
+FROM pending_task
+WHERE function_name =
+  'github.com/urnetwork/server/taskworker/work.ProviderEgressProbe'
+ORDER BY run_once_key;
+```
+
+Parse the argument JSON inside the monitor without returning it in an alert.
+Every row carries `shard_index`, `shard_count`, `idle_delay_seconds`,
+`max_time_seconds`, and the bounded full/blackhole batch settings. Require:
+
+- exactly `shard_count` rows with one common settings snapshot;
+- indexes covering every integer in `[0, shard_count)` exactly once;
+- `run_once_key=["provider_egress_probe",shard_index]` for each row;
+- positive limits, concurrency, timeouts, idle delay, and max time, with each
+  concurrency at or below its batch limit; and
+- `pending_task.run_max_time_seconds` equal to the argument snapshot.
+
+Malformed JSON, endpoint values, task IDs, credentials, and client IDs are
+never copied into the alert. The probe reports only bounded structural reasons
+such as `missing_shard_1` or `row_2_mixed_settings`. Zero rows is not zero due
+work: it is `egress-probe-unarmed`. The same rollout alert remains open until
+the append-only `provider_egress_health.tls_authentication_failure` field
+exists, because the new full-probe ingestion path cannot satisfy its integrity
+contract without that schema.
+
+After geometry is valid, assign each eligible active, top-level, connected,
+valid Public provider to the exact normalized PostgreSQL partition used by the
+due APIs:
+
+```sql
+((hashtext(client_id::text) % shard_count) + shard_count) % shard_count
+```
+
+For each shard, aggregate without exporting identifiers:
+
+- full due: no egress location, or location older than 84 hours, AND no probe
+  attempt in six hours;
+- blackhole due: no check, or a check older than 90 minutes;
+- newest full activity: the newest location, attempt, or health timestamp in
+  that same shard;
+- newest blackhole activity: the newest blackhole check in that shard; and
+- current coverage: locations inside seven days and blackhole checks inside
+  three hours.
+
+The due ages are the application contract: full refresh begins at half the
+seven-day location lifetime, failed attempts back off for six hours, and the
+cheap blackhole sweep becomes due at half its three-hour maximum age. Do not
+invent a percentage floor while a large first sweep is catching up. Instead,
+when `due > 0`, require the corresponding shard-local newest timestamp to be no
+older than its durable `max_time + idle_delay` plus one five-minute monitor
+cadence. Old evidence is healthy when the exact due count is zero.
+
+- `egress-probe-shards` (PAGE): missing, duplicate, malformed, or
+  mixed-generation durable geometry. Let the normal bootstrap/post path
+  converge it; never clone, delete, or rewrite pending rows by hand.
+- `egress-full-stalled` (PAGE after two samples): a shard has full-probe due
+  candidates but no location/attempt/health progress inside the derived bound.
+- `egress-blackhole-stalled` (PAGE after two samples): a shard has blackhole
+  due candidates but no check progress inside the same derived bound.
+- `egress-probe-unarmed` (WARN after two samples): the required schema or all
+  durable tasks are absent. Apply migrations before deploying the Taskworker
+  generation and let normal initialization schedule the rows.
+
+Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
+logs and generic task error. Repair the concrete authentication, API,
+task-claim, or tunnel execution fault; do not delete provider evidence just to
+move the timestamp. This is a **software execution / operational rollout**
+alert class. It cannot be fixed by adding Proxy hardware, and it does not imply
+that the independent Proxy active-client ceiling is adequate.
+
+Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
+`signal_egress_coverage.go` and `signal_egress_coverage_test.go`. Synthetic
+tests cover an unarmed rollout, a missing shard, shard-local full/blackhole
+stalls hidden by a healthy sibling, healthy empty due queues, malformed-secret
+redaction, normalized signed hashing, and ambiguous aggregate rejection.
+
 ---
 
 ## 3. redis signal catalog
