@@ -7983,7 +7983,10 @@ BROKEN:
   create a recovery point.
 - `backup-archive-stale` is immediate once the newest real completion is more
   than five days old. A current scrape of an old value proves the telemetry
-  path while reporting an expired recovery-point objective.
+  path while reporting an expired recovery-point objective. When
+  `in_progress=1`, preserve the single active writer and compare increasing
+  receive bytes plus source backlog with sustained VPN throughput. A transfer
+  is not stalled merely because its atomic final timestamp has not moved.
 - `backup-archive-progress-stale` after two probes means direct systemd state
   and the two exported GitHub phase gauges disagree, the active unit has no
   MainPID, or its producer heartbeat value is absent or more than 90 seconds
@@ -8080,6 +8083,19 @@ approved fstab/systemd-mount design; replacement media and additional free
 capacity are hardware work. Software cannot attach an absent disk or create
 archive capacity. Never fabricate a timestamp, rename a partial artifact,
 refresh a stale value, or raise the five-day threshold to clear these classes.
+
+The natural 2026-09-02 04:00 PDT data run supplied the capacity discriminator.
+Direct systemd checks retained one stable writer PID and one PostgreSQL rsync
+over the inventory VPN with zero restarts, a read-write archive mount, and
+about 5.6 TiB free. The receiver sustained only about 0.95 MiB/s while the two
+complete source PostgreSQL archives totaled 705.15 GiB; its active SSH stream
+had received about 4.8 GB after roughly 80 minutes. If that rate persists and
+both generations must cross the link, catch-up is approximately nine days.
+Restarting or deploying code cannot increase that link budget. Preserve the
+partial-capable rsync; operations must provision a faster offsite path or an
+approved offline seed, then prove later scheduled deltas keep every recovery
+point inside five days. This is a **network/operations or hardware-capacity
+closure**, not a software-only fix.
 
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;

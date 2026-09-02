@@ -105,6 +105,36 @@ func TestBackupArchivesSignalSyntheticStaleAndMissingGenerations(t *testing.T) {
 	}
 }
 
+func TestBackupArchivesSignalSyntheticStaleActiveTransferNeedsCapacity(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 30, 0, 0, time.UTC)
+	zero := float64(0)
+	one := float64(1)
+	stale := now.Add(-13 * 24 * time.Hour)
+	fresh := now.Add(-24 * time.Hour)
+	alerts := runBackupArchiveFixtures(t, now,
+		backupArchiveFixture{archive: "pg", generation: "main-pg-old.sql.xz", createdAt: &stale, progress: &one},
+		backupArchiveFixture{archive: "redis", generation: "main-redis-current", createdAt: &fresh, progress: &zero},
+		backupArchiveFixture{archive: "github-urnetwork", generation: "main-code-urnetwork-current.tar.xz", createdAt: &fresh, progress: &zero},
+		backupArchiveFixture{archive: "github-urfoundation", generation: "main-code-urfoundation-current.tar.xz", createdAt: &fresh, progress: &zero},
+	)
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-stale", "backup-1/pg")
+	for _, want := range []string{
+		"in_progress=1",
+		"Preserve the active writer",
+		"source backlog with sustained VPN throughput",
+		"faster path or an approved offline seed",
+		"Software cannot create WAN bandwidth",
+		"Do not restart, duplicate, or manually finalize",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("active stale archive alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	if strings.Contains(alert.Action, "Start a catch-up run") {
+		t.Fatalf("active transfer retained stale start guidance: %+v", alert)
+	}
+}
+
 func TestBackupArchivesSignalSyntheticDetectsStaleActiveWriterProgress(t *testing.T) {
 	now := time.Date(2026, 9, 1, 23, 56, 0, 0, time.UTC)
 	zero := float64(0)

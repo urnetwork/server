@@ -649,6 +649,16 @@ func evaluateBackupArchive(now time.Time, observation *backupArchiveObservation,
 		if len(observation.progress) == 1 {
 			progress = strconv.FormatFloat(observation.progress[0], 'f', 0, 64)
 		}
+		mechanism := "The source textfile is current, but its archive timestamp has not advanced inside the five-day recovery-point objective. The scheduled pull may have failed before its atomic final rename; on 2026-09-01 the data job waited 15 minutes for an absent udisks mount and exited without replacing the August 20 generation."
+		context := "This alert is operational and may require persistent mount configuration, replacement media, or more archive capacity. A collector, Grafana, or code deploy alone cannot create a new recovery point."
+		action := "Read the owning unit result and journal, verify the configured archive path is a real mounted filesystem with enough free space, then repair the first failed prerequisite. Start a catch-up run only with operator authorization; never refresh the metric without producing and validating a new archive."
+		verify := "The exact unit exits successfully, the completed generation and manifest validate on mounted media, its timestamp is within five days, and two consecutive direct Mimir reads show the same new generation."
+		if progress == "1" {
+			mechanism = "The source textfile is current and a writer is active, but no new atomic recovery point exists until that transfer completes. A healthy process can remain outside the five-day objective when source backlog divided by sustained offsite throughput exceeds the available recovery window."
+			context = "An active single-writer transfer is operationally pending, not fixed and not stalled merely because its final timestamp is unchanged. Software cannot create WAN bandwidth, attach seed media, or shorten the bytes that must cross the recovery boundary."
+			action = "Preserve the active writer. Confirm one stable unit/PID, one source transfer, a read-write mounted archive, fresh progress telemetry, and increasing receive bytes; then compare source backlog with sustained VPN throughput. If the projected completion misses the recovery-point objective, operations must provision a faster path or an approved offline seed. Do not restart, duplicate, or manually finalize the transfer to make the timestamp move."
+			verify = "The same authorized run completes atomically, its artifact and manifest validate, two direct Mimir reads expose the new generation, and a subsequent scheduled run proves the available offsite throughput can keep the archive inside the five-day objective."
+		}
 		findings = append(findings, finding{
 			probeId: "observability/backup-archives", tier: tierPage,
 			class: "backup-archive-stale", target: target, sustain: 1,
@@ -656,16 +666,16 @@ func evaluateBackupArchive(now time.Time, observation *backupArchiveObservation,
 				"%s newest completed generation is %s old",
 				target, ageText,
 			),
-			mechanism: "The source textfile is current, but its archive timestamp has not advanced inside the five-day recovery-point objective. The scheduled pull may have failed before its atomic final rename; on 2026-09-01 the data job waited 15 minutes for an absent udisks mount and exited without replacing the August 20 generation.",
+			mechanism: mechanism,
 			baseline:  "Every completed archive timestamp is no more than five days old; current scrapes continue even when the stored generation is stale.",
 			observed: fmt.Sprintf(
 				"generation=%s completed_at=%s age=%s in_progress=%s fresh_latest_samples=%d metrics_gateway=%s",
 				latest.generation, latest.createdAt.Format(time.RFC3339), ageText, progress, len(observation.latest), gateway,
 			),
 			evidence: "Archive age comes from the producer's completed-file timestamp carried as the metric value, not from the fresh Mimir scrape timestamp.",
-			context:  "This alert is operational and may require persistent mount configuration, replacement media, or more archive capacity. A collector, Grafana, or code deploy alone cannot create a new recovery point.",
-			action:   "Read the owning unit result and journal, verify the configured archive path is a real mounted filesystem with enough free space, then repair the first failed prerequisite. Start a catch-up run only with operator authorization; never refresh the metric without producing and validating a new archive.",
-			verify:   "The exact unit exits successfully, the completed generation and manifest validate on mounted media, its timestamp is within five days, and two consecutive direct Mimir reads show the same new generation.",
+			context:  context,
+			action:   action,
+			verify:   verify,
 			playbook: "SIGNALS.md §11.22",
 		})
 	} else {
