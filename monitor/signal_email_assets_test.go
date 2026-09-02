@@ -149,7 +149,7 @@ func TestEmailAssetsSignalSyntheticStaleSiteBundleRootCause(t *testing.T) {
 		"Web service",
 		"release-order blocker",
 		"API and Taskworker",
-		"server commit 7c852d56",
+		"server commit ec6e3b92",
 		"deployed build predates the assets",
 		"functional product regression",
 		"SIGNALS.md §19.2",
@@ -158,7 +158,7 @@ func TestEmailAssetsSignalSyntheticStaleSiteBundleRootCause(t *testing.T) {
 			t.Fatalf("email-asset alert missing %q: %s", want, markdown)
 		}
 	}
-	for _, stale := range []string{"CloudFront", "main-web", "/res/emails/"} {
+	for _, stale := range []string{"CloudFront", "main-web", "/res/emails/", "7c852d56"} {
 		if strings.Contains(markdown, stale) {
 			t.Fatalf("email-asset alert retained the retired hosting diagnosis %q: %s", stale, markdown)
 		}

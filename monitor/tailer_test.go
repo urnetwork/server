@@ -647,7 +647,7 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 		"independent random choices still cannot impose a fleet-wide per-second ceiling",
 		"five wallet rejections completed and a sixth transfer request received 429",
 		"four of those five rejections came from blocks whose exact executable already contained proportional jitter",
-		"commit eb7e79b6",
+		"commit 14928f69",
 		"commit 66525afc",
 		"atomic Redis-time rolling gate of three transfer submits/second",
 		"complete §2.14 admission metrics",
@@ -657,6 +657,9 @@ func TestPayoutRetryMicroburstCountsDistinctTaskAttemptsPerSecond(t *testing.T) 
 		if combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism + "\n" + finding.context + "\n" + finding.action + "\n" + finding.verify; !strings.Contains(combined, want) {
 			t.Fatalf("microburst finding missing %q: %+v", want, finding)
 		}
+	}
+	if strings.Contains(finding.context, "eb7e79b6") {
+		t.Fatalf("microburst finding retained former non-ancestor deployment guidance: %+v", finding)
 	}
 	if logIDRe.MatchString(finding.evidence) {
 		t.Fatalf("microburst evidence leaked a payment id: %q", finding.evidence)

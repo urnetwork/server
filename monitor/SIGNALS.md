@@ -511,7 +511,8 @@ WHERE function_name LIKE '%UpdateClient%'
   specifies five default POST requests/second and a 429 when exceeded, matching
   the observed five completed rejections plus sixth refusal.
 
-  Server commit `eb7e79b6` is the root fix. Immediately before the developer
+  Current-main server commit `14928f69` (the patch-identical replay of former
+  commit `eb7e79b6`) is the root fix. Immediately before the developer
   transfer POST, every process contends on one Redis-time rolling sorted set;
   an atomic Lua decision admits at most three submits in any rolling second,
   leaving two requests/second of documented headroom. A unique member makes a
@@ -3523,7 +3524,8 @@ though four of the five responses came from executables already proven to
 contain proportional retry jitter. Random scheduling is useful load
 dispersion, but it is not admission control.
 
-Server commit `eb7e79b6` puts one fail-closed, fleet-wide gate immediately
+Current-main server commit `14928f69` (the patch-identical replay of former
+commit `eb7e79b6`) puts one fail-closed, fleet-wide gate immediately
 before the transfer POST. Redis server time eliminates host-clock skew. One
 atomic sorted-set script admits no more than three unique transfer calls in a
 rolling second, leaving two requests/second of headroom for other callers. A
@@ -4185,7 +4187,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | Panic stack traces (`trace.go` "Unexpected error") | The STACK identifies the load-bearing call path (e.g. AddNetworkPeer → NominateLocalResident = connection-killing). | Rate per unique innermost app frame; a new frame appearing at rate = new incident. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes = netEscrow drift re-emerging (`bringyourctl contracts reconcile-net-escrow --dry-run`) or a balance-grant regression. Do not calculate the rate from sampled logs. |
-| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; `eb7e79b6` separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean `66525afc` Taskworker only where §8.12/§2.14 proves it absent; another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
+| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; current-main `14928f69` (the patch-identical replay of former `eb7e79b6`) separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean `66525afc` Taskworker only where §8.12/§2.14 proves it absent; another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
 | `payout-retry-microburst` (derived standing-tail finding; not a literal log line) | At least four exact-replay-deduplicated task evaluator attempts landed in one embedded source second. The post-jitter 2026-09-01 control proved independent random delays still reached five responses plus a sixth 429; four/second is therefore both the empirical precursor and the invariant below the new three/rolling-second gate. | **Software deployment action:** use §8.12 and §2.14 to deploy a clean Taskworker containing `66525afc` only where absent. Preserve backoff and idempotency keys. Verify all admission collectors, zero gate errors, a full 90-minute window below four attempts/second, and no new processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `66525afc` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
@@ -9386,8 +9388,9 @@ joins every admitted constructor and device worker, closes the shared
 external ownership boundary, and closes the acceptance tracker's independently
 owned space. SDK commit `e05ec46` supplies the matching device, provider, RPC,
 remote, generator, sampler, monitor, and owned-API joins while rejecting late
-work after close. Server commit `54f461fe` adds the identity-free capability
-gauge and replaces a remote-handler scheduling assumption in the manager test
+work after close. Current-main server commit `04c40524` (the patch-identical
+replay of former commit `54f461fe`) adds the identity-free capability gauge
+and replaces a remote-handler scheduling assumption in the manager test
 with an exact local `NetworkSpace.Close` barrier. Barrier-driven synthetic
 tests prove that manager shutdown cannot overtake the owned `NetworkSpace`, an
 admitted open drains without being
@@ -9428,7 +9431,7 @@ explicit operational load reduction) are required even after the live set is
 smaller.
 
 Deploy the Proxy service artifact from a clean server descendant of
-`54f461fe` (and therefore `a4a8b502` and `a11ae7b1`), built against a clean SDK
+`04c40524` (and therefore `a4a8b502` and `a11ae7b1`), built against a clean SDK
 descendant of `e05ec46`. It must contain targeted warmup, the value-only
 WireGuard TUN factory, the bounded caller-lock cache, the new owner gauges, the
 generic source/digest gauge, the lifecycle capability gauge, and the complete
@@ -10994,10 +10997,11 @@ one stale edge, and the deliberately disabled edge-5. A direct
 `g1`) entirely on `2026.8.31+1034210530`, which predates the image addition.
 The same direct sample showed API on `2026.8.31+1034210530` and Taskworker on
 `2026.9.1-outerwerld+1034926970`; both were built before server commit
-`7c852d56` introduced the new template URLs. At this observation boundary the
+`ec6e3b92` (the patch-identical current-main replay of former commit
+`7c852d56`) introduced the new template URLs. At this observation boundary the
 404 is therefore a predeployment ordering failure, not evidence that those
 new templates have already reached recipients. It becomes a user-facing
-broken-email regression if an email-sending artifact containing `7c852d56`
+broken-email regression if an email-sending artifact containing `ec6e3b92`
 rolls out before the Web dependency is healthy.
 
 Mmm commit `b4b229c5c` adds both PNGs to
@@ -11015,7 +11019,7 @@ also consumes the local SDK WASM, so its dependency checkout must be clean and
 attributable. At the 2026-09-02 incident observation that prerequisite was not
 met: the local SDK worktree held unrelated uncommitted device/network changes,
 so no Web release was built. Keep API and Taskworker artifacts containing
-server `7c852d56` or later behind this Web gate, then deploy those templates
+current-main server `ec6e3b92` or later behind this Web gate, then deploy those templates
 only after §19.2 is healthy. Connect, database, Grafana, and Xops deployments
 cannot repair this boundary. Do not copy files into live containers.
 

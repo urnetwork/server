@@ -69,19 +69,22 @@ func TestProxyRuntimeSignalSyntheticHighLiveSet(t *testing.T) {
 		"exactly two durable goroutines",
 		"endpoint-seeded server-initiated handshaking peers",
 		"shared NetworkSpace",
-		"current-main server commit 54f461fe",
+		"current-main server commit 04c40524",
 		"a4a8b502's complete manager/NetworkSpace join",
 		"a11ae7b1's no-target Proxy warmup",
 		"SDK descendant of e05ec46",
 		"cancellation as lifecycle completion",
 		"transient overlap and slow close",
-		"clean Go source descendant of 54f461fe",
+		"clean Go source descendant of 04c40524",
 		"additional hard client slots",
 		"SIGNALS.md §14.7b",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("runtime live-set alert missing %q:\n%s", want, alert.Markdown())
 		}
+	}
+	if strings.Contains(alert.Markdown(), "54f461fe") {
+		t.Fatalf("runtime live-set alert retained former non-ancestor deployment guidance:\n%s", alert.Markdown())
 	}
 }
 
@@ -209,7 +212,7 @@ func TestProxyRuntimeSignalSyntheticLifecycleJoinUnverified(t *testing.T) {
 		"fireside/g1#invalid[value=0]",
 		"Cancellation was not lifecycle completion",
 		"targeted warmup has already reduced",
-		"server descendant of commit 54f461fe",
+		"server descendant of commit 04c40524",
 		"a4a8b502's manager/NetworkSpace join",
 		"SDK descendant of e05ec46",
 		"no xops playbook is needed",
