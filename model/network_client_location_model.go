@@ -2563,6 +2563,9 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	        FROM network_client_location_reliability
 
+	        INNER JOIN network_client ON
+	            network_client.client_id = network_client_location_reliability.client_id
+
 	        -- fix(beta): this was an INNER JOIN upstream, which requires a
 	        -- client to already have a row in client_connection_reliability_score
 	        -- (populated by a separate multi-stage rollup: raw events -> redis
@@ -2584,6 +2587,8 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	        	country_location.location_id = network_client_location_reliability.country_location_id
 
 	        WHERE
+	            network_client.active = true AND
+	            network_client.source_client_id IS NULL AND
 	        	network_client_location_reliability.connected = true AND
 	        	network_client_location_reliability.valid = true AND
 	        	-- this is the number shown to everyone, so count only providers
@@ -3729,6 +3734,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 	        FROM network_client_location_reliability
 
+	        INNER JOIN network_client ON
+	            network_client.client_id = network_client_location_reliability.client_id
+
 	        -- fix(beta): same class of issue as UpdateClientLocations above --
 	        -- an INNER JOIN here requires a reliability score to already exist
 	        -- before a client counts toward its location's stability filter at
@@ -3742,6 +3750,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	                provider_egress_health.client_id = network_client_location_reliability.client_id AND
 	                provider_egress_health.measured_at >= $3
 	        WHERE
+	            network_client.active = true AND
+	            network_client.source_client_id IS NULL AND
 	        	network_client_location_reliability.connected = true AND
 	        	network_client_location_reliability.valid = true AND
 	        	-- the candidate pool, unlike the public count in
@@ -3839,6 +3849,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 
 	            FROM network_client_location_reliability
 
+	            INNER JOIN network_client ON
+	                network_client.client_id = network_client_location_reliability.client_id
+
 	            -- fix(beta): same class of issue as UpdateClientLocations/the query
             -- above this one -- treats an unscored client as neutral rather
             -- than excluding it, since the reliability-scoring pipeline may
@@ -3859,6 +3872,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	                location_group_member_country.location_id = network_client_location_reliability.country_location_id
 
 	            WHERE
+	                network_client.active = true AND
+	                network_client.source_client_id IS NULL AND
 	            	network_client_location_reliability.connected = true AND
 	            	network_client_location_reliability.valid = true AND
 	            	-- same rule as the per-location query above: Public or

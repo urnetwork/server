@@ -24,7 +24,8 @@ func testingConnectClientWithLocation(
 	location *Location,
 ) [32]byte {
 	Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
-	connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, server.NewId())
+	handlerId := CreateNetworkClientHandler(ctx)
+	connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 	connect.AssertEqual(t, err, nil)
 	err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
 	connect.AssertEqual(t, err, nil)

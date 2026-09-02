@@ -65,7 +65,7 @@ func TestAddClientReliabilityStats(t *testing.T) {
 					"",
 				)
 				clientAddress := "127.0.0.1:20000"
-				handlerId := server.NewId()
+				handlerId := CreateNetworkClientHandler(ctx)
 				connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 				connect.AssertEqual(t, err, nil)
 				location := &Location{
@@ -421,7 +421,8 @@ func TestRecordClientReliabilityStatsScores(t *testing.T) {
 		// network_client_location_reliability marks it valid
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		clientAddress := "127.0.0.1:20000"
-		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, server.NewId())
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			LocationType: LocationTypeCity,
@@ -488,7 +489,8 @@ func TestClientReliabilityScoreSharedIpNormalization(t *testing.T) {
 		CreateLocation(ctx, location)
 
 		connectHash := func(clientId server.Id, clientAddress string) [32]byte {
-			connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, server.NewId())
+			handlerId := CreateNetworkClientHandler(ctx)
+			connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 			connect.AssertEqual(t, err, nil)
 			err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
 			connect.AssertEqual(t, err, nil)
@@ -593,7 +595,8 @@ func TestReliabilityScoreStaleRowsRemoved(t *testing.T) {
 		clientId := server.NewId()
 
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
-		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "10.5.6.7:20000", server.NewId())
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "10.5.6.7:20000", handlerId)
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			LocationType: LocationTypeCity,
@@ -743,7 +746,8 @@ func TestClientReliabilityDrainGapExcused(t *testing.T) {
 		// connect the client with a location so
 		// network_client_location_reliability marks it valid
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
-		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "127.0.0.1:20000", server.NewId())
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, "127.0.0.1:20000", handlerId)
 		connect.AssertEqual(t, err, nil)
 		location := &Location{
 			LocationType: LocationTypeCity,
@@ -1039,4 +1043,110 @@ func TestClientReliabilityExcusedNewValid(t *testing.T) {
 		connect.AssertEqual(t, counters["connection_excused_new_count"], int64(1))
 		connect.AssertEqual(t, valid, true)
 	})
+}
+
+// A durable connected bit is not proof of liveness when its ephemeral handler
+// row has disappeared. The location snapshot must fail closed before the
+// periodic orphan repair gets a chance to rewrite the connection row.
+func TestUpdateClientLocationReliabilitiesExcludesOrphanHandler(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		location := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Handler City",
+			Region:       "Handler Region",
+			Country:      "Handler Country",
+			CountryCode:  "hc",
+		}
+		CreateLocation(ctx, location)
+
+		connectAtLocation := func(clientAddress string, handlerId server.Id) server.Id {
+			networkId := server.NewId()
+			clientId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+			connect.AssertEqual(t, err, nil)
+			err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+			connect.AssertEqual(t, err, nil)
+			return clientId
+		}
+
+		orphanHandlerId := CreateNetworkClientHandler(ctx)
+		orphanClientId := connectAtLocation("10.30.0.1:20000", orphanHandlerId)
+		liveHandlerId := CreateNetworkClientHandler(ctx)
+		liveClientId := connectAtLocation("10.30.0.2:20000", liveHandlerId)
+
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		connect.AssertEqual(t, testingClientLocationConnected(ctx, t, orphanClientId), true)
+		connect.AssertEqual(t, testingClientLocationConnected(ctx, t, liveClientId), true)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_client_handler WHERE handler_id = $1`,
+				orphanHandlerId,
+			))
+		})
+
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now.Add(ReliabilityBlockDuration))
+		connect.AssertEqual(t, testingClientLocationConnected(ctx, t, orphanClientId), false)
+		connect.AssertEqual(t, testingClientLocationConnected(ctx, t, liveClientId), true)
+	})
+}
+
+// The disconnected fallback exists to retain a first location sample for
+// historical scoring; it must not advertise that client as currently live for
+// the one update cycle before the normal missing-row pass corrects it.
+func TestUpdateClientLocationReliabilitiesKeepsDisconnectedFallbackDisconnected(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		location := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Fallback City",
+			Region:       "Fallback Region",
+			Country:      "Fallback Country",
+			CountryCode:  "fc",
+		}
+		CreateLocation(ctx, location)
+
+		networkId := server.NewId()
+		clientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+		handlerId := CreateNetworkClientHandler(ctx)
+		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "10.31.0.1:20000", handlerId)
+		connect.AssertEqual(t, err, nil)
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		connect.AssertEqual(t, err, nil)
+		err = DisconnectNetworkClient(ctx, connectionId)
+		connect.AssertEqual(t, err, nil)
+
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now.Add(time.Second))
+		connect.AssertEqual(t, testingClientLocationConnected(ctx, t, clientId), false)
+	})
+}
+
+// Reads the publication-facing connected bit and requires the row to exist.
+func testingClientLocationConnected(ctx context.Context, t testing.TB, clientId server.Id) bool {
+	t.Helper()
+	connected := false
+	found := false
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT connected FROM network_client_location_reliability WHERE client_id = $1`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&connected))
+				found = true
+			}
+		})
+	})
+	if !found {
+		t.Fatalf("client location reliability missing for %s", clientId)
+	}
+	return connected
 }

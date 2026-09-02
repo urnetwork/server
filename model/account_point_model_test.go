@@ -420,7 +420,7 @@ func TestReliabilityPoints(t *testing.T) {
 				"",
 			)
 			clientAddress := "127.0.0.1:20000"
-			handlerId := server.NewId()
+			handlerId := CreateNetworkClientHandler(ctx)
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 			connect.AssertEqual(t, err, nil)
 			location := &Location{

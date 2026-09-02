@@ -1398,6 +1398,16 @@ func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
 				perfectStats(),
 			)
 		}
+		// AddClientReliabilityStatsRange is the direct pg fixture path, so it
+		// intentionally does not maintain the block-health table owned by the
+		// redis drain. Seed the established healthy baseline that a running
+		// production rollup has before exercising the deploy collapse. Without
+		// it, the first deploy candidate has fewer than the minimum ten prior
+		// observations and is deliberately left unclassified.
+		baseBlockNumber := reliabilityBlockNumber(base)
+		for blockNumber := baseBlockNumber - reliabilityDegradedMinBlockCount + 1; blockNumber <= baseBlockNumber; blockNumber += 1 {
+			recordClientReliabilityBlockHealth(ctx, blockNumber)
+		}
 		RollupClientReliabilityStats(ctx, base)
 
 		// a rolling deploy at step 6: the first half of the providers are on
@@ -2692,6 +2702,155 @@ func TestUpdateClientScoresPoolExcludesStreamOnlyAndKeylessProviders(t *testing.
 			streamOnlyClientId,
 			keylessClientId,
 		)
+	})
+}
+
+// Derived window clients and inactive top-level clients can hold Network
+// provide keys, but neither is provider supply. Publishing either one feeds a
+// consumer's own short-lived connection identities back into provider
+// selection and amplifies replacement churn.
+func TestUpdateClientScoresExcludesDerivedAndInactiveClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		t.Cleanup(server.Config.PushSimpleResource(
+			providerConfigResourceName,
+			[]byte("enable_egress_test: false\n"),
+		))
+
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Provider City",
+			Region:       "Provider Region",
+			Country:      "Provider Country",
+			CountryCode:  "pc",
+		}
+		CreateLocation(ctx, city)
+		group := &LocationGroup{
+			Name:              "Top-level Providers",
+			Promoted:          true,
+			MemberLocationIds: []server.Id{city.LocationId},
+		}
+		CreateLocationGroup(ctx, group)
+		handlerId := CreateNetworkClientHandler(ctx)
+
+		connectCandidate := func(clientId server.Id, clientAddress string) {
+			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
+			connect.AssertEqual(t, err, nil)
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			connect.AssertEqual(t, err, nil)
+			SetProvide(ctx, clientId, map[ProvideMode][]byte{
+				ProvideModePublic:  []byte("public-secret"),
+				ProvideModeNetwork: []byte("network-secret"),
+			})
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO network_client_latency (connection_id, latency_ms, sample_count) VALUES ($1, 30, 1)`,
+					connectionId,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count) VALUES ($1, $2, 1)`,
+					connectionId,
+					100*1024*1024,
+				))
+			})
+		}
+
+		activeNetworkId := server.NewId()
+		activeClientId := server.NewId()
+		Testing_CreateDevice(ctx, activeNetworkId, server.NewId(), activeClientId, "", "")
+		connectCandidate(activeClientId, "10.40.0.1:20000")
+
+		childNetworkId := server.NewId()
+		childDeviceId := server.NewId()
+		parentClientId := server.NewId()
+		childClientId := server.NewId()
+		Testing_CreateDevice(ctx, childNetworkId, childDeviceId, parentClientId, "", "")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO network_client (
+					client_id,
+					network_id,
+					device_id,
+					description,
+					create_time,
+					auth_time,
+					source_client_id
+				)
+				VALUES ($1, $2, $3, '', now(), now(), $4)
+				`,
+				childClientId,
+				childNetworkId,
+				childDeviceId,
+				parentClientId,
+			))
+		})
+		connectCandidate(childClientId, "10.40.0.2:20000")
+
+		inactiveNetworkId := server.NewId()
+		inactiveClientId := server.NewId()
+		Testing_CreateDevice(ctx, inactiveNetworkId, server.NewId(), inactiveClientId, "", "")
+		connectCandidate(inactiveClientId, "10.40.0.3:20000")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET active = false WHERE client_id = $1`,
+				inactiveClientId,
+			))
+		})
+
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		err := UpdateClientScores(ctx, time.Hour, 1)
+		connect.AssertEqual(t, err, nil)
+
+		for _, source := range []struct {
+			name             string
+			locationIds      map[server.Id]bool
+			locationGroupIds map[server.Id]bool
+		}{
+			{name: "location", locationIds: map[server.Id]bool{city.LocationId: true}, locationGroupIds: map[server.Id]bool{}},
+			{name: "location group", locationIds: map[server.Id]bool{}, locationGroupIds: map[server.Id]bool{group.LocationGroupId: true}},
+		} {
+			clientScores, err := loadClientScores(
+				true,
+				RankModeQuality,
+				ctx,
+				source.locationIds,
+				source.locationGroupIds,
+				server.Id{},
+				100,
+			)
+			connect.AssertEqual(t, err, nil)
+			if _, ok := clientScores[activeClientId]; !ok {
+				t.Errorf("%s cache is missing active top-level provider %s", source.name, activeClientId)
+			}
+			for label, clientId := range map[string]server.Id{
+				"derived":                    childClientId,
+				"inactive":                   inactiveClientId,
+				"parent without provide key": parentClientId,
+			} {
+				if _, ok := clientScores[clientId]; ok {
+					t.Errorf("%s cache published %s client %s as provider supply", source.name, label, clientId)
+				}
+			}
+		}
+
+		err = UpdateClientLocations(ctx, time.Hour)
+		connect.AssertEqual(t, err, nil)
+		clientLocations, err := loadClientLocations(
+			ctx,
+			map[server.Id]bool{city.CountryLocationId: true},
+		)
+		connect.AssertEqual(t, err, nil)
+		clientLocation, ok := clientLocations[city.CountryLocationId]
+		if !ok {
+			t.Fatalf("public location %s was not published", city.CountryLocationId)
+		}
+		connect.AssertEqual(t, clientLocation.ClientCount, 1)
 	})
 }
 

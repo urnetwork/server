@@ -2280,6 +2280,7 @@ type cityRegionCountry struct {
 
 type clientLocationReliability struct {
 	networkId server.Id
+	connected bool
 	locations map[cityRegionCountry]int
 
 	clientAddressHashes map[[32]byte]int
@@ -2304,8 +2305,9 @@ func (self *clientLocationReliability) Values() []any {
 	// [9] min_relative_latency_ms
 	// [10] has_speed_test
 	// [11] has_latency_test
+	// [12] connected
 
-	values := make([]any, 12)
+	values := make([]any, 13)
 
 	values[0] = self.networkId
 
@@ -2343,6 +2345,7 @@ func (self *clientLocationReliability) Values() []any {
 
 	values[10] = 0 < len(self.allBytesPerSecond)
 	values[11] = 0 < len(self.allRelativeLatencyMillis)
+	values[12] = self.connected
 
 	return values
 }
@@ -2387,6 +2390,7 @@ func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, m
 // a valid client will have one connected location and one connected address hash
 func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
 	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
+	minHandlerHeartbeatTime := server.NowUtc().Add(-2 * NetworkClientHandlerHeartbeatTimeout)
 
 	// old entries are not deleted on each update, but the connected status is updated
 	// - connected clients are updated, and the valid state is reset to match the latest
@@ -2418,6 +2422,10 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		INNER JOIN network_client ON
 			network_client.client_id = network_client_connection.client_id 
 
+		INNER JOIN network_client_handler ON
+			network_client_handler.handler_id = network_client_connection.handler_id AND
+			network_client_handler.heartbeat_time >= $1
+
 		INNER JOIN network_client_location ON
 			network_client_location.connection_id = network_client_connection.connection_id
 
@@ -2430,6 +2438,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		WHERE
 			network_client_connection.connected = true
 		`,
+		minHandlerHeartbeatTime,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -2465,6 +2474,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			r, ok := clientLocationReliabilities[clientId]
 			if !ok {
 				r = &clientLocationReliability{
+					connected:                true,
 					locations:                map[cityRegionCountry]int{},
 					clientAddressHashes:      map[[32]byte]int{},
 					netTypeScores:            map[int]int{},
@@ -2574,6 +2584,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			if !ok {
 				r = &clientLocationReliability{
 					networkId:                networkId,
+					connected:                false,
 					locations:                map[cityRegionCountry]int{},
 					clientAddressHashes:      map[[32]byte]int{},
 					netTypeScores:            map[int]int{},
@@ -2618,8 +2629,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	            max_net_type_score_speed smallint,
 	            max_bytes_per_second bigint,
 	            min_relative_latency_ms integer,
-	            has_speed_test bool,
-	            has_latency_test bool 
+			    has_speed_test bool,
+			    has_latency_test bool,
+			    connected bool
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -2654,7 +2666,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        country_location_id,
 	        client_address_hash_count,
 	        location_count,
-	        true AS connected,
+	        connected,
 	        max_net_type_score,
 	        max_net_type_score_speed,
 	        max_bytes_per_second,
@@ -2672,7 +2684,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        country_location_id = EXCLUDED.country_location_id,
 	        client_address_hash_count = EXCLUDED.client_address_hash_count,
 	        location_count = EXCLUDED.location_count,
-	        connected = true,
+	        connected = EXCLUDED.connected,
 	        max_net_type_score = EXCLUDED.max_net_type_score,
 	        max_net_type_score_speed = EXCLUDED.max_net_type_score_speed,
 	        max_bytes_per_second = EXCLUDED.max_bytes_per_second,

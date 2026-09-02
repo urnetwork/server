@@ -3320,30 +3320,25 @@ func HeartbeatNetworkClientHandler(ctx context.Context, handlerId server.Id) (re
 }
 
 func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
+	disconnectTime := server.NowUtc()
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		handlerIds := []server.Id{}
-
-		result, err := tx.Query(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-				SELECT
-					handler_id
-				FROM network_client_handler
+				DELETE FROM network_client_handler
 				WHERE
 					heartbeat_time < $1
 			`,
 			minTime.UTC(),
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var handlerId server.Id
-				server.Raise(result.Scan(&handlerId))
-				handlerIds = append(handlerIds, handlerId)
-			}
-		})
+		))
 
-		server.CreateTempTableInTx(ctx, tx, "temp_handler_ids(handler_id uuid)", handlerIds...)
-
+		// A handler row and its connections deliberately have no foreign key:
+		// handlers are ephemeral, while connection history is retained. That
+		// means a process loss, an old cleanup implementation, or a connect that
+		// races handler deletion can leave an open row whose handler is already
+		// gone. Selecting only expired handler ids can never discover that row.
+		// Sweep the durable invariant after the delete so every such connection
+		// is repaired, including orphans left by an earlier taskworker.
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -3351,22 +3346,16 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 				SET
 					connected = false,
 					disconnect_time = $1
-				FROM temp_handler_ids
 				WHERE
-					temp_handler_ids.handler_id = network_client_connection.handler_id
-
+					network_client_connection.connected = true AND
+					NOT EXISTS (
+						SELECT 1
+						FROM network_client_handler
+						WHERE
+							network_client_handler.handler_id = network_client_connection.handler_id
+					)
 			`,
-			server.NowUtc(),
-		))
-
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				DELETE FROM network_client_handler
-				USING temp_handler_ids
-				WHERE
-					temp_handler_ids.handler_id = network_client_handler.handler_id
-			`,
+			disconnectTime,
 		))
 	})
 }

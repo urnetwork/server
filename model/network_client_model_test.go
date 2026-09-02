@@ -101,6 +101,49 @@ func TestNetworkClientHandlerLifecycleIPV6(t *testing.T) {
 	})
 }
 
+// An open connection whose ephemeral handler row is already gone must be
+// repaired even though it cannot appear in the expired-handler query.
+func TestCloseExpiredNetworkClientHandlersClosesOrphanedConnections(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		orphanHandlerId := CreateNetworkClientHandler(ctx)
+		orphanConnectionId, _, _, _, err := ConnectNetworkClient(
+			ctx,
+			server.NewId(),
+			"10.0.0.1:20000",
+			orphanHandlerId,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		liveHandlerId := CreateNetworkClientHandler(ctx)
+		liveConnectionId, _, _, _, err := ConnectNetworkClient(
+			ctx,
+			server.NewId(),
+			"10.0.0.2:20000",
+			liveHandlerId,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		// Simulate the durable failure found on main: the handler was removed,
+		// but its connection row remained connected. The control handler stays
+		// newer than the cutoff so the repair cannot pass by closing everything.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_client_handler WHERE handler_id = $1`,
+				orphanHandlerId,
+			))
+		})
+
+		CloseExpiredNetworkClientHandlers(ctx, server.NowUtc().Add(-time.Hour))
+
+		connect.AssertEqual(t, GetNetworkClientConnectionStatus(ctx, orphanConnectionId).Connected, false)
+		connect.AssertEqual(t, GetNetworkClientConnectionStatus(ctx, liveConnectionId).Connected, true)
+		connect.AssertEqual(t, HeartbeatNetworkClientHandler(ctx, liveHandlerId), nil)
+	})
+}
+
 func TestNetworkClientLifecycle(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
