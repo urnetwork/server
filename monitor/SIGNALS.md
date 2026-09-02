@@ -3967,6 +3967,71 @@ cover the high-rate frame, healthy boundary, absent and duplicate-series
 visibility, stale samples, invalid rates, query scoping, and detailed Markdown
 rendering without identifiers.
 
+### 2.18 Stale contract destination rejection — dead routes must not authorize
+Probe: `stale-destination`
+
+The API-side active-lifecycle guard exports the bounded counter cause
+`urnetwork_connect_contract_failures_total{cause="inactive_destination"}`.
+Unlike §2.17, this is not an inferred role or fallback: the contract boundary
+itself found the requested destination missing or inactive and refused to
+create the route. Query both original companion partitions over five minutes:
+
+```promql
+sum by (companion) (rate(urnetwork_connect_contract_failures_total{
+  env="main",cause="inactive_destination"
+}[5m])) * 60
+```
+
+The current API initializes both `companion=false` and `companion=true` label
+children to zero. This is part of the observation contract: two fresh zeroes
+mean the guard saw no rejection, while an absent, duplicate, malformed, stale,
+or time-skewed partition is UNKNOWN and must not be converted to zero.
+
+- HEALTHY: both partitions are present and the fleet total is at or below
+  50/min for two complete five-minute windows. Successful contracts whose
+  destination was already inactive at create time remain exactly zero.
+- LIFECYCLE REJECTION: the total exceeds 50/min. The guard is preventing a
+  correctness violation, but the selection/window path is still offering dead
+  identities often enough to affect users. Preserve the `companion` split as
+  bounded context; it is the original request bit and does not establish an
+  endpoint role.
+- UNKNOWN: either initialized partition is absent, duplicated, stale, negative,
+  NaN, infinite, labeled outside the fixed Boolean vocabulary, or evaluated at
+  a different timestamp. During rollout, absence means the API generation or
+  metrics path cannot expose the guard yet.
+
+The durable repair is ordered. First deploy every API instance from server
+commit `c8dfe570` or a descendant so an inactive destination cannot pass mode
+selection or the final active-only write check and receives the additive
+`ContractError_Reliability` result. Then rebuild affected Connect-bearing
+clients from Connect commit `5b33c91` or a descendant. That client binds the
+status to the exact emitting channel, excludes it from new-flow selection,
+records a terminal route error, and wakes the normal resize/refill path. An old
+client remains wire-compatible but can keep retrying its stale exit, so an API
+rollout alone protects contract correctness without necessarily removing the
+retry load.
+
+The 2026-09-02 main API, Connect, Proxy, and Taskworker artifacts were built at
+14:56–15:12Z from modified base `2d6f27c`, while the two repair commits were
+created at 18:05Z. Those artifacts therefore predate this repair. Before calling
+the incident fixed, prove exact running API and affected client artifacts carry
+the commits, let two full rate windows elapse, and require the inactive-success
+cohort to remain zero. If rejection remains high after the deployed client
+window lifetime, use §2.8, §2.9, §2.15, §2.16, and bounded lifecycle/relationship
+cohorts to locate the stale producer. Do not delete Redis provide keys, weaken
+lifecycle checks, lengthen contract timeouts, or restart clients merely to
+clear the graph.
+
+This is a software lifecycle-correctness signal, not a Proxy hardware-capacity
+signal. More Proxy hosts raise the active-client ceiling but do not make an
+inactive destination contractible.
+
+Implementation convention: SIGNALS.md §2.18 (`stale-destination`) maps to
+`signal_stale_destination.go` and `signal_stale_destination_test.go`. Synthetic
+tests cover the high-rate frame, explicit-zero boundary, missing/duplicate and
+unknown partitions, stale/invalid/skewed samples, query scoping, and detailed
+identifier-free Markdown.
+
 ---
 
 ## 3. redis signal catalog

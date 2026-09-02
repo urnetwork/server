@@ -91,6 +91,12 @@ var controlFrameFailureCounter = prometheus.NewCounterVec(
 )
 
 func init() {
+	// CounterVec label children are lazy. Materialize both bounded partitions
+	// for the lifecycle guard so Mimir can distinguish an explicit zero from an
+	// API generation that predates the guard and cannot report it at all.
+	for _, companion := range []string{"false", "true"} {
+		contractFailureCounter.WithLabelValues("inactive_destination", companion)
+	}
 	prometheus.MustRegister(transferByteCounter, contractFailureCounter, missingOriginDetailsCounter, controlFrameFailureCounter)
 }
 

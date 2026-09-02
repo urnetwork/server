@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
@@ -83,6 +85,34 @@ func TestContractDestinationActive(t *testing.T) {
 	} {
 		if got := contractDestinationActive(test.lifecycle); got != test.want {
 			t.Fatalf("contractDestinationActive(%q) = %t, want %t", test.lifecycle, got, test.want)
+		}
+	}
+}
+
+func TestContractFailureCounterInitializesInactiveDestinationPartitions(t *testing.T) {
+	metrics := make(chan prometheus.Metric)
+	go func() {
+		contractFailureCounter.Collect(metrics)
+		close(metrics)
+	}()
+
+	seen := map[string]bool{}
+	for metric := range metrics {
+		value := &dto.Metric{}
+		if err := metric.Write(value); err != nil {
+			t.Fatal(err)
+		}
+		labels := map[string]string{}
+		for _, label := range value.Label {
+			labels[label.GetName()] = label.GetValue()
+		}
+		if labels["cause"] == "inactive_destination" {
+			seen[labels["companion"]] = true
+		}
+	}
+	for _, companion := range []string{"false", "true"} {
+		if !seen[companion] {
+			t.Errorf("inactive_destination companion=%s zero series was not initialized", companion)
 		}
 	}
 }
