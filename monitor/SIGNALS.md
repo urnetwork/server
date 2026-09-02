@@ -11091,8 +11091,11 @@ alert or its cursor.
 
 Every 30 minutes, query DAILY `crashRate`, `userPerceivedCrashRate`, and
 `distinctUsers` through the provider's advertised freshness boundary, then
-search crash-only ErrorIssues across a rolling 48-hour UTC interval. Paginate
-both sources with exact original parameters. A new issue/version group, a
+search crash-only ErrorIssues across a rolling 48-hour UTC interval ending at
+the most recent whole UTC hour, as required by the provider's error-search
+contract. The next cadence overlaps the partial hour rather than sending an
+invalid minute/second boundary. Paginate both sources with exact original
+parameters. A new issue/version group, a
 later `lastErrorReportTime`, or a larger report count at the same report hour
 is class `play-crash-issue`. The alert carries the issue cause, likely method,
 latest version code and OS API, 48-hour report/user counts, current aggregate

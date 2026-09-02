@@ -68,7 +68,8 @@ func TestPlayCrashesPresentIncompleteCredentialIsVisible(t *testing.T) {
 }
 
 func TestPlayCrashesPaginatesRetriesDeduplicatesAndRedacts(t *testing.T) {
-	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 9, 2, 12, 34, 56, 0, time.UTC)
+	issueStart, issueEnd := playCrashInterval(now)
 	issueCount := int64(3)
 	metricAttempts := 0
 	issueAttempts := 0
@@ -116,7 +117,7 @@ func TestPlayCrashesPaginatesRetriesDeduplicatesAndRedacts(t *testing.T) {
 				writer.WriteHeader(http.StatusTooManyRequests)
 				return
 			}
-			assertPlayIntervalQuery(t, request.URL.Query())
+			assertPlayIntervalQuery(t, request.URL.Query(), issueStart, issueEnd)
 			issuePages++
 			if request.URL.Query().Get("pageToken") == "" {
 				writeTestJSON(t, writer, map[string]any{
@@ -140,7 +141,7 @@ func TestPlayCrashesPaginatesRetriesDeduplicatesAndRedacts(t *testing.T) {
 			writeTestJSON(t, writer, map[string]any{"errorIssues": []any{}})
 		case "/v1beta1/apps/com.example.app/errorReports:search":
 			sampleCalls++
-			assertPlayIntervalQuery(t, request.URL.Query())
+			assertPlayIntervalQuery(t, request.URL.Query(), issueStart, issueEnd)
 			if request.URL.Query().Get("filter") != "errorReportId = report-9" {
 				t.Errorf("sample filter = %q", request.URL.Query().Get("filter"))
 			}
@@ -397,15 +398,26 @@ func playMetricResponseFixture(date, next string) map[string]any {
 	}
 }
 
-func assertPlayIntervalQuery(t *testing.T, query url.Values) {
+func assertPlayIntervalQuery(t *testing.T, query url.Values, start, end time.Time) {
 	t.Helper()
-	for _, key := range []string{"interval.startTime.year", "interval.startTime.timeZone.id", "interval.endTime.year", "interval.endTime.timeZone.id"} {
-		if query.Get(key) == "" {
-			t.Errorf("missing interval query key %s in %v", key, query)
+	for prefix, value := range map[string]time.Time{
+		"interval.startTime": start.UTC(),
+		"interval.endTime":   end.UTC(),
+	} {
+		for suffix, want := range map[string]string{
+			"year":        fmt.Sprint(value.Year()),
+			"month":       fmt.Sprint(int(value.Month())),
+			"day":         fmt.Sprint(value.Day()),
+			"hours":       fmt.Sprint(value.Hour()),
+			"minutes":     "0",
+			"seconds":     "0",
+			"timeZone.id": "UTC",
+		} {
+			key := prefix + "." + suffix
+			if got := query.Get(key); got != want {
+				t.Errorf("%s = %q, want %q in %v", key, got, want, query)
+			}
 		}
-	}
-	if query.Get("interval.startTime.timeZone.id") != "UTC" || query.Get("interval.endTime.timeZone.id") != "UTC" {
-		t.Errorf("interval is not UTC: %v", query)
 	}
 }
 

@@ -82,6 +82,7 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 	}
 
 	now := settings.Now().UTC()
+	issueStart, issueEnd := playCrashInterval(now)
 	state := playCrashState{Groups: map[string]playCrashCursor{}}
 	if _, err := loadProviderState(settings.StateDir, s.Key(), playCrashStateVersion, &state); err != nil {
 		return nil, err
@@ -100,7 +101,7 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 	if metric.FreshThrough.After(now.Add(24 * time.Hour)) {
 		return nil, providerDataError("google play crash metric", fmt.Errorf("freshness boundary is implausibly in the future"))
 	}
-	issues, err := s.crashIssues(ctx, client, configured.PackageName, now.Add(-playCrashIssueLookback), now)
+	issues, err := s.crashIssues(ctx, client, configured.PackageName, issueStart, issueEnd)
 	if err != nil {
 		return nil, providerDataError("google play crash issues", err)
 	}
@@ -128,7 +129,7 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 		if err != nil {
 			return nil, providerDataError("google play crash issue", err)
 		}
-		if parsed.at.Before(now.Add(-playCrashIssueLookback)) || parsed.at.After(now) {
+		if parsed.at.Before(issueStart) || parsed.at.After(issueEnd) {
 			return nil, providerDataError("google play crash issue", fmt.Errorf("report hour is outside the requested interval"))
 		}
 		if _, exists := seenIssueGroups[parsed.key]; exists {
@@ -163,7 +164,7 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 	for _, item := range advancing[:visible] {
 		report, err := s.sampleReport(
 			ctx, client, configured.PackageName,
-			now.Add(-playCrashIssueLookback), now, item.issue,
+			issueStart, issueEnd, item.issue,
 		)
 		if err != nil {
 			return nil, providerDataError("google play crash sample", err)
@@ -178,6 +179,14 @@ func (s *playCrashesSignal) Run(ctx context.Context, settings SignalSettings) (A
 		return nil, err
 	}
 	return alerts, nil
+}
+
+// Google requires error issue/report search intervals to be aligned to whole
+// UTC hours. Use the most recent complete boundary; the next 30-minute cadence
+// overlaps it, so reports processed during the partial hour are not lost.
+func playCrashInterval(now time.Time) (time.Time, time.Time) {
+	end := now.UTC().Truncate(time.Hour)
+	return end.Add(-playCrashIssueLookback), end
 }
 
 func validateGooglePlayReportingSettings(settings GooglePlayReportingSettings) error {
