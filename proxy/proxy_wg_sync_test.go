@@ -43,6 +43,9 @@ func newTestProxyClient(t testing.TB, clientIpv4 netip.Addr) *model.ProxyClient 
 }
 
 func TestWgServerSyncProxyClients(t *testing.T) {
+	if testing.Short() {
+		return
+	}
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		setProxyTestEnv()
 

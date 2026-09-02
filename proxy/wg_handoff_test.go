@@ -165,6 +165,9 @@ func TestProxyWgHandoffFastReconnect(t *testing.T) {
 // the command, Done from the wrapper's retry gate) as the no-export outcome,
 // and must NOT absorb raises while the poll ctx is live.
 func TestProxyWgHandoffPollExpiry(t *testing.T) {
+	if testing.Short() {
+		return
+	}
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
