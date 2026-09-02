@@ -3236,6 +3236,17 @@ func fullTunMultiClientSettings(path *fullTunPath) *clientconnect.MultiClientSet
 			settings.WindowExpandTimeout,
 			allowance,
 		)
+		// The outcome watchdog starts with the same expansion attempt. It must
+		// not rebuild that window while the race-instrumented candidate is still
+		// inside the valid construction boundary above.
+		settings.WindowOutcomeDeadline = max(
+			settings.WindowOutcomeDeadline,
+			allowance,
+		)
+		settings.WindowOutcomeRebuildDeadline = max(
+			settings.WindowOutcomeRebuildDeadline,
+			allowance,
+		)
 		settings.StatsWindowMaxUnhealthyDuration = max(
 			settings.StatsWindowMaxUnhealthyDuration,
 			allowance,
@@ -5328,6 +5339,8 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 		if settings.SendStallTimeout != defaults.SendStallTimeout ||
 			settings.BlackholeReceiveTimeout != defaults.BlackholeReceiveTimeout ||
 			settings.WindowExpandTimeout != defaults.WindowExpandTimeout ||
+			settings.WindowOutcomeDeadline != defaults.WindowOutcomeDeadline ||
+			settings.WindowOutcomeRebuildDeadline != defaults.WindowOutcomeRebuildDeadline ||
 			clientSettings.ReadTimeout != clientDefaults.ReadTimeout ||
 			clientSettings.BufferTimeout != clientDefaults.BufferTimeout ||
 			clientSettings.ControlPingTimeout != 10*time.Second ||
@@ -5335,10 +5348,12 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 			platformSettings.ReadTimeout != platformDefaults.ReadTimeout ||
 			platformSettings.InactiveDrainTimeout != platformDefaults.InactiveDrainTimeout {
 			t.Fatalf(
-				"ordinary route settings multi=%s/%s/%s client=%s/%s/%s platform=%s/%s/%s",
+				"ordinary route settings multi=%s/%s/%s/%s/%s client=%s/%s/%s platform=%s/%s/%s",
 				settings.SendStallTimeout,
 				settings.BlackholeReceiveTimeout,
 				settings.WindowExpandTimeout,
+				settings.WindowOutcomeDeadline,
+				settings.WindowOutcomeRebuildDeadline,
 				clientSettings.ReadTimeout,
 				clientSettings.BufferTimeout,
 				clientSettings.ControlPingTimeout,
@@ -5358,6 +5373,8 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 		settings.BlackholeConnectTimeout < allowance ||
 		settings.WindowGeneratorTimeout < allowance ||
 		settings.WindowExpandTimeout < allowance ||
+		settings.WindowOutcomeDeadline < allowance ||
+		settings.WindowOutcomeRebuildDeadline < allowance ||
 		settings.StatsWindowMaxUnhealthyDuration < allowance ||
 		settings.SendStallTimeout < allowance ||
 		clientSettings.ReadTimeout < fixedAllowance ||
@@ -5382,7 +5399,7 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 		platformSettings.ReadTimeout < fixedAllowance ||
 		platformSettings.InactiveDrainTimeout < fixedAllowance {
 		t.Fatalf(
-			"race route settings multi=%s/%s/%s/%s/%s/%s/%s/%s/%s client=%s/%s/%s send=%s/%s receive=%s/%s/%s/%s forward=%s p2p=%s/%s/%s/%s/%s webrtc=%s/%s/%s platform=%s/%s/%s, want path allowance=%s fixed allowance=%s and receive disabled",
+			"race route settings multi=%s/%s/%s/%s/%s/%s/%s/%s/%s/%s/%s client=%s/%s/%s send=%s/%s receive=%s/%s/%s/%s forward=%s p2p=%s/%s/%s/%s/%s webrtc=%s/%s/%s platform=%s/%s/%s, want path allowance=%s fixed allowance=%s and receive disabled",
 			settings.PingTimeout,
 			settings.AckTimeout,
 			settings.BlackholeTimeout,
@@ -5390,6 +5407,8 @@ func TestFullTunMultiClientSettingsBoundRaceConstruction(t *testing.T) {
 			settings.BlackholeConnectTimeout,
 			settings.WindowGeneratorTimeout,
 			settings.WindowExpandTimeout,
+			settings.WindowOutcomeDeadline,
+			settings.WindowOutcomeRebuildDeadline,
 			settings.StatsWindowMaxUnhealthyDuration,
 			settings.SendStallTimeout,
 			clientSettings.ReadTimeout,

@@ -1220,21 +1220,71 @@ func (self *workloadDormantCandidateHarness) assertJoined(
 	}
 }
 
+// Each independent direction owns its complete calibrated budget. Canceling
+// one iteration before starting the next prevents its context from leaking
+// into the sibling lifecycle.
+func forEachTCPWorkloadDirection(
+	parent context.Context,
+	timeout time.Duration,
+	run func(context.Context, bool),
+) {
+	for _, forward := range []bool{true, false} {
+		func() {
+			ctx, cancel := context.WithTimeout(parent, timeout)
+			defer cancel()
+			run(ctx, forward)
+		}()
+	}
+}
+
+// The second directional context remains live after the first one's exact
+// cancellation boundary, without relying on elapsed time or scheduler order.
+func TestTCPWorkloadDirectionsUseIndependentContexts(t *testing.T) {
+	var firstCtx context.Context
+	callCount := 0
+	forEachTCPWorkloadDirection(t.Context(), time.Minute, func(ctx context.Context, forward bool) {
+		callCount += 1
+		if forward {
+			firstCtx = ctx
+			return
+		}
+		if firstCtx == nil {
+			t.Fatal("reverse direction ran before the forward direction")
+		}
+		if err := firstCtx.Err(); err != context.Canceled {
+			t.Fatalf("first directional context error=%v, want canceled", err)
+		}
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("second directional context inherited first cancellation: %v", err)
+		}
+	})
+	if callCount != 2 {
+		t.Fatalf("direction call count=%d, want 2", callCount)
+	}
+}
+
 // The logical quota counts three identified winners even when three dormant
 // candidates reached preface reads first; receiver hooks run for winners only.
 func TestTCPWorkloadClaimsAllFlowsAfterDormantAcceptedCandidates(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	const flowCount = 3
 	const warmupByteCount = 16*1024 + 1
 	const measuredByteCount = 32*1024 + 3
+	profile := initialNetworkProfiles(20260811)["clean-lan"]
+	ctx, cancel := context.WithTimeout(
+		t.Context(),
+		calibrationWorkloadTimeout(
+			profile,
+			int64(flowCount)*(warmupByteCount+measuredByteCount),
+		),
+	)
+	defer cancel()
 	harness := newWorkloadDormantCandidateHarness(flowCount)
 	defer harness.close()
 	var warmupHookCount atomic.Int64
 	var startHookCount atomic.Int64
 	result, err := measureTCPWorkloadWithWarmupAndFlowTestSettings(
 		ctx,
-		initialNetworkProfiles(20260811)["clean-lan"],
+		profile,
 		defaultTunResourceProfile(),
 		true,
 		flowCount,
@@ -1281,12 +1331,11 @@ func TestTCPWorkloadClaimsAllFlowsAfterDormantAcceptedCandidates(t *testing.T) {
 // A non-chunk-aligned warmup proves the receiver resets its hash at an exact
 // same-connection barrier before measuring either simulated direction.
 func TestWarmedTCPWorkloadSeparatesWarmupAndMeasuredPayload(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	profile := initialNetworkProfiles(20260810)["clean-lan"]
 	const warmupByteCount = 512*1024 + 1
 	const measuredByteCount = 64*1024 + 3
-	for _, forward := range []bool{true, false} {
+	timeout := calibrationWorkloadTimeout(profile, warmupByteCount+measuredByteCount)
+	forEachTCPWorkloadDirection(t.Context(), timeout, func(ctx context.Context, forward bool) {
 		startBoundaryCount := 0
 		result, err := measureTCPWorkloadWithWarmupAndStartHook(
 			ctx,
@@ -1327,16 +1376,17 @@ func TestWarmedTCPWorkloadSeparatesWarmupAndMeasuredPayload(t *testing.T) {
 				dataLink,
 			)
 		}
-	}
+	})
 }
 
 // A packet admitted after the first all-links-idle observation forces an exact
 // generation retry, so the untunneled measured phase cannot start early.
 func TestWarmedTCPWorkloadRetriesWarmupLinkGeneration(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	profile := initialNetworkProfiles(20260811)["clean-lan"]
-	for _, forward := range []bool{true, false} {
+	const warmupByteCount = 64*1024 + 1
+	const measuredByteCount = 128*1024 + 3
+	timeout := calibrationWorkloadTimeout(profile, warmupByteCount+measuredByteCount)
+	forEachTCPWorkloadDirection(t.Context(), timeout, func(ctx context.Context, forward bool) {
 		retryReached := make(chan struct{})
 		releaseRetry := make(chan struct{})
 		measuredStarted := make(chan struct{})
@@ -1355,8 +1405,8 @@ func TestWarmedTCPWorkloadRetriesWarmupLinkGeneration(t *testing.T) {
 				defaultTunResourceProfile(),
 				forward,
 				1,
-				64*1024+1,
-				128*1024+3,
+				warmupByteCount,
+				measuredByteCount,
 				func(path *tunPath, forward bool) error {
 					dataLink := path.forwardLink
 					if !forward {
@@ -1407,8 +1457,8 @@ func TestWarmedTCPWorkloadRetriesWarmupLinkGeneration(t *testing.T) {
 			if completion.err != nil {
 				t.Fatalf("forward=%t warmed workload: %v", forward, completion.err)
 			}
-			if completion.result.WarmupByteCount != 64*1024+1 ||
-				completion.result.UsefulByteCount != 128*1024+3 {
+			if completion.result.WarmupByteCount != warmupByteCount ||
+				completion.result.UsefulByteCount != measuredByteCount {
 				t.Fatalf("forward=%t warmed result=%+v", forward, completion.result)
 			}
 		case <-ctx.Done():
@@ -1422,7 +1472,7 @@ func TestWarmedTCPWorkloadRetriesWarmupLinkGeneration(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("forward=%t injected generation did not terminate: %v", forward, ctx.Err())
 		}
-	}
+	})
 }
 
 // Sequence metadata gives UDP exact loss, duplication, reorder, and latency accounting.
