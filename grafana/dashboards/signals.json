@@ -1047,9 +1047,18 @@
           "expr": "sum(max_over_time(urnetwork_proxy_wg_receive_routine_failures{env=\"$env\"}[$__rate_interval]))",
           "refId": "V",
           "legendFormat": "wg receiver failures"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (host, block) (urnetwork_proxy_lifecycle_join_enabled{env=\"$env\"})",
+          "refId": "W",
+          "legendFormat": "lifecycle join {{host}} {{block}}"
         }
       ],
-      "description": "Live proxy devices, prewarmed capacity, registered WireGuard peers, and unexpected WireGuard socket-reader exits. Receiver failures are retained over the rate window so a sampled failure remains visible while the owning process recovers; any nonzero value requires correlating the process restart and peer recovery."
+      "description": "Live proxy devices, prewarmed capacity, registered WireGuard peers, unexpected WireGuard socket-reader exits, and the lifecycle-join capability reported by each host/build. Receiver failures are retained over the rate window so a sampled failure remains visible while the owning process recovers; any nonzero value requires correlating the process restart and peer recovery. Lifecycle join must be 1 on every running proxy series before testing the joined close path."
     },
     {
       "type": "table",

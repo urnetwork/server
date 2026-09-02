@@ -145,6 +145,8 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 	for _, required := range []string{
 		"urnetwork_backup_archive_latest_timestamp_seconds",
 		"urnetwork_backup_archive_in_progress",
+		"urnetwork_backup_archive_storage_bytes",
+		"urnetwork_backup_archive_volume_free_bytes",
 		`host="planetoid"`,
 		`archive="pg"`,
 		`archive="redis"`,
@@ -200,6 +202,20 @@ func TestBackupArchiveDashboardFailsClosedAfterFiveDays(t *testing.T) {
 			!strings.Contains(panel.Targets[0].Expr, "topk(1") ||
 			!strings.Contains(panel.Targets[0].Expr, "* 1000") {
 			t.Errorf("latest stored archive panel %d is missing or does not select the newest generation", panelID)
+		}
+	}
+
+	storage := dashboardPanelById(dashboard, 15)
+	if storage == nil || storage.Type != "bargauge" || storage.Title != "archive volume storage breakdown" || len(storage.Targets) != 2 {
+		t.Fatal("backup archive storage breakdown panel is missing")
+	}
+	for _, required := range []string{
+		"urnetwork_backup_archive_storage_bytes",
+		`archive=~"pg|redis|code"`,
+		"urnetwork_backup_archive_volume_free_bytes",
+	} {
+		if !strings.Contains(storage.Targets[0].Expr+"\n"+storage.Targets[1].Expr, required) {
+			t.Errorf("backup storage breakdown is missing %q", required)
 		}
 	}
 }
@@ -729,6 +745,7 @@ func TestAdmissionCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 		`sum(rate(urnetwork_proxy_lock_cache_misses_total{env="$env"}[$__rate_interval]))`,
 		`sum(rate(urnetwork_proxy_lock_cache_expirations_total{env="$env"}[$__rate_interval]))`,
 		`sum(rate(urnetwork_proxy_lock_cache_evictions_total{env="$env"}[$__rate_interval]))`,
+		`max by (host, block) (urnetwork_proxy_lifecycle_join_enabled{env="$env"})`,
 	} {
 		if !slices.Contains(signalExpressions, expression) {
 			t.Errorf("signals dashboard is missing actionable query %q", expression)

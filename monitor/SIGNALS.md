@@ -7767,6 +7767,24 @@ Bit reads those files and remote-writes them with `env`, `host`, and `job`
 labels. Grafana is only a renderer; a blank panel is not enough to distinguish
 no completed backup from a missing collector.
 
+Code recovery points use the same sortable UTC naming convention as database
+recovery points: `main-code-urnetwork-YYYY-MM-DD-HH-MM-SS.tar.xz` and
+`main-code-urfoundation-YYYY-MM-DD-HH-MM-SS.tar.xz`. Each organization keeps
+four complete dated generations by default. The writer still recognizes the
+legacy fixed-name tarball as the latest generation until its first dated run;
+renaming that artifact would falsely change provenance and is forbidden.
+
+Planetoid also publishes physical allocation telemetry for the mounted archive
+volume. `urnetwork_backup_archive_storage_bytes{archive="pg|redis|code"}` is
+the total used by each class, with hard-linked PostgreSQL and Redis retention
+copies deduplicated and the persistent Git mirror cache included in `code`.
+`urnetwork_backup_archive_volume_size_bytes` and
+`urnetwork_backup_archive_volume_free_bytes` are the filesystem total and free
+bytes, and `urnetwork_backup_archive_storage_timestamp_seconds` proves when the
+bounded scan completed. The archive Grafana dashboard renders the three class
+totals beside free space; validate those values against one direct `du`/`df`
+sample on Planetoid before treating the panel as capacity evidence.
+
 The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
 role. It also reads `github-backup-archive.service` state and MainPID plus the

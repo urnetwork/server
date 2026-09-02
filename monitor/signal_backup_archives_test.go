@@ -110,8 +110,8 @@ func TestBackupArchivesSignalSyntheticDetectsStaleActiveWriterProgress(t *testin
 	base := []backupArchiveFixture{
 		{archive: "pg", generation: "main-pg-current.sql.xz", createdAt: &createdAt, progress: &zero},
 		{archive: "redis", generation: "main-redis-current", createdAt: &createdAt, progress: &zero},
-		{archive: "github-urnetwork", generation: "urnetwork.tar.xz", createdAt: &createdAt, progress: &zero, heartbeat: &staleHeartbeat},
-		{archive: "github-urfoundation", generation: "urfoundation.tar.xz", createdAt: &createdAt, progress: &zero, heartbeat: &staleHeartbeat},
+		{archive: "github-urnetwork", generation: "main-code-urnetwork-2026-09-01-22-30-00.tar.xz", createdAt: &createdAt, progress: &zero, heartbeat: &staleHeartbeat},
+		{archive: "github-urfoundation", generation: "main-code-urfoundation-2026-09-01-22-30-00.tar.xz", createdAt: &createdAt, progress: &zero, heartbeat: &staleHeartbeat},
 	}
 	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
 		unitState: "activating", mainPID: 156738,

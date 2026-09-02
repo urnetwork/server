@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-backup-archives",
   "title": "urnetwork / backup archives",
-  "description": "Planetoid archive health for PostgreSQL, Redis, and the urnetwork/urfoundation GitHub organization tarballs. A missing archive signal or newest stored archive older than five days is an error.",
+  "description": "Planetoid archive health and storage for PostgreSQL, Redis, and dated urnetwork/urfoundation GitHub organization tarballs. A missing archive signal or newest stored archive older than five days is an error.",
   "tags": ["urnetwork", "backups", "planetoid"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -109,7 +109,7 @@
       "id": 7,
       "type": "stat",
       "title": "urnetwork code freshness",
-      "description": "Fail-closed: missing telemetry and urnetwork.tar.xz older than five days are ERROR.",
+      "description": "Fail-closed: missing telemetry and the newest dated urnetwork code archive older than five days are ERROR.",
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 7},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
@@ -120,7 +120,7 @@
       "id": 8,
       "type": "stat",
       "title": "urfoundation code freshness",
-      "description": "Fail-closed: missing telemetry and urfoundation.tar.xz older than five days are ERROR.",
+      "description": "Fail-closed: missing telemetry and the newest dated urfoundation code archive older than five days are ERROR.",
       "gridPos": {"h": 4, "w": 6, "x": 18, "y": 7},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
@@ -194,6 +194,61 @@
           "refId": "A",
           "expr": "(time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation\"})) / 86400",
           "legendFormat": "{{archive}}",
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"}
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "row",
+      "title": "archive volume storage",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "panels": []
+    },
+    {
+      "id": 15,
+      "type": "bargauge",
+      "title": "archive volume storage breakdown",
+      "description": "Physical bytes used by each archive class plus free bytes remaining on the archive volume. PG and Redis hard-linked retention copies are counted once; code includes dated tarballs and the persistent Git mirror cache.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 26},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "noValue": "NO STORAGE SIGNAL",
+          "color": {"mode": "continuous-GrYlRd"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "free"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]}
+        ]
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16,
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (archive) (urnetwork_backup_archive_storage_bytes{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|code\"})",
+          "legendFormat": "{{archive}}",
+          "instant": true,
+          "range": false,
+          "datasource": {"type": "prometheus", "uid": "warp-mimir"}
+        },
+        {
+          "refId": "B",
+          "expr": "max(urnetwork_backup_archive_volume_free_bytes{env=\"main\",host=\"planetoid\"})",
+          "legendFormat": "free",
+          "instant": true,
+          "range": false,
           "datasource": {"type": "prometheus", "uid": "warp-mimir"}
         }
       ]
