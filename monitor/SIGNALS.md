@@ -1989,10 +1989,13 @@ exclusion, heartbeat ownership boundary, and this probe's active-build
 distinction.
 
 Do not interrupt a protected in-progress rebuild merely to apply the source
-fix. Deploy the fixed server revision to taskworker so future daily maintenance
-uses the new policy. Existing debris is a separate operational database
-mutation: after the protected operation finishes, obtain explicit maintenance
-authorization and run the supported cleanup-only full cycle:
+fix. Compare every active Taskworker artifact with current-main commits
+`908a8b2c` and `d8392c83`; deploy only blocks that predate either fix so future
+daily maintenance uses the new policy. When every block already contains both,
+do not redeploy Taskworker merely because debris remains. Existing debris is a
+separate operational database mutation: after the protected operation finishes,
+obtain explicit maintenance authorization and run the supported cleanup-only
+full cycle:
 
 ```sh
 bringyourctl db maintenance all --cleanup
@@ -2002,6 +2005,15 @@ Do not wildcard-drop `_ccnew` indexes by hand. Closure requires zero inactive
 suffixed artifacts, no later full-table `transfer_escrow` progress row, and one
 complete post-deploy maintenance cycle with no recurring DataFileExtend/WAL
 cluster or Connect login-timeout wave.
+
+The 2026-09-02 deployed-artifact control reached that software boundary. All
+eight current Taskworker processes started at 15:01Z and exported modified base
+`2d6f27c`; repository ancestry proves that base contains both `908a8b2c` and
+`d8392c83`. The same-snapshot catalog had no active table owner but retained at
+least 344 inactive artifacts across 27 owners, 277 write-ready, totaling about
+347.9 GiB. Redeploying the same fix cannot delete that residue. The remaining
+closure is the explicitly authorized cleanup-only cycle followed by a
+zero-artifact catalog and a later maintenance cycle that creates no new debris.
 
 ### 2.3 Planner-flip detection
 Probe: `planner-flips`
