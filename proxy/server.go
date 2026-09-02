@@ -61,11 +61,26 @@ var wgInboundDecryptionQueueDropPacketsGauge = prometheus.NewGauge(
 	},
 )
 
+// This artifact capability is intentionally identity-free. The monitor joins
+// it to the exact process identity and treats absence as unknown: a canceled
+// manager is not fully retired until its admitted constructors, device
+// workers, shared NetworkSpace, and SDK-owned child lifetimes have joined.
+var lifecycleJoinEnabledGauge = prometheus.NewGaugeFunc(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "lifecycle_join_enabled",
+		Help:      "Whether Proxy manager and SDK-owned device lifetimes are synchronously joined during external shutdown",
+	},
+	func() float64 { return 1 },
+)
+
 func init() {
 	prometheus.MustRegister(wgPeersGauge)
 	prometheus.MustRegister(wgInboundPeerQueueDropPacketsGauge)
 	prometheus.MustRegister(wgInboundDecryptionQueueDropPacketsGauge)
 	prometheus.MustRegister(wgReceiveRoutineFailuresGauge)
+	prometheus.MustRegister(lifecycleJoinEnabledGauge)
 }
 
 const InternalSocksPort = 8080

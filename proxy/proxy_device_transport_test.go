@@ -4,14 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sdk"
@@ -489,48 +485,32 @@ func TestProxyDeviceManagerSharesOneNetworkSpaceLifetime(t *testing.T) {
 	}
 }
 
-// Closing a production manager waits for its shared API worker before
-// releasing the underlying strategy. Cancellation alone is not completion.
+// Closing a production manager waits for its owned NetworkSpace cleanup. The
+// SDK separately pins that NetworkSpace.Close joins API and transport owners;
+// this barrier pins the manager-to-SDK ownership edge without relying on a
+// remote HTTP handler's lifecycle after the client request has been canceled.
 func TestProxyDeviceManagerCloseAndWaitJoinsOwnedNetworkSpace(t *testing.T) {
-	requestEntered := make(chan struct{})
-	requestCanceled := make(chan struct{})
-	requestRelease := make(chan struct{})
-	var enteredOnce sync.Once
-	var canceledOnce sync.Once
+	closeEntered := make(chan struct{})
+	closeRelease := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() {
 		releaseOnce.Do(func() {
-			close(requestRelease)
+			close(closeRelease)
 		})
 	}
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/hello" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		enteredOnce.Do(func() {
-			close(requestEntered)
-		})
-		<-r.Context().Done()
-		canceledOnce.Do(func() {
-			close(requestCanceled)
-		})
-		<-requestRelease
-	}))
 
 	managerCtx, managerCancel := context.WithCancel(context.Background())
 	manager := NewProxyDeviceManager(managerCtx, DefaultProxyDeviceManagerSettings())
-	clientSettings := connect.DefaultClientStrategySettings()
-	clientSettings.EnableNormal = true
-	clientSettings.EnableResilient = false
-	ownedNetworkSpace := sdk.NewNetworkSpaceWithUrls(
-		managerCtx,
-		apiServer.URL,
-		"wss://127.0.0.1:1",
-		clientSettings,
-	)
+	ownedNetworkSpace := &sdk.NetworkSpace{}
 	manager.networkSpaceBuilder = func(context.Context) *sdk.NetworkSpace {
 		return ownedNetworkSpace
+	}
+	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
+		if networkSpace != ownedNetworkSpace {
+			t.Errorf("closed NetworkSpace = %p, want %p", networkSpace, ownedNetworkSpace)
+		}
+		close(closeEntered)
+		<-closeRelease
 	}
 	if got := manager.networkSpaceForDevice(); got != ownedNetworkSpace {
 		t.Fatal("manager did not install its owned NetworkSpace")
@@ -538,28 +518,11 @@ func TestProxyDeviceManagerCloseAndWaitJoinsOwnedNetworkSpace(t *testing.T) {
 	t.Cleanup(func() {
 		release()
 		_ = manager.CloseAndWait(context.Background())
-		apiServer.Close()
 		managerCancel()
 	})
 
-	refreshJwt, err := gojwt.NewWithClaims(gojwt.SigningMethodNone, gojwt.MapClaims{
-		"client_id": "00000000-0000-0000-0000-000000000001",
-		"device_id": "00000000-0000-0000-0000-000000000002",
-		"exp":       time.Now().Add(24 * time.Hour).Unix(),
-	}).SignedString(gojwt.UnsafeAllowNoneSignatureType)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ownedNetworkSpace.GetApi().SetByJwt(refreshJwt)
-	ownedNetworkSpace.GetApi().StartJwtRefresh()
-
 	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer testCancel()
-	select {
-	case <-testCtx.Done():
-		t.Fatal(testCtx.Err())
-	case <-requestEntered:
-	}
 	closeResult := make(chan error, 1)
 	go func() {
 		closeResult <- manager.CloseAndWait(context.Background())
@@ -568,11 +531,11 @@ func TestProxyDeviceManagerCloseAndWaitJoinsOwnedNetworkSpace(t *testing.T) {
 	select {
 	case <-testCtx.Done():
 		t.Fatal(testCtx.Err())
-	case <-requestCanceled:
+	case <-closeEntered:
 	}
 	select {
 	case err := <-closeResult:
-		t.Fatalf("manager close returned before API cleanup: %v", err)
+		t.Fatalf("manager close returned before NetworkSpace cleanup: %v", err)
 	default:
 	}
 	release()

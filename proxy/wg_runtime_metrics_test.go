@@ -27,3 +27,9 @@ func TestUpdateWgRuntimeMetricsPublishesSharedReceiverFailures(t *testing.T) {
 		t.Fatalf("wg decryption queue drop packets = %v, want 17", got)
 	}
 }
+
+func TestProxyLifecycleJoinCapabilityMetric(t *testing.T) {
+	if got := testutil.ToFloat64(lifecycleJoinEnabledGauge); got != 1 {
+		t.Fatalf("proxy lifecycle join capability = %v, want 1", got)
+	}
+}

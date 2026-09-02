@@ -100,6 +100,7 @@ type ProxyDeviceManager struct {
 	networkSpaceOnce    sync.Once
 	networkSpace        *sdk.NetworkSpace
 	networkSpaceBuilder func(context.Context) *sdk.NetworkSpace
+	networkSpaceCloser  func(*sdk.NetworkSpace)
 	ownsNetworkSpace    bool
 	proxyDeviceBuilder  func(server.Id) (*ProxyDevice, error)
 
@@ -148,6 +149,9 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		lockCache:        newProxyLockCache(proxyLockCacheMaxEntries),
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
+	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
+		networkSpace.Close()
+	}
 	manager.proxyDeviceBuilder = manager.newProxyDevice
 	return manager
 }
@@ -536,7 +540,7 @@ func (self *ProxyDeviceManager) Close() {
 			// session after all admitted production opens have drained.
 			self.networkSpaceOnce.Do(func() {})
 			if self.ownsNetworkSpace && self.networkSpace != nil {
-				self.networkSpace.Close()
+				self.networkSpaceCloser(self.networkSpace)
 			}
 			close(self.closeDone)
 		}()
