@@ -57,7 +57,7 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	if lightnode.Frame != "lightnode" || !strings.Contains(lightnode.Mechanism, "falls back to full sync") {
 		t.Fatalf("lightnode fallback alert = %+v", lightnode)
 	}
-	if lightnode.Sustain != 15 {
+	if lightnode.Sustain != 1 {
 		t.Fatalf("lightnode fallback sustain = %d", lightnode.Sustain)
 	}
 	if !strings.Contains(lightnode.Action, "run-subtensor-lightnode.sh") ||
@@ -68,6 +68,47 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	if !strings.Contains(lightnode.Verify, "unchanged archive container ID/start time") ||
 		!strings.Contains(lightnode.Verify, "live /data mount") {
 		t.Fatalf("lightnode verification does not preserve the archive boundary: %s", lightnode.Verify)
+	}
+}
+
+func TestSubtensorSignalDistinguishesProgressedWarpResume(t *testing.T) {
+	observation := healthySubtensorObservation()
+	node := &observation.Nodes[1]
+	node.Direct.Sync = subtensorSyncState{
+		StartingBlock: 6_413_262,
+		CurrentBlock:  6_433_399,
+		HighestBlock:  7_913_976,
+	}
+	node.Direct.Health = subtensorHealth{Peers: 8, IsSyncing: true}
+	node.WarpFallback = true
+	node.FirstHead = blockHex(6_433_390)
+	node.SecondHead = blockHex(6_433_399)
+	node.Direct.Head = node.FirstHead
+	node.Gateway.Head = node.SecondHead
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := requireAlertClass(t, alerts, "subtensor-warp-resume")
+	if resume.Sustain != 1 {
+		t.Fatalf("warp resume sustain = %d, want immediate", resume.Sustain)
+	}
+	for _, want := range []string{
+		"already-progressed database",
+		"starting_block=6413262",
+		"Do not reset this progressing generation",
+		"full-host lightnode-preservation guard",
+		"same live /data generation",
+	} {
+		if !strings.Contains(resume.Markdown(), want) {
+			t.Fatalf("warp resume alert missing %q:\n%s", want, resume.Markdown())
+		}
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-warp-fallback" {
+			t.Fatalf("progressed resume was misclassified as cold fallback: %+v", alert)
+		}
 	}
 }
 

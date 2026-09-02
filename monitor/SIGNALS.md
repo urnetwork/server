@@ -10544,12 +10544,38 @@ near-head, runtime, EVM, peer, and gateway gates before declaring recovery.
 The `subtensor` probe now reads the live container's configured image, sole
 `/data` mount, start time, and bounded startup-log discriminators. Class
 `subtensor-deployment-drift` reports an image or generation mismatch;
-`subtensor-warp-fallback` remains specific to a rejected partial database;
+`subtensor-warp-fallback` remains specific to a rejected cold database without
+a retained starting block;
 `subtensor-warp-checkpoint` identifies a peer-connected finality-proof download
 stuck at genesis without fallback; and `subtensor-warp-bootstrap` preserves the
 generic lag case when neither root cause is yet proven. These classes require
 operational deployment/storage action and cannot be closed by server
 application code alone.
+
+The 2026-09-01 v3 rollout exposed a separate lifecycle class. The empty
+`/data/subtensor-lightnode-warp-v3` generation was created at 21:12Z and had
+acquired 1.4 GiB of state. At 23:06Z the full `run-subtensor.sh` path
+unconditionally restarted `subtensor.service`, recreating both the archive and
+lightnode. The new lightnode started from block 6,413,262 and logged both the
+partially-synced-database and full-sync-fallback discriminators. It continued
+to advance with nonzero peers. This proves that a host configuration deployment
+interrupted a progressed warp generation; it does not prove that the original
+empty-generation warp failed, and resetting to v4 solely to erase the log would
+discard useful progress.
+
+Class `subtensor-warp-resume` is therefore distinct from cold
+`subtensor-warp-fallback`. A nonzero `system_syncState.startingBlock` plus the
+startup fallback discriminator opens the resume class immediately; the generic
+cold-bootstrap case retains its 15-cadence noise guard. Preserve an advancing
+resumed generation and measure its lag slope. Xops' full-host playbook must
+reconcile only the archive, start rather than unconditionally restart the
+aggregate unit, require an existing lightnode image and `/data` path to match,
+and prove its container ID is unchanged. Intentional lightnode replacement
+remains exclusively owned by `run-subtensor-lightnode.sh`. Choose a new empty
+generation only if the current import stops or a newer independently verified
+checkpoint materially improves recovery. Faster sustained catch-up may still
+require storage/CPU capacity; neither the monitor nor a playbook can create that
+hardware capacity.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
