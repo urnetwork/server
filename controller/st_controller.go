@@ -2922,11 +2922,29 @@ func StSyncChainState(ctx context.Context) (*StEpochState, error) {
 
 const (
 	// stSyncEventsBlockRange bounds each eth_getLogs range (SP-4: public
-	// endpoints reject wide ranges).
-	stSyncEventsBlockRange = 2000
+	// endpoints reject wide ranges). The official testnet endpoint accepts the
+	// production query at one thousand inclusive blocks and rejects two
+	// thousand, so the worker and doctor share this exact ceiling.
+	stSyncEventsBlockRange = stconn.EventLogBlockRange
 	// stSyncEventsMaxRanges bounds the catch-up work per sync run.
 	stSyncEventsMaxRanges = 5
 )
+
+// Computes the inclusive end of one bounded forward range without allowing
+// uint64 addition to wrap near the chain-number limit.
+func stBoundedInclusiveRangeEnd(fromBlock uint64, headBlock uint64, blockCount uint64) (uint64, error) {
+	if blockCount == 0 {
+		return 0, errors.New("st block range size must be nonzero")
+	}
+	if headBlock < fromBlock {
+		return 0, fmt.Errorf("st block range head %d precedes start %d", headBlock, fromBlock)
+	}
+	maxOffset := blockCount - 1
+	if maxOffset < headBlock-fromBlock {
+		return fromBlock + maxOffset, nil
+	}
+	return headBlock, nil
+}
 
 // StSyncChainEvents advances the contract event mirror from the high-water
 // block toward headBlock in bounded ranges, and applies the status
@@ -2964,9 +2982,9 @@ func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 		if finalizedBlock < fromBlock {
 			break
 		}
-		toBlock := fromBlock + stSyncEventsBlockRange - 1
-		if finalizedBlock < toBlock {
-			toBlock = finalizedBlock
+		toBlock, rangeErr := stBoundedInclusiveRangeEnd(fromBlock, finalizedBlock, stSyncEventsBlockRange)
+		if rangeErr != nil {
+			return synced, rangeErr
 		}
 		events, nextBlock, err := client.SyncEvents(ctx, fromBlock, toBlock)
 		if err != nil {

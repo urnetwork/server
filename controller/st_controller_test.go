@@ -136,6 +136,34 @@ func TestStConfigRejectsRoleKeyReuseAndZeroDeploymentBoundary(t *testing.T) {
 	}
 }
 
+// The public-RPC block window is inclusive and must remain bounded at both an
+// ordinary head and math.MaxUint64. This guards the rejected 2,000-block shape
+// and the adjacent overflow that would silently query from block zero.
+func TestStBoundedInclusiveRangeEnd(t *testing.T) {
+	cases := []struct {
+		name       string
+		fromBlock  uint64
+		headBlock  uint64
+		blockCount uint64
+		want       uint64
+		wantError  bool
+	}{
+		{name: "single", fromBlock: 100, headBlock: 100, blockCount: 1000, want: 100},
+		{name: "exact thousand", fromBlock: 100, headBlock: 1099, blockCount: 1000, want: 1099},
+		{name: "bounded thousand", fromBlock: 100, headBlock: 1100, blockCount: 1000, want: 1099},
+		{name: "near maximum short", fromBlock: math.MaxUint64 - 10, headBlock: math.MaxUint64, blockCount: 1000, want: math.MaxUint64},
+		{name: "near maximum bounded", fromBlock: math.MaxUint64 - 1000, headBlock: math.MaxUint64, blockCount: 1000, want: math.MaxUint64 - 1},
+		{name: "zero size", fromBlock: 100, headBlock: 100, blockCount: 0, wantError: true},
+		{name: "reverse", fromBlock: 101, headBlock: 100, blockCount: 1000, wantError: true},
+	}
+	for _, c := range cases {
+		got, err := stBoundedInclusiveRangeEnd(c.fromBlock, c.headBlock, c.blockCount)
+		if (err != nil) != c.wantError || (!c.wantError && got != c.want) {
+			t.Errorf("%s end=%d error=%v, want end=%d error=%t", c.name, got, err, c.want, c.wantError)
+		}
+	}
+}
+
 // testStColdkey builds a distinct coldkey from a marker byte.
 func testStColdkey(marker byte) [32]byte {
 	var coldkey [32]byte

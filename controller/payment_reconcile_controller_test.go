@@ -63,6 +63,182 @@ func countReconcileEvents(events []*model.PaymentReconciliationEvent, store stri
 	return count
 }
 
+// A vault file is not itself a credential. SKU-only, malformed and blank-token
+// resources must skip Stripe before the reconciler reaches the strict token
+// accessor; only a nonblank api.token enables remote calls.
+func TestStripeReconcileCredentialsRequireNonblankAPIToken(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{name: "sku only", yaml: "skus:\n  pro: price_test\n", want: false},
+		{name: "malformed", yaml: "api: [\n", want: false},
+		{name: "blank token", yaml: "api:\n  token: '   '\n", want: false},
+		{name: "numeric token", yaml: "api:\n  token: 123\n", want: false},
+		{name: "sequence token", yaml: "api:\n  token: [sk_test]\n", want: false},
+		{name: "wrong api shape", yaml: "api: scalar\n", want: false},
+		{name: "token", yaml: "api:\n  token: sk_test_reconcile\n", want: true},
+	}
+	for _, c := range cases {
+		pop := server.Vault.PushSimpleResource("stripe.yml", []byte(c.yaml))
+		got := stripeReconcileCredentialsPresent()
+		pop()
+		if got != c.want {
+			t.Errorf("%s credentials = %t, want %t", c.name, got, c.want)
+		}
+	}
+}
+
+// Malformed Apple resources are absence, not a process panic. Every required
+// field must be nonblank before the authenticated pull client can run.
+func TestAppleReconcileCredentialsRequireCompleteServerAPIIdentity(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{name: "malformed", yaml: "issuer_id: [\n", want: false},
+		{name: "missing key", yaml: "issuer_id: issuer\nprivate_key: key\napp_store_notifications:\n  bundle_id: app\n", want: false},
+		{name: "numeric key", yaml: "app_store_server_api_key_id: 123\nissuer_id: issuer\nprivate_key: key\napp_store_notifications:\n  bundle_id: app\n", want: false},
+		{name: "blank bundle", yaml: "app_store_server_api_key_id: key-id\nissuer_id: issuer\nprivate_key: key\napp_store_notifications:\n  bundle_id: '  '\n", want: false},
+		{name: "complete", yaml: "app_store_server_api_key_id: key-id\nissuer_id: issuer\nprivate_key: key\napp_store_notifications:\n  bundle_id: app.example\n", want: true},
+	}
+	for _, c := range cases {
+		pop := server.Vault.PushSimpleResource("apple.yml", []byte(c.yaml))
+		got := appleReconcileCredentialsFromVault() != nil
+		pop()
+		if got != c.want {
+			t.Errorf("%s Apple credentials = %t, want %t", c.name, got, c.want)
+		}
+	}
+}
+
+// Play needs both the OAuth/package identity and a decodable nonempty SKU
+// catalog. File existence alone previously admitted malformed resources into
+// strict map assertions inside the run.
+func TestPlayReconcileCredentialsRequireOAuthPackageAndSKUs(t *testing.T) {
+	validGoogle := "webhook:\n  package_name: app.example\noauth:\n  client_id: client\n  client_secret: secret\n  refresh_token: refresh\n"
+	validPlay := "skus:\n  pro: {}\n"
+	cases := []struct {
+		name       string
+		googleYAML string
+		playYAML   string
+		want       bool
+	}{
+		{name: "malformed google", googleYAML: "oauth: [\n", playYAML: validPlay, want: false},
+		{name: "blank oauth", googleYAML: "webhook:\n  package_name: app.example\noauth:\n  client_id: client\n  client_secret: ''\n  refresh_token: refresh\n", playYAML: validPlay, want: false},
+		{name: "numeric oauth", googleYAML: "webhook:\n  package_name: app.example\noauth:\n  client_id: client\n  client_secret: 123\n  refresh_token: refresh\n", playYAML: validPlay, want: false},
+		{name: "malformed skus", googleYAML: validGoogle, playYAML: "skus: [\n", want: false},
+		{name: "empty skus", googleYAML: validGoogle, playYAML: "skus: {}\n", want: false},
+		{name: "complete", googleYAML: validGoogle, playYAML: validPlay, want: true},
+	}
+	for _, c := range cases {
+		popGoogle := server.Vault.PushSimpleResource("google.yml", []byte(c.googleYAML))
+		popPlay := server.Config.PushSimpleResource("play.yml", []byte(c.playYAML))
+		got := playReconcileCredentialsPresent()
+		popPlay()
+		popGoogle()
+		if got != c.want {
+			t.Errorf("%s Play credentials = %t, want %t", c.name, got, c.want)
+		}
+	}
+}
+
+// Helius reconciliation consumes helius.api_key specifically; unrelated
+// webhook fields or an invalid YAML file cannot enable Solana RPC calls.
+func TestSolanaReconcileCredentialsRequireNonblankHeliusAPIKey(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{name: "malformed", yaml: "helius: [\n", want: false},
+		{name: "unrelated", yaml: "helius:\n  webhook_auth_header: secret\n", want: false},
+		{name: "blank", yaml: "helius:\n  api_key: '  '\n", want: false},
+		{name: "numeric", yaml: "helius:\n  api_key: 123\n", want: false},
+		{name: "complete", yaml: "helius:\n  api_key: test-key\n", want: true},
+	}
+	for _, c := range cases {
+		pop := server.Vault.PushSimpleResource("helius.yml", []byte(c.yaml))
+		got := solanaReconcileCredentialsPresent()
+		pop()
+		if got != c.want {
+			t.Errorf("%s Solana credentials = %t, want %t", c.name, got, c.want)
+		}
+	}
+}
+
+// Reproduce the simulator's SKU-only vault shape through the orchestration
+// path. It must emit skipped_store rather than entering reconcileStripe and
+// recovering an unsafe token assertion as an error event.
+func TestPaymentReconcileSkipsStripeWithSKUOnlyVault(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		previous := stripeReconcileHasCredentials
+		stripeReconcileHasCredentials = stripeReconcileCredentialsPresent
+		t.Cleanup(func() { stripeReconcileHasCredentials = previous })
+		pop := server.Vault.PushSimpleResource("stripe.yml", []byte("skus:\n  pro: price_test\n"))
+		t.Cleanup(pop)
+
+		result, err := RunPaymentReconciliationWithOptions(
+			reconcileTestSession(t, ctx),
+			&PaymentReconcileRunOptions{Stores: []string{model.SubscriptionMarketStripe}},
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Errors, 0)
+		connect.AssertEqual(t, len(result.SkippedStores), 1)
+		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionSkippedStore), 1)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionError), 0)
+	})
+}
+
+// Credential checks run outside each store's panic-isolation block, so every
+// production checker must fail closed on malformed optional resources. This
+// exercises all four together through the real run orchestration.
+func TestPaymentReconcileMalformedCredentialResourcesSkipAllStores(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		previousStripe := stripeReconcileHasCredentials
+		previousApple := appleReconcileHasCredentials
+		previousPlay := playReconcileHasCredentials
+		previousSolana := solanaReconcileHasCredentials
+		stripeReconcileHasCredentials = stripeReconcileCredentialsPresent
+		appleReconcileHasCredentials = func() bool { return appleReconcileCredentialsFromVault() != nil }
+		playReconcileHasCredentials = playReconcileCredentialsPresent
+		solanaReconcileHasCredentials = solanaReconcileCredentialsPresent
+		t.Cleanup(func() {
+			stripeReconcileHasCredentials = previousStripe
+			appleReconcileHasCredentials = previousApple
+			playReconcileHasCredentials = previousPlay
+			solanaReconcileHasCredentials = previousSolana
+		})
+		pops := []func(){
+			server.Vault.PushSimpleResource("stripe.yml", []byte("api: [\n")),
+			server.Vault.PushSimpleResource("apple.yml", []byte("issuer_id: [\n")),
+			server.Vault.PushSimpleResource("google.yml", []byte("oauth: [\n")),
+			server.Vault.PushSimpleResource("helius.yml", []byte("helius: [\n")),
+			server.Config.PushSimpleResource("play.yml", []byte("skus: [\n")),
+		}
+		for _, pop := range pops {
+			t.Cleanup(pop)
+		}
+
+		result, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Errors, 0)
+		connect.AssertEqual(t, len(result.SkippedStores), 4)
+		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionSkippedStore), 1)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketApple, model.PaymentReconcileActionSkippedStore), 1)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketGoogle, model.PaymentReconcileActionSkippedStore), 1)
+		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketSolana, model.PaymentReconcileActionSkippedStore), 1)
+	})
+}
+
 // ----- stripe fake backend -----
 
 type stripeReconcileTestEnv struct {

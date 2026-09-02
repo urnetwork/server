@@ -13,11 +13,56 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/server"
 )
+
+// The former NUL-delimited advisory key failed before the first query could
+// reserve a nonce. Exercise the real PostgreSQL lock, idempotent replay, next
+// nonce and adjacent account namespace in one isolated deployment.
+func TestStTransactionIntentReservationUsesPostgreSQLSafeLockKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		deploymentId := server.NewId().String()
+		fromAddress := "0x" + strings.Repeat("1", 40)
+		otherFromAddress := "0x" + strings.Repeat("2", 40)
+		toAddress := "0x" + strings.Repeat("3", 40)
+		calldataHash := "0x" + strings.Repeat("4", 64)
+		calldata := []byte{1, 2, 3}
+
+		first := ReserveStTransactionIntent(
+			ctx, "test-intent-first", "testnet", deploymentId, 945,
+			fromAddress, toAddress, calldataHash, calldata, 7,
+		)
+		if first == nil || first.Nonce != 7 {
+			t.Fatalf("first reservation = %+v, want nonce 7", first)
+		}
+		replayed := ReserveStTransactionIntent(
+			ctx, "test-intent-first", "testnet", deploymentId, 945,
+			fromAddress, toAddress, calldataHash, calldata, 99,
+		)
+		if replayed == nil || replayed.IntentId != first.IntentId || replayed.Nonce != first.Nonce {
+			t.Fatalf("idempotent replay = %+v, want intent %s nonce %d", replayed, first.IntentId, first.Nonce)
+		}
+		next := ReserveStTransactionIntent(
+			ctx, "test-intent-next", "testnet", deploymentId, 945,
+			fromAddress, toAddress, calldataHash, []byte{4, 5, 6}, 1,
+		)
+		if next == nil || next.Nonce != 8 {
+			t.Fatalf("next reservation = %+v, want nonce 8", next)
+		}
+		other := ReserveStTransactionIntent(
+			ctx, "test-intent-other-account", "testnet", deploymentId, 945,
+			otherFromAddress, toAddress, calldataHash, calldata, 3,
+		)
+		if other == nil || other.Nonce != 3 {
+			t.Fatalf("other-account reservation = %+v, want nonce 3", other)
+		}
+	})
+}
 
 func TestStWalletRoundtrip(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

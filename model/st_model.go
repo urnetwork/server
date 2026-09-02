@@ -814,6 +814,21 @@ const stTransactionIntentColumns = `
 	from_address, to_address, calldata_hash, calldata, nonce,
 	status, current_tx_hash, attempt_count, error, create_time, update_time`
 
+// Frames the advisory-lock identity as printable, length-prefixed hex. Raw NUL
+// separators are invalid PostgreSQL text, and delimiter concatenation is
+// ambiguous when a component itself contains that delimiter.
+func stTransactionAdvisoryLockKey(profile string, deploymentId string, fromAddress string) string {
+	var builder strings.Builder
+	builder.WriteString("st-transaction-v1:")
+	for _, value := range []string{profile, deploymentId, fromAddress} {
+		encoded := hex.EncodeToString([]byte(value))
+		builder.WriteString(strconv.Itoa(len(encoded)))
+		builder.WriteByte(':')
+		builder.WriteString(encoded)
+	}
+	return builder.String()
+}
+
 // ReserveStTransactionIntent atomically reserves the next usable nonce for an
 // account and persists the immutable operation before any signing occurs.  A
 // repeated intentKey returns the original row after byte-for-byte validation.
@@ -839,7 +854,7 @@ func ReserveStTransactionIntent(
 		var ignored any
 		server.Raise(tx.QueryRow(ctx,
 			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-			profile+"\x00"+deploymentId+"\x00"+fromAddress,
+			stTransactionAdvisoryLockKey(profile, deploymentId, fromAddress),
 		).Scan(&ignored))
 
 		row := tx.QueryRow(ctx,

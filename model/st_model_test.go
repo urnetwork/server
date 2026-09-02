@@ -6,6 +6,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +15,35 @@ func testStCkey(marker byte) [32]byte {
 	var ckey [32]byte
 	ckey[0] = marker
 	return ckey
+}
+
+// Lock identities are deterministic, printable and injective across tuples
+// that collide under delimiter concatenation. NUL-bearing values exercise the
+// exact character PostgreSQL rejected in the former key.
+func TestStTransactionAdvisoryLockKeyFramesAdversarialTuples(t *testing.T) {
+	tuples := [][3]string{
+		{"testnet", "release", "0xabc"},
+		{"testnet:", "release", "0xabc"},
+		{"testnet", ":release", "0xabc"},
+		{"a\x00b", "c", "d"},
+		{"a", "b", "c\x00d"},
+		{"", "", ""},
+		{"测试", "deployment/with:delimiters", "address"},
+	}
+	seen := map[string][3]string{}
+	for _, tuple := range tuples {
+		key := stTransactionAdvisoryLockKey(tuple[0], tuple[1], tuple[2])
+		if strings.ContainsRune(key, '\x00') {
+			t.Errorf("tuple %q produced a PostgreSQL-invalid NUL key", tuple)
+		}
+		if previous, ok := seen[key]; ok {
+			t.Errorf("tuples %q and %q produced the same lock key", previous, tuple)
+		}
+		seen[key] = tuple
+		if repeated := stTransactionAdvisoryLockKey(tuple[0], tuple[1], tuple[2]); repeated != key {
+			t.Errorf("tuple %q produced nondeterministic keys", tuple)
+		}
+	}
 }
 
 // TestStHeadBoundCkeysFromEventsWindowOverlap covers the interval-overlap
