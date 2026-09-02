@@ -15,9 +15,19 @@ import (
 
 const (
 	backupArchiveMetricFreshness = 90 * time.Second
+	backupArchiveHeartbeatAge    = 90 * time.Second
 	backupArchiveMaximumAge      = 5 * 24 * time.Hour
 	backupArchiveFutureTolerance = 5 * time.Minute
 )
+
+const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
+unit_state=$(systemctl is-active github-backup-archive.service 2>/dev/null || true)
+main_pid=$(systemctl show github-backup-archive.service -p MainPID --value 2>/dev/null || true)
+metrics_mtime=$(stat -c %Y /var/lib/fluent-bit/textfile/backup-archive-code.prom 2>/dev/null || true)
+case "${unit_state}" in '') unit_state=unknown ;; esac
+case "${main_pid}" in ''|*[!0-9]*) main_pid=0 ;; esac
+case "${metrics_mtime}" in ''|*[!0-9]*) metrics_mtime=0 ;; esac
+printf '%s %s %s\n' "${unit_state}" "${main_pid}" "${metrics_mtime}"`
 
 var backupArchiveNames = []string{
 	"pg",
@@ -55,6 +65,13 @@ type backupArchiveObservation struct {
 	invalidLatest   []string
 	invalidProgress []string
 	staleScrapes    int
+}
+
+type backupArchiveWriterObservation struct {
+	host         string
+	unitState    string
+	mainPID      int64
+	metricsMTime time.Time
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -104,6 +121,18 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 
 	now := env.now().UTC()
+	writers := make(map[string]backupArchiveWriterObservation, len(backupHosts))
+	for _, host := range backupHosts {
+		output, err := env.runner.shell(ctx, host, backupArchiveWriterCommand)
+		if err != nil {
+			return nil, fmt.Errorf("backup archives: inspect writer on %s: %w", host.name, err)
+		}
+		writer, err := parseBackupArchiveWriterObservation(host.name, output)
+		if err != nil {
+			return nil, fmt.Errorf("backup archives: parse writer on %s: %w", host.name, err)
+		}
+		writers[host.name] = writer
+	}
 	for _, series := range response.Data.Result {
 		hostName := series.Metric["host"]
 		archive := series.Metric["archive"]
@@ -174,7 +203,124 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	for _, key := range keys {
 		findings = append(findings, evaluateBackupArchive(now, observations[key], metricHost.name)...)
 	}
+	for _, host := range backupHosts {
+		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
+	}
 	return findings, nil
+}
+
+func parseBackupArchiveWriterObservation(hostName, output string) (backupArchiveWriterObservation, error) {
+	fields := strings.Fields(strings.TrimSpace(output))
+	if len(fields) != 3 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("expected state, main PID, and metrics mtime; got %q", strings.TrimSpace(output))
+	}
+	if matched, _ := regexp.MatchString(`^[a-z-]+$`, fields[0]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid unit state %q", fields[0])
+	}
+	mainPID, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || mainPID < 0 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid main PID %q", fields[1])
+	}
+	metricsMTimeUnix, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil || metricsMTimeUnix < 0 {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid metrics mtime %q", fields[2])
+	}
+	writer := backupArchiveWriterObservation{host: hostName, unitState: fields[0], mainPID: mainPID}
+	if metricsMTimeUnix > 0 {
+		writer.metricsMTime = time.Unix(metricsMTimeUnix, 0).UTC()
+	}
+	return writer, nil
+}
+
+func evaluateBackupArchiveWriter(
+	now time.Time,
+	writer backupArchiveWriterObservation,
+	observations map[string]*backupArchiveObservation,
+) finding {
+	target := writer.host + "/github"
+	progressTotal := float64(0)
+	progressSeries := 0
+	progressComplete := true
+	for _, archive := range []string{"github-urnetwork", "github-urfoundation"} {
+		observation := observations[backupArchiveKey(writer.host, archive)]
+		if observation == nil || len(observation.progress) != 1 || len(observation.invalidProgress) != 0 {
+			progressComplete = false
+			continue
+		}
+		progressSeries++
+		progressTotal += observation.progress[0]
+	}
+
+	metricsMTime := "missing"
+	metricsAge := "unknown"
+	metricsAgeDuration := time.Duration(0)
+	if !writer.metricsMTime.IsZero() {
+		metricsMTime = writer.metricsMTime.Format(time.RFC3339)
+		metricsAgeDuration = now.Sub(writer.metricsMTime)
+		metricsAge = backupArchiveAge(metricsAgeDuration)
+	}
+
+	reasons := []string{}
+	switch writer.unitState {
+	case "active", "activating", "reloading":
+		if writer.mainPID == 0 {
+			reasons = append(reasons, "active-unit-without-main-pid")
+		}
+		if writer.metricsMTime.IsZero() {
+			reasons = append(reasons, "metrics-textfile-missing")
+		} else if metricsAgeDuration > backupArchiveHeartbeatAge {
+			reasons = append(reasons, "metrics-heartbeat-stale")
+		} else if metricsAgeDuration < -30*time.Second {
+			reasons = append(reasons, "metrics-mtime-in-future")
+		}
+		if !progressComplete {
+			reasons = append(reasons, "github-progress-incomplete")
+		} else if progressTotal != 1 {
+			reasons = append(reasons, "active-unit-progress-total-not-one")
+		}
+	case "inactive", "failed":
+		if progressComplete && progressTotal != 0 {
+			reasons = append(reasons, "idle-unit-progress-total-not-zero")
+		}
+	case "deactivating":
+		// The owner may have published its final zeros before systemd finishes
+		// moving the oneshot to inactive. Sustain gating absorbs this boundary.
+	default:
+		reasons = append(reasons, "unexpected-unit-state")
+	}
+
+	if len(reasons) == 0 {
+		return healthyFinding(
+			"observability/backup-archives", tierPage, "backup-archive-progress-stale", target,
+		)
+	}
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: "backup-archive-progress-stale", target: target,
+		frame: "unit=github-backup-archive.service", sustain: 2,
+		symptom: fmt.Sprintf(
+			"%s writer state and exported in-progress telemetry disagree",
+			target,
+		),
+		mechanism: "Fluent Bit assigns a fresh scrape timestamp each time it rereads a Prometheus textfile, so Mimir sample freshness cannot prove that the file's Boolean phase is current. A standalone refresh overwrote both gauges with zero while the oneshot was active, and the long-running writer only rewrote metrics at organization transitions. The stale source file therefore looked freshly idle throughout a multi-hour compression.",
+		baseline:  "While github-backup-archive.service is active, it has a nonzero MainPID, the code-backup textfile mtime is no more than 90 seconds old, and exactly one of the two fresh organization gauges is 1. When the unit is inactive or failed, both gauges are 0.",
+		observed: fmt.Sprintf(
+			"unit_state=%s main_pid=%d metrics_mtime=%s metrics_age=%s fresh_github_progress_series=%d progress_complete=%t published_progress_total=%s reasons=%s",
+			writer.unitState,
+			writer.mainPID,
+			metricsMTime,
+			metricsAge,
+			progressSeries,
+			progressComplete,
+			strconv.FormatFloat(progressTotal, 'f', 0, 64),
+			strings.Join(reasons, ","),
+		),
+		evidence: "The unit state, MainPID, and source textfile mtime are read directly on the configured backup host and joined with the two source-timestamp-filtered raw Mimir progress gauges.",
+		context:  "This is a telemetry-owner defect, not evidence that the active archive stopped and not a completed recovery point. Preserve a healthy active tar/xz generation; changing the installed script does not alter the already-running shell.",
+		action:   "Keep the current archive job running. Install Xops commit 2f22201 or a clean descendant with run-planetoid.sh; its sole owning writer republishes the active phase every 30 seconds and cancels the helper before publishing final zeros. The already-running pre-fix shell will not gain that behavior, so verify it on the next authorized archive generation rather than restarting this one or manually editing the .prom file.",
+		verify:   "On the next generation using the fixed script, require two consecutive direct samples during a long phase with exactly one GitHub gauge at 1 and a source textfile mtime no more than 90 seconds old; after successful atomic completion, require both gauges at 0, the helper gone, and the new tarball and manifest valid.",
+		playbook: "SIGNALS.md §11.22",
+	}
 }
 
 func backupArchivesQuery(environment string, hosts []*host) string {

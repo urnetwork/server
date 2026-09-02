@@ -17,6 +17,12 @@ type backupArchiveFixture struct {
 	sampleAt   time.Time
 }
 
+type backupArchiveWriterFixture struct {
+	unitState    string
+	mainPID      int64
+	metricsMTime time.Time
+}
+
 func TestBackupArchivesSignalSyntheticHealthy(t *testing.T) {
 	now := time.Date(2026, 9, 1, 18, 0, 0, 0, time.UTC)
 	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
@@ -90,6 +96,68 @@ func TestBackupArchivesSignalSyntheticStaleAndMissingGenerations(t *testing.T) {
 	}
 }
 
+func TestBackupArchivesSignalSyntheticDetectsStaleActiveWriterProgress(t *testing.T) {
+	now := time.Date(2026, 9, 1, 23, 56, 0, 0, time.UTC)
+	zero := float64(0)
+	one := float64(1)
+	createdAt := now.Add(-time.Hour)
+	base := []backupArchiveFixture{
+		{archive: "pg", generation: "main-pg-current.sql.xz", createdAt: &createdAt, progress: &zero},
+		{archive: "redis", generation: "main-redis-current", createdAt: &createdAt, progress: &zero},
+		{archive: "github-urnetwork", generation: "urnetwork.tar.xz", createdAt: &createdAt, progress: &zero},
+		{archive: "github-urfoundation", generation: "urfoundation.tar.xz", createdAt: &createdAt, progress: &zero},
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState: "activating", mainPID: 156738, metricsMTime: now.Add(-2 * time.Hour),
+	}, base...)
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-progress-stale", "backup-1/github")
+	for _, want := range []string{
+		"unit_state=activating",
+		"main_pid=156738",
+		"metrics_age=2h0m0s",
+		"published_progress_total=0",
+		"metrics-heartbeat-stale",
+		"active-unit-progress-total-not-one",
+		"Fluent Bit assigns a fresh scrape timestamp",
+		"Xops commit 2f22201",
+		"already-running pre-fix shell will not gain that behavior",
+		"rather than restarting this one",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("stale active-writer alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+
+	healthy := append([]backupArchiveFixture(nil), base...)
+	healthy[2].progress = &one
+	healthyAlerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState: "activating", mainPID: 156738, metricsMTime: now.Add(-30 * time.Second),
+	}, healthy...)
+	if unexpected := findBackupArchiveAlert(healthyAlerts, "backup-archive-progress-stale", "backup-1/github"); unexpected != nil {
+		t.Fatalf("fresh single-owner active progress alerted: %+v", *unexpected)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{name: "missing", output: "activating 12", want: "expected state"},
+		{name: "state", output: "ACTIVE 12 34", want: "invalid unit state"},
+		{name: "pid", output: "activating nope 34", want: "invalid main PID"},
+		{name: "mtime", output: "activating 12 nope", want: "invalid metrics mtime"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := parseBackupArchiveWriterObservation("backup-1", testCase.output)
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("parse error=%v, want substring %q", err, testCase.want)
+			}
+		})
+	}
+}
+
 func TestBackupArchivesSignalSyntheticStaleScrapeIsObservationLoss(t *testing.T) {
 	now := time.Date(2026, 9, 1, 18, 3, 0, 0, time.UTC)
 	zero := float64(0)
@@ -127,9 +195,28 @@ func TestBackupArchivesSignalSyntheticRejectsInvalidMetrics(t *testing.T) {
 }
 
 func runBackupArchiveFixtures(t testing.TB, now time.Time, fixtures ...backupArchiveFixture) Alerts {
+	return runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		unitState: "inactive", metricsMTime: now,
+	}, fixtures...)
+}
+
+func runBackupArchiveFixturesWithWriter(
+	t testing.TB,
+	now time.Time,
+	writer backupArchiveWriterFixture,
+	fixtures ...backupArchiveFixture,
+) Alerts {
 	t.Helper()
 	payload := backupArchiveFixtureJSON(t, now, fixtures...)
 	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
+		if host.Name == "backup-1" && strings.Contains(command, "monitor-signal-11.22-backup-archives") {
+			return fmt.Sprintf(
+				"%s %d %d\n",
+				writer.unitState,
+				writer.mainPID,
+				writer.metricsMTime.Unix(),
+			), nil
+		}
 		if host.Name != "metrics-1" ||
 			!strings.Contains(command, "urnetwork_backup_archive_%28latest_timestamp_seconds%7Cin_progress%29") ||
 			!strings.Contains(command, "host%3D~%22backup-1%22") ||

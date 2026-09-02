@@ -7752,18 +7752,23 @@ no completed backup from a missing collector.
 
 The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
-role. It expects exactly the four archive names above. Samples older than 90
-seconds are observation loss even when their archive timestamp value is old.
-The newest valid generation is selected during the short Mimir staleness
-overlap after a label change. Metric values must be finite, generations must
-be non-empty, archive timestamps may not be more than five minutes in the
-future, and each in-progress gauge must be uniquely present and equal to zero
-or one. The query carries no credentials, repository names, paths, or backup
+role. It also reads `github-backup-archive.service` state, MainPID, and the code
+textfile mtime directly on that backup host. It expects exactly the four archive
+names above. Samples older than 90 seconds are observation loss even when their
+archive timestamp value is old. The newest valid generation is selected during
+the short Mimir staleness overlap after a label change. Metric values must be
+finite, generations must be non-empty, archive timestamps may not be more than
+five minutes in the future, and each in-progress gauge must be uniquely present
+and equal to zero or one. The query and direct discriminator carry no
+credentials, repository names, paths beyond the fixed metrics file, or backup
 contents.
 
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
 at least one complete generation; and each newest completion is no more than
-five days old. BROKEN:
+five days old. While the GitHub unit is active, its MainPID is nonzero, its
+source textfile mtime is no more than 90 seconds old, and exactly one GitHub
+organization gauge is one; while it is inactive or failed both are zero.
+BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
   producer, textfile collector, authenticated remote-write path, or Mimir
@@ -7778,6 +7783,11 @@ five days old. BROKEN:
 - `backup-archive-stale` is immediate once the newest real completion is more
   than five days old. A current scrape of an old value proves the telemetry
   path while reporting an expired recovery-point objective.
+- `backup-archive-progress-stale` after two probes means direct systemd state
+  and the two exported GitHub phase gauges disagree, the active unit has no
+  MainPID, or its source textfile has not received the 30-second heartbeat for
+  more than 90 seconds. Fluent Bit gives every reread a fresh scrape timestamp,
+  so raw-Mimir freshness alone cannot disprove this source-file staleness.
 
 The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
 ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both
@@ -7814,6 +7824,20 @@ while it is active, activating, or reloading. The running writer remains the
 sole owner; its exit path publishes zero. This is a visibility fix and must not
 be treated as completing either tarball.
 
+The guard prevents another writer from clobbering an active phase, but it
+cannot repair a file that was already overwritten. After the guarded
+`run-planetoid.sh` on 2026-09-01, direct state still showed the original
+activating PID `156738` with live `tar` and two-thread `xz` children, while
+`backup-archive-code.prom` retained mtime `2026-09-01T22:29:50Z` and both
+organization gauges at zero. Mimir kept returning those zeros with fresh
+scrape timestamps. Xops commit `2f22201` fixes that causal gap: the sole owning
+shell atomically republishes its current phase every 30 seconds and cancels the
+heartbeat helper before publishing the transition or final zeros. A running
+pre-fix shell cannot inherit newly installed script behavior. Preserve the
+healthy active compression, install the fixed script for the next generation,
+and never restart the current job or hand-edit the metric merely to change the
+panel.
+
 Ownership is deliberately split. The quote bug, refresh race, atomic writers,
 and monitor detector are software/configuration work. Making the archive disk
 available before unattended timers and authorizing a catch-up run are operator
@@ -7824,13 +7848,17 @@ timestamp, rename a partial artifact, refresh a stale value, or raise the
 five-day threshold to clear these classes.
 
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
-as the Fluent Bit identity; reproduce the textfile input with a bounded
-stdout-only process; inspect the deployed unquoted metrics list; then read the
-owning systemd unit, mountpoint, free space, and bounded journal. Verify a
-repair only after the real unit exits successfully, the completed artifact and
-manifest validate on mounted media, and two consecutive direct Mimir reads
-show the same new generation inside the five-day band. The Grafana dashboard
-must agree with those raw inputs, but it is never the proof source.
+as the Fluent Bit identity and compare their mtime with the direct unit state;
+reproduce the textfile input with a bounded stdout-only process; inspect the
+deployed unquoted metrics list; then read the owning systemd unit, mountpoint,
+free space, and bounded journal. On the next fixed long-running GitHub phase,
+require two consecutive samples with exactly one organization gauge at one and
+a textfile mtime no more than 90 seconds old, followed by final zeros and no
+heartbeat helper after exit. Verify archive recovery only after the real unit
+exits successfully, the completed artifact and manifest validate on mounted
+media, and two consecutive direct Mimir reads show the same new generation
+inside the five-day band. The Grafana dashboard must agree with those raw
+inputs, but it is never the proof source.
 
 ---
 
