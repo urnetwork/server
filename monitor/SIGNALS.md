@@ -8468,6 +8468,19 @@ therefore preserve the PostgreSQL phase and require Redis to transition to one
 without a second unit generation. Generic “start a catch-up run” guidance at
 this boundary is a monitor defect because it risks concurrent writers.
 
+The operator-authorized 2026-09-02 route cutover preserved that single-writer
+boundary. The VPN-backed process with PID 262449 was stopped, its rsync partial
+state was retained, and `run-planetoid.sh` installed the direct endpoint unit.
+The explicitly restarted process had PID 278173 and resumed the same PostgreSQL
+phase through `65.49.70.73:8022`; no archive payload socket to either
+`172.28.208.182:22` or `172.28.208.177:22` remained. Over one 15-second direct
+socket sample, received bytes rose from 4,824,292,818 to 5,017,877,410, about
+12.3 MiB/s compared with the earlier 0.95 MiB/s VPN sample. This proves the
+route and resumability fix, but a short throughput sample is not a completed
+recovery point: freshness still closes only after the unit succeeds, validates
+the artifact and manifest, transitions through Redis without a second writer,
+and publishes current completed generations.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
@@ -11235,14 +11248,18 @@ merely to clear EACCES.
 Class `subtensor-data-permission` is immediate. The restricted helper reports
 the live process UID/GID, bind-source UID/GID/mode, whether that exact account
 has write plus traverse permission, and a Boolean from the bounded 5,000-line
-tail of that exact container generation for the RocksDB permission signature.
-The generation scope is intentional: a fatal background error must not age out
-after 30 minutes while the same process remains alive and frozen. HEALTHY
+tail beginning at that exact process's `StartedAt` boundary for the RocksDB
+permission signature. Docker retains a container ID and its older log stream
+across an in-place restart, so container-wide history would incorrectly blame
+the recovered process for its predecessor's EACCES. The process scope remains
+intentional and has no rolling wall-clock cutoff: a fatal background error must
+not age out after 30 minutes while the same process remains alive and frozen. HEALTHY
 requires permission observation to be present, `data_runtime_writable=true`,
 and either no retained permission signature or head advancement by that exact
 process. Recovery requires advancing best heads across two post-repair samples;
-container replacement changes the evidence generation and must retain the same
-data path. Missing permission facts are observation loss, not a healthy default.
+container replacement or restart changes the process evidence boundary and
+must retain the same data path. Missing permission facts are observation loss,
+not a healthy default.
 The alert action branches on the live permission boundary. A non-writable path
 requires the idempotent Xops ownership repair with both identities preserved.
 A writable path plus a retained signature and frozen head means provisioning is
@@ -11250,6 +11267,19 @@ already complete: do not rerun the full-host playbook or choose a new database
 generation. Obtain explicit authorization for one service-scoped,
 same-generation restart at a time, archive first, and prove progress plus the
 other node's unchanged identity before continuing.
+
+That authorization was exercised on 2026-09-02 without changing either
+generation. The archive restarted at 18:37:56Z with the same container ID,
+pinned image, `/data/subtensor` mount, and peer identity; it logged no new
+permission/database error and advanced from block 6,447,933 to 6,448,540. Only
+after that proof, the lightnode restarted at 18:39:33Z with the same container
+ID, image, `/data/subtensor-lightnode-warp-v3` mount, and peer identity while
+the archive start time remained unchanged. It logged no new permission/database
+error and advanced from 6,447,926 to 6,448,157. Both nodes had nonzero peers
+and advanced again across the final 15-second sample. This closes the latched
+EACCES freeze, not their bootstrap lag: the progressed lightnode necessarily
+reported the existing `subtensor-warp-resume` discriminator and both nodes must
+continue converging on their retained data.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
