@@ -26,6 +26,8 @@ func TestMissingOriginSignalSyntheticFallbackFromNormal(t *testing.T) {
 		"active top-level providers",
 		"maximum client-window lifetime",
 		"provider return paths and same-network peers",
+		"§2.20 reports zero successful contracts",
+		"server commit c8dfe570",
 		"do not infer endpoint roles",
 		"edit Redis blobs",
 		"No client, network, contract, or destination identifier",

@@ -3991,6 +3991,19 @@ that mode disappeared but Stream remained, the same stale destination fell
 back to companion settlement and surfaced as missing-origin. This is ongoing
 authorization of dead routes, not old clients merely aging out.
 
+A second identifier-free aggregate at `2026-09-02T21:12Z` isolated the live
+shape after all repaired score-cache controls were healthy. Over 15 minutes,
+8,705 successful non-companion contracts targeted 135 derived destinations
+that had already been inactive before contract creation. Every one was
+same-network, originated from one of 14 active top-level clients, and retained
+both Network and Stream provide keys; none was cross-network or a Public
+provider selection. Median destination deactivation preceded the new contract
+by 641,254 seconds. This rules out current Public score-cache contamination
+and Proxy capacity for that cohort: the active failure is a stale
+same-network return path accepted by the pre-guard API. §2.20 now measures the
+zero-success invariant directly instead of relying on the failed-request rate
+to imply it.
+
 The durable software fix has two halves. The API rejects an inactive or missing
 destination before provide-mode selection and repeats active-only endpoint
 checks at the contract write boundary. Those destination-lifecycle and bounded
@@ -4190,6 +4203,65 @@ Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
 tests cover an unarmed rollout, a missing shard, shard-local full/blackhole
 stalls hidden by a healthy sibling, healthy empty due queues, malformed-secret
 redaction, normalized signed hashing, and ambiguous aggregate rejection.
+
+### 2.20 Successful contracts to inactive destinations — stale route acceptance
+Probe: `stale-contracts`
+
+The rejection counter in §2.18 measures attempts stopped by the lifecycle
+guard. This probe independently measures the more severe opposite outcome: a
+row was successfully created after its destination had already become
+inactive. It reads only the most recent five-minute PostgreSQL cohort:
+
+```sql
+SELECT count(*)
+FROM transfer_contract tc
+JOIN network_client destination ON destination.client_id = tc.destination_id
+WHERE tc.create_time >= now() - interval '5 minutes'
+  AND tc.companion_contract_id IS NULL
+  AND NOT destination.active
+  AND destination.deactivate_time IS NOT NULL
+  AND destination.deactivate_time <= tc.create_time;
+```
+
+The `deactivate_time <= create_time` boundary is essential. Looking only at a
+destination's current inactive bit would falsely include a healthy contract
+whose destination disconnected after creation. The probe also exports only
+aggregate same/cross-network, derived/top-level, active-top-level source,
+distinct endpoint counts, and median/p95 deactivation lead time. It never
+returns identifiers or contract content.
+
+- HEALTHY: zero matching successful contracts on two consecutive five-minute
+  cohorts, alongside both observable §2.18 rejection partitions.
+- `stale-contract-success` (PAGE immediately): one or more matching rows. A
+  successful row is affirmative contract-correctness failure, not a noisy
+  retry or inferred client error. Same-network derived-destination dominance
+  identifies the stale return-path class seen on 2026-09-02; cross-network
+  rows require a separate producer discriminator.
+- UNKNOWN: the aggregate is absent, malformed, negative, internally
+  contradictory, or its median exceeds its p95. Preserve that as observation
+  failure rather than coercing it to zero.
+
+Use §8.12 to prove every API artifact contains server commit `c8dfe570`, after
+satisfying the selected artifact's append-only migration prerequisite. The API
+must reject the stale destination before mode selection and repeat the
+active-only check at the write boundary. A Connect-bearing client containing
+`5b33c91` separately consumes the Reliability result and retires only the
+emitting route, reducing repeated attempts; client behavior cannot substitute
+for the server-side zero-success invariant. Do not delete contract history,
+inactive clients, or provide keys to manufacture a healthy result.
+
+This is a **software lifecycle-correctness** alert. It is not fixed by adding
+Proxy hardware, widening a timeout, weakening provider eligibility, or
+clearing Redis state. The 2026-09-02 production control was the 8,705-row
+same-network cohort described in §2.17; after deployment, require this probe to
+stay at zero for two complete windows while §2.18 becomes observable and the
+missing-origin rate returns to band.
+
+Implementation convention: SIGNALS.md §2.20 (`stale-contracts`) maps to
+`signal_stale_contracts.go` and `signal_stale_contracts_test.go`. Synthetic
+tests cover the exact inactive-before-create failure, a healthy zero cohort,
+malformed and contradictory aggregates, query scoping, privacy boundaries,
+and detailed Markdown rendering.
 
 ---
 
