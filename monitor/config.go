@@ -62,6 +62,12 @@ type monitorYaml struct {
 				ExpectedDataPath string `yaml:"expected_data_path"`
 			} `yaml:"nodes"`
 		} `yaml:"subtensor"`
+		Backup *struct {
+			PGSource    string `yaml:"pg_source"`
+			PGPort      int    `yaml:"pg_port"`
+			RedisSource string `yaml:"redis_source"`
+			RedisPort   int    `yaml:"redis_port"`
+		} `yaml:"backup"`
 	} `yaml:"hosts"`
 	Pg struct {
 		Port          int `yaml:"port"`
@@ -287,6 +293,14 @@ func LoadSignalSettings() (SignalSettings, error) {
 					ContainerName: node.ContainerName, ExpectedImage: node.ExpectedImage,
 					ExpectedDataPath: node.ExpectedDataPath,
 				})
+			}
+		}
+		if configured.Backup != nil {
+			h.Backup = &BackupHostSettings{
+				PGSource:    strings.TrimSpace(configured.Backup.PGSource),
+				PGPort:      configured.Backup.PGPort,
+				RedisSource: strings.TrimSpace(configured.Backup.RedisSource),
+				RedisPort:   configured.Backup.RedisPort,
 			}
 		}
 		settings.Hosts = append(settings.Hosts, h)

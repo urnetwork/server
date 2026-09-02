@@ -120,10 +120,10 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	if len(metricHosts) == 0 {
 		return nil, fmt.Errorf("backup archives: no services host in inventory for the loopback Mimir query")
 	}
-	pgSource := env.cfg.hostByRole("pg-primary")
-	redisSource := env.cfg.hostByRole("redis-cluster")
-	if pgSource == nil || redisSource == nil || pgSource.overlayIp == "" || redisSource.overlayIp == "" {
-		return nil, fmt.Errorf("backup archives: PostgreSQL and Redis management-VPN source identities are required")
+	for _, host := range backupHosts {
+		if err := validateBackupArchiveSourceSettings(host.backup); err != nil {
+			return nil, fmt.Errorf("backup archives: %s: %w", host.name, err)
+		}
 	}
 
 	queryURL := "http://127.0.0.1:3100/prometheus/api/v1/query?query=" +
@@ -273,11 +273,36 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		findings = append(findings, evaluateBackupArchiveRetry(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveSourceRoute(
 			writers[host.name],
-			"by@"+pgSource.overlayIp,
-			"by@"+redisSource.overlayIp,
+			host.backup,
 		))
 	}
 	return findings, nil
+}
+
+func validateBackupArchiveSourceSettings(settings *BackupHostSettings) error {
+	if settings == nil {
+		return fmt.Errorf("direct backup source settings are missing")
+	}
+	for name, source := range map[string]string{
+		"PostgreSQL": settings.PGSource,
+		"Redis":      settings.RedisSource,
+	} {
+		if matched, _ := regexp.MatchString(`^by@[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$`, source); !matched {
+			return fmt.Errorf("invalid %s direct SSH source", name)
+		}
+		if strings.HasPrefix(source, "by@172.28.") {
+			return fmt.Errorf("%s bulk source uses the management VPN", name)
+		}
+	}
+	for name, port := range map[string]int{"PostgreSQL": settings.PGPort, "Redis": settings.RedisPort} {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid %s direct SSH port", name)
+		}
+	}
+	if settings.PGSource == settings.RedisSource && settings.PGPort == settings.RedisPort {
+		return fmt.Errorf("PostgreSQL and Redis direct SSH endpoints are identical")
+	}
+	return nil
 }
 
 func parseBackupArchiveWriterObservation(hostName, output string) (backupArchiveWriterObservation, error) {
@@ -360,12 +385,11 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 
 func evaluateBackupArchiveSourceRoute(
 	observation backupArchiveWriterObservation,
-	expectedPGSource string,
-	expectedRedisSource string,
+	expected *BackupHostSettings,
 ) finding {
 	target := observation.host + "/remote-sources"
-	if observation.remotePGSource == expectedPGSource && observation.remotePGPort == 22 &&
-		observation.remoteRedisSource == expectedRedisSource && observation.remoteRedisPort == 22 {
+	if observation.remotePGSource == expected.PGSource && observation.remotePGPort == int64(expected.PGPort) &&
+		observation.remoteRedisSource == expected.RedisSource && observation.remoteRedisPort == int64(expected.RedisPort) {
 		return healthyFinding(
 			"observability/backup-archives", tierPage, "backup-archive-source-route", target,
 		)
@@ -374,9 +398,9 @@ func evaluateBackupArchiveSourceRoute(
 		probeId: "observability/backup-archives", tier: tierPage,
 		class: "backup-archive-source-route", target: target,
 		frame: "unit=remote-backup-archive.service", sustain: 1,
-		symptom:   fmt.Sprintf("%s is not configured to pull both backup sources over their management-VPN identities", observation.host),
-		mechanism: "Planetoid is offsite. A shared public address plus router-specific forwarded SSH ports couples recovery to an unrelated NAT boundary and can silently retain obsolete source routing after the rest of Planetoid moves to the VPN. Distinct inventory-derived overlay targets keep PostgreSQL and Redis source identity explicit.",
-		baseline:  fmt.Sprintf("The effective unit uses PostgreSQL %s:22 and Redis %s:22, matching the monitor inventory exactly.", expectedPGSource, expectedRedisSource),
+		symptom:   fmt.Sprintf("%s is not configured to pull both bulk backups through their dedicated direct SSH endpoints", observation.host),
+		mechanism: "PostgreSQL and Redis generations are hundreds of GiB. Sending those bytes through Planetoid's management OpenVPN tunnel couples recovery to the tunnel's throughput and reconnects; a tunnel reset terminates rsync before an atomic generation can be published. The dedicated direct SSH forwards bypass that control-plane bottleneck.",
+		baseline:  fmt.Sprintf("The effective unit uses PostgreSQL %s:%d and Redis %s:%d, matching the configured direct endpoints exactly.", expected.PGSource, expected.PGPort, expected.RedisSource, expected.RedisPort),
 		observed: fmt.Sprintf(
 			"pg_source=%s pg_port=%d redis_source=%s redis_port=%d",
 			observation.remotePGSource,
@@ -384,10 +408,10 @@ func evaluateBackupArchiveSourceRoute(
 			observation.remoteRedisSource,
 			observation.remoteRedisPort,
 		),
-		evidence: "The monitor reads only the four non-secret BRINGYOUR_BACKUP_*_REMOTE/PORT values from the effective systemd Environment and compares them with the configured PostgreSQL and Redis overlay addresses.",
-		context:  "This is deployment/routing identity, not proof that a copy completed. Changing the unit does not authorize an unscheduled transfer and cannot make absent media or insufficient capacity healthy.",
-		action:   "Deploy a clean Xops descendant of fbd291a with main/ansible/run-planetoid.sh. Do not add a public-router fallback. Before the next scheduled pull, require both overlay routes to use tun0, TCP/22 to accept connections, and the installed fleet key to authenticate read-only to both source hosts. Obtain separate operator authorization for any unscheduled catch-up run.",
-		verify:   "The effective unit matches both exact VPN targets on port 22; authenticated source listings succeed through tun0; the next scheduled oneshot exits successfully; and the completed artifacts, manifests, and two direct Mimir samples expose the new generations.",
+		evidence: "The monitor reads only the four non-secret BRINGYOUR_BACKUP_*_REMOTE/PORT values from the effective systemd Environment and compares them with the configured direct bulk-transfer endpoints.",
+		context:  "The monitor itself may reach Planetoid over the management overlay; only archive payload traffic must bypass it. Installing a corrected unit does not change the already-running process environment, authorize interruption, or prove a copy completed.",
+		action:   "Deploy the corrected Xops Planetoid unit with main/ansible/run-planetoid.sh. Do not restart or interrupt an active archive transfer without explicit operator authorization. Before the next attempt, require both direct ports to accept connections and the installed fleet key to authenticate read-only to the intended source directories.",
+		verify:   "The effective unit matches both exact direct endpoints; public route lookup does not select tun0; authenticated source listings succeed on both forwarded ports; the next authorized oneshot exits successfully; and artifact, manifest, and two direct Mimir checks expose the new generations.",
 		playbook: "SIGNALS.md §11.22",
 	}
 }
@@ -715,7 +739,7 @@ func evaluateBackupArchive(
 		if progress == "1" {
 			mechanism = "The source textfile is current and a writer is active, but no new atomic recovery point exists until that transfer completes. A healthy process can remain outside the five-day objective when source backlog divided by sustained offsite throughput exceeds the available recovery window."
 			context = "An active single-writer transfer is operationally pending, not fixed and not stalled merely because its final timestamp is unchanged. Software cannot create WAN bandwidth, attach seed media, or shorten the bytes that must cross the recovery boundary."
-			action = "Preserve the active writer. Confirm one stable unit/PID, one source transfer, a read-write mounted archive, fresh progress telemetry, and increasing receive bytes; then compare source backlog with sustained VPN throughput. If the projected completion misses the recovery-point objective, operations must provision a faster path or an approved offline seed. Do not restart, duplicate, or manually finalize the transfer to make the timestamp move."
+			action = "Preserve the active writer. Confirm one stable unit/PID, one source transfer, a read-write mounted archive, fresh progress telemetry, and increasing receive bytes; verify the effective source route is the dedicated direct SSH path, then compare source backlog with sustained direct-transfer throughput. If the projected completion still misses the recovery-point objective, operations must provision a faster path or an approved offline seed. Do not restart, duplicate, or manually finalize the transfer to make the timestamp move."
 			verify = "The same authorized run completes atomically, its artifact and manifest validate, two direct Mimir reads expose the new generation, and a subsequent scheduled run proves the available offsite throughput can keep the archive inside the five-day objective."
 		} else if queue.activeArchive != "" {
 			frame = "queued-behind=" + queue.activeArchive

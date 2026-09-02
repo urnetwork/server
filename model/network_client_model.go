@@ -1535,12 +1535,56 @@ func GetNetworkClientNetwork(ctx context.Context, clientId server.Id) (networkId
 	return
 }
 
-func GetProvideRelationship(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideMode {
-	if clientIdA == clientIdB {
-		return ProvideModeNetwork
-	}
+// NetworkClientLifecycle is the bounded lifecycle class used when diagnosing
+// contract routing. It deliberately excludes client and network identifiers so
+// callers can expose it as a metric label without creating unbounded series or
+// leaking customer identity.
+type NetworkClientLifecycle string
 
-	sameNetwork := false
+const (
+	NetworkClientLifecycleMissing         NetworkClientLifecycle = "missing"
+	NetworkClientLifecycleActiveTop       NetworkClientLifecycle = "active_top"
+	NetworkClientLifecycleInactiveTop     NetworkClientLifecycle = "inactive_top"
+	NetworkClientLifecycleActiveDerived   NetworkClientLifecycle = "active_derived"
+	NetworkClientLifecycleInactiveDerived NetworkClientLifecycle = "inactive_derived"
+)
+
+type ProvideRelationshipDetails struct {
+	Mode                 ProvideMode
+	SourceLifecycle      NetworkClientLifecycle
+	DestinationLifecycle NetworkClientLifecycle
+}
+
+func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClientLifecycle {
+	if active == nil {
+		return NetworkClientLifecycleMissing
+	}
+	if sourceClientId != nil {
+		if *active {
+			return NetworkClientLifecycleActiveDerived
+		}
+		return NetworkClientLifecycleInactiveDerived
+	}
+	if *active {
+		return NetworkClientLifecycleActiveTop
+	}
+	return NetworkClientLifecycleInactiveTop
+}
+
+// GetProvideRelationshipDetails resolves the same relationship as
+// GetProvideRelationship while carrying bounded endpoint lifecycle classes
+// from that exact database snapshot. CreateContract already needs this lookup;
+// returning the extra columns makes missing-origin telemetry causal without an
+// additional query on the failure path.
+func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideRelationshipDetails {
+	details := ProvideRelationshipDetails{
+		Mode:                 ProvideModePublic,
+		SourceLifecycle:      NetworkClientLifecycleMissing,
+		DestinationLifecycle: NetworkClientLifecycleMissing,
+	}
+	if clientIdA == clientIdB {
+		details.Mode = ProvideModeNetwork
+	}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1548,34 +1592,51 @@ func GetProvideRelationship(ctx context.Context, clientIdA server.Id, clientIdB 
 			`
 			SELECT
 				a.network_id,
-				b.network_id
-			FROM network_client a
-			INNER JOIN network_client b ON b.client_id = $2
-			WHERE a.client_id = $1
+				a.active,
+				a.source_client_id,
+				b.network_id,
+				b.active,
+				b.source_client_id
+			FROM (VALUES (true)) AS seed(value)
+			LEFT JOIN network_client a ON a.client_id = $1
+			LEFT JOIN network_client b ON b.client_id = $2
 			`,
 			clientIdA,
 			clientIdB,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				var networkIdA server.Id
-				var networkIdB server.Id
-				server.Raise(result.Scan(&networkIdA, &networkIdB))
-				if networkIdA == networkIdB {
-					sameNetwork = true
+				var networkIdA *server.Id
+				var activeA *bool
+				var sourceClientIdA *server.Id
+				var networkIdB *server.Id
+				var activeB *bool
+				var sourceClientIdB *server.Id
+				server.Raise(result.Scan(
+					&networkIdA,
+					&activeA,
+					&sourceClientIdA,
+					&networkIdB,
+					&activeB,
+					&sourceClientIdB,
+				))
+				details.SourceLifecycle = networkClientLifecycle(activeA, sourceClientIdA)
+				details.DestinationLifecycle = networkClientLifecycle(activeB, sourceClientIdB)
+				if networkIdA != nil && networkIdB != nil && *networkIdA == *networkIdB {
+					details.Mode = ProvideModeNetwork
 				}
 			}
 		})
 	})
 
-	if sameNetwork {
+	return details
+}
+
+func GetProvideRelationship(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideMode {
+	if clientIdA == clientIdB {
 		return ProvideModeNetwork
 	}
-
-	// TODO network and friends-and-family not implemented yet
-	// FIXME these exist in the association model now, can be added
-
-	return ProvideModePublic
+	return GetProvideRelationshipDetails(ctx, clientIdA, clientIdB).Mode
 }
 
 // the roles and identity principal assigned to a client at creation.

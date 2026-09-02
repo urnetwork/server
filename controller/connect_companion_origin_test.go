@@ -5,12 +5,12 @@ package controller
 // encryption sessions up simultaneously, and the EncryptedControl carrier
 // requests its companion contract at session setup — frequently milliseconds
 // before the peer's origin contract lands. The platform used to answer the
-// race with an error; the client sees every contract failure collapsed into
-// InsufficientBalance, so it retried blind for its whole 30s
+// race with an indistinguishable error, so it retried blind for its whole 30s
 // CreateContractTimeout and the sequence starved — observed ~12 times per
 // full test-suite run as the chaos-family first-attempt Timeouts, and as the
 // mechanism manufacturing dead-on-arrival multiclient window clients.
-// nextContract now waits out the race, bounded by CompanionOriginWaitTimeout.
+// nextContract now waits out the race, bounded by CompanionOriginWaitTimeout;
+// a miss after that bound is returned as an explicit Reliability result.
 
 import (
 	"context"
@@ -130,7 +130,7 @@ func TestCompanionContractWaitsForRacedOrigin(t *testing.T) {
 			elapsed := time.Since(start)
 			if result.err != nil {
 				t.Fatalf(
-					"a companion request racing its origin must succeed once the origin lands (after %s): %s — an error here reaches the client as InsufficientBalance and starves the sequence for its whole CreateContractTimeout",
+					"a companion request racing its origin must succeed once the origin lands (after %s): %s — an error here becomes a reliability verdict and retires the route",
 					elapsed, result.err,
 				)
 			}

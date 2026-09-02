@@ -3848,6 +3848,125 @@ legacy leak and a harmless sub-two-minute cleanup race. Model regressions cover
 orphan sweeping, handler-qualified location reliability, and disconnected
 fallback semantics.
 
+### 2.17 Missing companion-origin contract rate — return path cannot anchor
+Probe: `missing-origin`
+
+`urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}`
+is the lossless API-side boundary for a contract request that entered companion
+settlement but could not find a usable reverse origin after the bounded
+server-side race wait. The probe queries only requests whose original wire bit
+was `companion=false`:
+
+```promql
+sum(rate(urnetwork_connect_contract_failures_total{
+  env="main",cause="missing_companion_origin",companion="false"
+}[5m])) * 60
+```
+
+- HEALTHY: the `companion=false` partition stays at or below 500/min for two
+  complete five-minute windows. A six-hour control on 2026-09-02 held mostly
+  128–201/min from 10:20Z through 14:50Z, with one short 271/min sample.
+- FALLBACK FROM NORMAL: `companion="false"` exceeds 500/min. This label is the
+  original request bit, not a trustworthy role label. A non-companion request
+  can be converted by `resolveNonCompanionProvideMode` to Stream/companion
+  fallback when the destination does not advertise the relationship mode.
+  Provider discovery can produce such a destination, but a provider return
+  path or same-network peer can also create this request shape. Do not call the
+  destination a selected provider from this label alone.
+- CONTEXT ONLY: `companion="true"` has a materially higher, workload-dependent
+  background (about 2,800–3,100/min during the 2026-09-02 incident). The shared
+  Grafana 500/min rule is not calibrated for that partition, so this probe does
+  not page on it. Establish a separate healthy band before adding that signal.
+- UNKNOWN: the aggregate `companion=false` series is absent, stale, duplicated,
+  negative, NaN, or malformed. Counter-vector label families are
+  traffic-created, so an empty Mimir response cannot be interpreted as zero.
+
+Require §2.8 score freshness, §2.9 active top-level eligibility, §2.15 guarded
+reliability, and §2.16 zero mature orphans. Decode bounded current score-cache
+samples and verify normal entries are active, contractable Public providers,
+but treat that as a control rather than proof about every failing request. Then
+compare the onset with score publications, service rollout/drain boundaries,
+connection churn, successful contract creation, and the client-window lifetime.
+Windows selected before a repaired publication must age out naturally. If the
+rate survives the last known legacy cohort, add or use bounded metric dimensions
+for source lifecycle, destination lifecycle, relationship, and resolution path;
+those categories can distinguish selection from return traffic without raw
+client pairs. Do not log identifiers, edit Redis blobs, weaken provider gates,
+restart clients, or increase the companion wait merely to hide the rate.
+
+2026-09-02 production evidence showed why this must be a first-class monitor
+signal rather than only a dashboard rule. After the eligibility export, the
+normal US cache held 32,390 providers (ForceMinimum 51,109), its sampled TTLs
+were near the five-hour maximum, and a decoded normal sample contained 200/200
+Public providers passing the quality minimum. PostgreSQL had 75,742 eligible
+active top-level location rows, zero mature connection orphans, and 73,769 of
+107,524 scored clients passing the 12-hour 0.70 gate. API and Connect then
+converged on their current artifacts, the last legacy Connect drain ended, and
+legacy 4,096-byte framer rejects fell to zero in a three-minute window.
+The `companion=false` rate stepped from 175/min at 14:50Z to 461/min at 14:55Z
+and 1,232/min at 15:00Z. That boundary coincided with the legacy
+UpdateClientScores run that ended at 14:55:06Z; the eligibility-filtered
+Taskworker did not start until 15:01Z. Current API, Connect, Proxy, and
+Taskworker generations subsequently converged, and repeated filtered score
+runs completed. At 16:17Z, a 20-bucket Redis sample contained 3,978/3,978
+active, reliable, connected top-level Public clients and zero Stream-only
+clients, yet the rate was still about 958/min while PostgreSQL recorded about
+9,753 successful contracts/min over the same five-minute wall-clock interval.
+The current cache therefore disproves simple ongoing contamination in that
+sample, but cannot identify the failing endpoint role. The last known legacy
+list can remain inside a client window for 45–60 minutes (and some draining
+flow-carrying channels have a two-lifetime hard bound); continue observation,
+then require the bounded lifecycle dimensions above if the rate persists.
+
+The two-lifetime explanation was falsified after its hard boundary. The
+`companion=false` rate remained 1,383/min over five minutes at 17:42Z and
+2,113/min over one minute at 17:43Z. A read-only contract/lifecycle cohort then
+found the continuing root cause: in each five-minute bucket, roughly 2,500
+successful non-companion contracts were still being created to derived
+destination identities that were already inactive before both the repaired
+15:37Z score publication and the new contract's own create time (2,633 in the
+17:30 bucket; 2,473 in 17:35). `GetProvideRelationship` treated equal network
+ids as Network without enforcing lifecycle, stale provide-mode keys continued
+to advertise the dead destination, and `newContract` used a network lookup that
+accepted inactive rows. While Network remained advertised this created a
+successful no-escrow contract to an identity that could not receive it; after
+that mode disappeared but Stream remained, the same stale destination fell
+back to companion settlement and surfaced as missing-origin. This is ongoing
+authorization of dead routes, not old clients merely aging out.
+
+The durable software fix has two halves. The API rejects an inactive or missing
+destination before provide-mode selection and repeats active-only endpoint
+checks at the contract write boundary. Those destination-lifecycle and bounded
+missing-origin failures use the additive wire result
+`ContractError_Reliability`; balance, policy, setup, trust, and malformed
+contract results remain distinct. Connect binds every ContractManager callback
+to the exact multi-client channel that emitted it. A matching Reliability
+result immediately excludes that channel from new-flow selection, records a
+terminal channel error, and wakes the existing resize path, which performs the
+normal removal, eligible-flow migration, and window refill. The destination
+key must match the channel tail, so a result cannot poison a neighboring exit.
+Older clients safely ignore the new action and retain their existing timeout
+behavior.
+
+Verification requires the API fix first and a Connect-bearing client build for
+the window reaction. After API convergence, successful contracts to already
+inactive destinations must fall to zero and the missing-origin rate must return
+to its calibrated band. After Connect rollout, a synthetic or observed
+Reliability result must remove only its emitting exit and refill that window;
+InsufficientBalance and every non-Reliability result must leave window health
+unchanged. Do not substitute a longer contract timeout, provider-capacity
+hardware, or manual cache deletion for either invariant.
+
+This is a software/provider-lifecycle or bounded operational-aging alert, not a
+hardware-capacity alert. More Proxy hosts can raise the active-client ceiling
+but cannot repair an unbootstrappable selected destination.
+
+Implementation convention: SIGNALS.md §2.17 (`missing-origin`) maps to
+`signal_missing_origin.go` and `signal_missing_origin_test.go`. Synthetic tests
+cover the high-rate frame, healthy boundary, absent and duplicate-series
+visibility, stale samples, invalid rates, query scoping, and detailed Markdown
+rendering without identifiers.
+
 ---
 
 ## 3. redis signal catalog
@@ -4447,7 +4566,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing `66525afc` only where §8.12/§2.14 proves the shared Redis-time three/second gate and complete failure telemetry absent. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The destination is invalid for its declared chain and Circle rejected it before creating a transfer. The pre-fix chain-blind validator admitted 44-character Solana base58 keys stored as active `MATIC` wallets. Current validation blocks that shape and the taskworker releases only this definitive pre-chain attempt, but six existing payments continued exactly once/hour because the configured payout wallets were still unchanged. | **Account-owner/operations action required:** correct the payout wallet through the supported account API. The current taskworker already releases the typed failed attempt so `UpdatePaymentWallet` can select the correction; another service deploy cannot invent or authorize replacement wallet data. Preserve keys for transport failures, 429s, and ambiguous submits; never edit/delete payment, task, or sweep rows. Verify the next natural retry uses the corrected chain-compatible wallet and the durable/logical counts clear within 90 minutes. See §5.7. |
-| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is a rate-limited exemplar only) | A contract request resolved to the companion path (destination usable only as reply traffic — announced stream-only / provide-off / gone) but no reversed origin contract exists. Emitted by the earliest-origin lookup (subscription_model CreateCompanionTransferEscrow). ~90/min background; `companion=false` means NORMAL requests are degrading to this path — the destination's keys are the problem, not the requester. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >500/min for 5 minutes means clients are being pointed at non-contractable destinations. Use the sampled log only to obtain a failing pair, then check the destination's `{pm_<clientId>}sk_*` keys. |
+| `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band. Require the selection controls, then use bounded relationship and endpoint-lifecycle dimensions if it persists; never infer roles from the Boolean or print raw pairs. The higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | The request did not reach the public edge. In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path, not the broader auth prefix. If absent, keep diagnosis client-side: inspect `[net]http serial`/`[net]http parallel` route selection and the embedded Connect revision. Require the bounded preferred-route scheduler and cold-route parallel discovery regression tests; do not restart API, increase the UI wait, or add an app-level retry. |
@@ -4904,14 +5023,15 @@ control plane and selection API work; the per-candidate contract path fails.
    (1.2), per-node redis (1.4) all healthy → this is not transport. The list
    arriving proves control/API; grey dots mean pings to the listed
    candidates are being refused.
-2. Name the refusal: api logs, class `Missing origin contract for companion`
-   (§4) — bucket its rate per 30 min from a long-lived api container's
-   docker logs to find the step-change and correlate with the deploy/outage
-   clock (§8).
-3. Classify the failing pairs (pg): resolve source/dest client_ids to
-   network_id and source_client_id. Cross-network + destination is a
-   derivative client = the PROVIDER ping path; same-network top-level pairs
-   = the network-peers panel instead.
+2. Name the refusal with the lossless API counter in §2.17. Per-pair API detail
+   is V(1) only and may contain customer identifiers, so it is neither the
+   default detector nor alert evidence. Use a bounded Mimir range to find the
+   step-change and correlate it with the deploy/publication clock (§8).
+3. Classify the path with bounded source/destination lifecycle, relationship,
+   and resolution dimensions. `companion=false` names the original request
+   bit, not the endpoint roles: provider discovery, provider return traffic,
+   and same-network peer traffic can all create non-companion requests. Never
+   export or paste raw client pairs to perform this classification.
 4. Check what the destinations really are (redis): `{pm_<clientId>}sk_<n>`
    EXISTS per provide mode + `network_client_connection.connected` in pg.
    Destinations that are stream-only (only sk_stream present) or
@@ -5935,7 +6055,7 @@ Tier-1 (warn):
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
-| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` 5-minute rate vs its ~90/min background | > 500/min for 5 min |
+| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate vs its 128–201/min control band | > 500/min for 5 min; `companion=true` is not covered |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
@@ -8079,15 +8199,27 @@ no completed backup from a missing collector.
 
 Code recovery points use the same sortable UTC naming convention as database
 recovery points: `main-code-urnetwork-YYYY-MM-DD-HH-MM-SS.tar.xz` and
-`main-code-urfoundation-YYYY-MM-DD-HH-MM-SS.tar.xz`. Each organization keeps
-four complete dated generations by default. The writer still recognizes the
-legacy fixed-name tarball as the latest generation until its first dated run;
-renaming that artifact would falsely change provenance and is forbidden.
+`main-code-urfoundation-YYYY-MM-DD-HH-MM-SS.tar.xz`. PostgreSQL, Redis, and
+each code organization follow the same retention contract: four newest
+complete generations under `latest/<type>`, the newest promotion candidate
+under `staging/<type>`, four generations under `week/<type>` selected after a
+seven-day window, and four under `month/<type>` selected after a 30-day window.
+Retention copies are hard links so the same recovery point consumes space once.
+For code, `<type>` is `code` and the organization remains in the filename. The
+first updated writer run atomically migrates existing flat dated code tarballs
+from `code/` into `latest/code/`; it still recognizes a legacy fixed-name
+tarball as the latest generation until a dated run succeeds.
+
+Redis's exported `generation` is intentionally the recovery-point identifier
+`main-redis-YYYY-MM-DD-HH-MM-SS`, not a literal filename. The complete stored
+generation is a pair named `<generation>.tar.gpg` and
+`<generation>.tar.gpg.sha256`; omitting `.tar.gpg` from the Grafana label does
+not mean the encrypted archive is an unpacked directory.
 
 Planetoid also publishes physical allocation telemetry for the mounted archive
 volume. `urnetwork_backup_archive_storage_bytes{archive="pg|redis|code"}` is
-the total used by each class, with hard-linked PostgreSQL and Redis retention
-copies deduplicated and the persistent Git mirror cache included in `code`.
+the total used by each class, with hard-linked retention copies for all three
+classes deduplicated and the persistent Git mirror cache included in `code`.
 `urnetwork_backup_archive_volume_size_bytes` and
 `urnetwork_backup_archive_volume_free_bytes` are the filesystem total and free
 bytes, and `urnetwork_backup_archive_storage_timestamp_seconds` proves when the
@@ -8118,10 +8250,10 @@ producer heartbeat values are no more than 90 seconds old, and exactly one
 GitHub organization gauge is one; while it is inactive or failed both are zero.
 The data-pull oneshot has effective `Restart=on-failure` and
 `RestartUSec=30min`, so a late encrypted-disk mount can recover without making
-successful pulls repeat. The effective data-pull unit resolves the inventory
-`pg-primary` and `redis-cluster` overlay addresses independently as
-`by@172.28.*:22`; a public router/NAT endpoint is not a recovery path for this
-offsite host.
+successful pulls repeat. The effective data-pull unit matches the two
+dedicated direct SSH endpoints and ports recorded in monitor inventory. These
+bulk paths deliberately bypass the `172.28.*` management VPN; the monitor
+itself may still use that VPN to inspect Planetoid.
 BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
@@ -8138,8 +8270,8 @@ BROKEN:
   than five days old. A current scrape of an old value proves the telemetry
   path while reporting an expired recovery-point objective. When
   `in_progress=1`, preserve the single active writer and compare increasing
-  receive bytes plus source backlog with sustained VPN throughput. A transfer
-  is not stalled merely because its atomic final timestamp has not moved. When
+  receive bytes plus source backlog with sustained direct-transfer throughput.
+  A transfer is not stalled merely because its atomic final timestamp has not moved. When
   a stale `pg` or `redis` gauge is zero but the direct data-pull unit is active
   and its sibling gauge is one, frame it as `queued-behind=<sibling>`: the
   script serializes those two sources, so zero describes the next phase rather
@@ -8155,9 +8287,9 @@ BROKEN:
   software policy failure even when its precipitating missing mount needs an
   operator or hardware repair.
 - `backup-archive-source-route` is immediate when either effective source
-  target or port differs from the exact monitor-inventory overlay identity and
-  SSH/22. This is a configuration failure even when the stale public forward
-  remains reachable; do not preserve it as a fallback.
+  target or port differs from its exact monitor-inventory direct SSH endpoint,
+  or when either source uses `172.28.*`. This is a configuration failure even
+  when the management VPN is reachable; bulk PG/Redis payloads must not use it.
 
 The 2026-09-01 blank-dashboard incident had two distinct layers. Planetoid's
 ordinary `node_uname_info` arrived through the new VPN Grafana publisher, both
@@ -8176,9 +8308,12 @@ dashboard input, not the underlying backup age.
 
 The newly visible state showed real operational failures. The PostgreSQL and
 Redis values still named August 20 generations, outside the five-day band.
-The data unit's direct journal showed that its September 1 04:00 run waited the
-full 900 seconds for `/run/media/by/archive1`, then exited because the udisks
-mount was absent. Its effective properties were `ActiveState=failed`,
+Kernel history established the first cause: on August 21 the Thunderbolt/PCIe
+dock carrying the archive device disconnected (`pciehp Link Down`, USB and
+`enp65s0` removal, followed by ext4 journal I/O errors). The archive device and
+udisks mount then remained unavailable across the August 25 through September
+1 daily attempts. The September 1 04:00 run waited the full 900 seconds for
+`/run/media/by/archive1`, then exited. Its effective properties were `ActiveState=failed`,
 `Result=exit-code`, `ExecMainStatus=1`, `Restart=no`, and `RestartUSec=100ms`.
 The disk appeared later, but a persistent daily timer does not revisit an
 already-consumed trigger, so the failed oneshot remained failed. Xops commit
@@ -8192,19 +8327,27 @@ GB) and remained in its atomic compression phase with no final organization
 tarball at the observation boundary. Preserve that job rather than restarting
 it merely to make the panel change.
 
-A 2026-09-02 preflight found another independent configuration residue before
-the next scheduled pull: the installed script still used the shared public
-`65.49.70.73` endpoint on forwarded ports 8022 and 8023. Planetoid is offsite,
-and both intended sources were already directly routable through `tun0` at
-`172.28.208.182:22` and `172.28.208.177:22`; the installed fleet key
-authenticated to each address. Xops commit `fbd291a` splits the two source
-identities, derives them from inventory, requires `by@172.28.*`, and removes
-the public-router fallback. `run-planetoid.sh` deployed the script and unit;
-the effective environment now matches both VPN targets. Read-only source
-listings expose complete August 30 PostgreSQL and Redis generations while the
-archive still exposes August 20, so only the next scheduled oneshot and
-artifact/manifest validation can close freshness. Installing the route does
-not authorize an unscheduled 430-plus-GiB catch-up transfer.
+A 2026-09-02 preflight initially misclassified the dedicated public SSH
+forwards as stale configuration and Xops commit `fbd291a` moved both bulk pulls
+onto `172.28.*:22`. That was incorrect: Planetoid is offsite, and the intended
+data paths are the direct forwards at `65.49.70.73:8022` for PostgreSQL and
+`:8023` for Redis. The management VPN is for control traffic and must not carry
+the archive payload. The monitor inventory, service template, and archive
+script now encode and validate that direct-path contract, including an explicit
+rejection of `172.28.*` sources. Installing the corrected unit changes only
+future processes; an already-running transfer retains the environment it
+started with and must not be interrupted without operator authorization.
+
+Read-only direct source listings expose complete August 27 and August 30
+PostgreSQL and Redis generations while the mounted archive still exposes
+August 20, so only a successfully completed transfer plus artifact/manifest
+validation can close freshness. The first September 2 attempt had already
+started through the erroneous VPN configuration. It received about 9.18 GB
+before OpenVPN went down at 13:38Z; rsync failed at 13:56Z, four bounded retries
+could not reach either VPN source, and the unit resumed only after tunnel
+recovery. That sequence proves the VPN route itself can prevent publication of
+an otherwise healthy source generation. It does not authorize an unscheduled
+or duplicate catch-up transfer.
 
 An additional metrics-writer race can falsely show an active GitHub job as
 idle: the standalone `--refresh-metrics` process initializes both shell-local
@@ -8241,18 +8384,15 @@ capacity are hardware work. Software cannot attach an absent disk or create
 archive capacity. Never fabricate a timestamp, rename a partial artifact,
 refresh a stale value, or raise the five-day threshold to clear these classes.
 
-The natural 2026-09-02 04:00 PDT data run supplied the capacity discriminator.
-Direct systemd checks retained one stable writer PID and one PostgreSQL rsync
-over the inventory VPN with zero restarts, a read-write archive mount, and
-about 5.6 TiB free. The receiver sustained only about 0.95 MiB/s while the two
-complete source PostgreSQL archives totaled 705.15 GiB; its active SSH stream
-had received about 4.8 GB after roughly 80 minutes. If that rate persists and
-both generations must cross the link, catch-up is approximately nine days.
-Restarting or deploying code cannot increase that link budget. Preserve the
-partial-capable rsync; operations must provision a faster offsite path or an
-approved offline seed, then prove later scheduled deltas keep every recovery
-point inside five days. This is a **network/operations or hardware-capacity
-closure**, not a software-only fix.
+The September 2 VPN run measured only about 0.95 MiB/s against roughly 705 GiB
+of complete PostgreSQL source data. That is evidence about the prohibited VPN
+path, not a valid capacity benchmark for the dedicated direct forwards. First
+deploy the direct-endpoint unit for the next process and measure that path. If
+source backlog divided by sustained direct throughput still exceeds five days,
+preserve partial rsync state and have operations provision a faster offsite
+path or approved offline seed. WAN bandwidth, attached media, and physical
+archive capacity remain **network/operations or hardware closures**, not
+software-only fixes.
 
 The same run also establishes the serial queue contract. Direct systemd state
 remained `activating` while the fresh PostgreSQL in-progress gauge was one and

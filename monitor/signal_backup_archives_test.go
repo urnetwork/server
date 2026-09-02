@@ -121,7 +121,8 @@ func TestBackupArchivesSignalSyntheticStaleActiveTransferNeedsCapacity(t *testin
 	for _, want := range []string{
 		"in_progress=1",
 		"Preserve the active writer",
-		"source backlog with sustained VPN throughput",
+		"dedicated direct SSH path",
+		"source backlog with sustained direct-transfer throughput",
 		"faster path or an approved offline seed",
 		"Software cannot create WAN bandwidth",
 		"Do not restart, duplicate, or manually finalize",
@@ -278,7 +279,7 @@ func TestBackupArchivesSignalSyntheticDetectsDisabledPullRetry(t *testing.T) {
 	}
 }
 
-func TestBackupArchivesSignalSyntheticDetectsPublicSourceRouting(t *testing.T) {
+func TestBackupArchivesSignalSyntheticDetectsManagementVPNSourceRouting(t *testing.T) {
 	now := time.Date(2026, 9, 2, 4, 45, 0, 0, time.UTC)
 	zero := float64(0)
 	createdAt := now.Add(-24 * time.Hour)
@@ -289,24 +290,25 @@ func TestBackupArchivesSignalSyntheticDetectsPublicSourceRouting(t *testing.T) {
 		})
 	}
 	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
-		remotePGSource:    "by@65.49.70.73",
-		remotePGPort:      8022,
-		remoteRedisSource: "by@65.49.70.73",
-		remoteRedisPort:   8023,
+		remotePGSource:    "by@172.28.0.2",
+		remotePGPort:      22,
+		remoteRedisSource: "by@172.28.0.3",
+		remoteRedisPort:   22,
 	}, fixtures...)
 	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-source-route", "backup-1/remote-sources")
 	if alert.Sustain != 1 {
 		t.Fatalf("source route sustain=%d, want 1", alert.Sustain)
 	}
 	for _, want := range []string{
-		"pg_source=by@65.49.70.73 pg_port=8022",
-		"redis_source=by@65.49.70.73 redis_port=8023",
-		"PostgreSQL by@172.28.0.2:22",
-		"Redis by@172.28.0.3:22",
-		"Xops descendant of fbd291a",
-		"Do not add a public-router fallback",
-		"routes to use tun0",
-		"separate operator authorization",
+		"pg_source=by@172.28.0.2 pg_port=22",
+		"redis_source=by@172.28.0.3 redis_port=22",
+		"PostgreSQL by@203.0.113.10:8022",
+		"Redis by@203.0.113.11:8023",
+		"hundreds of GiB",
+		"management OpenVPN tunnel",
+		"run-planetoid.sh",
+		"Do not restart or interrupt",
+		"does not select tun0",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("source route alert missing %q:\n%s", want, alert.Markdown())
@@ -387,7 +389,13 @@ func runBackupArchiveFixturesWithWriter(
 		}
 	}
 	settings.Hosts = append(settings.Hosts,
-		HostSettings{Name: "backup-1", Roles: []string{"backup"}},
+		HostSettings{
+			Name: "backup-1", Roles: []string{"backup"},
+			Backup: &BackupHostSettings{
+				PGSource: "by@203.0.113.10", PGPort: 8022,
+				RedisSource: "by@203.0.113.11", RedisPort: 8023,
+			},
+		},
 		HostSettings{Name: "metrics-1", Roles: []string{"services"}},
 	)
 	alerts, err := NewBackupArchivesSignal().Run(context.Background(), settings)
@@ -414,16 +422,16 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteRestartDelay = "30min"
 	}
 	if fixture.remotePGSource == "" {
-		fixture.remotePGSource = "by@172.28.0.2"
+		fixture.remotePGSource = "by@203.0.113.10"
 	}
 	if fixture.remotePGPort == 0 {
-		fixture.remotePGPort = 22
+		fixture.remotePGPort = 8022
 	}
 	if fixture.remoteRedisSource == "" {
-		fixture.remoteRedisSource = "by@172.28.0.3"
+		fixture.remoteRedisSource = "by@203.0.113.11"
 	}
 	if fixture.remoteRedisPort == 0 {
-		fixture.remoteRedisPort = 22
+		fixture.remoteRedisPort = 8023
 	}
 	return fmt.Sprintf(
 		"github_unit_state=%s\n"+

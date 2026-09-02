@@ -107,6 +107,7 @@ type host struct {
 	proxy                 *ProxyHostSettings
 	edgeIPv6              []EdgeIPv6InterfaceSettings
 	subtensor             *SubtensorHostSettings
+	backup                *BackupHostSettings
 }
 
 func (self *host) hasRole(role string) bool {

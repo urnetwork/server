@@ -17,6 +17,128 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
+func TestNetworkClientLifecycleClassesAreBounded(t *testing.T) {
+	active := true
+	inactive := false
+	sourceClientId := server.NewId()
+	for _, test := range []struct {
+		name   string
+		active *bool
+		source *server.Id
+		want   NetworkClientLifecycle
+	}{
+		{name: "missing", want: NetworkClientLifecycleMissing},
+		{name: "active top", active: &active, want: NetworkClientLifecycleActiveTop},
+		{name: "inactive top", active: &inactive, want: NetworkClientLifecycleInactiveTop},
+		{name: "active derived", active: &active, source: &sourceClientId, want: NetworkClientLifecycleActiveDerived},
+		{name: "inactive derived", active: &inactive, source: &sourceClientId, want: NetworkClientLifecycleInactiveDerived},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := networkClientLifecycle(test.active, test.source); got != test.want {
+				t.Fatalf("networkClientLifecycle() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkA := server.NewId()
+		networkB := server.NewId()
+		activeTop := server.NewId()
+		activeDerived := server.NewId()
+		inactiveTop := server.NewId()
+		inactiveDerived := server.NewId()
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO network_client (
+					client_id, network_id, active, source_client_id
+				) VALUES
+					($1, $2, true, NULL),
+					($3, $2, true, $1),
+					($4, $5, false, NULL),
+					($6, $5, false, $1)
+				`,
+				activeTop,
+				networkA,
+				activeDerived,
+				inactiveTop,
+				networkB,
+				inactiveDerived,
+			))
+		})
+
+		for _, test := range []struct {
+			name        string
+			source      server.Id
+			destination server.Id
+			want        ProvideRelationshipDetails
+		}{
+			{
+				name:        "same network derived destination",
+				source:      activeTop,
+				destination: activeDerived,
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModeNetwork,
+					SourceLifecycle:      NetworkClientLifecycleActiveTop,
+					DestinationLifecycle: NetworkClientLifecycleActiveDerived,
+				},
+			},
+			{
+				name:        "cross network inactive destination",
+				source:      activeTop,
+				destination: inactiveDerived,
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModePublic,
+					SourceLifecycle:      NetworkClientLifecycleActiveTop,
+					DestinationLifecycle: NetworkClientLifecycleInactiveDerived,
+				},
+			},
+			{
+				name:        "inactive source and top destination",
+				source:      inactiveDerived,
+				destination: inactiveTop,
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModeNetwork,
+					SourceLifecycle:      NetworkClientLifecycleInactiveDerived,
+					DestinationLifecycle: NetworkClientLifecycleInactiveTop,
+				},
+			},
+			{
+				name:        "missing destination",
+				source:      activeTop,
+				destination: server.NewId(),
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModePublic,
+					SourceLifecycle:      NetworkClientLifecycleActiveTop,
+					DestinationLifecycle: NetworkClientLifecycleMissing,
+				},
+			},
+			{
+				name:        "self",
+				source:      activeTop,
+				destination: activeTop,
+				want: ProvideRelationshipDetails{
+					Mode:                 ProvideModeNetwork,
+					SourceLifecycle:      NetworkClientLifecycleActiveTop,
+					DestinationLifecycle: NetworkClientLifecycleActiveTop,
+				},
+			},
+		} {
+			if got := GetProvideRelationshipDetails(ctx, test.source, test.destination); got != test.want {
+				t.Fatalf("%s: GetProvideRelationshipDetails() = %+v, want %+v", test.name, got, test.want)
+			}
+			if got := GetProvideRelationship(ctx, test.source, test.destination); got != test.want.Mode {
+				t.Fatalf("%s: GetProvideRelationship() = %d, want %d", test.name, got, test.want.Mode)
+			}
+		}
+	})
+}
+
 func TestNetworkClientHandlerLifecycle(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

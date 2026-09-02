@@ -23,11 +23,66 @@ func TestContractFailureClassIsBounded(t *testing.T) {
 		{fmt.Errorf("Insufficient balance (0)."), "insufficient_balance"},
 		{fmt.Errorf("Missing origin contract for companion."), "missing_companion_origin"},
 		{fmt.Errorf("Client does not exist."), "client_not_found"},
+		{fmt.Errorf("wrapped: %w", errContractDestinationInactive), "inactive_destination"},
 		{fmt.Errorf("postgres unavailable"), "other"},
 	}
 	for _, test := range tests {
 		if got := contractFailureClass(test.err); got != test.want {
 			t.Fatalf("contractFailureClass(%q) = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
+func TestContractResultErrorSeparatesReliabilityFromAccountFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want protocol.ContractError
+	}{
+		{
+			name: "missing companion origin",
+			err:  model.ErrMissingCompanionOrigin,
+			want: protocol.ContractError_Reliability,
+		},
+		{
+			name: "inactive destination",
+			err:  fmt.Errorf("write-boundary race: %w", errContractDestinationInactive),
+			want: protocol.ContractError_Reliability,
+		},
+		{
+			name: "insufficient balance",
+			err:  fmt.Errorf("Insufficient balance (0)."),
+			want: protocol.ContractError_InsufficientBalance,
+		},
+		{
+			name: "unknown legacy failure",
+			err:  fmt.Errorf("postgres unavailable"),
+			want: protocol.ContractError_InsufficientBalance,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := contractResultError(test.err); got != test.want {
+				t.Fatalf("contractResultError() = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestContractDestinationActive(t *testing.T) {
+	for _, test := range []struct {
+		lifecycle model.NetworkClientLifecycle
+		want      bool
+	}{
+		{model.NetworkClientLifecycleActiveTop, true},
+		{model.NetworkClientLifecycleActiveDerived, true},
+		{model.NetworkClientLifecycle("control"), true},
+		{model.NetworkClientLifecycleInactiveTop, false},
+		{model.NetworkClientLifecycleInactiveDerived, false},
+		{model.NetworkClientLifecycleMissing, false},
+		{model.NetworkClientLifecycle("future-value"), false},
+	} {
+		if got := contractDestinationActive(test.lifecycle); got != test.want {
+			t.Fatalf("contractDestinationActive(%q) = %t, want %t", test.lifecycle, got, test.want)
 		}
 	}
 }
@@ -53,6 +108,7 @@ func TestRecordContractFailureCounts(t *testing.T) {
 		{fmt.Errorf("Missing origin contract for companion."), true, "missing_companion_origin"},
 		{fmt.Errorf("Insufficient balance (0)."), false, "insufficient_balance"},
 		{fmt.Errorf("Client does not exist."), false, "client_not_found"},
+		{errContractDestinationInactive, false, "inactive_destination"},
 		// an unclassified cause still lands in a bounded bucket: `other`
 		// rising is the signal to enable V(1) and look
 		{fmt.Errorf("postgres unavailable"), false, "other"},
@@ -74,6 +130,77 @@ func TestRecordContractFailureCounts(t *testing.T) {
 		fmt.Errorf("Missing origin contract for companion."))
 	if after := count("missing_companion_origin", true); after != before {
 		t.Fatalf("a companion=false failure moved the companion=true counter: %v -> %v", before, after)
+	}
+}
+
+func TestRecordMissingOriginDetailsAreBounded(t *testing.T) {
+	count := func(
+		requestCompanion bool,
+		resolution string,
+		relationship string,
+		sourceLifecycle string,
+		destinationLifecycle string,
+	) float64 {
+		return testutil.ToFloat64(missingOriginDetailsCounter.WithLabelValues(
+			fmt.Sprintf("%t", requestCompanion),
+			resolution,
+			relationship,
+			sourceLifecycle,
+			destinationLifecycle,
+		))
+	}
+
+	resolution := contractResolution{
+		path:                 contractResolutionStreamFallback,
+		relationship:         model.ProvideModePublic,
+		sourceLifecycle:      model.NetworkClientLifecycleActiveTop,
+		destinationLifecycle: model.NetworkClientLifecycleInactiveDerived,
+	}
+	before := count(false, "stream_fallback", "public", "active_top", "inactive_derived")
+	recordContractFailureResolved(
+		server.NewId(),
+		server.NewId(),
+		false,
+		16384,
+		model.ErrMissingCompanionOrigin,
+		resolution,
+	)
+	if after := count(false, "stream_fallback", "public", "active_top", "inactive_derived"); after != before+1 {
+		t.Fatalf("missing-origin detail counter = %v, want %v", after, before+1)
+	}
+
+	// Every label passes through a fixed vocabulary even if a future caller
+	// accidentally supplies free-form values.
+	unknownBefore := count(false, "unknown", "unknown", "unknown", "unknown")
+	recordContractFailureResolved(
+		server.NewId(),
+		server.NewId(),
+		false,
+		16384,
+		model.ErrMissingCompanionOrigin,
+		contractResolution{
+			path:                 "client-controlled-value",
+			relationship:         999,
+			sourceLifecycle:      model.NetworkClientLifecycle("unbounded-source"),
+			destinationLifecycle: model.NetworkClientLifecycle("unbounded-destination"),
+		},
+	)
+	if after := count(false, "unknown", "unknown", "unknown", "unknown"); after != unknownBefore+1 {
+		t.Fatalf("unknown detail counter = %v, want %v", after, unknownBefore+1)
+	}
+
+	// Other contract causes stay out of this diagnostic family.
+	before = count(false, "stream_fallback", "public", "active_top", "inactive_derived")
+	recordContractFailureResolved(
+		server.NewId(),
+		server.NewId(),
+		false,
+		16384,
+		fmt.Errorf("postgres unavailable"),
+		resolution,
+	)
+	if after := count(false, "stream_fallback", "public", "active_top", "inactive_derived"); after != before {
+		t.Fatalf("non-missing failure moved detail counter: %v -> %v", before, after)
 	}
 }
 
@@ -289,6 +416,41 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 			connect.AssertEqual(t, result.Error != nil, true)
 			if result.Error != nil {
 				connect.AssertEqual(t, *result.Error, protocol.ContractError_NoPermission)
+			}
+		}
+
+		// Scenario 4: a stale provide key must not keep an inactive derived
+		// destination contractible. This is the production failure shape: the
+		// Redis mode survives lifecycle invalidation, relationship lookup still
+		// sees the same network, and the old path created a successful no-escrow
+		// contract to an identity that could no longer receive it.
+		{
+			networkId := newFundedNetwork()
+			provider := newClient(networkId)
+			consumer := newClient(networkId)
+			model.SetProvide(ctx, consumer, map[model.ProvideMode][]byte{
+				model.ProvideModeNetwork: networkKey,
+				model.ProvideModeStream:  streamKey,
+			})
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					UPDATE network_client
+					SET active = false, source_client_id = $2, deactivate_time = $3
+					WHERE client_id = $1
+					`,
+					consumer,
+					provider,
+					server.NowUtc(),
+				))
+			})
+
+			result := createReturnContract(provider, consumer)
+			connect.AssertEqual(t, result.Contract == nil, true)
+			connect.AssertEqual(t, result.Error != nil, true)
+			if result.Error != nil {
+				connect.AssertEqual(t, *result.Error, protocol.ContractError_Reliability)
 			}
 		}
 	})

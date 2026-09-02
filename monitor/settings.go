@@ -45,6 +45,21 @@ type HostSettings struct {
 	// node endpoints live in monitor.yml so the reusable probe does not bake a
 	// testnet/mainnet choice into its implementation.
 	Subtensor *SubtensorHostSettings
+
+	// Backup arms SIGNALS.md §11.22 for this host. These are the dedicated
+	// direct SSH endpoints used for bulk archive traffic; the monitor's own
+	// connection to the host can still use its management overlay address.
+	Backup *BackupHostSettings
+}
+
+// BackupHostSettings identifies the direct bulk-transfer endpoints for the
+// PostgreSQL and Redis archive sources. Source values include the SSH user so
+// they can be compared losslessly with the effective systemd environment.
+type BackupHostSettings struct {
+	PGSource    string
+	PGPort      int
+	RedisSource string
+	RedisPort   int
 }
 
 // SubtensorHostSettings describes one Subtensor deployment and its external
@@ -411,6 +426,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 			proxy:                 cloneProxyHostSettings(configured.Proxy),
 			edgeIPv6:              cloneEdgeIPv6Settings(configured.EdgeIPv6),
 			subtensor:             cloneSubtensorHostSettings(configured.Subtensor),
+			backup:                cloneBackupHostSettings(configured.Backup),
 		}
 		if len(configured.RedisNodePorts) > 0 {
 			h.redisPorts = append([]int(nil), configured.RedisNodePorts...)
@@ -448,6 +464,7 @@ func hostSettingsFromHost(h *host) HostSettings {
 		Proxy:                 cloneProxyHostSettings(h.proxy),
 		EdgeIPv6:              cloneEdgeIPv6Settings(h.edgeIPv6),
 		Subtensor:             cloneSubtensorHostSettings(h.subtensor),
+		Backup:                cloneBackupHostSettings(h.backup),
 	}
 }
 
@@ -470,6 +487,14 @@ func cloneSubtensorHostSettings(settings *SubtensorHostSettings) *SubtensorHostS
 	}
 	clone := *settings
 	clone.Nodes = append([]SubtensorNodeSettings(nil), settings.Nodes...)
+	return &clone
+}
+
+func cloneBackupHostSettings(settings *BackupHostSettings) *BackupHostSettings {
+	if settings == nil {
+		return nil
+	}
+	clone := *settings
 	return &clone
 }
 
