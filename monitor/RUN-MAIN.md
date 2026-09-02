@@ -71,6 +71,14 @@ not pause unrelated probes or investigations.
 - Preserve unrelated and pre-existing working-tree changes. Do not amend,
   force-push, rebase, or push by default. Keep changes in different repositories
   in separate tested commits.
+- Fix correctness bugs within the existing product architecture. A monitor
+  diagnosis is not authority to change how builds work, replace the deployment
+  workflow, or redesign the system. In particular, do not add clean-worktree
+  gates, freeze Git HEAD across a build, reject `modified=true`, or make
+  Warpctl build/deploy success contingent on service-binary provenance without
+  an explicit operator architecture decision. Local checkouts and deliberate
+  diffs remain valid deployment inputs; observe and record them without
+  changing that contract.
 - Software can reduce resource use and prevent unsafe overlap; it cannot create
   RAM, CPU, host slots, liquidity, routable addresses, or per-proxy active-client
   slots. Keep software, operator, finance, network, and hardware closure gates
@@ -127,6 +135,9 @@ that local Warp checkout. Do not substitute a published or cached Warpctl, and
 do not discard an intentional diff merely to make a signal green. Record and
 preserve the checkout base plus participating diff when exact replay matters;
 §8.12 independently verifies the resulting running service artifact.
+This is an observation contract, not a build-admission policy. Missing identity
+may alert, but it must not cause the monitor agent to redesign Warpctl's build
+pipeline without explicit operator direction.
 
 ## One-shot diagnostic snapshot
 

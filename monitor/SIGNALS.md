@@ -6709,6 +6709,15 @@ Operator policy later affirmed local checkout deployment and current Warp
 healthy compatibility tombstone so persisted state from an older monitor can
 resolve rather than linger.
 
+This establishes an ownership boundary, not a ban on correctness fixes. The
+monitor agent should repair correctness defects within the existing product
+architecture, but a provenance finding does not authorize it to change how
+builds work or redesign deployment. Clean-tree requirements, stable-HEAD build
+gates, rejection of `modified=true`, and checkout-versus-binary admission gates
+are architecture decisions requiring explicit operator direction. Exact
+identity remains useful read-only evidence; the intentional local checkout and
+its diff remain valid build inputs.
+
 This is software identity and release-operations visibility, never a hardware
 alert and never a prohibition on local changes. If identity is malformed,
 rebuild the workstation copy through the current local
