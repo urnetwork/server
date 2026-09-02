@@ -95,7 +95,10 @@ func Run(ctx context.Context, options RunOptions) error {
 	} else {
 		exchange = NewExchangeFromEnv(runCtx, exchangeSettingsForRun(options))
 		defer exchange.Close()
-		connectRouter := NewConnectRouterFromExchange(runCtx, cancel, exchange)
+		connectRouter, err := newConnectRouterFromExchange(runCtx, cancel, exchange)
+		if err != nil {
+			return fmt.Errorf("initialize Connect ingress: %w", err)
+		}
 		statusHandler = connectRouter.Status
 		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
 		server.Warmup(connectWarmupTargets()...)

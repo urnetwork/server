@@ -494,6 +494,9 @@ type ConnectHandlerSettings struct {
 	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
+	// Tests replace only the configuration loader so initialization failure can
+	// be held before any listener goroutine exists.
+	transportTlsLoader func(*server.TransportTlsSettings) (*server.TransportTls, error)
 }
 
 // Keeps server-resident Transfer recovery symmetric with the client H3 path.
@@ -702,6 +705,24 @@ func NewConnectHandlerWithPacketConns(
 	settings *ConnectHandlerSettings,
 	packetConns ConnectHandlerPacketConns,
 ) *ConnectHandler {
+	handler, err := newConnectHandlerWithPacketConns(ctx, handlerId, exchange, settings, packetConns)
+	if err != nil {
+		panic(err)
+	}
+	return handler
+}
+
+// newConnectHandlerWithPacketConns is the checked construction path used by
+// process startup. TLS identity must exist before listener supervision begins:
+// an empty fallback loader can bind UDP and report ready while rejecting every
+// ClientHello with TLS internal_error.
+func newConnectHandlerWithPacketConns(
+	ctx context.Context,
+	handlerId server.Id,
+	exchange *Exchange,
+	settings *ConnectHandlerSettings,
+	packetConns ConnectHandlerPacketConns,
+) (*ConnectHandler, error) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	packetEndpoints := connectHandlerPacketEndpoints(settings, packetConns)
 	activeZero := make(chan struct{})
@@ -718,10 +739,14 @@ func NewConnectHandlerWithPacketConns(
 		).Set(0)
 	}
 
-	transportTls, err := server.NewTransportTlsFromConfig(settings.TransportTlsSettings)
+	transportTlsLoader := settings.transportTlsLoader
+	if transportTlsLoader == nil {
+		transportTlsLoader = server.NewTransportTlsFromConfig
+	}
+	transportTls, err := transportTlsLoader(settings.TransportTlsSettings)
 	if err != nil {
-		glog.Errorf("[c]Could not initialize tls config. Disabling transport. = %s\n", err)
-		transportTls = server.NewTransportTls(map[string]bool{}, server.DefaultTransportTlsSettings())
+		cancel()
+		return nil, fmt.Errorf("initialize Connect transport TLS: %w", err)
 	}
 	h3DatagramSettings := settings.H3DatagramSettings
 	if h3DatagramSettings == nil {
@@ -770,7 +795,7 @@ func NewConnectHandlerWithPacketConns(
 
 	go server.HandleError(h.run, cancel)
 
-	return h
+	return h, nil
 }
 
 func (self *ConnectHandler) run() {
