@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -205,6 +206,70 @@ func TestRedisDbCandidatesHandleNegativeOffsets(t *testing.T) {
 	candidates := testRedisDbCandidates(5, 2, -1)
 	expected := []int{4, 1, 3}
 	connect.AssertEqual(t, candidates, expected)
+}
+
+// An exhausted client-level dial sequence is still one transient setup error;
+// the bounded lease setup horizon must give it another operation attempt.
+func TestRedisLeaseConnectionOperationRetriesTransientFailure(t *testing.T) {
+	attemptCount := 0
+	err := retryTestRedisLeaseConnectionOperation(context.Background(), func(ctx context.Context) error {
+		attemptCount += 1
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("lease retry operation context has no deadline")
+		}
+		if attemptCount == 1 {
+			return &net.DNSError{
+				Err:       "i/o timeout",
+				Name:      "local-redis.bringyour.com",
+				IsTimeout: true,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attemptCount != 2 {
+		t.Fatalf("operation attempts = %d; want 2", attemptCount)
+	}
+}
+
+// Authentication, protocol, and configuration errors are not made flaky by
+// retrying them as if they were transport failures.
+func TestRedisLeaseConnectionOperationRejectsPermanentFailure(t *testing.T) {
+	permanentErr := errors.New("redis lease configuration rejected")
+	attemptCount := 0
+	err := retryTestRedisLeaseConnectionOperation(context.Background(), func(context.Context) error {
+		attemptCount += 1
+		return permanentErr
+	})
+	if !errors.Is(err, permanentErr) {
+		t.Fatalf("operation error = %v; want %v", err, permanentErr)
+	}
+	if attemptCount != 1 {
+		t.Fatalf("operation attempts = %d; want 1", attemptCount)
+	}
+}
+
+// Caller cancellation remains stronger than the setup retry budget.
+func TestRedisLeaseConnectionOperationStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	attemptCount := 0
+	err := retryTestRedisLeaseConnectionOperation(ctx, func(context.Context) error {
+		attemptCount += 1
+		return &net.DNSError{
+			Err:       "i/o timeout",
+			Name:      "local-redis.bringyour.com",
+			IsTimeout: true,
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("operation error = %v; want context cancellation", err)
+	}
+	if attemptCount != 0 {
+		t.Fatalf("operation attempts = %d; want 0", attemptCount)
+	}
 }
 
 func TestRedisDatabaseLeaseRenewsWhileOwnerIsActive(t *testing.T) {

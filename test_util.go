@@ -6,6 +6,7 @@ import (
 	// "time"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -40,6 +41,9 @@ const (
 	testRedisLeaseTtl               = 15 * time.Minute
 	testRedisLeaseWait              = 25 * time.Millisecond
 	testRedisLeaseReleasedMarkerTtl = time.Minute
+	testRedisLeaseRetryTimeout      = 2 * time.Minute
+	testRedisLeaseRetryMinWait      = 100 * time.Millisecond
+	testRedisLeaseRetryMaxWait      = 5 * time.Second
 )
 
 // The coordinator client auto-retries a command whose response was lost on a
@@ -97,6 +101,52 @@ func testRedisDbCandidates(databaseCount int, reservedDb int, offset int) []int 
 	return candidates
 }
 
+// Retries only connection failures while an idempotent lease setup operation
+// remains inside one bounded setup horizon.
+func retryTestRedisLeaseConnectionOperation(
+	ctx context.Context,
+	operation func(context.Context) error,
+) error {
+	retryCtx, cancel := context.WithTimeout(ctx, testRedisLeaseRetryTimeout)
+	defer cancel()
+	backoff := &retryBackoff{
+		retryMinTimeout: testRedisLeaseRetryMinWait,
+		retryMaxTimeout: testRedisLeaseRetryMaxWait,
+	}
+	var lastErr error
+	for {
+		select {
+		case <-retryCtx.Done():
+			if lastErr == nil {
+				return retryCtx.Err()
+			}
+			return fmt.Errorf(
+				"redis test lease connection retry ended: %w",
+				errors.Join(retryCtx.Err(), lastErr),
+			)
+		default:
+		}
+
+		err := operation(retryCtx)
+		if err == nil {
+			return nil
+		}
+		if !isRedisConnectionError(err) {
+			return err
+		}
+		lastErr = err
+
+		select {
+		case <-retryCtx.Done():
+			return fmt.Errorf(
+				"redis test lease connection retry ended: %w",
+				errors.Join(retryCtx.Err(), lastErr),
+			)
+		case <-time.After(backoff.NextRetryTimeout()):
+		}
+	}
+}
+
 func acquireTestRedisDbLease(
 	ctx context.Context,
 	authority string,
@@ -113,9 +163,18 @@ func acquireTestRedisDbLease(
 		DialTimeout:  5 * time.Second,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
+		// The bounded outer setup retry passes one deadline through every
+		// internal command and dial attempt instead of letting one nested
+		// retry extend beyond the setup horizon.
+		ContextTimeoutEnabled: true,
 	})
 
-	config, err := client.ConfigGet(ctx, "databases").Result()
+	var config map[string]string
+	err := retryTestRedisLeaseConnectionOperation(ctx, func(operationCtx context.Context) error {
+		var operationErr error
+		config, operationErr = client.ConfigGet(operationCtx, "databases").Result()
+		return operationErr
+	})
 	if err != nil {
 		client.Close()
 		panic(fmt.Errorf("read redis logical database count: %w", err))
@@ -138,7 +197,12 @@ func acquireTestRedisDbLease(
 	for {
 		for _, db := range candidates {
 			key := fmt.Sprintf("urnetwork:server-test:redis-db-lease:%d", db)
-			acquired, err := client.SetNX(ctx, key, token, ttl).Result()
+			var acquired bool
+			err := retryTestRedisLeaseConnectionOperation(ctx, func(operationCtx context.Context) error {
+				var operationErr error
+				acquired, operationErr = client.SetNX(operationCtx, key, token, ttl).Result()
+				return operationErr
+			})
 			if err != nil {
 				client.Close()
 				panic(fmt.Errorf("lease redis test db %d: %w", db, err))
@@ -147,7 +211,16 @@ func acquireTestRedisDbLease(
 				// A lost SET response that go-redis retried internally reports
 				// not-acquired while the key already holds this process's
 				// token. Nothing else can write this token, so claim the lease.
-				current, getErr := client.Get(ctx, key).Result()
+				var current string
+				getErr := retryTestRedisLeaseConnectionOperation(ctx, func(operationCtx context.Context) error {
+					var operationErr error
+					current, operationErr = client.Get(operationCtx, key).Result()
+					return operationErr
+				})
+				if getErr != nil && !errors.Is(getErr, redis.Nil) {
+					client.Close()
+					panic(fmt.Errorf("verify redis test db %d lease owner: %w", db, getErr))
+				}
 				acquired = getErr == nil && current == token
 			}
 			if acquired {
