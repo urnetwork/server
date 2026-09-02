@@ -9095,6 +9095,16 @@ attribution metrics on exact `env`, `host`, `block`, and `instance` labels:
 - `go_memstats_stack_inuse_bytes`
 - `go_memstats_last_gc_time_seconds`
 
+Join a fifteenth capability family without making it part of the memory-owner
+sum: `urnetwork_proxy_lifecycle_join_enabled`. WARN
+`proxy-lifecycle-join-unverified` immediately when the newest fresh process
+omits it or reports anything other than exactly 1. Missing means the running
+artifact does not prove that its external owner waits for the manager, shared
+`NetworkSpace`, DeviceLocal, provider, RPC, and other SDK children; it does not
+mean those owners consume zero bytes. Keeping this separate from
+`proxy-runtime-unobservable` lets the live-set discriminator continue to
+evaluate a legacy process whose fourteen memory metrics are complete.
+
 Filter each family with its own source timestamp no older than 90 seconds
 before selecting the newest process start. Prometheus's instant-query timestamp
 is the evaluation time even for a stopped series returned through lookback, so
@@ -9229,6 +9239,49 @@ Connect, and Proxy target lists remain their declared sets. The Proxy-specific
 regression therefore tests the service selection, not a brittle source-string
 absence.
 
+A separate teardown audit found another software-owned memory-overlap path.
+Cancellation was not lifecycle completion: `ProxyDeviceManager.Close` could
+return to its process owner without joining an already admitted device
+construction, installed device run/idle workers, or the manager-owned shared
+`NetworkSpace`. The SDK's device graph also requested cancellation without a
+single join boundary for its owned API refresh, provider migration, RPC
+accept/callback/session, multi-client generator, memory sampler, and security
+monitor workers. A retired device or process generation could therefore keep
+transports and its reachable ownership graph alive while its replacement was
+already allocating. This can amplify device-churn and serialized-rollout RSS
+overlap and produce a long close tail. It cannot explain the legacy process's
+3.89 GiB heap only 22 seconds after start with zero hosted devices, so do not
+credit it with the eager-warmup floor.
+
+Current-main server commit `a4a8b502` closes manager admission before waiting,
+joins every admitted constructor and device worker, closes the shared
+`NetworkSpace` only after its borrowers drain, makes the Proxy CLI wait at its
+external ownership boundary, and closes the acceptance tracker's independently
+owned space. SDK commit `e05ec46` supplies the matching device, provider, RPC,
+remote, generator, sampler, monitor, and owned-API joins while rejecting late
+work after close. Server commit `54f461fe` adds the identity-free capability
+gauge and replaces a remote-handler scheduling assumption in the manager test
+with an exact local `NetworkSpace.Close` barrier. Barrier-driven synthetic
+tests prove that manager shutdown cannot overtake the owned `NetworkSpace`, an
+admitted open drains without being
+published, a late open is rejected, and each SDK owner waits for its exact
+blocked child. These are teardown/overlap fixes, not extra RAM or new active
+client slots.
+
+**Production verification (2026-09-02):** the current 20 Fireside/Crisp Proxy
+identities all reported clean server revision
+`fe3fa8eea625a3935ec7fe6569ee83b8a2578143`, `modified=false`, and one image
+digest. That revision descends from `a11ae7b1` but predates `a4a8b502`. With
+12,714–13,201 WireGuard peers and 34–66 hosted devices per process, fresh raw
+Mimir samples measured 487,169,696–691,516,768 bytes of `HeapAlloc`,
+845,558–2,227,123 heap objects, 541,851,648–781,660,160 bytes of RSS, and a
+922,075,906–1,162,316,170-byte next-GC goal. This is a material collapse from
+the legacy 3.6–3.9 GiB heap, 27.5–30.5-million-object, roughly 5 GiB RSS band
+and closes the eager global-warmup root cause on the deployed artifact. The
+absence of the lifecycle capability on that older clean revision keeps the
+teardown/overlap rollout open; a healthy steady heap is not proof that close
+joins retired ownership.
+
 The scoped warmup path is the first root-cause fix to verify. If a deployed
 Proxy build that selects no targets still retains the §14.7b floor, capture an
 aggregate heap allocation profile or add identity-free owner gauges on that
@@ -9248,23 +9301,34 @@ explicit operational load reduction) are required even after the live set is
 smaller.
 
 Deploy the Proxy service artifact from a clean server descendant of
-`a11ae7b1`, containing targeted warmup, the value-only WireGuard TUN factory,
-the bounded caller-lock cache, the new owner gauges, and the generic
-source/digest gauge; no xops deployment is needed for this process-memory
-correction. The release builder must use the Warp provenance
+`54f461fe` (and therefore `a4a8b502` and `a11ae7b1`), built against a clean SDK
+descendant of `e05ec46`. It must contain targeted warmup, the value-only
+WireGuard TUN factory, the bounded caller-lock cache, the new owner gauges, the
+generic source/digest gauge, the lifecycle capability gauge, and the complete
+manager/device/RPC ownership joins. No xops deployment is needed for these
+process-memory corrections. The release
+builder must use the Warp provenance
 gate that rejects dirty source, requires every Linux binary's embedded
 revision and `modified=false` to match the starting clean HEAD, and rechecks
 that HEAD immediately before publishing. Require §8.12 to join both
 `urnetwork_build_info` and `urnetwork_source_info` to the exact newest process
-identity and independently match the running container. With that provenance
-gate separate and healthy, the first post-sync sample and repeated post-GC
-floor must be materially lower than the legacy 3.6–3.9 GiB
+identity and independently match the running container; the release ledger
+must separately record the clean SDK dependency because the server's Go VCS
+stamp alone does not prove that checkout. With that provenance gate separate
+and healthy, the first post-sync sample and repeated post-GC floor must be
+materially lower than the legacy 3.6–3.9 GiB
 heap/27.5–30.5-million-object band. Require the conservative residual below 2
 GiB for 15 minutes across multiple GC cycles, improved RSS and host
 `MemAvailable`, and simultaneous WireGuard plus HTTP/SOCKS acceptance with no
-new OOM or adjacent UDP receive drops. If only the closure/cache reductions are
-visible while the large startup floor remains, provenance-check the target
-list before profiling the next owner. SIGNALS.md §14.7b (`proxy-runtime`) maps
+new OOM or adjacent UDP receive drops. During a controlled drain, require the
+old manager/device/RPC ownership graph to join before process exit and before
+the stop timeout, with no late device publication or continuing API refresh;
+compare old/candidate RSS overlap rather than using process disappearance as
+the only close proof. Require `urnetwork_proxy_lifecycle_join_enabled=1` on
+every newest identity for two consecutive scrapes. If only the closure/cache
+reductions are visible while
+the large startup floor remains, provenance-check the target list before
+profiling the next owner. SIGNALS.md §14.7b (`proxy-runtime`) maps
 to `signal_proxy_runtime.go` and `signal_proxy_runtime_test.go`; synthetic cases
 pin a complete high live set, optional source context that cannot hide high
 memory, conservative owner accounting, and newest-generation selection during

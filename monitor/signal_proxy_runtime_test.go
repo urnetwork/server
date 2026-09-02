@@ -31,6 +31,7 @@ type proxyRuntimeFixtureProcess struct {
 	gogc           *float64
 	stack          *float64
 	lastGC         *float64
+	lifecycleJoin  *float64
 }
 
 func TestProxyRuntimeSignalSyntheticHighLiveSet(t *testing.T) {
@@ -68,8 +69,13 @@ func TestProxyRuntimeSignalSyntheticHighLiveSet(t *testing.T) {
 		"exactly two durable goroutines",
 		"endpoint-seeded server-initiated handshaking peers",
 		"shared NetworkSpace",
-		"current-main server commit a11ae7b1",
-		"clean Go source descendant of a11ae7b1",
+		"current-main server commit 54f461fe",
+		"a4a8b502's complete manager/NetworkSpace join",
+		"a11ae7b1's no-target Proxy warmup",
+		"SDK descendant of e05ec46",
+		"cancellation as lifecycle completion",
+		"transient overlap and slow close",
+		"clean Go source descendant of 54f461fe",
 		"additional hard client slots",
 		"SIGNALS.md §14.7b",
 	} {
@@ -180,8 +186,50 @@ func TestProxyRuntimeSignalSyntheticMissingSourceDoesNotHideHighLiveSet(t *testi
 	}
 }
 
+func TestProxyRuntimeSignalSyntheticLifecycleJoinUnverified(t *testing.T) {
+	now := time.Date(2026, 9, 2, 1, 0, 0, 0, time.UTC)
+	old := completeProxyRuntimeFixture("crisp", "g2", "old", now.Add(-2*time.Hour))
+	setProxyRuntimeFixtureValues(&old, 700<<20, 600<<20, 2_000_000, 27_000, 12_800, 40, 32<<20, 4<<20)
+	current := completeProxyRuntimeFixture("crisp", "g2", "current", now.Add(-time.Minute))
+	setProxyRuntimeFixtureValues(&current, 700<<20, 600<<20, 2_000_000, 27_000, 12_800, 40, 32<<20, 4<<20)
+	current.lifecycleJoin = nil
+	invalid := completeProxyRuntimeFixture("fireside", "g1", "invalid", now.Add(-time.Minute))
+	setProxyRuntimeFixtureValues(&invalid, 700<<20, 600<<20, 2_000_000, 27_000, 12_900, 40, 32<<20, 4<<20)
+	zero := float64(0)
+	invalid.lifecycleJoin = &zero
+
+	alerts := runProxyRuntimeFixture(t, now, proxyRuntimeFixtureJSON(t, now, old, current, invalid))
+	alert := requireAlertClass(t, alerts, "proxy-lifecycle-join-unverified")
+	if alert.SignalNumber != "14.7b" || alert.SignalKey != "proxy-runtime" || alert.Sustain != 1 {
+		t.Fatalf("wrong lifecycle join identity: %+v", alert)
+	}
+	for _, want := range []string{
+		"2 of 2 newest fresh proxy identities",
+		"crisp/g2#current[metric=missing]",
+		"fireside/g1#invalid[value=0]",
+		"Cancellation was not lifecycle completion",
+		"targeted warmup has already reduced",
+		"server descendant of commit 54f461fe",
+		"a4a8b502's manager/NetworkSpace join",
+		"SDK descendant of e05ec46",
+		"no xops playbook is needed",
+		"does not add RAM, proxy hosts, or active-client slots",
+		"SIGNALS.md §14.7b",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("lifecycle join alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	for _, candidate := range alerts {
+		if candidate.Class == "proxy-runtime-unobservable" || candidate.Class == "proxy-runtime-live-set" {
+			t.Fatalf("lifecycle-only rollout gap changed memory classification: %+v", alerts)
+		}
+	}
+}
+
 func completeProxyRuntimeFixture(host, block, instance string, start time.Time) proxyRuntimeFixtureProcess {
 	zero := float64(0)
+	one := float64(1)
 	gogc := float64(100)
 	stack := float64(80 << 20)
 	lastGC := float64(start.Add(30 * time.Minute).Unix())
@@ -194,6 +242,7 @@ func completeProxyRuntimeFixture(host, block, instance string, start time.Time) 
 		heap:           &zero, objects: &zero, goroutines: &zero, peers: &zero,
 		devices: &zero, deviceTracked: &zero, poolRetained: &zero,
 		nextGC: &zero, gogc: &gogc, stack: &stack, lastGC: &lastGC,
+		lifecycleJoin: &one,
 	}
 }
 
@@ -219,6 +268,7 @@ func runProxyRuntimeFixture(t testing.TB, now time.Time, payload string) Alerts 
 		if host.Name != "metrics-1" ||
 			!strings.Contains(command, "go_memstats_heap_alloc_bytes") ||
 			!strings.Contains(command, "urnetwork_proxy_devices_live") ||
+			!strings.Contains(command, "urnetwork_proxy_lifecycle_join_enabled") ||
 			!strings.Contains(command, "urnetwork_source_info") ||
 			!strings.Contains(command, "%22synthetic%22") ||
 			!strings.Contains(command, "timestamp%28label_replace") ||
@@ -307,6 +357,7 @@ func proxyRuntimeFixtureJSON(
 			{"go_gc_gogc_percent", process.gogc},
 			{"go_memstats_stack_inuse_bytes", process.stack},
 			{"go_memstats_last_gc_time_seconds", process.lastGC},
+			{"urnetwork_proxy_lifecycle_join_enabled", process.lifecycleJoin},
 		} {
 			if metric.value != nil {
 				add(metric.name, *metric.value)

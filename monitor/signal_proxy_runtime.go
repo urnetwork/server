@@ -53,6 +53,7 @@ const (
 	proxyRuntimeMetricGOGC
 	proxyRuntimeMetricStack
 	proxyRuntimeMetricLastGC
+	proxyRuntimeMetricLifecycleJoin
 	proxyRuntimeMetricAttributionAll = proxyRuntimeMetricRSS |
 		proxyRuntimeMetricStart |
 		proxyRuntimeMetricBuild |
@@ -86,6 +87,7 @@ var proxyRuntimeMetricNames = []string{
 	"go_gc_gogc_percent",
 	"go_memstats_stack_inuse_bytes",
 	"go_memstats_last_gc_time_seconds",
+	"urnetwork_proxy_lifecycle_join_enabled",
 }
 
 type proxyRuntimeMetrics struct {
@@ -109,6 +111,7 @@ type proxyRuntimeMetrics struct {
 	gogc           float64
 	stack          float64
 	lastGC         float64
+	lifecycleJoin  float64
 	availableMask  uint16
 }
 
@@ -245,6 +248,9 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 		case "go_memstats_last_gc_time_seconds":
 			process.lastGC = value
 			process.availableMask |= proxyRuntimeMetricLastGC
+		case "urnetwork_proxy_lifecycle_join_enabled":
+			process.lifecycleJoin = value
+			process.availableMask |= proxyRuntimeMetricLifecycleJoin
 		}
 	}
 
@@ -260,6 +266,7 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	})
 
 	missing := []string{}
+	lifecycleUnverified := []string{}
 	high := []string{}
 	for _, process := range current {
 		if process.availableMask&proxyRuntimeMetricAll != proxyRuntimeMetricAll {
@@ -269,16 +276,22 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				strings.Join(proxyRuntimeMissingMetrics(process.availableMask), ","),
 			))
 		}
-		if process.availableMask&proxyRuntimeMetricAttributionAll != proxyRuntimeMetricAttributionAll {
-			continue
+		if process.availableMask&proxyRuntimeMetricAttributionAll == proxyRuntimeMetricAttributionAll {
+			peerAllowance := process.peers * proxyRuntimePeerAllowancePerPeer
+			knownAllowance := process.poolRetained + process.deviceTracked + peerAllowance
+			residual := max(0, process.heap-knownAllowance)
+			if process.heap >= proxyRuntimeHeapWarnBytes &&
+				process.objects >= proxyRuntimeObjectWarnCount &&
+				residual >= proxyRuntimeResidualWarnBytes {
+				high = append(high, proxyRuntimeObservation(process, peerAllowance, residual))
+			}
 		}
-		peerAllowance := process.peers * proxyRuntimePeerAllowancePerPeer
-		knownAllowance := process.poolRetained + process.deviceTracked + peerAllowance
-		residual := max(0, process.heap-knownAllowance)
-		if process.heap >= proxyRuntimeHeapWarnBytes &&
-			process.objects >= proxyRuntimeObjectWarnCount &&
-			residual >= proxyRuntimeResidualWarnBytes {
-			high = append(high, proxyRuntimeObservation(process, peerAllowance, residual))
+		if process.availableMask&proxyRuntimeMetricLifecycleJoin == 0 {
+			lifecycleUnverified = append(lifecycleUnverified, proxyRuntimeLabel(process)+"[metric=missing]")
+		} else if process.lifecycleJoin != 1 {
+			lifecycleUnverified = append(lifecycleUnverified, fmt.Sprintf(
+				"%s[value=%g]", proxyRuntimeLabel(process), process.lifecycleJoin,
+			))
 		}
 	}
 
@@ -304,6 +317,27 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 			playbook: "SIGNALS.md §14.7b",
 		})
 	}
+	if len(lifecycleUnverified) > 0 {
+		findings = append(findings, finding{
+			probeId: "runtime/proxy-live-set", tier: tierWarn,
+			class: "proxy-lifecycle-join-unverified", target: "proxy-fleet", frame: metricHost.name, sustain: 1,
+			symptom: fmt.Sprintf(
+				"%d of %d newest fresh proxy identities do not prove synchronous manager/device/RPC lifecycle completion",
+				len(lifecycleUnverified), len(current),
+			),
+			mechanism: "Cancellation was not lifecycle completion. Before the joined-lifecycle fix, an admitted Proxy device construction, installed device worker, shared NetworkSpace, SDK API refresh, provider migration, RPC callback/session, generator, sampler, or monitor could remain reachable while a replacement was already allocating. That can amplify churn/rollout RSS overlap and slow close even when targeted warmup has already reduced the steady startup heap.",
+			baseline:  "Every newest actual-scrape-fresh proxy identity exports urnetwork_proxy_lifecycle_join_enabled=1 on its exact env, host, block, and instance labels.",
+			observed: fmt.Sprintf(
+				"current_proxy_identities=%d lifecycle_join_proven_identities=%d unverified_identities=%d unverified=%s metrics_gateway=%s",
+				len(current), len(current)-len(lifecycleUnverified), len(lifecycleUnverified), strings.Join(lifecycleUnverified, ";"), metricHost.name,
+			),
+			evidence: fmt.Sprintf("The capability family is filtered to a producer timestamp no more than %.0f seconds old and joined only to the newest live process identity. Barrier-driven tests separately prove manager admission closure, admitted-open draining, shared-NetworkSpace completion, and the SDK's child-owner joins; the gauge makes that tested artifact capability observable after deployment.", proxyRuntimeFreshness.Seconds()),
+			context:  "This is a software rollout gap, not proof that the current process leaks monotonically and not proof that the targeted-warmup fix failed. Joining retired ownership can reduce transient overlap and close latency, but it does not add RAM, proxy hosts, or active-client slots.",
+			action:   "Deploy Proxy from a clean server descendant of commit 54f461fe (containing a4a8b502's manager/NetworkSpace join and the capability gauge), built against a clean SDK descendant of e05ec46. Use the ordinary host-serialized rollout; no xops playbook is needed. Retain the dependency checkout in release provenance because the server Go VCS stamp alone does not prove the SDK revision. Do not restart the same artifact or raise rollout concurrency to hide the gap.",
+			verify:   "For two consecutive scrapes, every newest Proxy identity reports lifecycle_join_enabled=1 with clean source/artifact provenance. During a controlled drain, the old manager/device/RPC graph joins before the stop timeout, with no late device publication or continuing API refresh; simultaneous WireGuard plus HTTP/SOCKS acceptance stays healthy, old/candidate RSS overlap remains bounded, and no OOM or adjacent UDP receive loss appears.",
+			playbook: "SIGNALS.md §14.7b",
+		})
+	}
 	if len(high) > 0 {
 		findings = append(findings, finding{
 			probeId: "runtime/proxy-live-set", tier: tierWarn,
@@ -312,7 +346,7 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				"%d of %d newest fresh proxy identities retain a multi-gigabyte Go heap not explained by tracked owners or the production-shaped WireGuard peer allowance",
 				len(high), len(current),
 			),
-			mechanism: "HeapAlloc and heap-object count prove process-owned allocated Go objects rather than filesystem cache or shared image pages. NextGC, GOGC, stack roots, and the last collection time distinguish a reachable post-collection floor from a temporary pre-GC allocation wave. Returned message buffers and tracked DeviceLocal bytes are subtracted directly. The remaining allowance charges 48 KiB per registered WireGuard peer—above the measured 44.6 KiB marginal RSS of endpoint-seeded, server-initiated handshaking peers—so a residual above 2 GiB cannot be attributed to the known peer lifecycle by that control. Legacy Proxy startup also called the process-global server warmup, eagerly constructing API-only SearchLocal indexes and their per-alias rune histograms before the first metrics sample. The Go VCS revision and modified state identify whether that source path can still be present; the separately reported WARP_VERSION is only the config-generation boundary.",
+			mechanism: "HeapAlloc and heap-object count prove process-owned allocated Go objects rather than filesystem cache or shared image pages. NextGC, GOGC, stack roots, and the last collection time distinguish a reachable post-collection floor from a temporary pre-GC allocation wave. Returned message buffers and tracked DeviceLocal bytes are subtracted directly. The remaining allowance charges 48 KiB per registered WireGuard peer—above the measured 44.6 KiB marginal RSS of endpoint-seeded, server-initiated handshaking peers—so a residual above 2 GiB cannot be attributed to the known peer lifecycle by that control. Legacy Proxy startup also called the process-global server warmup, eagerly constructing API-only SearchLocal indexes and their per-alias rune histograms before the first metrics sample. An independent teardown defect treated cancellation as lifecycle completion: retired manager, NetworkSpace, DeviceLocal, provider, and RPC ownership graphs could overlap replacements during churn or drain. That overlap can amplify RSS and slow close, but it cannot explain the legacy 22-second startup sample with zero hosted devices. The Go VCS revision and modified state identify whether those source paths can still be present; the separately reported WARP_VERSION is only the config-generation boundary.",
 			baseline:  "For each newest proxy identity, HeapAlloc is below 3 GiB or heap objects are below 20 million, or less than 2 GiB remains after returned-pool bytes, tracked DeviceLocal bytes, and a conservative 48 KiB-per-peer allowance.",
 			observed: fmt.Sprintf(
 				"current_proxy_identities=%d high_live_set_identities=%d heap_limit_bytes=%.0f object_limit=%.0f residual_limit_bytes=%.0f peer_allowance_bytes_per_peer=%.0f high=%s metrics_gateway=%s",
@@ -320,10 +354,10 @@ func (proxyRuntimeProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 				proxyRuntimeResidualWarnBytes, proxyRuntimePeerAllowancePerPeer,
 				strings.Join(high, ";"), metricHost.name,
 			),
-			evidence: "The newest process generation and config version are selected independently for every host/block from actual-scrape-fresh Mimir series; source revision, dirty state, and image digest are reported as optional context when present, while §8.12 owns their validity. NextGC and GOGC expose the collector's heap goal after its prior live-heap mark instead of inferring reachability from one HeapAlloc point. Corrected isolated controls measured exactly two durable goroutines per up peer, 44.6 KiB marginal RSS for endpoint-seeded server-initiated handshaking peers, and 904.2 MiB RSS/557.5 MiB heap at 20,000 such peers. Applying the server's 8 GiB logical message-pool ceiling did not materially change the up-peer result, so neither peer lifecycle nor empty pool capacity reproduces this multi-gigabyte heap floor. A live legacy process already held 3.89 GiB heap and 29.7 million objects 22 seconds after start with zero hosted devices, matching eager startup retention rather than caller-lock growth.",
-			context:  "This is a software attribution and efficiency alert, not yet a claim that one cache leaks monotonically. The 2026-09-01 fleet showed both positive and negative thirty-minute heap/object deltas around the large floor. Software can lower the floor, but it cannot create RAM or additional hard client slots: §14.7 still requires capable hardware when an optimized fleet or serialized old/candidate pair cannot fit with reserve.",
-			action:   "Provenance-check the selected source revision and modified state. If it predates current-main server commit a11ae7b1, deploy a clean descendant containing the Proxy startup fix that selects no API/model warmup targets, retains only ProxyId in durable WireGuard TUN factories, and bounds the caller-lock cache. If a source-proven a11ae7b1 descendant still crosses the band, capture an aggregate heap allocation profile or add identity-free owner gauges on that exact generation and separate full-sync payloads, shared NetworkSpace, hosted DeviceLocal structure, and active HTTP/SOCKS flows. Preserve pool/device metrics as negative controls. Do not force a production GC, restart away the evidence, raise GOGC, lower a cgroup below the measured live set, or shrink WireGuard queues without packet-ordering and slow-peer isolation tests.",
-			verify:   "Deploy the Proxy root-cause artifact through the host-serialized rollout. For 15 minutes across multiple GC cycles, every newest identity reports a clean Go source descendant of a11ae7b1, preserves peer/device counts and simultaneous WireGuard plus HTTP/SOCKS acceptance, and has a materially lower startup heap/object floor with conservative residual below 2 GiB; RSS and host reserve improve with no new OOM or adjacent UDP receive drops.",
+			evidence: "The newest process generation and config version are selected independently for every host/block from actual-scrape-fresh Mimir series; source revision, dirty state, and image digest are reported as optional context when present, while §8.12 owns their validity. NextGC and GOGC expose the collector's heap goal after its prior live-heap mark instead of inferring reachability from one HeapAlloc point. Corrected isolated controls measured exactly two durable goroutines per up peer, 44.6 KiB marginal RSS for endpoint-seeded server-initiated handshaking peers, and 904.2 MiB RSS/557.5 MiB heap at 20,000 such peers. Applying the server's 8 GiB logical message-pool ceiling did not materially change the up-peer result, so neither peer lifecycle nor empty pool capacity reproduces this multi-gigabyte heap floor. A live legacy process already held 3.89 GiB heap and 29.7 million objects 22 seconds after start with zero hosted devices, matching eager startup retention rather than caller-lock growth. Barrier-driven manager and SDK tests separately prove that close waits for admitted construction, the shared NetworkSpace, API refresh, provider migration, RPC callbacks/sessions, and other owned workers while rejecting late work.",
+			context:  "This is a software attribution and efficiency alert, not yet a claim that one cache leaks monotonically. The 2026-09-01 fleet showed both positive and negative thirty-minute heap/object deltas around the large floor. Joining retired ownership reduces transient overlap and slow close but does not by itself close the first-sample floor. Software can lower both, but it cannot create RAM or additional hard client slots: §14.7 still requires capable hardware when an optimized fleet or serialized old/candidate pair cannot fit with reserve.",
+			action:   "Provenance-check the selected source revision and modified state. If it predates current-main server commit 54f461fe, deploy a clean descendant containing a11ae7b1's no-target Proxy warmup, value-only WireGuard TUN factory, bounded caller-lock cache, a4a8b502's complete manager/NetworkSpace join, and 54f461fe's lifecycle capability gauge; build it against a clean SDK descendant of e05ec46 so DeviceLocal, provider, RPC, remote, generator, sampler, monitor, and owned-API workers also join. The server Go VCS stamp does not prove the SDK checkout, so retain that dependency in release provenance. If a source-proven 54f461fe descendant still crosses the band, capture an aggregate heap allocation profile or add identity-free owner gauges on that exact generation and separate full-sync payloads, shared NetworkSpace, hosted DeviceLocal structure, and active HTTP/SOCKS flows. Preserve pool/device metrics as negative controls. Do not force a production GC, restart away the evidence, raise GOGC, lower a cgroup below the measured live set, or shrink WireGuard queues without packet-ordering and slow-peer isolation tests.",
+			verify:   "Deploy the Proxy root-cause artifact through the host-serialized rollout. For 15 minutes across multiple GC cycles, every newest identity reports lifecycle_join_enabled=1 from a clean Go source descendant of 54f461fe and the release ledger records a clean SDK descendant of e05ec46; peer/device counts and simultaneous WireGuard plus HTTP/SOCKS acceptance remain healthy, the startup heap/object floor is materially lower with conservative residual below 2 GiB, and RSS/host reserve improve with no new OOM or adjacent UDP receive drops. On a controlled drain, the old manager/device/RPC graph joins before the stop timeout with no late device publication or continuing API refresh.",
 			playbook: "SIGNALS.md §14.7b",
 		})
 	}
