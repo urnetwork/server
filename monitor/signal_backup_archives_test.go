@@ -319,6 +319,10 @@ func TestBackupArchivesSignalSyntheticDetectsFailedPullInRestartBackoff(t *testi
 		"restart_delay=30min",
 		"no archive writer is active during the restart backoff",
 		"Preserve the rsync partial",
+		"both source sshd journals",
+		"no orderly close",
+		"sibling forward reset before authentication",
+		"shared public-forward path",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("failed pull alert missing %q:\n%s", want, alert.Markdown())

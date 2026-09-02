@@ -8750,6 +8750,21 @@ writer or abandon the direct path: observe the scheduled retry, preserve the
 partial, and escalate the shared router/network boundary if progress cannot be
 sustained.
 
+The source-side SSH journals make that boundary stronger. Edge-2 recorded the
+Planetoid public address authenticating the PostgreSQL rsync at
+`18:36:15Z`, but recorded no orderly disconnect or PAM session close for that
+sshd process when Planetoid received the reset almost two hours later. Edge-6
+recorded no non-monitor authentication for the Redis attempt that was reset two
+seconds later. In contrast, both hosts continued accepting management sessions
+through the same interval and retained their original boot generations. Thus
+the backup client did not independently terminate both transfers and neither
+source sshd rejected them: state disappeared before the first packet of the
+Redis SSH session reached edge-6, on infrastructure shared by public ports 8022
+and 8023. Inspect the public router's lifecycle and conntrack evidence at that
+timestamp before changing rsync or either source host. Absence of router logs
+still leaves router restart, state eviction, and an upstream reset as distinct
+possibilities; do not claim one from client-side `Connection reset` text alone.
+
 The scheduled recovery then exercised the intended policy without operator
 intervention. At `2026-09-02T21:03:18Z`, exactly 30 minutes after the failed
 unit entered backoff, systemd started one new main process (PID `292560`) and
