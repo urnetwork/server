@@ -46,6 +46,11 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "transfer_escrow_sweep_payment_contract", requiredVersion: 597, rowColumn: 10},
 	{name: "migration_catalog", requiredVersion: 599, rowColumn: 11},
 	{name: "transfer_escrow_unsettled_balance_contract", requiredVersion: 601, rowColumn: 12},
+	{name: "client_reliability_running_window.degraded_classification_version", requiredVersion: 602, rowColumn: 13},
+	{name: "client_reliability_running_window classification write guard", requiredVersion: 603, rowColumn: 14},
+	{name: "provider_egress_health TLS authentication failure guard", requiredVersion: 604, rowColumn: 15},
+	{name: "st_fleet_binding_signature", requiredVersion: 605, rowColumn: 16},
+	{name: "st_epoch_notification", requiredVersion: 606, rowColumn: 17},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -83,7 +88,46 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       to_regclass('public.account_payment_contract_retention_pending') IS NOT NULL,
 		       to_regclass('public.transfer_escrow_sweep_payment_contract') IS NOT NULL,
 		       to_regclass('public.migration_catalog') IS NOT NULL,
-		       to_regclass('public.transfer_escrow_unsettled_balance_contract') IS NOT NULL
+		       to_regclass('public.transfer_escrow_unsettled_balance_contract') IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public'
+		             AND table_name = 'client_reliability_running_window'
+		             AND column_name = 'degraded_classification_version'
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'client_reliability_running_window'
+		                 AND column_name = 'degraded_classification_write_token'
+		           )
+		           AND to_regprocedure('public.client_reliability_running_window_classification_guard()') IS NOT NULL
+		           AND EXISTS (
+		               SELECT 1
+		               FROM pg_trigger AS tr
+		               JOIN pg_class AS rel ON rel.oid = tr.tgrelid
+		               JOIN pg_namespace AS nsp ON nsp.oid = rel.relnamespace
+		               WHERE nsp.nspname = 'public'
+		                 AND rel.relname = 'client_reliability_running_window'
+		                 AND tr.tgname = 'client_reliability_running_window_classification_guard'
+		                 AND NOT tr.tgisinternal
+		           )
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = 'public'
+		                 AND table_name = 'provider_egress_health'
+		                 AND column_name = 'tls_authentication_failure'
+		           )
+		           AND to_regclass('public.provider_egress_health_tls_authentication_failed') IS NOT NULL
+		       ),
+		       (
+		           to_regclass('public.st_fleet_binding_signature') IS NOT NULL
+		           AND to_regclass('public.st_fleet_binding_signature_network') IS NOT NULL
+		       ),
+		       to_regclass('public.st_epoch_notification') IS NOT NULL
 		FROM version;
 	`)
 	if err != nil {

@@ -11,12 +11,23 @@ import (
 
 func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		if !strings.Contains(query, "migration_audit") ||
-			!strings.Contains(query, "transfer_escrow_balance_contract") ||
-			!strings.Contains(query, "transfer_escrow_unsettled_balance_contract") {
-			t.Fatalf("migration query is missing required evidence:\n%s", query)
+		for _, requiredEvidence := range []string{
+			"migration_audit",
+			"transfer_escrow_balance_contract",
+			"transfer_escrow_unsettled_balance_contract",
+			"degraded_classification_version",
+			"degraded_classification_write_token",
+			"client_reliability_running_window_classification_guard",
+			"tls_authentication_failure",
+			"provider_egress_health_tls_authentication_failed",
+			"st_fleet_binding_signature_network",
+			"st_epoch_notification",
+		} {
+			if !strings.Contains(query, requiredEvidence) {
+				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
+			}
 		}
-		return []Row{{"590", "t", "t", "t", "f", "f", "f", "f", "f", "f", "f", "f", "f"}}, nil
+		return []Row{syntheticMigrationArtifactRow(590)}, nil
 	}}
 	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -37,9 +48,9 @@ func TestMigrationsSignalReportsRecordedVersionWithoutArtifact(t *testing.T) {
 	head := server.MigrationCount()
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM migration_catalog") {
-			return []Row{{fmt.Sprint(head), "0", fmt.Sprint(head - 1)}}, nil
+			return syntheticMigrationCatalogRows(head), nil
 		}
-		return []Row{{fmt.Sprint(head), "t", "t", "t", "t", "t", "t", "f", "t", "t", "t", "t", "t"}}, nil
+		return []Row{syntheticMigrationMissingArtifactRow(t, head, "transfer_escrow_balance_contract")}, nil
 	}}
 	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -64,9 +75,9 @@ func TestMigrationsSignalHealthyAtCoherentHead(t *testing.T) {
 	head := server.MigrationCount()
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM migration_catalog") {
-			return []Row{{fmt.Sprint(head), "0", fmt.Sprint(head - 1)}}, nil
+			return syntheticMigrationCatalogRows(head), nil
 		}
-		return []Row{{fmt.Sprint(head), "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "t"}}, nil
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
 	}}
 	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -82,8 +93,11 @@ func TestMigrationsSignalUsesCurrentServerMigrationCount(t *testing.T) {
 	if head <= 597 {
 		t.Fatalf("test requires migrations newer than the former hard-coded head, got %d", head)
 	}
-	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{fmt.Sprint(head - 1), "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "f"}}, nil
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(head - 1), nil
+		}
+		return []Row{syntheticMigrationArtifactRow(head - 1)}, nil
 	}}
 	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -107,7 +121,7 @@ func TestMigrationsSignalRejectsIncompleteIdentityCatalog(t *testing.T) {
 		if strings.Contains(query, "FROM migration_catalog") {
 			return []Row{{fmt.Sprint(head - 1), "0", fmt.Sprint(head - 2)}}, nil
 		}
-		return []Row{{fmt.Sprint(head), "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "t"}}, nil
+		return []Row{syntheticMigrationArtifactRow(head)}, nil
 	}}
 	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -123,9 +137,9 @@ func TestMigrationsSignalReportsMissingUnsettledEscrowIndex(t *testing.T) {
 	head := server.MigrationCount()
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if strings.Contains(query, "FROM migration_catalog") {
-			return []Row{{fmt.Sprint(head), "0", fmt.Sprint(head - 1)}}, nil
+			return syntheticMigrationCatalogRows(head), nil
 		}
-		return []Row{{fmt.Sprint(head), "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "t", "f"}}, nil
+		return []Row{syntheticMigrationMissingArtifactRow(t, head, "transfer_escrow_unsettled_balance_contract")}, nil
 	}}
 	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -141,4 +155,82 @@ func TestMigrationsSignalReportsMissingUnsettledEscrowIndex(t *testing.T) {
 			t.Fatalf("missing unsettled-index alert detail %q:\n%s", want, markdown)
 		}
 	}
+}
+
+func TestMigrationsSignalReportsMissingNewPublishedArtifacts(t *testing.T) {
+	head := server.MigrationCount()
+	for _, testCase := range []struct {
+		name string
+		want string
+	}{
+		{
+			name: "client_reliability_running_window.degraded_classification_version",
+			want: "client_reliability_running_window.degraded_classification_version@v602",
+		},
+		{
+			name: "client_reliability_running_window classification write guard",
+			want: "client_reliability_running_window classification write guard@v603",
+		},
+		{
+			name: "provider_egress_health TLS authentication failure guard",
+			want: "provider_egress_health TLS authentication failure guard@v604",
+		},
+		{
+			name: "st_fleet_binding_signature",
+			want: "st_fleet_binding_signature@v605",
+		},
+		{
+			name: "st_epoch_notification",
+			want: "st_epoch_notification@v606",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				if strings.Contains(query, "FROM migration_catalog") {
+					return syntheticMigrationCatalogRows(head), nil
+				}
+				return []Row{syntheticMigrationMissingArtifactRow(t, head, testCase.name)}, nil
+			}}
+			alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown := requireAlertClass(t, alerts, "migration-schema-drift").Markdown()
+			if !strings.Contains(markdown, testCase.want) {
+				t.Fatalf("missing published artifact alert lacks %q:\n%s", testCase.want, markdown)
+			}
+		})
+	}
+}
+
+func syntheticMigrationArtifactRow(head int) Row {
+	maxColumn := 0
+	for _, artifact := range migrationArtifacts {
+		if maxColumn < artifact.rowColumn {
+			maxColumn = artifact.rowColumn
+		}
+	}
+	row := make(Row, maxColumn+1)
+	row[0] = fmt.Sprint(head)
+	for column := 1; column < len(row); column++ {
+		row[column] = "t"
+	}
+	return row
+}
+
+func syntheticMigrationMissingArtifactRow(t *testing.T, head int, name string) Row {
+	t.Helper()
+	row := syntheticMigrationArtifactRow(head)
+	for _, artifact := range migrationArtifacts {
+		if artifact.name == name {
+			row[artifact.rowColumn] = "f"
+			return row
+		}
+	}
+	t.Fatalf("unknown migration artifact %q", name)
+	return nil
+}
+
+func syntheticMigrationCatalogRows(head int) []Row {
+	return []Row{{fmt.Sprint(head), "0", fmt.Sprint(head - 1)}}
 }

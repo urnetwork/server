@@ -6814,6 +6814,11 @@ This is the version-to-artifact contract checked by the probe:
 | 599 | `migration_catalog` |
 | 600 | `migration_catalog` identities cover indices 0–599 |
 | 601 | `transfer_escrow_unsettled_balance_contract` |
+| 602 | `client_reliability_running_window.degraded_classification_version` |
+| 603 | `client_reliability_running_window.degraded_classification_write_token` plus its write-reset function and trigger |
+| 604 | `provider_egress_health.tls_authentication_failure` plus its failed-client index |
+| 605 | `st_fleet_binding_signature` plus its network-time index |
+| 606 | `st_epoch_notification` |
 
 Page immediately as `migration-schema-drift` when the successful audit head is
 at or above an artifact's version but that artifact is absent. Warn as
