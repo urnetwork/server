@@ -57,21 +57,29 @@ type subtensorRPCObservation struct {
 }
 
 type subtensorNodeObservation struct {
-	Name             string                  `json:"name"`
-	SyncMode         string                  `json:"sync_mode"`
-	RPCPort          int                     `json:"rpc_port"`
-	GatewayPort      int                     `json:"gateway_port"`
-	Direct           subtensorRPCObservation `json:"direct"`
-	Gateway          subtensorRPCObservation `json:"gateway"`
-	FirstHead        string                  `json:"first_head"`
-	SecondHead       string                  `json:"second_head"`
-	GatewayHTTP      int                     `json:"gateway_http"`
-	ContainerImage   string                  `json:"container_image"`
-	ContainerStarted string                  `json:"container_started"`
-	DataPath         string                  `json:"data_path"`
-	WarpFallback     bool                    `json:"warp_fallback"`
-	WarpProofStarted bool                    `json:"warp_proof_started"`
-	ContainerError   string                  `json:"container_error"`
+	Name                   string                  `json:"name"`
+	SyncMode               string                  `json:"sync_mode"`
+	RPCPort                int                     `json:"rpc_port"`
+	GatewayPort            int                     `json:"gateway_port"`
+	Direct                 subtensorRPCObservation `json:"direct"`
+	Gateway                subtensorRPCObservation `json:"gateway"`
+	FirstHead              string                  `json:"first_head"`
+	SecondHead             string                  `json:"second_head"`
+	GatewayHTTP            int                     `json:"gateway_http"`
+	ContainerImage         string                  `json:"container_image"`
+	ContainerStarted       string                  `json:"container_started"`
+	DataPath               string                  `json:"data_path"`
+	RuntimeUID             int64                   `json:"runtime_uid"`
+	RuntimeGID             int64                   `json:"runtime_gid"`
+	DataPathUID            int64                   `json:"data_path_uid"`
+	DataPathGID            int64                   `json:"data_path_gid"`
+	DataPathMode           int64                   `json:"data_path_mode"`
+	DataPermissionObserved bool                    `json:"data_permission_observed"`
+	DataRuntimeWritable    bool                    `json:"data_runtime_writable"`
+	DataPermissionError    bool                    `json:"data_permission_error"`
+	WarpFallback           bool                    `json:"warp_fallback"`
+	WarpProofStarted       bool                    `json:"warp_proof_started"`
+	ContainerError         string                  `json:"container_error"`
 }
 
 type subtensorRuntimeVersion struct {
@@ -384,6 +392,27 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 		if node.ContainerError != "" {
 			findings = append(findings, cannotObserveFinding(identity+"/container-identity", fmt.Errorf("%s", node.ContainerError)))
 		} else {
+			if !node.DataPermissionObserved {
+				findings = append(findings, cannotObserveFinding(identity+"/data-permission", fmt.Errorf("runtime and bind-mount ownership are unavailable")))
+			} else if !node.DataRuntimeWritable || node.DataPermissionError {
+				findings = append(findings, finding{
+					probeId: "subtensor/node-health", tier: tierPage, class: "subtensor-data-permission",
+					target: target.name, frame: configured.Name, sustain: 1,
+					symptom:   fmt.Sprintf("%s cannot safely continue writing its mounted Subtensor database", identity),
+					mechanism: "The pinned image starts as root, assigns /data to its UID/GID 10001 runtime account, and then drops privilege. A later host reconciliation that resets the active bind-mount root to root:root 0750 removes traverse/write permission; a RocksDB background reopen then fails with EACCES and block import freezes even though the original process and RPC remain live.",
+					baseline:  "The running node's exact runtime UID/GID has write plus traverse permission on its sole read-write /data bind mount, and recent logs contain no RocksDB permission error.",
+					observed: fmt.Sprintf(
+						"runtime_uid=%d runtime_gid=%d data_uid=%d data_gid=%d data_mode=%#o runtime_writable=%t recent_database_permission_error=%t",
+						node.RuntimeUID, node.RuntimeGID, node.DataPathUID, node.DataPathGID, node.DataPathMode,
+						node.DataRuntimeWritable, node.DataPermissionError,
+					),
+					evidence: fmt.Sprintf("container=%s data_path=%s started_at=%s", configured.ContainerName, node.DataPath, firstNonempty(node.ContainerStarted, "unknown")),
+					context:  "This is an Xops ownership regression, not peer starvation, disk exhaustion, or evidence that the preserved database must be discarded. An already-open database can continue temporarily after path access is revoked, so RPC health is not a negative control.",
+					action:   "Apply the committed Xops runtime-ownership repair with run-subtensor.sh and require Compose to preserve both container identities. Restore access before considering a restart. If the same framed process remains frozen for two further bounded samples after access is restored, preserve its generation and obtain explicit authorization for a service-scoped same-generation restart; recover one node at a time and do not erase it or select a new generation solely for EACCES.",
+					verify:   "The runtime account passes test -w /data in both containers, their IDs and start times remain unchanged during permission repair, no new database permission error appears, and both best heads advance across two samples. A restart, if separately authorized, must replace only the framed container and retain its data path plus the archive identity.",
+					playbook: "SIGNALS.md §17.4",
+				})
+			}
 			deploymentProblems := []string{}
 			if configured.ExpectedImage != "" && node.ContainerImage != configured.ExpectedImage {
 				deploymentProblems = append(deploymentProblems, fmt.Sprintf("image=%q expected=%q", node.ContainerImage, configured.ExpectedImage))

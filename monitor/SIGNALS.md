@@ -10627,6 +10627,42 @@ checkpoint materially improves recovery. Faster sustained catch-up may still
 require storage/CPU capacity; neither the monitor nor a playbook can create that
 hardware capacity.
 
+The 2026-09-02 freeze supplied a narrower cause than peer scarcity or slow
+hardware. Both pinned containers start through `/entrypoint.sh` as root, which
+recursively assigns `/data` to the `subtensor` account and then executes the
+node as UID/GID 10001. The full-host playbook subsequently reconciled each
+active bind-mount root to `root:root 0750` at 01:44Z. Direct process and inode
+inspection then proved UID 10001 could neither traverse nor write either
+mounted `/data`. The archive temporarily continued through already-open
+handles, but at 02:58:54Z the lightnode's RocksDB background worker reopened a
+path, received `IO Error: Permission denied`, failed block import, and froze at
+6,447,926. Its repeated one-to-three peer sessions, changing public target,
+0.0-bps import rate, low CPU, 1.7-TiB free space, and the simultaneously
+advancing archive rule out disk exhaustion, CPU saturation, and simple peer
+absence as the causal boundary.
+
+Xops must own both bind roots as the pinned runtime UID/GID, not as root, and
+must run an exact in-container `test -w /data` after Compose reconciliation.
+The permission repair must preserve both container identities; restoring an
+inode owner does not require replacing either process. The applied repair was
+idempotent and both exact write gates passed without changing either 23:06:56Z
+container start time, but two post-repair samples left the archive fixed at
+6,447,933 and the lightnode fixed at 6,447,926. That proves both existing
+RocksDB processes latched the earlier background error even after inode access
+was restored. Preserve both generations and obtain explicit authorization for
+service-scoped, same-generation restarts, one node at a time with head progress
+proved between them. Do not erase either database or select a new generation
+merely to clear EACCES.
+
+Class `subtensor-data-permission` is immediate. The restricted helper reports
+the live process UID/GID, bind-source UID/GID/mode, whether that exact account
+has write plus traverse permission, and a Boolean for the bounded recent
+RocksDB permission signature. HEALTHY requires permission observation to be
+present, `data_runtime_writable=true`, no new permission signature, unchanged
+container identity through ownership reconciliation, and advancing best heads
+across two post-repair samples. Missing permission facts are observation loss,
+not a healthy default.
+
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
 ### 18.1 Exact-address HTTPS and upstream identity

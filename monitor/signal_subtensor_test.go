@@ -12,6 +12,7 @@ import (
 const (
 	syntheticSubtensorGenesis = "0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105"
 	syntheticSubtensorImage   = "ghcr.io/raofoundation/subtensor@sha256:a1ac7792b5279cdad701eec15742296f91d4be83e256a29fe57cffd500fa8f13"
+	syntheticSubtensorArchive = "/data/subtensor"
 	syntheticSubtensorData    = "/data/subtensor-lightnode-warp-v3"
 )
 
@@ -68,6 +69,42 @@ func TestSubtensorSignalDetectsWarpFallbackAndArchiveLag(t *testing.T) {
 	if !strings.Contains(lightnode.Verify, "unchanged archive container ID/start time") ||
 		!strings.Contains(lightnode.Verify, "live /data mount") {
 		t.Fatalf("lightnode verification does not preserve the archive boundary: %s", lightnode.Verify)
+	}
+}
+
+func TestSubtensorSignalDetectsRevokedRuntimeDataPermission(t *testing.T) {
+	observation := healthySubtensorObservation()
+	node := &observation.Nodes[1]
+	node.DataPathUID = 0
+	node.DataPathGID = 0
+	node.DataPathMode = 0o750
+	node.DataRuntimeWritable = false
+	node.DataPermissionError = true
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "subtensor-data-permission")
+	if alert.Frame != "lightnode" || alert.Sustain != 1 {
+		t.Fatalf("data permission alert = %+v", alert)
+	}
+	for _, want := range []string{
+		"root:root 0750",
+		"runtime_uid=10001",
+		"data_uid=0",
+		"data_mode=0750",
+		"runtime_writable=false",
+		"recent_database_permission_error=true",
+		"run-subtensor.sh",
+		"preserve both container identities",
+		"two further bounded samples",
+		"one node at a time",
+		"SIGNALS.md §17.4",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("data permission alert missing %q:\n%s", want, alert.Markdown())
+		}
 	}
 }
 
@@ -254,7 +291,11 @@ func subtensorSyntheticSettings(source SignalSource) SignalSettings {
 			ExpectedEVMChainID:         "0x3b1",
 			WarpMaxLag:                 4096,
 			Nodes: []SubtensorNodeSettings{
-				{Name: "archive", SyncMode: "full", RPCPort: 9945, GatewayPort: 9944},
+				{
+					Name: "archive", SyncMode: "full", RPCPort: 9945, GatewayPort: 9944,
+					ContainerName: "subtensor", ExpectedImage: syntheticSubtensorImage,
+					ExpectedDataPath: syntheticSubtensorArchive,
+				},
 				{
 					Name: "lightnode", SyncMode: "warp", RPCPort: 9947, GatewayPort: 9946,
 					ContainerName: "subtensor-lightnode", ExpectedImage: syntheticSubtensorImage,
@@ -270,9 +311,26 @@ func healthySubtensorObservation() subtensorObservation {
 	public := healthySubtensorRPC(7_910_000)
 	archive := healthySubtensorNode("archive", "full", 9945, 9944, 7_909_990, 7_909_992)
 	lightnode := healthySubtensorNode("lightnode", "warp", 9947, 9946, 7_909_994, 7_909_996)
+	archive.ContainerImage = syntheticSubtensorImage
+	archive.ContainerStarted = "2026-09-01T20:00:00Z"
+	archive.DataPath = syntheticSubtensorArchive
+	archive.RuntimeUID = 10001
+	archive.RuntimeGID = 10001
+	archive.DataPathUID = 10001
+	archive.DataPathGID = 10001
+	archive.DataPathMode = 0o750
+	archive.DataPermissionObserved = true
+	archive.DataRuntimeWritable = true
 	lightnode.ContainerImage = syntheticSubtensorImage
 	lightnode.ContainerStarted = "2026-09-01T20:00:00Z"
 	lightnode.DataPath = syntheticSubtensorData
+	lightnode.RuntimeUID = 10001
+	lightnode.RuntimeGID = 10001
+	lightnode.DataPathUID = 10001
+	lightnode.DataPathGID = 10001
+	lightnode.DataPathMode = 0o750
+	lightnode.DataPermissionObserved = true
+	lightnode.DataRuntimeWritable = true
 	return subtensorObservation{
 		Units: map[string]string{
 			"subtensor": "active", "nginx": "active", "openvpn@by-pre": "active",
