@@ -306,13 +306,24 @@ func (self *pgConnectRateProbe) check(ctx context.Context, env *probeEnv) ([]fin
 		env.baseline.record(connectRateMetric, time.Now(), float64(rate))
 	}
 
-	// a sustained storm/churn window pollutes the trailing-hour median (it
-	// inflated to 10,875/min during the 2026-07-19 ansible restart wave);
-	// when the hour median is itself >= 1.5x the trailing-6h median, judge
-	// against the longer window instead — for both directions
+	// A sustained storm/churn window pollutes the trailing-hour median (it
+	// inflated to 10,875/min during the 2026-07-19 ansible restart wave).
+	// Fall through 6h and then a span-qualified 24h anchor whenever the shorter
+	// median is >= 1.5x the longer one. The second step is essential for a storm
+	// lasting several hours: on 2026-09-02 both 1h and 6h had adapted to ~13k/min
+	// while the 24h control remained ~4.3k/min. Requiring 12h of actual sample
+	// span prevents duplicate watchers from manufacturing a "daily" baseline.
 	if haveBaseline && env.baseline != nil {
 		if longMedian, _, haveLong := env.baseline.trailingMedian(connectRateMetric, 6*time.Hour, 120); haveLong && median >= 1.5*longMedian {
 			median = longMedian
+		}
+		if dailyMedian, _, haveDaily := env.baseline.trailingMedianSpanning(
+			connectRateMetric,
+			24*time.Hour,
+			120,
+			12*time.Hour,
+		); haveDaily && median >= 1.5*dailyMedian {
+			median = dailyMedian
 		}
 	}
 

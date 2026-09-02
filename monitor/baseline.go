@@ -187,3 +187,45 @@ func (self *baselineStore) trailingMedian(metric string, window time.Duration, m
 	}
 	return (vs[n/2-1] + vs[n/2]) / 2, n, true
 }
+
+// trailingMedianSpanning adds a minimum wall-clock span to the sample-count
+// guard. A duplicated watcher or temporarily faster cadence can otherwise
+// satisfy minSamples with only a short anomalous interval and call that a
+// long-window baseline. Samples after now are ignored rather than allowing a
+// bad local clock entry to manufacture the required span.
+func (self *baselineStore) trailingMedianSpanning(
+	metric string,
+	window time.Duration,
+	minSamples int,
+	minSpan time.Duration,
+) (median float64, n int, ok bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-window)
+	vs := []float64{}
+	var earliest time.Time
+	var latest time.Time
+	for _, sample := range self.metricSamples[metric] {
+		if sample.at.Before(cutoff) || sample.at.After(now) {
+			continue
+		}
+		vs = append(vs, sample.v)
+		if earliest.IsZero() || sample.at.Before(earliest) {
+			earliest = sample.at
+		}
+		if latest.IsZero() || latest.Before(sample.at) {
+			latest = sample.at
+		}
+	}
+	n = len(vs)
+	if n < minSamples || earliest.IsZero() || latest.Sub(earliest) < minSpan {
+		return 0, n, false
+	}
+	sort.Float64s(vs)
+	if n%2 == 1 {
+		return vs[n/2], n, true
+	}
+	return (vs[n/2-1] + vs[n/2]) / 2, n, true
+}

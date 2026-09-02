@@ -2790,7 +2790,14 @@ GROUP BY 1 ORDER BY 1;
   (false page observed 2026-07-19 23:42: contracts 4.5k/min vs a 10.9k
   churn-inflated median). Judge recovery against a pre-incident window; the
   probes fall back to the trailing-6h median whenever the hour median is
-  >= 1.5x it.
+  >= 1.5x it. A multi-hour incident can contaminate that control too. On
+  2026-09-02 the live rate remained ~13.4k/min against a pre-incident
+  ~4.3k/min, but the one-hour and six-hour medians had adapted to 13.8k and
+  12.5k. The connection-rate probe now falls through again to a trailing-24h
+  median when the selected shorter median is >= 1.5x it. The daily anchor must
+  contain at least 120 samples spanning 12 actual hours, so duplicate watcher
+  samples cannot manufacture a long baseline. A deterministic six-hour
+  contamination fixture preserves the high-side alert and its §2.15 causal frame.
 - CONFIG-GENERATION VARIANT (2026-08-27): compare binary AND config versions.
   During a cross-service config rollout, `warpctl ls versions --sample` showed
   old api/connect binaries reporting the new config generation while same-tag
