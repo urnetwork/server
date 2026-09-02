@@ -351,3 +351,43 @@ func TestExcludedIpRateLimitAttemptRetainsGlobalLimit(t *testing.T) {
 		}
 	})
 }
+
+// A continuously active caller receives a fresh counter at the exact next
+// fixed-window boundary. The former unsuffixed INCR+EXPIRE implementation
+// never reset while traffic continued and eventually locked out every honest
+// long-running validator.
+func TestIncrementRateLimitWindowResetsAtExactBoundary(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		duration := time.Minute
+		start := time.Unix(1_800_000_000, 0).UTC().Truncate(duration)
+		baseKey := "rate_limit_fixed_window_test_" + NewId().String()
+		firstKey, err := rateLimitWindowKey(baseKey, duration, start)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextKey, err := rateLimitWindowKey(baseKey, duration, start.Add(duration))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer Redis(ctx, func(r RedisClient) {
+			r.Del(ctx, firstKey, nextKey)
+		})
+
+		first, err := incrementRateLimitWindowAt(ctx, baseKey, duration, start)
+		if err != nil || first != 1 {
+			t.Fatalf("first count = %d, error = %v", first, err)
+		}
+		second, err := incrementRateLimitWindowAt(ctx, baseKey, duration, start.Add(duration-time.Millisecond))
+		if err != nil || second != 2 {
+			t.Fatalf("same-window count = %d, error = %v", second, err)
+		}
+		reset, err := incrementRateLimitWindowAt(ctx, baseKey, duration, start.Add(duration))
+		if err != nil || reset != 1 {
+			t.Fatalf("next-window count = %d, error = %v", reset, err)
+		}
+		if firstKey == nextKey {
+			t.Fatal("adjacent fixed windows selected the same Redis key")
+		}
+	})
+}

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	mathrand "math/rand"
@@ -133,8 +134,10 @@ func TestProxyDeviceConfigCacheAndFallback(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE proxy_client SET client_ipv4 = $2 WHERE proxy_id = $1`, proxyId, Ipv4ToInt(egress)))
 		})
-		FeedVerifyEgress(ctx, proxyDeviceConfig.ClientId, egress, DefaultVerifySettings())
-		if got := ResolveVerifyEgress(ctx, egress, DefaultVerifySettings()); got == nil || *got != proxyDeviceConfig.ClientId {
+		verifySettings := DefaultVerifySettings()
+		verifySettings.EgressHashKey = bytes.Repeat([]byte{0x31}, 32)
+		FeedVerifyEgress(ctx, proxyDeviceConfig.ClientId, egress, verifySettings)
+		if got := ResolveVerifyEgress(ctx, egress, verifySettings); got == nil || *got != proxyDeviceConfig.ClientId {
 			t.Fatalf("proxy egress did not resolve before release: %v", got)
 		}
 
@@ -148,7 +151,7 @@ func TestProxyDeviceConfigCacheAndFallback(t *testing.T) {
 		removedProxyClient, err := GetProxyClient(ctx, proxyId)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, removedProxyClient == nil, true)
-		if got := ResolveVerifyEgress(ctx, egress, DefaultVerifySettings()); got != nil {
+		if got := ResolveVerifyEgress(ctx, egress, verifySettings); got != nil {
 			t.Fatalf("released proxy egress still resolves to %v", got)
 		}
 		proxyClients, _, err := GetProxyClientsSince(ctx, proxyClient.ProxyHost, proxyClient.Block, 0)

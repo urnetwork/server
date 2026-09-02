@@ -865,16 +865,10 @@ PersistentKeepalive = 25`,
 			)
 		})
 
-		// verify egress feeder (proxy-allocated egress, sn/VALIDATOR.md §8):
-		// register the allocated egress ipv4 in the bijection-gated egress
-		// index. `RefreshVerifyProxyEgress` re-feeds it periodically while
-		// the allocation exists, so it ages out after release (§8.2).
-		if proxyClient.WgConfig != nil {
-			FeedVerifyEgress(ctx, clientId, proxyClient.WgConfig.ClientIpv4, DefaultVerifySettings())
-			// Every proxy_client deletion returns (client_id, client_ipv4) and
-			// synchronously calls ClearVerifyEgress after commit. TTL remains only
-			// a crash safety net, never the normal release mechanism.
-		}
+		// The API controller feeds a newly allocated WireGuard egress with the
+		// canonical verify.yml settings. The taskworker periodically re-feeds
+		// all live allocations with those same settings. This model layer must
+		// not create an unkeyed default entry beside that keyed namespace.
 	}
 
 	return

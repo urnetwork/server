@@ -256,11 +256,20 @@ func SetVerifySettings(settings *model.VerifySettings) {
 	verifySettingsInstance = settings
 }
 
-func verifySettings() *model.VerifySettings {
+// VerifySettings returns the canonical verify-protocol settings for this
+// process. API request handling and Connect's observed-egress feeder run in
+// separate binaries, but they must load the same verify.yml profile: in
+// particular, EgressHashKey defines the private Redis index namespace shared
+// by the writer and reader.
+func VerifySettings() *model.VerifySettings {
 	if verifySettingsInstance != nil {
 		return verifySettingsInstance
 	}
 	return verifySettingsFromVault()
+}
+
+func verifySettings() *model.VerifySettings {
+	return VerifySettings()
 }
 
 // VerifyArgs is the decoded `POST /verify` body — the superset of the two

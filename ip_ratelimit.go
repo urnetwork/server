@@ -424,10 +424,7 @@ func IncrementIpRateLimit(
 	if client.excluded {
 		return 0, nil
 	}
-	if key == "" || duration < time.Millisecond {
-		return 0, fmt.Errorf("invalid ip rate-limit counter settings")
-	}
-	return incrementRateLimitWindow(ctx, key, duration)
+	return IncrementRateLimitWindow(ctx, key, duration)
 }
 
 // Atomically checks and records a seedphrase account creation. PostgreSQL owns
@@ -783,7 +780,7 @@ func CheckRateLimitWindow(
 	if err != nil {
 		return RateLimitResult{}, err
 	}
-	return checkRateLimitWindow(ctx, client, settings, incrementRateLimitWindow)
+	return checkRateLimitWindow(ctx, client, settings, incrementRateLimitCounter)
 }
 
 // Applies the exclusion before invoking the supplied counter. The callback is
@@ -828,8 +825,40 @@ func checkRateLimitWindow(
 	}, nil
 }
 
-// Atomically increments a fixed-window counter and refreshes its bounded ttl.
-func incrementRateLimitWindow(
+// rateLimitWindowKey assigns one Redis key to one epoch-aligned fixed window.
+// The window number is part of the key; merely refreshing a counter's TTL
+// would instead turn a "per window" cap into a lifetime cap for any caller
+// that remains active more frequently than duration.
+func rateLimitWindowKey(key string, duration time.Duration, now time.Time) (string, error) {
+	if key == "" || duration < time.Millisecond {
+		return "", fmt.Errorf("invalid rate-limit counter settings")
+	}
+	windowMillis := duration.Milliseconds()
+	return fmt.Sprintf("%s_%d", key, now.UnixMilli()/windowMillis), nil
+}
+
+// IncrementRateLimitWindow atomically increments the current epoch-aligned
+// fixed-window counter and gives that physical key a bounded cleanup TTL.
+func IncrementRateLimitWindow(ctx context.Context, key string, duration time.Duration) (int64, error) {
+	return incrementRateLimitWindowAt(ctx, key, duration, NowUtc())
+}
+
+func incrementRateLimitWindowAt(
+	ctx context.Context,
+	key string,
+	duration time.Duration,
+	now time.Time,
+) (count int64, returnErr error) {
+	windowKey, err := rateLimitWindowKey(key, duration, now)
+	if err != nil {
+		return 0, err
+	}
+	return incrementRateLimitCounter(ctx, windowKey, duration)
+}
+
+// incrementRateLimitCounter owns only the atomic Redis increment and cleanup
+// TTL. Its callers must supply an already window-qualified physical key.
+func incrementRateLimitCounter(
 	ctx context.Context,
 	key string,
 	duration time.Duration,
