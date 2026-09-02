@@ -135,6 +135,18 @@ func TestReleaseBuilderSignalSyntheticMalformedIdentity(t *testing.T) {
 	}
 }
 
+func TestMonitorGuidanceDoesNotTurnProvenanceIntoBuildGate(t *testing.T) {
+	for _, path := range []string{"SIGNALS.md", "task_checks.go", "tailer.go"} {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToLower(string(contents)), "provenance-gate") {
+			t.Errorf("%s describes artifact observation as a build gate", path)
+		}
+	}
+}
+
 func TestReleaseBuilderSignalPreservesPartialObservationFailure(t *testing.T) {
 	source := &syntheticSource{
 		localFn: func(string, ...string) (string, error) {

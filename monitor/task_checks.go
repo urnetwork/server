@@ -129,13 +129,13 @@ func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
 		"deploy the queued, cursor-batched CompletePayment retention path for connection-cleanup-deadline rows",
 		"the legacy retention query and new 120-second cleanup failures disappear")
 	add("processor-invalid-destination",
-		"provenance-gate typed-reset commit b8af229f on every active taskworker and deploy it only to blocks whose artifact predates it; on already-current blocks, repeated rejection means the invalid configured wallet is still selected, so correct chain-mismatched payout wallets through the supported account API; never clear payment rows or keys manually",
+		"verify typed-reset commit b8af229f in every active taskworker artifact and deploy it only to blocks whose artifact predates it; on already-current blocks, repeated rejection means the invalid configured wallet is still selected, so correct chain-mismatched payout wallets through the supported account API; never clear payment rows or keys manually",
 		"every active taskworker contains typed-reset commit b8af229f, the next retry selects the corrected wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination clears")
 	add("processor-bad-request",
 		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
 		"processor-bad-request rows reach a definitive safe outcome")
 	add("processor-rate-limit",
-		"do not accelerate processor-rate-limit rows; provenance-gate current-main server commit 66525afc on every active taskworker and deploy its shared Redis-time Circle transfer admission only to blocks that lack it; keep the gate fail closed and preserve every payment idempotency key",
+		"do not accelerate processor-rate-limit rows; verify current-main server commit 66525afc in every active taskworker artifact and deploy its shared Redis-time Circle transfer admission only to blocks that lack it; keep the transfer-admission gate fail closed and preserve every payment idempotency key",
 		"every active taskworker exposes the §2.14 admission metrics, admission errors and processor-rate-limit remain zero, and canonical payout attempts stay below four per second for a full 90-minute retry window")
 	add("deadline-timeout",
 		"correlate deadline-timeout rows with their exact evaluator boundary before changing batch size or MaxTime",

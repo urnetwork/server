@@ -343,7 +343,7 @@ func TestLogErrorsSignalExplainsDirectLokiTailDroppedEntries(t *testing.T) {
 		"privacy-safe",
 		"does not distinguish the two stages",
 		"same-window ingester reset identifies the earlier path",
-		"Provenance-gate Warp 5927527",
+		"Verify the running Grafana and Warpctl artifacts contain Warp 5927527",
 		"two consecutive overlap reconciliations complete",
 		"no service-attributed loki-tail-dropped-entries summary",
 	} {
