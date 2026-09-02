@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,7 +31,35 @@ func (pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) ([]f
 	if redisHost == nil {
 		return nil, fmt.Errorf("no redis-cluster host in inventory")
 	}
-	rows, err := env.runner.pg(ctx, `
+	schemaRows, err := env.runner.pg(ctx, `
+		SELECT EXISTS (
+		 SELECT 1 FROM pg_attribute
+		 WHERE attrelid='provider_egress_health'::regclass
+		   AND attname='tls_authentication_failure'
+		   AND NOT attisdropped
+		);
+	`)
+	if err != nil {
+		return nil, err
+	}
+	if len(schemaRows) != 1 || len(schemaRows[0]) != 1 {
+		return nil, fmt.Errorf("provider population TLS-integrity schema query returned an invalid shape")
+	}
+	tlsIntegrityArmed, err := strconv.ParseBool(schemaRows[0].str(0))
+	if err != nil {
+		return nil, fmt.Errorf("provider population query returned invalid TLS-integrity arming state %q", schemaRows[0].str(0))
+	}
+	tlsPassingPredicate := ""
+	tlsFailureCount := "0"
+	if tlsIntegrityArmed {
+		// Keep the pre-migration query parseable while allowing PostgreSQL to use
+		// the partial boolean index once the append-only column is present. Row
+		// conversion through to_jsonb would be schema-compatible but would also
+		// serialize every wide health row on every five-minute observation.
+		tlsPassingPredicate = "AND NOT peh.tls_authentication_failure"
+		tlsFailureCount = "(SELECT count(*) FROM provider_egress_health WHERE tls_authentication_failure)"
+	}
+	rows, err := env.runner.pg(ctx, fmt.Sprintf(`
 		WITH supply AS MATERIALIZED (
 		 SELECT nc.active, nc.source_client_id
 		 FROM network_client_location_reliability nclr
@@ -49,14 +78,18 @@ func (pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) ([]f
 		 (SELECT count(*) FROM supply WHERE source_client_id IS NOT NULL),
 		 (SELECT count(*) FROM supply WHERE NOT active AND source_client_id IS NULL),
 		 (SELECT count(*) FROM provider_egress_health),
-		 (SELECT count(*) FROM provider_egress_health WHERE measured_at>=now()-interval '24 hours' AND total_count>0 AND 10*ok_count>=9*total_count),
+		 (SELECT count(*) FROM provider_egress_health peh
+		  WHERE measured_at>=now()-interval '24 hours'
+		    AND total_count>0 AND 10*ok_count>=9*total_count
+		    %s),
 		 (SELECT count(*) FROM provider_egress_location),
+		 %s,
 		 (SELECT location_id::text FROM location WHERE location_type='country' AND country_code='us' LIMIT 1);
-	`)
+	`, tlsPassingPredicate, tlsFailureCount))
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 || len(rows[0]) < 9 || rows[0].str(8) == "" {
+	if len(rows) == 0 || len(rows[0]) < 10 || rows[0].str(9) == "" {
 		return nil, fmt.Errorf("provider population query returned no target location")
 	}
 	connected := atoiRow(rows[0], 0)
@@ -64,7 +97,8 @@ func (pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) ([]f
 	eligible := atoiRow(rows[0], 2)
 	derived := atoiRow(rows[0], 3)
 	inactive := atoiRow(rows[0], 4)
-	targetLocation := rows[0].str(8)
+	tlsAuthenticationFailures := atoiRow(rows[0], 8)
+	targetLocation := rows[0].str(9)
 	caller := "00000000-0000-0000-0000-000000000000"
 	normalKey := fmt.Sprintf("{cs_0_q_%s_%s}c_l", caller, targetLocation)
 	forcedKey := fmt.Sprintf("{cs_1_q_%s_%s}c_l", caller, targetLocation)
@@ -105,7 +139,7 @@ func (pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) ([]f
 			mechanism: "The legacy score queries trusted connected location rows without joining the durable client lifecycle. Derived window identities and inactive top-level clients could therefore be exported as provider supply; feeding short-lived consumer identities back into destination selection amplifies replacement churn. A completed current writer publishes the durable marker only after filtering both classes from every location and location-group export.",
 			baseline:  "Only active top-level clients enter provider-score caches, and client_score_provider_eligibility_v1_ready=1 proves a complete filtered export.",
 			observed: fmt.Sprintf(
-				"raw_providing_supply=%d eligible_active_top_level=%d derived_providing=%d inactive_top_level_providing=%d eligibility_ready=%t normal_cache_count=%d forced_cache_count=%d",
+				"raw_providing_supply=%d eligible_active_top_level=%d derived_providing=%d inactive_top_level_providing=%d eligibility_ready=%t normal_cache_count=%d forced_cache_count=%d tls_integrity_armed=%t tls_authentication_failures=%d",
 				rawSupply,
 				eligible,
 				derived,
@@ -113,6 +147,8 @@ func (pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) ([]f
 				eligibilityReady,
 				normalCount,
 				forcedCount,
+				tlsIntegrityArmed,
+				tlsAuthenticationFailures,
 			),
 			evidence: "PostgreSQL aggregates connected/valid clients holding Network or Public provide keys by active and source-client state. Redis supplies only the fixed rollout marker and aggregate decoded cache counts; no client identifier leaves either source.",
 			context:  "Raw derived or inactive rows may remain for history after the fix, so their existence alone must not keep this alert open once a current, fully converged Taskworker completes the filtered export. The marker does not replace runtime provenance: an old Taskworker can still overwrite caches during a partial rollout.",
@@ -141,9 +177,9 @@ func (pgSelectionPopulationProbe) check(ctx context.Context, env *probeEnv) ([]f
 		symptom:   fmt.Sprintf("eligible score candidates=%d but normal score-cache export=%d (ForceMinimum=%d)", eligible, normalCount, forcedCount),
 		mechanism: mechanism,
 		baseline:  "The normal decoded provider sum is nonzero and tracks eligible supply; ForceMinimum is normally larger.",
-		observed: fmt.Sprintf("connected=%d raw_supply=%d eligible=%d derived=%d inactive=%d eligibility_ready=%t normal=%d forced=%d egress_health=%s fresh_passing=%s egress_locations=%s target=%s",
-			connected, rawSupply, eligible, derived, inactive, eligibilityReady, normalCount, forcedCount, rows[0].str(5), rows[0].str(6), rows[0].str(7), targetLocation),
-		evidence: fmt.Sprintf("normal_key=%s bytes=%d; forced_key=%s bytes=%d", normalKey, len(normalRaw), forcedKey, len(forcedRaw)),
+		observed: fmt.Sprintf("connected=%d raw_supply=%d eligible=%d derived=%d inactive=%d eligibility_ready=%t normal=%d forced=%d egress_health=%s fresh_passing_excluding_tls=%s egress_locations=%s tls_integrity_armed=%t tls_authentication_failures=%d target=%s",
+			connected, rawSupply, eligible, derived, inactive, eligibilityReady, normalCount, forcedCount, rows[0].str(5), rows[0].str(6), rows[0].str(7), tlsIntegrityArmed, tlsAuthenticationFailures, targetLocation),
+		evidence: fmt.Sprintf("normal_key=%s bytes=%d; forced_key=%s bytes=%d; TLS-integrity evidence is aggregate-only and the compatibility query does not require the pending column to exist", normalKey, len(normalRaw), forcedKey, len(forcedRaw)),
 		action:   "Split the score predicates and inspect the deployed provider.yml enable_egress_test value before changing provider connectivity or cache TTLs.",
 		verify:   "A fresh UpdateClientScores run produces a nonzero decoded normal cache count consistent with eligible supply.",
 		playbook: "SIGNALS.md §2.9 and §5.9",

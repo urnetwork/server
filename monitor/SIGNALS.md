@@ -2975,6 +2975,17 @@ successfully, refresh every ttl, and publish either an empty provider market or
 a large market made from the wrong lifecycle class. Check the database supply,
 the writer-generation marker, and the exported cache as separate stages:
 ```sql
+-- Arm the hard-integrity fields only when this returns true. The Go probe
+-- executes the population query without either direct column reference while
+-- the append-only migration is pending.
+SELECT EXISTS (
+  SELECT 1 FROM pg_attribute
+  WHERE attrelid = 'provider_egress_health'::regclass
+    AND attname = 'tls_authentication_failure'
+    AND NOT attisdropped
+) AS tls_integrity_armed;
+
+-- Once armed:
 WITH supply AS MATERIALIZED (
   SELECT nc.active, nc.source_client_id
   FROM network_client_location_reliability nclr
@@ -2995,11 +3006,15 @@ SELECT
   (SELECT count(*) FROM supply
    WHERE NOT active AND source_client_id IS NULL) AS inactive_top_level_candidates,
   (SELECT count(*) FROM provider_egress_health) AS egress_health_rows,
-  (SELECT count(*) FROM provider_egress_health
+  (SELECT count(*) FROM provider_egress_health peh
    WHERE measured_at >= now() - interval '24 hours'
      AND total_count > 0 AND 10 * ok_count >= 9 * total_count
+     AND NOT peh.tls_authentication_failure
   ) AS fresh_passing_health_rows,
-  (SELECT count(*) FROM provider_egress_location) AS egress_location_rows;
+  (SELECT count(*) FROM provider_egress_location) AS egress_location_rows,
+  (SELECT count(*) FROM provider_egress_health peh
+   WHERE peh.tls_authentication_failure
+  ) AS tls_authentication_failures;
 ```
 The raw count is diagnostic only. The score writer must join `network_client`
 and admit only `active = true AND source_client_id IS NULL`. A derived window
@@ -3054,6 +3069,22 @@ incident is caller/rank-specific.
 - GATE WIPE: connected/eligible are large, normal sum is 0, ForceMinimum is
   large. Provider connectivity is healthy; a minimum predicate ate the market.
   Split the predicates: reliability lookbacks, score cutoff, then egress health.
+- TLS-INTEGRITY DISCRIMINATOR: `fresh_passing_health_rows` excludes a provider
+  whose otherwise-passing ratio contains a hard certificate-authentication
+  failure. `tls_authentication_failures` is aggregate-only evidence; never put
+  provider IDs in the alert. The Go probe first checks `pg_attribute`; before
+  the append-only column exists it omits both direct column references, so the
+  current database remains observable without serializing every wide health row
+  through JSON. Until `tls_integrity_armed=true`, §2.10 owns the pending
+  migration and this count is unarmed rather than proof of zero failures. Once
+  armed, PostgreSQL can use the partial boolean index, a positive row remains
+  excluded even after its 24-hour score sample ages out, and only a later clean
+  authenticated run may replace and clear it. Do not weaken the hard gate or
+  average the failure into the 90% score. API must persist the bit and the
+  Taskworker/operator-proxy probe must classify, submit, and enforce it; apply
+  the migration before deploying either schema-dependent artifact. This is a
+  software integrity boundary plus provider/network remediation, not a
+  hardware-capacity alert.
 - EGRESS-CONFIG DISCRIMINATOR: locate `provider.yml` in the DEPLOYED taskworker
   with `find /srv/warp/config -maxdepth 2 -type f -name provider.yml -print`
   (normally `/srv/warp/config/<version>/provider.yml`) and inspect the newest
