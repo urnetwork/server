@@ -104,8 +104,8 @@ type ProviderCountryCount struct {
 	CityCount int64
 }
 
-// CountProvidersByCountry returns the connected, valid, Public provider
-// count per country — the same population and predicate as
+// CountProvidersByCountry returns the active top-level, connected, valid,
+// Public provider count per country — the same population and predicate as
 // CountProviderCountries and the public providers map
 // (GetProvidersMap), grouped by country code — with the distinct region
 // and city counts of that population. Region and city location ids are
@@ -139,9 +139,13 @@ func countProvidersByCountry(ctx context.Context, conn server.PgConn) []Provider
                     COUNT(DISTINCT network_client_location_reliability.region_location_id),
                     COUNT(DISTINCT network_client_location_reliability.city_location_id)
                 FROM network_client_location_reliability
+                INNER JOIN network_client ON
+                    network_client.client_id = network_client_location_reliability.client_id
                 INNER JOIN location ON
                     location.location_id = network_client_location_reliability.country_location_id
                 WHERE
+                    network_client.active = true AND
+                    network_client.source_client_id IS NULL AND
                     network_client_location_reliability.connected = true AND
                     network_client_location_reliability.valid = true AND
                     EXISTS (

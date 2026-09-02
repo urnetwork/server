@@ -94,8 +94,9 @@ func buildProvidersMap(rows []regionProviderCount) map[string]map[string]*Region
 	return out
 }
 
-// GetProvidersMap aggregates connected, valid, scored providers by
-// country -> region, attaching a representative centroid to each region.
+// GetProvidersMap aggregates active top-level, connected, valid, scored
+// providers by country -> region, attaching a representative centroid to each
+// region.
 //
 // This queries the reliability tables directly — the same population
 // UpdateClientLocations counts — NOT the InitialClientLocations snapshot. That
@@ -116,6 +117,9 @@ func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProvider
 
 				FROM network_client_location_reliability
 
+				INNER JOIN network_client ON
+					network_client.client_id = network_client_location_reliability.client_id
+
 				INNER JOIN client_connection_reliability_score ON
 					client_connection_reliability_score.client_id = network_client_location_reliability.client_id AND
 					client_connection_reliability_score.lookback_index = 0
@@ -124,6 +128,8 @@ func GetProvidersMap(ctx context.Context) (map[string]map[string]*RegionProvider
 					location.location_id = network_client_location_reliability.region_location_id
 
 				WHERE
+					network_client.active = true AND
+					network_client.source_client_id IS NULL AND
 					network_client_location_reliability.connected = true AND
 					network_client_location_reliability.valid = true AND
 					-- same Public-only rule as UpdateClientLocations

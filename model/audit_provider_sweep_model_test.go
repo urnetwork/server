@@ -196,6 +196,74 @@ func TestSweepProviderAuditEvents(t *testing.T) {
 	})
 }
 
+// The live provider audit is another provider-publication surface. It reads
+// raw connections rather than the location-reliability snapshot, so it must
+// independently reject derivative clients, inactive clients, and connected
+// rows whose owning handler has disappeared. Otherwise one stale return-
+// traffic identity becomes a durable online event in the public history.
+func TestSweepProviderAuditEventsRequiresLiveTopLevelClient(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		active := createSweepTestProvider(ctx, t, "sweep-active")
+		derived := createSweepTestProvider(ctx, t, "sweep-derived")
+		inactive := createSweepTestProvider(ctx, t, "sweep-inactive")
+		orphan := createSweepTestProvider(ctx, t, "sweep-orphan")
+
+		derivedSourceClientId := server.NewId()
+		Testing_CreateDevice(
+			ctx,
+			derived.networkId,
+			server.NewId(),
+			derivedSourceClientId,
+			"",
+			"",
+		)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET source_client_id = $2 WHERE client_id = $1`,
+				derived.clientId,
+				derivedSourceClientId,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET active = false WHERE client_id = $1`,
+				inactive.clientId,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM network_client_handler
+				WHERE handler_id = (
+					SELECT handler_id
+					FROM network_client_connection
+					WHERE connection_id = $1
+				)
+				`,
+				orphan.connectionId,
+			))
+		})
+
+		onlineCount, offlineCount := SweepProviderAuditEvents(ctx)
+		if onlineCount != 1 || offlineCount != 0 {
+			t.Errorf("sweep = (%d, %d), want only one live active top-level provider", onlineCount, offlineCount)
+		}
+		if events := providerEventsForDevice(ctx, active.clientId); len(events) != 1 {
+			t.Errorf("active provider events = %d, want 1", len(events))
+		}
+		for label, clientId := range map[string]server.Id{
+			"derived":  derived.clientId,
+			"inactive": inactive.clientId,
+			"orphan":   orphan.clientId,
+		} {
+			if events := providerEventsForDevice(ctx, clientId); len(events) != 0 {
+				t.Errorf("%s provider emitted %d events, want 0", label, len(events))
+			}
+		}
+	})
+}
+
 // An unlocated provider comes online with empty geo (which the aggregation
 // does not count as a place); when its location lands, the sweep re-emits an
 // online event with the real geo, and never downgrades known geo back to
@@ -273,6 +341,8 @@ func TestBackfillProviderAuditEvents(t *testing.T) {
 		networkA := server.NewId()
 		clientB := server.NewId()
 		networkB := server.NewId()
+		Testing_CreateDevice(ctx, networkA, server.NewId(), clientA, "", "")
+		Testing_CreateDevice(ctx, networkB, server.NewId(), clientB, "", "")
 
 		insertBlock := func(clientId server.Id, networkId server.Id, at time.Time, provideEnabled int) {
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -423,6 +493,66 @@ func TestBackfillProviderAuditEvents(t *testing.T) {
 			if stats.ProvidersData[dayKey(0)] != 1 {
 				t.Fatalf("providers today = %d, want 1 (b carries)", stats.ProvidersData[dayKey(0)])
 			}
+		}
+	})
+}
+
+// Backfill reconstructs historical provider devices, not short-lived
+// derivative return-traffic identities. Inactive top-level clients still count
+// for periods when they really provided; filtering active at query time would
+// erase valid history, while omitting the top-level boundary duplicates it.
+func TestBackfillProviderAuditEventsExcludesOnlyDerivedClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		blockMs := int64(ReliabilityBlockDuration / time.Millisecond)
+		networkId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "backfill-lifecycle", server.NewId())
+
+		sourceClientId := testingCreateProviderClient(ctx, networkId, nil, true)
+		activeClientId := testingCreateProviderClient(ctx, networkId, nil, true)
+		inactiveClientId := testingCreateProviderClient(ctx, networkId, nil, false)
+		derivedClientId := testingCreateProviderClient(ctx, networkId, &sourceClientId, true)
+		providerTime := startOfUtcDay(now).Add(-24*time.Hour + time.Hour)
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			for index, clientId := range []server.Id{activeClientId, inactiveClientId, derivedClientId} {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					INSERT INTO client_reliability (
+						block_number,
+						client_address_hash,
+						network_id,
+						client_id,
+						provide_enabled_count,
+						connection_established_count,
+						receive_message_count
+					)
+					VALUES ($1, $2, $3, $4, 1, 1, 1)
+					`,
+					providerTime.UnixMilli()/blockMs,
+					[]byte{byte(index + 1)},
+					networkId,
+					clientId,
+				))
+			}
+		})
+
+		eventCount := BackfillProviderAuditEvents(ctx, now.Add(-3*24*time.Hour), now)
+		if eventCount != 2 {
+			t.Errorf("backfill events = %d, want active and inactive top-level providers only", eventCount)
+		}
+		for label, clientId := range map[string]server.Id{
+			"active top-level":   activeClientId,
+			"inactive top-level": inactiveClientId,
+		} {
+			if events := providerEventsForDevice(ctx, clientId); len(events) != 1 {
+				t.Errorf("%s provider events = %d, want 1", label, len(events))
+			}
+		}
+		if events := providerEventsForDevice(ctx, derivedClientId); len(events) != 0 {
+			t.Errorf("derived provider events = %d, want 0", len(events))
 		}
 	})
 }

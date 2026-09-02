@@ -382,8 +382,8 @@ func statsSumInt(m map[string]int) int {
 // Exercises the provider-enumeration query in StatsProviders (network_client
 // semi-join provide_key). Guards the JOIN + GROUP BY -> EXISTS rewrite: a
 // client with multiple provide_keys must appear exactly once, an active client
-// with no provide_key must be excluded, and an inactive client that has one
-// must be excluded.
+// with no provide_key must be excluded, and inactive or derivative clients
+// that have one must be excluded.
 func TestStatsProvidersProviderEnumeration(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -422,6 +422,20 @@ func TestStatsProvidersProviderEnumeration(t *testing.T) {
 		})
 		statsInsertProvideKey(ctx, p4, ProvideModePublic)
 
+		// derivative clients carry provide keys for return traffic, but they are
+		// not provider devices and must not become their own dashboard rows
+		p5 := server.NewId()
+		statsInsertNetworkClient(ctx, networkId, p5)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET source_client_id = $2 WHERE client_id = $1`,
+				p5,
+				p1,
+			))
+		})
+		statsInsertProvideKey(ctx, p5, ProvideModePublic)
+
 		result, err := StatsProviders(clientSession)
 		connect.AssertEqual(t, err, nil)
 
@@ -437,6 +451,7 @@ func TestStatsProvidersProviderEnumeration(t *testing.T) {
 		connect.AssertEqual(t, seen[p2], 1)
 		connect.AssertEqual(t, seen[p3], 0)
 		connect.AssertEqual(t, seen[p4], 0)
+		connect.AssertEqual(t, seen[p5], 0)
 	})
 }
 
@@ -468,6 +483,20 @@ func TestStatsProvidersOverviewDedupsMultiProvideKey(t *testing.T) {
 		statsInsertProvideKey(ctx, provider, ProvideModePublic)
 		statsInsertProvideKey(ctx, provider, ProvideModeNetwork)
 
+		// a derivative return-traffic client with its own Public key and real
+		// traffic must not be aggregated as a second provider device
+		derived := server.NewId()
+		statsInsertNetworkClient(ctx, networkId, derived)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET source_client_id = $2 WHERE client_id = $1`,
+				derived,
+				provider,
+			))
+		})
+		statsInsertProvideKey(ctx, derived, ProvideModePublic)
+
 		// a single settled contract in the last 24h: 2 GiB served, $3 payout
 		customerNetworkId := server.NewId()
 		customerA := server.NewId()
@@ -475,6 +504,11 @@ func TestStatsProvidersOverviewDedupsMultiProvideKey(t *testing.T) {
 		statsInsertContract(ctx, contractId, customerNetworkId, customerA, networkId, provider, 2*gib, now.Add(-2*time.Hour), now.Add(-1*time.Hour))
 		statsInsertContractClose(ctx, contractId, 2*gib, now.Add(-1*time.Hour))
 		statsInsertSweep(ctx, contractId, networkId, provider, 2*gib, UsdToNanoCents(3.0), now.Add(-1*time.Hour))
+
+		derivedContractId := server.NewId()
+		statsInsertContract(ctx, derivedContractId, customerNetworkId, customerA, networkId, derived, 5*gib, now.Add(-2*time.Hour), now.Add(-time.Hour))
+		statsInsertContractClose(ctx, derivedContractId, 5*gib, now.Add(-time.Hour))
+		statsInsertSweep(ctx, derivedContractId, networkId, derived, 5*gib, UsdToNanoCents(7.0), now.Add(-time.Hour))
 
 		overview, err := StatsProvidersOverview(&StatsProvidersOverviewArgs{LastN: 72}, clientSession)
 		connect.AssertEqual(t, err, nil)

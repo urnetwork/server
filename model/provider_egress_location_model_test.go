@@ -477,6 +477,89 @@ func TestGetProviderEgressLocationDueRequiresConnectedAndValid(t *testing.T) {
 	})
 }
 
+// The due queue has three independent SQL passes: never located, stale
+// location, and fresh location with stale health. Every pass reads the
+// materialized provider population directly and must reject derivative and
+// inactive clients even while their connected rows and Public keys remain.
+func TestGetProviderEgressLocationDueExcludesDerivedAndInactiveClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Palo Alto",
+			Region:       "California",
+			Country:      "United States",
+			CountryCode:  "us",
+		}
+		CreateLocation(ctx, city)
+		sourceClientId := testingCreateProviderClient(ctx, networkId, nil, true)
+
+		activeClientIds := []server.Id{}
+		excludedClientIds := []server.Id{}
+		newGroup := func() (activeClientId server.Id, derivedClientId server.Id, inactiveClientId server.Id) {
+			activeClientId = testingCreateProviderClient(ctx, networkId, nil, true)
+			derivedClientId = testingCreateProviderClient(ctx, networkId, &sourceClientId, true)
+			inactiveClientId = testingCreateProviderClient(ctx, networkId, nil, false)
+			activeClientIds = append(activeClientIds, activeClientId)
+			excludedClientIds = append(excludedClientIds, derivedClientId, inactiveClientId)
+			for _, clientId := range []server.Id{activeClientId, derivedClientId, inactiveClientId} {
+				testingInsertProviderLocationReliability(ctx, clientId, networkId, city)
+			}
+			return
+		}
+
+		// pass 1: no egress-location row
+		newGroup()
+
+		// pass 2: egress location older than the requested freshness horizon
+		activeStaleId, derivedStaleId, inactiveStaleId := newGroup()
+		for _, clientId := range []server.Id{activeStaleId, derivedStaleId, inactiveStaleId} {
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId:    clientId,
+				LocationId:  city.LocationId,
+				CountryCode: "us",
+				ObservedAt:  now.Add(-48 * time.Hour),
+			})
+		}
+
+		// pass 3: location is fresh, but an existing health row has aged out
+		activeHealthId, derivedHealthId, inactiveHealthId := newGroup()
+		for _, clientId := range []server.Id{activeHealthId, derivedHealthId, inactiveHealthId} {
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId:    clientId,
+				LocationId:  city.LocationId,
+				CountryCode: "us",
+				ObservedAt:  now.Add(-time.Hour),
+			})
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId:   clientId,
+				MeasuredAt: now.Add(-2 * ProviderEgressHealthMaxAge),
+				OKCount:    1,
+				Total:      1,
+			})
+		}
+
+		due := GetProviderEgressLocationDue(
+			ctx,
+			now.Add(-24*time.Hour),
+			now.Add(-ProviderEgressProbeAttemptBackoff),
+			100,
+		)
+		for _, clientId := range activeClientIds {
+			if !slices.Contains(due, clientId) {
+				t.Errorf("due = %v, missing active top-level provider %s", due, clientId)
+			}
+		}
+		for _, clientId := range excludedClientIds {
+			if slices.Contains(due, clientId) {
+				t.Errorf("due = %v, contains derived or inactive provider %s", due, clientId)
+			}
+		}
+	})
+}
+
 // The attempt upsert is monotonic in attempt_at, for the same reason the
 // location upsert is: a replayed or out-of-order report must not move the last
 // attempt backwards and hand the provider back to the prober early.

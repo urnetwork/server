@@ -109,6 +109,7 @@ func TestGetProvidersMapAggregatesRegions(t *testing.T) {
 		addProvider := func(region *Location, connected bool, scored bool) {
 			clientId := server.NewId()
 			networkId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(
 					ctx,
@@ -231,6 +232,7 @@ func TestProviderStatsCountOnlyPublicProviders(t *testing.T) {
 		addProvider := func(region *Location, modes map[ProvideMode][]byte) {
 			clientId := server.NewId()
 			networkId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(
 					ctx,
@@ -331,6 +333,50 @@ func TestProviderStatsCountOnlyPublicProviders(t *testing.T) {
 	})
 }
 
+// Public provider summaries consume materialized location rows that can lag a
+// client lifecycle change. A derivative return-traffic client also carries a
+// Public key by design, and an inactive top-level client can retain both its
+// key and its last connected location row. Neither is selectable provider
+// supply, so every direct summary query must enforce the lifecycle boundary.
+func TestProviderPublicStatsExcludeDerivedAndInactiveClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		city := &Location{
+			LocationType: LocationTypeCity,
+			City:         "Sydney",
+			Region:       "New South Wales",
+			Country:      "Australia",
+			CountryCode:  "au",
+		}
+		CreateLocation(ctx, city)
+
+		sourceClientId := testingCreateProviderClient(ctx, networkId, nil, true)
+		activeClientId := testingCreateProviderClient(ctx, networkId, nil, true)
+		derivedClientId := testingCreateProviderClient(ctx, networkId, &sourceClientId, true)
+		inactiveClientId := testingCreateProviderClient(ctx, networkId, nil, false)
+		for _, clientId := range []server.Id{activeClientId, derivedClientId, inactiveClientId} {
+			testingInsertProviderLocationReliability(ctx, clientId, networkId, city)
+			testingInsertProviderConnectionScore(ctx, clientId, city)
+		}
+
+		byCountry := CountProvidersByCountry(ctx)
+		if len(byCountry) != 1 || byCountry[0].Count != 1 {
+			t.Errorf("CountProvidersByCountry() = %+v, want one active top-level provider", byCountry)
+		}
+		if countries := CountProviderCountries(ctx); countries != 1 {
+			t.Errorf("CountProviderCountries() = %d, want 1", countries)
+		}
+
+		providersMap, err := GetProvidersMap(ctx)
+		connect.AssertEqual(t, err, nil)
+		au := providersMap["au"]
+		if au == nil || au["New South Wales"] == nil || au["New South Wales"].ProviderCount != 1 {
+			t.Errorf("GetProvidersMap() = %+v, want one active top-level provider in New South Wales", providersMap)
+		}
+	})
+}
+
 // CountProvidersByCountry drives the public dashboard's provider map, top
 // countries, and region/city reach numbers from one scan. Guards the
 // grouping (one row per country, upper-case ISO code, country name), the
@@ -379,6 +425,7 @@ func TestCountProvidersByCountry(t *testing.T) {
 		addProvider := func(city *Location, connected bool, hashCount int) {
 			clientId := server.NewId()
 			networkId := server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(
 					ctx,

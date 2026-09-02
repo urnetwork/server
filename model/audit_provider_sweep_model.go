@@ -19,8 +19,9 @@ import (
 // state tables:
 //
 //   - SweepProviderAuditEvents: periodic state diff. A provider is online when
-//     it has a ProvideModePublic provide key AND a connected
-//     network_client_connection. The sweep diffs that live set against
+//     it is an active top-level client with a ProvideModePublic provide key and
+//     a connected connection owned by a fresh handler. The sweep diffs that
+//     live set against
 //     audit_provider_state (the last emitted state per device) and appends
 //     online/offline transition events with the client's real geo
 //     (network_client_location -> location names). Because it diffs observed
@@ -32,7 +33,9 @@ import (
 //   - BackfillProviderAuditEvents: one-shot reconstruction of recent history
 //     from client_reliability blocks (per-minute rows with
 //     provide_enabled_count recorded only while a client was connected AND
-//     provide-public). Reach is bounded by that table's retention
+//     provide-public). Only top-level client rows are reconstructed; derivative
+//     clients carry provide keys for return traffic but are not provider
+//     devices. Reach is bounded by that table's retention
 //     (ClientExpiration, ~30 days).
 //
 //   - RollupTransferAuditEvents: one aggregate audit_contract_event per UTC
@@ -151,6 +154,7 @@ func SweepProviderAuditEvents(ctx context.Context) (onlineCount int, offlineCoun
 		offlineCount = 0
 
 		now := server.NowUtc()
+		minHandlerHeartbeatTime := now.Add(-2 * NetworkClientHandlerHeartbeatTimeout)
 
 		// the live provider set, one row per client, preferring a located
 		// connection and then the newest connection
@@ -177,6 +181,9 @@ func SweepProviderAuditEvents(ctx context.Context) (onlineCount int, offlineCoun
 			INNER JOIN network_client_connection ON
 				network_client_connection.client_id = provide_key.client_id AND
 				network_client_connection.connected
+			INNER JOIN network_client_handler ON
+				network_client_handler.handler_id = network_client_connection.handler_id AND
+				network_client_handler.heartbeat_time >= @minHandlerHeartbeatTime
 			LEFT JOIN network_client_location ON
 				network_client_location.connection_id = network_client_connection.connection_id
 			LEFT JOIN location city_location ON
@@ -185,14 +192,18 @@ func SweepProviderAuditEvents(ctx context.Context) (onlineCount int, offlineCoun
 				region_location.location_id = network_client_location.region_location_id
 			LEFT JOIN location country_location ON
 				country_location.location_id = network_client_location.country_location_id
-			WHERE provide_key.provide_mode = @provideModePublic
+			WHERE
+				network_client.active = true AND
+				network_client.source_client_id IS NULL AND
+				provide_key.provide_mode = @provideModePublic
 			ORDER BY
 				network_client.client_id,
 				network_client_location.country_location_id ASC NULLS LAST,
 				network_client_connection.connect_time DESC
 			`,
 			server.PgNamedArgs{
-				"provideModePublic": ProvideModePublic,
+				"minHandlerHeartbeatTime": minHandlerHeartbeatTime,
+				"provideModePublic":       ProvideModePublic,
 			},
 		)
 		server.WithPgResult(result, err, func() {
@@ -591,8 +602,8 @@ func BackfillDeviceAuditEvents(
 			ctx,
 			`
 			SELECT
-				client_id,
-				network_id,
+				client_reliability.client_id,
+				client_reliability.network_id,
 				MIN(block_number) * @blockMs AS first_ms,
 				MAX(block_number) * @blockMs + @blockMs AS last_ms
 			FROM client_reliability
@@ -854,8 +865,8 @@ func BackfillProviderAuditEvents(
 			ctx,
 			`
 			SELECT
-				client_id,
-				network_id,
+				client_reliability.client_id,
+				client_reliability.network_id,
 				to_char(
 					to_timestamp(block_number * @blockSeconds) AT TIME ZONE 'UTC',
 					'YYYY-MM-DD'
@@ -863,12 +874,15 @@ func BackfillProviderAuditEvents(
 				MIN(block_number) * @blockMs AS first_ms,
 				MAX(block_number) * @blockMs + @blockMs AS last_ms
 			FROM client_reliability
+			INNER JOIN network_client ON
+				network_client.client_id = client_reliability.client_id
 			WHERE
-				1 <= provide_enabled_count AND
-				@startBlock <= block_number AND
-				block_number < @endBlock
-			GROUP BY client_id, network_id, day
-			ORDER BY client_id, day ASC
+				network_client.source_client_id IS NULL AND
+				1 <= client_reliability.provide_enabled_count AND
+				@startBlock <= client_reliability.block_number AND
+				client_reliability.block_number < @endBlock
+			GROUP BY client_reliability.client_id, client_reliability.network_id, day
+			ORDER BY client_reliability.client_id, day ASC
 			`,
 			server.PgNamedArgs{
 				"blockSeconds": blockMs / 1000,

@@ -116,7 +116,7 @@ func statsProviders(
 
 	// stats read: tolerates replica delay
 	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
-		// enumerate the network's active provider clients
+		// enumerate the network's active top-level provider clients
 		order := []server.Id{}
 		result, err := conn.Query(
 			clientSession.Ctx,
@@ -125,7 +125,10 @@ func statsProviders(
 			FROM network_client
 			INNER JOIN provide_key ON
 				provide_key.client_id = network_client.client_id
-			WHERE network_client.network_id = $1 AND network_client.active = true
+			WHERE
+				network_client.network_id = $1 AND
+				network_client.active = true AND
+				network_client.source_client_id IS NULL
 			`,
 			networkId,
 		)
@@ -554,7 +557,7 @@ func StatsProvidersOverview(
 
 	// stats read: tolerates replica delay
 	server.ReplicaDb(clientSession.Ctx, func(conn server.PgConn) {
-		// enumerate the network's provider clients
+		// enumerate the network's active top-level provider clients
 		providerIds := []server.Id{}
 		result, err := conn.Query(
 			clientSession.Ctx,
@@ -563,7 +566,10 @@ func StatsProvidersOverview(
 			FROM network_client
 			INNER JOIN provide_key ON
 				provide_key.client_id = network_client.client_id
-			WHERE network_client.network_id = $1 AND network_client.active = true
+			WHERE
+				network_client.network_id = $1 AND
+				network_client.active = true AND
+				network_client.source_client_id IS NULL
 			`,
 			networkId,
 		)

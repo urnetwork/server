@@ -840,10 +840,10 @@ func matchChildLocation(
 //
 // Three things about the shape of this query matter.
 //
-// First, candidates are sourced from the live provider population
-// (network_client_location_reliability, connected + valid) and the egress row
-// is LEFT JOINed on. The dominant case by far is a provider that has *never*
-// been probed and therefore has no provider_egress_location row at all;
+// First, candidates are sourced from the live provider population: active
+// top-level clients with a connected + valid location-reliability row. The
+// egress row is LEFT JOINed on. The dominant case by far is a provider that has
+// *never* been probed and therefore has no provider_egress_location row at all;
 // selecting from provider_egress_location would return exactly the providers
 // that least need probing and none of the ones that most do.
 //
@@ -954,8 +954,12 @@ func GetProviderEgressLocationDueSharded(
 			SELECT
 				network_client_location_reliability.client_id
 			FROM network_client_location_reliability
+			INNER JOIN network_client ON
+				network_client.client_id = network_client_location_reliability.client_id
 
 			WHERE
+				network_client.active = true AND
+				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
 				EXISTS (
@@ -1024,9 +1028,13 @@ func GetProviderEgressLocationDueSharded(
 
 			INNER JOIN network_client_location_reliability ON
 				network_client_location_reliability.client_id = provider_egress_location.client_id
+			INNER JOIN network_client ON
+				network_client.client_id = provider_egress_location.client_id
 
 			WHERE
 				provider_egress_location.observed_at < $2 AND
+				network_client.active = true AND
+				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
 				EXISTS (
@@ -1128,8 +1136,12 @@ func GetProviderEgressLocationDueSharded(
 			SELECT
 				network_client_location_reliability.client_id
 			FROM network_client_location_reliability
+			INNER JOIN network_client ON
+				network_client.client_id = network_client_location_reliability.client_id
 
 			WHERE
+				network_client.active = true AND
+				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
 				EXISTS (

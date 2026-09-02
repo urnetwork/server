@@ -173,9 +173,9 @@ func GetAllProviderBlackholedClientIds(ctx context.Context) map[server.Id]bool {
 // checked, then those checked least recently, oldest first.
 //
 // The candidate set is the same "can this provider serve a stranger" predicate
-// the egress-location queue uses -- connected, valid, and holding a Public
-// provide key. A provider that cannot accept a contract cannot be checked, and
-// offering it would burn a slot on a tunnel that will be refused.
+// the egress-location queue uses -- active, top-level, connected, valid, and
+// holding a Public provide key. A provider that cannot accept a contract cannot
+// be checked, and offering it would burn a slot on a tunnel that will be refused.
 //
 // Unlike the egress-location queue this has no attempt backoff. The check is
 // cheap and the whole design is that it runs hourly over everything, so a
@@ -199,10 +199,15 @@ func GetProviderBlackholeCheckDue(
 				network_client_location_reliability.client_id
 			FROM network_client_location_reliability
 
+			INNER JOIN network_client ON
+				network_client.client_id = network_client_location_reliability.client_id
+
 			LEFT JOIN provider_blackhole_check ON
 				provider_blackhole_check.client_id = network_client_location_reliability.client_id
 
 			WHERE
+				network_client.active = true AND
+				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
 				EXISTS (
