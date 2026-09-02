@@ -1,18 +1,24 @@
-You earned {{.AmountUsd}} USDC
+{{define "headline"}}YOU GOT PAID{{end}}
+{{define "why"}}You received this because a payout was sent to the wallet on your
+URnetwork account.{{end}}
+{{define "content"}}
+{{.AmountUsd}} USDC
 
-You just got paid {{.AmountUsd}} USDC for providing services up to {{.CreatedAt}} UTC.
+Earnings for providing on URnetwork through {{.CreatedAt}} UTC were sent
+to your wallet.
 
-All associated contracts will be automatically deleted in 7 days to
-preseve anonymity of the network. If there appears to be an error, please
-contact <support@ur.io> immediately.
+Network: {{.Blockchain}}
+Wallet: {{.DestinationAddress}}
+Transaction: {{.TxHash}} ({{.ExplorerBasePath}}/{{.TxHash}})
+Payment ID: {{.PaymentId}}
 
-We're building an internet that gives not takes.
+View this payout: https://ur.io/app/account/payouts?id={{.PaymentId}}
 
-URnetwork Payment ID {{.PaymentId}}
+The more decentralized we are, the better the product gets. Run
+providers on more of your devices to earn more. Learn about providing
+(https://ur.io/docs/faq#can-i-earn-by-sharing-my-connection).
 
-{{.AmountUsd}} sent on {{.Blockchain}} to {{.DestinationAddress}} in
-transaction {{.ExplorerBasePath}}/{{.TxHash}}.
-
-Copyright {{.CopyrightYear}} BringYour, Inc.
-2261 Market Street #5245, San Francisco, CA 94114, United States
-https://ur.io
+The contracts behind this payment are deleted after 7 days to preserve
+the anonymity of the network. If something looks wrong, contact
+support@ur.io right away.
+{{end}}

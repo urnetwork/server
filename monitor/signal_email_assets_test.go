@@ -21,7 +21,7 @@ func TestEmailAssetsCatalogMatchesServerTemplates(t *testing.T) {
 	if len(templatePaths) == 0 {
 		t.Fatal("server email-template inventory is empty")
 	}
-	pattern := regexp.MustCompile(`https://bringyour\.com(/res/emails/[A-Za-z0-9._-]+)`)
+	pattern := regexp.MustCompile(`https://ur\.io(/images/emails/[A-Za-z0-9._-]+)`)
 	fromTemplates := map[string]struct{}{}
 	for _, templatePath := range templatePaths {
 		contents, err := os.ReadFile(templatePath)
@@ -41,7 +41,7 @@ func TestEmailAssetsCatalogMatchesServerTemplates(t *testing.T) {
 	}
 }
 
-func TestEmailAssetsSignalSyntheticHealthyCDNAndOrigins(t *testing.T) {
+func TestEmailAssetsSignalSyntheticHealthyPublicAndEdges(t *testing.T) {
 	address := "2001:db8:19::2"
 	var lock sync.Mutex
 	calls := map[string]int{}
@@ -57,17 +57,18 @@ func TestEmailAssetsSignalSyntheticHealthyCDNAndOrigins(t *testing.T) {
 		scope := "cdn"
 		if strings.Contains(joined, "--resolve") {
 			scope = "origin"
-			if !strings.Contains(joined, "main-web.example.com:443:["+address+"]") ||
-				!strings.Contains(joined, "https://main-web.example.com"+asset) {
-				return "", fmt.Errorf("origin request did not retain exact address and Host: %s", joined)
+			// the edge check keeps the site's own Host, pinned to the exact address
+			if !strings.Contains(joined, "ur.io:443:["+address+"]") ||
+				!strings.Contains(joined, "https://ur.io"+asset) {
+				return "", fmt.Errorf("edge request did not retain exact address and Host: %s", joined)
 			}
-		} else if !strings.Contains(joined, "https://example.com"+asset) {
-			return "", fmt.Errorf("CDN request used the wrong public URL: %s", joined)
+		} else if !strings.Contains(joined, "https://ur.io"+asset) {
+			return "", fmt.Errorf("public request used the wrong URL: %s", joined)
 		}
 		lock.Lock()
 		calls[scope+":"+asset]++
 		lock.Unlock()
-		return emailAssetHTTPFixture("200", "0", "image/jpeg", "2048", address), nil
+		return emailAssetHTTPFixture("200", "0", "image/png", "5038", address), nil
 	}}
 
 	alerts, err := NewEmailAssetsSignal().Run(
@@ -83,7 +84,7 @@ func TestEmailAssetsSignalSyntheticHealthyCDNAndOrigins(t *testing.T) {
 	lock.Lock()
 	defer lock.Unlock()
 	if len(calls) != 2*len(emailAssets) {
-		t.Fatalf("distinct CDN/origin requests = %d, want %d: %v", len(calls), 2*len(emailAssets), calls)
+		t.Fatalf("distinct public/edge requests = %d, want %d: %v", len(calls), 2*len(emailAssets), calls)
 	}
 	for _, asset := range emailAssets {
 		for _, scope := range []string{"cdn", "origin"} {
@@ -94,7 +95,23 @@ func TestEmailAssetsSignalSyntheticHealthyCDNAndOrigins(t *testing.T) {
 	}
 }
 
-func TestEmailAssetsSignalSyntheticOriginHostRootCause(t *testing.T) {
+func TestEmailAssetsSignalDisarmedWithoutWebsiteDomain(t *testing.T) {
+	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
+		return "", errors.New("no request expected without a website domain")
+	}}
+	settings := emailAssetSyntheticSettings(source, "2001:db8:19::9")
+	settings.WebsiteDomain = ""
+
+	alerts, err := NewEmailAssetsSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("probe ran without a website domain: %+v", alerts)
+	}
+}
+
+func TestEmailAssetsSignalSyntheticStaleSiteBundleRootCause(t *testing.T) {
 	address := "2001:db8:19::404"
 	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
 		if name != "curl" || requestedEmailAsset(strings.Join(args, " ")) == "" {
@@ -114,26 +131,30 @@ func TestEmailAssetsSignalSyntheticOriginHostRootCause(t *testing.T) {
 		t.Fatalf("alerts = %d, want one aggregated email-asset alert: %+v", len(alerts), alerts)
 	}
 	alert := requireAlertClass(t, alerts, "web-email-assets")
-	if alert.SignalNumber != "19.2" || alert.SignalKey != "email-assets" || alert.Target != "example.com" {
+	if alert.SignalNumber != "19.2" || alert.SignalKey != "email-assets" || alert.Target != "ur.io" {
 		t.Fatalf("wrong email-asset identity: %+v", alert)
 	}
 	markdown := alert.Markdown()
 	for _, want := range []string{
-		"cdn_failed=6",
-		"origin_failed=6",
-		"missing_404=12",
-		"main-web.example.com",
+		"cdn_failed=2",
+		"origin_failed=2",
+		"missing_404=4",
+		"ur.io",
 		address,
-		"/res/emails/urnetwork-spin.gif",
+		"/images/emails/ur-wordmark-white-320.png",
 		"controller/email_templates",
-		"dc8fd20c",
-		"2b410faa",
-		"/etc/nginx/html",
+		"sync-public",
+		"deployed build predates the assets",
 		"functional product regression",
 		"SIGNALS.md §19.2",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("email-asset alert missing %q: %s", want, markdown)
+		}
+	}
+	for _, stale := range []string{"CloudFront", "main-web", "/res/emails/"} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("email-asset alert retained the retired hosting diagnosis %q: %s", stale, markdown)
 		}
 	}
 }
@@ -145,18 +166,18 @@ func TestEmailAssetsSignalRejectsHTMLAndEmptyImages(t *testing.T) {
 		if name != "curl" {
 			return "", errors.New("unexpected local command")
 		}
-		// Keep the public/CDN contract healthy and synthesize two different
-		// exact-origin semantic failures behind it.
+		// Keep the public contract healthy and synthesize two different exact-edge
+		// semantic failures behind it.
 		if !strings.Contains(joined, "--resolve") {
-			return emailAssetHTTPFixture("200", "0", "image/jpeg", "1024", address), nil
+			return emailAssetHTTPFixture("200", "0", "image/png", "1024", address), nil
 		}
 		switch requestedEmailAsset(joined) {
-		case "/res/emails/bringyour-wordmark-bg-240.jpg":
+		case "/images/emails/ur-wordmark-black-bg-320.png":
 			return emailAssetHTTPFixture("200", "0", "text/html", "1024", address), nil
-		case "/res/emails/ur-wordmark-bg-240.jpg":
-			return emailAssetHTTPFixture("200", "0", "image/jpeg", "0", address), nil
+		case "/images/emails/ur-wordmark-white-320.png":
+			return emailAssetHTTPFixture("200", "0", "image/png", "0", address), nil
 		default:
-			return emailAssetHTTPFixture("200", "0", "image/gif", "4096", address), nil
+			return emailAssetHTTPFixture("200", "0", "image/png", "4096", address), nil
 		}
 	}}
 
@@ -187,7 +208,7 @@ func TestEmailAssetsSignalLeavesExactTransportFailureToEdgeIPv6(t *testing.T) {
 		if strings.Contains(strings.Join(args, " "), "--resolve") {
 			return emailAssetHTTPFixture("000", "28", "", "0", ""), errors.New("exit status 28")
 		}
-		return emailAssetHTTPFixture("200", "0", "image/jpeg", "1024", "203.0.113.19"), nil
+		return emailAssetHTTPFixture("200", "0", "image/png", "1024", "203.0.113.19"), nil
 	}}
 
 	alerts, err := NewEmailAssetsSignal().Run(
@@ -202,7 +223,7 @@ func TestEmailAssetsSignalLeavesExactTransportFailureToEdgeIPv6(t *testing.T) {
 	}
 }
 
-func TestEmailAssetsSignalClassifiesTransientCDNTransport(t *testing.T) {
+func TestEmailAssetsSignalClassifiesTransientPublicTransport(t *testing.T) {
 	address := "2001:db8:19::35"
 	source := &syntheticSource{localFn: func(name string, args ...string) (string, error) {
 		if name != "curl" {
@@ -213,11 +234,11 @@ func TestEmailAssetsSignalClassifiesTransientCDNTransport(t *testing.T) {
 		if asset == "" {
 			return "", fmt.Errorf("request omitted a tracked email asset: %s", joined)
 		}
-		if !strings.Contains(joined, "--resolve") && asset == "/res/emails/urnetwork-goodbye-vpn.gif" {
+		if !strings.Contains(joined, "--resolve") && asset == "/images/emails/ur-wordmark-black-bg-320.png" {
 			return emailAssetHTTPFixture("000", "35", "", "0", "2001:db8:ffff::35"),
-				errors.New("curl --http1.1 https://example.com/res/emails/urnetwork-goodbye-vpn.gif: exit status 35")
+				errors.New("curl --http1.1 https://ur.io/images/emails/ur-wordmark-black-bg-320.png: exit status 35")
 		}
-		return emailAssetHTTPFixture("200", "0", "image/gif", "4096", address), nil
+		return emailAssetHTTPFixture("200", "0", "image/png", "4096", address), nil
 	}}
 
 	alerts, err := NewEmailAssetsSignal().Run(

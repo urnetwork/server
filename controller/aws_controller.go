@@ -8,6 +8,7 @@ import (
 	// "net/url"
 	"embed"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"strings"
 	"sync"
@@ -30,6 +31,13 @@ import (
 
 type EmailConfig struct {
 	CompanySenderEmail string `yaml:"company_sender_email"`
+	// ReplyToEmail, when set, is the Reply-To of every account email. Empty
+	// means replies go to the sender address, which is a monitored mailbox.
+	ReplyToEmail string `yaml:"reply_to_email"`
+	// ConfigurationSet names the SES configuration set that publishes send,
+	// bounce, and complaint events (EMAIL1.md §5 phase A). Empty until it exists
+	// in SES; the per-template message tag is attached only alongside it.
+	ConfigurationSet string `yaml:"configuration_set"`
 }
 
 var EnvEmailConfig = sync.OnceValue(func() *EmailConfig {
@@ -162,24 +170,6 @@ func (self *X402ReceiptTemplate) Balance() string {
 	return model.ByteCountHumanReadable(self.BalanceByteCount)
 }
 
-type SubscriptionTransferBalanceCompanyTemplate struct {
-	BalanceByteCount model.ByteCount
-	BaseTemplate
-}
-
-func (self *SubscriptionTransferBalanceCompanyTemplate) Name() string {
-	return "subscription_transfer_balance_company"
-}
-
-func (self *SubscriptionTransferBalanceCompanyTemplate) Funcs(funcs texttemplate.FuncMap) {
-	self.BaseTemplate.Funcs(funcs)
-	funcs["Balance"] = self.Balance
-}
-
-func (self *SubscriptionTransferBalanceCompanyTemplate) Balance() string {
-	return model.ByteCountHumanReadable(self.BalanceByteCount)
-}
-
 type SubscriptionEndedTemplate struct {
 	BaseTemplate
 }
@@ -241,14 +231,6 @@ func SetMessageSender(messageSender MessageSender) {
 
 type AWSMessageSender struct{}
 
-type NetworkUserInterviewRequest1Template struct {
-	BaseTemplate
-}
-
-func (self *NetworkUserInterviewRequest1Template) Name() string {
-	return "network_user_interview_request_1"
-}
-
 func (c *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
 
 	normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
@@ -268,65 +250,98 @@ func SendAccountEmailTemplate(emailAddress string, template Template, sendOpts .
 	if err != nil {
 		return err
 	}
-	return sendAccountEmail(emailAddress, subject, bodyHtml, bodyText, sendOpts...)
+	return sendAccountEmail(emailAddress, template.Name(), subject, bodyHtml, bodyText, sendOpts...)
 }
 
+const emailTemplateDir = "email_templates"
+
+// Every email is the shared shell plus one body. `_layout.html` and `_layout.txt`
+// carry the header, footer, preheader slot, and dark-mode css; `<name>.html` and
+// `<name>.txt` supply the `{{define}}` blocks the layout invokes (title, preheader,
+// eyebrow, accent, headline, why, content). Executing the layout renders the whole
+// message, so a change to the shell changes every template at once. See EMAIL1.md.
 func RenderEmailTemplate(template Template) (subject string, bodyHtml string, bodyText string, returnErr error) {
-	if subjectBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.subject.txt", template.Name())); err == nil {
-		if subjectTemplate, err := texttemplate.New("subject").Parse(string(subjectBytes)); err == nil {
-			subjectOut := &strings.Builder{}
-			if err := subjectTemplate.Funcs(TemplateFuncs(template)).Execute(subjectOut, template); err == nil {
-				subject = subjectOut.String()
-			} else {
-				returnErr = err
-				return
-			}
-		} else {
-			returnErr = err
-			return
-		}
-	} else {
-		returnErr = err
+	subject, returnErr = renderEmailSubject(template)
+	if returnErr != nil {
 		return
 	}
-
-	if bodyHtmlBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.html", template.Name())); err == nil {
-		if bodyHtmlTemplate, err := htmltemplate.New("body").Parse(string(bodyHtmlBytes)); err == nil {
-			bodyHtmlOut := &strings.Builder{}
-			if err := bodyHtmlTemplate.Funcs(TemplateFuncs(template)).Execute(bodyHtmlOut, template); err == nil {
-				bodyHtml = bodyHtmlOut.String()
-			} else {
-				returnErr = err
-				return
-			}
-		} else {
-			returnErr = err
-			return
-		}
-	} else {
-		returnErr = err
+	bodyHtml, returnErr = renderEmailHtml(template)
+	if returnErr != nil {
 		return
 	}
-
-	if bodyTextBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.txt", template.Name())); err == nil {
-		if bodyTextTemplate, err := texttemplate.New("body").Parse(string(bodyTextBytes)); err == nil {
-			bodyTextOut := &strings.Builder{}
-			if err := bodyTextTemplate.Funcs(TemplateFuncs(template)).Execute(bodyTextOut, template); err == nil {
-				bodyText = bodyTextOut.String()
-			} else {
-				returnErr = err
-				return
-			}
-		} else {
-			returnErr = err
-			return
-		}
-	} else {
-		returnErr = err
-		return
-	}
-
+	bodyText, returnErr = renderEmailText(template)
 	return
+}
+
+func renderEmailSubject(template Template) (string, error) {
+	out, err := renderEmailTextFile(template, "subject", fmt.Sprintf("%s/%s.subject.txt", emailTemplateDir, template.Name()))
+	if err != nil {
+		return "", err
+	}
+	// a subject is one header line; a stray newline in the file would otherwise
+	// become a header injection or an SES rejection
+	subject := strings.TrimSpace(out)
+	if subject == "" {
+		return "", fmt.Errorf("email template %s: empty subject", template.Name())
+	}
+	if strings.ContainsAny(subject, "\r\n") {
+		return "", fmt.Errorf("email template %s: subject must be a single line", template.Name())
+	}
+	return subject, nil
+}
+
+func renderEmailHtml(template Template) (string, error) {
+	layoutTemplate, err := htmltemplate.New("_layout.html").
+		Funcs(TemplateFuncs(template)).
+		ParseFS(
+			emailTemplates,
+			fmt.Sprintf("%s/_layout.html", emailTemplateDir),
+			fmt.Sprintf("%s/%s.html", emailTemplateDir, template.Name()),
+		)
+	if err != nil {
+		return "", err
+	}
+	out := &strings.Builder{}
+	if err := layoutTemplate.ExecuteTemplate(out, "_layout.html", template); err != nil {
+		return "", err
+	}
+	return out.String(), nil
+}
+
+func renderEmailText(template Template) (string, error) {
+	layoutTemplate, err := texttemplate.New("_layout.txt").
+		Funcs(TemplateFuncs(template)).
+		ParseFS(
+			emailTemplates,
+			fmt.Sprintf("%s/_layout.txt", emailTemplateDir),
+			fmt.Sprintf("%s/%s.txt", emailTemplateDir, template.Name()),
+		)
+	if err != nil {
+		return "", err
+	}
+	out := &strings.Builder{}
+	if err := layoutTemplate.ExecuteTemplate(out, "_layout.txt", template); err != nil {
+		return "", err
+	}
+	return out.String(), nil
+}
+
+// renderEmailTextFile renders one standalone text file (a subject or an SMS body)
+// with no layout around it.
+func renderEmailTextFile(template Template, name string, path string) (string, error) {
+	contents, err := emailTemplates.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	fileTemplate, err := texttemplate.New(name).Funcs(TemplateFuncs(template)).Parse(string(contents))
+	if err != nil {
+		return "", err
+	}
+	out := &strings.Builder{}
+	if err := fileTemplate.Execute(out, template); err != nil {
+		return "", err
+	}
+	return out.String(), nil
 }
 
 func SendAccountSms(phoneNumber string, template Template) error {
@@ -337,26 +352,19 @@ func SendAccountSms(phoneNumber string, template Template) error {
 	return sendAccountSms(phoneNumber, bodyText)
 }
 
-func RenderSmsTemplate(template Template) (bodyText string, returnErr error) {
-	if bodyTextBytes, err := emailTemplates.ReadFile(fmt.Sprintf("email_templates/%s.txt", template.Name())); err == nil {
-		if bodyTextTemplate, err := texttemplate.New("body").Parse(string(bodyTextBytes)); err == nil {
-			bodyTextOut := &strings.Builder{}
-			if err := bodyTextTemplate.Funcs(TemplateFuncs(template)).Execute(bodyTextOut, template); err == nil {
-				bodyText = bodyTextOut.String()
-			} else {
-				returnErr = err
-				return
-			}
-		} else {
-			returnErr = err
-			return
+// RenderSmsTemplate renders `<name>.sms.txt`, the short body a phone account
+// receives instead of the email. A template without one (the email-only
+// purchase receipts) falls back to its full plain-text email body.
+func RenderSmsTemplate(template Template) (string, error) {
+	path := fmt.Sprintf("%s/%s.sms.txt", emailTemplateDir, template.Name())
+	if _, err := fs.Stat(emailTemplates, path); err == nil {
+		out, err := renderEmailTextFile(template, "sms", path)
+		if err != nil {
+			return "", err
 		}
-	} else {
-		returnErr = err
-		return
+		return strings.TrimSpace(out), nil
 	}
-
-	return
+	return renderEmailText(template)
 }
 
 type SendAccountEmailSenderEmail struct {
@@ -372,7 +380,7 @@ func SenderEmail(senderEmail string) *SendAccountEmailSenderEmail {
 // https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 // https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/ses-example-send-email.html
 // https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
-func sendAccountEmail(emailAddress string, subject string, bodyHtml string, bodyText string, sendOpts ...any) error {
+func sendAccountEmail(emailAddress string, templateName string, subject string, bodyHtml string, bodyText string, sendOpts ...any) error {
 	awsRegion := "us-west-1"
 	charSet := "UTF-8"
 
@@ -420,8 +428,19 @@ func sendAccountEmail(emailAddress string, subject string, bodyHtml string, body
 			},
 		},
 		Source: aws.String(senderEmail),
-		// Uncomment to use a configuration set
-		//ConfigurationSetName: aws.String(ConfigurationSet),
+	}
+	emailConfig := EnvEmailConfig()
+	if replyTo := strings.TrimSpace(emailConfig.ReplyToEmail); replyTo != "" {
+		input.ReplyToAddresses = []*string{aws.String(replyTo)}
+	}
+	if configurationSet := strings.TrimSpace(emailConfig.ConfigurationSet); configurationSet != "" {
+		// the configuration set publishes send/bounce/complaint events, and the
+		// template tag splits every metric by template (EMAIL1.md §5)
+		input.ConfigurationSetName = aws.String(configurationSet)
+		input.Tags = []*ses.MessageTag{{
+			Name:  aws.String("template"),
+			Value: aws.String(templateName),
+		}}
 	}
 
 	// Attempt to send the email.

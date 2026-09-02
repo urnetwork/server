@@ -1,10 +1,13 @@
+{{define "headline"}}YOUR DATA CODE{{end}}
+{{define "why"}}You received this because a data pack was purchased with this address.{{end}}
+{{define "content"}}
+Thanks for your purchase. This code adds {{.Balance}} of data to
+whichever network redeems it.
 
-{{.Secret}}
+    {{.Secret}}
 
-You got {{.Balance}} of data!
+Redeem code: https://ur.io/app/balance-codes#code={{.Secret}}
 
-Add the data to your account at https://app.bringyour.com/account/add-balance?{{.Secret}} or visit https://app.bringyour.com/account/add-balance
-
-Copyright {{.CopyrightYear}} BringYour, Inc.
-2261 Market Street #5245, San Francisco, CA 94114, United States
-https://bringyour.com
+The button opens Balance codes with the code filled in; sign in if
+asked. Anyone with the code can redeem it, so keep it private.
+{{end}}

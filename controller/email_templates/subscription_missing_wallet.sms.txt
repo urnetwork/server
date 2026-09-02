@@ -1,0 +1,1 @@
+URnetwork: {{.AmountUsd}} USDC is waiting. Connect a wallet at https://ur.io/app/account/wallets

@@ -1,116 +1,30 @@
-<div
-  style="
-    font-family: sans-serif;
-    font-size: 12pt;
-    font-weight: 100;
-    background-color: rgb(248, 248, 248);
-    color: rgb(16, 16, 16);
-    padding: 24px;
-  "
->
-  <div style="margin-left: auto; margin-right: auto; max-width: 640px">
-    <div
-      style="
-        margin-top: 48px;
-        margin-bottom: 48px;
-        font-family: monospace;
-        font-size: 24pt;
-        color: rgb(237, 143, 255);
-        letter-spacing: 2px;
-        text-shadow: 1px 1px 1px rgb(64, 64, 64);
-        -webkit-background-clip: text;
-        -moz-background-clip: text;
-        user-select: all;
-        -moz-user-select: all;
-        -webkit-user-select: all;
-      "
-    >
-      You earned {{.AmountUsd}} USDC
-    </div>
+{{define "title"}}You got paid{{end}}
+{{define "preheader"}}Your provider earnings were sent to your wallet.{{end}}
+{{define "eyebrow"}}Payout sent{{end}}
+{{define "accent"}}#87fb67{{end}}
+{{define "headline"}}You got paid{{end}}
+{{define "why"}}You received this because a payout was sent to the wallet on your URnetwork account.{{end}}
+{{define "content"}}
+<div class="ur-big ur-ink" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:40px; line-height:44px; font-weight:700; letter-spacing:-0.02em; color:#101010; font-variant-numeric:tabular-nums;">{{.AmountUsd}} USDC</div>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Earnings for providing on URnetwork through {{.CreatedAt}} UTC were sent to your wallet.</p>
 
-    <div style="margin-top: 24px">
-      You just got paid {{.AmountUsd}} USDC for participating in URnetwork up to
-      {{.CreatedAt}} UTC.
-    </div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Network</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">{{.Blockchain}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Wallet</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">{{.DestinationAddress}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Transaction</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;"><a class="ur-link" href="{{.ExplorerBasePath}}/{{.TxHash}}" style="color:#0039de; text-decoration:underline;">{{.TxHash}}</a></td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Payment ID</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">{{.PaymentId}}</td>
+</tr></table>
 
-    <div style="margin-top: 24px">
-      All associated contracts will be automatically deleted in 7 days to
-      preseve anonymity of the network. If there appears to be an error, please
-      contact <a href="mailto:support@ur.io">support@ur.io</a> immediately.
-    </div>
-
-    <div style="margin-top: 24px">The more decentralized we are, the better the product gets. You can earn more money by running more providers on your existing devices. <a href="https://docs.ur.io/provider">See our docs</a>.</div>
-
-    <div style="margin-top: 24px">We're building an internet that gives not takes.</div>
-
-    <div
-      style="
-        margin-top: 24px;
-/*        border: 4px dotted rgb(214, 230, 244);*/
-        background: rgb(239, 247, 187);
-        padding: 24px;
-        font-family: monospace;
-        font-size: 10pt;
-        font-weight: 100;
-        border-radius: 24px;
-      "
-    >
-      <p>URnetwork Payment ID {{.PaymentId}}</p>
-      <p>
-        {{.AmountUsd}} sent on {{.Blockchain}} to {{.DestinationAddress}} in
-        transaction
-        <a href="{{.ExplorerBasePath}}/{{.TxHash}}" target="_blank"
-          >{{.TxHash}}</a
-        >
-      </p>
-    </div>
-
-        <div style="margin-top: 24px">Are we doing good? Give us 5 stars &#x1F64F</div>
-
-    <div style="margin-top: 24px"><a href="https://play.google.com/store/apps/details?id=com.bringyour.network">Rate us on Google Play</a></div>
-
-    <div style="margin-top: 24px"><a href="solanadappstore://details?id=com.bringyour.network">Rate us on Solana dApp Store</a></div>
-
-    <div style="margin-top: 24px"><a href="https://bringyour.com/discord">Chat us on Discord</a></div>
-
-
-  </div>
-
-
-
-  <div
-    style="
-      margin-left: auto;
-      margin-right: auto;
-      max-width: 640px;
-      padding-top: 48px;
-      padding-bottom: 48px;
-    "
-  >
-    <div style="display: inline-block; width: 120px; vertical-align: middle">
-      <a href="https://ur.io"
-        ><img
-          alt="URnetwork wordmark"
-          style="width: 120px"
-          src="https://bringyour.com/res/emails/ur-wordmark-bg-240.jpg"
-      /></a>
-    </div>
-    <div
-      style="
-        display: inline-block;
-        max-width: 504px;
-        padding: 8px;
-        font-size: 8pt;
-        font-weight: 100;
-        vertical-align: middle;
-      "
-    >
-      Copyright {{.CopyrightYear}} BringYour, Inc.<br />2261 Market Street
-      #5245, San Francisco, CA 94114, United States
-    </div>
-  </div>
-
-  <div style="margin-left: auto; margin-right: auto; max-width: 716px; padding: 0px;"><img style="max-width: 716px; width: 100%;" alt="URnetwork animation" src="https://bringyour.com/res/emails/urnetwork-spin.gif">
-</div>
-
-</div>
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="https://ur.io/app/account/payouts?id={{.PaymentId}}" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">View this payout</a></td>
+</tr></table>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">The more decentralized we are, the better the product gets. Run providers on more of your devices to earn more. <a class="ur-link" href="https://ur.io/docs/faq#can-i-earn-by-sharing-my-connection" style="color:#0039de; text-decoration:underline;">Learn about providing</a>.</p>
+<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">The contracts behind this payment are deleted after 7 days to preserve the anonymity of the network. If something looks wrong, contact <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a> right away.</p>
+{{end}}

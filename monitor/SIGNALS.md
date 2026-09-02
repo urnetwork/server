@@ -5655,7 +5655,7 @@ Tier-1 (warn):
 | loki-tailers | host Loki metrics | §11.19 exact-process active-tail and active-stream accounting | either gauge missing, non-finite, or negative; any process |
 | http-hijack-write | logs | §1.5 canonical net/http WriteHeader-after-Hijack recovery line | any |
 | web-association-files | synthetic HTTPS | §19.1 Android assetlinks + Apple association documents pinned to every enabled edge and semantically decoded | any exact HTTP/contract failure; edge transport remains §18.1 |
-| web-email-assets | synthetic HTTPS | §19.2 every image embedded by transactional-email templates through the public CDN and exact `main-web` origin Host on each enabled edge | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
+| web-email-assets | synthetic HTTPS | §19.2 every image embedded by the transactional-email layout through the public website URL and pinned to each enabled edge under the same Host | any non-200, non-image, or empty response; exact edge transport remains §18.1 |
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes |
@@ -10931,24 +10931,25 @@ taskworker deployments cannot change these static image contents.
 
 Probe: `email-assets`
 
-Server templates embed absolute `https://bringyour.com/res/emails/...` image
-URLs. These are live product dependencies even though the legacy BringYour HTML
-site redirects to `ur.io`. Keep the probe's dependency list equal to the
-distinct URLs in `controller/email_templates`:
+The shared email layout (`controller/email_templates/_layout.html`) embeds two
+absolute `https://ur.io/images/emails/...` wordmark images in every
+transactional email: the black-on-paper default, and the white one clients swap
+in under `prefers-color-scheme: dark`. They ship inside the product site's
+bundle (`mmm/ur.io/react/public/images/emails`, mirrored into the astro build by
+`sync-public`), so they are live product dependencies of the website deployment.
+Keep the probe's dependency list equal to the distinct URLs in
+`controller/email_templates`:
 
-- `bringyour-wordmark-bg-240.jpg`
-- `ur-wordmark-bg-240.jpg`
-- `ur-welcome-header-1080.jpg`
-- `welcome-header-1080.jpg`
-- `urnetwork-goodbye-vpn.gif`
-- `urnetwork-spin.gif`
+- `ur-wordmark-black-bg-320.png`
+- `ur-wordmark-white-320.png`
 
 Healthy means every path returns HTTP 200, an `image/*` media type, and a
 non-empty body at both relevant layers. First request the recipient-facing
-`bringyour.com` URL through DNS/CloudFront. Then retain
-`main-web.bringyour.com` TLS SNI and Host while pinning the same paths to every
-enabled edge IPv6 address. The second check detects one stale web generation
-and distinguishes an origin fault from CDN configuration or a cached error.
+`ur.io` URL through ordinary DNS. Then retain the `ur.io` TLS SNI and Host while
+pinning the same paths to every enabled edge IPv6 address, the way §19.3 pins the
+association files. The second check detects one stale site generation and
+distinguishes an edge fault from DNS selection, TLS, or a cache in front of the
+edges.
 Curl exit 7/28 on an exact edge remains owned by §18.1; failure of the public
 CDN path remains user-facing and is always measured. An affirmative HTTP or
 content failure is class `web-email-assets` on the first cadence. A request
@@ -10959,7 +10960,7 @@ One transport miss cannot establish missing bytes, origin-Host drift, or a
 cached error and must not prescribe invalidation. A one-shot diagnostic still
 returns the first sample.
 
-At 2026-08-31 20:10Z all six recipient-facing URLs returned HTTP 404
+History, before the 2026-09-01 move of the images into the site bundle (they were `https://bringyour.com/res/emails/...` until then): at 2026-08-31 20:10Z all six then-current recipient-facing URLs returned HTTP 404
 `text/html` with the same 146-byte error body. Bounded web logs independently
 showed nginx `open()` failures for current email-template paths. The files were
 present in the source/build asset tree and current image contents, ruling out a

@@ -1,1 +1,1 @@
-You received a payment!
+You got paid: {{.AmountUsd}} USDC

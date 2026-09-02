@@ -1,1 +1,1 @@
-Verify your email
+{{.VerifyCode}} is your URnetwork verification code

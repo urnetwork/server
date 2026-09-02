@@ -467,40 +467,18 @@ func stripeFulfillCheckoutLineItems(
 
 				glog.Infof("[sub]create balance code: %s %s\n", purchaseEmail, string(stripeItemJsonBytes))
 
-				if sku.Special == "" {
-					err = CreateBalanceCode(
-						ctx,
-						quantity*sku.BalanceByteCount(),
-						model.Pro().DataCodeDuration,
-						netRevenue,
-						stripeCheckoutPurchaseEventId(stripeSessionId, lineIndex),
-						string(stripeItemJsonBytes),
-						purchaseEmail,
-						redeemNetworkId,
-					)
-					if err != nil {
-						return err
-					}
-				} else if sku.Special == SpecialCompany {
-					if purchaseEmail == "" {
-						// the company template is delivered by email only -- there is
-						// no network to credit directly
-						return fmt.Errorf("Stripe company sku %s requires a purchase email", stripeSku)
-					}
-					awsMessageSender := GetAWSMessageSender()
-					// company shared data
-					err := awsMessageSender.SendAccountMessageTemplate(
-						purchaseEmail,
-						&SubscriptionTransferBalanceCompanyTemplate{
-							BalanceByteCount: sku.BalanceByteCount(),
-						},
-						SenderEmail(EnvEmailConfig().CompanySenderEmail),
-					)
-					if err != nil {
-						return err
-					}
-				} else {
-					return fmt.Errorf("Stripe unknown special (%s) for sku: %s", sku.Special, stripeSku)
+				err = CreateBalanceCode(
+					ctx,
+					quantity*sku.BalanceByteCount(),
+					model.Pro().DataCodeDuration,
+					netRevenue,
+					stripeCheckoutPurchaseEventId(stripeSessionId, lineIndex),
+					string(stripeItemJsonBytes),
+					purchaseEmail,
+					redeemNetworkId,
+				)
+				if err != nil {
+					return err
 				}
 
 			}
@@ -1621,10 +1599,10 @@ func stripeDataPackByteCount(itemId string) (model.ByteCount, bool) {
 
 // stripeProductForByteCount finds the Stripe product configured for a data amount, so
 // the fulfilment webhook (which looks a sku up by product id) can tell how much data
-// was bought. Company and supporter skus are not data packs.
+// was bought. The supporter sku is not a data pack.
 func stripeProductForByteCount(byteCount model.ByteCount) (string, bool) {
 	for productId, sku := range stripeSkus() {
-		if sku.Supporter || sku.Special != "" {
+		if sku.Supporter {
 			continue
 		}
 		if sku.BalanceByteCount() == byteCount {

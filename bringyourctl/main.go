@@ -73,7 +73,6 @@ Usage:
     bringyourctl send auth-password-set --user_auth=<user_auth>
     bringyourctl send subscription-transfer-balance-code --user_auth=<user_auth>
     bringyourctl send payout-email --user_auth=<user_auth>
-    bringyourctl send network-user-interview-request-1 --user_auth=<user_auth>
     bringyourctl payments reconcile [--dry-run] [--store=<store>]
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
@@ -230,8 +229,6 @@ Options:
 			sendSubscriptionTransferBalanceCode(opts)
 		} else if payoutEmail, _ := opts.Bool("payout-email"); payoutEmail {
 			sendPayoutEmail(opts)
-		} else if networkUserInterviewRequest1, _ := opts.Bool("network-user-interview-request-1"); networkUserInterviewRequest1 {
-			sendNetworkUserInterviewRequest1(opts)
 		}
 	} else if payments, _ := opts.Bool("payments"); payments {
 		if reconcile, _ := opts.Bool("reconcile"); reconcile {
@@ -1204,22 +1201,6 @@ func sendPayoutEmail(opts docopt.Opts) {
 			AmountUsd:          "5.00",
 			PaymentCreatedAt:   time.Now().UTC(),
 		},
-	)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("Sent\n")
-}
-
-func sendNetworkUserInterviewRequest1(opts docopt.Opts) {
-	userAuth, _ := opts.String("--user_auth")
-
-	awsMessageSender := controller.GetAWSMessageSender()
-
-	err := awsMessageSender.SendAccountMessageTemplate(
-		userAuth,
-		&controller.NetworkUserInterviewRequest1Template{},
-		controller.SenderEmail("brien@brienyour.com"),
 	)
 	if err != nil {
 		panic(err)

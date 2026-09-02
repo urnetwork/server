@@ -1,1 +1,11 @@
-Your URnetwork verification code is {{.VerifyCode}} . If you did not make this change or you believe and unauthorized person has accessed your account, please contact <security@ur.io>
+{{define "headline"}}YOUR CODE{{end}}
+{{define "why"}}You received this because this address was entered to create or sign in
+to a URnetwork network.{{end}}
+{{define "content"}}
+Enter this code in the app to verify your email. It expires in 4 hours.
+
+    {{.VerifyCode}}
+
+Didn't ask for a code? Ignore this email. Nothing happens without it. If
+you believe someone else is using your account, contact security@ur.io.
+{{end}}

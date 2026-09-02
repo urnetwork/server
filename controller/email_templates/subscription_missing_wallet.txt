@@ -1,15 +1,17 @@
-You earned {{.AmountUsd}} USDC ...
+{{define "headline"}}CONNECT A WALLET{{end}}
+{{define "why"}}Sent once per pay period while you have new earnings and no wallet
+connected.{{end}}
+{{define "content"}}
+{{.AmountUsd}} USDC waiting
 
-But you need to connect a wallet before we can send it to you. Open the app and connect a wallet in the account section. The payment will be automatically retried once a wallet is connected.
+You earned {{.AmountUsd}} USDC providing on URnetwork, but there's no
+wallet on your account to send it to. Connect one and the payment is
+retried automatically.
 
-This reminder is generated once per pay period when you have new earnings in that pay period.
+Connect a wallet: https://ur.io/app/account/wallets
 
-All associated contracts will be automatically deleted in 7 days to
-preseve anonymity of the network. If there appears to be an error, please
-contact <a href="mailto:support@ur.io">support@ur.io</a> immediately.
-
-We're building an internet that gives not takes.
-
-Copyright {{.CopyrightYear}} BringYour, Inc.
-2261 Market Street #5245, San Francisco, CA 94114, United States
-https://ur.io
+This reminder is sent once per pay period while you have new earnings.
+The contracts behind this payment are deleted after 7 days to preserve
+the anonymity of the network. If something looks wrong, contact
+support@ur.io.
+{{end}}

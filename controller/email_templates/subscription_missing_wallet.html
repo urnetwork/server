@@ -1,78 +1,15 @@
-<div
-  style="
-    font-family: sans-serif;
-    font-size: 12pt;
-    font-weight: 100;
-    background-color: rgb(248, 248, 248);
-    color: rgb(16, 16, 16);
-    padding: 24px;
-  "
->
-  <div style="margin-left: auto; margin-right: auto; max-width: 640px">
-    <div
-      style="
-        margin-top: 48px;
-        margin-bottom: 48px;
-        font-family: monospace;
-        font-size: 24pt;
-        color: rgb(237, 143, 255);
-        letter-spacing: 2px;
-        text-shadow: 1px 1px 1px rgb(64, 64, 64);
-        -webkit-background-clip: text;
-        -moz-background-clip: text;
-        user-select: all;
-        -moz-user-select: all;
-        -webkit-user-select: all;
-      "
-    >
-      You earned {{.AmountUsd}} USDC ...
-    </div>
+{{define "title"}}Connect a wallet{{end}}
+{{define "preheader"}}Your earnings are waiting. Connect a wallet and the payment retries automatically.{{end}}
+{{define "eyebrow"}}Action needed{{end}}
+{{define "accent"}}#87fb67{{end}}
+{{define "headline"}}Connect a wallet{{end}}
+{{define "why"}}Sent once per pay period while you have new earnings and no wallet connected.{{end}}
+{{define "content"}}
+<div class="ur-big ur-ink" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:40px; line-height:44px; font-weight:700; letter-spacing:-0.02em; color:#101010; font-variant-numeric:tabular-nums;">{{.AmountUsd}} USDC waiting</div>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">You earned {{.AmountUsd}} USDC providing on URnetwork, but there's no wallet on your account to send it to. Connect one and the payment is retried automatically.</p>
 
-    <div style="margin-top: 24px">
-      But you need to connect a wallet before we can send it to you. Open the app and connect a wallet in the account section. The payment will be automatically retried once a wallet is connected.
-    </div>
-
-    <div style="margin-top: 24px">
-      This reminder is generated once per pay period when you have new earnings in that pay period. <a href="https://ur.io/app">Get the app</a> to connect a wallet.
-    </div>
-
-    <div style="margin-top: 24px">
-      All associated contracts will be automatically deleted in 7 days to
-      preseve anonymity of the network. If there appears to be an error, please
-      contact <a href="mailto:support@ur.io">support@ur.io</a> immediately.
-    </div>
-
-    <div style="margin-top: 24px">We're building an internet that gives not takes.</div>
-
-  <div
-    style="
-      margin-left: auto;
-      margin-right: auto;
-      max-width: 640px;
-      padding-top: 48px;
-      padding-bottom: 48px;
-    "
-  >
-    <div style="display: inline-block; width: 120px; vertical-align: middle">
-      <a href="https://ur.io"
-        ><img
-          alt="URnetwork wordmark"
-          style="width: 120px"
-          src="https://bringyour.com/res/emails/ur-wordmark-bg-240.jpg"
-      /></a>
-    </div>
-    <div
-      style="
-        display: inline-block;
-        max-width: 504px;
-        padding: 8px;
-        font-size: 8pt;
-        font-weight: 100;
-        vertical-align: middle;
-      "
-    >
-      Copyright {{.CopyrightYear}} BringYour, Inc.<br />2261 Market Street
-      #5245, San Francisco, CA 94114, United States
-    </div>
-  </div>
-</div>
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="https://ur.io/app/account/wallets" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">Connect a wallet</a></td>
+</tr></table>
+<p class="ur-muted" style="margin:20px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:13px; line-height:20px; color:#5f6a74;">This reminder is sent once per pay period while you have new earnings. The contracts behind this payment are deleted after 7 days to preserve the anonymity of the network. If something looks wrong, contact <a class="ur-link" href="mailto:support@ur.io" style="color:#0039de; text-decoration:underline;">support@ur.io</a>.</p>
+{{end}}

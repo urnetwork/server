@@ -1,1 +1,1 @@
-Action needed: Connect a wallet.
+Connect a wallet to receive {{.AmountUsd}} USDC

@@ -45,8 +45,6 @@ const SubscriptionGracePeriod = 24 * time.Hour
 
 const SubscriptionYearDuration = 365 * 24 * time.Hour
 
-const SpecialCompany = "company"
-
 type Skus struct {
 	Skus map[string]*Sku `yaml:"skus"`
 }
@@ -56,7 +54,6 @@ type Sku struct {
 	FeeFraction                   float64 `yaml:"fee_fraction"`
 	PriceAmountUsd                float64 `yaml:"price_amount_usd,omitempty"`
 	BalanceByteCountHumanReadable string  `yaml:"balance_byte_count"`
-	Special                       string  `yaml:"special"`
 	Supporter                     bool    `yaml:"supporter"`
 }
 

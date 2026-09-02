@@ -1,1 +1,24 @@
-Welcome to URnetwork! 1. your network 2. you are network 3. our network
+{{define "headline"}}WELCOME TO URNETWORK{{end}}
+{{define "why"}}You received this because a URnetwork network was created with this
+address.{{end}}
+{{define "content"}}
+URnetwork started in 2023 with a mission: give people real encryption,
+great privacy products, and transparency. Our vision for the future is
+giving everyone, anywhere in the world, the choice on how to be seen and
+what to see.
+
+URnetwork is a free product. We’re building for the billions of people
+and agents on the internet who want to be free. It also has paid tiers
+that can be summarized as
+
++ more of what you get for free
++ expanded tools for businesses and pro users
++ bespoke integration
+
+Get connected: https://ur.io/install
+
+Thanks for joining us. Your feedback is what drives us forward, and
+hearing that URnetwork just works is the best part of the day.
+
+❤️ The URnetwork team
+{{end}}

@@ -1,21 +1,36 @@
+{{define "title"}}Receipt{{end}}
+{{define "preheader"}}Paid {{.Price}} {{.Asset}} automatically over x402.{{end}}
+{{define "eyebrow"}}Receipt{{end}}
+{{define "accent"}}#87fb67{{end}}
+{{define "headline"}}Receipt{{end}}
+{{define "why"}}You received this because this address was given with an x402 purchase.{{end}}
+{{define "content"}}
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Receipt for {{.Description}}, paid automatically over x402.</p>
 
-<div style="font-family: sans-serif; font-size: 12pt; font-weight: 100; background-color: rgb(255, 255, 255); color: rgb(0, 0, 0); padding: 24px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Paid</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">{{.Price}} {{.Asset}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Network</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">{{.Network}}</td>
+</tr></table>
+{{if .Balance}}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Data added</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">{{.Balance}}</td>
+</tr></table>{{end}}
+{{if .Pro}}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">UR Pro</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">UR Pro is active on your network</td>
+</tr></table>{{end}}
 
-  <div style="margin-left: auto; margin-right: auto; max-width: 640px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Transaction</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-all; font-variant-numeric:tabular-nums;">{{.Transaction}}</td>
+</tr></table>
 
-    <div style="margin-top: 48px; margin-bottom: 24px; font-size: 20pt;">Receipt for {{.Description}}</div>
-
-    <div style="margin-top: 24px;">Paid <strong>{{.Price}} {{.Asset}}</strong> on {{.Network}}.</div>
-
-    {{if .Balance}}<div style="margin-top: 12px;">Data added: <strong>{{.Balance}}</strong></div>{{end}}
-
-    {{if .Pro}}<div style="margin-top: 12px;">UR Pro is active on your network.</div>{{end}}
-
-    <div style="margin-top: 24px; font-family: monospace; font-size: 10pt; color: rgb(120, 120, 120); word-break: break-all; user-select: all; -moz-user-select: all; -webkit-user-select: all;">{{.Transaction}}</div>
-
-    <div style="margin-top: 24px;">Paid automatically over x402. <a href="https://app.bringyour.com/account">See your balance</a>.</div>
-
-  </div>
-
-  <div style="margin-left: auto; margin-right: auto; max-width: 640px; padding-top: 48px; padding-bottom: 48px;"><div style="display: inline-block; width: 120px; vertical-align: middle;"><a href="https://bringyour.com"><img alt="BringYour wordmark" style="width: 120px;" src="https://bringyour.com/res/emails/bringyour-wordmark-bg-240.jpg"></a></div><div style="display: inline-block; max-width: 504px; padding: 8px; font-size: 8pt; font-weight: 100; vertical-align: middle;">Copyright {{.CopyrightYear}} BringYour, Inc.<br>2261 Market Street #5245, San Francisco, CA 94114, United States</div></div>
-</div>
+<table role="presentation" class="ur-btn-t" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0;"><tr>
+<td class="ur-btn" style="border-radius:100px; background-color:#0039de; mso-padding-alt:14px 32px;"><a class="ur-btn-a" href="https://ur.io/app/account" style="display:inline-block; padding:14px 32px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:20px; font-weight:600; color:#ffffff; text-decoration:none; border-radius:100px;">See your balance</a></td>
+</tr></table>
+{{end}}

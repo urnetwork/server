@@ -1,0 +1,1 @@
+Your URnetwork verification code is {{.VerifyCode}}. It expires in 4 hours.
