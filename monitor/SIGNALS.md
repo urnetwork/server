@@ -10995,11 +10995,12 @@ Build and deploy only the Web service from a clean Mmm descendant of
 `b4b229c5c`, using the fail-closed Warp release builder. Require `sync-public`
 to place both files in staged output before image publication. The Web build
 also consumes the local SDK WASM, so its dependency checkout must be clean and
-attributable; do not publish from the currently dirty SDK worktree. Keep API
-and Taskworker artifacts containing server `7c852d56` or later behind this Web
-gate, then deploy those templates only after §19.2 is healthy. Connect,
-database, Grafana, and Xops deployments cannot repair this boundary. Do not
-copy files into live containers.
+attributable. At the 2026-09-02 incident observation that prerequisite was not
+met: the local SDK worktree held unrelated uncommitted device/network changes,
+so no Web release was built. Keep API and Taskworker artifacts containing
+server `7c852d56` or later behind this Web gate, then deploy those templates
+only after §19.2 is healthy. Connect, database, Grafana, and Xops deployments
+cannot repair this boundary. Do not copy files into live containers.
 
 This alert can cross from software into operations: any exact-edge semantic
 failure requires the Web image/config repair and full Web rollout. If every

@@ -145,6 +145,7 @@ func TestEmailAssetsSignalSyntheticStaleSiteBundleRootCause(t *testing.T) {
 		"controller/email_templates",
 		"sync-public",
 		"Mmm descendant of b4b229c5c",
+		"clean, attributable SDK checkout",
 		"Web service",
 		"release-order blocker",
 		"API and Taskworker",
