@@ -129,10 +129,17 @@ func TestSubtensorSignalRetainsPermissionRootCauseAfterOwnershipRepair(t *testin
 		"current_generation_database_permission_error=true",
 		"head_advanced=false",
 		"started_at=2026-09-01T20:00:00Z",
+		"Ownership is already repaired",
+		"do not rerun run-subtensor.sh",
+		"service-scoped same-generation restart",
+		"Recover the archive first",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("latched permission alert missing %q:\n%s", want, alert.Markdown())
 		}
+	}
+	if strings.Contains(alert.Action, "Apply the committed Xops runtime-ownership repair") {
+		t.Fatalf("repaired ownership retained the pre-repair action: %s", alert.Action)
 	}
 }
 

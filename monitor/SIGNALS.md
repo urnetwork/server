@@ -10703,6 +10703,13 @@ and either no retained permission signature or head advancement by that exact
 process. Recovery requires advancing best heads across two post-repair samples;
 container replacement changes the evidence generation and must retain the same
 data path. Missing permission facts are observation loss, not a healthy default.
+The alert action branches on the live permission boundary. A non-writable path
+requires the idempotent Xops ownership repair with both identities preserved.
+A writable path plus a retained signature and frozen head means provisioning is
+already complete: do not rerun the full-host playbook or choose a new database
+generation. Obtain explicit authorization for one service-scoped,
+same-generation restart at a time, archive first, and prove progress plus the
+other node's unchanged identity before continuing.
 
 ## 18. Edge IPv6 ingress — EDGEIPV61
 

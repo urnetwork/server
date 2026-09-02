@@ -396,6 +396,12 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 				findings = append(findings, cannotObserveFinding(identity+"/data-permission", fmt.Errorf("runtime and bind-mount ownership are unavailable")))
 			} else if !node.DataRuntimeWritable || (node.DataPermissionError && secondHead <= firstHead) {
 				headAdvanced := secondHead > firstHead
+				action := "Apply the committed Xops runtime-ownership repair with run-subtensor.sh and require Compose to preserve both container identities. Restore access before considering a restart. If the same framed process remains frozen for two further bounded samples after access is restored, preserve its generation and obtain explicit authorization for a service-scoped same-generation restart; recover one node at a time and do not erase it or select a new generation solely for EACCES."
+				context := "This is an Xops ownership regression, not peer starvation, disk exhaustion, or evidence that the preserved database must be discarded. An already-open database can continue temporarily after path access is revoked, so RPC health is not a negative control."
+				if node.DataRuntimeWritable && node.DataPermissionError && !headAdvanced {
+					action = "Ownership is already repaired; do not rerun run-subtensor.sh or replace the database generation. Preserve both container identities and obtain explicit authorization for a service-scoped same-generation restart of only this framed node. Recover the archive first, prove its head advances across two bounded samples, then separately recover the lightnode while proving the archive identity and progress remain intact."
+					context = "The exact runtime account can write the retained data path again, but this unchanged process still exposes the earlier RocksDB EACCES signature and does not advance. Provisioning is no longer the recovery boundary: the database process latched the background failure. This is not peer starvation, disk exhaustion, or evidence that the preserved database must be discarded."
+				}
 				findings = append(findings, finding{
 					probeId: "subtensor/node-health", tier: tierPage, class: "subtensor-data-permission",
 					target: target.name, frame: configured.Name, sustain: 1,
@@ -408,8 +414,8 @@ func evaluateSubtensorNode(target *host, configured SubtensorNodeSettings, node 
 						node.DataRuntimeWritable, node.DataPermissionError, headAdvanced,
 					),
 					evidence: fmt.Sprintf("container=%s data_path=%s started_at=%s", configured.ContainerName, node.DataPath, firstNonempty(node.ContainerStarted, "unknown")),
-					context:  "This is an Xops ownership regression, not peer starvation, disk exhaustion, or evidence that the preserved database must be discarded. An already-open database can continue temporarily after path access is revoked, so RPC health is not a negative control.",
-					action:   "Apply the committed Xops runtime-ownership repair with run-subtensor.sh and require Compose to preserve both container identities. Restore access before considering a restart. If the same framed process remains frozen for two further bounded samples after access is restored, preserve its generation and obtain explicit authorization for a service-scoped same-generation restart; recover one node at a time and do not erase it or select a new generation solely for EACCES.",
+					context:  context,
+					action:   action,
 					verify:   "The runtime account passes test -w /data in both containers, their IDs and start times remain unchanged during permission repair, and both best heads advance across two samples. A retained permission signature clears this class only when that exact process advances; a restart, if separately authorized, must replace only the framed container and retain its data path plus the archive identity.",
 					playbook: "SIGNALS.md §17.4",
 				})
