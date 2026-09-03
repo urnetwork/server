@@ -1200,6 +1200,16 @@ type NetworkClientConnection struct {
 	ConnectionBlock   string     `json:"connection_block"`
 }
 
+// Builds the wire result with an allocated empty slice. JSON null is not the
+// collection contract and older SDK views dereferenced the generated list.
+func newNetworkClientsResult(clientInfos map[server.Id]*NetworkClientInfo) *NetworkClientsResult {
+	clients := make([]*NetworkClientInfo, 0, len(clientInfos))
+	for _, clientInfo := range clientInfos {
+		clients = append(clients, clientInfo)
+	}
+	return &NetworkClientsResult{Clients: clients}
+}
+
 func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, error) {
 	var clientsResult *NetworkClientsResult
 	var clientsErr error
@@ -1340,9 +1350,7 @@ func GetNetworkClients(session *session.ClientSession) (*NetworkClientsResult, e
 			}
 		})
 
-		clientsResult = &NetworkClientsResult{
-			Clients: slices.Collect(maps.Values(clientInfos)),
-		}
+		clientsResult = newNetworkClientsResult(clientInfos)
 	})
 
 	if clientsResult != nil && 0 < len(clientsResult.Clients) {
