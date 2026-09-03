@@ -129,6 +129,48 @@ func TestLocalBlobStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLocalBlobStoreListPageBoundsAndContinues(t *testing.T) {
+	root := t.TempDir()
+	store := NewLocalBlobStore(root, "blob")
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	keys := []string{
+		"blob/history/run-a/01.json",
+		"blob/history/run-a/02.json",
+		"blob/history/run-a/03.json",
+		"blob/history/run-b/01.json",
+	}
+	for _, key := range keys {
+		if err := store.Put(ctx, key, source, "application/json"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix := "blob/history/run-a/"
+	first, more, err := store.ListPage(ctx, prefix, "", 2)
+	if err != nil || !more || len(first) != 2 || first[0].Key != keys[0] || first[1].Key != keys[1] {
+		t.Fatalf("first page = %+v more=%v err=%v", first, more, err)
+	}
+	second, more, err := store.ListPage(ctx, prefix, first[len(first)-1].Key, 2)
+	if err != nil || more || len(second) != 1 || second[0].Key != keys[2] {
+		t.Fatalf("second page = %+v more=%v err=%v", second, more, err)
+	}
+	if _, _, err := store.ListPage(ctx, prefix, "", 0); err == nil {
+		t.Fatal("zero page limit accepted")
+	}
+}
+
+func TestLocalBlobStoreListPageHonorsCancellation(t *testing.T) {
+	store := NewLocalBlobStore(t.TempDir(), "blob")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := store.ListPage(ctx, "blob/", "", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled page error = %v, want context canceled", err)
+	}
+}
+
 func TestLocalBlobStorePutIfAbsentIsAtomicAcrossInstances(t *testing.T) {
 	root := t.TempDir()
 	stores := []*localBlobStore{
@@ -467,6 +509,60 @@ func TestMinIOBlobStorePutIfAbsentUsesConditionalRequest(t *testing.T) {
 		if !bytes.Equal(decodedBody, expectedBody) {
 			t.Errorf("request %d decoded body = %q, want %q", i, decodedBody, expectedBody)
 		}
+	}
+}
+
+func TestMinIOBlobStoreListPageBoundsBackendRequest(t *testing.T) {
+	type requestRecord struct {
+		prefix     string
+		startAfter string
+		maxKeys    string
+		listType   string
+	}
+	requests := make(chan requestRecord, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- requestRecord{
+			prefix:     r.URL.Query().Get("prefix"),
+			startAfter: r.URL.Query().Get("start-after"),
+			maxKeys:    r.URL.Query().Get("max-keys"),
+			listType:   r.URL.Query().Get("list-type"),
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>evidence</Name><Prefix>history/run/</Prefix><KeyCount>3</KeyCount><MaxKeys>3</MaxKeys><IsTruncated>false</IsTruncated>
+  <Contents><Key>history/run/01.json</Key><Size>1</Size></Contents>
+  <Contents><Key>history/run/02.json</Key><Size>2</Size></Contents>
+  <Contents><Key>history/run/03.json</Key><Size>3</Size></Contents>
+</ListBucketResult>`)
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := minio.New(endpoint.Host, &minio.Options{
+		Creds:        credentials.NewStaticV4("access", "secret", ""),
+		Secure:       false,
+		Region:       "us-east-1",
+		BucketLookup: minio.BucketLookupPath,
+		MaxRetries:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &minioBlobStore{client: client, bucket: "evidence", prefix: "blob", authority: endpoint.Host}
+	objects, more, err := store.ListPage(context.Background(), "history/run/", "history/run/00.json", 2)
+	if err != nil || !more || len(objects) != 2 || objects[0].Key != "history/run/01.json" || objects[1].Key != "history/run/02.json" {
+		t.Fatalf("page = %+v more=%v err=%v", objects, more, err)
+	}
+	select {
+	case request := <-requests:
+		if request.prefix != "history/run/" || request.startAfter != "history/run/00.json" || request.maxKeys != "3" || request.listType != "2" {
+			t.Fatalf("list request = %+v", request)
+		}
+	default:
+		t.Fatal("MinIO listing request was not observed")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,5 +63,23 @@ func TestEvidenceRejectsUnsafeHistorySegments(t *testing.T) {
 	e.RunID = "../escape"
 	if err := VerifyEvidence(e); err == nil {
 		t.Fatal("unsafe run id accepted")
+	}
+}
+
+func TestEvidenceHistoryRunPrefixAcceptsSignedRunGrammar(t *testing.T) {
+	store := server.NewLocalBlobStore(t.TempDir(), "blob/operator-1")
+	got, err := EvidenceHistoryRunPrefix(store, "test-deployment", 521, "scenario-bundle", "release.v1-attempt-4")
+	want := "blob/operator-1/st/v1/evidence/history/test-deployment/521/scenario-bundle/release.v1-attempt-4/"
+	if err != nil || got != want {
+		t.Fatalf("run prefix = %q, %v; want %q", got, err, want)
+	}
+	invalidRunIDs := []string{"", "../escape", "a/b", " a", "a ", strings.Repeat("a", 129)}
+	for _, runID := range invalidRunIDs {
+		if prefix, err := EvidenceHistoryRunPrefix(store, "test-deployment", 521, "scenario-bundle", runID); err == nil {
+			t.Errorf("unsafe run id %q produced %q", runID, prefix)
+		}
+	}
+	if prefix, err := EvidenceHistoryRunPrefix(store, "test-deployment", 521, "", "run-1"); err == nil {
+		t.Errorf("empty kind produced %q", prefix)
 	}
 }

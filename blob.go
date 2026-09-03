@@ -124,6 +124,11 @@ type BlobStore interface {
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	// List returns every object whose key starts with keyPrefix.
 	List(ctx context.Context, keyPrefix string) ([]BlobObject, error)
+	// ListPage returns at most limit objects after startAfter whose keys start
+	// with keyPrefix. More is true only when another matching object exists.
+	// The bound applies while reading the backing store, not only to the
+	// returned slice, so callers may safely expose listings to untrusted peers.
+	ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) (objects []BlobObject, more bool, err error)
 	// SetLifecycle declares per-key-prefix TTL expiry, replacing the store's
 	// previously-declared rules. Idempotent. MinIO enforces it server-side via
 	// an ILM lifecycle configuration; the local backend runs an in-process
@@ -448,6 +453,45 @@ func (self *minioBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobO
 		objects = append(objects, BlobObject{Key: object.Key, Size: object.Size})
 	}
 	return objects, nil
+}
+
+// ListPage uses a separately cancelable MinIO iterator so discovery stops as
+// soon as one object beyond the requested page proves that another page exists.
+func (self *minioBlobStore) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]BlobObject, bool, error) {
+	if limit <= 0 {
+		return nil, false, errors.New("blob list page limit must be positive")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	listCtx, listCancel := context.WithCancel(ctx)
+	defer listCancel()
+	objects := make([]BlobObject, 0, limit)
+	more := false
+	objectCh := self.client.ListObjects(listCtx, self.bucket, minio.ListObjectsOptions{
+		Prefix:     keyPrefix,
+		Recursive:  true,
+		MaxKeys:    limit + 1,
+		StartAfter: startAfter,
+	})
+	for object := range objectCh {
+		if object.Err != nil {
+			if more && errors.Is(object.Err, context.Canceled) {
+				continue
+			}
+			return nil, false, object.Err
+		}
+		if len(objects) == limit {
+			more = true
+			listCancel()
+			continue
+		}
+		objects = append(objects, BlobObject{Key: object.Key, Size: object.Size})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return objects, more, nil
 }
 
 // resolveBlobAuthority resolves the configured authority to a dialable
@@ -873,6 +917,63 @@ func (self *localBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobO
 		return nil, err
 	}
 	return objects, nil
+}
+
+// ListPage walks only the directory selected by a slash-terminated prefix and
+// stops after the first object beyond the requested page. filepath.Walk visits
+// sibling names lexically, matching the object-store ordering used by MinIO.
+func (self *localBlobStore) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]BlobObject, bool, error) {
+	if limit <= 0 {
+		return nil, false, errors.New("blob list page limit must be positive")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	scanRoot := self.root
+	if strings.HasSuffix(keyPrefix, "/") {
+		candidate := self.pathFor(strings.TrimSuffix(keyPrefix, "/"))
+		if rel, err := filepath.Rel(self.root, candidate); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			scanRoot = candidate
+		}
+	}
+	if _, err := os.Stat(scanRoot); err != nil {
+		if os.IsNotExist(err) {
+			return []BlobObject{}, false, nil
+		}
+		return nil, false, err
+	}
+	objects := make([]BlobObject, 0, limit)
+	more := false
+	stop := errors.New("blob list page complete")
+	err := filepath.Walk(scanRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if info.IsDir() || strings.HasSuffix(path, blobPartialSuffix) {
+			return nil
+		}
+		rel, err := filepath.Rel(self.root, path)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if !strings.HasPrefix(key, keyPrefix) || key <= startAfter {
+			return nil
+		}
+		if len(objects) == limit {
+			more = true
+			return stop
+		}
+		objects = append(objects, BlobObject{Key: key, Size: info.Size()})
+		return nil
+	})
+	if err != nil && !errors.Is(err, stop) {
+		return nil, false, err
+	}
+	return objects, more, nil
 }
 
 // SetLifecycle records the rules and starts (once) a background reaper bound to

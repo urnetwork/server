@@ -144,6 +144,20 @@ func EvidenceHistoryPrefix(store server.BlobStore, deploymentID string, netuid u
 	return filepath.ToSlash(filepath.Join(parts...)) + "/", nil
 }
 
+// EvidenceHistoryRunPrefix scopes an immutable history listing to exactly one
+// kind and run. Run ids use the signed-envelope grammar, which deliberately
+// permits dots even though several older artifact path helpers do not.
+func EvidenceHistoryRunPrefix(store server.BlobStore, deploymentID string, netuid uint16, kind string, runID string) (string, error) {
+	if !evidenceSegment.MatchString(runID) || kind == "" {
+		return "", errors.New("invalid evidence history run identity")
+	}
+	prefix, err := EvidenceHistoryPrefix(store, deploymentID, netuid, kind)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(filepath.Join(prefix, runID)) + "/", nil
+}
+
 func PublishEvidence(ctx context.Context, store server.BlobStore, e *EvidenceEnvelope) (*Published, error) {
 	if store == nil {
 		return nil, errors.New("server/blob store is unavailable")

@@ -20,6 +20,11 @@ import (
 
 const maximumSnEvidenceBytes = 64 * 1024 * 1024
 
+const (
+	defaultSnEvidenceHistoryPageObjects = 256
+	maximumSnEvidenceHistoryPageObjects = 4096
+)
+
 // Swappable boundaries let handler tests force exact storage interleavings
 // while production uses the configured controller and blob store.
 var (
@@ -219,13 +224,15 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// SnEvidenceHistory exposes a bounded, lexically paged history. Supplying a
+// signed run id moves the storage prefix below unrelated runs before listing.
 func SnEvidenceHistory(w http.ResponseWriter, r *http.Request) {
 	store, ok := loadSnEvidenceBlobStore()
 	if !ok {
 		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
 		return
 	}
-	deployment := cleanArtifactSegment(r.URL.Query().Get("deployment_id"))
+	deployment := r.URL.Query().Get("deployment_id")
 	netuidValue, err := strconv.ParseUint(r.URL.Query().Get("netuid"), 10, 16)
 	if err != nil || netuidValue == 0 {
 		http.Error(w, "deployment_id and numeric netuid are required.", http.StatusBadRequest)
@@ -233,24 +240,50 @@ func SnEvidenceHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := ""
 	if raw := r.URL.Query().Get("kind"); raw != "" {
-		kind = cleanArtifactSegment(raw)
-		if kind == "" {
-			http.Error(w, "Bad evidence kind.", http.StatusBadRequest)
-			return
-		}
+		kind = raw
 	}
-	prefix, err := startifact.EvidenceHistoryPrefix(store, deployment, uint16(netuidValue), kind)
+	runID := r.URL.Query().Get("run_id")
+	var prefix string
+	if runID == "" {
+		prefix, err = startifact.EvidenceHistoryPrefix(store, deployment, uint16(netuidValue), kind)
+	} else {
+		prefix, err = startifact.EvidenceHistoryRunPrefix(store, deployment, uint16(netuidValue), kind, runID)
+	}
 	if err != nil {
 		http.Error(w, "Bad evidence history identity.", http.StatusBadRequest)
 		return
 	}
-	objects, err := store.List(r.Context(), prefix)
+	limit := defaultSnEvidenceHistoryPageObjects
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed <= 0 || maximumSnEvidenceHistoryPageObjects < parsed {
+			http.Error(w, "Bad evidence history limit.", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+	startAfter := r.URL.Query().Get("after")
+	if startAfter != "" && (!strings.HasPrefix(startAfter, prefix) || filepath.ToSlash(filepath.Clean(startAfter)) != startAfter || strings.ContainsAny(startAfter, "\\\r\n\x00")) {
+		http.Error(w, "Bad evidence history cursor.", http.StatusBadRequest)
+		return
+	}
+	objects, more, err := store.ListPage(r.Context(), prefix, startAfter, limit)
 	if err != nil {
 		http.Error(w, "Evidence history unavailable.", http.StatusBadGateway)
 		return
 	}
+	nextAfter := ""
+	if more && 0 < len(objects) {
+		nextAfter = objects[len(objects)-1].Key
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"schema": "urnetwork-release-evidence-history-v1", "objects": objects})
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema":     "urnetwork-release-evidence-history-v1",
+		"objects":    objects,
+		"more":       more,
+		"next_after": nextAfter,
+	})
 }
 
 func cleanArtifactSegment(v string) string {

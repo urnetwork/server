@@ -93,6 +93,24 @@ func (self *stubBlobStore) List(ctx context.Context, keyPrefix string) ([]server
 	return objects, nil
 }
 
+func (self *stubBlobStore) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]server.BlobObject, bool, error) {
+	objects, err := self.List(ctx, keyPrefix)
+	if err != nil {
+		return nil, false, err
+	}
+	page := []server.BlobObject{}
+	for _, object := range objects {
+		if object.Key <= startAfter {
+			continue
+		}
+		if len(page) == limit {
+			return page, true, nil
+		}
+		page = append(page, object)
+	}
+	return page, false, nil
+}
+
 func (self *stubBlobStore) SetLifecycle(ctx context.Context, rules []server.BlobLifecycleRule) error {
 	return nil
 }

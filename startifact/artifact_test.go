@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -132,6 +133,25 @@ func (self *immutableRaceBlobStore) List(ctx context.Context, keyPrefix string) 
 		}
 	}
 	return objects, nil
+}
+
+func (self *immutableRaceBlobStore) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]server.BlobObject, bool, error) {
+	objects, err := self.List(ctx, keyPrefix)
+	if err != nil {
+		return nil, false, err
+	}
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	page := []server.BlobObject{}
+	for _, object := range objects {
+		if object.Key <= startAfter {
+			continue
+		}
+		if len(page) == limit {
+			return page, true, nil
+		}
+		page = append(page, object)
+	}
+	return page, false, nil
 }
 
 func (self *immutableRaceBlobStore) SetLifecycle(context.Context, []server.BlobLifecycleRule) error {

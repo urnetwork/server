@@ -87,6 +87,29 @@ func serveSnEvidenceHistory(target string) *httptest.ResponseRecorder {
 	return response
 }
 
+type snEvidenceListPageRecorder struct {
+	server.BlobStore
+	stateLock sync.Mutex
+	prefix    string
+	limit     int
+	listCalls int
+}
+
+func (self *snEvidenceListPageRecorder) List(ctx context.Context, keyPrefix string) ([]server.BlobObject, error) {
+	self.stateLock.Lock()
+	self.listCalls++
+	self.stateLock.Unlock()
+	return self.BlobStore.List(ctx, keyPrefix)
+}
+
+func (self *snEvidenceListPageRecorder) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]server.BlobObject, bool, error) {
+	self.stateLock.Lock()
+	self.prefix = keyPrefix
+	self.limit = limit
+	self.stateLock.Unlock()
+	return self.BlobStore.ListPage(ctx, keyPrefix, startAfter, limit)
+}
+
 // snEvidenceRaceStore gives both the obsolete List/Put sequence and the new
 // PutIfAbsent path the same two-party content-key barrier.
 type snEvidenceRaceStore struct {
@@ -192,6 +215,24 @@ func (self *snEvidenceRaceStore) List(ctx context.Context, keyPrefix string) ([]
 	return objects, nil
 }
 
+func (self *snEvidenceRaceStore) ListPage(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]server.BlobObject, bool, error) {
+	objects, err := self.List(ctx, keyPrefix)
+	if err != nil {
+		return nil, false, err
+	}
+	page := []server.BlobObject{}
+	for _, object := range objects {
+		if object.Key <= startAfter {
+			continue
+		}
+		if len(page) == limit {
+			return page, true, nil
+		}
+		page = append(page, object)
+	}
+	return page, false, nil
+}
+
 func (self *snEvidenceRaceStore) SetLifecycle(context.Context, []server.BlobLifecycleRule) error {
 	return nil
 }
@@ -280,7 +321,8 @@ func TestSnEvidencePostGetAndHistoryRoundTrip(t *testing.T) {
 	}
 	history := serveSnEvidenceHistory(
 		"/sn/evidence/history?deployment_id=" + url.QueryEscape(evidence.DeploymentID) +
-			"&netuid=7&kind=" + url.QueryEscape(evidence.Kind),
+			"&netuid=7&kind=" + url.QueryEscape(evidence.Kind) +
+			"&run_id=" + url.QueryEscape(evidence.RunID),
 	)
 	if history.Code != http.StatusOK {
 		t.Fatalf("history status = %d, body = %s", history.Code, history.Body.String())
@@ -295,6 +337,123 @@ func TestSnEvidencePostGetAndHistoryRoundTrip(t *testing.T) {
 	if listing.Schema != "urnetwork-release-evidence-history-v1" || len(listing.Objects) != 1 ||
 		listing.Objects[0].Key != published.HistoryKey || listing.Objects[0].Size != int64(len(expected)) {
 		t.Fatalf("history = %+v", listing)
+	}
+}
+
+func TestSnEvidenceHistoryScopesDottedRunAndPaginates(t *testing.T) {
+	config, artifactKey := configureSnEvidenceHandler(t)
+	publish := func(runID string, marker string) startifact.Published {
+		evidence := signedSnEvidence(t, config, artifactKey)
+		evidence.RunID = runID
+		evidence.Payload = json.RawMessage(fmt.Sprintf(`{"marker":%q}`, marker))
+		if err := startifact.SignEvidence(evidence, artifactKey); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := serveSnEvidence(http.MethodPost, "/sn/evidence", encoded)
+		if response.Code != http.StatusOK {
+			t.Fatalf("publish %q status = %d, body = %s", runID, response.Code, response.Body.String())
+		}
+		var result startifact.Published
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	targetRunID := "release.v1-attempt-4"
+	firstPublished := publish(targetRunID, "a")
+	secondPublished := publish(targetRunID, "b")
+	publish("unrelated-run", "c")
+	target := "/sn/evidence/history?deployment_id=test-deployment&netuid=7&kind=scenario-result&run_id=" + url.QueryEscape(targetRunID) + "&limit=1"
+	first := serveSnEvidenceHistory(target)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first page status = %d, body = %s", first.Code, first.Body.String())
+	}
+	if first.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("history cache control = %q", first.Header().Get("Cache-Control"))
+	}
+	var firstPage struct {
+		Objects   []server.BlobObject `json:"objects"`
+		More      bool                `json:"more"`
+		NextAfter string              `json:"next_after"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage.Objects) != 1 || !firstPage.More || firstPage.NextAfter != firstPage.Objects[0].Key || !strings.Contains(firstPage.Objects[0].Key, "/"+targetRunID+"/") {
+		t.Fatalf("first page = %+v", firstPage)
+	}
+	second := serveSnEvidenceHistory(target + "&after=" + url.QueryEscape(firstPage.NextAfter))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second page status = %d, body = %s", second.Code, second.Body.String())
+	}
+	var secondPage struct {
+		Objects []server.BlobObject `json:"objects"`
+		More    bool                `json:"more"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPage); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := map[string]bool{firstPublished.HistoryKey: true, secondPublished.HistoryKey: true}
+	delete(wantKeys, firstPage.Objects[0].Key)
+	if len(secondPage.Objects) != 1 || secondPage.More || !wantKeys[secondPage.Objects[0].Key] {
+		t.Fatalf("second page = %+v, remaining = %+v", secondPage, wantKeys)
+	}
+}
+
+func TestSnEvidenceHistoryRejectsUnsafeRunLimitAndCursor(t *testing.T) {
+	configureSnEvidenceHandler(t)
+	base := "/sn/evidence/history?deployment_id=test-deployment&netuid=7&kind=scenario-result"
+	targets := []string{
+		base + "&run_id=..%2Fescape",
+		"/sn/evidence/history?deployment_id=test-deployment&netuid=7&run_id=run-1",
+		"/sn/evidence/history?deployment_id=..%2Fdeployment&netuid=7&kind=scenario-result&run_id=run-1",
+		"/sn/evidence/history?deployment_id=test-deployment&netuid=7&kind=..%2Fkind&run_id=run-1",
+		base + "&run_id=run-1&limit=0",
+		base + "&run_id=run-1&limit=4097",
+		base + "&run_id=run-1&limit=not-a-number",
+		base + "&run_id=run-1&after=" + url.QueryEscape("blob/other/key.json"),
+		base + "&run_id=run-1&after=" + url.QueryEscape("blob/st/v1/evidence/history/test-deployment/7/scenario-result/run-1/../other.json"),
+	}
+	for _, target := range targets {
+		response := serveSnEvidenceHistory(target)
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("unsafe history request %q status = %d, body = %s", target, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestSnEvidenceHistoryUsesSignedSegmentGrammar(t *testing.T) {
+	configureSnEvidenceHandler(t)
+	response := serveSnEvidenceHistory("/sn/evidence/history?deployment_id=test.deployment&netuid=7&kind=scenario.result&run_id=run.1")
+	if response.Code != http.StatusOK {
+		t.Fatalf("dotted evidence identity status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSnEvidenceHistoryBoundsExactRunAtStorageLayer(t *testing.T) {
+	configureSnEvidenceHandler(t)
+	store, ok := server.LoadBlobStore()
+	if !ok {
+		t.Fatal("configured test blob store is unavailable")
+	}
+	recorder := &snEvidenceListPageRecorder{BlobStore: store}
+	previousLoad := loadSnEvidenceBlobStore
+	loadSnEvidenceBlobStore = func() (server.BlobStore, bool) { return recorder, true }
+	t.Cleanup(func() { loadSnEvidenceBlobStore = previousLoad })
+	response := serveSnEvidenceHistory("/sn/evidence/history?deployment_id=test-deployment&netuid=7&kind=scenario-bundle&run_id=release.v1&limit=8")
+	if response.Code != http.StatusOK {
+		t.Fatalf("history status = %d, body = %s", response.Code, response.Body.String())
+	}
+	recorder.stateLock.Lock()
+	prefix, limit, listCalls := recorder.prefix, recorder.limit, recorder.listCalls
+	recorder.stateLock.Unlock()
+	wantPrefix := "blob/st/v1/evidence/history/test-deployment/7/scenario-bundle/release.v1/"
+	if prefix != wantPrefix || limit != 8 || listCalls != 0 {
+		t.Fatalf("storage listing prefix=%q limit=%d unbounded_calls=%d; want %q, 8, 0", prefix, limit, listCalls, wantPrefix)
 	}
 }
 
