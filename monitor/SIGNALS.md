@@ -4350,16 +4350,24 @@ The `deactivate_time <= create_time` boundary is essential. Looking only at a
 destination's current inactive bit would falsely include a healthy contract
 whose destination disconnected after creation. The probe also exports only
 aggregate same/cross-network, derived/top-level, active-top-level source,
-distinct endpoint counts, and median/p95 deactivation lead time. It never
-returns identifiers or contract content.
+distinct endpoint counts, and median/p95 deactivation lead time. For the
+cross-network subset it additionally exports inactive top-level destination,
+derived source, active source-parent, distinct destination, distinct parent,
+and distinct device counts. Those bounded counts distinguish one retained
+client window from a fleet-wide producer without returning identifiers or
+contract content.
 
 - HEALTHY: zero matching successful contracts on two consecutive five-minute
   cohorts, alongside both observable §2.18 rejection partitions.
 - `stale-contract-success` (PAGE immediately): one or more matching rows. A
   successful row is affirmative contract-correctness failure, not a noisy
   retry or inferred client error. Same-network derived-destination dominance
-  identifies the stale return-path class seen on 2026-09-02; cross-network
-  rows require a separate producer discriminator.
+  identifies the stale return-path class seen on 2026-09-02. Cross-network
+  rows to inactive top-level destinations from derived sources with active
+  parents can be a retained Public route. Concentration into one destination
+  and one parent/device, paired with bursts from fresh derived sources, is a
+  client-window discriminator; corroborate a bounded current score-cache
+  sample before ruling the cache in or out.
 - UNKNOWN: the aggregate is absent, malformed, negative, internally
   contradictory, or its median exceeds its p95. Preserve that as observation
   failure rather than coercing it to zero.
@@ -4380,11 +4388,30 @@ same-network cohort described in §2.17; after deployment, require this probe to
 stay at zero for two complete windows while §2.18 becomes observable and the
 missing-origin rate returns to band.
 
+A `2026-09-03T05:24Z` identifier-free 15-minute cohort separated a smaller
+cross-network shape from the dominant same-network incident. All 180 rows went
+from 60 derived source identities belonging to one active parent, network, and
+device to one inactive top-level destination. Every source was created only
+15--17 seconds before its contracts and made exactly three within zero to two
+seconds; the rolling five-minute view therefore shows 20 new derived sources
+and 60 contracts. The destination had been inactive for about 18.5 hours,
+retained a Public provide key, had no Stream key, and had no connected row. A
+bounded read-only sample of 1,600 current score blobs across all 32 Redis nodes
+found that destination zero times. That sample is not an
+exhaustive proof of absence, but the one-parent/one-destination concentration
+and per-source bursts strongly identify one retained client route churning new
+derived identities rather than fleet-wide score-cache contamination. The
+pre-guard API turns those stale attempts into successful contracts, so deploy
+the `c8dfe570` lifecycle guard first; a Connect-bearing client containing
+`5b33c91` then consumes the Reliability result and retires exactly that route.
+Do not delete the durable Public key or Redis data to hide the cohort.
+
 Implementation convention: SIGNALS.md §2.20 (`stale-contracts`) maps to
 `signal_stale_contracts.go` and `signal_stale_contracts_test.go`. Synthetic
 tests cover the exact inactive-before-create failure, a healthy zero cohort,
-malformed and contradictory aggregates, query scoping, privacy boundaries,
-and detailed Markdown rendering.
+the concentrated retained-client-route boundary, malformed and contradictory
+aggregates, query scoping, privacy boundaries, and detailed Markdown
+rendering.
 
 ---
 

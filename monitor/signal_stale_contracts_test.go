@@ -15,12 +15,15 @@ func TestStaleContractsSignalSyntheticInactiveBeforeCreate(t *testing.T) {
 			"NOT destination.active",
 			"destination.deactivate_time <= tc.create_time",
 			"count(DISTINCT destination_id)",
+			"source_parent.active AS source_parent_active",
+			"count(DISTINCT source_id) FILTER (WHERE NOT same_network)",
+			"count(DISTINCT source_parent_id) FILTER (WHERE NOT same_network)",
 		} {
 			if !strings.Contains(query, want) {
 				t.Fatalf("stale-contract query missing %q:\n%s", want, query)
 			}
 		}
-		return []Row{{"8705", "8705", "8705", "8705", "135", "14", "641254", "651744"}}, nil
+		return []Row{{"8705", "8705", "8705", "8705", "135", "14", "641254", "651744", "0", "0", "0", "0", "0", "0", "0"}}, nil
 	}}
 	alerts, err := NewStaleContractsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -56,7 +59,7 @@ func TestStaleContractsSignalSyntheticInactiveBeforeCreate(t *testing.T) {
 
 func TestStaleContractsSignalSyntheticHealthy(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
-		return []Row{{"0", "0", "0", "0", "0", "0", "0", "0"}}, nil
+		return []Row{{"0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"}}, nil
 	}}
 	alerts, err := NewStaleContractsSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -67,15 +70,44 @@ func TestStaleContractsSignalSyntheticHealthy(t *testing.T) {
 	}
 }
 
+func TestStaleContractsSignalSyntheticConcentratedRetainedClientRoute(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"180", "0", "0", "0", "1", "60", "66000", "67000", "180", "180", "180", "1", "60", "1", "1"}}, nil
+	}}
+	alerts, err := NewStaleContractsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "stale-contract-success")
+	for _, want := range []string{
+		"cross_network=180",
+		"cross_destination_top=180",
+		"cross_source_derived=180",
+		"cross_source_parent_active=180",
+		"cross_distinct_destinations=1",
+		"cross_distinct_sources=60",
+		"cross_distinct_source_parents=1",
+		"cross_distinct_source_devices=1",
+		"one window churning derived identities",
+		"bounded current-cache control",
+		"do not call one retained route global provider-cache contamination",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("concentrated stale-contract alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
 func TestStaleContractsSignalSyntheticRejectsMalformedAggregate(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		row  Row
 		want string
 	}{
-		{name: "negative", row: Row{"-1", "0", "0", "0", "0", "0", "0", "0"}, want: "invalid column 0"},
-		{name: "part_above_total", row: Row{"2", "3", "0", "0", "1", "1", "1", "2"}, want: "same_network=3 above total=2"},
-		{name: "reversed_quantiles", row: Row{"2", "2", "2", "2", "1", "1", "5", "4"}, want: "median inactive age 5 above p95 4"},
+		{name: "negative", row: Row{"-1", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"}, want: "invalid column 0"},
+		{name: "part_above_total", row: Row{"2", "3", "0", "0", "1", "1", "1", "2", "0", "0", "0", "0", "0", "0", "0"}, want: "same_network=3 above total=2"},
+		{name: "cross_part_above_cross", row: Row{"2", "2", "0", "0", "1", "1", "1", "2", "1", "0", "0", "0", "0", "0", "0"}, want: "cross_destination_top=1 above cross_network=0"},
+		{name: "reversed_quantiles", row: Row{"2", "2", "2", "2", "1", "1", "5", "4", "0", "0", "0", "0", "0", "0", "0"}, want: "median inactive age 5 above p95 4"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
