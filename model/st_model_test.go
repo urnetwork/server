@@ -6,6 +6,7 @@ package model
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +15,25 @@ func testStCkey(marker byte) [32]byte {
 	var ckey [32]byte
 	ckey[0] = marker
 	return ckey
+}
+
+// Human labels do not create nonce lanes; only the chain account does.
+func TestStTransactionAdvisoryLockKeyUsesEthereumNonceScope(t *testing.T) {
+	address := "0x" + strings.Repeat("a", 40)
+	genesisHash := "0x" + strings.Repeat("1", 64)
+	key := stTransactionAdvisoryLockKey(945, genesisHash, address)
+	if strings.ContainsRune(key, '\x00') {
+		t.Fatalf("lock key contains a PostgreSQL-invalid NUL: %q", key)
+	}
+	if repeated := stTransactionAdvisoryLockKey(945, strings.ToUpper(genesisHash), strings.ToUpper(address)); repeated != key {
+		t.Fatalf("address case created another nonce lane: %q != %q", repeated, key)
+	}
+	if other := stTransactionAdvisoryLockKey(964, genesisHash, address); other == key {
+		t.Fatal("different chains shared one nonce lock")
+	}
+	if other := stTransactionAdvisoryLockKey(945, genesisHash, "0x"+strings.Repeat("b", 40)); other == key {
+		t.Fatal("different accounts shared one nonce lock")
+	}
 }
 
 // TestStHeadBoundCkeysFromEventsWindowOverlap covers the interval-overlap

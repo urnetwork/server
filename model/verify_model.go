@@ -21,14 +21,14 @@ package model
 //	{vstat_<clientId>}p<t>  per-period stats hash: assignments, confirmations,
 //	                        log-spaced latency buckets lb_<i> (§7)
 //	verify_stat_clients     set of clientIds with stats pending rollup
-//	verify_seed_ip_<hash>   seed rate counter per source ip (INCR+EXPIRE, §9)
-//	verify_seed_vpk_<vpk>   seed rate counter per vpk (INCR+EXPIRE, §9)
+//	verify_seed_ip_<hash>_<window> seed fixed-window counter per source ip (§9)
+//	verify_seed_vpk_<vpk>_<window> seed fixed-window counter per vpk (§9)
 //	verify_trails_<vpk>     active trail count per vpk (concurrent-trail cap, §9)
 //
 // The egress index is fed by exactly one bijection-gated feeder
-// (`FeedVerifyEgress`) with two call sites: observed connection source ips
-// (connect/transport_announce.go) and proxy-allocated egresses
-// (CreateProxyClient + the periodic `RefreshVerifyProxyEgress`). The §8.2
+// (`FeedVerifyEgress`) with two sources: observed connection source ips
+// (connect/transport_announce.go) and proxy-allocated egresses (the API
+// controller's post-allocation feed + periodic `RefreshVerifyProxyEgress`). The §8.2
 // invariant — one provider ⇄ one egress ip — is enforced at write time (an ip
 // observed backing a second client becomes ambiguous and resolves to nothing)
 // and re-checked at read time (`ResolveVerifyEgress` requires the forward and
@@ -845,17 +845,8 @@ func incrVerifySeedRatesForClient(
 		)
 		server.Raise(err)
 	}
-	server.Redis(ctx, func(r server.RedisClient) {
-		var countCmd *redis.IntCmd
-		_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			countCmd = pipe.Incr(ctx, verifySeedVpkRateKey(vpk))
-			pipe.Expire(ctx, verifySeedVpkRateKey(vpk), settings.SeedRateWindow)
-			return nil
-		})
-		server.Raise(err)
-		vpkCount, err = countCmd.Result()
-		server.Raise(err)
-	})
+	vpkCount, err := server.IncrementRateLimitWindow(ctx, verifySeedVpkRateKey(vpk), settings.SeedRateWindow)
+	server.Raise(err)
 	return
 }
 

@@ -2739,9 +2739,16 @@ type releasedProxyEgress struct {
 }
 
 func clearReleasedProxyEgress(ctx context.Context, released []releasedProxyEgress) {
+	cleared := map[server.Id]bool{}
 	for _, item := range released {
-		if item.IPv4 != nil {
-			ClearVerifyEgress(ctx, item.ClientID, IntToIpv4(*item.IPv4), DefaultVerifySettings())
+		if item.IPv4 != nil && !cleared[item.ClientID] {
+			// The HMAC key is deliberately unavailable in the model cleanup
+			// layer. The reverse index is authoritative and lets release remove
+			// every keyed entry for this client without guessing a namespace.
+			// Any surviving direct connection is fail-closed briefly and restores
+			// its observed egress on its next bounded refresh.
+			RemoveVerifyEgressForClient(ctx, item.ClientID)
+			cleared[item.ClientID] = true
 		}
 	}
 }

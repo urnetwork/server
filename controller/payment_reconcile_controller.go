@@ -69,30 +69,90 @@ const paymentReconcileSolanaFinalityGrace = 1 * time.Hour
 // skipped with a skipped_store audit row. Replaceable only by hermetic tests
 // (the S5 Play seam pattern); production never mutates these.
 
-var stripeReconcileHasCredentials = func() bool {
-	_, err := server.Vault.SimpleResource("stripe.yml")
-	return err == nil
+// simpleResourceNonblankString requires the selected YAML value to be an
+// actual string scalar. Typed YAML decoding deliberately coerces numeric
+// scalars into strings, which is unsafe for credential-presence checks.
+func simpleResourceNonblankString(resource *server.SimpleResource, path ...string) bool {
+	object, err := resource.ParseE()
+	if err != nil {
+		return false
+	}
+	var value any = object
+	for _, component := range path {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		value, ok = object[component]
+		if !ok {
+			return false
+		}
+	}
+	stringValue, ok := value.(string)
+	return ok && strings.TrimSpace(stringValue) != ""
 }
+
+func stripeReconcileCredentialsPresent() bool {
+	resource, err := server.Vault.SimpleResource("stripe.yml")
+	if err != nil {
+		return false
+	}
+	return simpleResourceNonblankString(resource, "api", "token")
+}
+
+var stripeReconcileHasCredentials = stripeReconcileCredentialsPresent
 
 var appleReconcileHasCredentials = func() bool {
 	return appleReconcileCredentialsFunc() != nil
 }
 
-var playReconcileHasCredentials = func() bool {
-	if _, err := server.Vault.SimpleResource("google.yml"); err != nil {
+func playReconcileCredentialsPresent() bool {
+	resource, err := server.Vault.SimpleResource("google.yml")
+	if err != nil {
 		return false
 	}
-	// the sku catalog the credit path prices from
-	if _, err := server.Config.SimpleResource("play.yml"); err != nil {
+	if !simpleResourceNonblankString(resource, "webhook", "package_name") ||
+		!simpleResourceNonblankString(resource, "oauth", "client_id") ||
+		!simpleResourceNonblankString(resource, "oauth", "client_secret") ||
+		!simpleResourceNonblankString(resource, "oauth", "refresh_token") {
 		return false
 	}
-	return true
+	var credentials struct {
+		Webhook struct {
+			PackageName string `yaml:"package_name"`
+		} `yaml:"webhook"`
+		OAuth struct {
+			ClientId     string `yaml:"client_id"`
+			ClientSecret string `yaml:"client_secret"`
+			RefreshToken string `yaml:"refresh_token"`
+		} `yaml:"oauth"`
+	}
+	if err := resource.UnmarshalYamlE(&credentials); err != nil ||
+		strings.TrimSpace(credentials.Webhook.PackageName) == "" ||
+		strings.TrimSpace(credentials.OAuth.ClientId) == "" ||
+		strings.TrimSpace(credentials.OAuth.ClientSecret) == "" ||
+		strings.TrimSpace(credentials.OAuth.RefreshToken) == "" {
+		return false
+	}
+	resource, err = server.Config.SimpleResource("play.yml")
+	if err != nil {
+		return false
+	}
+	var skus Skus
+	return resource.UnmarshalYamlE(&skus) == nil && 0 < len(skus.Skus)
 }
 
-var solanaReconcileHasCredentials = func() bool {
-	_, err := server.Vault.SimpleResource("helius.yml")
-	return err == nil
+var playReconcileHasCredentials = playReconcileCredentialsPresent
+
+func solanaReconcileCredentialsPresent() bool {
+	resource, err := server.Vault.SimpleResource("helius.yml")
+	if err != nil {
+		return false
+	}
+	return simpleResourceNonblankString(resource, "helius", "api_key")
 }
+
+var solanaReconcileHasCredentials = solanaReconcileCredentialsPresent
 
 // ----- apple App Store Server API client -----
 
@@ -109,9 +169,15 @@ type appleServerApiCredentials struct {
 	ProductIds []string
 }
 
-var appleReconcileCredentialsFunc = func() *appleServerApiCredentials {
+func appleReconcileCredentialsFromVault() *appleServerApiCredentials {
 	resource, err := server.Vault.SimpleResource("apple.yml")
 	if err != nil {
+		return nil
+	}
+	if !simpleResourceNonblankString(resource, "app_store_server_api_key_id") ||
+		!simpleResourceNonblankString(resource, "issuer_id") ||
+		!simpleResourceNonblankString(resource, "private_key") ||
+		!simpleResourceNonblankString(resource, "app_store_notifications", "bundle_id") {
 		return nil
 	}
 	var config struct {
@@ -123,9 +189,9 @@ var appleReconcileCredentialsFunc = func() *appleServerApiCredentials {
 			ProductIds []string `yaml:"product_ids"`
 		} `yaml:"app_store_notifications"`
 	}
-	resource.UnmarshalYaml(&config)
-	if config.KeyId == "" || config.IssuerId == "" || config.PrivateKey == "" ||
-		config.AppStoreNotifications == nil || config.AppStoreNotifications.BundleId == "" {
+	if err := resource.UnmarshalYamlE(&config); err != nil ||
+		strings.TrimSpace(config.KeyId) == "" || strings.TrimSpace(config.IssuerId) == "" || strings.TrimSpace(config.PrivateKey) == "" ||
+		config.AppStoreNotifications == nil || strings.TrimSpace(config.AppStoreNotifications.BundleId) == "" {
 		return nil
 	}
 	return &appleServerApiCredentials{
@@ -136,6 +202,8 @@ var appleReconcileCredentialsFunc = func() *appleServerApiCredentials {
 		ProductIds: config.AppStoreNotifications.ProductIds,
 	}
 }
+
+var appleReconcileCredentialsFunc = appleReconcileCredentialsFromVault
 
 // replaceable by tests standing up a fake App Store Server API
 var appleAppStoreServerApiBaseUrl = "https://api.storekit.itunes.apple.com"

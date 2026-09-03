@@ -119,22 +119,22 @@ func (self *EpochEarningsTemplate) EpochEndText() string {
 
 // stMarkEpochFinalized advances the mirror row to finalized and, on the
 // actual transition, queues the epoch earnings email once.
-func stMarkEpochFinalized(ctx context.Context, epoch uint64) {
-	prior := model.GetStEpoch(ctx, epoch)
-	model.SetStEpochStatus(ctx, epoch, model.StEpochStatusFinalized)
+func stMarkEpochFinalized(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64) {
+	prior := model.GetStEpoch(ctx, deploymentKey, epoch)
+	model.SetStEpochStatus(ctx, deploymentKey, epoch, model.StEpochStatusFinalized)
 	if prior != nil && prior.Status == model.StEpochStatusFinalized {
 		return
 	}
 	// a new finalized epoch changes blocks-with-points and streaks
 	TriggerRebuildPointsLeaderboard(ctx)
-	StNotifyEpochEarnings(ctx, epoch)
+	StNotifyEpochEarnings(ctx, deploymentKey, epoch)
 }
 
 // StNotifyEpochEarnings sends the epoch earnings email to every network that
 // earned points inside the epoch window or holds a payout leaf in the epoch.
 // It runs once per epoch (ClaimStEpochNotification) in the background.
-func StNotifyEpochEarnings(ctx context.Context, epoch uint64) {
-	if !model.ClaimStEpochNotification(ctx, epoch) {
+func StNotifyEpochEarnings(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64) {
+	if !model.ClaimStEpochNotification(ctx, deploymentKey, epoch) {
 		return
 	}
 	go func() {
@@ -145,18 +145,18 @@ func StNotifyEpochEarnings(ctx context.Context, epoch uint64) {
 		}()
 		sendCtx, cancel := context.WithTimeout(context.Background(), stEpochEarningsSendTimeout)
 		defer cancel()
-		sent, skipped := stSendEpochEarnings(sendCtx, epoch, GetAWSMessageSender())
+		sent, skipped := stSendEpochEarnings(sendCtx, deploymentKey, epoch, GetAWSMessageSender())
 		glog.Infof("[st]epoch %d earnings email: sent %d, skipped %d\n", epoch, sent, skipped)
 	}()
 }
 
 // stSendEpochEarnings builds and sends one email per recipient network.
-func stSendEpochEarnings(ctx context.Context, epoch uint64, sender MessageSender) (sent int, skipped int) {
-	row := model.GetStEpoch(ctx, epoch)
+func stSendEpochEarnings(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64, sender MessageSender) (sent int, skipped int) {
+	row := model.GetStEpoch(ctx, deploymentKey, epoch)
 	if row == nil {
 		return 0, 0
 	}
-	for networkId, template := range stEpochEarningsTemplates(ctx, epoch, row) {
+	for networkId, template := range stEpochEarningsTemplates(ctx, deploymentKey, epoch, row) {
 		userAuth, err := model.GetUserAuth(ctx, networkId)
 		if err != nil || userAuth == "" {
 			skipped += 1
@@ -197,14 +197,14 @@ func stEpochPoolTotal(ctx context.Context, epoch uint64, noId uint64) *big.Int {
 // the epoch window, share from the committed leaves, rank from the
 // leaderboard ranking, Top 200 from the head estimate and the binding
 // registry, alpha from the pool total × share.
-func stEpochEarningsTemplates(ctx context.Context, epoch uint64, row *model.StEpoch) map[server.Id]*EpochEarningsTemplate {
+func stEpochEarningsTemplates(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64, row *model.StEpoch) map[server.Id]*EpochEarningsTemplate {
 	start, end := snEpochWindow(ctx, row)
 	points := model.GetNetworkNanoPointsInWindow(ctx, start, end)
 	noId := uint64(0)
 	if cfg := stConfig(); cfg != nil {
 		noId = cfg.NoId
 	}
-	shares := model.GetStPayoutNetworkShares(ctx, epoch, noId)
+	shares := model.GetStPayoutNetworkShares(ctx, deploymentKey, epoch, noId)
 	rankings, err := model.GetNetworkLeaderboardRankings(ctx)
 	if err != nil {
 		rankings = map[server.Id]model.NetworkRanking{}

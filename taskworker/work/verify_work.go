@@ -82,7 +82,7 @@ func SweepVerifyTrails(
 	model.SweepExpiredVerifyTrails(
 		clientSession.Ctx,
 		server.NowUtc(),
-		model.DefaultVerifySettings(),
+		controller.VerifySettings(),
 	)
 	return &SweepVerifyTrailsResult{}, nil
 }
@@ -128,7 +128,7 @@ func RollupVerifyProviderStats(
 	model.RollupVerifyProviderStats(
 		clientSession.Ctx,
 		server.NowUtc(),
-		model.DefaultVerifySettings(),
+		controller.VerifySettings(),
 	)
 	return &RollupVerifyProviderStatsResult{}, nil
 }
@@ -159,7 +159,7 @@ func ScheduleRefreshVerifyProxyEgress(clientSession *session.ClientSession, tx s
 		&RefreshVerifyProxyEgressArgs{},
 		clientSession,
 		task.RunOnce("refresh_verify_proxy_egress"),
-		task.RunAt(server.NowUtc().Add(model.DefaultVerifySettings().EgressRefreshInterval)),
+		task.RunAt(server.NowUtc().Add(controller.VerifySettings().EgressRefreshInterval)),
 		task.MaxTime(15*time.Minute),
 	)
 }
@@ -173,7 +173,7 @@ func RefreshVerifyProxyEgress(
 	}
 	model.RefreshVerifyProxyEgress(
 		clientSession.Ctx,
-		model.DefaultVerifySettings(),
+		controller.VerifySettings(),
 	)
 	return &RefreshVerifyProxyEgressResult{}, nil
 }

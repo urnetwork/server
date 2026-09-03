@@ -263,8 +263,9 @@ func TestVerifyRateMetersExcludeOnlySourceIp(t *testing.T) {
 			if count := r.Exists(ctx, verifySeedIpRateKey(ipHash), verifyExtendIpRateKey(ipHash)).Val(); count != 0 {
 				t.Fatalf("excluded source created %d ip counter keys, want 0", count)
 			}
-			if count := r.Exists(ctx, verifySeedVpkRateKey(vpk)).Val(); count != 1 {
-				t.Fatalf("vpk counter keys = %d, want 1", count)
+			keys := r.Keys(ctx, verifySeedVpkRateKey(vpk)+"_*").Val()
+			if len(keys) != 1 {
+				t.Fatalf("vpk counter keys = %v, want one current-window key", keys)
 			}
 		})
 	})

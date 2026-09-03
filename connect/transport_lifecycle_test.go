@@ -2,12 +2,14 @@ package connect
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
@@ -111,6 +113,197 @@ func TestConnectHandlerPreboundPacketConnEnablesZeroPort(t *testing.T) {
 	if !connectHandlerPacketEndpointEnabled(0, packetConn) {
 		t.Fatal("prebound packet conn must enable a zero-port endpoint")
 	}
+}
+
+func TestConnectHandlerTlsInitializationFailurePreventsListenerStart(t *testing.T) {
+	packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer packetConn.Close()
+
+	sentinel := errors.New("synthetic TLS loader failure")
+	settings := DefaultConnectHandlerSettings()
+	settings.ListenH3Port = 0
+	settings.ListenDnsPort = 0
+	settings.EnableProxyProtocol = false
+	settings.transportTlsLoader = func(*server.TransportTlsSettings) (*server.TransportTls, error) {
+		return nil, sentinel
+	}
+	handler, err := newConnectHandlerWithPacketConns(
+		context.Background(),
+		server.NewId(),
+		&Exchange{settings: DefaultExchangeSettings()},
+		settings,
+		ConnectHandlerPacketConns{H3: packetConn},
+	)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("constructor error = %v, want TLS loader failure", err)
+	}
+	if handler != nil {
+		handler.Close()
+		t.Fatal("TLS loader failure returned a handler capable of starting listeners")
+	}
+}
+
+func TestConnectHandlerTlsInitializationSuccessReachesListenerReadiness(t *testing.T) {
+	packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	settings := DefaultConnectHandlerSettings()
+	settings.ListenH3Port = 0
+	settings.ListenDnsPort = 0
+	settings.EnableProxyProtocol = false
+	settings.TransportTlsSettings.EnableSelfSign = true
+	settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
+	settings.transportTlsLoader = func(tlsSettings *server.TransportTlsSettings) (*server.TransportTls, error) {
+		return server.NewTransportTls(map[string]bool{}, tlsSettings), nil
+	}
+	handler, err := newConnectHandlerWithPacketConns(
+		context.Background(),
+		server.NewId(),
+		&Exchange{settings: DefaultExchangeSettings()},
+		settings,
+		ConnectHandlerPacketConns{H3: packetConn},
+	)
+	if err != nil {
+		packetConn.Close()
+		t.Fatal(err)
+	}
+	defer func() {
+		handler.Close()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		if !handler.WaitForIdle(closeCtx) {
+			t.Error("successful TLS handler did not stop")
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := handler.ListenerReady(); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("successful TLS loader never reached listener readiness: %v", handler.ListenerReady())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The simulator pins H3DnsPump to the same loopback ingress as H3Dns. Prove
+// that exact UDP/53 carrier reaches the listener and completes TLS; a rendered
+// carrier is not evidence of coverage if every handshake fails before auth.
+func TestConnectHandlerLocalDNSPumpCompletesTLSHandshake(t *testing.T) {
+	serverPacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	translationCtx, translationCancel := context.WithCancel(context.Background())
+	defer translationCancel()
+	translationSettings := clientconnect.DefaultPacketTranslationSettings()
+	translationSettings.DnsTlds = [][]byte{[]byte("ur.xyz.")}
+	translatedServer, err := clientconnect.NewPacketTranslation(
+		translationCtx,
+		clientconnect.PacketTranslationModeDecode53,
+		serverPacketConn,
+		translationSettings,
+	)
+	if err != nil {
+		serverPacketConn.Close()
+		t.Fatal(err)
+	}
+	defer translatedServer.Close()
+
+	tlsSettings := server.DefaultTransportTlsSettings()
+	tlsSettings.EnableSelfSign = true
+	tlsSettings.DefaultHostName = "127.0.0.1"
+	transportTLS := server.NewTransportTls(map[string]bool{}, tlsSettings)
+	serverQUICTransport := &quic.Transport{Conn: translatedServer}
+	defer serverQUICTransport.Close()
+	listener, err := serverQUICTransport.ListenEarly(
+		&tls.Config{GetConfigForClient: transportTLS.GetTlsConfigForClient},
+		&quic.Config{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer testCancel()
+	type acceptResult struct {
+		conn *quic.Conn
+		err  error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		conn, acceptErr := listener.Accept(testCtx)
+		accepted <- acceptResult{conn: conn, err: acceptErr}
+	}()
+
+	clientPacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	translatedClient, err := clientconnect.NewPacketTranslation(
+		translationCtx,
+		clientconnect.PacketTranslationModeDnsPump,
+		clientPacketConn,
+		translationSettings,
+	)
+	if err != nil {
+		clientPacketConn.Close()
+		t.Fatal(err)
+	}
+	defer translatedClient.Close()
+
+	clientQUICTransport := &quic.Transport{Conn: translatedClient}
+	defer clientQUICTransport.Close()
+	clientConn, err := clientQUICTransport.DialEarly(
+		testCtx,
+		serverPacketConn.LocalAddr(),
+		&tls.Config{
+			InsecureSkipVerify: true, // The deterministic listener uses a fresh self-signed certificate.
+			ServerName:         "127.0.0.1",
+		},
+		&quic.Config{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientConn.CloseWithError(0, "")
+	waitForHandshake := func(role string, conn *quic.Conn) {
+		handshakeComplete := conn.HandshakeComplete()
+		select {
+		case <-handshakeComplete:
+		case <-conn.Context().Done():
+			select {
+			case <-handshakeComplete:
+				return
+			default:
+			}
+			t.Fatalf("%s local DNS-pump TLS handshake failed: %v", role, context.Cause(conn.Context()))
+		case <-testCtx.Done():
+			t.Fatalf("%s local DNS-pump TLS handshake did not complete: %v", role, testCtx.Err())
+		}
+	}
+	waitForHandshake("client", clientConn)
+
+	var serverConn *quic.Conn
+	select {
+	case result := <-accepted:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		serverConn = result.conn
+	case <-testCtx.Done():
+		t.Fatalf("local DNS-pump listener did not accept the connection: %v", testCtx.Err())
+	}
+	defer serverConn.CloseWithError(0, "")
+	waitForHandshake("server", serverConn)
 }
 
 func TestConnectHandlerCloseJoinsAndClosesPreboundPacketConns(t *testing.T) {

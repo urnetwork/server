@@ -28,6 +28,7 @@ type stripeRefundTestEnv struct {
 	sessionsByPaymentIntent map[string][]map[string]any
 	sessionsBySubscription  map[string][]map[string]any
 	fullInvoices            map[string]map[string]any
+	sentMessageCount        int
 
 	testServer *httptest.Server
 }
@@ -86,12 +87,18 @@ func newStripeRefundTestEnv(t testing.TB) *stripeRefundTestEnv {
 
 	prevBaseUrl := stripeApiBaseUrl
 	prevTokenFunc := stripeApiTokenFunc
+	prevMessageSender := GetAWSMessageSender()
 	stripeApiBaseUrl = env.testServer.URL
 	stripeApiTokenFunc = func() string { return "sk_test_refund" }
+	SetMessageSender(&mockAWSMessageSender{SendMessageFunc: func(string, Template, ...any) error {
+		env.sentMessageCount++
+		return nil
+	}})
 
 	t.Cleanup(func() {
 		stripeApiBaseUrl = prevBaseUrl
 		stripeApiTokenFunc = prevTokenFunc
+		SetMessageSender(prevMessageSender)
 		env.testServer.Close()
 	})
 
@@ -288,6 +295,7 @@ func TestStripeDataPackRefundVoidsUnredeemedCode(t *testing.T) {
 			nil, // not signed in: the code stays unredeemed
 		)
 		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, env.sentMessageCount, 1)
 
 		env.charges["ch_void_1"] = map[string]any{
 			"id":             "ch_void_1",
@@ -347,6 +355,7 @@ func TestStripeDataPackRefundEndsRedeemedBalance(t *testing.T) {
 			&networkId, // signed in: redeemed immediately
 		)
 		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, env.sentMessageCount, 1)
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
 
 		env.charges["ch_redeemed_1"] = map[string]any{

@@ -256,11 +256,20 @@ func SetVerifySettings(settings *model.VerifySettings) {
 	verifySettingsInstance = settings
 }
 
-func verifySettings() *model.VerifySettings {
+// VerifySettings returns the canonical verify-protocol settings for this
+// process. API request handling and Connect's observed-egress feeder run in
+// separate binaries, but they must load the same verify.yml profile: in
+// particular, EgressHashKey defines the private Redis index namespace shared
+// by the writer and reader.
+func VerifySettings() *model.VerifySettings {
 	if verifySettingsInstance != nil {
 		return verifySettingsInstance
 	}
 	return verifySettingsFromVault()
+}
+
+func verifySettings() *model.VerifySettings {
+	return VerifySettings()
 }
 
 // VerifyArgs is the decoded `POST /verify` body — the superset of the two
@@ -435,6 +444,16 @@ func verifySeed(
 		return nil, err
 	}
 	keyOk := len(registeredKey) == ed25519.PublicKeySize && slices.Equal(registeredKey, verify.Vpk)
+	var assignmentExclusions []server.Id
+	if keyOk {
+		assignmentExclusions, err = verifySimulationAssignmentExclusions(verify.Vpk)
+		if err != nil {
+			return nil, fmt.Errorf("500 %s", err)
+		}
+		if seedClientId != nil && verifySimulationAssignmentExcluded(assignmentExclusions, *seedClientId) {
+			return nil, fmt.Errorf("503 validator-local simulated route unavailable")
+		}
+	}
 
 	// §9: over the soft rate limit → poison (computed from the early counters).
 	// per-vpk is best-effort (unauthenticated input); per-source-ip is the real
@@ -502,11 +521,10 @@ func verifySeed(
 	// hop. Poison replaces only the provider-stat mutation with a timing pad.
 	var nextHopClientId server.Id
 	var assignN int
-	nextHop, n := model.SampleVerifyNextHop(
-		ctx,
-		[]server.Id{seedHopClientId, verify.ClientId},
-		settings,
-	)
+	sampleExclusions := make([]server.Id, 0, 2+len(assignmentExclusions))
+	sampleExclusions = append(sampleExclusions, seedHopClientId, verify.ClientId)
+	sampleExclusions = append(sampleExclusions, assignmentExclusions...)
+	nextHop, n := model.SampleVerifyNextHop(ctx, sampleExclusions, settings)
 	if nextHop == nil {
 		if !poison {
 			// no eligible provider to assign: degrade to poison so the
@@ -695,6 +713,10 @@ func verifyExtend(
 	if result, matched, err := replayConfirmed(trail, confirmedIds); matched {
 		return result, err
 	}
+	assignmentExclusions, err := verifySimulationAssignmentExclusions(trail.Vpk)
+	if err != nil {
+		return nil, fmt.Errorf("500 %s", err)
+	}
 
 	// §4.2 step 2: require active and not expired
 	if trail.Status != model.VerifyTrailStatusActive {
@@ -702,6 +724,10 @@ func verifyExtend(
 	}
 	if trail.Pending == nil {
 		return nil, fmt.Errorf("400 trail not active")
+	}
+	if verifySimulationAssignmentExcluded(assignmentExclusions, trail.Pending.ClientId) {
+		verifyFailTrail(ctx, trail)
+		return nil, fmt.Errorf("503 validator-local simulated route unavailable")
 	}
 
 	now := server.NowUtc()
@@ -875,6 +901,7 @@ func verifyExtend(
 	var assignN int
 	sampled := false
 	excludeClientIds := append(slices.Clone(confirmedHopIds), trail.ClientId)
+	excludeClientIds = append(excludeClientIds, assignmentExclusions...)
 	nextHop, n := model.SampleVerifyNextHop(ctx, excludeClientIds, settings)
 	if nextHop != nil {
 		nextHopClientId = *nextHop

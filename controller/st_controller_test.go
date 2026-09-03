@@ -136,6 +136,80 @@ func TestStConfigRejectsRoleKeyReuseAndZeroDeploymentBoundary(t *testing.T) {
 	}
 }
 
+// Exact chain/coordinator identity selects the logical operation. Human labels
+// do not, while a replacement contract or reset genesis always gets new keys.
+func TestStTransactionLogicalKeyUsesExactDeploymentIdentity(t *testing.T) {
+	cfg := &StConfig{
+		Profile: "testnet", DeploymentId: "reused-label", ChainId: 945,
+		ContractAddress: common.HexToAddress("0x1000000000000000000000000000000000000001"),
+	}
+	cfg.GenesisHash[0] = 1
+	key, err := stTransactionLogicalKey(cfg, "root:7:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed := *cfg
+	renamed.Profile, renamed.DeploymentId = "mainnet", "another-label"
+	if repeated, err := stTransactionLogicalKey(&renamed, "root:7:1"); err != nil || repeated != key {
+		t.Fatalf("metadata rename changed logical identity: %q %v", repeated, err)
+	}
+	replacement := *cfg
+	replacement.ContractAddress = common.HexToAddress("0x2000000000000000000000000000000000000002")
+	if other, err := stTransactionLogicalKey(&replacement, "root:7:1"); err != nil || other == key {
+		t.Fatalf("replacement coordinator reused logical identity: %q %v", other, err)
+	}
+	reset := *cfg
+	reset.GenesisHash[0] = 2
+	if other, err := stTransactionLogicalKey(&reset, "root:7:1"); err != nil || other == key {
+		t.Fatalf("reset genesis reused logical identity: %q %v", other, err)
+	}
+}
+
+// A stable epoch boundary, rather than a moving head offset, prevents retries
+// from changing calldata or being attributed to the following contract epoch.
+func TestStDepositDeadlinePinsIntendedEpoch(t *testing.T) {
+	deadline, err := stDepositDeadline(7, 1_000, 900)
+	if err != nil || deadline != 999 {
+		t.Fatalf("deadline = %d, %v; want 999", deadline, err)
+	}
+	if repeated, err := stDepositDeadline(7, 1_000, 998); err != nil || repeated != deadline {
+		t.Fatalf("later head changed deadline: %d, %v", repeated, err)
+	}
+	for _, headBlock := range []uint64{1_000, 1_001} {
+		if _, err := stDepositDeadline(7, 1_000, headBlock); err == nil {
+			t.Errorf("head %d accepted after intended epoch ended", headBlock)
+		}
+	}
+}
+
+// The public-RPC block window is inclusive and must remain bounded at both an
+// ordinary head and math.MaxUint64. This guards the rejected 2,000-block shape
+// and the adjacent overflow that would silently query from block zero.
+func TestStBoundedInclusiveRangeEnd(t *testing.T) {
+	cases := []struct {
+		name       string
+		fromBlock  uint64
+		headBlock  uint64
+		blockCount uint64
+		want       uint64
+		wantError  bool
+	}{
+		{name: "single", fromBlock: 100, headBlock: 100, blockCount: 1000, want: 100},
+		{name: "exact thousand", fromBlock: 100, headBlock: 1099, blockCount: 1000, want: 1099},
+		{name: "bounded thousand", fromBlock: 100, headBlock: 1100, blockCount: 1000, want: 1099},
+		{name: "near maximum short", fromBlock: math.MaxUint64 - 10, headBlock: math.MaxUint64, blockCount: 1000, want: math.MaxUint64},
+		{name: "near maximum bounded", fromBlock: math.MaxUint64 - 1000, headBlock: math.MaxUint64, blockCount: 1000, want: math.MaxUint64 - 1},
+		{name: "zero size", fromBlock: 100, headBlock: 100, blockCount: 0, wantError: true},
+		{name: "reverse", fromBlock: 101, headBlock: 100, blockCount: 1000, wantError: true},
+	}
+	for _, c := range cases {
+		got, err := stBoundedInclusiveRangeEnd(c.fromBlock, c.headBlock, c.blockCount)
+		if (err != nil) != c.wantError || (!c.wantError && got != c.want) {
+			t.Errorf("%s end=%d error=%v, want end=%d error=%t", c.name, got, err, c.want, c.wantError)
+		}
+	}
+}
+
 // testStColdkey builds a distinct coldkey from a marker byte.
 func testStColdkey(marker byte) [32]byte {
 	var coldkey [32]byte

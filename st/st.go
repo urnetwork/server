@@ -42,6 +42,12 @@ const DefaultGatewayPort = "9944"
 // DefaultLightnodeGatewayPort is the side-by-side lightnode gateway on snow.
 const DefaultLightnodeGatewayPort = "9946"
 
+// EventLogBlockRange is the inclusive eth_getLogs window used by settlement
+// event indexing and release diagnostics. The official public testnet gateway
+// accepts this one-thousand-block shape and rejects the former two-thousand
+// block request.
+const EventLogBlockRange uint64 = 1000
+
 // Connection is the subtensor endpoints derived from st.yml.
 //
 //   - Authority is the RPC gateway host:port (BRINGYOUR_SUBTENSOR_HOSTNAME + port).

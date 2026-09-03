@@ -138,9 +138,14 @@ func TestPointsLeaderboardApiDb(t *testing.T) {
 			return windows[row.Epoch-1].Start, windows[row.Epoch-1].End
 		}
 		defer func() { pointsLeaderboardEpochWindowFunc = snEpochWindow }()
+		testDeploymentKey := model.StDeploymentKey("test:points-leaderboard")
+		pointsLeaderboardDeploymentKeyFunc = func() (model.StDeploymentKey, bool) {
+			return testDeploymentKey, true
+		}
+		defer func() { pointsLeaderboardDeploymentKeyFunc = StDeploymentKey }()
 		for _, window := range windows {
 			finalized := now
-			model.UpsertStEpoch(ctx, &model.StEpoch{
+			model.UpsertStEpoch(ctx, testDeploymentKey, &model.StEpoch{
 				Epoch:         window.Epoch,
 				StartBlock:    window.Epoch * 100,
 				Status:        model.StEpochStatusFinalized,

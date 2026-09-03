@@ -25,7 +25,7 @@ func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	router.WrapWithInputRequireAuth(
-		model.AuthNetworkClient,
+		controller.AuthNetworkClient,
 		w,
 		r,
 		func(result *model.AuthNetworkClientResult) bool {

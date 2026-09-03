@@ -232,39 +232,58 @@ func snEpochSummaryWithChainSettings(cfg *StConfig, summary *model.StEpochSummar
 // snCurrentEpoch is the contract epoch as mirrored by the sync task, else the
 // newest mirrored epoch row, else 0.
 func snCurrentEpoch(ctx context.Context) uint64 {
-	if summary := model.GetStEpochSummaryCache(ctx); summary != nil {
+	cfg := stConfig()
+	if cfg == nil || cfg.DeploymentKey() == "" {
+		return 0
+	}
+	deploymentKey := cfg.DeploymentKey()
+	if summary := model.GetStEpochSummaryCache(ctx, deploymentKey); summary != nil {
 		return summary.Epoch
 	}
-	if latest := model.GetLatestStEpoch(ctx); latest != nil {
+	if latest := model.GetLatestStEpoch(ctx, deploymentKey); latest != nil {
 		return latest.Epoch
 	}
 	return 0
 }
 
+type snEpochWindowCacheKey struct {
+	deploymentKey model.StDeploymentKey
+	epoch         uint64
+}
+
 var snEpochWindowCache = struct {
 	lock    sync.Mutex
-	windows map[uint64][2]time.Time
-}{windows: map[uint64][2]time.Time{}}
+	windows map[snEpochWindowCacheKey][2]time.Time
+}{windows: map[snEpochWindowCacheKey][2]time.Time{}}
 
 // snEpochWindow resolves an epoch's wall-clock [start, end) window: from block
 // times when the chain is reachable (cached — a closed epoch's window never
 // changes), else estimated from the mirrored row's finalized time and the
 // block period.
 func snEpochWindow(ctx context.Context, row *model.StEpoch) (time.Time, time.Time) {
+	cfg := stConfig()
+	deploymentKey := model.StDeploymentKey("")
+	if cfg != nil {
+		deploymentKey = cfg.DeploymentKey()
+	}
+	cacheKey := snEpochWindowCacheKey{deploymentKey: deploymentKey, epoch: row.Epoch}
 	snEpochWindowCache.lock.Lock()
-	window, ok := snEpochWindowCache.windows[row.Epoch]
+	window, ok := snEpochWindowCache.windows[cacheKey]
 	snEpochWindowCache.lock.Unlock()
 	if ok {
 		return window[0], window[1]
 	}
-	cfg, client, state := snChainState(ctx)
-	if client != nil && state != nil {
+	chainCfg, client, state := snChainState(ctx)
+	if chainCfg != nil {
+		cfg = chainCfg
+	}
+	if deploymentKey != "" && client != nil && state != nil {
 		callCtx, cancel := context.WithTimeout(ctx, snChainCallTimeout)
-		start, end, _, _, err := stEpochWindow(callCtx, client, state, row.Epoch, cfg.BlockSeconds)
+		start, end, _, _, err := stEpochWindow(callCtx, deploymentKey, client, state, row.Epoch, cfg.BlockSeconds)
 		cancel()
 		if err == nil {
 			snEpochWindowCache.lock.Lock()
-			snEpochWindowCache.windows[row.Epoch] = [2]time.Time{start, end}
+			snEpochWindowCache.windows[cacheKey] = [2]time.Time{start, end}
 			snEpochWindowCache.lock.Unlock()
 			return start, end
 		}
@@ -287,8 +306,10 @@ func snEstimateEpochWindow(ctx context.Context, cfg *StConfig, row *model.StEpoc
 	}
 	anchorBlock := row.FinalizeBlock
 	closeBlock := row.CommitDeadlineBlock
-	if summary := model.GetStEpochSummaryCache(ctx); summary != nil && 0 < summary.TEpochBlocks {
-		closeBlock = row.StartBlock + summary.TEpochBlocks
+	if cfg != nil && cfg.DeploymentKey() != "" {
+		if summary := model.GetStEpochSummaryCache(ctx, cfg.DeploymentKey()); summary != nil && 0 < summary.TEpochBlocks {
+			closeBlock = row.StartBlock + summary.TEpochBlocks
+		}
 	}
 	blockTime := func(block uint64) time.Time {
 		if block <= anchorBlock {
@@ -338,6 +359,11 @@ func AccountEpochs(
 ) (*AccountEpochsResult, error) {
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
+	cfg := stConfig()
+	if cfg == nil || cfg.DeploymentKey() == "" {
+		return &AccountEpochsResult{Epochs: []AccountEpoch{}}, nil
+	}
+	deploymentKey := cfg.DeploymentKey()
 	limit := args.Limit
 	if limit <= 0 {
 		limit = accountEpochsDefaultLimit
@@ -345,16 +371,12 @@ func AccountEpochs(
 	if accountEpochsMaxLimit < limit {
 		limit = accountEpochsMaxLimit
 	}
-	rows := model.GetFinalizedStEpochs(ctx, limit)
+	rows := model.GetFinalizedStEpochs(ctx, deploymentKey, limit)
 	epochs := make([]uint64, len(rows))
 	for i, row := range rows {
 		epochs[i] = row.Epoch
 	}
-	noId := uint64(0)
-	if cfg := stConfig(); cfg != nil {
-		noId = cfg.NoId
-	}
-	shares := model.GetStPayoutShareBpsForNetwork(ctx, networkId, noId, epochs)
+	shares := model.GetStPayoutShareBpsForNetwork(ctx, deploymentKey, networkId, cfg.NoId, epochs)
 	result := &AccountEpochsResult{Epochs: []AccountEpoch{}}
 	for _, row := range rows {
 		start, end := snEpochWindow(ctx, row)
@@ -551,7 +573,11 @@ func snHeadBoundState(ctx context.Context, networkId server.Id, allowChain bool,
 	for _, ckey := range ckeys {
 		ckeyList = append(ckeyList, ckey)
 	}
-	for _, binding := range model.GetActiveStHeadBindingsForCkeys(ctx, ckeyList) {
+	cfg := stConfig()
+	if cfg == nil || cfg.DeploymentKey() == "" {
+		return snHeadBound{}
+	}
+	for _, binding := range model.GetActiveStHeadBindingsForCkeys(ctx, cfg.DeploymentKey(), ckeyList) {
 		return snHeadBound{bound: true, hotkey: binding.Hotkey, uid: binding.Uid}
 	}
 	if !allowChain {
@@ -813,7 +839,8 @@ func SnHeadBinding(
 		ContractAddress:      common.Address(binding.Coordinator).Hex(),
 		ChainId:              binding.ChainID,
 	}
-	if cfg := stConfig(); cfg != nil && cfg.ContractAddress != (common.Address{}) {
+	cfg := stConfig()
+	if cfg != nil && cfg.ContractAddress != (common.Address{}) {
 		result.ContractAddress = cfg.ContractAddress.Hex()
 		result.ChainId = cfg.ChainId
 	}
@@ -821,6 +848,9 @@ func SnHeadBinding(
 	if !result.ClientSignatureValid {
 		result.Error = &SnHeadBindingError{Message: "client_signature does not verify for this binding."}
 		return result, nil
+	}
+	if cfg == nil || cfg.DeploymentKey() == "" || binding.ChainID != cfg.ChainId || common.Address(binding.Coordinator) != cfg.ContractAddress {
+		return fail("Binding chain or coordinator does not match the active subnet deployment.")
 	}
 	var hotkeySignature []byte
 	if strings.TrimSpace(args.HotkeySignature) != "" {
@@ -838,6 +868,7 @@ func SnHeadBinding(
 		return nil, err
 	}
 	model.SetStFleetBindingSignature(ctx, &model.StFleetBindingSignature{
+		DeploymentKey:   cfg.DeploymentKey(),
 		ClientId:        clientId,
 		NetworkId:       networkId,
 		Generation:      binding.Generation,

@@ -368,9 +368,10 @@ func statsRefreshChain(ctx context.Context) {
 
 	blockStart := model.SubnetBlockStart(now)
 	windowStartBlock := chainBlockAt(blockStart)
-	statsBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, windowStartBlock, state.HeadBlock+1)))
-	statsBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, windowStartBlock, state.HeadBlock+1)))
-	claimsRao, minersClaimed := model.SumStMinerClaimedInBlockRange(ctx, windowStartBlock, state.HeadBlock+1)
+	deploymentKey := cfg.DeploymentKey()
+	statsBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, deploymentKey, windowStartBlock, state.HeadBlock+1)))
+	statsBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, deploymentKey, windowStartBlock, state.HeadBlock+1)))
+	claimsRao, minersClaimed := model.SumStMinerClaimedInBlockRange(ctx, deploymentKey, windowStartBlock, state.HeadBlock+1)
 	statsBlockMinerClaimsAlphaGauge.set(statsRaoToAlpha(claimsRao))
 	statsBlockMinersClaimedGauge.set(float64(minersClaimed))
 
@@ -378,9 +379,9 @@ func statsRefreshChain(ctx context.Context) {
 	// block 1 has no predecessor
 	if model.SubnetBlockGenesis.Before(blockStart) {
 		prevStartBlock := chainBlockAt(blockStart.Add(-model.SubnetBlockDuration))
-		statsPrevBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, prevStartBlock, windowStartBlock)))
-		statsPrevBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, prevStartBlock, windowStartBlock)))
-		prevClaimsRao, prevMinersClaimed := model.SumStMinerClaimedInBlockRange(ctx, prevStartBlock, windowStartBlock)
+		statsPrevBlockDemandDepositsAlphaGauge.set(statsRaoToAlpha(model.SumStDepositedInBlockRangeRao(ctx, deploymentKey, prevStartBlock, windowStartBlock)))
+		statsPrevBlockMinerEmissionsAlphaGauge.set(statsRaoToAlpha(model.SumStPoolSweptMeasuredInBlockRangeRao(ctx, deploymentKey, prevStartBlock, windowStartBlock)))
+		prevClaimsRao, prevMinersClaimed := model.SumStMinerClaimedInBlockRange(ctx, deploymentKey, prevStartBlock, windowStartBlock)
 		statsPrevBlockMinerClaimsAlphaGauge.set(statsRaoToAlpha(prevClaimsRao))
 		statsPrevBlockMinersClaimedGauge.set(float64(prevMinersClaimed))
 	}

@@ -432,11 +432,16 @@ func RebuildPointsLeaderboardPost(
 // pointsLeaderboardEpochWindowFunc resolves one finalized epoch's window;
 // tests replace it so the rebuild never touches the chain.
 var pointsLeaderboardEpochWindowFunc = snEpochWindow
+var pointsLeaderboardDeploymentKeyFunc = StDeploymentKey
 
 // pointsLeaderboardEpochWindows lists every finalized epoch with its
 // wall-clock window.
 func pointsLeaderboardEpochWindows(ctx context.Context) []model.PointsEpochWindow {
-	rows := model.GetFinalizedStEpochs(ctx, pointsLeaderboardEpochLimit)
+	deploymentKey, ok := pointsLeaderboardDeploymentKeyFunc()
+	if !ok {
+		return nil
+	}
+	rows := model.GetFinalizedStEpochs(ctx, deploymentKey, pointsLeaderboardEpochLimit)
 	windows := make([]model.PointsEpochWindow, 0, len(rows))
 	for _, row := range rows {
 		start, end := pointsLeaderboardEpochWindowFunc(ctx, row)

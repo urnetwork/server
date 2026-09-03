@@ -44,12 +44,14 @@ func GetStProviderWalletsForNetwork(ctx context.Context, networkId server.Id) []
 }
 
 // GetFinalizedStEpochs returns finalized epochs, newest first.
-func GetFinalizedStEpochs(ctx context.Context, limit int) []*StEpoch {
+func GetFinalizedStEpochs(ctx context.Context, deploymentKey StDeploymentKey, limit int) []*StEpoch {
+	key := requireStDeploymentKey(deploymentKey)
 	epochs := []*StEpoch{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT `+stEpochSelectColumns+` FROM st_epoch WHERE status = 'finalized' ORDER BY epoch DESC LIMIT $1`,
+			`SELECT `+stEpochSelectColumns+` FROM st_epoch WHERE deployment_key = $1 AND status = 'finalized' ORDER BY epoch DESC LIMIT $2`,
+			key,
 			limit,
 		)
 		server.WithPgResult(result, err, func() {
@@ -64,7 +66,8 @@ func GetFinalizedStEpochs(ctx context.Context, limit int) []*StEpoch {
 // GetStPayoutShareBpsForNetwork sums a network's committed leaf shares per
 // epoch. A network with several provider coldkeys holds several leaves in an
 // epoch; the sum is the network's share of the operator pool.
-func GetStPayoutShareBpsForNetwork(ctx context.Context, networkId server.Id, noId uint64, epochs []uint64) map[uint64]int {
+func GetStPayoutShareBpsForNetwork(ctx context.Context, deploymentKey StDeploymentKey, networkId server.Id, noId uint64, epochs []uint64) map[uint64]int {
+	key := requireStDeploymentKey(deploymentKey)
 	shares := map[uint64]int{}
 	if len(epochs) == 0 {
 		return shares
@@ -77,9 +80,9 @@ func GetStPayoutShareBpsForNetwork(ctx context.Context, networkId server.Id, noI
 		result, err := conn.Query(ctx, `
             SELECT epoch, SUM(share_bps)::bigint
             FROM st_payout_leaf
-            WHERE network_id = $1 AND no_id = $2 AND epoch = ANY($3::bigint[])
+            WHERE deployment_key = $1 AND network_id = $2 AND no_id = $3 AND epoch = ANY($4::bigint[])
             GROUP BY epoch
-        `, networkId, int64(noId), epochInts)
+        `, key, networkId, int64(noId), epochInts)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var epoch int64
@@ -94,15 +97,16 @@ func GetStPayoutShareBpsForNetwork(ctx context.Context, networkId server.Id, noI
 
 // GetStPayoutNetworkShares returns every network's summed share of one
 // epoch's operator pool (only networks that hold a leaf are present).
-func GetStPayoutNetworkShares(ctx context.Context, epoch uint64, noId uint64) map[server.Id]int {
+func GetStPayoutNetworkShares(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, noId uint64) map[server.Id]int {
+	key := requireStDeploymentKey(deploymentKey)
 	shares := map[server.Id]int{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
             SELECT network_id, SUM(share_bps)::bigint
             FROM st_payout_leaf
-            WHERE epoch = $1 AND no_id = $2
+            WHERE deployment_key = $1 AND epoch = $2 AND no_id = $3
             GROUP BY network_id
-        `, int64(epoch), int64(noId))
+        `, key, int64(epoch), int64(noId))
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var networkId server.Id
@@ -211,7 +215,8 @@ func GetNetworkIdsForClientIds(ctx context.Context, clientIds []server.Id) map[s
 
 // GetActiveStHeadBindingsForCkeys returns the active legacy head bindings
 // (`bindHead`, mirrored from chain events) for the given client keys.
-func GetActiveStHeadBindingsForCkeys(ctx context.Context, ckeys [][32]byte) map[[32]byte]*StHeadBinding {
+func GetActiveStHeadBindingsForCkeys(ctx context.Context, deploymentKey StDeploymentKey, ckeys [][32]byte) map[[32]byte]*StHeadBinding {
+	key := requireStDeploymentKey(deploymentKey)
 	bindings := map[[32]byte]*StHeadBinding{}
 	if len(ckeys) == 0 {
 		return bindings
@@ -224,8 +229,8 @@ func GetActiveStHeadBindingsForCkeys(ctx context.Context, ckeys [][32]byte) map[
 		result, err := conn.Query(ctx, `
             SELECT ckey, hotkey, uid, active, update_block, update_time
             FROM st_head_binding
-            WHERE active = true AND ckey = ANY($1::bytea[])
-        `, ckeyBytes)
+            WHERE deployment_key = $1 AND active = true AND ckey = ANY($2::bytea[])
+        `, key, ckeyBytes)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				binding := &StHeadBinding{}
@@ -251,6 +256,7 @@ func GetActiveStHeadBindingsForCkeys(ctx context.Context, ckeys [][32]byte) map[
 // operator adds it. The server never submits it on chain; the operator
 // fetches the assembled calldata and sends it from their own key.
 type StFleetBindingSignature struct {
+	DeploymentKey   StDeploymentKey
 	ClientId        server.Id
 	NetworkId       server.Id
 	Generation      uint64
@@ -265,13 +271,14 @@ type StFleetBindingSignature struct {
 // SetStFleetBindingSignature upserts the stored consent for (client,
 // generation). A later hotkey signature never clears an earlier one.
 func SetStFleetBindingSignature(ctx context.Context, signature *StFleetBindingSignature) {
+	key := requireStDeploymentKey(signature.DeploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `
             INSERT INTO st_fleet_binding_signature (
-                client_id, network_id, generation, hotkey, digest, binding_json,
+                deployment_key, client_id, network_id, generation, hotkey, digest, binding_json,
                 client_signature, hotkey_signature, create_time
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ON CONFLICT (client_id, generation) DO UPDATE
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (deployment_key, client_id, generation) DO UPDATE
             SET
                 network_id = EXCLUDED.network_id,
                 hotkey = EXCLUDED.hotkey,
@@ -281,6 +288,7 @@ func SetStFleetBindingSignature(ctx context.Context, signature *StFleetBindingSi
                 hotkey_signature = COALESCE(EXCLUDED.hotkey_signature, st_fleet_binding_signature.hotkey_signature),
                 create_time = EXCLUDED.create_time
         `,
+			key,
 			signature.ClientId,
 			signature.NetworkId,
 			int64(signature.Generation),
@@ -295,17 +303,18 @@ func SetStFleetBindingSignature(ctx context.Context, signature *StFleetBindingSi
 }
 
 // GetStFleetBindingSignature reads the stored consent for (client, generation).
-func GetStFleetBindingSignature(ctx context.Context, clientId server.Id, generation uint64) *StFleetBindingSignature {
+func GetStFleetBindingSignature(ctx context.Context, deploymentKey StDeploymentKey, clientId server.Id, generation uint64) *StFleetBindingSignature {
+	key := requireStDeploymentKey(deploymentKey)
 	var signature *StFleetBindingSignature
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
             SELECT network_id, hotkey, digest, binding_json, client_signature, hotkey_signature, create_time
             FROM st_fleet_binding_signature
-            WHERE client_id = $1 AND generation = $2
-        `, clientId, int64(generation))
+            WHERE deployment_key = $1 AND client_id = $2 AND generation = $3
+        `, key, clientId, int64(generation))
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				signature = &StFleetBindingSignature{ClientId: clientId, Generation: generation}
+				signature = &StFleetBindingSignature{DeploymentKey: deploymentKey, ClientId: clientId, Generation: generation}
 				var hotkey []byte
 				var digest []byte
 				server.Raise(result.Scan(
@@ -328,13 +337,14 @@ func GetStFleetBindingSignature(ctx context.Context, clientId server.Id, generat
 // ClaimStEpochNotification marks the earnings notification for an epoch as
 // taken. Exactly one caller gets true, so several finalize paths and workers
 // send the epoch email once.
-func ClaimStEpochNotification(ctx context.Context, epoch uint64) (claimed bool) {
+func ClaimStEpochNotification(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64) (claimed bool) {
+	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(ctx, `
-            INSERT INTO st_epoch_notification (epoch, notify_time)
-            VALUES ($1, $2)
-            ON CONFLICT (epoch) DO NOTHING
-        `, int64(epoch), server.NowUtc()))
+            INSERT INTO st_epoch_notification (deployment_key, epoch, notify_time)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (deployment_key, epoch) DO NOTHING
+        `, key, int64(epoch), server.NowUtc()))
 		claimed = tag.RowsAffected() == 1
 	})
 	return claimed

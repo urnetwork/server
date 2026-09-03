@@ -68,6 +68,16 @@ func (self *stubStClient) BlockHash(context.Context, uint64) ([32]byte, error) {
 	return [32]byte{1}, nil
 }
 
+// BlockHashes returns one deterministic canonical hash for each requested
+// block while preserving input order.
+func (self *stubStClient) BlockHashes(_ context.Context, blocks []uint64) ([][32]byte, error) {
+	hashes := make([][32]byte, len(blocks))
+	for index := range hashes {
+		hashes[index] = [32]byte{1}
+	}
+	return hashes, nil
+}
+
 func (self *stubStClient) RollEpochs(ctx context.Context) (string, error) {
 	self.rollCount += 1
 	return "0xstubroll", nil
@@ -81,12 +91,12 @@ func (self *stubStClient) DeferMissedEmission(context.Context, uint64, uint64) (
 	return "0xstubdefer", nil
 }
 
-func (self *stubStClient) DepositPush(ctx context.Context, alphaRao *big.Int) (string, error) {
+func (self *stubStClient) DepositPush(ctx context.Context, epoch uint64, alphaRao *big.Int) (string, error) {
 	self.depositCount += 1
 	return "0xstubpush", nil
 }
 
-func (self *stubStClient) DepositCredit(ctx context.Context, noId uint64, alphaRao *big.Int) (string, error) {
+func (self *stubStClient) DepositCredit(ctx context.Context, epoch uint64, noId uint64, alphaRao *big.Int) (string, error) {
 	self.depositCount += 1
 	return "0xstubcredit", nil
 }
@@ -123,6 +133,14 @@ func (self *stubStClient) PoolState(ctx context.Context, epoch uint64, noId uint
 
 func (self *stubStClient) BindingAt(context.Context, [16]byte, uint64) (*StFleetBindingState, error) {
 	return &StFleetBindingState{}, nil
+}
+
+func (self *stubStClient) BindingsAt(_ context.Context, clientIds [][16]byte, _ uint64) ([]*StFleetBindingState, error) {
+	bindings := make([]*StFleetBindingState, len(clientIds))
+	for index := range bindings {
+		bindings[index] = &StFleetBindingState{}
+	}
+	return bindings, nil
 }
 
 func (self *stubStClient) EpochDeposit(context.Context, uint64, uint64) (*big.Int, error) {
