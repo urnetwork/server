@@ -66,6 +66,49 @@ func TestEvidenceRejectsUnsafeHistorySegments(t *testing.T) {
 	}
 }
 
+func TestEvidenceReservesDeploymentHistoryRunID(t *testing.T) {
+	e := testEvidence(t)
+	e.RunID = EvidenceDeploymentHistoryRunID
+	if err := validateEvidenceIdentity(e); err == nil {
+		t.Fatal("deployment history sentinel accepted as a signed run id")
+	}
+	key, err := crypto.HexToECDSA("1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SignEvidence(e, key); err == nil {
+		t.Fatal("deployment history sentinel was signed as a named run")
+	}
+	e.RunID = "deployment"
+	if err := SignEvidence(e, key); err != nil {
+		t.Fatalf("legacy-valid named deployment run was rejected: %v", err)
+	}
+}
+
+func TestEvidencePublishesEmptyRunUnderReservedDeploymentHistory(t *testing.T) {
+	e := testEvidence(t)
+	e.RunID = ""
+	key, err := crypto.HexToECDSA("1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SignEvidence(e, key); err != nil {
+		t.Fatal(err)
+	}
+	store := server.NewLocalBlobStore(t.TempDir(), "blob")
+	published, err := PublishEvidence(context.Background(), store, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := EvidenceHistoryRunPrefix(store, e.DeploymentID, e.Netuid, e.Kind, EvidenceDeploymentHistoryRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(published.HistoryKey, prefix) {
+		t.Fatalf("deployment history key = %q, want prefix %q", published.HistoryKey, prefix)
+	}
+}
+
 func TestEvidenceHistoryRunPrefixAcceptsSignedRunGrammar(t *testing.T) {
 	store := server.NewLocalBlobStore(t.TempDir(), "blob/operator-1")
 	got, err := EvidenceHistoryRunPrefix(store, "test-deployment", 521, "scenario-bundle", "release.v1-attempt-4")
@@ -81,5 +124,18 @@ func TestEvidenceHistoryRunPrefixAcceptsSignedRunGrammar(t *testing.T) {
 	}
 	if prefix, err := EvidenceHistoryRunPrefix(store, "test-deployment", 521, "", "run-1"); err == nil {
 		t.Errorf("empty kind produced %q", prefix)
+	}
+}
+
+func TestEvidenceHistoryKeyBindsExactRunAndContentHash(t *testing.T) {
+	store := server.NewLocalBlobStore(t.TempDir(), "blob/operator-1")
+	hash := "sha256:" + strings.Repeat("ab", 32)
+	got, err := EvidenceHistoryKey(store, "test-deployment", 521, "scenario-bundle", "release.v1", hash)
+	want := "blob/operator-1/st/v1/evidence/history/test-deployment/521/scenario-bundle/release.v1/" + strings.Repeat("ab", 32) + ".json"
+	if err != nil || got != want {
+		t.Fatalf("history key = %q, %v; want %q", got, err, want)
+	}
+	if key, err := EvidenceHistoryKey(store, "test-deployment", 521, "scenario-bundle", "release.v1", "sha256:not-hex"); err == nil {
+		t.Fatalf("invalid content hash produced history key %q", key)
 	}
 }
