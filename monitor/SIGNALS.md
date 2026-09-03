@@ -12746,13 +12746,16 @@ IPv4 address, not by a possibly different certificate common name. The ICMP
 check is part of this inventory's established host contract: every enabled
 client currently answers it from the VPN server.
 
-The status and journal reductions compare current and recent-timeout source
-addresses only inside the VPN server. Their output contains transient
-equality-group numbers and configured host names in each group; public
-addresses, source ports, certificates, and unrelated VPN identities never
-leave the host. A missing client with no recent comparable timeout stays
-isolated-or-unknown rather than being assigned to a site from adjacency or
-memory.
+The status and journal are reduced through one source-equality map inside the
+VPN server. This lets a current-but-unreachable session and a recently timed
+out session retain their shared-site attribution while the site flaps between
+control-plane states. The output contains only transient equality-group
+numbers and configured host names in each group; public addresses, source
+ports, certificates, and unrelated VPN identities never leave the host. A
+missing client with no recent comparable timeout stays isolated-or-unknown
+rather than being assigned to a site from adjacency or memory. Site-class
+attribution also requires at least one reachable configured client as a
+central-path control.
 
 HEALTHY: the VPN server is `active/running`; its status file is no more than 90
 seconds old (the live configuration uses OpenVPN's 60-second default status
@@ -12774,17 +12777,18 @@ BROKEN:
 - `vpn-client-session-loss` after two cadences is a warning for one absent
   virtual address whose source is isolated or cannot be compared. Ownership
   can be the client process, host, WAN, route, or NAT path.
-- `vpn-site-session-loss` after two cadences is a page when at least two
-  currently missing configured clients have recent inactivity timeouts from
-  the same public source. With the central server and unrelated sessions
-  healthy, this localizes the common boundary to that offsite LAN,
-  router/conntrack/NAT, WAN, or site-side OpenVPN path. It does not prove which
-  device failed.
+- `vpn-site-session-loss` after two cadences is a page when a missing client
+  and at least one other missing or current-but-unreachable configured client
+  map to the same current/recent public source. With the central server and an
+  unrelated reachable client healthy, this localizes the common boundary to
+  that offsite LAN, router/conntrack/NAT, WAN, or site-side OpenVPN path. It
+  does not prove which device failed.
 - `vpn-client-data-path-loss` after two cadences warns when a current session
   exists but its exact overlay address does not answer the server-originated
   check. This separates control-session presence from host/tunnel forwarding.
-- `vpn-site-data-path-loss` after two cadences pages when at least two such
-  unreachable current sessions share one public source while another
+- `vpn-site-data-path-loss` after two cadences pages when a current-but-
+  unreachable client and at least one other current-but-unreachable or
+  recently timed-out configured client map to the same source while another
   configured client remains reachable. This healthy control rules out a
   server-wide tunnel failure and the monitor workstation, but the equality
   still does not distinguish the site client processes, router state, NAT/WAN,
@@ -12829,6 +12833,21 @@ absent again in the 08:55:53Z focused probe. The transition from absent, to
 session-present-but-unreachable, to absent again is an active flap of the same
 site path. It is not a completed recovery window and must not clear the
 router/WAN investigation.
+
+A bounded Planetoid capture at 09:18:53Z caught the next brief return. The host
+had retained the same August 15 boot, OpenVPN PID, and zero-restart generation;
+its Ethernet carrier was up and its route still selected the LAN gateway. The
+unchanged client had nevertheless logged repeated UDP `EHOSTUNREACH` failures
+from 08:04Z onward, while NetworkManager moved from global connectivity to
+site-only at 08:47:52Z, briefly back to global at 09:06:14Z, and back to
+site-only at 09:11:50Z. OpenVPN completed again at 09:18:29Z, but the server
+could not reach either Planetoid or Snow at 09:23:35Z while reaching the other
+eight configured controls. Subsequent workstation SSH to both timed out. This
+rules out client process replacement and a persistent missing host route; the
+remaining causal boundary is the shared site gateway/router/WAN path. A DHCP
+lease renewal occurred during the outage but is correlation, not evidence that
+DHCP caused it. Exact router WAN-event, gateway/conntrack, or carrier evidence
+is still required before naming the failed device or mechanism.
 
 The historical client template named
 `by-us-fmt-0-edge-0.bringyour.com`, which Route 53 authoritatively returns as

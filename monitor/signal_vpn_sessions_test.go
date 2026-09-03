@@ -3,6 +3,9 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -43,7 +46,7 @@ func TestVPNSessionsSignalSyntheticSharedSiteLoss(t *testing.T) {
 		}
 		for _, want := range []string{
 			"shared_public_source=true",
-			"correlated_missing_hosts=planetoid,snow",
+			"correlated_affected_hosts=planetoid,snow",
 			"offsite LAN, router/NAT, WAN",
 			"source-address equality",
 			"public source itself is never emitted",
@@ -104,7 +107,7 @@ func TestVPNSessionsSignalSyntheticSharedSiteDataPathLoss(t *testing.T) {
 			"session_present=true",
 			"data_path_reachable=false",
 			"reachable_controls=1",
-			"correlated_unreachable_hosts=planetoid,snow",
+			"correlated_affected_hosts=planetoid,snow",
 			"CLIENT_LIST row proves a control session, not usable forwarding",
 			"never emits public sources",
 			"same-source configured peers recover",
@@ -112,6 +115,29 @@ func TestVPNSessionsSignalSyntheticSharedSiteDataPathLoss(t *testing.T) {
 			if !strings.Contains(alert.Markdown(), want) {
 				t.Errorf("%s data-path alert missing %q:\n%s", target, want, alert.Markdown())
 			}
+		}
+	}
+}
+
+func TestVPNSessionsSignalSyntheticCorrelatesMixedSessionStates(t *testing.T) {
+	now := time.Date(2026, 9, 3, 9, 15, 0, 0, time.UTC)
+	settings := vpnSessionTestSettings(t, now, fmt.Sprintf(
+		"server_active_state active\nserver_sub_state running\nserver_restarts 0\nstatus_mtime_epoch %d\nclient 172.28.208.173 %d 1\nclient 172.28.208.187 %d 2\nreach 172.28.208.173 true\nreach 172.28.208.185 false\nreach 172.28.208.187 false\ntimeout snow %d 2\n",
+		now.Add(-5*time.Second).Unix(), now.Add(-time.Hour).Unix(), now.Add(-2*time.Minute).Unix(), now.Add(-time.Minute).Unix(),
+	))
+	alerts, err := NewVPNSessionsSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("mixed-state alerts=%d, want 2: %+v", len(alerts), alerts)
+	}
+	planetoid := requireVPNSessionAlert(t, alerts, "vpn-site-data-path-loss", "planetoid")
+	snow := requireVPNSessionAlert(t, alerts, "vpn-site-session-loss", "snow")
+	for _, alert := range []Alert{planetoid, snow} {
+		markdown := alert.Markdown()
+		if alert.Severity != SeverityPage || !strings.Contains(markdown, "correlated_affected_hosts=planetoid,snow") || !strings.Contains(markdown, "current/recent public source") {
+			t.Fatalf("mixed-state alert lost shared-site attribution: %+v\n%s", alert, markdown)
 		}
 	}
 }
@@ -201,6 +227,89 @@ func TestVPNSessionsSignalNoopsWithoutInventory(t *testing.T) {
 	alerts, err := NewVPNSessionsSignal().Run(context.Background(), syntheticSettings(&syntheticSource{}))
 	if err != nil || len(alerts) != 0 {
 		t.Fatalf("unconfigured VPN signal alerts=%+v err=%v", alerts, err)
+	}
+}
+
+func TestVPNSessionsCommandPreservesCombinedSourceGrouping(t *testing.T) {
+	command, err := vpnSessionsCommand([]*host{
+		{name: "edge-0", overlayIp: "172.28.208.173"},
+		{name: "planetoid", overlayIp: "172.28.208.187"},
+		{name: "snow", overlayIp: "172.28.208.185"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"printf '%s\\n' '---monitor-journal---'",
+		"} | awk -v wanted_names=",
+		"if (!(source in source_group)) source_group[source]=++source_groups",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("generated command lost %q:\n%s", want, command)
+		}
+	}
+	if strings.Contains(command, "%!s(MISSING)") {
+		t.Fatalf("generated command has an unexpanded Go format error:\n%s", command)
+	}
+	check := exec.Command("sh", "-n")
+	check.Stdin = strings.NewReader(command)
+	if output, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("generated command is not valid POSIX shell: %v\n%s", err, output)
+	}
+
+	binDir := t.TempDir()
+	writeExecutable := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable("systemctl", `#!/bin/sh
+case "$*" in
+  *ActiveState*) printf '%s\n' active ;;
+  *SubState*) printf '%s\n' running ;;
+  *NRestarts*) printf '%s\n' 0 ;;
+  *) exit 64 ;;
+esac
+`)
+	writeExecutable("sudo", `#!/bin/sh
+if [ "$1" = -n ]; then shift; fi
+case "$1" in
+  test) exit 0 ;;
+  stat) printf '%s\n' "$VPN_TEST_MTIME" ;;
+  cat) printf '%s' "$VPN_TEST_STATUS" ;;
+  journalctl) printf '%s' "$VPN_TEST_JOURNAL" ;;
+  *) exit 64 ;;
+esac
+`)
+	writeExecutable("ping", `#!/bin/sh
+for address do :; done
+[ "$address" = 172.28.208.173 ]
+`)
+	execute := exec.Command("sh", "-c", command)
+	execute.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"VPN_TEST_MTIME=1788427200",
+		"VPN_TEST_STATUS="+
+			"CLIENT_LIST,edge-0,198.51.100.8:1200,172.28.208.173,x,x,x,x,1788420000\n"+
+			"CLIENT_LIST,planetoid,203.0.113.9:1300,172.28.208.187,x,x,x,x,1788427109\n",
+		"VPN_TEST_JOURNAL=1788427110.000000 host ovpn[1]: snow/203.0.113.9:1400 Inactivity timeout (--ping-restart), restarting\n",
+	)
+	output, err := execute.CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute generated command: %v\n%s", err, output)
+	}
+	observation, err := parseVPNSessionsObservation(string(output))
+	if err != nil {
+		t.Fatalf("parse generated command output: %v\n%s", err, output)
+	}
+	planetoidGroup := observation.clients["172.28.208.187"].group
+	snowGroup := observation.timeouts["snow"].group
+	if planetoidGroup <= 0 || snowGroup != planetoidGroup {
+		t.Fatalf("current and timed-out clients with one source got different groups: planetoid=%d snow=%d\n%s", planetoidGroup, snowGroup, output)
+	}
+	if edgeGroup := observation.clients["172.28.208.173"].group; edgeGroup == planetoidGroup {
+		t.Fatalf("different sources got one group: edge=%d planetoid=%d\n%s", edgeGroup, planetoidGroup, output)
 	}
 }
 

@@ -25,7 +25,8 @@ var vpnSessionNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
 // Signal vpn-sessions implements SIGNALS.md §21.1. It compares the VPN
 // server's current status with the explicitly enabled client inventory and
-// groups recent losses by equal public source without exporting that address.
+// groups current or recent losses by equal public source without exporting
+// that address.
 func NewVPNSessionsSignal() Signal {
 	return &signalAdapter{
 		number: "21.1", key: "vpn-sessions", name: "Management VPN client sessions",
@@ -144,19 +145,25 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	}
 
 	findings := make([]finding, 0, len(missing)+len(unreachable))
-	unreachableByGroup := map[int][]string{}
+	affectedByGroup := map[int][]string{}
 	for _, client := range unreachable {
 		group := observation.clients[client.overlayIp].group
 		if group > 0 {
-			unreachableByGroup[group] = append(unreachableByGroup[group], client.name)
+			affectedByGroup[group] = append(affectedByGroup[group], client.name)
 		}
 	}
-	for group := range unreachableByGroup {
-		sort.Strings(unreachableByGroup[group])
+	for _, client := range missing {
+		timeout := observation.timeouts[client.name]
+		if recentVPNSessionTimeout(now, timeout) {
+			affectedByGroup[timeout.group] = append(affectedByGroup[timeout.group], client.name)
+		}
+	}
+	for group := range affectedByGroup {
+		sort.Strings(affectedByGroup[group])
 	}
 	for _, client := range unreachable {
 		session := observation.clients[client.overlayIp]
-		peers := unreachableByGroup[session.group]
+		peers := affectedByGroup[session.group]
 		sharedSite := len(peers) >= 2 && reachableClients > 0
 		class := "vpn-client-data-path-loss"
 		tier := tierWarn
@@ -166,7 +173,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			class = "vpn-site-data-path-loss"
 			tier = tierPage
 			frame = "shared-public-source-data-path"
-			mechanism = "The VPN server has current sessions for multiple clients sharing one public source, can reach unrelated configured clients, and cannot reach these peers over their virtual addresses. That isolates a session-present data-plane blackhole at the shared offsite client/router/NAT/WAN path rather than the central process or the monitor workstation."
+			mechanism = "This current-but-unreachable session and at least one other missing or unreachable configured client map to one current/recent public source, while the VPN server can reach unrelated configured clients. That isolates a shared offsite client/router/NAT/WAN path rather than the central process or the monitor workstation."
 		}
 		peerText := "none"
 		if len(peers) > 0 {
@@ -179,7 +186,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism: mechanism,
 			baseline:  "Every enabled vpn-client has its exact overlay address in the fresh server snapshot and answers a bounded server-originated overlay reachability check.",
 			observed: fmt.Sprintf(
-				"host=%s overlay_address=%s session_present=true data_path_reachable=false reachable_controls=%d configured_clients=%d shared_public_source=%t correlated_unreachable_hosts=%s connected_since=%s server_restarts=%d",
+				"host=%s overlay_address=%s session_present=true data_path_reachable=false reachable_controls=%d configured_clients=%d shared_public_source=%t correlated_affected_hosts=%s connected_since=%s server_restarts=%d",
 				client.name, client.overlayIp, reachableClients, len(clients), sharedSite, peerText, session.connectedAt.Format(time.RFC3339), observation.restarts,
 			),
 			evidence: "The current status snapshot groups real-source equality only inside the VPN server and exports configured private overlay addresses plus configured host names; it never emits public sources, source ports, certificates, or unrelated identities. The server then probes each configured overlay address directly.",
@@ -190,32 +197,13 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		})
 	}
 
-	missingByName := make(map[string]*host, len(missing))
-	for _, client := range missing {
-		missingByName[client.name] = client
-	}
-	correlated := map[string][]string{}
-	for _, timeout := range observation.timeouts {
-		if timeout.group <= 0 || now.Sub(timeout.at) < 0 || now.Sub(timeout.at) > vpnSessionCorrelationLimit {
-			continue
-		}
-		if _, isMissing := missingByName[timeout.client]; !isMissing {
-			continue
-		}
-		key := strconv.Itoa(timeout.group)
-		correlated[key] = append(correlated[key], timeout.client)
-	}
-	for key := range correlated {
-		sort.Strings(correlated[key])
-	}
-
 	for _, client := range missing {
 		timeout := observation.timeouts[client.name]
 		peers := []string{}
-		if timeout.group > 0 {
-			peers = append(peers, correlated[strconv.Itoa(timeout.group)]...)
+		if recentVPNSessionTimeout(now, timeout) {
+			peers = append(peers, affectedByGroup[timeout.group]...)
 		}
-		sharedSite := len(peers) >= 2
+		sharedSite := len(peers) >= 2 && reachableClients > 0
 		class := "vpn-client-session-loss"
 		tier := tierWarn
 		frame := "isolated-or-unknown-source"
@@ -234,7 +222,7 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		}
 		mechanism := "The VPN server and its fresh status writer are healthy, but the configured virtual address is absent. That localizes the management failure to this client, its host, or the route/NAT path between it and the server."
 		if sharedSite {
-			mechanism = "The VPN server and unrelated client sessions remain healthy while multiple missing clients' latest inactivity timeouts share one public source. That equality localizes the common boundary to their offsite LAN, router/NAT, WAN, or site-side OpenVPN reachability rather than the central VPN process or each application independently."
+			mechanism = "This missing client and at least one other missing or unreachable configured client map to one current/recent public source while unrelated overlay controls remain healthy. That equality localizes the common boundary to their offsite LAN, router/NAT, WAN, or site-side OpenVPN reachability rather than the central VPN process or each application independently."
 		}
 		findings = append(findings, finding{
 			probeId: "network/vpn-sessions", tier: tier, class: class,
@@ -243,10 +231,10 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 			mechanism: mechanism,
 			baseline:  "Every enabled vpn-client host has its exact configured overlay address in the VPN server's fresh CLIENT_LIST snapshot.",
 			observed: fmt.Sprintf(
-				"missing_host=%s overlay_address=%s missing_clients=%d configured_clients=%d last_inactivity_timeout=%s shared_public_source=%t correlated_missing_hosts=%s server_restarts=%d",
+				"missing_host=%s overlay_address=%s missing_clients=%d configured_clients=%d last_inactivity_timeout=%s shared_public_source=%t correlated_affected_hosts=%s server_restarts=%d",
 				client.name, client.overlayIp, len(missing), len(clients), lastTimeout, sharedSite, peerText, observation.restarts,
 			),
-			evidence: "The server-side status file supplies only configured virtual addresses. A bounded two-hour journal reduction compares source-address equality inside the VPN host and exports only the names of configured peers in the same group; the public source itself is never emitted.",
+			evidence: "The current status and bounded two-hour journal are reduced through one source-address equality map inside the VPN host. Only configured virtual addresses and names in the same group are exported; the public source itself is never emitted.",
 			context:  "This proves management-session loss, not application death. Correlate a dedicated direct-path control: if Planetoid's public PostgreSQL/Redis SSH transfer also disappears, the fault is broader than OpenVPN; if that transfer advances, keep the diagnosis at the UDP/VPN path. Bulk backups must never move onto the management VPN.",
 			action:   "Inspect the affected host and site router through an independent console: WAN/link history, address selection, NAT/conntrack state, UDP/443 reachability, and openvpn@by-pre state/journal. Preserve advancing Subtensor databases and the single Planetoid backup writer. Restore the site path or client session; do not restart databases, launch a duplicate transfer, or change the central VPN architecture to manufacture recovery.",
 			verify:   "The exact client virtual address remains in two consecutive fresh server snapshots, all same-site configured peers recover, direct public backup traffic uses its dedicated non-VPN endpoint and advances when scheduled, and dependent host probes remain observable for ten minutes.",
@@ -254,6 +242,11 @@ func (vpnSessionsProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 		})
 	}
 	return findings, nil
+}
+
+func recentVPNSessionTimeout(now time.Time, timeout vpnSessionTimeout) bool {
+	age := now.Sub(timeout.at)
+	return timeout.group > 0 && !timeout.at.IsZero() && age >= 0 && age <= vpnSessionCorrelationLimit
 }
 
 func vpnSessionsCommand(clients []*host) (string, error) {
@@ -303,49 +296,55 @@ fi
 status_mtime=$(sudo -n stat -c '%%Y' "$vpn_status" 2>/dev/null || true)
 case "$status_mtime" in ''|*[!0-9]*) status_mtime=0 ;; esac
 printf 'status_mtime_epoch %%s\n' "$status_mtime"
-sudo -n awk -F, -v wanted="$expected_addresses" '
+	{
+		sudo -n cat "$vpn_status"
+		printf '%%s\n' '---monitor-journal---'
+		sudo -n journalctl -u "$vpn_service" --since "2 hours ago" --no-pager -o short-unix 2>/dev/null
+	} | awk -v wanted_names="$expected_names" -v wanted_addresses="$expected_addresses" '
   BEGIN {
-    count=split(wanted, values, " ")
-    for (i=1; i<=count; i++) expected[values[i]]=1
+	address_count=split(wanted_addresses, addresses, " ")
+	for (i=1; i<=address_count; i++) expected_address[addresses[i]]=1
+	name_count=split(wanted_names, names, " ")
+	for (i=1; i<=name_count; i++) expected_name[names[i]]=1
   }
-  $1=="CLIENT_LIST" && expected[$4] {
-	 source=$3
-	 sub(/:[0-9]+$/, "", source)
-	 if (!(source in source_group)) source_group[source]=++source_groups
-    connected=$9
-    if (connected !~ /^[0-9]+$/) connected=0
-	 print "client", $4, connected, source_group[source]
+	$0=="---monitor-journal---" { journal=1; next }
+	!journal {
+		field_count=split($0, row, ",")
+		if (field_count >= 9 && row[1]=="CLIENT_LIST" && expected_address[row[4]]) {
+			source=row[3]
+			sub(/:[0-9]+$/, "", source)
+			if (source=="") next
+			if (!(source in source_group)) source_group[source]=++source_groups
+			connected=row[9]
+			if (connected !~ /^[0-9]+$/) connected=0
+			print "client", row[4], connected, source_group[source]
+		}
+		next
+	}
+	/Inactivity timeout \(--ping-restart\)/ {
+		field_count=split($0, fields, /[[:space:]]+/)
+		token=fields[4]
+		parts=split(token, pair, "/")
+		if (parts != 2) next
+		client=pair[1]
+		if (!expected_name[client]) next
+		source=pair[2]
+		sub(/:[0-9]+$/, "", source)
+		if (source=="") next
+		if (!(source in source_group)) source_group[source]=++source_groups
+		epoch=fields[1]
+		sub(/[.][0-9]+$/, "", epoch)
+		if (epoch !~ /^[0-9]+$/) next
+		print "timeout", client, epoch, source_group[source]
   }
-' "$vpn_status"
+'
 for address in $expected_addresses; do
 	if ping -n -c 1 -W 1 "$address" >/dev/null 2>&1; then
 		printf 'reach %%s true\n' "$address"
 	else
 		printf 'reach %%s false\n' "$address"
 	fi
-done
-sudo -n journalctl -u "$vpn_service" --since "2 hours ago" --no-pager -o short-unix 2>/dev/null |
-awk -v wanted="$expected_names" '
-  BEGIN {
-    count=split(wanted, values, " ")
-    for (i=1; i<=count; i++) expected[values[i]]=1
-  }
-  /Inactivity timeout \(--ping-restart\)/ {
-    token=$4
-    parts=split(token, pair, "/")
-    if (parts != 2) next
-    client=pair[1]
-    if (!expected[client]) next
-    source=pair[2]
-    sub(/:[0-9]+$/, "", source)
-    if (source=="") next
-    if (!(source in source_group)) source_group[source]=++source_groups
-    epoch=$1
-    sub(/[.][0-9]+$/, "", epoch)
-    if (epoch !~ /^[0-9]+$/) next
-    print "timeout", client, epoch, source_group[source]
-  }
-'`, vpnSessionsMarker, strings.Join(names, " "), strings.Join(addresses, " ")), nil
+done`, vpnSessionsMarker, strings.Join(names, " "), strings.Join(addresses, " ")), nil
 }
 
 func clientName(client *host) string {
