@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,9 +31,12 @@ func (egressCoverageProbe) tier() string           { return tierWarn }
 func (egressCoverageProbe) cadence() time.Duration { return 5 * time.Minute }
 
 type egressCoverageBatchArgs struct {
-	Limit               int `json:"limit"`
-	Concurrency         int `json:"concurrency"`
-	ProbeTimeoutSeconds int `json:"probe_timeout_seconds"`
+	Limit                   int  `json:"limit"`
+	Concurrency             int  `json:"concurrency"`
+	ProbeTimeoutSeconds     int  `json:"probe_timeout_seconds"`
+	AllDestinations         bool `json:"all_destinations,omitempty"`
+	Bandwidth               bool `json:"bandwidth,omitempty"`
+	BandwidthTimeoutSeconds int  `json:"bandwidth_timeout_seconds,omitempty"`
 }
 
 type egressCoverageTaskArgs struct {
@@ -44,6 +48,8 @@ type egressCoverageTaskArgs struct {
 	Blackhole        egressCoverageBatchArgs `json:"blackhole"`
 	APIURL           string                  `json:"api_url"`
 	PlatformURL      string                  `json:"platform_url"`
+	PublicAPIURL     string                  `json:"public_api_url,omitempty"`
+	BandwidthCDNURL  string                  `json:"bandwidth_cdn_url,omitempty"`
 }
 
 type egressCoverageGeometry struct {
@@ -57,14 +63,12 @@ type egressCoverageConfig struct {
 	shardCount       int
 	idleDelaySeconds int
 	maxTimeSeconds   int
-	fullLimit        int
-	fullConcurrency  int
-	fullTimeout      int
-	blackholeLimit   int
-	blackholeWorkers int
-	blackholeTimeout int
+	full             egressCoverageBatchArgs
+	blackhole        egressCoverageBatchArgs
 	apiURL           string
 	platformURL      string
+	publicAPIURL     string
+	bandwidthCDNURL  string
 }
 
 func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -130,13 +134,13 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			probeId: "pg/egress-coverage", tier: tierPage,
 			class: "egress-probe-shards", target: target, frame: "durable-geometry", sustain: 1,
 			symptom:   "Durable provider-egress tasks do not form one complete, internally consistent shard geometry.",
-			mechanism: "Each recurring task carries the total shard count and one disjoint index. A missing, duplicate, mixed-generation, or malformed row strands part of the provider fleet even while sibling shards continue producing healthy-looking global timestamps.",
-			baseline:  "Exactly shard_count rows exist, their indexes cover [0, shard_count), each run_once_key names its index, and every row carries the same bounded execution settings.",
+			mechanism: "Each recurring task carries the total shard count, one disjoint index, and the complete endpoint, destination, and bandwidth execution snapshot. A missing, duplicate, mixed-generation, unknown-setting, or malformed row strands or changes part of the provider fleet even while sibling shards continue producing healthy-looking global timestamps.",
+			baseline:  "Exactly shard_count rows exist, their indexes cover [0, shard_count), each run_once_key names its index, and every row carries the same complete bounded execution settings.",
 			observed:  fmt.Sprintf("provider_egress_task_rows=%d geometry_error=%s", len(taskRows), geometryErr),
-			evidence:  "The parser reports bounded structural reasons only; it never copies task IDs, raw JSON, provider IDs, credentials, or endpoint values into the alert.",
+			evidence:  "The parser recognizes the complete current task schema, rejects unknown JSON fields, and reports bounded structural reasons only; it never copies task IDs, raw JSON, provider IDs, credentials, or endpoint values into the alert.",
 			context:   "A healthy sibling task cannot compensate for a missing hash partition. Generic task health may still be green because this check concerns fleet coverage, not whether one existing row can execute.",
 			action:    "Converge every Taskworker on one configuration and allow the normal ProviderEgressProbe post-step/bootstrap scheduler to replace stale geometry. Do not manually clone, delete, or rewrite task rows.",
-			verify:    "The durable rows converge to one complete geometry and every shard either has no due candidates or advances its own aggregate full and blackhole evidence within the derived execution bound.",
+			verify:    "The durable rows converge to one complete geometry and execution snapshot, and every shard either has no due candidates or advances its own aggregate full and blackhole evidence within the derived execution bound.",
 			playbook:  "SIGNALS.md §2.19 and §8.9",
 		}}, nil
 	}
@@ -186,22 +190,21 @@ func inspectEgressCoverageTasks(rows []pgRow) (egressCoverageGeometry, error) {
 			problems = append(problems, fmt.Sprintf("row_%d_invalid_shape", rowIndex+1))
 			continue
 		}
-		var args egressCoverageTaskArgs
-		if err := json.Unmarshal([]byte(row.str(1)), &args); err != nil {
+		args, err := decodeEgressCoverageTaskArgs(row.str(1))
+		if err != nil {
 			problems = append(problems, fmt.Sprintf("row_%d_malformed_args", rowIndex+1))
 			continue
 		}
 		config := egressCoverageConfig{
 			shardCount: args.ShardCount, idleDelaySeconds: args.IdleDelaySeconds, maxTimeSeconds: args.MaxTimeSeconds,
-			fullLimit: args.Full.Limit, fullConcurrency: args.Full.Concurrency, fullTimeout: args.Full.ProbeTimeoutSeconds,
-			blackholeLimit: args.Blackhole.Limit, blackholeWorkers: args.Blackhole.Concurrency, blackholeTimeout: args.Blackhole.ProbeTimeoutSeconds,
-			apiURL: strings.TrimSpace(args.APIURL), platformURL: strings.TrimSpace(args.PlatformURL),
+			full: args.Full, blackhole: args.Blackhole,
+			apiURL: args.APIURL, platformURL: args.PlatformURL,
+			publicAPIURL: args.PublicAPIURL, bandwidthCDNURL: args.BandwidthCDNURL,
 		}
 		if config.shardCount < 1 || 256 < config.shardCount || args.ShardIndex < 0 || config.shardCount <= args.ShardIndex ||
 			config.idleDelaySeconds < 1 || config.maxTimeSeconds < 1 ||
-			config.fullLimit < 1 || config.fullConcurrency < 1 || config.fullLimit < config.fullConcurrency || config.fullTimeout < 1 ||
-			config.blackholeLimit < 1 || config.blackholeWorkers < 1 || config.blackholeLimit < config.blackholeWorkers || config.blackholeTimeout < 1 ||
-			config.apiURL == "" || config.platformURL == "" {
+			!validEgressCoverageBatchArgs(config.full) || !validEgressCoverageBatchArgs(config.blackhole) ||
+			strings.TrimSpace(config.apiURL) == "" || strings.TrimSpace(config.platformURL) == "" {
 			problems = append(problems, fmt.Sprintf("row_%d_invalid_settings", rowIndex+1))
 			continue
 		}
@@ -248,6 +251,27 @@ func inspectEgressCoverageTasks(rows []pgRow) (egressCoverageGeometry, error) {
 	}
 	sort.Ints(geometry.indices)
 	return geometry, nil
+}
+
+func decodeEgressCoverageTaskArgs(raw string) (egressCoverageTaskArgs, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var args egressCoverageTaskArgs
+	if err := decoder.Decode(&args); err != nil {
+		return egressCoverageTaskArgs{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return egressCoverageTaskArgs{}, fmt.Errorf("multiple JSON values")
+		}
+		return egressCoverageTaskArgs{}, err
+	}
+	return args, nil
+}
+
+func validEgressCoverageBatchArgs(args egressCoverageBatchArgs) bool {
+	return 0 < args.Limit && 0 < args.Concurrency && args.Concurrency <= args.Limit &&
+		0 < args.ProbeTimeoutSeconds && (!args.Bandwidth || 0 < args.BandwidthTimeoutSeconds)
 }
 
 func egressCoverageActivityQuery(shardCount int) string {

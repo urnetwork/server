@@ -13,18 +13,29 @@ func syntheticEgressCoverageTask(t *testing.T, shardIndex, shardCount int) Row {
 	args := egressCoverageTaskArgs{
 		ShardIndex: shardIndex, ShardCount: shardCount,
 		IdleDelaySeconds: 300, MaxTimeSeconds: 1800,
-		Full:      egressCoverageBatchArgs{Limit: 8, Concurrency: 2, ProbeTimeoutSeconds: 60},
-		Blackhole: egressCoverageBatchArgs{Limit: 250, Concurrency: 4, ProbeTimeoutSeconds: 15},
-		APIURL:    "https://api.example.invalid", PlatformURL: "wss://connect.example.invalid",
+		Full: egressCoverageBatchArgs{
+			Limit: 8, Concurrency: 2, ProbeTimeoutSeconds: 60,
+			Bandwidth: true, BandwidthTimeoutSeconds: 5,
+		},
+		Blackhole:       egressCoverageBatchArgs{Limit: 250, Concurrency: 4, ProbeTimeoutSeconds: 15},
+		APIURL:          "https://api.example.invalid",
+		PlatformURL:     "wss://connect.example.invalid",
+		PublicAPIURL:    "https://public-api.example.invalid",
+		BandwidthCDNURL: "https://cdn.example.invalid/down",
 	}
+	return syntheticEgressCoverageTaskWithArgs(t, args)
+}
+
+func syntheticEgressCoverageTaskWithArgs(t *testing.T, args egressCoverageTaskArgs) Row {
+	t.Helper()
 	raw, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return Row{
-		fmt.Sprintf("[\"provider_egress_probe\",%d]", shardIndex),
+		fmt.Sprintf("[\"provider_egress_probe\",%d]", args.ShardIndex),
 		string(raw),
-		"1800",
+		fmt.Sprintf("%d", args.MaxTimeSeconds),
 	}
 }
 
@@ -223,6 +234,84 @@ func TestInspectEgressCoverageTasksRedactsMalformedArguments(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "malformed_args") {
 		t.Fatalf("malformed task error lost its structural class: %v", err)
+	}
+}
+
+func TestInspectEgressCoverageTasksRejectsUnknownExecutionSettings(t *testing.T) {
+	secret := "do-not-copy-this-unknown-setting"
+	row := syntheticEgressCoverageTask(t, 0, 1)
+	row[1] = strings.TrimSuffix(row[1], "}") + `,"future_execution_endpoint":"` + secret + `"}`
+	_, err := inspectEgressCoverageTasks([]pgRow{pgRow(row)})
+	if err == nil {
+		t.Fatal("unknown task setting was accepted")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("unknown task setting leaked into error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "row_1_malformed_args") {
+		t.Fatalf("unknown task setting lost its structural class: %v", err)
+	}
+}
+
+func TestInspectEgressCoverageTasksRejectsMixedCompleteExecutionSettings(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*egressCoverageTaskArgs)
+	}{
+		{name: "all destinations", mutate: func(args *egressCoverageTaskArgs) {
+			args.Full.AllDestinations = !args.Full.AllDestinations
+		}},
+		{name: "bandwidth enabled", mutate: func(args *egressCoverageTaskArgs) {
+			args.Full.Bandwidth = !args.Full.Bandwidth
+		}},
+		{name: "bandwidth timeout", mutate: func(args *egressCoverageTaskArgs) {
+			args.Full.BandwidthTimeoutSeconds++
+		}},
+		{name: "blackhole all destinations", mutate: func(args *egressCoverageTaskArgs) {
+			args.Blackhole.AllDestinations = !args.Blackhole.AllDestinations
+		}},
+		{name: "blackhole bandwidth", mutate: func(args *egressCoverageTaskArgs) {
+			args.Blackhole.Bandwidth = true
+			args.Blackhole.BandwidthTimeoutSeconds = 5
+		}},
+		{name: "public API endpoint", mutate: func(args *egressCoverageTaskArgs) {
+			args.PublicAPIURL = "https://other-public-api.example.invalid"
+		}},
+		{name: "bandwidth CDN endpoint", mutate: func(args *egressCoverageTaskArgs) {
+			args.BandwidthCDNURL = "https://other-cdn.example.invalid/down"
+		}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			first := syntheticEgressCoverageTask(t, 0, 2)
+			var secondArgs egressCoverageTaskArgs
+			if err := json.Unmarshal([]byte(syntheticEgressCoverageTask(t, 1, 2)[1]), &secondArgs); err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(&secondArgs)
+			second := syntheticEgressCoverageTaskWithArgs(t, secondArgs)
+			_, err := inspectEgressCoverageTasks([]pgRow{pgRow(first), pgRow(second)})
+			if err == nil || !strings.Contains(err.Error(), "row_2_mixed_settings") {
+				t.Fatalf("mixed %s setting was not rejected: %v", testCase.name, err)
+			}
+			if strings.Contains(err.Error(), "example.invalid") {
+				t.Fatalf("mixed %s setting leaked endpoint values: %v", testCase.name, err)
+			}
+		})
+	}
+}
+
+func TestInspectEgressCoverageTasksRejectsInvalidBandwidthTimeout(t *testing.T) {
+	row := syntheticEgressCoverageTask(t, 0, 1)
+	var args egressCoverageTaskArgs
+	if err := json.Unmarshal([]byte(row[1]), &args); err != nil {
+		t.Fatal(err)
+	}
+	args.Full.BandwidthTimeoutSeconds = 0
+	row = syntheticEgressCoverageTaskWithArgs(t, args)
+	_, err := inspectEgressCoverageTasks([]pgRow{pgRow(row)})
+	if err == nil || !strings.Contains(err.Error(), "row_1_invalid_settings") {
+		t.Fatalf("enabled bandwidth with no timeout was not rejected: %v", err)
 	}
 }
 

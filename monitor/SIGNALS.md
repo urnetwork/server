@@ -4242,18 +4242,26 @@ ORDER BY run_once_key;
 
 Parse the argument JSON inside the monitor without returning it in an alert.
 Every row carries `shard_index`, `shard_count`, `idle_delay_seconds`,
-`max_time_seconds`, and the bounded full/blackhole batch settings. Require:
+`max_time_seconds`, the API/platform/public-API/bandwidth-CDN endpoints, and
+the bounded full/blackhole batch settings. Each batch snapshot includes its
+limit, concurrency, probe timeout, all-destinations mode, bandwidth mode, and
+bandwidth timeout. Require:
 
 - exactly `shard_count` rows with one common settings snapshot;
 - indexes covering every integer in `[0, shard_count)` exactly once;
 - `run_once_key=["provider_egress_probe",shard_index]` for each row;
-- positive limits, concurrency, timeouts, idle delay, and max time, with each
-  concurrency at or below its batch limit; and
+- positive limits, concurrency, probe timeouts, idle delay, and max time, with
+  each concurrency at or below its batch limit and a positive bandwidth timeout
+  whenever bandwidth sampling is enabled;
+- one exact complete execution snapshot across the shards, including optional
+  endpoints and Boolean modes; and
 - `pending_task.run_max_time_seconds` equal to the argument snapshot.
 
-Malformed JSON, endpoint values, task IDs, credentials, and client IDs are
-never copied into the alert. The probe reports only bounded structural reasons
-such as `missing_shard_1` or `row_2_mixed_settings`. Zero rows is not zero due
+Malformed JSON, unknown task fields, endpoint values, task IDs, credentials,
+and client IDs are never copied into the alert. The parser fails closed on an
+unknown field so a later task schema cannot silently escape geometry checking;
+it reports only bounded structural reasons such as `missing_shard_1`,
+`row_2_malformed_args`, or `row_2_mixed_settings`. Zero rows is not zero due
 work: it is `egress-probe-unarmed`. The same rollout alert remains open until
 the append-only `provider_egress_health.tls_authentication_failure` field
 exists, because the new full-probe ingestion path cannot satisfy its integrity
@@ -4313,6 +4321,19 @@ startup supplied the behavioral discriminator. The immediate closure boundary
 was therefore a Taskworker artifact containing `49b51eeb`, not another schema
 migration.
 
+That incident review also found a monitor-only forward-compatibility defect.
+The first geometry parser predated the final `49b51eeb` task argument shape: it
+compared limits, concurrency, probe timeouts, and two endpoints but silently
+ignored all-destinations/bandwidth modes, bandwidth timeout, public API, and
+bandwidth CDN. Zero rows still classified correctly, but after rollout two
+shards could disagree on those execution-critical fields and appear coherent.
+The parser now mirrors the complete task snapshot, requires a bandwidth timeout
+when enabled, and rejects unknown fields without returning raw JSON or endpoint
+values. Deterministic regressions change each previously ignored field and
+require `mixed_settings`, reject an enabled bandwidth sampler with no timeout,
+and prove an unknown secret-shaped field produces only a redacted structural
+error.
+
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
 task-claim, or tunnel execution fault; do not delete provider evidence just to
@@ -4323,8 +4344,9 @@ that the independent Proxy active-client ceiling is adequate.
 Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
 `signal_egress_coverage.go` and `signal_egress_coverage_test.go`. Synthetic
 tests cover a fully unarmed rollout, the schema-armed/tasks-absent deployment
-boundary, a missing shard, shard-local full/blackhole stalls hidden by a
-healthy sibling, healthy empty due queues, malformed-secret redaction,
+boundary, a missing shard, complete execution-setting drift, unknown-field and
+malformed-secret redaction, an invalid bandwidth timeout, shard-local
+full/blackhole stalls hidden by a healthy sibling, healthy empty due queues,
 normalized signed hashing, and ambiguous aggregate rejection.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
