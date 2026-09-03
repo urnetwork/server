@@ -27,6 +27,7 @@
     <td style="padding:4px 0;font-size:14px;line-height:22px;color:#ffffff;">Data only. It does not start or change a Pro membership.</td>
   </tr>
 </table>
+{{if .Secret}}
 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:0 0 16px 0;border-collapse:separate;">
   <tr>
     <td style="padding:14px 16px;border:1px solid #2a2a2a;border-radius:10px;background:#101010;">
@@ -38,4 +39,5 @@
 <p style="margin:0;font-size:13px;line-height:20px;color:#9a9a9a;">
   The code is shown for your records only. It has already been applied to &ldquo;{{.NetworkName}}&rdquo; and cannot be redeemed again.
 </p>
+{{end}}
 {{end}}

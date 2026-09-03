@@ -76,6 +76,10 @@ var coinbaseSkus = sync.OnceValue(func() map[string]*Sku {
 	return skus.Skus
 })
 
+// Replaceable only by hermetic fulfillment tests whose environment does not
+// carry coinbase.yml. Production always delegates to the cached config.
+var coinbaseSkusFunc = func() map[string]*Sku { return coinbaseSkus() }
+
 var playPublisherEmail = sync.OnceValue(func() string {
 	c := server.Vault.RequireSimpleResource("google.yml").Parse()
 	return c["webhook"].(map[string]any)["publisher_email"].(string)
@@ -302,7 +306,7 @@ func CoinbaseWebhook(
 			return nil, errors.New("Coinbase event data missing.")
 		}
 		skuName := coinbaseWebhook.Event.Data.Name
-		skus := coinbaseSkus()
+		skus := coinbaseSkusFunc()
 		if sku, ok := skus[skuName]; ok {
 			purchaseEmail := ""
 			var redeemNetworkId *server.Id
@@ -460,9 +464,15 @@ func createBalanceCode(
 		}
 	}
 
-	// applied: the data is on redeemNetworkId (this call or an earlier attempt)
-	applied := false
-	if redeemNetworkId != nil {
+	// A normal webhook retry reaches this call after the first redemption has
+	// committed. Preserve that state instead of asking the redeem endpoint,
+	// whose public unavailable-code result deliberately does not distinguish a
+	// spent code from an unknown one.
+	applied := redeemNetworkId != nil &&
+		balanceCode.RedeemNetworkId != nil &&
+		*balanceCode.RedeemNetworkId == *redeemNetworkId &&
+		!balanceCode.RedeemTime.IsZero()
+	if redeemNetworkId != nil && !applied {
 		redeemResult, err := model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: *redeemNetworkId,
@@ -1762,11 +1772,10 @@ func HeliusWebhook(
 			continue
 		}
 
-		// array of accounts to use to search for payment intents
-		accounts := make([]string, len(transaction.AccountData))
-		for i, accountData := range transaction.AccountData {
-			accounts[i] = accountData.Account
-		}
+		// every string the reference could be found under: the account keys (a
+		// Solana Pay wallet attaches the reference as an account) and the memo
+		// texts (a payment sent by hand carries it as the transfer memo)
+		accounts := solanaReferenceCandidates(transaction)
 
 		paymentSearchResult, err := model.SearchPaymentIntents(accounts, clientSession)
 
@@ -1798,8 +1807,8 @@ func HeliusWebhook(
 			// Money arrived at our address and no open intent matched -- a payment
 			// after the intent was swept, or an unknown reference. Helius is still
 			// acked 200 (it never re-examines a delivered tx), so record it where an
-			// operator can see and repair it, with the account keys the reference was
-			// searched among. A late payment whose intent has merely EXPIRED but not
+			// operator can see and repair it, with the account keys and memos the
+			// reference was searched among. A late payment whose intent has merely EXPIRED but not
 			// yet been swept never lands here: the search ignores expires_at on
 			// purpose, so it still resolves and is credited below -- late is not
 			// fraudulent.
@@ -1907,6 +1916,12 @@ func solanaCreditPaymentIntent(
 	signature string,
 	tokenAmountReceivedUsd float64,
 ) (credited bool, returnErr error) {
+	// a data pack bought for a named network from the buy-data page: data only,
+	// no subscription (pay_data_solana_controller.go)
+	if solanaIsDataPackPlan(paymentSearchResult.SubscriptionPlan) {
+		return solanaCreditDataPack(clientSession, paymentSearchResult, signature, tokenAmountReceivedUsd)
+	}
+
 	// Grant the plan they actually bought. This used to be a YEAR every time,
 	// whatever they had chosen and whatever they had paid.
 	startTime := server.NowUtc()

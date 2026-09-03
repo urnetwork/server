@@ -156,8 +156,8 @@ func TestX402PricesComeFromProYml(t *testing.T) {
 	// exactly the numbers in pro.yml -- the same ones the site shows and Stripe charges
 	connect.AssertEqual(t, prices[X402SkuProMonth], model.Pro().PriceMonthlyUsd())
 	connect.AssertEqual(t, prices[X402SkuProMonth], float64(5))
-	connect.AssertEqual(t, prices[X402SkuData1Tib], float64(5))
-	connect.AssertEqual(t, prices[X402SkuData10Tib], float64(30))
+	connect.AssertEqual(t, prices[X402SkuData1Tib], float64(3))
+	connect.AssertEqual(t, prices[X402SkuData10Tib], float64(20))
 }
 
 // TestX402RequirementsForNetwork pins that a payment is always checked against the

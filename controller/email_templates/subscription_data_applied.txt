@@ -5,6 +5,6 @@
 - Amount: {{.Balance}}
 - Network: {{.NetworkName}}
 - Valid for one year from today.
-- This adds data only. It does not start or change a Pro membership.
+- This adds data only. It does not start or change a Pro membership.{{if .Secret}}
 
-For your records, the code behind this purchase was {{.Secret}}. It has already been applied to "{{.NetworkName}}" and cannot be redeemed again.{{end}}
+For your records, the code behind this purchase was {{.Secret}}. It has already been applied to "{{.NetworkName}}" and cannot be redeemed again.{{end}}{{end}}

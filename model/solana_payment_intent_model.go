@@ -406,3 +406,105 @@ func CleanupExpiredPaymentIntents(
 	return
 
 }
+
+// CreateSolanaPaymentIntentForNetwork records a quote for a network that is
+// not the caller's: the buy-data page sells USDC data packs to a NAMED network
+// with no sign-in (controller.PayDataSolanaIntent). subscriptionPlan carries the
+// data item id ("data_1tib") there, which is how the webhook tells a data pack
+// from a plan when it credits. The expiry is the caller's: a payment sent by
+// hand takes longer than a wallet flow.
+func CreateSolanaPaymentIntentForNetwork(
+	ctx context.Context,
+	reference string,
+	networkId server.Id,
+	expectedAmountUsd float64,
+	subscriptionPlan string,
+	expiresAt time.Time,
+) (err error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag, execErr := tx.Exec(
+			ctx,
+			`
+				INSERT INTO solana_payment_intent
+				(payment_reference, network_id, expires_at, expected_amount_usd, subscription_plan)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT DO NOTHING
+			`,
+			reference,
+			networkId,
+			expiresAt,
+			expectedAmountUsd,
+			subscriptionPlan,
+		)
+		if execErr != nil {
+			err = execErr
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			err = errors.New("payment_reference already exists")
+			return
+		}
+	})
+	return
+}
+
+// SolanaPaymentIntent is one intent row, open or consumed.
+type SolanaPaymentIntent struct {
+	PaymentReference  string
+	NetworkId         server.Id
+	ExpectedAmountUsd float64
+	SubscriptionPlan  string
+	CreatedAt         time.Time
+	ExpiresAt         *time.Time
+	// set once the intent was consumed by an on-chain payment
+	TxSignature *string
+}
+
+// GetSolanaPaymentIntent reads one intent back by reference, consumed or not.
+// nil when there is none (or it was swept after expiring).
+func GetSolanaPaymentIntent(
+	ctx context.Context,
+	reference string,
+) (intent *SolanaPaymentIntent) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				payment_reference,
+				network_id,
+				expected_amount_usd,
+				subscription_plan,
+				created_at,
+				expires_at,
+				tx_signature
+			FROM solana_payment_intent
+			WHERE payment_reference = $1
+			`,
+			reference,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				intent = &SolanaPaymentIntent{}
+				var expectedAmountUsd *float64
+				var subscriptionPlan *string
+				server.Raise(result.Scan(
+					&intent.PaymentReference,
+					&intent.NetworkId,
+					&expectedAmountUsd,
+					&subscriptionPlan,
+					&intent.CreatedAt,
+					&intent.ExpiresAt,
+					&intent.TxSignature,
+				))
+				if expectedAmountUsd != nil {
+					intent.ExpectedAmountUsd = *expectedAmountUsd
+				}
+				if subscriptionPlan != nil {
+					intent.SubscriptionPlan = *subscriptionPlan
+				}
+			}
+		})
+	})
+	return
+}

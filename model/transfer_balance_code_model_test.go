@@ -79,6 +79,12 @@ func TestBalanceCode(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, redeemResult0.Error, nil)
 		connect.AssertEqual(t, redeemResult0.TransferBalance.BalanceByteCount, ByteCount(1024))
+
+		redeemedBalanceCode, err := GetBalanceCode(ctx, balanceCode.BalanceCodeId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, redeemedBalanceCode.RedeemTime.IsZero(), false)
+		connect.AssertNotEqual(t, redeemedBalanceCode.RedeemNetworkId, nil)
+		connect.AssertEqual(t, *redeemedBalanceCode.RedeemNetworkId, networkIdA)
 	})
 }
 

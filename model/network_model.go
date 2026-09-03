@@ -1436,3 +1436,33 @@ func FindNetworkByName(ctx context.Context, networkName string) (networkId *serv
 	})
 	return
 }
+
+// GetNetworkAdminUserAuth returns a network's name and its admin user's login
+// (an email or a phone number, as stored), for a note to a network that was
+// bought data for by name. ok = false when the network does not exist; userAuth
+// is empty for an admin with no email or phone login (wallet, seed phrase).
+func GetNetworkAdminUserAuth(ctx context.Context, networkId server.Id) (networkName string, userAuth string, ok bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT network.network_name, network_user.user_auth
+			FROM network
+			LEFT JOIN network_user ON network_user.user_id = network.admin_user_id
+			WHERE network.network_id = $1
+			`,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var adminUserAuth *string
+				server.Raise(result.Scan(&networkName, &adminUserAuth))
+				if adminUserAuth != nil {
+					userAuth = *adminUserAuth
+				}
+				ok = true
+			}
+		})
+	})
+	return
+}

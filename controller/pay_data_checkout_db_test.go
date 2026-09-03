@@ -11,11 +11,13 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // Database-backed tests for the buy-data flow: network name resolution and the
-// webhook apply path for both providers. These need the test database
-// (server.DefaultTestEnv) and pro.yml.
+// webhook apply paths (Stripe, the legacy Coinbase metadata). These need the
+// test database (server.DefaultTestEnv) and pro.yml. The USDC on Solana data
+// pack credit is pay_data_solana_db_test.go.
 
 // TestFindNetworkByName pins the resolution the buy-data page relies on:
 // case-insensitive, exact, and NOT the sign-up similarity check.
@@ -94,24 +96,65 @@ func stripeBuyDataTestEnv(t testing.TB, lineItems map[string][]*StripeLineItem) 
 	})
 }
 
+// Supplies the configured sku used by the webhook without making this local
+// database test depend on coinbase.yml.
+func coinbaseBuyDataTestEnv(t testing.TB) {
+	prevSkus := coinbaseSkusFunc
+	coinbaseSkusFunc = func() map[string]*Sku {
+		return map[string]*Sku{
+			"1TiB": {FeeFraction: 0.3, BalanceByteCountHumanReadable: "1TiB"},
+		}
+	}
+	t.Cleanup(func() {
+		coinbaseSkusFunc = prevSkus
+	})
+}
+
+// Captures purchase email templates so database tests never contact AWS and
+// can verify that retries describe the already-applied credit correctly.
+func payDataMessageTestEnv(t testing.TB) <-chan Template {
+	messages := make(chan Template, 4)
+	prevMessageSender := GetAWSMessageSender()
+	SetMessageSender(&mockAWSMessageSender{
+		SendMessageFunc: func(_ string, template Template, _ ...any) error {
+			messages <- template
+			return nil
+		},
+	})
+	t.Cleanup(func() {
+		SetMessageSender(prevMessageSender)
+	})
+	return messages
+}
+
 // TestStripeWebhookAppliesDataToNamedNetwork: a checkout.session.completed event
 // from a buy-data checkout made FOR a network lands the data on that network,
 // and a retry of the same event does not land it twice.
 func TestStripeWebhookAppliesDataToNamedNetwork(t *testing.T) {
 	skipWithoutProYml(t)
+	sessionId := "cs_test_buydata_1"
+	stripeBuyDataTestEnv(t, map[string][]*StripeLineItem{
+		sessionId: {
+			{Id: "li_1", AmountTotal: 500, Quantity: 1, Price: &StripeLineItemProduct{Product: "prod_1tib"}},
+		},
+	})
+	messages := payDataMessageTestEnv(t)
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		assertAppliedMessage := func() {
+			select {
+			case template := <-messages:
+				_, ok := template.(*SubscriptionDataAppliedTemplate)
+				connect.AssertEqual(t, ok, true)
+			default:
+				t.Fatal("expected a synchronous data-applied email")
+			}
+		}
+
 		ctx := context.Background()
 		networkId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "buydatastripe", userId)
-
-		sessionId := "cs_test_buydata_1"
-		stripeBuyDataTestEnv(t, map[string][]*StripeLineItem{
-			sessionId: {
-				{Id: "li_1", AmountTotal: 500, Quantity: 1, Price: &StripeLineItemProduct{Product: "prod_1tib"}},
-			},
-		})
 
 		target := payDataTarget{
 			ItemId:      StripeItemData1Tib,
@@ -136,6 +179,7 @@ func TestStripeWebhookAppliesDataToNamedNetwork(t *testing.T) {
 
 		_, err := StripeWebhook(stripeWebhookEvent(t, "checkout.session.completed", completed), reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
+		assertAppliedMessage()
 
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
@@ -152,15 +196,19 @@ func TestStripeWebhookAppliesDataToNamedNetwork(t *testing.T) {
 		// Stripe retries: nothing lands twice
 		_, err = StripeWebhook(stripeWebhookEvent(t, "checkout.session.completed", completed), reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
+		assertAppliedMessage()
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
 	})
 }
 
 // TestCoinbaseWebhookAppliesDataToNamedNetwork: a charge:confirmed event whose
-// metadata names a network (a buy-data crypto checkout) lands the data there,
-// with no email needed, and a retry does not land it twice.
+// metadata names a network lands the data there, with no email needed, and a
+// retry does not land it twice. The hosted Coinbase checkout no longer creates
+// such charges (crypto moved to USDC on Solana), but the webhook still honors
+// the metadata for any charge that carries it.
 func TestCoinbaseWebhookAppliesDataToNamedNetwork(t *testing.T) {
 	skipWithoutProYml(t)
+	coinbaseBuyDataTestEnv(t)
 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -168,22 +216,10 @@ func TestCoinbaseWebhookAppliesDataToNamedNetwork(t *testing.T) {
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "buydatacoinbase", userId)
 
-		target := payDataTarget{
-			ItemId:      StripeItemData1Tib,
-			ByteCount:   1 * model.Tib,
-			NetworkId:   &networkId,
-			NetworkName: "buydatacoinbase",
-		}
-		request := coinbaseChargeRequest(target, "1TiB", 5, payDataTestUrls())
-		if _, ok := coinbaseSkus()[request.Name]; !ok {
+		skuName := "1TiB"
+		if _, ok := coinbaseSkusFunc()[skuName]; !ok {
 			t.Skip("coinbase.yml has no 1TiB sku in this environment")
 		}
-
-		// the event Coinbase sends back for that charge, metadata round-tripped
-		metadataJson, err := json.Marshal(request.Metadata)
-		connect.AssertEqual(t, err, nil)
-		var metadata CoinbaseEventDataMetadata
-		connect.AssertEqual(t, json.Unmarshal(metadataJson, &metadata), nil)
 
 		event := &CoinbaseWebhookArgs{
 			Event: &CoinbaseEvent{
@@ -191,20 +227,24 @@ func TestCoinbaseWebhookAppliesDataToNamedNetwork(t *testing.T) {
 				Type: "charge:confirmed",
 				Data: &CoinbaseEventData{
 					Id:   "charge_buydata_1",
-					Name: request.Name,
+					Name: skuName,
 					Payments: []*CoinbaseEventDataPayment{
 						{Net: &CoinbaseEventDataPaymentNet{
-							Local: &CoinbaseEventDataPaymentAmount{Amount: request.LocalPrice.Amount, Currency: "USD"},
+							Local: &CoinbaseEventDataPaymentAmount{Amount: "3.00", Currency: "USD"},
 						}},
 					},
-					Metadata: &metadata,
+					Metadata: &CoinbaseEventDataMetadata{
+						ApplyToNetwork: payDataMetadataApplyYes,
+						NetworkId:      networkId.String(),
+						NetworkName:    "buydatacoinbase",
+					},
 				},
 			},
 		}
 
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 0)
 
-		_, err = CoinbaseWebhook(event, reconcileTestSession(t, ctx))
+		_, err := CoinbaseWebhook(event, reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
 
 		balances := model.GetActiveTransferBalances(ctx, networkId)

@@ -146,6 +146,18 @@ func PayDataNetworkLookup(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.PayDataNetworkLookup, w, r)
 }
 
+// PayDataSolanaIntent quotes a data pack for a named network and records the
+// Solana payment intent the Helius webhook credits when the USDC arrives.
+func PayDataSolanaIntent(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.PayDataSolanaIntent, w, r)
+}
+
+// PayDataSolanaStatus is what the buy-data page polls while it waits for the
+// USDC transfer.
+func PayDataSolanaStatus(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.PayDataSolanaStatus, w, r)
+}
+
 func StripeCreateCustomerPortal(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreateCustomerPortal, w, r)
 }

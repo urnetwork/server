@@ -1,11 +1,8 @@
 package controller
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -22,11 +19,12 @@ import (
 
 // Buy data without signing in.
 //
-// POST /pay/data/checkout starts a hosted checkout with Stripe or Coinbase
-// Commerce for a data pack and hands back the url to send the customer to. The
-// customer either names the network that should receive the data (the webhook
-// then applies it on payment and emails an "it is on your network" note) or
-// gives no network and receives a data code by email, exactly as today.
+// POST /pay/data/checkout starts a hosted Stripe checkout for a data pack and
+// hands back the url to send the customer to. The customer either names the
+// network that should receive the data (the webhook then applies it on payment
+// and emails an "it is on your network" note) or gives no network and receives
+// a data code by email, exactly as today. Paying with USDC on Solana is
+// pay_data_solana_controller.go.
 //
 // POST /pay/data/network-lookup answers "does a network with exactly this name
 // exist" for the buy-data page. /auth/network-check is a sign-up similarity
@@ -36,18 +34,16 @@ import (
 // Both are unauthenticated and per-ip rate limited.
 
 const (
-	PayDataProviderStripe   = "stripe"
-	PayDataProviderCoinbase = "coinbase"
+	PayDataProviderStripe = "stripe"
 )
 
-// The checkout metadata both webhooks read. `apply_to_network` = "1" means the
+// The checkout metadata the webhook reads. `apply_to_network` = "1" means the
 // purchase was made for a named network and the data is applied on payment
 // instead of only emailing a code.
 const (
 	payDataMetadataApplyToNetwork = "apply_to_network"
 	payDataMetadataNetworkId      = "network_id"
 	payDataMetadataNetworkName    = "network_name"
-	payDataMetadataEmail          = "email"
 	payDataMetadataItemId         = "item_id"
 	payDataMetadataApplyYes       = "1"
 )
@@ -55,14 +51,13 @@ const (
 type PayDataCheckoutArgs struct {
 	// "data_1tib" or "data_10tib"
 	ItemId string `json:"item_id"`
-	// "stripe" or "coinbase"
+	// "stripe"; empty means stripe
 	Provider string `json:"provider"`
 	// the network that should receive the data. Optional: without it the
 	// customer gets a data code by email.
 	NetworkName string `json:"network_name,omitempty"`
 	// where the data code (or the applied note) is sent. Stripe collects the
-	// email at checkout when it is not given here; Coinbase needs it here
-	// unless a network name is given.
+	// email at checkout when it is not given here.
 	Email string `json:"email,omitempty"`
 }
 
@@ -209,20 +204,9 @@ func PayDataCheckout(
 		}
 		target.NetworkId = networkId
 		target.NetworkName = storedName
-	} else if provider == PayDataProviderCoinbase && target.Email == "" {
-		// Stripe collects the email on its checkout page; Coinbase Commerce does
-		// not hand the payer's email back reliably, so without a network there
-		// would be nowhere to send the code
-		return payDataCheckoutError("Enter the email that should receive the data code, or the network that should receive the data."), nil
 	}
 
-	var checkoutUrl string
-	switch provider {
-	case PayDataProviderStripe:
-		checkoutUrl, errMessage = payDataStripeCheckout(target)
-	case PayDataProviderCoinbase:
-		checkoutUrl, errMessage = payDataCoinbaseCheckout(clientSession.Ctx, target)
-	}
+	checkoutUrl, errMessage := payDataStripeCheckout(target)
 	if errMessage != "" {
 		return payDataCheckoutError(errMessage), nil
 	}
@@ -250,7 +234,9 @@ func payDataValidate(args *PayDataCheckoutArgs) (target payDataTarget, provider 
 
 	provider = strings.ToLower(strings.TrimSpace(args.Provider))
 	switch provider {
-	case PayDataProviderStripe, PayDataProviderCoinbase:
+	case "", PayDataProviderStripe:
+		// the request shape keeps the field; stripe is the only hosted checkout
+		provider = PayDataProviderStripe
 	default:
 		return target, "", "Unknown provider."
 	}
@@ -371,211 +357,4 @@ func payDataStripeCheckout(target payDataTarget) (checkoutUrl string, errMessage
 		return "", "Could not start checkout. Please try again."
 	}
 	return checkoutSession.URL, ""
-}
-
-// -----------------------------------------------------------------------------
-// coinbase commerce
-// -----------------------------------------------------------------------------
-
-// coinbaseCommerceApiBase is the seam for tests; the api key comes from the
-// vault (coinbase.yml `commerce.api_key`).
-var coinbaseCommerceApiBase = "https://api.commerce.coinbase.com"
-
-const coinbaseCommerceApiVersion = "2018-03-22"
-
-// coinbaseCommerceApiKey reads the Commerce api key. Empty when the vault has
-// no `commerce` section: crypto checkout is then reported as not configured
-// instead of panicking on a missing secret.
-var coinbaseCommerceApiKey = sync.OnceValue(func() (apiKey string) {
-	defer func() {
-		if r := recover(); r != nil {
-			apiKey = ""
-		}
-	}()
-	c := server.Vault.RequireSimpleResource("coinbase.yml").Parse()
-	commerce, ok := c["commerce"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	apiKey, _ = commerce["api_key"].(string)
-	return strings.TrimSpace(apiKey)
-})
-
-var coinbaseCommerceApiKeyFunc = func() string { return coinbaseCommerceApiKey() }
-
-// coinbaseSkuForItem maps a data item to the sku name in config coinbase.yml.
-// The charge is created with this as its `name`, which is how the webhook
-// looks the sku up again on charge:confirmed.
-func coinbaseSkuForItem(itemId string) (string, bool) {
-	switch itemId {
-	case StripeItemData1Tib:
-		return "1TiB", true
-	case StripeItemData10Tib:
-		return "10TiB", true
-	}
-	return "", false
-}
-
-type CoinbaseChargeRequest struct {
-	Name        string                   `json:"name"`
-	Description string                   `json:"description"`
-	PricingType string                   `json:"pricing_type"`
-	LocalPrice  CoinbaseChargeLocalPrice `json:"local_price"`
-	Metadata    map[string]string        `json:"metadata"`
-	RedirectUrl string                   `json:"redirect_url,omitempty"`
-	CancelUrl   string                   `json:"cancel_url,omitempty"`
-}
-
-type CoinbaseChargeLocalPrice struct {
-	Amount   string `json:"amount"`
-	Currency string `json:"currency"`
-}
-
-type CoinbaseChargeResponse struct {
-	Data *CoinbaseChargeResponseData `json:"data"`
-}
-
-type CoinbaseChargeResponseData struct {
-	Id        string `json:"id"`
-	Code      string `json:"code"`
-	HostedUrl string `json:"hosted_url"`
-}
-
-// coinbaseChargeRequest builds the Commerce charge for a data pack. The price is
-// the same pro.yml price Stripe charges, and the metadata is what the webhook
-// reads back (`CoinbaseEventDataMetadata`).
-func coinbaseChargeRequest(
-	target payDataTarget,
-	skuName string,
-	priceUsd float64,
-	urls StripeCheckoutUrls,
-) *CoinbaseChargeRequest {
-	metadata := map[string]string{
-		payDataMetadataItemId: target.ItemId,
-	}
-	if target.Email != "" {
-		metadata[payDataMetadataEmail] = target.Email
-	}
-	description := fmt.Sprintf("%s of URnetwork data, valid for one year", payDataAmountLabel(target.ByteCount))
-	if target.applyToNetwork() {
-		metadata[payDataMetadataApplyToNetwork] = payDataMetadataApplyYes
-		metadata[payDataMetadataNetworkId] = target.NetworkId.String()
-		metadata[payDataMetadataNetworkName] = target.NetworkName
-		description = fmt.Sprintf("%s, applied to network %s", description, target.NetworkName)
-	} else {
-		description = fmt.Sprintf("%s, delivered as a code by email", description)
-	}
-	request := &CoinbaseChargeRequest{
-		Name:        skuName,
-		Description: description,
-		PricingType: "fixed_price",
-		LocalPrice: CoinbaseChargeLocalPrice{
-			Amount:   fmt.Sprintf("%.2f", priceUsd),
-			Currency: "USD",
-		},
-		Metadata: metadata,
-	}
-	if urls.SuccessUrl != "" {
-		request.RedirectUrl = payDataSuccessUrl(coinbaseRedirectBase(urls.SuccessUrl), target.ItemId, target.NetworkName)
-	}
-	if urls.CancelUrl != "" {
-		request.CancelUrl = urls.CancelUrl
-	}
-	return request
-}
-
-// payDataAmountLabel is the customer-facing amount on the Coinbase charge:
-// "1 TiB", "10 TiB".
-func payDataAmountLabel(byteCount model.ByteCount) string {
-	if 0 < byteCount && byteCount%model.Tib == 0 {
-		return fmt.Sprintf("%d TiB", byteCount/model.Tib)
-	}
-	return model.ByteCountHumanReadable(byteCount)
-}
-
-// coinbaseRedirectBase strips Stripe's `session_id={CHECKOUT_SESSION_ID}`
-// placeholder from the shared success url: Coinbase does not fill it in.
-func coinbaseRedirectBase(successUrl string) string {
-	parsed, err := url.Parse(successUrl)
-	if err != nil {
-		return successUrl
-	}
-	query := parsed.Query()
-	for key, values := range query {
-		for _, value := range values {
-			if strings.Contains(value, "{") {
-				query.Del(key)
-				break
-			}
-		}
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
-}
-
-// coinbaseCreateCharge posts the charge and returns the hosted checkout url.
-func coinbaseCreateCharge(
-	ctx context.Context,
-	apiKey string,
-	request *CoinbaseChargeRequest,
-) (*CoinbaseChargeResponseData, error) {
-	// server.HttpPost json-encodes the body and sets the json content type
-	responseBytes, err := server.HttpPost[[]byte](
-		ctx,
-		fmt.Sprintf("%s/charges", coinbaseCommerceApiBase),
-		request,
-		func(header http.Header) {
-			header.Set("Accept", "application/json")
-			header.Set("X-CC-Api-Key", apiKey)
-			header.Set("X-CC-Version", coinbaseCommerceApiVersion)
-		},
-		server.HttpResponseRequireStatusOk[[]byte](func(response *http.Response, responseBodyBytes []byte) ([]byte, error) {
-			return responseBodyBytes, nil
-		}),
-	)
-	if err != nil {
-		return nil, err
-	}
-	var response CoinbaseChargeResponse
-	if err := json.Unmarshal(responseBytes, &response); err != nil {
-		return nil, err
-	}
-	if response.Data == nil || response.Data.HostedUrl == "" {
-		return nil, errors.New("coinbase charge response has no hosted url")
-	}
-	return response.Data, nil
-}
-
-func payDataCoinbaseCheckout(ctx context.Context, target payDataTarget) (checkoutUrl string, errMessage string) {
-	apiKey := coinbaseCommerceApiKeyFunc()
-	if apiKey == "" {
-		glog.Errorf("[paydata]coinbase commerce api key is not configured\n")
-		return "", "Crypto checkout is not configured"
-	}
-
-	skuName, ok := coinbaseSkuForItem(target.ItemId)
-	if !ok {
-		return "", "That data pack is not available."
-	}
-	if _, ok := coinbaseSkus()[skuName]; !ok {
-		// the webhook would not recognize the charge: refuse rather than take
-		// money for nothing
-		glog.Errorf("[paydata]coinbase sku %s is not configured\n", skuName)
-		return "", "That data pack is not available."
-	}
-
-	priceUsd, ok := stripeDataPackPriceUsd(target.ByteCount)
-	if !ok || priceUsd <= 0 {
-		glog.Errorf("[paydata]no price in pro.yml for data pack %s\n", target.ItemId)
-		return "", "That data pack is not available."
-	}
-
-	request := coinbaseChargeRequest(target, skuName, priceUsd, stripeCheckoutUrls())
-	charge, err := coinbaseCreateCharge(ctx, apiKey, request)
-	if err != nil {
-		glog.Errorf("[paydata]could not create coinbase charge for %s: %s\n", target.ItemId, err)
-		return "", "Could not start crypto checkout. Please try again."
-	}
-	glog.Infof("[paydata]coinbase charge %s created for %s\n", charge.Id, target.ItemId)
-	return charge.HostedUrl, ""
 }
