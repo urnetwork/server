@@ -15,6 +15,25 @@ func SubscriptionBalance(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.SubscriptionBalance, w, r)
 }
 
+// SubscriptionDetails lists every store billing the caller's network with the
+// paid-through date, the store's auto-renew state and the control that stops
+// it (the "Manage subscription" screen).
+func SubscriptionDetails(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.SubscriptionDetails, w, r)
+}
+
+// SubscriptionCancel lets the Stripe subscription run out at the end of the
+// paid period; other stores answer with where to cancel instead.
+func SubscriptionCancel(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SubscriptionCancel, w, r)
+}
+
+// SubscriptionResume undoes SubscriptionCancel while the paid period is still
+// running.
+func SubscriptionResume(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SubscriptionResume, w, r)
+}
+
 func StripeWebhook(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputBodyFormatterNoAuth(
 		controller.VerifyStripeBody,

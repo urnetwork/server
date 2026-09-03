@@ -195,6 +195,9 @@ type appleLastTransaction struct {
 	Status                int    `json:"status"`
 	OriginalTransactionId string `json:"originalTransactionId"`
 	SignedTransactionInfo string `json:"signedTransactionInfo"`
+	// the renewal info JWS: autoRenewStatus (the customer's auto-renew switch),
+	// autoRenewProductId, expirationIntent. Read by the subscription details.
+	SignedRenewalInfo string `json:"signedRenewalInfo"`
 }
 
 func (self *appleLastTransaction) entitled() bool {

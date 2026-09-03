@@ -153,6 +153,12 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
 		router.NewRoute("POST", "/wallet/circle-transfer-out", handlers.WalletCircleTransferOut),
 		router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
+		// the "Manage subscription" screen: every store billing the network with
+		// its paid-through date and auto-renew state; cancel/resume act on
+		// Stripe, the other stores are cancelled on the store itself
+		router.NewRoute("GET", "/subscription/details", handlers.SubscriptionDetails),
+		router.NewRoute("POST", "/subscription/cancel", handlers.SubscriptionCancel),
+		router.NewRoute("POST", "/subscription/resume", handlers.SubscriptionResume),
 		router.NewRoute("POST", "/subscription/check-balance-code", handlers.SubscriptionCheckBalanceCode),
 		router.NewRoute("POST", "/subscription/redeem-balance-code", handlers.SubscriptionRedeemBalanceCode),
 		router.NewRoute("POST", "/subscription/create-payment-id", handlers.SubscriptionCreatePaymentId),

@@ -653,6 +653,13 @@ type PlaySubscribeWithGoogleInfo struct {
 type PlaySubscriptionPurchaseLineItem struct {
 	ProductId  string `json:"productId"`
 	ExpiryTime string `json:"expiryTime"`
+	// present for auto-renewing plans (absent for prepaid): the customer's
+	// auto-renew switch, read by the subscription details
+	AutoRenewingPlan *PlayAutoRenewingPlan `json:"autoRenewingPlan,omitempty"`
+}
+
+type PlayAutoRenewingPlan struct {
+	AutoRenewEnabled bool `json:"autoRenewEnabled"`
 }
 
 func (self *PlaySubscriptionPurchaseLineItem) ParseExpiryTime() (time.Time, error) {
