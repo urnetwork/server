@@ -285,7 +285,7 @@ func verifyRemoteSourceEpochMode(
 		return err
 	}
 	defer os.RemoveAll(temporaryRoot)
-	for _, repositoryName := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repositoryName := range sourceRepositoryNames() {
 		localRoot := filepath.Join(repositoriesRoot, repositoryName)
 		origin, err := gitOutput(localRoot, "remote", "get-url", "origin")
 		if err != nil {

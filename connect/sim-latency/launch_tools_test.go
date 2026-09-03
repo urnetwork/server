@@ -15,7 +15,7 @@ import (
 func TestLaunchPreflightVerifiesRemoteEpochWithoutChangingWorkingTrees(t *testing.T) {
 	repositoriesRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
-	for _, repositoryName := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repositoryName := range sourceRepositoryNames() {
 		commit := sourceTestRepository(t, repositoriesRoot, repositoryName)
 		repositoryCommits[repositoryName] = commit
 		remoteRoot := filepath.Join(t.TempDir(), repositoryName+".git")
@@ -108,11 +108,9 @@ func TestLaunchPreflightChecksGrafanaRoutingAndLiveMetrics(t *testing.T) {
 
 func TestHandoffManifestAuthenticatesEveryLocalInput(t *testing.T) {
 	temporaryRoot := t.TempDir()
-	commits := map[string]string{
-		"connect": strings.Repeat("1", 40),
-		"sdk":     strings.Repeat("2", 40),
-		"server":  strings.Repeat("3", 40),
-		"proxy":   strings.Repeat("4", 40),
+	commits := map[string]string{}
+	for index, repositoryName := range sourceRepositoryNames() {
+		commits[repositoryName] = strings.Repeat(string(rune('1'+index)), 40)
 	}
 	sourcePath := filepath.Join(temporaryRoot, "sim-latency.yml")
 	writeSourceTestManifest(t, sourcePath, sourceTestManifest(commits))

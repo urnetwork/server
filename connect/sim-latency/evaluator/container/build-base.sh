@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # Build the trusted evaluator base from clean, secret-free repository clones.
-# Production uses committed HEADs. --include-worktree exists only to exercise a
+# Production uses the epoch checkpoint's remote sim-latency commits.
+# --include-worktree exists only to exercise a
 # not-yet-committed evaluator during development; it creates deterministic
 # synthetic commits inside the temporary build context and never alters a
 # source checkout.
@@ -88,8 +89,7 @@ install -m 0555 "$SCRIPT_DIR/entrypoint.sh" "$build_context/evaluator/entrypoint
 install -m 0555 "$SERVER_ROOT/connect/sim-latency/official-run.sh" "$build_context/evaluator/official-run.sh"
 install -m 0444 "$source_config" "$build_context/sim-latency.yml"
 
-readonly REPOSITORIES=(server connect proxy sdk glog goidenticons userwireguard sn)
-readonly MEASURED_REPOSITORIES=(server connect proxy sdk)
+readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn)
 declare -A revisions
 
 source_record=""
@@ -112,9 +112,11 @@ if [ "$include_worktree" = false ]; then
     fi
     jq -e \
         --argjson epoch "$source_epoch" \
+        --argjson repositories '["server","connect","sdk","proxy","glog","goidenticons","userwireguard","sn"]' \
         '.schema == 1 and .epoch == $epoch and .branch == "sim-latency" and
          (.significant_improvement_percent | type == "number" and . > 0 and . <= 50) and
-         (["server","connect","proxy","sdk"] |
+         (($record.repositories | keys) == ($repositories | sort)) and
+         ($repositories |
           all(. as $repository | $record.repositories[$repository] | test("^[0-9a-f]{40}$")))' \
         --argjson record "$source_record" \
         <<<"$source_record" >/dev/null || {
@@ -122,14 +124,6 @@ if [ "$include_worktree" = false ]; then
         exit 1
     }
 fi
-
-is_measured_repository() {
-    local candidate="$1" repository
-    for repository in "${MEASURED_REPOSITORIES[@]}"; do
-        [ "$candidate" = "$repository" ] && return 0
-    done
-    return 1
-}
 
 overlay_worktree() {
     local source_root="$1" clone_root="$2" relative
@@ -159,7 +153,7 @@ for repository in "${REPOSITORIES[@]}"; do
     source_root="$WORKSPACE_ROOT/$repository"
     clone_root="$build_context/source/$repository"
     [ -d "$source_root/.git" ] || { printf 'repository missing: %s\n' "$source_root" >&2; exit 1; }
-    if [ "$include_worktree" = false ] && is_measured_repository "$repository"; then
+    if [ "$include_worktree" = false ]; then
         source_revision="$(jq -er --arg repository "$repository" '.repositories[$repository]' <<<"$source_record")"
         source_origin="$(git -C "$source_root" remote get-url origin)"
     else

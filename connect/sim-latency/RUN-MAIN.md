@@ -2,9 +2,26 @@
 
 `run-main.sh` is the fail-closed agent harness for the six-epoch competition.
 It drives the continuously deployed main API and one-shot worker while keeping
-the measured `connect`, `sdk`, `server`, and `proxy` source isolated in
-temporary clones. Neither evaluation nor promotion changes the operator's
-product checkouts.
+the complete evaluator source graph—`server`, `connect`, `sdk`, `proxy`,
+`glog`, `goidenticons`, `userwireguard`, and `sn`—isolated in temporary
+clones. Every repository is pinned per epoch on its `sim-latency` branch.
+Neither evaluation nor promotion changes the operator's product checkouts.
+
+## Agent model roles
+
+Use Terra with max reasoning for all test execution, including preflight,
+submission validation, post-promotion smoke tests, and reruns. A test failure or
+suspected flake must be handed to Sol with max reasoning to diagnose the root
+cause, implement the correction, and add a deterministic regression test. Terra
+max then reruns the affected test and required suite; do not accept a Sol-run
+test as the independent completion result.
+
+Sol with max reasoning owns each winning-submission honesty and safety code
+review, the approve/reject decision, every winner promotion, and all source or
+config merge/push operations. It must review the exact materialized patch and
+score evidence before invoking this harness. Terra must not approve candidates,
+merge branches, or push source/config refs. These roles apply to all six epochs
+and must survive an agent handoff.
 
 ## Before starting
 
@@ -13,6 +30,14 @@ vault resources, PostgreSQL/Redis migrations, MinIO retention and replication,
 and the Grafana alert route. Port-forward PostgreSQL and Redis to localhost when
 the worker is run from this host. Set an exact control-plane image identity in
 `WARP_IMAGE_DIGEST`; this is recorded per evaluation but is not a scoring input.
+
+Every epoch checkpoint in `config/main/sim-latency.yml` must list exactly these
+eight repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
+`goidenticons`, `userwireguard`, and `sn`. Each commit must be reachable from
+that repository's remote `sim-latency` branch, and the active epoch commit must
+be the branch head before promotion begins. Never fill a missing dependency
+from a local checkout, its default branch, or the evaluator builder's current
+`HEAD`; those sources are deliberately excluded from the evaluation identity.
 
 Create a mode-0600 file containing the operator bearer token, then export:
 
@@ -84,10 +109,11 @@ with status 20; run `./run-main.sh candidate --epoch N` to materialize that
 candidate before reviewing it. If candidates are exhausted, it records
 a no-winner transition and carries the exact incumbent commits and significance
 threshold into the next epoch. Approval authenticates the reviewed score and
-patch, clones all four repositories into a new temporary directory, checks out
-the frozen `sim-latency` branch heads, applies the winner, verifies the protected
-runner tree is unchanged, pushes the product branches, and pushes the config
-ledger last. It then starts the next epoch. Temporary candidate and promotion
+patch, clones all eight locked repositories into a new temporary directory,
+checks out the frozen `sim-latency` branch heads, applies the winner to the
+evaluated server surface, verifies every dependency and the protected runner
+tree are unchanged, pushes changed source branches, and pushes the config ledger
+last. It then starts the next epoch. Temporary candidate and promotion
 directories are deleted after use.
 
 After epoch 6 is reviewed, `run-main.sh` exits zero. A canceled round, missing

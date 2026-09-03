@@ -108,11 +108,13 @@ source commits and percentage carry forward unchanged.
 
 ## Epoch source identity and promotion
 
-Only the repositories that can affect the measured product are frozen by
-source epoch: `connect`, `sdk`, `server`, and `proxy`, all on branch
-`sim-latency`. The trusted API and worker continue on `main`; they record their
-runtime image digests per evaluation but their source commits are not scoring
-inputs.
+The complete local-module graph that can affect the measured product is frozen
+by source epoch: `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`,
+`userwireguard`, and `sn`, all on branch `sim-latency`. The first four are the
+product roots, the next three are their reachable UR dependencies, and `sn` is
+also a server dependency and evaluator build input. The trusted API and worker
+continue on `main`; they record their runtime image digests per evaluation but
+their source commits are not scoring inputs.
 
 Round N evaluates source epoch N-1. Before a measured command touches services,
 the tool verifies the disposable evaluation checkouts against the authenticated
@@ -161,11 +163,12 @@ Only after review finalizes the epoch does the external control loop run one of:
 ./run-local-main.sh promote --epoch N --no-winner
 ```
 
-Promotion creates one temporary root, clones `connect`, `sdk`, `server`, and
-`proxy` into it, checks out each `sim-latency` branch at the prior epoch, applies
-and commits the winner there, pushes measured branches first, and activates the
-new config ledger commit last. Before staging, promotion queries the finalized
-round and requires the exact approved job, canonical patch SHA-256, and score
+Promotion creates one temporary root and clones all eight locked repositories
+into it. It checks out each `sim-latency` branch at the prior epoch, applies and
+commits the winner to the evaluated server surface, verifies every dependency
+remains unchanged, pushes changed source branches first, and activates the new
+config ledger commit last. Before staging, promotion queries the finalized round
+and requires the exact approved job, canonical patch SHA-256, and score
 significance record; unevaluated repository patches are rejected. `--dry-run`
 performs the same validation without publishing. The next evaluator image and
 round baseline are built only after the new source epoch is active.

@@ -616,7 +616,7 @@ seal_evaluation_source() {
     local root="$1" expected_server="$2" expected_patch="$3"
     [ "$root" = "$baseline_source_root" ] || [ "$root" = "$candidate_source_root" ] ||
         die "refusing to seal an unexpected source directory"
-    for repository in server connect sdk proxy; do
+    for repository in server connect sdk proxy glog goidenticons userwireguard sn; do
         local repository_root="$root/$repository"
         local expected_commit
         expected_commit="$(jq -er --arg repository "$repository" \

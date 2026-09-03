@@ -48,7 +48,8 @@ the release evidence:
 3. the editable file's imports and constructor call sites;
 4. successful structural validation and offline vet/compile for all three
    reference patches;
-5. a clean source lock across `server`, `connect`, `sdk`, and `sn`.
+5. a clean source lock across `server`, `connect`, `sdk`, `proxy`, `glog`,
+   `goidenticons`, `userwireguard`, and `sn`.
 
 `TestExamplePatchPolicyMatchesReviewedSurface` fails if the literal surface is
 widened or if protected local/all configuration and vault paths become

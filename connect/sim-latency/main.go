@@ -91,7 +91,7 @@ Options:
   --version              Show version.
   --epoch=<n>            Source epoch: 0 is baseline; 1..6 follow finalized epoch transitions.
   --source-config=<path> Epoch ledger path [default: discovered config/main/sim-latency.yml].
-  --repos-root=<dir>     Parent of connect, sdk, server, and proxy [default: discovered workspace].
+  --repos-root=<dir>     Parent of all repositories in the frozen evaluator source graph [default: discovered workspace].
   --winner=<dir>         Winner directory containing score.json and one or more patch files.
   --winner-job-id=<id>   Published winning competition job id recorded in the next epoch.
   --job-id=<id>          Exact candidate job id currently presented for honesty review.

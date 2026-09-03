@@ -212,7 +212,7 @@ func TestAuthenticateApprovedWinnerBundleBindsPatchAndScore(t *testing.T) {
 		t.Fatal("tampered approved score significance was accepted")
 	}
 	promotion.RecommendedNextEpochTakeoverMarginPercent = nextMarginPercent
-	if err := os.WriteFile(filepath.Join(root, "connect.patch"), patch, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "userwireguard.patch"), patch, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := authenticateApprovedWinnerBundle(root, approved, winnerScore, promotion); err == nil {

@@ -1,7 +1,7 @@
 package main
 
 // Winner promotion advances measured source one epoch. It creates one temporary
-// root, clones all measured repositories there, checks out their sim-latency
+// root, clones all evaluator repositories there, checks out their sim-latency
 // branch at the prior epoch, applies and commits the winner, pushes repository
 // branches, and activates the config ledger last. The operator checkouts are
 // preflight inputs only and are never patched.
@@ -313,10 +313,14 @@ func stagePromotionRepository(repository *promotionRepository, stagingRoot strin
 // sourceRepositoriesFromCommits converts a complete promotion result back to the strict ledger shape.
 func sourceRepositoriesFromCommits(repositoryCommits map[string]string) sourceRepositories {
 	return sourceRepositories{
-		Connect: sourceRepository{Commit: repositoryCommits["connect"]},
-		Sdk:     sourceRepository{Commit: repositoryCommits["sdk"]},
-		Server:  sourceRepository{Commit: repositoryCommits["server"]},
-		Proxy:   sourceRepository{Commit: repositoryCommits["proxy"]},
+		Server:        sourceRepository{Commit: repositoryCommits["server"]},
+		Connect:       sourceRepository{Commit: repositoryCommits["connect"]},
+		Sdk:           sourceRepository{Commit: repositoryCommits["sdk"]},
+		Proxy:         sourceRepository{Commit: repositoryCommits["proxy"]},
+		Glog:          sourceRepository{Commit: repositoryCommits["glog"]},
+		Goidenticons:  sourceRepository{Commit: repositoryCommits["goidenticons"]},
+		Userwireguard: sourceRepository{Commit: repositoryCommits["userwireguard"]},
+		Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
 	}
 }
 
@@ -529,7 +533,7 @@ func runPromote(opts docopt.Opts) {
 	}
 	repositories := []*promotionRepository{}
 	patchCount := 0
-	for _, repositoryName := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repositoryName := range sourceRepositoryNames() {
 		patchPath := ""
 		if !noWinner {
 			var found bool

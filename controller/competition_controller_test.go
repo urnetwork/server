@@ -1251,7 +1251,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 	}
 	prepare := string(prepareBytes)
 	for _, required := range []string{
-		`readonly REPOSITORIES=(server connect sdk proxy)`,
+		`readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn)`,
 		`docker cp "$source_container:/workspace/$repository" "$destination/"`,
 		`checkout --quiet -B sim-latency "$expected_commit"`,
 		`source_lock_sha256`,
@@ -1277,6 +1277,7 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		`--destination "$baseline_source_root"`,
 		`--destination "$candidate_source_root"`,
 		`--source-root "$candidate_source_root"`,
+		`for repository in server connect sdk proxy glog goidenticons userwireguard sn; do`,
 		`rev-parse HEAD:connect/sim-latency`,
 		`candidate changed the protected sim-latency source tree`,
 		`EVALUATION_SOURCE_DIR=$source`,
@@ -1288,6 +1289,17 @@ func TestEvaluatorUsesAttemptLocalSourceCheckouts(t *testing.T) {
 		if !strings.Contains(evaluator, required) {
 			t.Errorf("evaluator source isolation is missing %q", required)
 		}
+	}
+
+	buildSubmissionBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/build-submission.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(
+		string(buildSubmissionBytes),
+		"for repository in server connect sdk proxy glog goidenticons userwireguard sn; do",
+	) {
+		t.Fatal("submission builder does not authenticate the complete source graph")
 	}
 
 	composeBytes, err := os.ReadFile("../connect/sim-latency/evaluator/container/compose.yml")
@@ -1410,7 +1422,7 @@ func TestEvaluatorMountsOnlyLocalConfigAndVault(t *testing.T) {
 	}
 	if !strings.Contains(
 		string(buildBaseBytes),
-		"readonly REPOSITORIES=(server connect proxy sdk glog goidenticons userwireguard sn)",
+		"readonly REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn)",
 	) {
 		t.Fatal("evaluator base repository allowlist changed; re-audit config/vault exclusion")
 	}

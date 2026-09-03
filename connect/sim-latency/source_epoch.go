@@ -1,9 +1,10 @@
 package main
 
-// Epoch source control binds every measured run to the four repositories that
-// can affect the product result. Host runs require clean sim-latency branches
-// at the configured heads. Evaluator images use their authenticated source-lock
-// record so a one-commit candidate can run against its configured base epoch.
+// Epoch source control binds every measured run to the complete local-module
+// graph that can affect the product result. Host runs require clean
+// sim-latency branches at the configured heads. Evaluator images use their
+// authenticated source-lock record so a one-commit candidate can run against
+// its configured base epoch.
 
 import (
 	"bytes"
@@ -35,19 +36,42 @@ type sourceRepository struct {
 }
 
 type sourceRepositories struct {
-	Connect sourceRepository `yaml:"connect"`
-	Sdk     sourceRepository `yaml:"sdk"`
-	Server  sourceRepository `yaml:"server"`
-	Proxy   sourceRepository `yaml:"proxy"`
+	Server        sourceRepository `yaml:"server"`
+	Connect       sourceRepository `yaml:"connect"`
+	Sdk           sourceRepository `yaml:"sdk"`
+	Proxy         sourceRepository `yaml:"proxy"`
+	Glog          sourceRepository `yaml:"glog"`
+	Goidenticons  sourceRepository `yaml:"goidenticons"`
+	Userwireguard sourceRepository `yaml:"userwireguard"`
+	Sn            sourceRepository `yaml:"sn"`
 }
 
-// commits returns the complete measured-source identity for one epoch.
+// sourceRepositoryNames returns every repository copied into and built by the
+// evaluator. A fresh slice keeps callers from mutating the package policy.
+func sourceRepositoryNames() []string {
+	return []string{
+		"server",
+		"connect",
+		"sdk",
+		"proxy",
+		"glog",
+		"goidenticons",
+		"userwireguard",
+		"sn",
+	}
+}
+
+// commits returns the complete evaluation-source identity for one epoch.
 func (self sourceRepositories) commits() map[string]string {
 	return map[string]string{
-		"connect": self.Connect.Commit,
-		"sdk":     self.Sdk.Commit,
-		"server":  self.Server.Commit,
-		"proxy":   self.Proxy.Commit,
+		"server":        self.Server.Commit,
+		"connect":       self.Connect.Commit,
+		"sdk":           self.Sdk.Commit,
+		"proxy":         self.Proxy.Commit,
+		"glog":          self.Glog.Commit,
+		"goidenticons":  self.Goidenticons.Commit,
+		"userwireguard": self.Userwireguard.Commit,
+		"sn":            self.Sn.Commit,
 	}
 }
 
@@ -320,10 +344,19 @@ func loadEvaluatorSourceLock(path string) (*evaluatorSourceLock, error) {
 	if lock.DevelopmentSnapshot {
 		return nil, errors.New("development snapshot cannot be used for an epoch-bound evaluation")
 	}
+	repositoryNames := sourceRepositoryNames()
+	if len(lock.Repositories) != len(repositoryNames) {
+		return nil, errors.New("evaluator source lock must contain the complete repository set")
+	}
+	for _, repository := range repositoryNames {
+		if !sourceGitShaPattern.MatchString(lock.Repositories[repository]) {
+			return nil, fmt.Errorf("evaluator source lock repository %s has an invalid commit", repository)
+		}
+	}
 	return lock, nil
 }
 
-// verifySourceEpoch fails closed unless every measured repository matches the ledger.
+// verifySourceEpoch fails closed unless every evaluator repository matches the ledger.
 func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRoot string, sourceLockPath string) error {
 	epoch, err := manifest.epoch(epochNumber)
 	if err != nil {
@@ -337,7 +370,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 			return fmt.Errorf("load evaluator source lock: %w", err)
 		}
 	}
-	for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
 		expectedCommit := commits[repository]
 		repositoryRoot := filepath.Join(repositoriesRoot, repository)
 		status, err := gitOutput(repositoryRoot, "status", "--porcelain=v1", "--untracked-files=all")
@@ -382,7 +415,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 	return nil
 }
 
-// findRepositoriesRoot discovers the common parent of the four measured repositories.
+// findRepositoriesRoot discovers the common parent of the complete source graph.
 func findRepositoriesRoot() (string, error) {
 	if root := strings.TrimSpace(os.Getenv("SIM_LATENCY_REPOSITORIES_ROOT")); root != "" {
 		return filepath.Abs(root)
@@ -403,7 +436,7 @@ func findRepositoriesRoot() (string, error) {
 	candidates = append(candidates, "/workspace")
 	for _, candidate := range candidates {
 		complete := true
-		for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+		for _, repository := range sourceRepositoryNames() {
 			if _, err := os.Stat(filepath.Join(candidate, repository)); err != nil {
 				complete = false
 				break
@@ -413,7 +446,7 @@ func findRepositoriesRoot() (string, error) {
 			return filepath.Clean(candidate), nil
 		}
 	}
-	return "", errors.New("could not locate connect, sdk, server, and proxy repositories")
+	return "", errors.New("could not locate the complete sim-latency source repository set")
 }
 
 // findSourceConfig locates the non-secret source epoch ledger.

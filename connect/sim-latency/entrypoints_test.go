@@ -113,6 +113,8 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 	}
 	for _, required := range []string{
 		"Mandatory candidate review",
+		"Terra with max reasoning",
+		"Sol with max reasoning",
 		"fabricated measurements",
 		"status 20",
 		"mode-0700 temporary directory",

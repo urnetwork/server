@@ -31,8 +31,10 @@ still needed to activate the competition through Apex.
 - A statistically significant submission is only a review candidate. The first
   honest significant candidate wins; if none remains, there is no winner and
   the source commits and threshold carry forward.
-- Winning patches advance the `sim-latency` branches of `connect`, `sdk`,
-  `server`, and `proxy`. The main API and worker remain continuously maintained
+- Every epoch locks the `sim-latency` branches of `server`, `connect`, `sdk`,
+  `proxy`, `glog`, `goidenticons`, `userwireguard`, and `sn`. A winning canonical
+  patch changes only the evaluated server-tree surface; unchanged repository
+  commits carry forward. The main API and worker remain continuously maintained
   control-plane services.
 
 ## 1. Identifiers, calendar, and economics
@@ -66,8 +68,9 @@ still needed to activate the competition through Apex.
   integration: an image digest and cosign identity for a standalone adapter, or
   the equivalent digest-pinned Apex platform release for direct integration.
 - [ ] Confirm the transport mapping supplies one stable Apex submission id and
-  the exact canonical text patch, up to 262,144 bytes, for `connect`, `sdk`,
-  `server`, and `proxy`. Player-built images are not submitted to the UR API.
+  the exact canonical text patch, up to 262,144 bytes, for the reviewed
+  server-tree patch surface. Player-built images and dependency-repository
+  patches are not submitted to the UR API.
 - [ ] Confirm durable idempotency across HTTP 429, typed retriable 5xx,
   connection loss, and process restart without a second fee or admission.
 - [ ] Record how this approved external-evaluator integration is represented in

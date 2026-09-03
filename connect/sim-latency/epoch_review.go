@@ -270,7 +270,10 @@ func authenticateApprovedWinnerBundle(
 	if approved == nil || approved.JobId == (server.Id{}) {
 		return errors.New("approved promotion candidate is missing")
 	}
-	for _, repository := range []string{"connect", "sdk", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
+		if repository == "server" {
+			continue
+		}
 		_, found, err := promotionPatchPath(winnerRoot, repository)
 		if err != nil {
 			return err

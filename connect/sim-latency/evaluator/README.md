@@ -62,8 +62,9 @@ evaluator image and round policy before opening epoch 1.
    evaluator accepts canonical patch bytes, not miner images or URLs, and
    derives one image per `(base, patch, policy, builder)` identity with the
    fixed Dockerfile and authenticated cache reuse. Each attempt copies the
-   four measured repositories from the authenticated base image into fresh
-   temporary baseline/candidate checkouts, applies the patch only there, and
+   eight locked repositories from the authenticated base image into fresh
+   temporary baseline/candidate checkouts, applies the patch only to the
+   evaluated server surface there, and
    mounts the selected checkout read-only at `/workspace`; the main runner
    checkout is neither inspected nor changed. Mount no production
    credentials or Docker socket into a candidate container.
