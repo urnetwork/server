@@ -67,6 +67,8 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/auth/network-delete", handlers.RemoveNetwork),
 		router.NewRoute("POST", "/auth/code-create", handlers.AuthCodeCreate),
 		router.NewRoute("POST", "/auth/code-login", handlers.AuthCodeLogin),
+		router.NewRoute("POST", "/auth/apple/callback", handlers.AuthAppleOAuthCallback),
+		router.NewRoute("GET", "/auth/apple/callback", handlers.AuthAppleOAuthCallback),
 		router.NewRoute("POST", "/auth/add-auth", handlers.AuthAdd),
 		router.NewRoute("POST", "/auth/remove-auth", handlers.AuthRemove),
 		router.NewRoute("POST", "/auth/regenerate-seedphrase", handlers.AuthRegenerateSeedphrase),

@@ -55,6 +55,14 @@ func AuthCodeLogin(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(model.AuthCodeLogin, w, r)
 }
 
+// AuthAppleOAuthCallback receives Apple's form_post for the apps that sign in
+// with Apple through the system browser (android, windows, linux) and hands the
+// result back to the app through its own scheme. No auth, no body wrapper: the
+// request is a browser form, not an api call.
+func AuthAppleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	controller.AppleOAuthCallback(w, r)
+}
+
 func AuthConnect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, controller.SsoRedirectUrl(), http.StatusSeeOther)
 }
