@@ -9772,6 +9772,59 @@ deterministic boundaries are
 `TestHostDrainLockTimeoutRefusesReplacement` in
 `warpctl/host_drain_lock_test.go`.
 
+**Cross-block drain from a Docker name-prefix collision (2026-09-03):** a
+replacement may be healthy and correctly serialized yet still stop a different
+block. Docker interprets `--filter name=...` as an unanchored regular
+expression, not a shell glob. The former `name=main-proxy-g1-*` filter therefore
+matched both `g1` and `g10`: `*` repeated only the preceding hyphen and the
+unanchored `main-proxy-g1` prefix matched the start of `main-proxy-g10`. The g1
+worker then classified the live g10 container as its own overlap and ran
+`docker update --restart=no` followed by `docker container stop -t 3600` on it.
+This is never a normal candidate/ancestor drain.
+
+The decisive signal is a container whose exact name belongs to another block
+in a worker's `Found overlapping containers` line or subsequent update/stop
+commands. Compare the legacy result with an anchored inventory before changing
+containers:
+
+```bash
+docker ps --filter 'name=main-proxy-g1-*' --format '{{.ID}}\t{{.Names}}'
+docker ps --filter 'name=^/main-proxy-g1-' --format '{{.ID}}\t{{.Names}}'
+docker ps --filter 'name=^/main-proxy-g10-' --format '{{.ID}}\t{{.Names}}'
+journalctl --utc -u warp-main-proxy-<interface>-g1 \
+  --since '<candidate-start>' | grep -E 'Found overlapping|docker (update|container stop)'
+```
+
+Do not confuse this with two normal same-block phases: candidate `/status` 503
+or unreachable while the ancestor still serves 200 is pre-cutover readiness;
+candidate 200 while the ancestor has closed its listener is post-cutover drain.
+Resolve port 80 from each container's current `WARP_PORTS` and probe the
+host-network bind/LAN address with `Host: main-proxy.bringyour.com`; these
+listeners are not bound to `127.0.0.1`, so a loopback curl returning 000 is not
+a readiness failure. A g10 stop or disappearance initiated by the g1 worker is
+the cross-block failure regardless of either phase.
+
+Current Warp builds both discovery filters as `name=^/` plus
+`regexp.QuoteMeta(prefix)`, including the trailing block delimiter. The fix
+must be installed in Warpctl on both transparent Proxy hosts; rebuilding only
+the Proxy image cannot repair the host controller, and already-running workers
+retain the old executable. Before another Proxy image or config-generation
+rollout, restart at least each host's g1 worker with the patched Warpctl under
+the serial rollout playbook. Let each block worker recover an accidentally
+stopped container; do not manually delete a candidate or ancestor without the
+DNAT/socket ownership proof in §14.5.
+
+Recovery is complete only when each host has one exact anchored g1 and g10
+owner, both current LAN-address `/status` probes return 200, each live DNAT
+target names that owner's `WARP_PORTS` allocation and has a matching socket,
+and no replacement repeats. During one controlled g1 replacement, record the
+g10 container ID, process ID, `/status`, and DNAT target before and after: all
+four must remain unchanged while the g1 candidate becomes ready, takes DNAT,
+and its own ancestor drains within the two-minute grace. The g1 journal must
+not contain a g10 ID in overlap/update/stop output. The deterministic source
+boundary is `TestContainerNamePrefixFilterSeparatesG1FromG10` in
+`warpctl/run_test.go`.
+
 ### 14.3 Post-flip convergence (the replacement container)
 - wg re-establishment is SERVER-initiated: `[wg]handoff apply: N/M
   endpoints seeded` then per-peer `[wg]handoff re-established <ip> in Xms`
