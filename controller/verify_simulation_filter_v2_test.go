@@ -28,11 +28,27 @@ type verifySimulationAssignmentFilterV2TestFixture struct {
 	Filter     verifySimulationAssignmentFilterV2
 }
 
+// verifySimulationAssignmentFilterTestTempDir returns an absolute test
+// directory whose existing components are not symbolic links. On Darwin,
+// testing.T.TempDir normally starts with /var, which aliases /private/var;
+// feeding that spelling to the production no-follow reader would test the
+// platform alias rather than the filter file. Keep the reader strict and give
+// positive fixtures the canonical path. Symlink rejection tests add their own
+// deliberate link beneath this directory.
+func verifySimulationAssignmentFilterTestTempDir(t *testing.T) string {
+	t.Helper()
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve verify simulation assignment filter test directory: %v", err)
+	}
+	return directory
+}
+
 func newVerifySimulationAssignmentFilterV2TestFixture(t *testing.T) *verifySimulationAssignmentFilterV2TestFixture {
 	t.Helper()
 	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
 	t.Setenv(VerifySimulationModeEnv, "1")
-	path := filepath.Join(t.TempDir(), "assignment-filter.json")
+	path := filepath.Join(verifySimulationAssignmentFilterTestTempDir(t), "assignment-filter.json")
 	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
 	planHash := "0x" + strings.Repeat("33", 32)
 	t.Setenv(VerifySimulationAssignmentFilterPlanHashEnv, planHash)
@@ -169,7 +185,7 @@ func TestVerifySimulationAssignmentFilterV1SingleValidatorCompatibilityIsUnambig
 	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
 	t.Setenv(VerifySimulationModeEnv, "1")
 	t.Setenv(VerifySimulationAssignmentFilterPlanHashEnv, "")
-	path := filepath.Join(t.TempDir(), "assignment-filter.json")
+	path := filepath.Join(verifySimulationAssignmentFilterTestTempDir(t), "assignment-filter.json")
 	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
 	validator := bytes.Repeat([]byte{0x51}, 32)
 	other := bytes.Repeat([]byte{0x52}, 32)
@@ -433,7 +449,7 @@ func TestVerifySimulationAssignmentFilterRejectsParentSymlink(t *testing.T) {
 		RuleID: "valid-rule", ValidatorVPKs: verifySimulationAssignmentFilterTestEncodedVPKs(fixture.Validators[0]),
 		ExcludedClientIDs: verifySimulationAssignmentFilterTestEncodedClientIDs(fixture.ClientIDs[0]),
 	}}
-	root := t.TempDir()
+	root := verifySimulationAssignmentFilterTestTempDir(t)
 	realDirectory := filepath.Join(root, "real")
 	if err := os.Mkdir(realDirectory, 0o700); err != nil {
 		t.Fatal(err)

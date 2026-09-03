@@ -77,7 +77,7 @@ func TestVerifySeedRejectsMissingSignatureBeforeState(t *testing.T) {
 func TestVerifySimulationAssignmentFilterIsValidatorLocalAndFailClosed(t *testing.T) {
 	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
 	t.Setenv(VerifySimulationModeEnv, "1")
-	path := filepath.Join(t.TempDir(), "assignment-filter.json")
+	path := filepath.Join(verifySimulationAssignmentFilterTestTempDir(t), "assignment-filter.json")
 	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
 	matching, _, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestVerifySimulationAssignmentFilterIsValidatorLocalAndFailClosed(t *testin
 func TestVerifySimulationAssignmentFilterRejectsAmbiguousFiles(t *testing.T) {
 	t.Setenv("URNETWORK_ST_PROFILE", "testnet")
 	t.Setenv(VerifySimulationModeEnv, "1")
-	dir := t.TempDir()
+	dir := verifySimulationAssignmentFilterTestTempDir(t)
 	path := filepath.Join(dir, "assignment-filter.json")
 	t.Setenv(VerifySimulationAssignmentFilterFileEnv, path)
 	public, _, err := ed25519.GenerateKey(nil)
