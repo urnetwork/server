@@ -159,7 +159,6 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 	for _, want := range []string{
 		"https://ur.io/app/account/claim",
 		"https://ur.io/app/account/top200",
-		"https://ur.xyz",
 		"3.2410 SN25α",
 		"#3 of 100",
 		"0.71%",

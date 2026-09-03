@@ -21,7 +21,4 @@ epoch {{.Epoch}}.
 Claim your SN25α: https://ur.io/app/account/claim{{else}}Nothing to claim for epoch {{.Epoch}} yet. Keep providing and your
 next epoch settles as SN25α: https://ur.io/app/account/claim{{end}}{{else}}Connect a Bittensor wallet to settle your points as SN25α:
 https://ur.io/app/account/claim{{end}}
-
-Earnings come from the UR protocol. Learn how it works at ur.xyz
-(https://ur.xyz).
 {{end}}
