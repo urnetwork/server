@@ -351,8 +351,8 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 				probeId: "subtensor/node-health", tier: tierPage, class: "subtensor-runtime-ahead",
 				target: target.name, frame: "public-reference", sustain: 1,
 				symptom:   "The public Subtensor runtime is newer than the configured current-runtime pin",
-				mechanism: "The public RPC still matches the exact configured chain, genesis, runtime name, and EVM chain identity, but its on-chain Wasm spec version advanced beyond the static monitor/Xops expectation. This is an upstream runtime transition and stale conformance pin, not evidence of a wrong RPC surface or failed local node.",
-				baseline:  "The independently verified current upstream runtime and transaction versions match the monitor inventory and Subtensor Xops host variables.",
+				mechanism: "The public RPC still matches the exact configured chain, genesis, runtime name, and EVM chain identity, but its on-chain Wasm spec version advanced beyond the static monitor expectation. This is an upstream runtime transition and stale conformance pin, not evidence of a wrong RPC surface or failed local node.",
+				baseline:  "The independently verified current upstream runtime and transaction versions match every owning configuration.",
 				observed: fmt.Sprintf(
 					"public_head=%d specVersion=%d expected_specVersion=%d transactionVersion=%d expected_transactionVersion=%d",
 					publicHead, observation.Public.Runtime.SpecVersion, settings.ExpectedSpecVersion,
@@ -365,8 +365,8 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 					observation.Public.EVMChainID,
 				),
 				context:  "This is an upstream/configuration boundary. Lagging local nodes correctly report the historical runtime at their own heads until they import the transition block; do not restart, replace, or reset a progressing database merely because the public current runtime advanced.",
-				action:   "Independently verify the official upstream release artifact and exact on-chain transition, then update expected_spec_version—and expected_transaction_version if it changed—together in the owning monitor inventory and Subtensor Xops host variables. Rebuild and promote the monitor after the inventory change; do not restart either node solely for this pin update.",
-				verify:   "The public reference repeatedly retains the exact chain/genesis/EVM identity at the verified newer runtime, both configuration owners agree on it, and the runtime-ahead alert clears after monitor promotion while progressing historical nodes retain their ordinary lag classifications. At convergence, each node and gateway must report the new pinned runtime.",
+				action:   "Independently verify the official upstream release artifact and exact on-chain transition, then update expected_spec_version—and expected_transaction_version if it changed—in each stale owning configuration while preserving owners that already match. Rebuild and promote the monitor after its inventory changes; do not restart either node solely for this pin update.",
+				verify:   "The public reference repeatedly retains the exact chain/genesis/EVM identity at the verified newer runtime, every configuration owner agrees on it, and the runtime-ahead alert clears after monitor promotion while progressing historical nodes retain their ordinary lag classifications. At convergence, each node and gateway must report the new pinned runtime.",
 				playbook: "SIGNALS.md §17.1",
 			})
 		} else if len(identityProblems) > 0 {

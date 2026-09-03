@@ -345,7 +345,8 @@ func TestSubtensorSignalClassifiesPublicRuntimeAhead(t *testing.T) {
 		"expected_specVersion=452",
 		"exact configured chain, genesis, runtime name, and EVM chain identity",
 		"official upstream release artifact and exact on-chain transition",
-		"monitor inventory and Subtensor Xops host variables",
+		"each stale owning configuration while preserving owners that already match",
+		"every configuration owner agrees on it",
 		"do not restart either node solely for this pin update",
 		"progressing historical nodes retain their ordinary lag classifications",
 	} {

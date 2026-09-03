@@ -12043,10 +12043,11 @@ transition and stale configuration boundary, not the generic wrong-RPC
 `subtensor-identity` class. Preserve page severity: independently verify the
 official release artifact and exact on-chain transition, then update
 `expected_spec_version` (and transaction version if it changed) together in
-the owning monitor inventory and the Xops Subtensor host vars. Do not restart,
-replace, or reset a progressing historical node solely because the public
-current runtime advanced. A lower public spec, or any chain/genesis/runtime
-name/EVM mismatch, remains `subtensor-identity`.
+each stale owning configuration while preserving an owner that already
+matches. Rebuild and promote the watcher when its inventory changes. Do not
+restart, replace, or reset a progressing historical node solely because the
+public current runtime advanced. A lower public spec, or any
+chain/genesis/runtime name/EVM mismatch, remains `subtensor-identity`.
 
 On 2026-09-03, the public testfinney endpoint retained chain `Bittensor`,
 genesis `0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105`,
@@ -12057,12 +12058,15 @@ on-chain discriminator. RaoFoundation's official v453 release was published
 at 16:12:43Z with commit `823bdcbc58a29f60b243be4737a7c72b34ac7d93`
 and Wasm SHA-256
 `9e51859faf28a69365005e7dd7f152f239a305c468869b2f54303aba938d840e`.
-Monitor and Xops remained pinned to 452, so updating those two configuration
-owners is the operational closure; the archive and lightnode were still about
-1.39 million historical blocks behind and correctly retained historical
-runtimes. After the pin update and monitor promotion, require the
-runtime-ahead page to clear while both lag/progress alerts remain truthful;
-at eventual convergence, direct and gateway RPC must both report spec 453.
+Xops commit `67c1c03` already pinned its Subtensor host variables to 453, while
+Vault `main/monitor.yml` still supplied 452 to the watcher. Preserve the
+already-current Xops owner: the remaining deployment boundary is an authorized
+Vault inventory update followed by watcher rebuild and promotion; this server
+change does not alter either. The archive and lightnode were still about 1.39
+million historical blocks behind and correctly retained historical runtimes.
+After the Vault update and watcher promotion, require the runtime-ahead page to
+clear while both lag/progress alerts remain truthful; at eventual convergence,
+direct and gateway RPC must both report spec 453.
 
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a
