@@ -11,7 +11,6 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/session"
 )
 
 // Database-backed tests for the buy-data flow: network name resolution and the
