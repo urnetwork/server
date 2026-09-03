@@ -28,6 +28,11 @@ type backupArchiveWriterFixture struct {
 	remoteRestart      string
 	remoteRestartDelay string
 	remoteExitStatus   int64
+	remoteInvocationID string
+	remoteExecStart    int64
+	remoteTimerState   string
+	remoteTimerNext    int64
+	remoteBoot         int64
 	remotePGSource     string
 	remotePGPort       int64
 	remoteRedisSource  string
@@ -37,6 +42,15 @@ type backupArchiveWriterFixture struct {
 	remoteMountSource  string
 	remoteMountFSType  string
 	remoteMountOptions string
+	remoteMountLineage string
+	storageReadable    *bool
+	storageEvents      []backupArchiveStorageEventFixture
+}
+
+type backupArchiveStorageEventFixture struct {
+	epoch  int64
+	kind   string
+	device string
 }
 
 func TestBackupArchivesSignalSyntheticHealthy(t *testing.T) {
@@ -271,6 +285,177 @@ func TestBackupArchivesSignalSyntheticEmergencyReadOnlyVolume(t *testing.T) {
 	}
 }
 
+func TestBackupArchivesSignalSyntheticPostRebootStorageRecoveryRemainsUnverifiedAndIdle(t *testing.T) {
+	now := time.Date(2026, 9, 3, 17, 5, 11, 0, time.UTC)
+	zero := float64(0)
+	fresh := now.Add(-24 * time.Hour)
+	boot := time.Date(2026, 9, 3, 14, 23, 45, 0, time.UTC)
+	nextTimer := time.Date(2026, 9, 4, 11, 0, 0, 0, time.UTC)
+	transportFault := time.Date(2026, 9, 3, 13, 17, 58, 0, time.UTC)
+	journalFault := time.Date(2026, 9, 3, 13, 18, 12, 0, time.UTC)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState:    "inactive",
+		remoteUnitSubstate: "dead",
+		remoteResult:       "success",
+		remoteExitStatus:   0,
+		remoteInvocationID: "none",
+		remoteExecStart:    0,
+		remoteTimerState:   "active",
+		remoteTimerNext:    nextTimer.Unix(),
+		remoteBoot:         boot.Unix(),
+		remoteMountPresent: boolPointer(true),
+		remoteMountSource:  "/dev/mapper/luks-synthetic",
+		remoteMountFSType:  "ext4",
+		remoteMountOptions: "rw,nosuid,nodev,relatime,errors=remount-ro",
+		remoteMountLineage: "dm-2,sda1,sda",
+		storageReadable:    boolPointer(true),
+		storageEvents: []backupArchiveStorageEventFixture{
+			{epoch: transportFault.Unix(), kind: "transport", device: "sda"},
+			{epoch: transportFault.Add(time.Second).Unix(), kind: "block-io", device: "sda"},
+			{epoch: journalFault.Unix(), kind: "journal", device: "dm-2"},
+			// The filter must not attribute an unrelated local disk to archive1.
+			{epoch: journalFault.Unix(), kind: "block-io", device: "sdb"},
+		},
+	},
+		backupArchiveFixture{archive: "pg", progress: &zero},
+		backupArchiveFixture{archive: "redis", progress: &zero},
+		backupArchiveFixture{archive: "github-urnetwork", generation: "main-code-urnetwork-current.tar.xz", createdAt: &fresh, progress: &zero},
+		backupArchiveFixture{archive: "github-urfoundation", generation: "main-code-urfoundation-current.tar.xz", createdAt: &fresh, progress: &zero},
+	)
+
+	volume := requireBackupArchiveAlert(t, alerts, "backup-archive-volume-recovery-unverified", "backup-1/archive-volume")
+	if volume.Sustain != 1 || volume.Severity != SeverityPage {
+		t.Fatalf("post-reboot volume alert urgency = %s/%d, want page/1: %+v", volume.Severity, volume.Sustain, volume)
+	}
+	for _, want := range []string{
+		"mount_state=read-write",
+		"lineage=dm-2,sda1,sda",
+		"matched_devices=dm-2,sda",
+		"transport_events=1",
+		"block_io_events=1",
+		"journal_events=1",
+		"latest_event=2026-09-03T13:18:12Z",
+		"Journal replay and a fresh read-write mount",
+		"do not prove an offline full-filesystem check",
+		"kernel names are mutable",
+		"full offline e2fsck",
+		"bounded write/read/delete check",
+		"30 minutes with no new lineage-bound",
+		"intentionally remains active for the full 30-day evidence window",
+		"not an automated alert-clear condition",
+		"neither alert disappearance nor the 30-minute probation alone is closure",
+	} {
+		if !strings.Contains(volume.Markdown(), want) {
+			t.Fatalf("post-reboot volume alert missing %q:\n%s", want, volume.Markdown())
+		}
+	}
+	for _, raw := range []string{"uas_eh_abort_handler", "Remounting filesystem read-only", "sector 123"} {
+		if strings.Contains(volume.Markdown(), raw) {
+			t.Fatalf("post-reboot volume alert leaked raw kernel text %q:\n%s", raw, volume.Markdown())
+		}
+	}
+
+	idle := requireBackupArchiveAlert(t, alerts, "backup-archive-recovery-idle", "backup-1/remote")
+	for _, want := range []string{
+		"recovery_required=pg:missing,redis:missing",
+		"unit_state=inactive",
+		"unit_substate=dead",
+		"main_pid=0",
+		"invocation_id=none",
+		"exec_start_monotonic=0",
+		"result=success",
+		"exit_status=0",
+		"timer_state=active",
+		"timer_next=2026-09-04T11:00:00Z",
+		"boot=2026-09-03T14:23:45Z",
+		"manager defaults",
+		"reboot therefore discarded the pre-reboot retry/backoff",
+		"run only the bounded metrics refresh",
+		"explicit operator authorization",
+		"direct SSH banner and an enp65s0 route",
+	} {
+		if !strings.Contains(idle.Markdown(), want) {
+			t.Fatalf("post-reboot idle alert missing %q:\n%s", want, idle.Markdown())
+		}
+	}
+	for _, archive := range []string{"pg", "redis"} {
+		requireBackupArchiveAlert(t, alerts, "backup-archive-missing", "backup-1/"+archive)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticUnrelatedDeviceFaultDoesNotTaintArchiveVolume(t *testing.T) {
+	now := time.Date(2026, 9, 3, 17, 6, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteInvocationID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		remoteExecStart:    42,
+		remoteMountLineage: "dm-2,sda1,sda",
+		storageReadable:    boolPointer(true),
+		storageEvents: []backupArchiveStorageEventFixture{
+			{epoch: now.Add(-time.Minute).Unix(), kind: "transport", device: "sdb"},
+			{epoch: now.Add(-time.Minute).Unix(), kind: "block-io", device: "dm-9"},
+		},
+	}, fixtures...)
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-volume-recovery-unverified", "backup-1/archive-volume"); alert != nil {
+		t.Fatalf("unrelated block-device fault tainted archive volume: %+v", *alert)
+	}
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-volume-history-unobservable", "backup-1/archive-volume"); alert != nil {
+		t.Fatalf("observable archive lineage was marked unknown: %+v", *alert)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticSuccessfulIdleWithRecentRowsIsNotRecoveryIdle(t *testing.T) {
+	now := time.Date(2026, 9, 3, 17, 7, 0, 0, time.UTC)
+	zero := float64(0)
+	createdAt := now.Add(-24 * time.Hour)
+	fixtures := make([]backupArchiveFixture, 0, len(backupArchiveNames))
+	for _, archive := range backupArchiveNames {
+		fixtures = append(fixtures, backupArchiveFixture{
+			archive: archive, generation: archive + "-complete", createdAt: &createdAt, progress: &zero,
+		})
+	}
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		remoteUnitState:    "inactive",
+		remoteUnitSubstate: "dead",
+		remoteResult:       "success",
+		remoteInvocationID: "cccccccccccccccccccccccccccccccc",
+		remoteExecStart:    123456,
+	}, fixtures...)
+	if alert := findBackupArchiveAlert(alerts, "backup-archive-recovery-idle", "backup-1/remote"); alert != nil {
+		t.Fatalf("normal successful idle unit was marked recovery-idle: %+v", *alert)
+	}
+}
+
+func TestBackupArchivesSignalSyntheticArchiveStorageHistoryUnknownIsExplicit(t *testing.T) {
+	now := time.Date(2026, 9, 3, 17, 8, 0, 0, time.UTC)
+	alerts := runBackupArchiveFixturesWithWriter(t, now, backupArchiveWriterFixture{
+		storageReadable:    boolPointer(false),
+		remoteMountLineage: "unknown",
+	})
+	alert := requireBackupArchiveAlert(t, alerts, "backup-archive-volume-history-unobservable", "backup-1/archive-volume")
+	if alert.Severity != SeverityWarn || alert.Sustain != 2 {
+		t.Fatalf("storage-history visibility alert urgency = %s/%d, want warn/2: %+v", alert.Severity, alert.Sustain, alert)
+	}
+	for _, want := range []string{
+		"journal_readable=false",
+		"lineage=unknown",
+		"UNKNOWN storage history",
+		"must not attribute an unrelated disk",
+		"raw kernel text does not leave",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("storage-history visibility alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+}
+
 func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -299,6 +484,14 @@ func TestBackupArchiveMountStatePrioritizesEmergencyReadOnlyOverRW(t *testing.T)
 		"mountpoint -q --",
 		"findmnt -rn -T",
 		"remote_mount_options",
+		"InvocationID",
+		"NextElapseUSecRealtime",
+		"remote_mount_lineage",
+		"lsblk -srno KNAME",
+		"remote_storage_journal_readable",
+		"remote_storage_event=",
+		"_TRANSPORT=kernel",
+		"-n 512",
 	} {
 		if !strings.Contains(backupArchiveWriterCommand, want) {
 			t.Fatalf("writer observation command missing %q", want)
@@ -359,12 +552,18 @@ func TestBackupArchivesSignalSyntheticRejectsMalformedWriterObservation(t *testi
 		output string
 		want   string
 	}{
-		{name: "missing", output: "github_unit_state=activating", want: "expected 18 properties"},
+		{name: "missing", output: "github_unit_state=activating", want: "expected 25 properties"},
 		{name: "state", output: strings.Replace(valid, "github_unit_state=inactive", "github_unit_state=ACTIVE", 1), want: "invalid github_unit_state"},
 		{name: "pid", output: strings.Replace(valid, "github_main_pid=0", "github_main_pid=nope", 1), want: "invalid main PID"},
 		{name: "delay", output: strings.Replace(valid, "remote_restart_delay=30min", "remote_restart_delay=immediate!", 1), want: "invalid remote_restart_delay"},
+		{name: "invocation", output: strings.Replace(valid, "remote_invocation_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "remote_invocation_id=not-a-uuid", 1), want: "invalid remote_invocation_id"},
+		{name: "timer epoch", output: strings.Replace(valid, "remote_timer_next_epoch=2000000000", "remote_timer_next_epoch=tomorrow", 1), want: "invalid remote_timer_next_epoch"},
 		{name: "mount present", output: strings.Replace(valid, "remote_mount_present=true", "remote_mount_present=maybe", 1), want: "invalid remote_mount_present"},
 		{name: "mount options", output: strings.Replace(valid, "remote_mount_options=rw,nosuid,nodev,relatime,errors=remount-ro", "remote_mount_options=rw secret", 1), want: "invalid remote_mount_options"},
+		{name: "mount lineage", output: strings.Replace(valid, "remote_mount_lineage=dm-2,sda1,sda", "remote_mount_lineage=dm-2,sda1,sda;bad", 1), want: "invalid remote_mount_lineage"},
+		{name: "journal readable", output: strings.Replace(valid, "remote_storage_journal_readable=true", "remote_storage_journal_readable=maybe", 1), want: "invalid remote_storage_journal_readable"},
+		{name: "event kind", output: valid + "remote_storage_event=1788450000,other,sda\n", want: "invalid remote_storage_event kind"},
+		{name: "event device", output: valid + "remote_storage_event=1788450000,transport,sda;bad\n", want: "invalid remote_storage_event device"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			_, err := parseBackupArchiveWriterObservation("backup-1", testCase.output)
@@ -683,6 +882,21 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.remoteRestartDelay == "" {
 		fixture.remoteRestartDelay = "30min"
 	}
+	if fixture.remoteInvocationID == "" {
+		fixture.remoteInvocationID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		if fixture.remoteExecStart == 0 {
+			fixture.remoteExecStart = 1
+		}
+	}
+	if fixture.remoteTimerState == "" {
+		fixture.remoteTimerState = "active"
+	}
+	if fixture.remoteTimerNext == 0 {
+		fixture.remoteTimerNext = 2_000_000_000
+	}
+	if fixture.remoteBoot == 0 {
+		fixture.remoteBoot = 1_700_000_000
+	}
 	if fixture.remotePGSource == "" {
 		fixture.remotePGSource = "by@203.0.113.10"
 	}
@@ -710,7 +924,13 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 	if fixture.remoteMountOptions == "" {
 		fixture.remoteMountOptions = "rw,nosuid,nodev,relatime,errors=remount-ro"
 	}
-	return fmt.Sprintf(
+	if fixture.remoteMountLineage == "" {
+		fixture.remoteMountLineage = "dm-2,sda1,sda"
+	}
+	if fixture.storageReadable == nil {
+		fixture.storageReadable = boolPointer(true)
+	}
+	output := fmt.Sprintf(
 		"github_unit_state=%s\n"+
 			"github_main_pid=%d\n"+
 			"remote_unit_state=%s\n"+
@@ -720,6 +940,11 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_restart=%s\n"+
 			"remote_restart_delay=%s\n"+
 			"remote_exit_status=%d\n"+
+			"remote_invocation_id=%s\n"+
+			"remote_exec_start_monotonic=%d\n"+
+			"remote_timer_state=%s\n"+
+			"remote_timer_next_epoch=%d\n"+
+			"remote_boot_epoch=%d\n"+
 			"remote_pg_source=%s\n"+
 			"remote_pg_port=%d\n"+
 			"remote_redis_source=%s\n"+
@@ -728,7 +953,9 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 			"remote_mount_present=%t\n"+
 			"remote_mount_source=%s\n"+
 			"remote_mount_fstype=%s\n"+
-			"remote_mount_options=%s\n",
+			"remote_mount_options=%s\n"+
+			"remote_mount_lineage=%s\n"+
+			"remote_storage_journal_readable=%t\n",
 		fixture.unitState,
 		fixture.mainPID,
 		fixture.remoteUnitState,
@@ -738,6 +965,11 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteRestart,
 		fixture.remoteRestartDelay,
 		fixture.remoteExitStatus,
+		fixture.remoteInvocationID,
+		fixture.remoteExecStart,
+		fixture.remoteTimerState,
+		fixture.remoteTimerNext,
+		fixture.remoteBoot,
 		fixture.remotePGSource,
 		fixture.remotePGPort,
 		fixture.remoteRedisSource,
@@ -747,7 +979,13 @@ func backupArchiveWriterFixtureText(fixture backupArchiveWriterFixture) string {
 		fixture.remoteMountSource,
 		fixture.remoteMountFSType,
 		fixture.remoteMountOptions,
+		fixture.remoteMountLineage,
+		*fixture.storageReadable,
 	)
+	for _, event := range fixture.storageEvents {
+		output += fmt.Sprintf("remote_storage_event=%d,%s,%s\n", event.epoch, event.kind, event.device)
+	}
+	return output
 }
 
 func boolPointer(value bool) *bool { return &value }

@@ -18,6 +18,8 @@ const (
 	backupArchiveHeartbeatAge    = 90 * time.Second
 	backupArchiveMaximumAge      = 5 * 24 * time.Hour
 	backupArchiveFutureTolerance = 5 * time.Minute
+	backupArchiveStorageLookback = 30 * 24 * time.Hour
+	backupArchiveTimerImminent   = 5 * time.Minute
 )
 
 const backupArchiveWriterCommand = `# monitor-signal-11.22-backup-archives
@@ -30,6 +32,12 @@ remote_result=$(systemctl show remote-backup-archive.service -p Result --value 2
 remote_restart=$(systemctl show remote-backup-archive.service -p Restart --value 2>/dev/null || true)
 remote_restart_delay=$(systemctl show remote-backup-archive.service -p RestartUSec --value 2>/dev/null || true)
 remote_exit_status=$(systemctl show remote-backup-archive.service -p ExecMainStatus --value 2>/dev/null || true)
+remote_invocation_id=$(systemctl show remote-backup-archive.service -p InvocationID --value 2>/dev/null || true)
+remote_exec_start_monotonic=$(systemctl show remote-backup-archive.service -p ExecMainStartTimestampMonotonic --value 2>/dev/null || true)
+remote_timer_state=$(systemctl show remote-backup-archive.timer -p ActiveState --value 2>/dev/null || true)
+remote_timer_next=$(systemctl show remote-backup-archive.timer -p NextElapseUSecRealtime --value 2>/dev/null || true)
+remote_timer_next_epoch=$(date -d "${remote_timer_next}" +%s 2>/dev/null || true)
+remote_boot_epoch=$(awk '$1 == "btime" {print $2}' /proc/stat 2>/dev/null)
 remote_environment=$(systemctl show remote-backup-archive.service -p Environment --value 2>/dev/null || true)
 remote_pg_source=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_PG_REMOTE=//p' | tail -n 1)
 remote_pg_port=$(printf '%s\n' "${remote_environment}" | tr ' ' '\n' | sed -n 's/^BRINGYOUR_BACKUP_PG_PORT=//p' | tail -n 1)
@@ -40,11 +48,14 @@ remote_mount_present=0
 remote_mount_source=unknown
 remote_mount_fstype=unknown
 remote_mount_options=unknown
+remote_mount_lineage=unknown
 if test -n "${remote_mount}" && mountpoint -q -- "${remote_mount}"; then
 	remote_mount_present=1
 	remote_mount_source=$(findmnt -rn -T "${remote_mount}" -o SOURCE 2>/dev/null | head -n 1)
 	remote_mount_fstype=$(findmnt -rn -T "${remote_mount}" -o FSTYPE 2>/dev/null | head -n 1)
 	remote_mount_options=$(findmnt -rn -T "${remote_mount}" -o OPTIONS 2>/dev/null | head -n 1)
+	remote_mount_lineage=$(lsblk -srno KNAME -- "${remote_mount_source}" 2>/dev/null |
+		awk '$1 ~ /^[A-Za-z0-9._+-]+$/ && !seen[$1]++ {if (out != "") out=out ","; out=out $1} END {print out}')
 fi
 case "${github_unit_state}" in '') github_unit_state=unknown ;; esac
 case "${github_main_pid}" in ''|*[!0-9]*) github_main_pid=0 ;; esac
@@ -55,6 +66,11 @@ case "${remote_result}" in '') remote_result=unknown ;; esac
 case "${remote_restart}" in '') remote_restart=unknown ;; esac
 case "${remote_restart_delay}" in ''|*[!0-9a-z]*) remote_restart_delay=unknown ;; esac
 case "${remote_exit_status}" in ''|*[!0-9]*) remote_exit_status=0 ;; esac
+case "${remote_invocation_id}" in '') remote_invocation_id=none ;; esac
+case "${remote_exec_start_monotonic}" in ''|*[!0-9]*) remote_exec_start_monotonic=0 ;; esac
+case "${remote_timer_state}" in '') remote_timer_state=unknown ;; esac
+case "${remote_timer_next_epoch}" in ''|*[!0-9]*) remote_timer_next_epoch=0 ;; esac
+case "${remote_boot_epoch}" in ''|*[!0-9]*) remote_boot_epoch=0 ;; esac
 case "${remote_pg_source}" in '') remote_pg_source=unknown ;; esac
 case "${remote_pg_port}" in ''|*[!0-9]*) remote_pg_port=0 ;; esac
 case "${remote_redis_source}" in '') remote_redis_source=unknown ;; esac
@@ -63,6 +79,19 @@ case "${remote_mount}" in '') remote_mount=unknown ;; esac
 case "${remote_mount_source}" in '') remote_mount_source=unknown ;; esac
 case "${remote_mount_fstype}" in '') remote_mount_fstype=unknown ;; esac
 case "${remote_mount_options}" in '') remote_mount_options=unknown ;; esac
+case "${remote_mount_lineage}" in '') remote_mount_lineage=unknown ;; esac
+remote_storage_journal_source=unavailable
+remote_storage_journal_probe=$(sudo -n journalctl --since '30 days ago' --no-pager -n 1 -o short-unix _TRANSPORT=kernel 2>/dev/null || true)
+if test -n "${remote_storage_journal_probe}"; then
+	remote_storage_journal_source=sudo
+else
+	remote_storage_journal_probe=$(journalctl --since '30 days ago' --no-pager -n 1 -o short-unix _TRANSPORT=kernel 2>/dev/null || true)
+	if test -n "${remote_storage_journal_probe}"; then
+		remote_storage_journal_source=direct
+	fi
+fi
+remote_storage_journal_readable=0
+case "${remote_storage_journal_source}" in sudo|direct) remote_storage_journal_readable=1 ;; esac
 printf 'github_unit_state=%s\n' "${github_unit_state}"
 printf 'github_main_pid=%s\n' "${github_main_pid}"
 printf 'remote_unit_state=%s\n' "${remote_unit_state}"
@@ -72,6 +101,11 @@ printf 'remote_result=%s\n' "${remote_result}"
 printf 'remote_restart=%s\n' "${remote_restart}"
 printf 'remote_restart_delay=%s\n' "${remote_restart_delay}"
 printf 'remote_exit_status=%s\n' "${remote_exit_status}"
+printf 'remote_invocation_id=%s\n' "${remote_invocation_id}"
+printf 'remote_exec_start_monotonic=%s\n' "${remote_exec_start_monotonic}"
+printf 'remote_timer_state=%s\n' "${remote_timer_state}"
+printf 'remote_timer_next_epoch=%s\n' "${remote_timer_next_epoch}"
+printf 'remote_boot_epoch=%s\n' "${remote_boot_epoch}"
 printf 'remote_pg_source=%s\n' "${remote_pg_source}"
 printf 'remote_pg_port=%s\n' "${remote_pg_port}"
 printf 'remote_redis_source=%s\n' "${remote_redis_source}"
@@ -80,7 +114,71 @@ printf 'remote_mount=%s\n' "${remote_mount}"
 printf 'remote_mount_present=%s\n' "${remote_mount_present}"
 printf 'remote_mount_source=%s\n' "${remote_mount_source}"
 printf 'remote_mount_fstype=%s\n' "${remote_mount_fstype}"
-printf 'remote_mount_options=%s\n' "${remote_mount_options}"`
+printf 'remote_mount_options=%s\n' "${remote_mount_options}"
+printf 'remote_mount_lineage=%s\n' "${remote_mount_lineage}"
+printf 'remote_storage_journal_readable=%s\n' "${remote_storage_journal_readable}"
+read_archive_kernel_journal() {
+	case "${remote_storage_journal_source}" in
+		sudo) sudo -n journalctl "$@" ;;
+		direct) command journalctl "$@" ;;
+		*) return 1 ;;
+	esac
+}
+if test "${remote_storage_journal_readable}" = 1; then
+	read_archive_kernel_journal --since '30 days ago' --no-pager -n 512 -o short-unix \
+		--grep='uas_eh_(abort|device_reset)_handler|device offlined|not ready after error recovery|Synchronize Cache.*failed|rejecting I/O to offline device|I/O error|Aborting journal|Remounting filesystem read-only|emergency_ro' \
+		_TRANSPORT=kernel 2>/dev/null |
+	awk '
+	function clean_device(value) {
+		sub(/^\[/, "", value); sub(/^\(/, "", value)
+		sub(/\]$/, "", value); sub(/\):$/, "", value)
+		sub(/[,:;.]$/, "", value)
+		if (value ~ /^dm-[0-9]+-[0-9]+$/) sub(/-[0-9]+$/, "", value)
+		if (value !~ /^[A-Za-z0-9._+-]+$/) return ""
+		return value
+	}
+	function bracket_device( i, value) {
+		for (i=1; i<=NF; i++) if ($i ~ /^\[[A-Za-z0-9._+-]+\][,:;.]?$/) {
+			value=clean_device($i); if (value != "") return value
+		}
+		return ""
+	}
+	function parenthesized_device( i, value) {
+		for (i=1; i<=NF; i++) if ($i ~ /^\([A-Za-z0-9._+-]+\):?$/) {
+			value=clean_device($i); if (value != "") return value
+		}
+		return ""
+	}
+	function device_after(word, i, value) {
+		for (i=1; i<NF; i++) if ($i == word) {
+			value=clean_device($(i+1)); if (value != "") return value
+		}
+		return ""
+	}
+	function emit(kind, device, epoch) {
+		if (device == "" || epoch !~ /^[0-9]+$/) return
+		printf "remote_storage_event=%s,%s,%s\n", epoch, kind, device
+	}
+	{
+		epoch=$1; sub(/[.][0-9]+$/, "", epoch)
+		if ($0 ~ /Aborting journal|JBD2:.*I\/O error|Remounting filesystem read-only|emergency_ro/) {
+			device=parenthesized_device()
+			if (device == "") device=device_after("device")
+			if (device == "") device=device_after("for")
+			emit("journal", device, epoch); next
+		}
+		if ($0 ~ /uas_eh_(abort|device_reset)_handler|device offlined|not ready after error recovery|Synchronize Cache.*failed|rejecting I\/O to offline device/) {
+			device=bracket_device()
+			if (device == "") device=device_after("dev")
+			emit("transport", device, epoch); next
+		}
+		if ($0 ~ /I\/O error/) {
+			device=device_after("dev")
+			if (device == "") device=bracket_device()
+			emit("block-io", device, epoch)
+		}
+	}'
+fi`
 
 var backupArchiveNames = []string{
 	"pg",
@@ -133,6 +231,11 @@ type backupArchiveWriterObservation struct {
 	remoteRestart      string
 	remoteRestartDelay string
 	remoteExitStatus   int64
+	remoteInvocationID string
+	remoteExecStart    int64
+	remoteTimerState   string
+	remoteTimerNext    time.Time
+	remoteBoot         time.Time
 	remotePGSource     string
 	remotePGPort       int64
 	remoteRedisSource  string
@@ -143,6 +246,15 @@ type backupArchiveWriterObservation struct {
 	remoteMountSource  string
 	remoteMountFSType  string
 	remoteMountOptions string
+	remoteMountLineage []string
+	storageReadable    bool
+	storageEvents      []backupArchiveStorageEvent
+}
+
+type backupArchiveStorageEvent struct {
+	occurredAt time.Time
+	kind       string
+	device     string
 }
 
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -305,6 +417,8 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 	for _, host := range backupHosts {
 		findings = append(findings, evaluateBackupArchiveVolume(writers[host.name]))
+		findings = append(findings, evaluateBackupArchiveVolumeRecovery(now, writers[host.name])...)
+		findings = append(findings, evaluateBackupArchiveRecoveryIdle(now, writers[host.name], observations))
 		findings = append(findings, evaluateBackupArchiveWriter(now, writers[host.name], observations))
 		findings = append(findings, evaluateBackupArchiveRun(writers[host.name]))
 		findings = append(findings, evaluateBackupArchiveRetry(writers[host.name]))
@@ -344,10 +458,22 @@ func validateBackupArchiveSourceSettings(settings *BackupHostSettings) error {
 
 func parseBackupArchiveWriterObservation(hostName, output string) (backupArchiveWriterObservation, error) {
 	values := map[string]string{}
+	storageEvents := []backupArchiveStorageEvent{}
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if !ok || key == "" || value == "" {
 			return backupArchiveWriterObservation{}, fmt.Errorf("invalid property line %q", line)
+		}
+		if key == "remote_storage_event" {
+			event, err := parseBackupArchiveStorageEvent(value)
+			if err != nil {
+				return backupArchiveWriterObservation{}, err
+			}
+			if len(storageEvents) >= 512 {
+				return backupArchiveWriterObservation{}, fmt.Errorf("too many remote_storage_event properties")
+			}
+			storageEvents = append(storageEvents, event)
+			continue
 		}
 		if _, duplicate := values[key]; duplicate {
 			return backupArchiveWriterObservation{}, fmt.Errorf("duplicate property %q", key)
@@ -364,6 +490,11 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_restart",
 		"remote_restart_delay",
 		"remote_exit_status",
+		"remote_invocation_id",
+		"remote_exec_start_monotonic",
+		"remote_timer_state",
+		"remote_timer_next_epoch",
+		"remote_boot_epoch",
 		"remote_pg_source",
 		"remote_pg_port",
 		"remote_redis_source",
@@ -373,6 +504,8 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		"remote_mount_source",
 		"remote_mount_fstype",
 		"remote_mount_options",
+		"remote_mount_lineage",
+		"remote_storage_journal_readable",
 	}
 	if len(values) != len(required) {
 		return backupArchiveWriterObservation{}, fmt.Errorf("expected %d properties; got %q", len(required), strings.TrimSpace(output))
@@ -382,7 +515,7 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 			return backupArchiveWriterObservation{}, fmt.Errorf("missing property %q", key)
 		}
 	}
-	for _, key := range []string{"github_unit_state", "remote_unit_state", "remote_unit_substate", "remote_result", "remote_restart"} {
+	for _, key := range []string{"github_unit_state", "remote_unit_state", "remote_unit_substate", "remote_result", "remote_restart", "remote_timer_state"} {
 		if matched, _ := regexp.MatchString(`^[a-z-]+$`, values[key]); !matched {
 			return backupArchiveWriterObservation{}, fmt.Errorf("invalid %s %q", key, values[key])
 		}
@@ -399,9 +532,17 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	if matched, _ := regexp.MatchString(`^(unknown|[A-Za-z0-9,._=:+/-]+)$`, values["remote_mount_options"]); !matched {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount_options %q", values["remote_mount_options"])
 	}
+	remoteMountLineage, err := parseBackupArchiveMountLineage(values["remote_mount_lineage"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
 	remoteMountPresent, err := strconv.ParseBool(values["remote_mount_present"])
 	if err != nil {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_mount_present %q", values["remote_mount_present"])
+	}
+	storageReadable, err := strconv.ParseBool(values["remote_storage_journal_readable"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_storage_journal_readable %q", values["remote_storage_journal_readable"])
 	}
 	if matched, _ := regexp.MatchString(`^(unknown|[0-9]+(?:us|ms|s|min|h|d|w))$`, values["remote_restart_delay"]); !matched {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_restart_delay %q", values["remote_restart_delay"])
@@ -417,6 +558,21 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 	remoteExitStatus, err := strconv.ParseInt(values["remote_exit_status"], 10, 64)
 	if err != nil || remoteExitStatus < 0 {
 		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote exit status %q", values["remote_exit_status"])
+	}
+	if matched, _ := regexp.MatchString(`^(none|unknown|[0-9a-f]{32})$`, values["remote_invocation_id"]); !matched {
+		return backupArchiveWriterObservation{}, fmt.Errorf("invalid remote_invocation_id %q", values["remote_invocation_id"])
+	}
+	remoteExecStart, err := parseBackupArchiveNonnegativeInt64("remote_exec_start_monotonic", values["remote_exec_start_monotonic"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
+	remoteTimerNextEpoch, err := parseBackupArchiveNonnegativeInt64("remote_timer_next_epoch", values["remote_timer_next_epoch"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
+	}
+	remoteBootEpoch, err := parseBackupArchiveNonnegativeInt64("remote_boot_epoch", values["remote_boot_epoch"])
+	if err != nil {
+		return backupArchiveWriterObservation{}, err
 	}
 	for _, key := range []string{"remote_pg_source", "remote_redis_source"} {
 		if matched, _ := regexp.MatchString(`^(unknown|[a-z][a-z0-9_-]{0,31}@[A-Za-z0-9][A-Za-z0-9.:-]{0,252})$`, values[key]); !matched {
@@ -442,6 +598,11 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		remoteRestart:      values["remote_restart"],
 		remoteRestartDelay: values["remote_restart_delay"],
 		remoteExitStatus:   remoteExitStatus,
+		remoteInvocationID: values["remote_invocation_id"],
+		remoteExecStart:    remoteExecStart,
+		remoteTimerState:   values["remote_timer_state"],
+		remoteTimerNext:    unixIntegerTime(remoteTimerNextEpoch),
+		remoteBoot:         unixIntegerTime(remoteBootEpoch),
 		remotePGSource:     values["remote_pg_source"],
 		remotePGPort:       remotePGPort,
 		remoteRedisSource:  values["remote_redis_source"],
@@ -456,6 +617,65 @@ func parseBackupArchiveWriterObservation(hostName, output string) (backupArchive
 		remoteMountSource:  values["remote_mount_source"],
 		remoteMountFSType:  values["remote_mount_fstype"],
 		remoteMountOptions: values["remote_mount_options"],
+		remoteMountLineage: remoteMountLineage,
+		storageReadable:    storageReadable,
+		storageEvents:      storageEvents,
+	}, nil
+}
+
+func parseBackupArchiveNonnegativeInt64(name, value string) (int64, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("invalid %s %q", name, value)
+	}
+	return parsed, nil
+}
+
+func unixIntegerTime(epoch int64) time.Time {
+	if epoch == 0 {
+		return time.Time{}
+	}
+	return time.Unix(epoch, 0).UTC()
+}
+
+func parseBackupArchiveMountLineage(value string) ([]string, error) {
+	if value == "unknown" {
+		return nil, nil
+	}
+	parts := strings.Split(value, ",")
+	seen := map[string]bool{}
+	lineage := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if matched, _ := regexp.MatchString(`^[A-Za-z0-9._+-]+$`, part); !matched || seen[part] {
+			return nil, fmt.Errorf("invalid remote_mount_lineage %q", value)
+		}
+		seen[part] = true
+		lineage = append(lineage, part)
+	}
+	return lineage, nil
+}
+
+func parseBackupArchiveStorageEvent(value string) (backupArchiveStorageEvent, error) {
+	parts := strings.Split(value, ",")
+	if len(parts) != 3 {
+		return backupArchiveStorageEvent{}, fmt.Errorf("invalid remote_storage_event %q", value)
+	}
+	epoch, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || epoch <= 0 {
+		return backupArchiveStorageEvent{}, fmt.Errorf("invalid remote_storage_event epoch %q", parts[0])
+	}
+	switch parts[1] {
+	case "transport", "block-io", "journal":
+	default:
+		return backupArchiveStorageEvent{}, fmt.Errorf("invalid remote_storage_event kind %q", parts[1])
+	}
+	if matched, _ := regexp.MatchString(`^[A-Za-z0-9._+-]+$`, parts[2]); !matched {
+		return backupArchiveStorageEvent{}, fmt.Errorf("invalid remote_storage_event device %q", parts[2])
+	}
+	return backupArchiveStorageEvent{
+		occurredAt: time.Unix(epoch, 0).UTC(),
+		kind:       parts[1],
+		device:     parts[2],
 	}, nil
 }
 
@@ -521,6 +741,221 @@ func evaluateBackupArchiveVolume(observation backupArchiveWriterObservation) fin
 		verify:   "Require three consecutive one-minute direct observations of the same LUKS-backed mount in read-write state, a clean offline filesystem check, a successful bounded write/read/delete check, no new USB/UAS reset, block-I/O, journal-abort, or read-only-remount event for 30 minutes, and one subsequent single-writer archive generation whose artifact and manifest validate.",
 		playbook: "SIGNALS.md §11.22",
 	}
+}
+
+func evaluateBackupArchiveVolumeRecovery(
+	now time.Time,
+	observation backupArchiveWriterObservation,
+) []finding {
+	target := observation.host + "/archive-volume"
+	visibilityClass := "backup-archive-volume-history-unobservable"
+	recoveryClass := "backup-archive-volume-recovery-unverified"
+	if observation.remoteMountState != "read-write" {
+		return []finding{
+			healthyFinding("observability/backup-archives", tierWarn, visibilityClass, target),
+			healthyFinding("observability/backup-archives", tierPage, recoveryClass, target),
+		}
+	}
+
+	lineage := make(map[string]bool, len(observation.remoteMountLineage))
+	for _, device := range observation.remoteMountLineage {
+		lineage[device] = true
+	}
+	if !observation.storageReadable || len(lineage) == 0 {
+		reason := "kernel-journal-unreadable"
+		if observation.storageReadable {
+			reason = "archive-block-lineage-unknown"
+		}
+		return []finding{
+			{
+				probeId: "observability/backup-archives", tier: tierWarn,
+				class: visibilityClass, target: target, frame: "storage-history", sustain: 2,
+				symptom:   fmt.Sprintf("%s recent storage-fault history cannot be bound to its mounted archive volume", observation.host),
+				mechanism: "A current read-write mount is only a point-in-time state. Without a readable bounded kernel journal and the current mapper/backing-device lineage, the monitor cannot tell whether USB/UAS, block-I/O, or journal-abort evidence preceded that state, and it must not attribute an unrelated disk's errors to the archive.",
+				baseline:  "The monitor can read the last 30 days of kernel records and resolve the configured archive mount through its current mapper, partition, and backing-disk kernel names.",
+				observed: fmt.Sprintf(
+					"reason=%s journal_readable=%t mount=%s mount_state=%s source=%s lineage=%s",
+					reason,
+					observation.storageReadable,
+					observation.remoteMount,
+					observation.remoteMountState,
+					observation.remoteMountSource,
+					backupArchiveLineageText(observation.remoteMountLineage),
+				),
+				evidence: "The host-side discriminator returns only journal readability, sanitized block names, and normalized event type/device/time triples; raw kernel text does not leave the backup host.",
+				context:  "This is UNKNOWN storage history, not proof of a healthy volume and not permission to infer that another local disk failed. Kernel block names can also change across re-enumeration, so stable LUKS and device identity remain operator discriminators.",
+				action:   "Restore read-only journal visibility or block-lineage resolution. Then rerun this signal before starting an archive writer; do not weaken the lineage filter or treat an unrelated device event as the archive cause.",
+				verify:   "Two consecutive probes resolve the same mounted LUKS-backed lineage and return bounded normalized history; any matching event is handled by backup-archive-volume-recovery-unverified.",
+				playbook: "SIGNALS.md §11.22",
+			},
+		}
+	}
+
+	counts := map[string]int{"transport": 0, "block-io": 0, "journal": 0}
+	devices := map[string]bool{}
+	latest := time.Time{}
+	invalidFuture := 0
+	windowStart := now.Add(-backupArchiveStorageLookback)
+	for _, event := range observation.storageEvents {
+		if !lineage[event.device] {
+			continue
+		}
+		if event.occurredAt.After(now.Add(backupArchiveFutureTolerance)) {
+			invalidFuture++
+			continue
+		}
+		if event.occurredAt.Before(windowStart) {
+			continue
+		}
+		counts[event.kind]++
+		devices[event.device] = true
+		if latest.IsZero() || event.occurredAt.After(latest) {
+			latest = event.occurredAt
+		}
+	}
+	visibility := healthyFinding(
+		"observability/backup-archives", tierWarn, visibilityClass, target,
+	)
+	if invalidFuture > 0 {
+		return []finding{visibility, {
+			probeId: "observability/backup-archives", tier: tierWarn,
+			class: visibilityClass, target: target, frame: "storage-history-clock", sustain: 1,
+			symptom:   fmt.Sprintf("%s archive-bound kernel storage history has future timestamps", observation.host),
+			mechanism: "The normalized event clock is too far ahead of the monitor clock, so the bounded recovery window cannot be evaluated safely.",
+			baseline:  "Archive-bound kernel event timestamps are no more than five minutes in the future.",
+			observed:  fmt.Sprintf("future_events=%d lineage=%s", invalidFuture, backupArchiveLineageText(observation.remoteMountLineage)),
+			evidence:  "Only normalized event metadata was returned; raw kernel text remains on the host.",
+			action:    "Repair the host or monitor clock and rerun the signal before using storage history as a recovery gate.",
+			verify:    "Two consecutive probes contain no future normalized storage event.",
+			playbook:  "SIGNALS.md §11.22",
+		}}
+	}
+	if latest.IsZero() {
+		return []finding{visibility, healthyFinding(
+			"observability/backup-archives", tierPage, recoveryClass, target,
+		)}
+	}
+
+	deviceNames := make([]string, 0, len(devices))
+	for device := range devices {
+		deviceNames = append(deviceNames, device)
+	}
+	sort.Strings(deviceNames)
+	return []finding{visibility, {
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: recoveryClass, target: target, frame: "recent-storage-fault", sustain: 1,
+		symptom:   fmt.Sprintf("%s archive volume is read-write after recent storage-path failures", observation.host),
+		mechanism: "The bounded kernel history contains USB/UAS transport, direct block-I/O, or ext4/JBD2 failure evidence naming a device in the currently mounted archive mapper/backing-device lineage. Journal replay and a fresh read-write mount restore present access; they do not prove an offline full-filesystem check or repair the cable, port, enclosure, bridge, or SSD that caused the I/O loss.",
+		baseline:  "The archive volume has no lineage-bound transport, block-I/O, journal-abort, emergency-read-only, or read-only-remount event in the bounded 30-day evidence window.",
+		observed: fmt.Sprintf(
+			"mount=%s mount_state=%s source=%s lineage=%s matched_devices=%s transport_events=%d block_io_events=%d journal_events=%d latest_event=%s lookback=%s",
+			observation.remoteMount,
+			observation.remoteMountState,
+			observation.remoteMountSource,
+			backupArchiveLineageText(observation.remoteMountLineage),
+			strings.Join(deviceNames, ","),
+			counts["transport"],
+			counts["block-io"],
+			counts["journal"],
+			latest.Format(time.RFC3339),
+			backupArchiveStorageLookback,
+		),
+		evidence: "The probe resolves the configured mount through its current lsblk -s kernel lineage and joins only exact device tokens to normalized event type/device/time triples. Raw kernel text stays on the host; events naming other block devices are excluded.",
+		context:  "A match to a current kernel name excludes an unrelated currently named device, but kernel names are mutable across detach/re-enumeration. Confirm the stable LUKS UUID and physical serial before replacing hardware. This page intentionally remains active for the full 30-day evidence window when repaired hardware retains the same kernel lineage. The 30-minute fault-free interval is only the minimum probation before a catch-up attempt, not an automated alert-clear condition; expiry of the bounded journal window is not a repair certificate.",
+		action:   "Keep both archive writers stopped. With explicit operator authorization, bind the mounted mapper to the stable LUKS UUID and physical device, collect SMART/media evidence if the bridge supports it, and isolate or replace the proven cable, port, enclosure, bridge, or SSD fault. Unmount and run a full offline e2fsck; a boot-time journal replay is insufficient. After mounting normally, perform a bounded write/read/delete check before authorizing exactly one catch-up writer.",
+		verify:   "Operational closure requires the stable LUKS-backed volume to pass a full offline filesystem check, three consecutive one-minute read-write observations, a bounded write/read/delete check, and 30 minutes with no new lineage-bound transport, block-I/O, journal-abort, emergency-read-only, or remount event. Then require one single-writer generation to complete, validate its artifact and manifest, and publish the same new generation on two direct Mimir reads. The page deliberately retains the event until it leaves the 30-day window (or a proven replacement has a distinct lineage); neither alert disappearance nor the 30-minute probation alone is closure.",
+		playbook: "SIGNALS.md §11.22",
+	}}
+}
+
+func backupArchiveLineageText(lineage []string) string {
+	if len(lineage) == 0 {
+		return "unknown"
+	}
+	return strings.Join(lineage, ",")
+}
+
+func evaluateBackupArchiveRecoveryIdle(
+	now time.Time,
+	writer backupArchiveWriterObservation,
+	observations map[string]*backupArchiveObservation,
+) finding {
+	target := writer.host + "/remote"
+	class := "backup-archive-recovery-idle"
+	required := backupArchiveDataRecoveryRequired(now, writer.host, observations)
+	if len(required) == 0 || writer.remoteMountState != "read-write" ||
+		writer.remoteUnitState != "inactive" || writer.remoteUnitSubstate != "dead" ||
+		writer.remoteMainPID != 0 || writer.remoteInvocationID != "none" || writer.remoteExecStart != 0 ||
+		(!writer.remoteTimerNext.IsZero() && !writer.remoteTimerNext.After(now.Add(backupArchiveTimerImminent))) {
+		return healthyFinding(
+			"observability/backup-archives", tierPage, class, target,
+		)
+	}
+
+	nextTrigger := "unknown"
+	if !writer.remoteTimerNext.IsZero() {
+		nextTrigger = writer.remoteTimerNext.Format(time.RFC3339)
+	}
+	boot := "unknown"
+	if !writer.remoteBoot.IsZero() {
+		boot = writer.remoteBoot.Format(time.RFC3339)
+	}
+	mechanism := "The PostgreSQL/Redis recovery objective is unresolved, but systemd has no current-boot invocation and no writer or on-failure retry is active. Result=success and ExecMainStatus=0 are manager defaults in this empty InvocationID state, not evidence that a post-reboot archive run succeeded. The persistent timer already consumed its earlier calendar trigger; its next trigger is still in the future. A reboot therefore discarded the pre-reboot retry/backoff without creating a replacement attempt."
+	if writer.remoteTimerNext.IsZero() || writer.remoteTimerState != "active" {
+		mechanism = "The PostgreSQL/Redis recovery objective is unresolved, but systemd has no current-boot invocation, no writer or on-failure retry is active, and the timer has no proven active future trigger. Result=success and ExecMainStatus=0 are manager defaults in this empty InvocationID state, not evidence that a post-reboot archive run succeeded."
+	}
+	return finding{
+		probeId: "observability/backup-archives", tier: tierPage,
+		class: class, target: target, frame: "post-reboot-no-invocation", sustain: 1,
+		symptom:   fmt.Sprintf("%s data archive recovery is idle after reboot", target),
+		mechanism: mechanism,
+		baseline:  "When PostgreSQL or Redis completion is missing or older than five days and the archive mount is usable, the data unit is executing, waiting in a bounded on-failure restart, has a real current-boot invocation result, or has an imminent timer trigger.",
+		observed: fmt.Sprintf(
+			"recovery_required=%s unit_state=%s unit_substate=%s main_pid=%d invocation_id=%s exec_start_monotonic=%d result=%s exit_status=%d timer_state=%s timer_next=%s boot=%s mount_state=%s",
+			strings.Join(required, ","),
+			writer.remoteUnitState,
+			writer.remoteUnitSubstate,
+			writer.remoteMainPID,
+			writer.remoteInvocationID,
+			writer.remoteExecStart,
+			writer.remoteResult,
+			writer.remoteExitStatus,
+			writer.remoteTimerState,
+			nextTrigger,
+			boot,
+			writer.remoteMountState,
+		),
+		evidence: "The monitor joins raw Mimir completion state with the effective service InvocationID/start/result, timer state/next trigger, current boot time, and exact archive mount state. It does not call systemctl start or infer success from default zero-valued properties.",
+		context:  "This is a post-recovery scheduling gap, separate from the physical storage cause and the erased off-volume completion rows. A direct SSH banner and an enp65s0 route prove only present network reachability; they do not repair the archive filesystem, authenticate the source listing, preserve a multi-hour session, or create a recovery point.",
+		action:   "Do not wait for the next calendar trigger and do not start the data writer merely to clear this alert. First satisfy the simultaneous storage-recovery gates. With the volume proven safe and both writers still inactive, run only the bounded metrics refresh to reconstruct real completed rows from disk; validate those rows against the root-owned artifacts. Then obtain explicit operator authorization for exactly one catch-up data pull through the configured direct endpoints.",
+		verify:   "The metrics refresh exposes the real stored PostgreSQL and Redis generations on two direct Mimir reads without starting a pull. After storage clearance and explicit authorization, exactly one current-boot InvocationID/MainPID runs; both direct source authentications succeed, the unit completes, artifacts and manifests validate, and two direct Mimir reads show both recovery points inside five days. The unit then becomes normally inactive with a real invocation result.",
+		playbook: "SIGNALS.md §11.22",
+	}
+}
+
+func backupArchiveDataRecoveryRequired(
+	now time.Time,
+	host string,
+	observations map[string]*backupArchiveObservation,
+) []string {
+	required := []string{}
+	for _, archive := range []string{"pg", "redis"} {
+		observation := observations[backupArchiveKey(host, archive)]
+		if observation == nil || len(observation.latest) == 0 {
+			required = append(required, archive+":missing")
+			continue
+		}
+		latest := observation.latest[0].createdAt
+		for _, sample := range observation.latest[1:] {
+			if sample.createdAt.After(latest) {
+				latest = sample.createdAt
+			}
+		}
+		if now.Sub(latest) > backupArchiveMaximumAge {
+			required = append(required, archive+":stale")
+		}
+	}
+	return required
 }
 
 func backupArchiveRemoteWriterRunning(observation backupArchiveWriterObservation) bool {

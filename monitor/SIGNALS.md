@@ -8851,13 +8851,27 @@ The `backup-archives` probe queries raw Mimir through a reachable loopback
 Grafana service gateway for every monitor-inventory host with the `backup`
 role. It also reads `github-backup-archive.service` state and MainPID plus the
 effective `remote-backup-archive.service` active state, substate, MainPID,
-result, exit status, restart policy, restart delay, and its four non-secret
-PostgreSQL/Redis source endpoint values directly on that backup host. From the
+result, exit status, restart policy, restart delay, current InvocationID and
+monotonic start time, plus its four non-secret PostgreSQL/Redis source endpoint
+values directly on that backup host. It reads the data timer's active state and
+next realtime trigger plus the host boot time; an empty current-boot invocation
+therefore cannot masquerade as a successful run merely because systemd exposes
+default `Result=success` and `ExecMainStatus=0` values after a reboot. From the
 same effective unit it reads `BRINGYOUR_BACKUP_MOUNT`, then uses `mountpoint`
 and direct `findmnt` source, filesystem type, and options to classify that exact
 destination as missing, read-only, read-write, or unknown. In particular,
-ext4's `emergency_ro` overrides a simultaneous top-level `rw` mount flag. The
-probe also queries the producer-owned
+ext4's `emergency_ro` overrides a simultaneous top-level `rw` mount flag.
+
+For a currently mounted read-write destination, the host-side discriminator
+also resolves the mapper, partition, and backing disk through `lsblk -s` and
+reads a maximum of 512 candidate kernel records from a 30-day lookback. It
+returns only normalized event time, type (`transport`, `block-io`, or
+`journal`), and sanitized kernel device name; raw kernel text remains on the
+host. The evaluator accepts only exact device tokens in the current archive
+lineage, so an error from another local disk does not taint this volume. Kernel
+names remain mutable across detach and re-enumeration, so a lineage match is
+strong evidence rather than a physical serial: stable LUKS UUID and device
+identity remain mandatory operator discriminators. The probe also queries the producer-owned
 `urnetwork_backup_archive_heartbeat_timestamp_seconds` values alongside the
 progress gauges. It expects exactly the four archive names above.
 Samples older than 90 seconds are observation loss even when their archive
@@ -8884,7 +8898,11 @@ a nonzero MainPID. Otherwise its last invocation has `Result=success` and
 zero MainPID is a failed attempt waiting for its retry, not active progress.
 The configured archive path is a real mountpoint whose direct options contain
 `rw` and contain neither `ro` nor `emergency_ro`. Serial queue and active-phase
-attribution are valid only while this volume contract is healthy.
+attribution are valid only while this volume contract is healthy. A current
+read-write flag alone does not clear a recent lineage-bound transport,
+block-I/O, journal-abort, or read-only-remount event. When either data recovery
+point is missing or stale, an inactive/dead unit with no InvocationID or start
+time and a non-imminent next timer is idle recovery, not a successful run.
 BROKEN:
 
 - `backup-archive-metrics-missing` after two one-minute probes means the
@@ -8925,6 +8943,33 @@ BROKEN:
   unmounted mapper, unlock the current volume, run `e2fsck` offline, and mount
   normally. Never live-remount an aborted ext4 journal read-write or let a
   writer target the bare directory beneath a missing mount.
+- `backup-archive-volume-history-unobservable` warns after two probes when a
+  currently read-write archive mount cannot be resolved to a current block
+  lineage or the bounded kernel journal cannot be read. This is unknown
+  history, not a healthy disk and not authority to assign an unrelated block
+  device's errors to the archive. A future normalized event is immediate clock
+  ambiguity.
+- `backup-archive-volume-recovery-unverified` is immediate when the currently
+  read-write archive lineage has a transport, direct block-I/O, JBD2/ext4
+  journal-abort, emergency-read-only, or read-only-remount event in the bounded
+  history. Journal replay and a fresh mount do not clear it. Keep both writers
+  stopped; identify the physical device by stable LUKS UUID/serial, repair or
+  replace the proven cable, port, enclosure, bridge, or SSD boundary, run a
+  full `e2fsck` offline, and complete the explicit probation gates below. The
+  page intentionally remains active for the full 30-day evidence window when
+  repaired hardware keeps the same lineage. The 30-minute fault-free interval
+  is only the minimum probation before the authorized catch-up gate, not an
+  automated clear condition; eventual lookback expiry is not a repair
+  certificate.
+- `backup-archive-recovery-idle` is immediate when PostgreSQL or Redis
+  completion is missing/stale, the archive is mounted read-write, the data unit
+  is inactive/dead with no MainPID, InvocationID, or current-boot start time,
+  and its next timer is not imminent. In that state, default
+  `Result=success`/`ExecMainStatus=0` values do not record an invocation. A
+  reboot can discard an `on-failure` backoff after the day's calendar trigger,
+  leaving the next attempt until tomorrow. Restore visibility with only the
+  bounded metrics refresh after storage clearance, then require separate
+  operator authorization for exactly one catch-up pull.
 - `backup-archive-progress-stale` after two probes means direct systemd state
   and the two exported GitHub phase gauges disagree, the active unit has no
   MainPID, or its producer heartbeat value is absent or more than 90 seconds
@@ -9240,44 +9285,56 @@ confirms that the direct path cannot preserve an active multi-hour mapping,
 the operational closure remains a pinned stable public/no-CGNAT WAN path with
 adequate conntrack lifetime/capacity, never the management VPN.
 
-The `2026-09-03T13:18:01Z` storage failure superseded the apparent healthy
-serial-transfer interpretation. During the Redis phase, the GlyphTech BB Plus
-U.2 external enclosure on `usb 10-2` accumulated UAS command timeouts. Two
-device-reset attempts completed without restoring readiness; the SCSI layer
-offlined the device, reads and writes to the underlying disk returned I/O
-errors, JBD2 aborted the encrypted ext4 journal, and ext4 reported
-`Remounting filesystem read-only`. The live mount temporarily exposed both
-`rw` and `emergency_ro`, so checking only the ordinary mount flag would have
-been a false negative. Rsync then reported filesystem error 30 while the unit
-and phase metric remained active.
+The `2026-09-03T06:17:58-07:00` (`13:17:58Z`) storage failure superseded the
+apparent healthy serial-transfer interpretation. The GlyphTech
+BB Plus U.2 external archive enclosure accumulated UAS command timeouts and
+resets on its backing `/dev/sda`. The SCSI layer then offlined the device as not
+ready, direct reads and writes returned repeated I/O errors, JBD2 aborted the
+encrypted ext4 journal, and at `2026-09-03T06:18:12-07:00` (`13:18:12Z`) ext4
+remounted it read-only. A live unit or phase metric could not make that
+destination usable.
+The same failure class had already appeared on August 21 as failed cache sync,
+JBD2, and superblock I/O, and on September 1 as repeated 30-second UAS aborts
+and a USB reset. This recurrence rules out rsync and the earlier public-forward
+instability as the cause of the storage loss. It establishes the external
+storage transport/device stack as the failed boundary, while SMART/media
+evidence versus cable, port, bridge, enclosure, or SSD substitution is still
+needed to select the physical component.
 
-At `14:16:05Z` the enclosure disconnected, removing the mount. Thirteen seconds
-later the same 7 TB partition reappeared on a different USB controller and
-mutable block name as `/dev/sdc1`; its LUKS UUID still matched the archive, but
-it was locked while the stale mapper still named the vanished `sda1`. This is
-not an intentional read-only mount and cannot be recovered by
-`mount -o remount,rw`. A September 1 control already contained another UAS
-reset and ten read I/O errors for this enclosure, so today is a recurrent
-storage/transport fault rather than a one-off rsync or network failure. The
-remaining hardware discriminator is SMART/media evidence versus cable, port,
-or enclosure stability; the current bridge does not expose SMART through
-UDisks. Recover offline in the order prescribed by
-`backup-archive-volume-unavailable`, then require three one-minute read-write
-observations, a bounded write/read/delete check, 30 minutes without another
-USB/UAS, block-I/O, journal, or remount event, and one validated atomic backup
-generation. The writer scripts must reject `ro` and `emergency_ro` before any
-future phase, but that software guard cannot repair the external SSD path.
-The host then rebooted and, at `14:25:18Z`, ext4 replayed the journal and
-mounted the same filesystem read-write with no subsequent runtime error count.
-That proves present mount availability, not an offline full-filesystem check or
-transport durability. Both archive units were inactive afterward. Their
-pre-fix failure exit had refreshed the off-volume data metric while the mount
-was absent, so a focused raw-Mimir read at `14:33Z` contained fresh zero phase
-gauges but no PostgreSQL or Redis latest row. The monitor must report that as
-unknown completion visibility rather than claiming the physical artifacts are
-gone. The fixed data and code writers preserve strictly validated last-known
-latest rows while resetting phases during volume loss; when the volume is
-healthy, the existing bounded refresh reconstructs current rows from disk.
+The host rebooted at `2026-09-03T07:23:45-07:00` (`14:23:45Z`). At
+`2026-09-03T07:25:18-07:00` (`14:25:18Z`) the current boot replayed the ext4
+journal and mounted the archive read-write. The explicit `-07:00` offsets are
+from the remote host journal, not the monitor operator's timezone. That proves
+only present access: journal replay is not a full offline `e2fsck` and does not
+demonstrate transport durability. The previous
+service journal had listed three complete PostgreSQL and three complete Redis
+generations, newest August 20, immediately before the storage failures. Both
+writer units were inactive after the reboot. The off-volume metric contained
+fresh zero phases but no PostgreSQL or Redis latest row, so raw Mimir correctly
+reported two unknown-completion alerts rather than asserting that those six
+physical generations disappeared.
+
+The reboot exposed a second, independent recovery gap. The effective data unit
+showed `ActiveState=inactive`, `SubState=dead`, `MainPID=0`, an empty
+InvocationID and start timestamp, yet systemd's defaults appeared as
+`Result=success` and `ExecMainStatus=0`. Its 04:00 trigger and pre-reboot retry
+were gone, while the next timer was tomorrow. `Restart=on-failure` correctly
+recovers an ordinary failed process inside one manager boot; it does not
+persist an outstanding auto-restart across a host reboot after that day's
+calendar event was already consumed. The new `backup-archive-recovery-idle`
+classification makes that state visible without starting anything.
+
+The monitor's bounded storage-history discriminator separately prevents the
+fresh `rw` mount from clearing the physical incident. It joins normalized
+events only to exact devices in the currently resolved archive lineage and
+ignores an unrelated block device; raw journal lines stay on Planetoid. Because
+kernel names can change across re-enumeration, stable LUKS UUID and physical
+identity remain required before attributing or replacing hardware. The fixed
+data and code writers preserve strictly validated last-known latest rows while
+resetting phases during future volume loss; with both writers inactive and the
+volume cleared for read-only inspection, the existing bounded metrics refresh
+can reconstruct current rows from disk. That refresh repairs visibility only.
+It neither proves the filesystem safe nor authorizes a catch-up transfer.
 
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
