@@ -147,7 +147,13 @@ func TestProxyDeviceRpcVersionGuard(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	// The caller already controls repetition with go test -count. Retrying an
+	// environment/setup failure only hides the missing local-test prerequisite
+	// behind four 15-second backoffs, and this control-plane exchange has no
+	// external provider timing to retry.
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		opts := defaultProxyTestOptions()
 		opts.enableDeviceRpc = true
 		// the guard is decided before any data flows; a live provider and a
@@ -183,16 +189,13 @@ func TestProxyDeviceRpcVersionGuard(t *testing.T) {
 		syncResponse = syncHostedDeviceRpc(t, h, 0, !offlineBefore)
 		connect.AssertEqual(t, syncResponse.Error, "")
 		connect.AssertEqual(t, syncResponse.DeviceGeneration, pd.deviceGeneration.String())
-		waitFor(t, 10*time.Second, "version-zero sync applied", func() bool {
-			return hosted.GetOffline() == !offlineBefore
-		})
+		// net/rpc returns only after DeviceLocalRpc.Sync applied the state.
+		connect.AssertEqual(t, hosted.GetOffline(), !offlineBefore)
 
 		// ---- the matching production version syncs normally ------------------
 		syncResponse = syncHostedDeviceRpc(t, h, sdk.DeviceRpcVersion, offlineBefore)
 		connect.AssertEqual(t, syncResponse.Error, "")
 		connect.AssertEqual(t, syncResponse.DeviceGeneration, pd.deviceGeneration.String())
-		waitFor(t, 10*time.Second, "matching-version sync applied", func() bool {
-			return hosted.GetOffline() == offlineBefore
-		})
+		connect.AssertEqual(t, hosted.GetOffline(), offlineBefore)
 	})
 }
