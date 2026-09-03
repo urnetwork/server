@@ -197,7 +197,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		activeLogSource,
 	)
 	if taskID != "" {
-		observed += " task_id=" + taskID
+		observed += " attempt_correlated=true"
 	}
 	if phase == "active" && identity.host != "" {
 		observed += fmt.Sprintf(
@@ -209,9 +209,8 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	if phase == "active" && failedPrecursorToActive {
 		observed += fmt.Sprintf(
-			" precursor_failed_duration_s=%d precursor_failed_task_id=%s",
+			" precursor_failed_duration_s=%d precursor_failed_attempt_correlated=true",
 			terminal.seconds,
-			terminal.taskID,
 		)
 		if terminal.errorText != "" {
 			observed += fmt.Sprintf(" precursor_failed_error=%q", terminal.errorText)
@@ -286,7 +285,7 @@ func (closeDurationProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 	}
 	retryEvidence := ""
 	if retryObserved {
-		retryEvidence = " The retry fields preserve the same task id's next observed lifecycle and executor; a fast peer retry is an A/B control for load sensitivity, not permission to erase the failed precursor."
+		retryEvidence = " The retry fields preserve the same durable attempt's next observed lifecycle and executor; a fast peer retry is an A/B control for load sensitivity, not permission to erase the failed precursor."
 		incidentContext += retryEvidence
 	}
 	logEvidence := "Taskworker eval-active is the live elapsed-time source; eval-error retains rescheduled deadline attempts that never become a finished duration; finished_task retains completed duration. The latest failed overrun remains visible for 45 minutes, including beside a newer active successor, so retry progress cannot erase the precursor."

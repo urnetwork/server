@@ -423,6 +423,9 @@ func parseExecutorActiveTasks(logOutput, host, block string, now time.Time) []ex
 	return runs
 }
 
+// formatExecutorActiveTasks exposes task family and elapsed time while keeping
+// the durable task identifier inside the correlation path. That identifier can
+// name a payment/task row and must not enter Markdown alerts.
 func formatExecutorActiveTasks(runs []executorActiveTask, limit int) string {
 	if limit <= 0 || len(runs) == 0 {
 		return ""
@@ -433,9 +436,6 @@ func formatExecutorActiveTasks(runs []executorActiveTask, limit int) string {
 	parts := make([]string, 0, len(runs))
 	for _, run := range runs {
 		part := fmt.Sprintf("%s:%ds", run.name, run.seconds)
-		if run.taskID != "" {
-			part += "@" + run.taskID
-		}
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, ",")
@@ -517,7 +517,7 @@ func parseTaskTerminalRun(logOutput, taskName string) taskTerminalRun {
 				seconds:  int(seconds),
 				identity: parseWarpLogIdentity(line),
 			},
-			errorText: strings.TrimSpace(match[2]),
+			errorText: redactTaskErrorIdentifiers(strings.TrimSpace(match[2])),
 		}
 		if idMatch := taskRunIDRe.FindStringSubmatch(line); len(idMatch) == 2 {
 			candidate.taskID = idMatch[1]

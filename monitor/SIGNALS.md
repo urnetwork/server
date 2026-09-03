@@ -251,10 +251,20 @@ FROM failures GROUP BY task;
 - The error TEXT is diagnostic gold: `CLUSTERDOWN` vs `OOM command not
   allowed` vs `dial tcp <ip>:<port>: i/o timeout` vs `connection refused`
   name the failure mode AND the sick node (see section 4 taxonomy).
-- Never emit the task UUID embedded at the front of a stored error. It is not
-  needed to classify the failure and can identify a durable payment/task row;
-  structured alerts replace it with `<task-id>` while preserving the bounded
-  error class and target.
+- Never emit a durable task identifier from a stored error, PostgreSQL row, or
+  taskworker heartbeat. It can identify a durable payment/task row. A probe may
+  retain the exact identifier in memory only long enough to correlate lifecycle
+  records; structured alerts emit `attempt_correlated=true`, task family,
+  duration, lifecycle timestamps, executor identity, source, and the bounded
+  error class/target instead. A mutation that truly needs the identifier must
+  obtain it through the protected operator lookup and must not copy it into an
+  alert, transcript, test failure, commit, or agent response.
+- The 2026-09-03 `UpdateReliabilities` alert exposed this gap. Task-canary,
+  close-duration, selection-freshness, netescrow, reboot-collision,
+  stuck-leases, worker-memory, and worker-churn now keep identifiers inside
+  correlation only. Their deterministic failure cases require the rendered
+  Markdown to omit the synthetic identifiers. Historical opaque identifiers in
+  this catalog are represented as `<redacted-id>`.
 - The 2026-09-01 recurrence supplied the non-Redis discriminator. Completions
   were normal through 19:16Z, fell to one at 19:17Z, and were zero for four
   minutes. At 19:17:47Z, while the legacy maintenance worker was rebuilding
@@ -577,9 +587,11 @@ WHERE function_name LIKE '%UpdateClient%'
   defects have polluted the tail: use `min(2*p95, max(4*p50, 20m))`, with the
   original one-hour fallback when history is absent. First select only the
   worst live row per task family so many payment rows cannot hide a singleton
-  maintenance task. Then query and verify the matching task id's authoritative
-  `eval active` elapsed time; `run_at` is only the due time, and a task that
-  waited in the queue but began less than the guard ago is not long-running.
+  maintenance task. Then use its identifier internally to correlate the
+  authoritative `eval active` elapsed time; emit only the task family, duration,
+  executor, source, and `heartbeat_attempt_correlated=true`. `run_at` is only
+  the due time, and a task that waited in the queue but began less than the
+  guard ago is not long-running.
   The 2026-08-30 reaper recurrence supplied the regression values: p50 42s,
   p95 3,552s, due age 6,283s, and matching heartbeat 6,220s. The old p95-only
   rule waited until 7,104s; the median-tail guard alerts at 1,200s.
@@ -1813,7 +1825,7 @@ pass. Do not conflate that software deployment with authorization to delete
 the existing relations while `contract_close` progress remains active.
 
 The same legacy policy recurred under a later owner boundary. Task
-`01a05aeb-4595-ff84-af06-add9ce62726e`, epoch 422, started old-format
+`<redacted-id>`, epoch 422, started old-format
 `maintenance reindex[6/22] transfer_escrow` on edge-3/g1 at 16:33:01Z. It did
 not emit a matching completion line; its last heartbeat was at 16:44:27Z and
 the maintenance call unwound at 16:44:57Z while other tasks on that process
@@ -1951,7 +1963,7 @@ evaluation, lease recovery retried the same epoch, and each retry encountered
 or created numbered debris under the old cleanup ordering.
 
 The later `contract_close` phase isolated why those otherwise-exclusive
-evaluations were lost. Task `01a05aeb-4595-ff84-af06-add9ce62726e` completed a
+evaluations were lost. Task `<redacted-id>` completed a
 2,023.98-second `transfer_escrow` rebuild on edge-1 at 13:30:05Z, started
 `contract_close` at 13:30:18Z, and emitted its last ten-second heartbeat at
 13:33:06Z without any terminal result. The same task then emitted its first
@@ -2369,8 +2381,8 @@ retries.
 The legacy boundary recurred a third time at 08:39:35Z:
 `eval error(1801.18s) ... CloseExpiredContracts ... = Timeout`. The open set
 had risen to 419,520 (358,485 older than five minutes and 70,126 older than 30
-minutes). The identical task id retried 14 seconds later; within the next
-minute, fresh successor task ids appeared about every 20–30 seconds, confirming
+minutes). The same durable attempt retried 14 seconds later; within the next
+minute, fresh successor attempts appeared about every 20–30 seconds, confirming
 that per-contract commits survived and full cohorts were again draining. This
 is the exact `Timeout` variant the task alert now explains as the deployed 100k
 scheduler boundary. It reinforces, rather than changes, the deterministic 25k
@@ -2390,7 +2402,7 @@ complementary remediations.
 
 The following 100k cohort then hit the boundary again. Taskworker logged
 `eval error(1801.33s) ... CloseExpiredContracts ... = Timeout` at 10:29:19Z;
-the same task id was reclaimed seconds later and emitted a fresh 10s heartbeat
+the same durable attempt was reclaimed seconds later and emitted a fresh 10s heartbeat
 at 10:29:33Z. At the surrounding sample the open set was 436,567
 (371,408 older than five minutes and 36,769 older than 30), three legacy
 retention writers overlapped, and the successor autovacuum was still scanning
@@ -2399,7 +2411,7 @@ write pressure exactly as diagnosed—not a reason to raise the deadline or
 restart PostgreSQL. The deterministic 25k cohort remains the fix.
 
 A later deployed cohort reproduced the full chain while cleanup debt was still
-present. Task `01a05242-c226-d02d-1a3a-907f6084a454` reached
+present. Task `<redacted-id>` reached
 `eval error(1801.55s) ... = Timeout` at 11:11:46Z, was reclaimed under the
 same id 17 seconds later, and needed another 504.55s to return `full=true`.
 The immediate successor then completed another full legacy cohort in 33.13s,
@@ -2435,7 +2447,7 @@ shared write/vacuum pressure. Keep the 25k source cap and require consecutive
 aged-bucket decline; do not infer safety from the fast successors.
 
 The deployed boundary then recurred under another retention/vacuum overlap.
-Task `01a05298-6315-fa3e-3719-55e95aac9de1` reached
+Task `<redacted-id>` reached
 `eval error(1800.69s) ... = Timeout` at 12:45:18Z. Its same-id retry completed
 in 27.55s, and four new full successor cohorts completed in 20.01s, 22.11s,
 19.96s, and 30.34s. The open set had peaked at 919,950 (854,226 older than five
@@ -2449,22 +2461,22 @@ nor vacuum cancellation addresses this reproduced boundary.
 
 The following legacy cohort repeated the exact deadline under the successor
 vacuum and reliability anchor. Task
-`01a052b5-dd90-0999-08a1-de70429d62df` reached
+`<redacted-id>` reached
 `eval error(1800.86s) ... = Timeout` at 13:17:30Z. Its same-id retry ran from
 13:17:36Z to 13:24:14Z and committed successfully in 397.89s; the historical
-`Timeout` remains on that finished row, while a new successor task id proves
+`Timeout` remains on that finished row, while a distinct successor attempt proves
 the recurring chain advanced. This is durable retry progress, not proof that
 the deployed 100k checkpoint is safe: the first attempt still spent its whole
 deadline beside vacuum/reliability work. Keep the 25k source checkpoint and
 follow the new successor plus aged open buckets.
 
 That successor supplied the next exact boundary. Task
-`01a052d7-9750-7771-3efd-a76cd0275248` ran from 13:24:18Z until
+`<redacted-id>` ran from 13:24:18Z until
 `eval error(1800.72s) ... = Timeout` at 13:54:19Z while the successor vacuum,
 an 18-minute net-escrow reconcile, and a 3,356,615-row legacy payment-retention
 update overlapped. Its same-id retry committed in 24.84s. Eight immediately
 following full cohorts then committed in 18.89–24.44s through 13:57:52Z, with
-new task ids proving the chain advanced. This is the strongest form of the
+new successor attempts proving the chain advanced. This is the strongest form of the
 checkpoint discriminator: the database and per-contract writes were not
 wedged, because the exact same remaining work and its successors drained
 quickly after the task-level rollback. The 30-minute first attempt is still a
@@ -2472,7 +2484,7 @@ production failure. Retain the 25k source checkpoint and bounded retention
 queue; do not convert the fast retry into evidence for a larger deadline.
 
 The following cohort supplied a tighter same-executor coupling to net-escrow
-write amplification. Task `01a052f6-5c55-e78b-110d-dad7afffe710` ran from
+write amplification. Task `<redacted-id>` ran from
 13:57:54Z to 14:20:41Z (1,367.15s) on
 `by-us-fmt-5-edge-3/g2`, container `4cf91fd25a2e`. The same executor was
 simultaneously applying a 1,021.01s legacy `ReconcileNetEscrow` pass from
@@ -2480,7 +2492,7 @@ simultaneously applying a 1,021.01s legacy `ReconcileNetEscrow` pass from
 fleet-wide Redis writer stopped; its next three full successors then completed
 in 21.35s, 27.30s, and 22.29s. No task timeout was required to expose the
 boundary, but executor overlap alone was not the causal discriminator. The
-following close task `01a0530c-65aa-153e-19d8-82ad3698cf40` began on the same
+following close task `<redacted-id>` began on the same
 container at 14:21:56Z, after the escrow writer had stopped, and still remained
 live after 769s. At 14:28:18Z the open set was 435,994 (368,281 older than five
 minutes), a legacy payment-retention writer had been active for 106s, and the
@@ -2497,9 +2509,9 @@ The same close id then reached the exact boundary at 14:52:00Z:
 `eval error(1800.83s) ... = Timeout` on
 `by-us-fmt-5-edge-3/g2`, container `4cf91fd25a2e`. Its same-id retry moved to
 edge-1/g2 and committed in 31.41s. A new full successor
-`01a05328-7ab0-20bf-7a56-da7de2a04be3` moved to edge-0/g1 and committed in
+`<redacted-id>` moved to edge-0/g1 and committed in
 21.89s. The following full successor
-`01a05328-d675-7e6d-1991-20f454b4e1ce` landed back on edge-3/g2 and exceeded
+`<redacted-id>` landed back on edge-3/g2 and exceeded
 1,000s while the open set rose from 621,149 to 676,121. That A/B/A executor
 sequence proves a container-local contention component in addition to the
 global retention/vacuum debt; the same 100k algorithm and live fleet state
@@ -2514,17 +2526,17 @@ uniquely identified; keep the bounded fixes for all three paths and do not
 restart the executor to erase the evidence.
 
 That successor then supplied a same-host generation control. Edge-3/g2 reached
-`eval error(1801.06s) ... = Timeout` at 15:23:04Z. The same task id retried on
+`eval error(1801.06s) ... = Timeout` at 15:23:04Z. The same attempt retried on
 edge-3/g1 container `786ae804bb97` and committed in 22.450s; its authoritative
 `finished_task` row retained the prior `Timeout`. The next full successor
-`01a05344-c984-35a7-ff1f-89df7a57b0ea` returned immediately to edge-3/g2.
+`<redacted-id>` returned immediately to edge-3/g2.
 Moving only between g2 and g1 on the same physical host reproduces the slow/
 fast split without changing host memory, network, PostgreSQL, or Redis. The
 process-level allocated-heap evidence in §2.12 is therefore the local discriminator,
 while the 25k close cohort remains the durable checkpoint fix.
 
 The next independent edge-1/g2 cohort supplied the deadline/reclaim sequence
-again. Task `01a0534c-0b80-16c9-d801-6b052913efcc` started at 15:31:31Z,
+again. Task `<redacted-id>` started at 15:31:31Z,
 logged `eval error(1801.47s) ... = Timeout` at 16:01:32Z, and was reclaimed
 under the same id seconds later. The retry emitted a fresh 10.02s heartbeat at
 16:01:49Z, then completed from 16:01:39Z to 16:19:15Z in 1,056.375s; its
@@ -2561,18 +2573,19 @@ had ten minutes to mature. `pending_task.run_at` is only the due time and
 `claim_time` is a moving lease heartbeat; neither is an execution-start clock.
 For completed incidents, read `finished_task.run_end_time-run_start_time`.
 Also retain taskworker `eval error(<seconds>s) (reschedule)` attempts: a timeout
-never becomes a finished duration because the same pending task id is reclaimed.
+never becomes a finished duration because the same pending attempt is reclaimed.
 Retain the latest overrun for 45 minutes so an immediate fast successor cannot
 erase its precursor.
 
 - HEALTHY: full deployed legacy cohorts normally finish in roughly 20–30s.
-- WARN: a live or completed checkpoint reaches 120s. Include task id plus the
-  live heartbeat's host/generation/container when present.
+- WARN: a live or completed checkpoint reaches 120s. Internally correlate its
+  identifier, then include `attempt_correlated=true` plus the live heartbeat's
+  host/generation/container when present; never render the identifier.
 - DEADLINE: 1,800s is failure even when the per-contract commits survived.
   The retry repeats discovery because the task-level checkpoint did not
   commit; do not treat those durable child writes as task success.
 
-The 14:21:56Z task `01a0530c-65aa-153e-19d8-82ad3698cf40` demonstrated the
+The 14:21:56Z task `<redacted-id>` demonstrated the
 lead time: its taskworker heartbeat exceeded 900s before the existing
 open-contract probe's sustained trend opened at 536,761 contracts (474,389
 older than five minutes and 141,039 older than 30). The live probe therefore
@@ -2599,20 +2612,20 @@ than increasing the deadline or attributing every long cohort to one sibling.
 Implementation convention: SIGNALS.md §2.6a (`close-duration`) maps to
 `signal_close_duration.go` and `signal_close_duration_test.go`. The synthetic
 lifecycle tests require the newest timestamped heartbeat to supersede an older
-one, the same completed task id to suppress its lingering heartbeat, and a
-different active successor id to remain visible. They also preserve the exact
+one, the same completed attempt to suppress its lingering heartbeat, and a
+different active successor to remain visible. They also preserve the exact
 1,800.83s rescheduled timeout when a short same-id retry follows it and the only
 `finished_task` overrun belongs to an older checkpoint. A completed-retry case
 places an even newer successor completion and heartbeat after that retry; the
-query must still retain the terminal task id's own row, and executor attribution
-must come from that exact id's heartbeat rather than the newest function
+query must still retain the terminal attempt's own row, and executor attribution
+must come from that exact attempt's heartbeat rather than the newest function
 heartbeat. When a different successor crosses 120s, its active alert retains
-the precursor failure's duration, task id, error, timestamp, and executor
+the precursor failure's duration, correlation marker, error, timestamp, and executor
 identity rather than letting new activity erase the deadline incident.
-An exact completed task id is authoritative for the full 45-minute incident
+An exact internally correlated completed attempt is authoritative for the full 45-minute incident
 window; the two-minute completion-age bound applies only to the legacy
 unlabelled duration fallback. Live task
-`01a05446-9d23-9e06-7cd9-1e3db5d91423` exposed that distinction: the monitor
+`<redacted-id>` exposed that distinction: the monitor
 correctly rendered its 253-second completion, then incorrectly resurrected its
 last 251-second heartbeat as active once the completion became 131 seconds old.
 The shared lifecycle comparator now checks exact ids before the age fallback,
@@ -2628,7 +2641,7 @@ authoritative journal timestamp, hostname, generation tag, and container id;
 `-o cat` is unsafe here because it removes the timestamp and lets an older run's
 larger elapsed heartbeat masquerade as the newest task. The synthetic 502 case
 places an older 837-second run before a current 432-second run and requires the
-fallback to retain the latter task id, duration, and host/generation/container
+fallback to retain the latter attempt's duration and host/generation/container
 attribution. A partial fleet read remains an observation error unless its
 returned lifecycle already proves an incident; it must never silently become a
 healthy result.
@@ -2681,10 +2694,10 @@ rates and aged open buckets to fall. Do not add closer concurrency; exact
 co-residency remains an incident-specific causal control, not a claim that all
 slow close cohorts share one owner.
 
-Task `01a0537a-bb79-1dfe-a0fb-ae25bb4d3a31` supplied the sharpest executor
+Task `<redacted-id>` supplied the sharpest executor
 control at 16:52Z. Edge-1/g1 container `53ef545dc646` logged
 `eval error(1800.88s) (reschedule) ... = Timeout`; the monitor immediately
-rendered `phase=failed`, the exact task id, error, timestamp, and executor.
+rendered `phase=failed`, an attempt-correlation marker, error, timestamp, and executor.
 The same id was reclaimed on edge-4/g2 container `3c0a752d4433` and its
 authoritative row ran from 16:52:36.353384Z to 16:53:00.255024Z—23.902s—while
 retaining `reschedule_error=Timeout`. That 75x same-task duration split proves
@@ -2693,7 +2706,7 @@ must not erase its failed precursor. It validates the monitor lifecycle rule
 and the 25k source checkpoint; it is not a reason to raise 1,800 seconds.
 
 Its later scheduled successor made the local amplifier visible without another
-timeout. Task `01a05397-bb73-ca07-2df7-cd1e483c0e70` landed back on the
+timeout. Task `<redacted-id>` landed back on the
 edge-1/g1 score-heavy process and ran from 16:54:11.917863Z to
 17:17:32.289278Z (1,400.371s). During it the open set resumed rising through
 315,750, 395,199, and 452,844. The colocated score export completed at
@@ -2705,7 +2718,7 @@ checkpoint close at 25k. A successful 1,400-second cohort is still far outside
 the 20–30-second band and only 400 seconds from failure.
 
 The next hourly placement repeated the exact A/B boundary on a third
-executor. Task `01a053ad-eae5-752f-3e04-95696dff3a2e` shared edge-0/g1 with
+executor. Task `<redacted-id>` shared edge-0/g1 with
 the next score export, reached `eval error(1800.90s) ... = Timeout` at
 17:48:27.076631Z, and let the open set rise to 567,403. The same id was
 reclaimed on edge-3/g2 14 seconds later and its authoritative row ran from
@@ -2716,7 +2729,7 @@ of edge-1. Keep the 25k checkpoint; do not normalize the rising historical p95
 or raise the deadline.
 
 Its full successor repeated the boundary on the same score-heavy executor.
-Task `01a053ca-bd27-e4b7-5d8e-f5b6c2acd410` reached
+Task `<redacted-id>` reached
 `eval error(1801.17s) ... = Timeout` at 18:19:55.787918Z on edge-0/g1
 container `4a6bbf31e2d4`; the open set had reached 720,664 and was still
 rising. The same id was reclaimed on edge-1/g2 container `06abfbe03c32`, and
@@ -2730,7 +2743,7 @@ both the oversized checkpoint and its process-local amplifier; retain the 25k
 checkpoint and bounded sibling paths.
 
 The immediately following same-sized checkpoint repeated that control again.
-Task `01a053e8-00d2-cdfd-7c2f-f4843d2f972a` reached
+Task `<redacted-id>` reached
 `eval error(1801.43s) ... = Timeout` at 18:51:54.281835Z on the same
 edge-0/g1 container. The same id was reclaimed on edge-3/g1, and its
 authoritative row ran from 18:51:59.461170Z to 18:52:21.335651Z—21.874s—
@@ -2741,7 +2754,7 @@ generations to complete recurring 25k checkpoints below 120s before clearing
 the incident.
 
 The next old-generation checkpoint supplied the non-timeout side of the same
-boundary. Task `01a05406-222b-61a7-a780-cc6244cde015` remained on the
+boundary. Task `<redacted-id>` remained on the
 edge-0/g1 hot process and `finished_task` recorded a successful 1,568-second
 run. It was still only 232 seconds below the hard deadline and roughly 65x the
 healthy 20–30-second band. A successful terminal row therefore does not clear
@@ -2749,7 +2762,7 @@ the latency incident or weaken the 25k checkpoint fix; it shows the amplifier
 is continuous near the deadline rather than a binary timeout-only failure.
 
 The last observed old-generation checkpoint repeated the failed/fast-peer
-control. Task `01a0541e-82bf-5677-cb49-aa25a23ecdf0` reached
+control. Task `<redacted-id>` reached
 `eval error(1801.41s) ... = Timeout` at 19:51:23.925745Z on edge-1/g2
 container `06abfbe03c32`. The same id was reclaimed on edge-3/g1 container
 `786ae804bb97`, emitted 10s and 20s heartbeats, and `finished_task` recorded a
@@ -2759,8 +2772,9 @@ duration/time, and the exact retry executor. This live validation also exposed
 and fixed two evidence-loss bugs: selecting only the latest completion plus
 latest overrun lost a retry after later cohorts completed, and using the newest
 function heartbeat mislabeled that retry with a later successor's executor.
-The probe now selects the exact active and terminal task ids in addition to the
-ranked rows and parses executor identity for the terminal id specifically. The
+The probe now selects the exact active and terminal identifiers internally in
+addition to the ranked rows and parses executor identity for the terminal
+attempt specifically. The rendered alert omits both identifiers. The
 deterministic later-successor test locks both invariants. This approximately
 72x same-task split remains pre-rollout evidence for the 25k checkpoint and
 process-local load sensitivity; it is not permission to erase the timeout or
@@ -2914,14 +2928,14 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   payloads, and retain the exact failed-batch retry checks above.
 
   The edge-0 scheduled reboot at 02:09:48Z supplied the process-exit variant.
-  It interrupted task `01a05555-97e8-e794-e009-04721c586db9` after a fresh
+  It interrupted task `<redacted-id>` after a fresh
   4,096s heartbeat. Normal scheduler reclamation restarted that exact id at
   02:15:01Z; by 02:39 it had advanced another 1,458s while the completion gap
   crossed 98 minutes. This is not a stuck lease: the same-id heartbeat proves
   recovery. It is lost in-process scan progress, because the full-fleet export
   still restarts from its scheduler boundary. `selection-freshness` now
   reads the bounded task lifecycle window (with host-journal fallback), emits
-  task id/duration/executor with the gap, and tells the operator not to restart
+  an attempt-correlation marker, duration, and executor with the gap, and tells the operator not to restart
   or duplicate a live rebuild. Retain the streaming bounded exporter wherever
   version/code evidence proves it present and deploy it only on older
   generations, then require the exact task to finish and two following runs to
@@ -2953,7 +2967,7 @@ redis-cli -p <port> TTL "{cs_...}s_l_0"
   uninterrupted run now exceeds 60 minutes.
 
   The next uninterrupted run isolated that remaining fan-out before reaching
-  the freshness cliff. Task `01a055c8-759e-406e-4061-603f0dc86869` began on
+  the freshness cliff. Task `<redacted-id>` began on
   edge-3/g2 at 03:07:07Z and was still active after 2,875 seconds at 03:55Z.
   The deployed streaming fix kept allocated heap near 3.7GiB and RSS near
   4.1GiB, but the process stayed at its four-core quota and allocated about
@@ -3049,7 +3063,7 @@ new writer sets the marker; deployment provenance must therefore be healthy as
 well.
 
 Then inspect the SAME target/caller pair in the normal and ForceMinimum score
-caches. Resolve a country target first; `00000000-0000-0000-0000-000000000000`
+caches. Resolve a country target first; `<redacted-id>`
 is the no-caller-location key:
 ```sql
 SELECT location_id FROM location
@@ -3057,7 +3071,7 @@ WHERE location_type = 'country' AND country_code = 'us';
 ```
 ```bash
 target=<uuid-from-sql>
-caller=00000000-0000-0000-0000-000000000000
+caller=<redacted-id>
 normal="{cs_0_q_${caller}_${target}}c_l"
 forced="{cs_1_q_${caller}_${target}}c_l"
 redis-cli -c -p <entry-port> TTL "$normal"
@@ -3282,8 +3296,9 @@ go_memstats_heap_alloc_bytes{env="main",job="taskworker"}
   `go_memstats_heap_objects`, `process_resident_memory_bytes`, cumulative
   allocations, GC cycles, process age, exact host/block/instance, and
   five-minute CPU-core, allocation-byte, GC-cycle, and GC-pause rates plus
-  fleet medians. Join the newest active task IDs/durations from that
-  host/block's taskworker heartbeats. Ignore a sample older than 90s so a
+  fleet medians. Internally join the newest active attempt identifiers and
+  durations from that host/block's taskworker heartbeats, but render only task
+  families and elapsed times. Ignore a sample older than 90s so a
   drained generation cannot create a false skew. The rate query is
   best-effort: an unavailable range evaluation must not hide a decisive heap
   outlier, but its absence is recorded in the evidence.
@@ -3291,8 +3306,8 @@ go_memstats_heap_alloc_bytes{env="main",job="taskworker"}
   objects not yet reclaimed by the next GC; unlike RSS, it excludes retained
   pages with no allocated objects. Host free memory, CPU count, cgroup limits,
   and pressure remain necessary controls, but they do not clear a worker whose
-  allocated heap is hundreds of times its peers. Correlate exact
-  taskworker `eval active` task IDs on that executor, then compare those task
+  allocated heap is hundreds of times its peers. Internally correlate exact
+  taskworker `eval active` attempts on that executor, then compare those task
   families on other workers. Co-residency proves local contention; it does not
   assign every byte to one task.
 - Query the loopback Mimir API through service hosts in inventory order rather
@@ -3331,24 +3346,24 @@ every flushed backing-array slot releases its payload, and the retry tests prese
 failed-batch-only replay.
 
 The task boundaries supplied a second discriminator. Edge-3's score task
-`01a0530b-0e6a-9c14-6694-11a165f3c27b` completed at 15:30:03Z in
+`<redacted-id>` completed at 15:30:03Z in
 4,143.294s, but its allocated heap stayed near 25GiB until a later GC; the
 co-resident reaper completed at 15:32:16Z in 7,932.960s in the same scrape
 where heap and RSS contracted. That coincidence does not assign those bytes
 to the reaper: `HeapAlloc` can retain unreachable objects between collections.
 The independent reproduction did assign the allocator. Edge-1/g2 began score
-task `01a0534a-c1c9-fb11-37e6-98740046f7eb` at 15:30:34Z: allocated heap rose
+task `<redacted-id>` at 15:30:34Z: allocated heap rose
 from 0.91GiB at 15:30:30Z to 5.55GiB at 15:31:00Z and 8.74GiB at 15:31:30Z,
 before its later close and reliability-rollup tasks began, then reached
 13.94GiB at 15:32:00Z. That clean start-aligned reproduction validates the
 score-export working-set fix independently of the edge-3 task mixture. A
 simultaneous negative control separated the reaper: task
-`01a0534c-cb89-633c-78b2-417bb4ea3717` ran past 460s on edge-4/g1 while that
+`<redacted-id>` ran past 460s on edge-4/g1 while that
 process stayed between 0.07GiB and 0.16GiB allocated heap and near 0.50GiB RSS.
 The reaper's old serialized Redis path explains its wall-clock tail, but not
 the multi-GiB allocation pattern. The probe now performs this correlation in
 its alert by joining the outlier's exact host/block to recent taskworker
-heartbeats and listing active task IDs plus elapsed times. A timestamped
+heartbeats and listing active task families plus elapsed times. A timestamped
 terminal line supersedes an older active line; successful `eval done` is V(1)
 and absent from the production stream, so an otherwise unterminated active
 line also expires after 45 seconds (four missed 10–12-second heartbeats).
@@ -3367,7 +3382,7 @@ these rates and their fleet-median ratios so a post-completion heap awaiting a
 collection is distinguishable from an actively allocating task.
 
 The reproduction then reached an authoritative terminal boundary. Task
-`01a0534a-c1c9-fb11-37e6-98740046f7eb` completed at 16:18:55Z in
+`<redacted-id>` completed at 16:18:55Z in
 2,901.257s; Mimir's 60-minute maximum allocated heap for that exact instance
 was 23.24GiB. Heap was still 20.98GiB at 16:18:47Z, then collapsed to 0.28GiB
 by 16:19:19Z and 0.20–0.25GiB thereafter. The ordinary two-minute log query
@@ -3382,7 +3397,7 @@ rates alone are not a regression if live heap no longer grows by tens of GiB.
 
 The next scheduled score export reproduced the allocator on a second executor
 without a cold-start ambiguity. Task
-`01a05377-7f00-72a0-c8a0-6de9c75d6147` began on edge-1/g1 container
+`<redacted-id>` began on edge-1/g1 container
 `53ef545dc646` at 16:19:26Z. Its heap repeatedly sawtoothed from roughly
 9.39GiB to 27.72GiB while five-minute allocation stayed near 798–850MiB/s and
 CPU near 4.00 cores. GC pause accumulation was only
@@ -3398,7 +3413,7 @@ instance was 30,436,930,688 bytes (28.35GiB); its heap was still 20.78GB at
 17:17:10Z and had collapsed to 252.9MB by 17:17:25Z. The colocated close and
 reaper then completed 19 and 33 seconds after score, respectively. At
 17:17:44Z the next hourly score task
-`01a053ac-ddd5-a88a-f7f3-88e1f63d11d6` began on edge-0/g1 and reached
+`<redacted-id>` began on edge-0/g1 and reached
 19.33GiB allocated heap after only 135s, later allocating roughly
 760–915MiB/s. Its new close and reaper siblings immediately developed the same
 slow tail while edge-1/g1 stayed near 0.16GiB. That start/stop/cross-host
@@ -3435,8 +3450,9 @@ alias marker to distinguish a pending target-oriented fix from residual
 post-deploy allocation; a co-resident close task adds the process-budget impact
 and close/backlog verification. A deterministic synthetic regression
 forces the gateway failure, normalizes a timestamped journal heartbeat, and
-requires both the exact task id and `host-journal-fallback` source in Markdown.
-The first v114 live result attached four fresh task IDs, including the
+requires the exact identifier to remain absent while `host-journal-fallback`
+appears in Markdown. The first v114 live result attached four active task
+families and elapsed times, including the
 4,357-second score export and 747-second close checkpoint, but also labeled
 `crisp` and `fireside` as partial-read failures. Direct checks showed zero
 running taskworker units on both hosts and an exact `journalctl --grep` status
@@ -3513,8 +3529,9 @@ label_replace(
   one-minute probes. Ignore samples older than 90 seconds. CPU saturation by
   itself can be useful work and a short allocation burst is not a leak; the
   absolute-plus-fleet conjunction identifies exceptional object churn.
-- Join recent `eval active` heartbeats on exact host/block and include task id,
-  duration, runtime instance, fleet sample count, both rates, medians, and
+- Join recent `eval active` heartbeats on exact host/block. Use identifiers only
+  for internal correlation; include task family, duration, runtime instance,
+  fleet sample count, both rates, medians, and
   ratios. A missing heartbeat prevents task attribution but does not clear the
   process-rate finding. A large quiescent heap belongs to §2.12; this signal
   catches sustained encoding/allocation even after streaming bounds live heap.
@@ -3530,7 +3547,7 @@ one-minute alert at 04:19Z measured 3.996 cores and 639.51MiB/s, 363.6× and
 6,421.9× its fleet medians. Heap stayed near 3.7GiB and RSS near 4.1GiB, so
 §2.12 correctly no longer fired even though the process was still doing
 pathological work. The exact task beginning at the rate transition was
-`UpdateClientScores` id `01a055c8-759e-406e-4061-603f0dc86869`; it remained
+`UpdateClientScores` id `<redacted-id>`; it remained
 active beyond 4,322 seconds. PostgreSQL statements sampled during colocated
 close work were fast and had no lock waits, separating database blocking from
 application CPU starvation.
@@ -3570,9 +3587,9 @@ bounded journal read.
 
 The next exact terminal boundary tied the churn to close latency without a
 restart or database wait. Score task
-`01a05616-2af9-07af-9ce6-8ba1bc304862` ran from 04:32:00Z to 05:52:41Z for
+`<redacted-id>` ran from 04:32:00Z to 05:52:41Z for
 4,841 seconds. Its same-process close task
-`01a0565a-f183-d81f-b09e-f5f58be0e29a` ran from 05:46:38Z to 05:52:44Z for
+`<redacted-id>` ran from 05:46:38Z to 05:52:44Z for
 365 seconds and ended only three seconds after the score export. The score
 log had printed `export client location[1008/1008]` at 05:49:12Z, but source
 inspection shows that atomic counter advances before a caller export begins;
@@ -3586,14 +3603,14 @@ the start counter, a brief task-row handoff, or the absence of a restart as a
 recovery claim.
 
 The successor made that overlap repeatable rather than coincidental. Score
-task `01a05660-8743-e181-2a6c-be423b1089bd` began at approximately
+task `<redacted-id>` began at approximately
 05:53:14Z on the same edge-3/g1 process and was still active beyond 2,040s.
 While it ran continuously, close task
-`01a05661-a88b-0b67-87e1-132dce59ce32` completed its 25,000-contract
+`<redacted-id>` completed its 25,000-contract
 checkpoint in 920s (05:53:58Z–06:09:18Z), its immediate successor
-`01a0566f-dc4f-be77-0c0a-28ddd3a5a3bd` completed in 870s
+`<redacted-id>` completed in 870s
 (06:09:29Z–06:23:59Z), and third task
-`01a0567d-511c-b67c-69b0-c0509e164c98` completed in 889s
+`<redacted-id>` completed in 889s
 (06:24:11Z–06:39:00Z). A fourth close began about 12 seconds later on the same
 process. During the third overlap the exact worker consumed 4.003 cores and
 allocated 651MiB/s; PostgreSQL migration, wait-event, active-query, and
@@ -3613,8 +3630,8 @@ after each services-host boot, read the previous boot's final journal boundary,
 the `by-restart.service` evidence, and bounded g1/g2 taskworker lifecycle logs.
 Treat a task as colliding only when its newest `eval active` heartbeat was
 within 45 seconds of shutdown, had already reached 120 seconds, and no newer
-terminal line exists. Cross-check its exact task id against `finished_task`
-through the previous-boot boundary so a task that completed between its last
+terminal line exists. Internally cross-check its exact identifier against
+`finished_task` through the previous-boot boundary so a task that completed between its last
 informational heartbeat and shutdown is not mislabeled.
 
 - HEALTHY: no task above 120 seconds is still active at a boot boundary, or its
@@ -3630,9 +3647,9 @@ informational heartbeat and shutdown is not mislabeled.
 Production supplied the discriminator on edge-0 at 2026-08-31 02:09:48Z.
 `by-restart.timer` started its scheduled reboot after the configured Monday
 01:00Z window plus randomized delay. At the previous-boot boundary,
-`CloseExpiredContracts` task `01a0558c-3405-5671-1f3d-7429f4dd08f7` still had
+`CloseExpiredContracts` task `<redacted-id>` still had
 a fresh 541-second heartbeat and `UpdateClientScores` task
-`01a05555-97e8-e794-e009-04721c586db9` had run for roughly 59 minutes. The host
+`<redacted-id>` had run for roughly 59 minutes. The host
 shut down cleanly, came back on the same old binary, and neither attempt had a
 terminal line. That is a maintenance collision, not an OOM or crash. The
 existing 25,000-contract checkpoint and streaming score exporter remain the
@@ -4770,7 +4787,7 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
   threshold forced a full scan on every 30-minute task cycle, contradicting the
   documented four-hour cadence. More importantly, all lookbacks shared one
   transaction. At 08:29:40Z the task hit its exact 7,200-second deadline and
-  rolled the whole attempt back; by 08:29:43Z the same task id and `min_time`
+  rolled the whole attempt back; by 08:29:43Z the same attempt and `min_time`
   were active again. `pg_stat_statements` showed the full-anchor statement's
   long-tail maximum at 12,392.06s (34 calls, 482.53s mean), so changing cadence
   alone would merely make the same unbounded failure less frequent.
@@ -4799,7 +4816,7 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
   preceding 7,200-second attempt performed no durable marker work, while the
   statement history already contains a 12,392-second tail. Checkpoints remove
   that all-or-nothing exposure without changing the score result.
-- A later deployed run, task `01a05333-245b-2c2e-4e8e-1ad790efe454`, ran on
+- A later deployed run, task `<redacted-id>`, ran on
   edge-4/g2 from 15:34:17Z to 15:53:29Z (1,152.120s). Its exact PostgreSQL
   statement remained active with no wait event while the task heartbeat
   advanced, then the task completed normally. Concurrent
@@ -4808,7 +4825,7 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
   it does not make the all-lookback transaction safe. Retain the four-hour
   anchor cadence, per-lookback checkpoints, and maintenance-aware optional
   deferral, then verify their marker-by-marker behavior after rollout.
-- The following task `01a05360-3544-70b6-58ec-f4327c74c449` ran on
+- The following task `<redacted-id>` ran on
   edge-3/g2 container `4cf91fd25a2e` from 16:23:30.019754Z to
   16:45:44.722565Z (1,334.703s) with uninterrupted heartbeats and no task
   error. During it, the anchor INSERT held the oldest useful MVCC horizon and
@@ -5084,7 +5101,7 @@ limit:
   verifies that both transaction settings return to their session baselines
   after commit.
   A later live retry supplied the deployment discriminator. Exact task
-  `01a0088a-327f-ed06-0c69-9b994a1e70fe` began on edge-1/g2 at
+  `<redacted-id>` began on edge-1/g2 at
   05:51:51Z, kept authoritative ten-second heartbeats through planner work,
   and failed at 06:10:31Z after 1,120.91s with the same SQLSTATE 53000 in
   `PaymentPlanner.finalizePayments`, advancing the row from 157 to 158
@@ -5218,7 +5235,7 @@ limit:
   per hour, and no new non-`Drained:` context-canceled retries. Do not enlarge
   the global default: short tasks should retain the tighter bound. The deployed
   boundary recurred at 10:47:34Z: taskworker logged `eval error(120.04s)` with
-  no drain line, then the same task id retried on another worker and completed
+  no drain line, then the same attempt retried on another worker and completed
   in 68.125s. Its next hourly row retained the old 120-second configuration.
   That exact-error/fast-retry pair is another production validation of the
   task-specific 600-second source fix, not a reason to change global task
@@ -5250,7 +5267,7 @@ limit:
   `task-overdue` alert clears, and the Redis regression still removes target
   public/reverse/eligible state while preserving a reassigned forward owner.
   The defect recurred at 13:20Z in task
-  `01a052d2-9c33-c78e-1e37-66e411e45c1e` on edge-3/g2 container
+  `<redacted-id>` on edge-3/g2 container
   `4cf91fd25a2e`: its heartbeat passed 6,220s with a fresh claim and no task
   error. Its 7-day distribution had become p50 42s, p95 3,552s, and max
   6,644s, so the old `>2*p95` monitor rule treated another hour-scale tail as
@@ -5258,18 +5275,18 @@ limit:
   shared the executor with the slow close and net-escrow passes. The host had
   ample CPU and memory and the cgroup reported zero throttling, OOM, or
   pressure. The task-canary probe now applies the median-tail cap from §1.2,
-  carries the exact task id plus heartbeat executor identity, and includes the
+  carries an internal exact-attempt correlation plus heartbeat executor identity, and includes the
   bounded Redis cleanup diagnosis. Its two synthetic regressions repeat the
   6,283s/42s/3,552s/6,220s shape and also prove that a 600s new attempt whose
   due time is 6,283s old is suppressed rather than misreported. The next
   production run supplied an independent memory control: task
-  `01a0534c-cb89-633c-78b2-417bb4ea3717` ran on edge-4/g1 from 15:35:01Z to
+  `<redacted-id>` ran on edge-4/g1 from 15:35:01Z to
   15:51:28Z and completed normally in 987.628s. Its process stayed near
   0.61–0.71GiB RSS (and was only 0.07–0.16GiB allocated heap during the
   earlier samples), while another executor's score export cycled through
   10–30GiB. Keep the bounded Redis latency fix, but do not attribute the score
   allocator's heap to this reaper.
-  A subsequent reaper `01a05379-a1b0-d902-e4bd-4aef15756092` began on
+  A subsequent reaper `<redacted-id>` began on
   edge-1/g1 at 16:25:04Z and remained live beyond 1,870s with fresh
   heartbeats. Its seven-day p50/p95 were 51s/3,718s, so the generic
   median-tail cap correctly alerted at 1,200s instead of normalizing the
@@ -5593,7 +5610,7 @@ control. Keep this sequence open until the corrective aggregate contracts and
 all three emitters remain quiet for a full interval.
 
 The first scheduled successor confirmed the inverse but did not converge. Task
-`01a052c9-2ecc-a48f-5f1a-4f79b0c831a9` ran from 13:13:33Z to
+`<redacted-id>` ran from 13:13:33Z to
 13:13:55Z in 21.85s and corrected 115.91GiB over-reserved plus 2.37TiB
 under-reserved across 2,047 networks. The monitor matched its dominant
 under-reserved quantity to the preceding 2.70TiB over-reserved correction and
@@ -5603,9 +5620,9 @@ outside the 256GiB band. Follow the next scheduled aggregate, and start the
 full three-emitter quiet interval only after a genuinely contracting pass.
 
 The next two scheduled passes supplied that terminal certificate. Task
-`01a052ce-207b-164e-e724-2df892d11bcd` completed at 13:19:25Z in 28.42s and
+`<redacted-id>` completed at 13:19:25Z in 28.42s and
 contracted to 66.33GiB over/42.61GiB under across 994 networks. Task
-`01a052d3-2948-c5cd-bb58-752bed8f963d` completed at 13:24:45Z in 17.93s
+`<redacted-id>` completed at 13:24:45Z in 17.93s
 and remained in band at 37.03GiB over/65.06GiB under across 1,012 networks.
 Taskworker, API, and Connect each stayed at zero negative lines throughout the
 full interval between them, including the post-pass ingestion allowance. The
@@ -5623,7 +5640,7 @@ incident history into a one-direction claim. The deterministic regression
 uses the exact inverse plus both healthy successors and rejects `false`.
 
 An eleventh sequence then proved why executor identity belongs in the monitor.
-Task `01a052d8-0c5e-3471-5ac8-2ec7ef3aeca4` ran from 13:29:48Z to
+Task `<redacted-id>` ran from 13:29:48Z to
 13:47:40Z (1,071.29s), ending with 2.30TiB over-reserved and 148.44GiB
 under-reserved across 2,107 networks. Six API settlements after completion
 exposed exact -1MiB counters before the 18.42s successor reversed the dominant
@@ -5633,7 +5650,7 @@ full following interval.
 
 The next scheduled pass showed that convergence and fast successors still do
 not make the deployed writer safe. The monitor followed task
-`01a052f6-cbde-7a3b-ce45-cb6e8554c036` on
+`<redacted-id>` on
 `by-us-fmt-5-edge-3/g2`, container `4cf91fd25a2e`, from 14:03:23Z to
 14:20:24Z (1,021.01s). It rewrote 898,352 balances and recreated 2.23TiB
 over-reserved versus 118.03GiB under-reserved across 2,060 networks. No
@@ -5644,25 +5661,25 @@ certificate. `warpctl ls versions main taskworker --sample` showed the same
 `2026.8.28+1031763440` binary/config version in all 20 g1 and all 20 g2
 samples. The earlier 18-second passes were therefore runtime variance, not a
 partial fixed rollout. The `netescrow` alert now carries source
-task id plus host/generation/container for active heartbeats, and source
+an attempt-correlation marker plus host/generation/container for active heartbeats, and source
 host/generation/container for aggregate pairs. That
 identity lets operators connect a long writer to sibling work and prevents one
 fast executor from erasing it.
 
 The scheduled successors supplied the correction sequence. Task
-`01a0530a-ff8e-5d3b-de01-16d864868d75` ran on
+`<redacted-id>` ran on
 `by-us-fmt-5-edge-3/g1`, container `786ae804bb97`, from 14:25:26Z to
 14:25:47Z (20.92s) and reversed the dominant quantity to 122.19GiB over and
 2.24TiB under across 2,083 networks. One exact -1MiB taskworker settle went
 negative at 14:25:22Z—five minutes after the stale writer completed and four
 seconds before the correction began—so it is aftermath of the stale mirror,
 not damage caused by the corrective pass. Task
-`01a0530f-eaf7-3701-855e-2a8cf6c2d32c` then ran on
+`<redacted-id>` then ran on
 `by-us-fmt-5-edge-1/g2`, container `06abfbe03c32`, from 14:30:48Z to
 14:31:10Z (21.46s) and contracted to 40.69GiB over/46.04GiB under across 921
 networks. By 14:33:59Z taskworker, API, and Connect all reported zero negative
 lines in the trailing eight minutes. Task
-`01a05314-d7d0-473e-9e5d-6140352a6b5c` supplied the terminal certificate on
+`<redacted-id>` supplied the terminal certificate on
 `by-us-fmt-5-edge-4/g2`, container `3c0a752d4433`: it ran from 14:36:11Z to
 14:36:29Z (18.00s), remained in band at 38.77GiB over/43.52GiB under across
 847 networks, and all three emitters were still zero after the ingestion
@@ -5671,18 +5688,18 @@ recurring deployed fleet writer remains unsafe until the page-local additive
 fix is rolled out.
 
 The next sequence recreated the incident and supplied an executor control.
-Task `01a05319-b85b-2d49-4564-7eb70075486c` ran on edge-3/g2 container
+Task `<redacted-id>` ran on edge-3/g2 container
 `4cf91fd25a2e` from 14:41:32Z to 14:59:35Z (1,082.77s). It rewrote 898,443
 balances and reported 1.26TiB over-reserved plus 1.17TiB under-reserved across
 2,237 networks; API and Connect each emitted negative-counter lines after the
-apply. Its scheduled successor `01a0532e-dff2-7a25-199e-cb9e6e935865` moved
+apply. Its scheduled successor `<redacted-id>` moved
 to edge-1/g1 and completed in 23.26s, immediately reversing the quantities to
 1.18TiB over and 1.26TiB under across 2,290 networks. That fast inverse is both
 the stale-write repair signature and an A/B executor control: fleet Redis and
 PostgreSQL could complete the same deployed algorithm in seconds while the
 edge-3 taskworker was co-resident with the long reaper, score rebuild, and
 close checkpoint. The next scheduled pass
-`01a05333-d6b7-6573-ec1d-0fac2c382c9f` moved again, to edge-0/g1, and ran from
+`<redacted-id>` moved again, to edge-0/g1, and ran from
 15:10:02Z to 15:10:23Z (20.453s). It contracted the residual to 38.73GiB over
 and 48.03GiB under across 873 networks. By 15:12:10Z taskworker, API, and
 Connect all reported zero negative-counter lines in the trailing eight minutes,
@@ -5693,15 +5710,15 @@ page-local additive fix is rolled out.
 
 The following recurrence reproduced the same causal inversion and exposed the
 last cross-store race that remains after page-local reconciliation. Task
-`01a0534c-7dce-2fa4-d40b-6e28adcc03c3` ran on edge-1/g2 from 15:37:00Z to
+`<redacted-id>` ran on edge-1/g2 from 15:37:00Z to
 15:54:51Z (1,071.751s), rewrote 898,581 balances, and reported 2.25TiB
 over-reserved versus 129.43GiB under-reserved across 2,035 networks. Four API
 and five Connect releases then exposed exact -1MiB negative counters; the
 first was at 15:53:29Z while the stale apply was still live, and taskworker
 emitted none. Its successor
-`01a05361-7b03-7f6e-7ab9-4d52336aceb8` ran for 24.248s and reversed the
+`<redacted-id>` ran for 24.248s and reversed the
 dominant quantity to 131.74GiB over/2.25TiB under across 2,050 networks. The
-next scheduled pass `01a05366-735f-cd75-31f1-7ee0f1586af8` completed in
+next scheduled pass `<redacted-id>` completed in
 20.751s, contracted to 46.26GiB over/49.31GiB under across 945 networks, and
 taskworker, API, and Connect were all at zero negative lines after the full
 following interval and ingestion allowance. This is another terminal recovery
@@ -5711,17 +5728,17 @@ is safe. Two further scheduled passes stayed in band at 52.59GiB/45.38GiB and
 quiet; the convergence was durable across executor changes.
 
 The next recurrence completed the same long-run/reversal/convergence chain at
-16:50Z. Task `01a05375-52b2-59c3-8a72-36646de9060d` ran on edge-1/g1 from
+16:50Z. Task `<redacted-id>` ran on edge-1/g1 from
 16:21:36.597190Z to 16:39:30.633361Z (1,074.036s), rewriting 898,952 balances
 and reporting 1.11TiB over-reserved plus 1.81TiB under-reserved across 2,331
 networks. Eleven settlements then exposed negative mirrors: seven API and four
 Connect lines from 16:35:31.032Z through 16:43:16.640Z; taskworker emitted
 none. The first three occurred while the stale apply was live, and the last
 three Connect results on one balance reached -62.98MiB, -191MiB, and
--319MiB. Corrective task `01a0538a-5d49-7938-0805-24eed3a0e8de` moved to
+-319MiB. Corrective task `<redacted-id>` moved to
 edge-3/g1 and completed in 17.020s, reversing the dominant quantities to
 1.81TiB over and 1.11TiB under across 2,317 networks. The next scheduled pass
-`01a0538f-3b89-ea12-7f55-39e0ae148398` moved to edge-0/g2 and completed in
+`<redacted-id>` moved to edge-0/g2 and completed in
 20.841s, contracting drift to 46.12GiB over/36.47GiB under across 834
 networks. API, Connect, and taskworker then each remained at zero negative
 lines through 16:58:40Z, more than eight minutes after that pass and beyond the
@@ -5734,20 +5751,20 @@ mutation sites cannot collapse into one opaque target.
 The immediately following sequence proved that duration alone cannot clear
 the legacy writer. Four scheduled passes from 16:55Z through 17:11Z completed
 in 15.997–23.394s and stayed within 28.7–51.33GiB in either direction. Task
-`01a053a7-c9ff-805e-78b8-9df21c8bf561` then ran on edge-1/g1 from
+`<redacted-id>` then ran on edge-1/g1 from
 17:16:43.785282Z to 17:17:29.346654Z (45.561s) and abruptly corrected
 59.78GiB over plus 536.69GiB under across 1,570 networks. Its successor
-`01a053ad-1d8a-fe42-fdce-f6eef954abf6` moved to edge-3/g2, completed in
+`<redacted-id>` moved to edge-3/g2, completed in
 18.761s, and reversed the same dominant quantity to 525.76GiB over plus
 62.9GiB under across 1,571 networks. The monitor rendered
 `matched_reversal=true reversal_direction=under-to-over` and retained both
 executor identities. No settlement happened to expose a negative counter.
-The next scheduled task `01a053b2-0002-dfba-240e-b302d2ef7429` completed in
+The next scheduled task `<redacted-id>` completed in
 22.133s and contracted the aggregate to 50.5GiB over/30.4GiB under across 837
 networks. This short-pass inversion is the exact synthetic aggregate
 regression: skipping already-correct mirrors is required even when the full
 fleet walk stays below 120 seconds. Another scheduled pass
-`01a053b6-f72f-beb4-2a87-683c53a3fe89` then completed in 17.653s and stayed in
+`<redacted-id>` then completed in 17.653s and stayed in
 band at 31.29GiB over/52.27GiB under across 858 networks. API, Connect, and
 taskworker each remained at zero negative lines through 17:41:58Z, more than
 eight minutes after that pass and beyond the ingestion allowance. This is the
@@ -5755,13 +5772,13 @@ terminal recovery certificate; it does not make a later legacy absolute walk
 safe.
 
 One more short legacy sequence reproduced the same matched reversal before
-the rollout boundary. Task `01a053c5-a2b7-053b-5583-e8ea35e63aee` completed
+the rollout boundary. Task `<redacted-id>` completed
 in 19.708s at 17:49:37Z with 19.37GiB over-reserved and 604.48GiB
 under-reserved across 1,574 networks. Its successor
-`01a053ca-8796-54e3-24ea-02bf8923b555` moved to edge-1/g1 and completed in
+`<redacted-id>` moved to edge-1/g1 and completed in
 23.294s at 17:55:01Z, reversing the quantities to 619.08GiB over and
 16.87GiB under across 1,615 networks. The following pass
-`01a053cf-7ae3-752e-6e14-dba61deb77bc` completed in 16.821s at 18:00:19Z and
+`<redacted-id>` completed in 16.821s at 18:00:19Z and
 contracted to 29.53GiB over/51.05GiB under across 903 networks. API, Connect,
 and taskworker remained at zero negative lines through 18:07Z. This is a
 second short-duration proof that a quick full-fleet write can still clobber a
@@ -5769,7 +5786,7 @@ newer mirror; no-op skipping is part of the root fix, not only an optimization
 for long passes.
 
 The very next legacy pass escalated on the score-heavy edge-0/g1 executor.
-Task `01a053d4-54d7-89b7-4910-8f757791cb0e` ran from
+Task `<redacted-id>` ran from
 18:05:21.913100Z to 18:20:32.094955Z—910.182s—and rewrote 900,039 balances.
 Its terminal aggregate corrected 1.58TiB over-reserved plus 553.29GiB
 under-reserved across 2,076 networks. Two API and two Connect settlements
@@ -5781,13 +5798,13 @@ a full quiet interval across all three emitters.
 
 Instead of supplying that recovery, two consecutive scheduled passes landed
 on the same old edge-0/g1 container and amplified the damage. Task
-`01a053e6-d5e1-a07e-ca22-a9fe98395e34` ran from 18:25:35.186328Z to
+`<redacted-id>` ran from 18:25:35.186328Z to
 18:44:36.869386Z (1,141.683s), rewrote 900,295 balances, and corrected
 2.05TiB over-reserved plus 777.02GiB under-reserved across 2,469 networks.
 Six exact -1MiB settlement negatives appeared across API and Connect from
 18:44:15Z through 18:45:53Z, beginning while the apply was still live.
 
-Its successor `01a053fc-e925-686d-b08a-fa82b2ee3864` ran from
+Its successor `<redacted-id>` ran from
 18:49:41.687654Z to 19:08:43.856564Z (1,142.169s) on the same process. Its
 terminal aggregate rewrote 900,556 balances and corrected 586.11GiB over plus
 8.53TiB under across 2,562 networks. This was not a matched inverse: the
@@ -5806,15 +5823,15 @@ following interval.
 
 A later pre-deploy sequence supplied that terminal control while also
 reproducing a short-duration clobber. Task
-`01a05417-ef96-3dc9-4448-e5f849e7f296` ran for about 108 seconds on old
+`<redacted-id>` ran for about 108 seconds on old
 edge-0/g1 and ended at 19:21:00.946518Z with 185.27GiB over plus 267.55GiB
 under across 1,596 networks. Its approximately 23-second successor
-`01a0541e-3516-546c-9cb5-8c0c8c1cfa88` moved to old edge-1/g1 and ended at
+`<redacted-id>` moved to old edge-1/g1 and ended at
 19:26:25.921346Z with 268.32GiB over plus 186.55GiB under across 1,620
 networks. The monitor preserved both executor identities and rendered the
 near-exact 267.55GiB-under to 268.32GiB-over flip as
 `matched_reversal=true reversal_direction=under-to-over`. Task
-`01a05423-2a85-ac78-d438-085f46362b21` then moved to old edge-0/g2, completed
+`<redacted-id>` then moved to old edge-0/g2, completed
 in about 21 seconds at 19:31:48.963077Z, and contracted to 42.95GiB over plus
 47.14GiB under across 868 networks. The overlapping v71/v72 standing streams
 recorded zero negative-counter lines across the reversal and contraction.
@@ -5826,19 +5843,19 @@ across 842 networks, while every negative-counter stream remained quiet.
 
 The next old-generation pass recreated a full stale-write sequence on the hot
 edge-1/g2 container `06abfbe03c32`. Task
-`01a0542c-fa1a-6ed7-5e90-19b29c5f76a8` ran from about 19:42:13Z to
+`<redacted-id>` ran from about 19:42:13Z to
 20:04:07.468260Z (an authoritative rounded 1,314s), rewriting 901,144
 balances and correcting 438.07GiB over-reserved plus 5.54TiB under-reserved
 across 2,238 networks. The redacted raw taskworker pull peaked at 3,181
 negative settlements in minute 20:05; the standing monitor windows retained
 289, 207, 133, and 81/min during the decay rather than losing the burst at a
 snapshot boundary. Its same-executor successor
-`01a05445-aef3-991e-3ccd-e3557c314bf6` was not a fast recovery: it ran 402s
+`<redacted-id>` was not a fast recovery: it ran 402s
 and ended at 20:15:53.180148Z with 6.17TiB over plus 386.85GiB under across
 2,405 networks. The monitor correctly rendered the 5.54TiB-under to
 6.17TiB-over pair as `matched_reversal=true`, and its next full stream window
 paged on another 1,280 taskworker negatives/min. This is a causal inverse, not
-convergence. The next task `01a05450-7164-89a5-becd-0ac85f54b68d` moved to
+convergence. The next task `<redacted-id>` moved to
 old edge-4/g2 and completed in about 19 seconds at 20:21:12.648396Z, providing
 a peer-executor control and contracting the aggregate to 137.45GiB over plus
 838.12GiB under across 1,529 networks. A following g1 task completed its
@@ -5851,7 +5868,7 @@ for a full following interval.
 
 The completed service-version rollout did not supply that recovery. With the
 database still at 590 and therefore missing the version-594 balance/contract
-index, task `01a0546b-c769-9420-2055-cd95e18fab76` timed out on edge-3/g1 at
+index, task `<redacted-id>` timed out on edge-3/g1 at
 exactly 1,800 seconds, retried on edge-1/g1, and reached a 1,799-second live
 heartbeat before its task row advanced from one to two `context-canceled`
 errors and immediately showed another fresh claim. During the second attempt,
@@ -5872,7 +5889,7 @@ heartbeat was 1,777s at 22:22:17Z; by the 22:23:13Z task-canary sample the
 row's `reschedule_error_count` had advanced from two to three with the same
 `context canceled` error and already carried a fresh successor claim. The
 standing taskworker stream recorded 8/min and then 4/min negative counters
-across that boundary. A narrow task-id Loki lookup timed out while awaiting
+across that boundary. A narrow attempt-correlation Loki lookup timed out while awaiting
 headers, so the successor executor was not inferred from missing log results;
 the PostgreSQL row is authoritative for the third failure and fresh retry.
 
@@ -6053,12 +6070,12 @@ negative-counter interval.
 The next production sequence exposed why matched reversals must retain exact
 executor and statement-shape attribution. Current taskworker
 `2026.8.31-outerwerld+1033599540`, task
-`01a056d0-cb51-3ea5-8d0b-09bc6936bb1e`, ran for 1,282 seconds on
+`<redacted-id>`, ran for 1,282 seconds on
 edge-0/g1 container `40f27d3cd53f`. At 08:21:42Z it reported 906,751
 balances, 1,060 drifted networks, 158.60GiB over-reserved, and 686.26GiB
 under-reserved. The same current container emitted many atomic
 `clamped_to=0` settlement diagnostics during the run. Its scheduled successor,
-task `01a056e8-f4bb-be02-7a27-d9f3b7e18d79`, completed on the same executor in
+task `<redacted-id>`, completed on the same executor in
 165 seconds and at 08:29:30Z reported 906,827 balances, 544 drifted networks,
 703.87GiB over-reserved, and 20.85GiB under-reserved. The roughly 686--704GiB
 under-to-over inverse is a reconciliation-created stale write, but it cannot
@@ -6088,7 +6105,7 @@ live mirror posts and reconciliation; do not mask it with manual reruns.
 
 Deployment `2026.8.31-outerwerld+1033655820` initially appeared to supply the
 access-path proof. Its first unequivocally post-rollout task,
-`01a056fc-6076-682e-f24d-56133eacdd9a`, ran on edge-3/g1 container
+`<redacted-id>`, ran on edge-3/g1 container
 `3e5e8253a54e` and completed in about 15 seconds at 08:48:13Z. It scanned
 907,015 balances but corrected only 499.65MiB over-reserved and 10.19GiB
 under-reserved across 165 networks. The adjacent `pg_stat_statements` sample
@@ -6775,7 +6792,7 @@ one direct consequence. Its page-local query requires version 594's
 `transfer_escrow_balance_contract` index; without that artifact, each bounded
 page can rescan the large escrow history. The run reached its exact
 1,800-second deadline at 21:20:46Z, was rescheduled with `context canceled`,
-and the same task ID was already 337 seconds into its retry on another edge by
+and the same attempt was already 337 seconds into its retry on another edge by
 21:26:38Z. `RemoveCompletedContracts` independently began failing on the
 missing version-595 `account_payment.contract_retention_cursor` column, with
 seven reschedule errors observed by 21:26:22Z. These are direct schema-lag
@@ -8877,7 +8894,7 @@ claim with a future release_time whose keepalive (claim_time refresh every
 ```sql
 -- claims held with a future release: normal while a task RUNS; suspect when
 -- the claiming container is gone (correlate with deploys/restarts)
-SELECT split_part(function_name,'.',3) AS task, task_id,
+SELECT split_part(function_name,'.',3) AS task,
        claim_time, release_time,
        round(extract(epoch from (release_time - now()))) AS lease_remaining_s,
        run_max_time_seconds
@@ -8897,10 +8914,11 @@ ORDER BY release_time DESC;
   lock with the dead worker's connection. A lease remaining far beyond five
   minutes identifies a pre-fix claim/binary and still needs manual handling.
 - ACTION: normally observe automatic expiry. If immediate re-claim is needed,
-  verify the claiming worker is dead (deploy log / container list), then run
-  `bringyourctl task release <task_id>` and/or `bringyourctl task kick
-  <run_once_key>` (pull run_at to now). Releasing a RUNNING task re-opens the
-  duplicate-execution window — verify first.
+  verify the claiming worker is dead (deploy log / container list), obtain the
+  exact claim through the protected operator lookup, then use the supported
+  release/kick commands without copying that identifier into an alert or
+  transcript. Releasing a RUNNING task re-opens the duplicate-execution window
+  — verify first.
 
 ### 12.4 Post-deploy convergence
 Probe: `task-convergence`

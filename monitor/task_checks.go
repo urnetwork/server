@@ -315,9 +315,9 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			activeLog, activeLogErr = env.runner.warpctl(
 				ctx,
 				"logs", env.cfg.env, "taskworker",
-				"--since=5m", "--limit=500", "--query="+taskID, "--utc",
+				"--since=5m", "--limit=5000", "--query="+task, "--utc",
 			)
-			active = parseTaskActiveRun(activeLog, task)
+			active = parseTaskActiveRunForID(activeLog, task, taskID)
 			if active.taskID == taskID && 0 < active.seconds && active.seconds <= thresholdSeconds {
 				// The row waited in the due queue and only recently began running.
 				// Task convergence owns queue delay; this signal owns execution time.
@@ -364,10 +364,8 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			"overdue_s=%s elapsed_s=%d elapsed_source=%s comparison_s=%s comparison_source=%s alert_threshold_s=%d p50_s=%d p95_s=%d max_time_s=%s claim=live",
 			r.str(1), elapsedSeconds, elapsedSource, r.str(2), comparisonSource, thresholdSeconds, p50Seconds, p95Seconds, r.str(4),
 		)
-		if taskID != "" {
-			observed += " task_id=" + taskID
-		}
 		if active.taskID == taskID && active.identity.host != "" {
+			observed += " heartbeat_attempt_correlated=true"
 			observed += fmt.Sprintf(
 				" active_host=%s active_generation=%s active_container=%s",
 				active.identity.host,
@@ -532,7 +530,7 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertVerify = "A retry preserves completed lookback markers, rolls those windows instead of rescanning them, then clears the task error; the blocked concurrent reindex and vacuum chain advance after each checkpoint releases its snapshot."
 		} else if task == "CloseExpiredContracts" && strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
 			alertMechanism = "A close checkpoint reached the exact 30-minute task boundary. Its per-contract commits made durable progress, but the scheduler did not checkpoint task success, so the retry must rescan the remaining ordered cohort while old contracts accumulate. The task row does not contain the selected cohort size; use the matching live selection log before distinguishing an older 100,000-contract generation from the current 25,000 cap."
-			alertContext += " A successor with a new task id after the retry is evidence that per-contract work survived; it does not make that scheduler boundary safe under recurring write/vacuum pressure."
+			alertContext += " A distinct successor attempt after the retry is evidence that per-contract work survived; it does not make that scheduler boundary safe under recurring write/vacuum pressure."
 			alertAction = "Read the matching `found <n> contracts to close` journal line. If n exceeds 25,000, roll out the 25,000 cap while retaining the 92-worker inner pool; if n is already at or below 25,000, retain it and attribute the remaining overrun to the active retention, vacuum, storage, or executor phase before reducing the checkpoint further. Do not raise the 30-minute deadline or add task-level shards."
 			alertVerify = "Live selection stays at or below 25,000, each full cohort acknowledges task success before the deadline and schedules its immediate successor, and the older-than-five-minute open set falls on consecutive samples without another Timeout."
 		} else if task == "Payout" && strings.Contains(lowerError, "connlockerror=conn closed") {

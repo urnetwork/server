@@ -53,7 +53,7 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 		"alloc_bytes_per_s_1m=681574400",
 		"fleet_median_alloc_bytes_per_s_1m=3145728",
 		"alloc_ratio_1m=216.7",
-		"active_tasks=UpdateClientScores:2875s@01a055c8-759e-406e-4061-603f0dc86869,CloseExpiredContracts:7s@01a055f4-ccee-406e-4061-603f0dc86869",
+		"active_tasks=UpdateClientScores:2875s,CloseExpiredContracts:7s",
 		"target's exported score payload is caller-invariant",
 		"CloseExpiredContracts is active on the same host/block",
 		"delay its Go work between otherwise short PostgreSQL statements",
@@ -66,6 +66,10 @@ func TestWorkerChurnSignalSyntheticScoreFanout(t *testing.T) {
 			t.Fatalf("worker-churn diagnosis missing %q:\n%s", want, markdown)
 		}
 	}
+	requireAlertOmits(t, alert,
+		"01a055c8-759e-406e-4061-603f0dc86869",
+		"01a055f4-ccee-406e-4061-603f0dc86869",
+	)
 }
 
 func TestWorkerChurnSignalSyntheticRequiresBothRatesAndFreshSkew(t *testing.T) {
@@ -120,9 +124,10 @@ func TestWorkerChurnSignalSyntheticRefreshesClockAfterDelayedLogFallback(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown := requireAlertClass(t, alerts, "worker-cpu-allocation-churn").Markdown()
+	alert := requireAlertClass(t, alerts, "worker-cpu-allocation-churn")
+	markdown := alert.Markdown()
 	for _, want := range []string{
-		"active_tasks=UpdateClientScores:4190s@01a055c8-759e-406e-4061-603f0dc86869",
+		"active_tasks=UpdateClientScores:4190s",
 		"target's exported score payload is caller-invariant",
 		"target-oriented UpdateClientScores fanout",
 	} {
@@ -130,4 +135,5 @@ func TestWorkerChurnSignalSyntheticRefreshesClockAfterDelayedLogFallback(t *test
 			t.Fatalf("delayed log collection lost %q:\n%s", want, markdown)
 		}
 	}
+	requireAlertOmits(t, alert, "01a055c8-759e-406e-4061-603f0dc86869")
 }

@@ -38,6 +38,12 @@ items ledger), SIGNALS.md §7 (the alert emission spec this service implements).
    battery per host); a probe that times out is *recorded as an observation*
    (often the strongest signal — e.g. a hung redis PING), never retried hot.
    The monitor never mutates the monitored systems.
+   Durable task identifiers are correlation material, not alert content: a
+   probe may use an exact identifier in memory to join PostgreSQL and log
+   lifecycle records, but `Alert`/Markdown emits only a correlation boolean,
+   task family, duration, lifecycle timestamps, executor, and bounded error
+   class. The identifier must be obtained separately through a protected
+   operator lookup before any authorized mutation.
 4. **Baseline over threshold.** Static bands from SIGNALS.md are the floor,
    but the strongest detections are deviations from *learned normal* ("a ton
    of table-scan queries when normally we don't have that"). The monitor
@@ -193,6 +199,9 @@ local-command, and raw TCP-exchange output. An `Alert` carries stable identity
 plus symptom, mechanism, baseline, observed values, evidence, action,
 verification, and playbook fields. `Alert.Markdown` and `AlertsMarkdown`
 render the same value as a detailed human-readable alert file.
+Task-oriented synthetic failures also assert that every seeded identifier is
+absent from the rendered Markdown, while exact internal lifecycle correlation
+still selects the correct attempt and executor.
 
 Probes are cheap by construction: tier-0 is five queries/commands per 60s
 tick (SIGNALS.md §1 — contract rate, canaries, idle-in-tx/active split,

@@ -180,7 +180,7 @@ func TestWorkerMemorySignalSyntheticLiveHeapSkew(t *testing.T) {
 		"gc_cycles_per_s_5m=0.125",
 		"gc_pause_seconds_per_s_5m=0.000040",
 		"active_task_count=2",
-		"active_tasks=UpdateClientScores:620s@01a0530b-0e6a-9c14-6694-11a165f3c27b,CloseExpiredContracts:130s@01a0530c-65aa-153e-19d8-82ad3698cf40",
+		"active_tasks=UpdateClientScores:620s,CloseExpiredContracts:130s",
 		"active_log_source=warpctl",
 		"process-local allocator/GC contention",
 		"score_alias_schema_ready=true",
@@ -194,6 +194,10 @@ func TestWorkerMemorySignalSyntheticLiveHeapSkew(t *testing.T) {
 			t.Fatalf("worker-memory diagnosis missing %q:\n%s", want, markdown)
 		}
 	}
+	requireAlertOmits(t, alert,
+		"01a0530b-0e6a-9c14-6694-11a165f3c27b",
+		"01a0530c-65aa-153e-19d8-82ad3698cf40",
+	)
 	if strings.Contains(markdown, "Deploy the target-oriented UpdateClientScores fanout") {
 		t.Fatalf("deployed alias marker retained the pre-deploy action:\n%s", markdown)
 	}
@@ -239,9 +243,10 @@ func TestWorkerMemorySignalSyntheticFallsBackToHostJournalForActiveTasks(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown := requireAlertClass(t, alerts, "worker-memory-skew").Markdown()
+	alert := requireAlertClass(t, alerts, "worker-memory-skew")
+	markdown := alert.Markdown()
 	for _, want := range []string{
-		"active_tasks=UpdateClientScores:3940s@01a05616-2af9-07af-9ce6-8ba1bc304862",
+		"active_tasks=UpdateClientScores:3940s",
 		"active_log_source=host-journal-fallback",
 		"UpdateClientScores is active on the exact heap outlier",
 		"target-oriented UpdateClientScores fanout and alias-aware cache",
@@ -250,6 +255,7 @@ func TestWorkerMemorySignalSyntheticFallsBackToHostJournalForActiveTasks(t *test
 			t.Fatalf("worker-memory journal fallback missing %q:\n%s", want, markdown)
 		}
 	}
+	requireAlertOmits(t, alert, "01a05616-2af9-07af-9ce6-8ba1bc304862")
 	if strings.Contains(markdown, "task-lifecycle lookup was degraded") {
 		t.Fatalf("complete host-journal fallback was reported as degraded:\n%s", markdown)
 	}

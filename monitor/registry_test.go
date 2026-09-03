@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -135,6 +136,19 @@ func TestVisibilityAlertKeepsRemoteCommandFailureGeneric(t *testing.T) {
 	)
 	if alert.Class != "cannot-observe" {
 		t.Fatalf("class = %q, want cannot-observe", alert.Class)
+	}
+}
+
+func TestVisibilityAlertRedactsTaskIdentifierFromCommandFailure(t *testing.T) {
+	taskID := "01a05700-aaaa-bbbb-cccc-dddddddddddd"
+	alert := visibilityAlert(
+		syntheticSettings(&syntheticSource{}),
+		NewTaskCanariesSignal(),
+		fmt.Errorf("warpctl logs failed while correlating %s", taskID),
+	)
+	requireAlertOmits(t, alert, taskID)
+	if !strings.Contains(alert.Markdown(), "<task-id>") {
+		t.Fatal("visibility alert did not retain a safe identifier placeholder")
 	}
 }
 

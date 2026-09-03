@@ -38,7 +38,7 @@ func TestSelectionFreshnessSignalExplainsLiveReclaimedExport(t *testing.T) {
 	for _, want := range []string{
 		"actively rebuilding full-fleet export rather than a parked lease",
 		"active_duration_s=1458",
-		"active_task_id=" + taskID,
+		"active_attempt_correlated=true",
 		"active_host=edge-0 active_generation=g1 active_container=scoreworker",
 		"Retain the streaming, bounded-batch score exporter",
 		"roll it out only where version or code evidence says it is absent",
@@ -50,6 +50,7 @@ func TestSelectionFreshnessSignalExplainsLiveReclaimedExport(t *testing.T) {
 			t.Fatalf("live score-recovery diagnosis lost %q:\n%s", want, markdown)
 		}
 	}
+	requireAlertOmits(t, requireAlertClass(t, alerts, "selection-stale"), taskID)
 	if strings.Contains(markdown, "roll out the streaming, bounded-batch score exporter on every taskworker generation") {
 		t.Fatalf("live score-recovery diagnosis retained a stale rollout prescription:\n%s", markdown)
 	}

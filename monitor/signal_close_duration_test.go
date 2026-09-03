@@ -47,7 +47,7 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 	for _, want := range []string{
 		"phase=active",
 		"duration_s=130",
-		"task_id=01a0530c-65aa-153e-19d8-82ad3698cf40",
+		"attempt_correlated=true",
 		"active_host=edge-3",
 		"active_generation=g2",
 		"active_container=new",
@@ -62,6 +62,7 @@ func TestCloseDurationSignalSyntheticActiveOverrunUsesNewestHeartbeat(t *testing
 			t.Fatalf("active close alert lost %q:\n%s", want, alert.Markdown())
 		}
 	}
+	requireAlertOmits(t, alert, "01a0530c-65aa-153e-19d8-82ad3698cf40")
 	for _, stale := range []string{
 		"The deployed 100,000-contract task checkpoint",
 		"Roll out the bounded retention queue and the 25,000-contract checkpoint",
@@ -128,7 +129,7 @@ func TestCloseDurationSignalFallsBackToBoundedHostJournalsWhenFleetLogsFail(t *t
 	for _, want := range []string{
 		"phase=active duration_s=432",
 		"active_log_source=host-journal-fallback",
-		"task_id=" + currentTaskID,
+		"attempt_correlated=true",
 		"active_host=edge-2",
 		"active_generation=g2",
 		"active_container=newclose0002",
@@ -139,6 +140,7 @@ func TestCloseDurationSignalFallsBackToBoundedHostJournalsWhenFleetLogsFail(t *t
 			t.Fatalf("journal fallback alert lost %q:\n%s", want, alert.Markdown())
 		}
 	}
+	requireAlertOmits(t, alert, oldTaskID, currentTaskID)
 }
 
 func TestCloseDurationSignalCompletedRunSupersedesSameHeartbeat(t *testing.T) {
@@ -161,6 +163,7 @@ func TestCloseDurationSignalCompletedRunSupersedesSameHeartbeat(t *testing.T) {
 		!strings.Contains(alert.Observed, "completed_age_s=60") {
 		t.Fatalf("finished row did not supersede its lingering heartbeat: %+v", alert)
 	}
+	requireAlertOmits(t, alert, taskID)
 }
 
 func TestCloseDurationSignalCompletedRunDoesNotResurfaceStaleSameIDHeartbeat(t *testing.T) {
@@ -185,6 +188,7 @@ func TestCloseDurationSignalCompletedRunDoesNotResurfaceStaleSameIDHeartbeat(t *
 		!strings.Contains(alert.Observed, "completed_age_s=131") {
 		t.Fatalf("stale same-id heartbeat resurfaced after completion: %+v", alert)
 	}
+	requireAlertOmits(t, alert, taskID)
 }
 
 func TestCloseDurationSignalDifferentSuccessorHeartbeatRemainsActive(t *testing.T) {
@@ -208,10 +212,10 @@ func TestCloseDurationSignalDifferentSuccessorHeartbeatRemainsActive(t *testing.
 	alert := requireAlertClass(t, alerts, "close-duration-overrun")
 	for _, want := range []string{
 		"phase=active duration_s=130",
-		"task_id=" + newTaskID,
+		"attempt_correlated=true",
 		"active_host=edge-1",
 		"precursor_failed_duration_s=1800",
-		"precursor_failed_task_id=" + failedTaskID,
+		"precursor_failed_attempt_correlated=true",
 		`precursor_failed_error="Timeout"`,
 		"precursor_failed_at=2026-08-30T14:21:00.125Z",
 		"precursor_failed_host=edge-3",
@@ -223,10 +227,12 @@ func TestCloseDurationSignalDifferentSuccessorHeartbeatRemainsActive(t *testing.
 			t.Fatalf("active successor lost failed precursor %q:\n%s", want, alert.Markdown())
 		}
 	}
+	requireAlertOmits(t, alert, oldTaskID, newTaskID, failedTaskID)
 }
 
 func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *testing.T) {
 	taskID := "01a0530c-65aa-153e-19d8-82ad3698cf40"
+	errorTaskID := "01a0530c-aaaa-bbbb-cccc-dddddddddddd"
 	source := &syntheticSource{
 		postgresFn: func(string) ([]Row, error) {
 			// An older successful overrun is the only finished row. The current
@@ -234,7 +240,7 @@ func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *t
 			return []Row{{"01a052f6-5c55-e78b-110d-dad7afffe710", "completed", "1367", "1902", "1788098400"}}, nil
 		},
 		localFn: func(string, ...string) (string, error) {
-			return "[edge-3][taskworker][g2][cid:failed][I][2026-08-30T14:52:00.815957Z][task.go:1930][" + taskID + "]eval error(1800.83s) (reschedule) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({}) = Timeout\n" +
+			return "[edge-3][taskworker][g2][cid:failed][I][2026-08-30T14:52:00.815957Z][task.go:1930][" + taskID + "]eval error(1800.83s) (reschedule) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({}) = Timeout [" + errorTaskID + "]\n" +
 				"[edge-1][taskworker][g2][cid:retry][I][2026-08-30T14:52:25.507527Z][task.go:1938][" + taskID + "]eval active(20.01s) github.com/urnetwork/server/taskworker/work.CloseExpiredContracts({})", nil
 		},
 	}
@@ -246,8 +252,8 @@ func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *t
 	alert := requireAlertClass(t, alerts, "close-duration-overrun")
 	for _, want := range []string{
 		"phase=failed duration_s=1800",
-		"task_id=" + taskID,
-		`failed_error="Timeout"`,
+		"attempt_correlated=true",
+		`failed_error="Timeout [<task-id>]"`,
 		"failed_at=2026-08-30T14:52:00.815957Z",
 		"failed_host=edge-3",
 		"failed_container=failed",
@@ -265,6 +271,7 @@ func TestCloseDurationSignalRetainsRescheduledTimeoutAcrossShortSameIDRetry(t *t
 			t.Fatalf("rescheduled timeout was lost after its short retry, missing %q:\n%s", want, alert.Markdown())
 		}
 	}
+	requireAlertOmits(t, alert, taskID, errorTaskID, "01a052f6-5c55-e78b-110d-dad7afffe710")
 	if strings.Contains(alert.Observed, "phase=completed duration_s=1367") ||
 		strings.HasPrefix(alert.Observed, "phase=active ") {
 		t.Fatalf("older completion or short retry replaced timeout: %+v", alert)
@@ -299,7 +306,7 @@ func TestCloseDurationSignalReportsCompletedSameIDRetryWithoutErasingTimeout(t *
 	alert := requireAlertClass(t, alerts, "close-duration-overrun")
 	for _, want := range []string{
 		"phase=failed duration_s=1800",
-		"task_id=" + taskID,
+		"attempt_correlated=true",
 		`failed_error="Timeout"`,
 		"retry_phase=completed",
 		"retry_duration_s=24",
@@ -314,6 +321,7 @@ func TestCloseDurationSignalReportsCompletedSameIDRetryWithoutErasingTimeout(t *
 			t.Fatalf("completed retry lost timeout evidence %q:\n%s", want, alert.Markdown())
 		}
 	}
+	requireAlertOmits(t, alert, taskID, successorTaskID, "01a052f6-5c55-e78b-110d-dad7afffe710")
 	if strings.Contains(alert.Observed, "phase=completed duration_s=24") ||
 		strings.Contains(alert.Observed, "phase=completed duration_s=1367") {
 		t.Fatalf("completion erased timeout: %+v", alert)

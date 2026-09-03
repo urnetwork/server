@@ -451,10 +451,10 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 		action := "Restore task-log visibility, then let the existing claimed attempt run or allow normal lease reclamation. Do not schedule a duplicate score export or restart a progressing taskworker while the cache still has TTL headroom."
 		verify := "A fresh heartbeat or finished_task row identifies the exact lifecycle; the completion gap returns below 60 minutes and remains there for two consecutive runs before the five-hour cache TTL expires."
 		if active.seconds > 0 {
-			mechanism = "A fresh eval-active heartbeat proves the scheduler has a live UpdateClientScores attempt, so the stale completion boundary is an actively rebuilding full-fleet export rather than a parked lease. A reboot or worker exit discards that attempt's in-process scan and the same task id must restart from its durable scheduler boundary."
+			mechanism = "A fresh eval-active heartbeat proves the scheduler has a live UpdateClientScores attempt, so the stale completion boundary is an actively rebuilding full-fleet export rather than a parked lease. A reboot or worker exit discards that attempt's in-process scan and the same durable attempt must restart from its scheduler boundary."
 			observed += fmt.Sprintf(" active_duration_s=%d", active.seconds)
 			if active.taskID != "" {
-				observed += " active_task_id=" + active.taskID
+				observed += " active_attempt_correlated=true"
 			}
 			if active.identity.host != "" {
 				observed += fmt.Sprintf(
@@ -468,9 +468,9 @@ func (self pgSelectionFreshnessProbe) check(ctx context.Context, env *probeEnv) 
 			if activeLogSource == "host-journal-fallback" {
 				evidence += " The fleet log gateway was unavailable, so the heartbeat came from bounded host-local taskworker journals."
 			}
-			context = "If reboot-collision names this same task id, the active heartbeat proves lease reclamation while its reset duration proves lost in-process progress. The cache still serves its last snapshot until the five-hour TTL cliff; a live retry is not permission to erase the interrupted-attempt evidence."
+			context = "If reboot-collision correlates this same durable attempt, the active heartbeat proves lease reclamation while its reset duration proves lost in-process progress. The cache still serves its last snapshot until the five-hour TTL cliff; a live retry is not permission to erase the interrupted-attempt evidence."
 			action = "Let the live attempt finish. Retain the streaming, bounded-batch score exporter on generations that already have it and roll it out only where version or code evidence says it is absent. If an uninterrupted bounded-export run still exceeds 60 minutes, profile and checkpoint the remaining full-map load and caller-location fan-out. Do not restart this worker, schedule a duplicate export, or raise its deadline merely to reset the freshness alert."
-			verify = "This exact task id reaches a real finished_task result, the completion gap resets below 60 minutes, and the next two scheduled exports finish without a reboot collision, memory-skew alert, or five-hour cache expiry."
+			verify = "This exact claimed attempt reaches a real finished_task result, the completion gap resets below 60 minutes, and the next two scheduled exports finish without a reboot collision, memory-skew alert, or five-hour cache expiry."
 		} else if activeLogErr != nil {
 			evidence += " Task lifecycle lookup failed: " + activeLogErr.Error()
 		}

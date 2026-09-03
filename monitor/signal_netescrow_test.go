@@ -265,7 +265,7 @@ func TestNetEscrowSignalSyntheticActiveHeartbeat(t *testing.T) {
 		t.Fatalf("active heartbeat was not used as live duration: %+v", alert)
 	}
 	for _, want := range []string{
-		"active_task_id=01a05319-b85b-2d49-4564-7eb70075486c",
+		"active_attempt_correlated=true",
 		"active_host=edge-3",
 		"active_generation=g2",
 		"active_container=old123",
@@ -278,6 +278,7 @@ func TestNetEscrowSignalSyntheticActiveHeartbeat(t *testing.T) {
 			t.Fatalf("active alert lost rollout identity %q:\n%s", want, alert.Markdown())
 		}
 	}
+	requireAlertOmits(t, alert, "01a05319-b85b-2d49-4564-7eb70075486c")
 	if strings.Contains(alert.Observed, "completed_age_s") {
 		t.Fatalf("active run without a completed precursor fabricated completion age: %+v", alert)
 	}

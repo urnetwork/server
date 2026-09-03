@@ -324,7 +324,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			evidence += " Compare both consecutive reconcile aggregates; an active successor does not erase its completed overrun precursor."
 		}
 		if activeRun.taskID != "" {
-			observed += " active_task_id=" + activeRun.taskID
+			observed += " active_attempt_correlated=true"
 		}
 		if activeRun.identity.host != "" {
 			observed += fmt.Sprintf(
@@ -334,7 +334,7 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 				activeRun.identity.container,
 			)
 			incidentContext += fmt.Sprintf(
-				" The live heartbeat is from %s/%s container %s; retain its task id and executor identity when the fleet alternates fast and long runs, because one executor's fast pass does not prove the deployed algorithm is fixed.",
+				" The live heartbeat is from %s/%s container %s; retain its lifecycle timestamps and executor identity when the fleet alternates fast and long runs, because one executor's fast pass does not prove the deployed algorithm is fixed.",
 				activeRun.identity.host,
 				activeRun.identity.generation,
 				activeRun.identity.container,

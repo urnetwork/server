@@ -238,9 +238,6 @@ func formatRebootCollisionTasks(tasks []rebootCollisionTask) string {
 	parts := make([]string, 0, len(tasks))
 	for _, task := range tasks {
 		part := fmt.Sprintf("%s:%ds", task.name, task.seconds)
-		if task.taskID != "" {
-			part += "@" + task.taskID
-		}
 		if task.identity.generation != "" {
 			part += fmt.Sprintf("(%s/%s)", task.identity.generation, task.identity.container)
 		}
@@ -356,7 +353,7 @@ func (rebootCollisionProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			}, "\n")),
 			context:  "The finished_task cross-check excludes work that completed between its last informational heartbeat and shutdown. A surviving pending row and later retry are recovery, not proof that the interrupted attempt completed; correlate the resulting lease delay and backlog without blaming an orderly reboot on OOM or a crash.",
 			action:   action,
-			verify:   "Every interrupted task id is reclaimed and reaches a real terminal result, its affected backlog drains, and the next maintenance boot has no fresh task heartbeat beyond 120 seconds at shutdown.",
+			verify:   "Every interrupted task attempt is reclaimed and reaches a real terminal result, its affected backlog drains, and the next maintenance boot has no fresh task heartbeat beyond 120 seconds at shutdown.",
 			playbook: "SIGNALS.md §2.13 and §8.1",
 		})
 	}

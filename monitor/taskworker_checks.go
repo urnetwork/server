@@ -56,8 +56,7 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		SELECT split_part(function_name,'.',3) AS task,
 		       round(extract(epoch FROM now()-claim_time))::int AS silent_s,
 		       round(extract(epoch FROM release_time-now()))::int AS lease_remaining_s,
-		       run_max_time_seconds,
-		       task_id
+		       run_max_time_seconds
 		FROM pending_task
 		WHERE now() < release_time
 		  AND claim_time < now() - interval '2 minutes'
@@ -76,9 +75,11 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			symptom: fmt.Sprintf("task %s claim keepalive silent %ss but lease held %ss more (max_time %ss) — claiming worker likely gone; the task auto-recovers when this bounded lease expires",
 				task, r.str(1), r.str(2), r.str(3)),
 			baseline: "a running task refreshes claim_time every ~10s; after a kill/crash its lease expires within 5m of the last heartbeat (12.3)",
-			observed: fmt.Sprintf("silent_s=%s lease_remaining_s=%s max_time_s=%s task_id=%s", r.str(1), r.str(2), r.str(3), r.str(4)),
+			observed: fmt.Sprintf("silent_s=%s lease_remaining_s=%s max_time_s=%s claim_identity=withheld", r.str(1), r.str(2), r.str(3)),
 			context:  "correlate with taskworker deploys/kills; a cpu-starved extender can rarely mimic this — wait for automatic expiry unless immediate recovery is needed and the claiming worker is confirmed gone",
-			evidence: fmt.Sprintf("automatic recovery: lease expires in %ss; immediate recovery after confirming the worker is dead: bringyourctl task release %s   (then task kick <run_once_key> if run_at is far out)", r.str(2), r.str(4)),
+			evidence: fmt.Sprintf("automatic recovery: lease expires in %ss; the durable claim identifier remains available only through the protected operator lookup", r.str(2)),
+			action:   "Normally observe automatic expiry. If immediate recovery is required, first prove the claiming worker is dead, then obtain the exact claim through the protected operator path and use the supported task release command without copying the identifier into an alert or transcript. Releasing a running task can permit duplicate execution.",
+			verify:   "The stranded lease expires or is safely released after its owner is proven dead, one successor claims the task, and the task reaches a real terminal result without duplicate execution.",
 			playbook: "SIGNALS.md 12.3",
 		})
 	}

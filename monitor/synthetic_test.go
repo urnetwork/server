@@ -92,6 +92,16 @@ func requireAlertClass(t *testing.T, alerts []Alert, class string) Alert {
 	return Alert{}
 }
 
+func requireAlertOmits(t testing.TB, alert Alert, forbidden ...string) {
+	t.Helper()
+	markdown := alert.Markdown()
+	for index, value := range forbidden {
+		if value != "" && strings.Contains(markdown, value) {
+			t.Fatalf("alert leaked forbidden identifier at fixture index %d", index)
+		}
+	}
+}
+
 func populateMetric(t *testing.T, stateDir, metric string, values ...float64) {
 	t.Helper()
 	store, err := newBaselineStore(stateDir + "/baseline")

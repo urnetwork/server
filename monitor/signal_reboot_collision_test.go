@@ -70,7 +70,7 @@ func TestRebootCollisionSignalSyntheticScheduledRebootExcludesFinishedTask(t *te
 	for _, want := range []string{
 		"edge-0 rebooted with 1 taskworker task",
 		"reboot_source=by-restart.timer",
-		"CloseExpiredContracts:541s@" + interruptedID,
+		"CloseExpiredContracts:541s",
 		"g2/closeworker1",
 		"Starting Scheduled Reboot Service",
 		"finished_task cross-check excludes work",
@@ -81,7 +81,8 @@ func TestRebootCollisionSignalSyntheticScheduledRebootExcludesFinishedTask(t *te
 			t.Fatalf("reboot collision alert lost %q:\n%s", want, alert.Markdown())
 		}
 	}
-	if strings.Contains(alert.Markdown(), finishedID) || strings.Contains(alert.Markdown(), "UpdateClientScores") {
+	requireAlertOmits(t, alert, interruptedID, finishedID)
+	if strings.Contains(alert.Markdown(), "UpdateClientScores") {
 		t.Fatalf("task completed before shutdown was misclassified:\n%s", alert.Markdown())
 	}
 }

@@ -115,8 +115,10 @@ func TestTaskCanariesSignalMedianTailCapCatchesRepeatedReaperOverrun(t *testing.
 		localFn: func(name string, args ...string) (string, error) {
 			joined := strings.Join(args, " ")
 			if name != "warpctl" || !strings.Contains(joined, "--since=5m") ||
-				!strings.Contains(joined, "--query="+taskID) {
-				t.Fatalf("unexpected task heartbeat command: %s %s", name, joined)
+				!strings.Contains(joined, "--limit=5000") ||
+				!strings.Contains(joined, "--query=RemoveDisconnectedNetworkClients") ||
+				strings.Contains(joined, taskID) {
+				t.Fatal("task heartbeat lookup did not use the identifier-free task-family query")
 			}
 			return "[by-us-fmt-5-edge-3][taskworker][g2][cid:4cf91fd25a2e][I][2026-08-30T15:03:44.466258Z][task.go:1938][" + taskID + "]eval active(6220.53s) github.com/urnetwork/server/taskworker/work.RemoveDisconnectedNetworkClients({})", nil
 		},
@@ -133,7 +135,7 @@ func TestTaskCanariesSignalMedianTailCapCatchesRepeatedReaperOverrun(t *testing.
 		"7-day p50 42s, p95 3552s",
 		"elapsed_source=eval-active",
 		"comparison_source=median-tail-cap",
-		"task_id=" + taskID,
+		"heartbeat_attempt_correlated=true",
 		"active_host=by-us-fmt-5-edge-3",
 		"active_generation=g2",
 		"active_container=4cf91fd25a2e",
@@ -145,6 +147,7 @@ func TestTaskCanariesSignalMedianTailCapCatchesRepeatedReaperOverrun(t *testing.
 			t.Fatalf("median-tail reaper diagnosis missing %q:\n%s", want, alert.Markdown())
 		}
 	}
+	requireAlertOmits(t, alert, taskID)
 	for _, want := range []string{
 		"percentile_cont(0.50)",
 		"row_number() OVER (PARTITION BY task",
@@ -173,8 +176,9 @@ func TestTaskCanariesSignalDiagnosesLiveNetEscrowOverrun(t *testing.T) {
 		},
 		localFn: func(name string, args ...string) (string, error) {
 			joined := strings.Join(args, " ")
-			if name != "warpctl" || !strings.Contains(joined, "--query="+taskID) {
-				t.Fatalf("unexpected task heartbeat command: %s %s", name, joined)
+			if name != "warpctl" || !strings.Contains(joined, "--query=ReconcileNetEscrow") ||
+				strings.Contains(joined, taskID) {
+				t.Fatal("task heartbeat lookup did not use the identifier-free task-family query")
 			}
 			return "[by-us-fmt-5-edge-4][taskworker][g1][cid:52c4c3be3b3f][I][2026-08-30T22:16:30Z][task.go:1938][" + taskID + "]eval active(1517.00s) github.com/urnetwork/server/taskworker/work.ReconcileNetEscrow({})", nil
 		},
@@ -217,8 +221,9 @@ func TestTaskCanariesSignalDiagnosesLivePayoutOverrun(t *testing.T) {
 		},
 		localFn: func(name string, args ...string) (string, error) {
 			joined := strings.Join(args, " ")
-			if name != "warpctl" || !strings.Contains(joined, "--query="+taskID) {
-				t.Fatalf("unexpected task heartbeat command: %s %s", name, joined)
+			if name != "warpctl" || !strings.Contains(joined, "--query=Payout") ||
+				strings.Contains(joined, taskID) {
+				t.Fatal("task heartbeat lookup did not use the identifier-free task-family query")
 			}
 			return "[by-us-fmt-5-edge-4][taskworker][g1][cid:52c4c3be3b3f][I][2026-08-30T22:30:00Z][task.go:1938][" + taskID + "]eval active(4500.00s) github.com/urnetwork/server/taskworker/work.Payout({})", nil
 		},
@@ -276,18 +281,33 @@ func TestTaskCanariesSignalDoesNotMistakeDueQueueDelayForExecutionTime(t *testin
 }
 
 func TestTaskCanariesSignalExplainsReliabilityReanchorOverrun(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH history AS"):
-			return []Row{{"UpdateReliabilities", "2482", "1122", "t", "7200"}}, nil
-		case strings.Contains(query, "WITH failures AS"):
-			return nil, nil
-		default:
-			return nil, nil
-		}
-	}}
+	taskID := "01a05700-1111-2222-3333-444444444444"
+	otherTaskID := "01a05700-5555-6666-7777-888888888888"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return []Row{{"UpdateReliabilities", "2482", "1158", "t", "7200", "78", taskID}}, nil
+			case strings.Contains(query, "WITH failures AS"):
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		localFn: func(name string, args ...string) (string, error) {
+			joined := strings.Join(args, " ")
+			if name != "warpctl" || !strings.Contains(joined, "--query=UpdateReliabilities") ||
+				strings.Contains(joined, taskID) {
+				t.Fatal("reliability heartbeat lookup did not use the identifier-free task-family query")
+			}
+			return strings.Join([]string{
+				"[edge-4][taskworker][g1][cid:reliabilityworker][I][2026-08-29T11:59:50Z][task.go:1938][" + taskID + "]eval active(1510.00s) github.com/urnetwork/server/taskworker/work.UpdateReliabilities({})",
+				"[edge-1][taskworker][g2][cid:unrelatedworker][I][2026-08-29T11:59:55Z][task.go:1938][" + otherTaskID + "]eval active(50.00s) github.com/urnetwork/server/taskworker/work.UpdateReliabilities({})",
+			}, "\n"), nil
+		},
+	}
 
 	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
@@ -297,6 +317,8 @@ func TestTaskCanariesSignalExplainsReliabilityReanchorOverrun(t *testing.T) {
 	markdown := alert.Markdown()
 	for _, want := range []string{
 		"multi-billion-row history",
+		"heartbeat_attempt_correlated=true",
+		"active_host=edge-4 active_generation=g1 active_container=reliabilityworker",
 		"active INSERT into client_reliability_running",
 		"four-hour re-anchor cadence",
 		"per-lookback transaction checkpoints",
@@ -306,6 +328,7 @@ func TestTaskCanariesSignalExplainsReliabilityReanchorOverrun(t *testing.T) {
 			t.Fatalf("reliability diagnosis missing %q: %s", want, markdown)
 		}
 	}
+	requireAlertOmits(t, alert, taskID, otherTaskID)
 }
 
 func TestTaskCanariesSignalExplainsMaintenanceBlockedByReliabilityAnchor(t *testing.T) {
