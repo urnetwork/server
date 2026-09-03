@@ -7005,6 +7005,13 @@ This is the version-to-artifact contract checked by the probe:
 | 604 | `provider_egress_health.tls_authentication_failure` plus its failed-client index |
 | 605 | `st_fleet_binding_signature` plus its network-time index |
 | 606 | `st_epoch_notification` |
+| 607 | `network.points_leaderboard_public` |
+| 608 | `network.emoji_tag` |
+| 609 | `network_points_leaderboard_snapshot` |
+| 610 | `network_points_leaderboard` |
+| 611 | `network_points_leaderboard_pos_points` |
+| 612 | `network_points_leaderboard_pos_blocks` |
+| 613 | `network_points_leaderboard_pos_streak` |
 
 Page immediately as `migration-schema-drift` when the successful audit head is
 at or above an artifact's version but that artifact is absent. Warn as
@@ -7015,6 +7022,18 @@ require the current head and all version-gated artifact checks, and only then
 activate dependent APIs or taskworkers. Never edit `migration_audit` or create
 objects by hand merely to silence the probe; repair the append-only migration
 stream and let its normal runner advance the database.
+
+At `2026-09-03T06:09Z`, production remained coherently at version 606 when
+server commit `c42a4a4e` appended the all-time points-leaderboard schema through
+613. No API or Taskworker artifact containing that commit had been activated,
+so this was a valid pre-deployment gate rather than a live missing-object
+outage. Versions 607 and 608 add the opt-in and emoji columns; 609 and 610 add
+the snapshot and ranked-row tables; 611--613 add the three keyset-paging
+indexes. Apply the exact append-only stream before deploying either the API
+endpoints or the Taskworker snapshot builder. The probe must then verify every
+published object, not infer coherence from numeric head 613 alone; each object
+has a synthetic missing-at-head regression, and a version-606 fixture proves
+future objects do not create false schema drift before migration.
 
 The 2026-08-31 taskworker rollout proved why the monitor must derive that head
 from code. Image `2026.8.31-outerwerld+1033599540` pulled and started on both

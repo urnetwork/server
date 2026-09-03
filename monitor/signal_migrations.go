@@ -51,6 +51,13 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "provider_egress_health TLS authentication failure guard", requiredVersion: 604, rowColumn: 15},
 	{name: "st_fleet_binding_signature", requiredVersion: 605, rowColumn: 16},
 	{name: "st_epoch_notification", requiredVersion: 606, rowColumn: 17},
+	{name: "network.points_leaderboard_public", requiredVersion: 607, rowColumn: 18},
+	{name: "network.emoji_tag", requiredVersion: 608, rowColumn: 19},
+	{name: "network_points_leaderboard_snapshot", requiredVersion: 609, rowColumn: 20},
+	{name: "network_points_leaderboard", requiredVersion: 610, rowColumn: 21},
+	{name: "network_points_leaderboard_pos_points", requiredVersion: 611, rowColumn: 22},
+	{name: "network_points_leaderboard_pos_blocks", requiredVersion: 612, rowColumn: 23},
+	{name: "network_points_leaderboard_pos_streak", requiredVersion: 613, rowColumn: 24},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -127,7 +134,22 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		           to_regclass('public.st_fleet_binding_signature') IS NOT NULL
 		           AND to_regclass('public.st_fleet_binding_signature_network') IS NOT NULL
 		       ),
-		       to_regclass('public.st_epoch_notification') IS NOT NULL
+		       to_regclass('public.st_epoch_notification') IS NOT NULL,
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network'
+		             AND column_name = 'points_leaderboard_public'
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network'
+		             AND column_name = 'emoji_tag'
+		       ),
+		       to_regclass('public.network_points_leaderboard_snapshot') IS NOT NULL,
+		       to_regclass('public.network_points_leaderboard') IS NOT NULL,
+		       to_regclass('public.network_points_leaderboard_pos_points') IS NOT NULL,
+		       to_regclass('public.network_points_leaderboard_pos_blocks') IS NOT NULL,
+		       to_regclass('public.network_points_leaderboard_pos_streak') IS NOT NULL
 		FROM version;
 	`)
 	if err != nil {

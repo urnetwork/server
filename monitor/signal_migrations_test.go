@@ -22,6 +22,12 @@ func TestMigrationsSignalReportsDeploymentGateWithoutFalseSchemaDrift(t *testing
 			"provider_egress_health_tls_authentication_failed",
 			"st_fleet_binding_signature_network",
 			"st_epoch_notification",
+			"points_leaderboard_public",
+			"emoji_tag",
+			"network_points_leaderboard_snapshot",
+			"network_points_leaderboard_pos_points",
+			"network_points_leaderboard_pos_blocks",
+			"network_points_leaderboard_pos_streak",
 		} {
 			if !strings.Contains(query, requiredEvidence) {
 				t.Fatalf("migration query is missing %q evidence:\n%s", requiredEvidence, query)
@@ -183,6 +189,34 @@ func TestMigrationsSignalReportsMissingNewPublishedArtifacts(t *testing.T) {
 			name: "st_epoch_notification",
 			want: "st_epoch_notification@v606",
 		},
+		{
+			name: "network.points_leaderboard_public",
+			want: "network.points_leaderboard_public@v607",
+		},
+		{
+			name: "network.emoji_tag",
+			want: "network.emoji_tag@v608",
+		},
+		{
+			name: "network_points_leaderboard_snapshot",
+			want: "network_points_leaderboard_snapshot@v609",
+		},
+		{
+			name: "network_points_leaderboard",
+			want: "network_points_leaderboard@v610",
+		},
+		{
+			name: "network_points_leaderboard_pos_points",
+			want: "network_points_leaderboard_pos_points@v611",
+		},
+		{
+			name: "network_points_leaderboard_pos_blocks",
+			want: "network_points_leaderboard_pos_blocks@v612",
+		},
+		{
+			name: "network_points_leaderboard_pos_streak",
+			want: "network_points_leaderboard_pos_streak@v613",
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
@@ -200,6 +234,39 @@ func TestMigrationsSignalReportsMissingNewPublishedArtifacts(t *testing.T) {
 				t.Fatalf("missing published artifact alert lacks %q:\n%s", testCase.want, markdown)
 			}
 		})
+	}
+}
+
+func TestMigrationsSignalDoesNotRequireFutureLeaderboardArtifactsAtVersion606(t *testing.T) {
+	head := server.MigrationCount()
+	row := syntheticMigrationArtifactRow(606)
+	for _, artifact := range migrationArtifacts {
+		if 606 < artifact.requiredVersion {
+			row[artifact.rowColumn] = "f"
+		}
+	}
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(606), nil
+		}
+		return []Row{row}, nil
+	}}
+	alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 || alerts[0].Class != "migration-behind" {
+		t.Fatalf("version 606 with only future artifacts absent produced alerts %+v, want only migration-behind", alerts)
+	}
+	markdown := alerts[0].Markdown()
+	for _, want := range []string{
+		"database migration head 606",
+		fmt.Sprintf("code-required head %d", head),
+		fmt.Sprintf("lag=%d", head-606),
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("version-gated migration alert missing %q:\n%s", want, markdown)
+		}
 	}
 }
 
