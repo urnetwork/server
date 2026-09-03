@@ -15,6 +15,14 @@ func TestProxyMainDoesNotRunGlobalModelWarmups(t *testing.T) {
 	}
 }
 
+func TestProxyMainForcesIpv4ControlTraffic(t *testing.T) {
+	defer connect.SetControlIpFamilyPolicy(connect.IpFamilyAuto)
+	configureProxyControlFamily()
+	if got := connect.ControlIpFamilyPolicy(); got != connect.IpFamilyForce4 {
+		t.Fatalf("proxy control family policy = %d, want IPv4", got)
+	}
+}
+
 func TestResizeProxyMessagePoolsCapsAllClassesAtEightGiB(t *testing.T) {
 	resizeProxyMessagePools()
 

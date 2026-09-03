@@ -434,7 +434,6 @@ func setupFetchTestStackWithOptions(t testing.TB, options *fetchTestStackOptions
 
 	// ---- the test network space pointing the sdk at the local servers --------
 	connectSettings := connect.DefaultConnectSettings()
-	connectSettings.DisableIpv6 = true
 	networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
 		ctx,
 		apiUrl,

@@ -43,6 +43,13 @@ func resizeProxyMessagePools() {
 	)
 }
 
+// Keeps the proxy process's platform control traffic on IPv4. Family policy
+// is process-wide and evaluated at dial time, so it belongs at the binary
+// boundary rather than on one manager-owned NetworkSpace.
+func configureProxyControlFamily() {
+	connect.SetControlIpFamilyPolicy(connect.IpFamilyForce4)
+}
+
 // Couples the identity-restoration hold to the deployment handoff feature.
 // A plain manager used by tests remains immediately restorable; production
 // releases this hold through wg.CompleteDeploymentHandoff.
@@ -71,6 +78,7 @@ Options:
 	}
 
 	settings := proxy.DefaultProxySettings()
+	configureProxyControlFamily()
 
 	// Use up to 8 GiB across all message-pool classes per instance.
 	resizeProxyMessagePools()

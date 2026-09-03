@@ -175,8 +175,6 @@ func (self *ProxyDeviceManager) ReleaseWindowIdentityRestore() {
 // environment configuration.
 func newProxyDeviceManagerNetworkSpace(ctx context.Context) *sdk.NetworkSpace {
 	connectSettings := connect.DefaultConnectSettings()
-	// FIXME use only ipv4 when communicating back to the platform
-	connectSettings.DisableIpv6 = true
 	// Embedded devices must be silent: this host runs thousands of clients.
 	connectSettings.Log = connect.NewNoopLogger()
 	return sdk.NewPlatformNetworkSpace(

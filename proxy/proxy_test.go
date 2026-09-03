@@ -333,7 +333,6 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 
 	// ---- the test network space pointing the SDK at the local servers --------
 	connectSettings := connect.DefaultConnectSettings()
-	connectSettings.DisableIpv6 = true
 	networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
 		ctx,
 		fmt.Sprintf("http://127.0.0.1:%d", testApiPort),
