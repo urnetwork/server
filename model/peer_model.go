@@ -1096,12 +1096,99 @@ func init() {
 	prometheus.MustRegister(networkPeerListenerResets)
 }
 
-type networkPeerKeyEventDelta struct {
-	clientId server.Id
-	// "set" | "del" | "expired" (see NetworkPeerListener.Delta)
-	event      string
+type networkPeerDeltaValue struct {
+	peer       *NetworkPeer
 	eventId    int64
 	hasEventId bool
+}
+
+// NetworkPeerDelta is one immutable key-event update whose registry read is
+// shared lazily by every listener for the network in one process. A listener
+// worker, rather than the subscriber demux, performs the read; concurrent
+// listeners wait on the same result instead of multiplying one HGET by the
+// network's resident count. Callers must treat the returned peer as immutable.
+type NetworkPeerDelta struct {
+	clientId server.Id
+	// "set" | "del" | "expired" (see NetworkPeerListener.Delta)
+	event string
+
+	loadOnce  sync.Once
+	load      func() networkPeerDeltaValue
+	value     networkPeerDeltaValue
+	loadError any
+}
+
+// Builds a lazy delta around the supplied registry loader. Tests use the
+// loader boundary to force concurrent listeners onto one deterministic read.
+func newNetworkPeerDelta(
+	clientId server.Id,
+	event string,
+	load func() networkPeerDeltaValue,
+) *NetworkPeerDelta {
+	return &NetworkPeerDelta{
+		clientId: clientId,
+		event:    event,
+		load:     load,
+	}
+}
+
+// NewNetworkPeerDelta prepares a lazy peer metadata + registry-version read
+// for process-wide listener fanout. Constructing it does no Redis work, so the
+// key-event subscriber remains a nonblocking demultiplexer. The first listener
+// to consume it executes one pipelined read; all other listeners share that
+// exact result.
+func NewNetworkPeerDelta(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	event string,
+) *NetworkPeerDelta {
+	return newNetworkPeerDelta(clientId, event, func() networkPeerDeltaValue {
+		value := networkPeerDeltaValue{hasEventId: true}
+		server.Redis(ctx, func(r server.RedisClient) {
+			pipe := r.Pipeline()
+			var peerCmd *redis.StringCmd
+			if event == "set" {
+				peerCmd = pipe.HGet(ctx, networkPeerMetaKey(networkId), string(clientId.Bytes()))
+			}
+			eventIdCmd := pipe.Get(ctx, networkPeerEventIdKey(networkId))
+			_, err := pipe.Exec(ctx)
+			if err != nil && err != server.RedisNil {
+				panic(err)
+			}
+
+			if peerCmd != nil {
+				metaBytes, err := peerCmd.Bytes()
+				if err != nil && err != server.RedisNil {
+					panic(err)
+				}
+				if err == nil {
+					meta, _ := loadNetworkPeerMeta(metaBytes)
+					if meta != nil {
+						value.peer = meta.Peer
+					}
+				}
+			}
+
+			eventId, err := eventIdCmd.Int64()
+			if err != nil && err != server.RedisNil {
+				panic(err)
+			}
+			value.eventId = eventId
+		})
+		return value
+	})
+}
+
+// Resolves the shared registry value once and contains a loader failure so
+// every listener can independently request its corrective resync.
+func (self *NetworkPeerDelta) loadValue() (value networkPeerDeltaValue, ok bool) {
+	self.loadOnce.Do(func() {
+		self.loadError = server.HandleError(func() {
+			self.value = self.load()
+		})
+	})
+	return self.value, self.loadError == nil
 }
 
 type networkPeerStateHash [sha256.Size]byte
@@ -1180,7 +1267,7 @@ type NetworkPeerListener struct {
 	// events; `resync` forces the next tick to full-read. Both are fed
 	// non-blocking by the exchange's key-event subscriber; a full delta
 	// buffer degrades to a resync, never to a lost change.
-	deltas      chan *networkPeerKeyEventDelta
+	deltas      chan *NetworkPeerDelta
 	resync      chan struct{}
 	forceResync atomic.Bool
 
@@ -1216,7 +1303,7 @@ func NewNetworkPeerListener(
 		callback:      callback,
 		pollInterval:  pollInterval,
 		fullReadEvery: fullReadEvery,
-		deltas:        make(chan *networkPeerKeyEventDelta, 32),
+		deltas:        make(chan *NetworkPeerDelta, 32),
 		resync:        make(chan struct{}, 1),
 		snapshotReady: make(chan struct{}, 1),
 	}
@@ -1232,7 +1319,13 @@ func NewNetworkPeerListener(
 // listener degrades to a resync — a delayed full read, never a lost change.
 // Safe to call from the subscriber's demux goroutine.
 func (self *NetworkPeerListener) Delta(clientId server.Id, event string) {
-	self.delta(clientId, event, 0, false)
+	self.ApplyDelta(newNetworkPeerDelta(clientId, event, func() networkPeerDeltaValue {
+		value := networkPeerDeltaValue{}
+		if event == "set" {
+			value.peer = GetNetworkPeerMember(self.ctx, self.networkId, clientId)
+		}
+		return value
+	}))
 }
 
 // DeltaWithEventId is Delta with the registry version observed once by the
@@ -1240,17 +1333,24 @@ func (self *NetworkPeerListener) Delta(clientId server.Id, event string) {
 // delta prevents every listener from redundantly full-reading the same
 // network on its next corrective tick.
 func (self *NetworkPeerListener) DeltaWithEventId(clientId server.Id, event string, eventId int64) {
-	self.delta(clientId, event, eventId, true)
+	self.ApplyDelta(newNetworkPeerDelta(clientId, event, func() networkPeerDeltaValue {
+		value := networkPeerDeltaValue{
+			eventId:    eventId,
+			hasEventId: true,
+		}
+		if event == "set" {
+			value.peer = GetNetworkPeerMember(self.ctx, self.networkId, clientId)
+		}
+		return value
+	}))
 }
 
-func (self *NetworkPeerListener) delta(clientId server.Id, event string, eventId int64, hasEventId bool) {
+// ApplyDelta non-blockingly supplies a prepared delta. Multiple listeners may
+// receive the same delta; its lazy registry read executes once across them. A
+// full input buffer degrades to a resync, never a lost change.
+func (self *NetworkPeerListener) ApplyDelta(delta *NetworkPeerDelta) {
 	select {
-	case self.deltas <- &networkPeerKeyEventDelta{
-		clientId:   clientId,
-		event:      event,
-		eventId:    eventId,
-		hasEventId: hasEventId,
-	}:
+	case self.deltas <- delta:
 	default:
 		self.Resync()
 	}
@@ -1323,15 +1423,21 @@ func (self *NetworkPeerListener) run() {
 
 	// handleDelta applies one per-peer key event (PEERSSTREAMS2.md): `set`
 	// reads the single member and delivers an Updated event; `del`/`expired`
-	// delivers a disconnect marker. No version movement — the corrective poll
-	// reconciles the counter on its own cadence.
-	handleDelta := func(delta *networkPeerKeyEventDelta) {
-		if synced && delta.hasEventId {
-			eventId = delta.eventId
+	// delivers a disconnect marker. A subscriber-supplied delta advances the
+	// shared observed version; legacy direct deltas leave reconciliation to the
+	// corrective poll.
+	handleDelta := func(delta *NetworkPeerDelta) {
+		value, ok := delta.loadValue()
+		if !ok {
+			self.Resync()
+			return
+		}
+		if synced && value.hasEventId {
+			eventId = value.eventId
 		}
 		switch delta.event {
 		case "set":
-			if peer := GetNetworkPeerMember(self.ctx, self.networkId, delta.clientId); peer != nil {
+			if peer := value.peer; peer != nil {
 				if oldHash, ok := peerState[delta.clientId]; ok {
 					xorNetworkPeerStateHash(&stateHash, oldHash)
 				}

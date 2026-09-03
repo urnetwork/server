@@ -4851,6 +4851,27 @@ Probe: `redis-connections`
   symptom and ratio remain the later sustained sample. This live contraction
   continues to support observation rather than a client kill, pool-limit
   change, or marker-writer rollback.
+- A 2026-09-03 outlier established a separate Connect live-delta
+  amplification fingerprint. Port 6393 held 954 clients against a 281-node
+  median (3.4x); 375 long-lived clients from edge-3 and 294 from edge-4 ended
+  in `HGET`. A simultaneous 15-second commandstats delta measured 301.13
+  HGET/s on 6393 while the next busiest Redis node was only 9.4/s. The node
+  still had zero blocked clients, 0.487ms local latency, an empty accept queue,
+  about 2.7MB of client memory, and no output-buffer memory, so this was
+  workload and lazy-pool amplification rather than a wedged Redis process.
+  The only production HGET path for that peer metadata is the network-peer
+  listener. The process-wide key-event subscriber delivered one event to
+  every resident listener, and each listener independently read the same hash
+  member. The software fix constructs one lazy immutable delta per event and
+  shares one pipelined peer-metadata plus event-version read across the
+  process's listeners; construction remains nonblocking in the subscriber.
+  Deploy the Connect artifact containing that fix. Verify on consecutive
+  samples that both HGET/s and the HGET-ended cohort collapse, port 6393
+  returns near the fleet median, key-event delivery continues, listener resets
+  do not spike, and Redis latency/pool-timeout controls stay healthy. The
+  probe's trip battery now measures a two-second HGET commandstats delta and
+  counts HGET-ended clients, so this fingerprint no longer receives the
+  generic hot-slot diagnosis.
 - `CLIENT LIST` sorted by omem: any client > 32mb = a stalled consumer.
 - Accept-queue: `ss -lnt` Recv-Q pegged at backlog on a redis port = event
   loop too busy to accept() = wedge in progress (dials time out while the
@@ -6543,7 +6564,7 @@ Tier-1 (warn):
 | ttl-leaks | redis | 3.3a `INFO keyspace` average TTL | > 2 years; longest intentional family exception is 395 days |
 | score-byte-dominance | redis | 3.3b bounded `MEMORY USAGE SAMPLES 1` family share on fullest node | node ≥85% AND score ≥50% / ≥128KiB sampled bytes |
 | client-buffers | redis | used_memory_clients | > 25% of used or > 2G |
-| clients-spike | redis | connected_clients own-node step and fleet shape; trip battery groups `CLIENT LIST` cohorts | +50% in 10 min or >3× fleet median for 2 probes |
+| clients-spike | redis | connected_clients own-node step and fleet shape; trip battery groups `CLIENT LIST` cohorts and samples HGET command rate | +50% in 10 min or >3× fleet median for 2 probes |
 | pubsub-drops | logs | channel-is-full rate | > 10/min/service |
 | connect-tls-disabled | logs | exact legacy Connect TLS-loader fallback that binds transport with no usable identity | any |
 | tls-key-mitm | logs | 15.2 identity cross-check mismatch class | any |

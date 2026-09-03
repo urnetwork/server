@@ -372,6 +372,11 @@ redis-cli --raw -p "$redis_port" INFO clients 2>/dev/null | awk -F: '
 redis-cli --raw -p "$redis_port" INFO memory 2>/dev/null | awk -F: '
 /^(used_memory|mem_clients_normal):/ { gsub(/\r/, "", $2); print $1 "_bytes=" $2 }
 '
+hget_calls_before=$(redis-cli --raw -p "$redis_port" INFO commandstats 2>/dev/null | awk -F'[:,=]' '
+/^cmdstat_hget:/ {
+  for (i=1; i<=NF; i++) if ($i == "calls") { print $(i+1); exit }
+}')
+[ -n "$hget_calls_before" ] || hget_calls_before=0
 latency_sample=$(timeout 2 redis-cli --raw -p "$redis_port" --latency 2>/dev/null | tr '\r' '\n' | awk 'NF { last=$0 } END { print last }')
 latency_avg=$(printf '%%s\n' "$latency_sample" | awk '
 NF == 4 && $1 ~ /^[0-9.]+$/ && $3 ~ /^[0-9.]+$/ { print $3; exit }
@@ -385,6 +390,24 @@ NF == 4 && $1 ~ /^[0-9.]+$/ && $3 ~ /^[0-9.]+$/ { print $3; exit }
 }')
 [ -n "$latency_avg" ] || latency_avg=-
 printf 'latency_avg_ms=%%s\n' "$latency_avg"
+hget_calls_after=$(redis-cli --raw -p "$redis_port" INFO commandstats 2>/dev/null | awk -F'[:,=]' '
+/^cmdstat_hget:/ {
+  for (i=1; i<=NF; i++) if ($i == "calls") { print $(i+1); exit }
+}')
+[ -n "$hget_calls_after" ] || hget_calls_after=0
+case "$hget_calls_before:$hget_calls_after" in
+  *[!0-9:]*|:*) hget_calls_delta=-1; hget_calls_per_second=- ;;
+  *)
+    hget_calls_delta=$((hget_calls_after - hget_calls_before))
+    [ "$hget_calls_delta" -ge 0 ] || hget_calls_delta=-1
+    if [ "$hget_calls_delta" -ge 0 ]; then
+      hget_calls_per_second=$(awk -v delta="$hget_calls_delta" 'BEGIN { printf "%%.3f", delta / 2 }')
+    else
+      hget_calls_per_second=-
+    fi
+    ;;
+esac
+printf 'hget_sample_seconds=2 hget_calls_delta=%%s hget_calls_per_second=%%s\n' "$hget_calls_delta" "$hget_calls_per_second"
 ss -lnt 2>/dev/null | awk -v port="$redis_port" '
 BEGIN { maxRecv=0; maxSend=0; found=0 }
 $4 ~ (":" port "$") {
@@ -398,19 +421,21 @@ END {
 }'
 
 printf '%%s\n' "$client_list" | awk '
-BEGIN { count=0; total=0; maximum=0 }
+BEGIN { count=0; total=0; maximum=0; hgetCount=0 }
 {
-  omem=0
+  omem=0; cmd="-"
   for (i=1; i<=NF; i++) {
     split($i, value, "=")
     if (value[1] == "omem") omem=value[2]+0
+    else if (value[1] == "cmd") cmd=value[2]
   }
   count++
+  if (cmd == "hget") hgetCount++
   total+=omem
   if (maximum < omem) maximum=omem
 }
 END {
-  print "client_list_total=" count, "client_output_memory_bytes=" total, "client_output_memory_max_bytes=" maximum
+  print "client_list_total=" count, "client_cmd_hget_count=" hgetCount, "client_output_memory_bytes=" total, "client_output_memory_max_bytes=" maximum
 }'
 printf '%%s\n' "$client_list" | awk '
 {

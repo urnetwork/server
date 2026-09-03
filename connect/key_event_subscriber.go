@@ -49,8 +49,8 @@ func init() {
 // ONE subscriber per exchange process: it holds the per-master psubscribe
 // connections (via server.SubscribeKeyEvents) and demuxes key events to the
 // in-process listeners registered by residents. The demux only routes — it
-// reads no registry data and never blocks: the listener inputs
-// (NetworkPeerListener.Delta/Resync, StreamHopListener.Kick/Resync) are
+// performs no registry I/O and never blocks: peer deltas defer one shared
+// registry read to the listener workers, and all listener inputs are
 // non-blocking and degrade to a resync under pressure. Delivery reaches only
 // explicitly registered listeners; there is no broadcast path.
 //
@@ -66,6 +66,7 @@ type keyEventSubscriber struct {
 	nextListenerId int64
 	peerListeners  map[server.Id]map[int64]*model.NetworkPeerListener
 	hopListeners   map[server.Id]map[int64]*model.StreamHopListener
+	newPeerDelta   func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 
 	resyncLock   sync.Mutex
 	resyncCancel context.CancelFunc
@@ -79,6 +80,7 @@ func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettin
 		settings:      settings,
 		peerListeners: map[server.Id]map[int64]*model.NetworkPeerListener{},
 		hopListeners:  map[server.Id]map[int64]*model.StreamHopListener{},
+		newPeerDelta:  model.NewNetworkPeerDelta,
 	}
 	go server.HandleError(s.run)
 	return s
@@ -221,8 +223,15 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 					listeners = append(listeners, listener)
 				}
 			}()
+			if len(listeners) == 0 {
+				return
+			}
+			// Construction is lazy: dispatch remains nonblocking, while the
+			// first listener worker performs one metadata/version read shared
+			// by every resident listener in this process.
+			delta := self.newPeerDelta(self.ctx, networkId, clientId, event)
 			for _, listener := range listeners {
-				listener.Delta(clientId, event)
+				listener.ApplyDelta(delta)
 				keyEventsDispatchedPeers.Inc()
 			}
 		}

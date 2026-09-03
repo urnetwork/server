@@ -253,6 +253,18 @@ func diagnoseRedisConnectionSpike(evidence string) redisConnectionDiagnosis {
 		}
 		return action + " At least one trip-time control is already unhealthy; treat this as active Redis pressure and execute the compatible workload-distribution repair instead of waiting only for idle-pool contraction."
 	}
+	clientTotal, clientTotalKnown := redisConnectionEvidenceInt(lowerEvidence, "client_list_total")
+	hgetClients, hgetClientsKnown := redisConnectionEvidenceInt(lowerEvidence, "client_cmd_hget_count")
+	hgetRate, hgetRateKnown := redisConnectionEvidenceFloat(lowerEvidence, "hget_calls_per_second")
+	if clientTotalKnown && hgetClientsKnown && hgetRateKnown &&
+		clientTotal > 0 && hgetClients >= 50 && 2*hgetClients >= clientTotal && hgetRate >= 50 {
+		return redisConnectionDiagnosis{
+			mechanism: "One network-peer keyspace event is being fanned out to every resident listener in the Connect process, and each listener independently reads the same peer metadata with HGET. That live-delta read amplification both produces the measured HGET command rate and causes lazy Redis cluster clients to retain large per-node connection pools for the peer registry's hot slot.",
+			context:   appendControlSummary(fmt.Sprintf("The trip battery counted %d of %d clients ending in HGET and measured %.3f HGET calls/second. This joint cohort-and-rate fingerprint attributes the connection shape to network-peer live-delta fanout rather than a reconnect storm, the retired reliability marker, or Redis alone.", hgetClients, clientTotal, hgetRate)),
+			action:    appendPressureAction("Deploy the Connect version that constructs one lazy peer delta per subscriber event and shares its pipelined metadata/version read across all resident listeners. Do not kill Redis clients or raise pool floors; old per-node pools should contract through their ordinary idle lifetime after the rollout."),
+			verify:    "On consecutive samples, the HGET command rate and HGET-ended client cohort collapse, the outlier node returns near the fleet connection median, key-event delivery continues, listener resets do not spike, and Redis latency plus pool-timeout signals remain healthy.",
+		}
+	}
 	if strings.Contains(lowerEvidence, "queried_node_owns_reliability_marker=true") &&
 		strings.Contains(lowerEvidence, "cmd=sadd") {
 		return redisConnectionDiagnosis{

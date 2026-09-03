@@ -91,8 +91,11 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 					"done | redis-cli --raw",
 					"INFO clients",
 					"INFO memory",
+					"INFO commandstats",
 					"--latency",
+					"hget_calls_delta",
 					"ss -lnt",
+					"client_cmd_hget_count",
 					"client_output_memory_max_bytes",
 				} {
 					if !strings.Contains(command, fragment) {
@@ -136,6 +139,46 @@ func TestRedisConnectionsSignalAttributesCurrentReliabilityShardCollision(t *tes
 	}
 	if strings.Contains(alert.Action, "restart writers normally") || strings.Contains(alert.Action, "Roll out the marker-free reliability writer") {
 		t.Fatalf("shard collision received legacy or destructive action: %s", alert.Action)
+	}
+}
+
+func TestRedisConnectionsSignalAttributesPeerDeltaReadAmplification(t *testing.T) {
+	source := &syntheticSource{
+		hostFn: func(_ HostSettings, command string) (string, error) {
+			if strings.Contains(command, "CLIENT LIST") {
+				return "reliability_marker_slot=9508 reliability_marker_owner_port=6382 queried_node_owns_reliability_marker=false\n" +
+					"reliability_stats_current_block=29808000 current_reliability_shards_on_node=0 previous_reliability_shards_on_node=0 reliability_shard_count=32 reliability_shard_lookback_blocks=2 reliability_shards_recent_max=1 reliability_shards_recent_max_age_blocks=0\n" +
+					"blocked_clients=0\nused_memory_bytes=1060000000\nmem_clients_normal_bytes=2800000\n" +
+					"latency_avg_ms=0.487\nhget_sample_seconds=2 hget_calls_delta=602 hget_calls_per_second=301.000\n" +
+					"accept_recv_q=0 accept_send_q=65535\n" +
+					"client_list_total=954 client_cmd_hget_count=669 client_output_memory_bytes=0 client_output_memory_max_bytes=0\n" +
+					"375 max_idle_s=95 max_age_s=4132 source=192.0.2.180 flags=N cmd=hget lib=go-redis\n" +
+					"294 max_idle_s=268 max_age_s=5096 source=192.0.2.181 flags=N cmd=hget lib=go-redis", nil
+			}
+			return "6380 100 1000 90 1 281\n6381 100 1000 90 1 280\n6393 100 1000 90 1 954", nil
+		},
+	}
+	alerts, err := NewRedisConnectionsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "clients-spike")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"669 of 954 clients ending in HGET",
+		"301.000 HGET calls/second",
+		"network-peer live-delta fanout",
+		"one lazy peer delta per subscriber event",
+		"Do not kill Redis clients or raise pool floors",
+		"HGET command rate and HGET-ended client cohort collapse",
+		"below their alert bands",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("peer-delta diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(alert.Action, "marker-free reliability writer") {
+		t.Fatalf("peer-delta amplification received reliability-marker action: %s", alert.Action)
 	}
 }
 

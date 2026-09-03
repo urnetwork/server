@@ -1,13 +1,116 @@
+// Network peer key-event tests cover registry lifecycle and deterministic
+// listener fanout behavior.
 package model
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 )
+
+// TestNetworkPeerDeltaLoadsOnceAcrossListeners reproduces the live-delta
+// fanout that multiplied one peer metadata read by every resident listener.
+// All listeners contend on the same blocked loader, then must receive the
+// update from exactly one completed load.
+func TestNetworkPeerDeltaLoadsOnceAcrossListeners(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const listenerCount = 16
+	networkId := server.NewId()
+	clientId := server.NewId()
+	peer := &NetworkPeer{
+		ClientId:   clientId,
+		DeviceName: "shared peer",
+	}
+	eventChans := make([]chan *NetworkPeerEvent, listenerCount)
+	listeners := make([]*NetworkPeerListener, listenerCount)
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	var releaseOnce sync.Once
+	var loadCount atomic.Int64
+	defer func() {
+		releaseOnce.Do(func() {
+			close(releaseLoad)
+		})
+		for _, listener := range listeners {
+			listener.CloseAndWait()
+		}
+	}()
+
+	for i := range listenerCount {
+		eventChans[i] = make(chan *NetworkPeerEvent, 4)
+		listeners[i] = NewNetworkPeerListener(
+			ctx,
+			networkId,
+			func(event *NetworkPeerEvent) {
+				eventChans[i] <- event
+			},
+			10*time.Minute,
+			0,
+		)
+		listeners[i].ApplySnapshot(PrepareNetworkPeerSnapshot(41, nil))
+	}
+	for i := range listenerCount {
+		select {
+		case event := <-eventChans[i]:
+			if event.NetworkPeerEventType != NetworkPeerEventTypeReset {
+				t.Fatalf("listener %d initial event = %d; want reset", i, event.NetworkPeerEventType)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("listener %d did not apply its initial snapshot", i)
+		}
+	}
+
+	delta := newNetworkPeerDelta(clientId, "set", func() networkPeerDeltaValue {
+		if loadCount.Add(1) == 1 {
+			close(loadStarted)
+		}
+		<-releaseLoad
+		return networkPeerDeltaValue{
+			peer:       peer,
+			eventId:    42,
+			hasEventId: true,
+		}
+	})
+	for _, listener := range listeners {
+		listener.ApplyDelta(delta)
+	}
+
+	select {
+	case <-loadStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("shared delta loader did not start")
+	}
+	releaseOnce.Do(func() {
+		close(releaseLoad)
+	})
+
+	for i := range listenerCount {
+		select {
+		case event := <-eventChans[i]:
+			if event.NetworkPeerEventType != NetworkPeerEventTypeUpdated {
+				t.Fatalf("listener %d event = %d; want updated", i, event.NetworkPeerEventType)
+			}
+			if event.EventId != 42 {
+				t.Fatalf("listener %d event id = %d; want 42", i, event.EventId)
+			}
+			if len(event.Peers) != 1 || event.Peers[0] != peer {
+				t.Fatalf("listener %d did not receive the shared peer: %+v", i, event.Peers)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("listener %d did not apply the shared delta", i)
+		}
+	}
+	if got := loadCount.Load(); got != 1 {
+		t.Fatalf("shared delta loader ran %d times; want 1", got)
+	}
+}
 
 // TestNetworkPeerMemberKeys asserts the PEERSSTREAMS2 per-member key
 // lifecycle alongside the registry writers: add writes the key with the
