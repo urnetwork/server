@@ -6786,4 +6786,54 @@ var migrations = []any{
 			PRIMARY KEY (epoch)
 		)
 	`),
+	// All-time points leaderboard (android/POINTSLEADERBOARD.md). The opt-in is
+	// separate from leaderboard_public, which only controls whether the network
+	// NAME shows; emoji_tag is 1-6 emoji validated by connect/emoji.
+	newSqlMigration(`
+		ALTER TABLE network ADD COLUMN points_leaderboard_public boolean NOT NULL DEFAULT false
+	`),
+	newSqlMigration(`
+		ALTER TABLE network ADD COLUMN emoji_tag text NULL
+	`),
+	// One header row per rebuild; the newest two snapshots are retained so a
+	// cursor minted just before a rebuild still resolves.
+	newSqlMigration(`
+		CREATE TABLE network_points_leaderboard_snapshot (
+			snapshot_id uuid NOT NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+			latest_epoch bigint NOT NULL,
+			total_ranked bigint NOT NULL,
+
+			PRIMARY KEY (snapshot_id)
+		)
+	`),
+	// rank_* is the competition rank (1, 2, 2, 4) shown to users; pos_* is the
+	// row_number of the same ordering, a total order the keyset cursor pages on.
+	newSqlMigration(`
+		CREATE TABLE network_points_leaderboard (
+			snapshot_id uuid NOT NULL,
+			network_id uuid NOT NULL,
+			total_nano_points bigint NOT NULL,
+			blocks_with_points int NOT NULL,
+			streak int NOT NULL,
+			longest_streak int NOT NULL,
+			rank_points bigint NOT NULL,
+			rank_blocks bigint NOT NULL,
+			rank_streak bigint NOT NULL,
+			pos_points bigint NOT NULL,
+			pos_blocks bigint NOT NULL,
+			pos_streak bigint NOT NULL,
+
+			PRIMARY KEY (snapshot_id, network_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_points_leaderboard_pos_points ON network_points_leaderboard (snapshot_id, pos_points)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_points_leaderboard_pos_blocks ON network_points_leaderboard (snapshot_id, pos_blocks)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_points_leaderboard_pos_streak ON network_points_leaderboard (snapshot_id, pos_streak)
+	`),
 }

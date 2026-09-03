@@ -60,6 +60,7 @@ func InitTasks(ctx context.Context) {
 		controller.ScheduleRefreshFreeTransferBalances(clientSession, tx)
 		controller.ScheduleRefreshProTransferBalances(clientSession, tx)
 		controller.ScheduleRefreshReferralTransferBalances(clientSession, tx)
+		controller.ScheduleRebuildPointsLeaderboard(clientSession, tx)
 		work.ScheduleSetMissingConnectionLocations(clientSession, tx)
 		work.ScheduleRemoveLocationLookupResults(clientSession, tx)
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
@@ -228,6 +229,11 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			controller.RefreshFreeTransferBalances,
 			controller.RefreshFreeTransferBalancesPost,
 			"bringyour.com/bringyour/controller.RefreshFreeTransferBalances",
+		),
+		task.NewTaskTargetWithPost(
+			controller.RebuildPointsLeaderboard,
+			controller.RebuildPointsLeaderboardPost,
+			"bringyour.com/bringyour/controller.RebuildPointsLeaderboard",
 		),
 		task.NewTaskTargetWithPost(
 			controller.RefreshProTransferBalances,

@@ -143,6 +143,13 @@ func sendPaymentsWithPlanner(clientSession *session.ClientSession, planner payme
 	// and payments held from earlier plans (e.g. waiting on a valid wallet)
 	SchedulePendingPayments(clientSession)
 
+	// committed plans applied account points: re-rank the points leaderboard
+	if 0 < len(plans) {
+		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+			TriggerRebuildPointsLeaderboardInTx(clientSession, tx)
+		})
+	}
+
 	// The loop can return already-committed plans together with an error from a
 	// later slice. Those durable payments were scheduled above; return the error
 	// so the payout task still retries the remaining frontier.

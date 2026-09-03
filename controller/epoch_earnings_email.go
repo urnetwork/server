@@ -125,6 +125,8 @@ func stMarkEpochFinalized(ctx context.Context, epoch uint64) {
 	if prior != nil && prior.Status == model.StEpochStatusFinalized {
 		return
 	}
+	// a new finalized epoch changes blocks-with-points and streaks
+	TriggerRebuildPointsLeaderboard(ctx)
 	StNotifyEpochEarnings(ctx, epoch)
 }
 

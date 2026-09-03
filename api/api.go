@@ -51,6 +51,8 @@ func Routes() []*router.Route {
 		router.NewRoute("GET", "/stats/providers-overview-last-90", handlers.StatsProvidersOverviewLast90),
 		router.NewRoute("POST", "/stats/provider-last-90", handlers.StatsProviderLast90),
 		router.NewRoute("POST", "/stats/leaderboard", handlers.GetLeaderboard),
+		// all-time points leaderboard: reads a snapshot table (no live aggregate)
+		router.NewRoute("POST", "/stats/points-leaderboard", handlers.GetPointsLeaderboard),
 		router.NewRoute("POST", "/auth/login", handlers.AuthLogin),
 		router.NewRoute("POST", "/auth/wallet-nonce", handlers.AuthWalletNonce),
 		router.NewRoute("POST", "/auth/login-with-password", handlers.AuthLoginWithPassword),
@@ -123,6 +125,8 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkName),
 		router.NewRoute("GET", "/network/ranking", handlers.GetLeaderboardNetworkRanking),
 		router.NewRoute("POST", "/network/ranking-visibility", handlers.SetNetworkLeaderboardPublic),
+		router.NewRoute("POST", "/network/points-ranking-visibility", handlers.SetNetworkPointsLeaderboardPublic),
+		router.NewRoute("POST", "/network/emoji", handlers.SetNetworkEmojiTag),
 
 		// block locations
 		router.NewRoute("POST", "/network/block-location", handlers.NetworkBlockLocation),

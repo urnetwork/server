@@ -360,6 +360,33 @@ func WrapWithInputBodyFormatterRequireClient[T any, R any](
 	)
 }
 
+// WrapWithInputOptionalAuth serves signed-out callers and, when the request
+// carries an Authorization header, authenticates it exactly as RequireAuth
+// would (a bad token is a 401, not a silently signed-out request). The impl
+// checks session.ByJwt for the optional caller identity.
+func WrapWithInputOptionalAuth[T any, R any](
+	impl ImplWithInputFunction[T, R],
+	w http.ResponseWriter,
+	req *http.Request,
+	formatters ...FormatFunction[R],
+) {
+	wrapWithInput(
+		RequestBodyFormatter,
+		func(arg T, session *session.ClientSession) (R, error) {
+			if req.Header.Get("Authorization") != "" {
+				if err := session.Auth(req); err != nil {
+					var empty R
+					return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+				}
+			}
+			return impl(arg, session)
+		},
+		w,
+		req,
+		formatters...,
+	)
+}
+
 func WrapWithInputNoAuth[T any, R any](
 	impl ImplWithInputFunction[T, R],
 	w http.ResponseWriter,

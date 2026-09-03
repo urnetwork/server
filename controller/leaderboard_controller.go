@@ -81,9 +81,42 @@ func SetNetworkLeaderboardRankingPublic(
  */
 
 type GetNetworkRankingResult struct {
-	NetworkRanking model.NetworkRanking    `json:"network_ranking"`
-	Error          *GetNetworkRankingError `json:"error,omitempty"`
+	NetworkRanking NetworkRankingWithPoints `json:"network_ranking"`
+	Error          *GetNetworkRankingError  `json:"error,omitempty"`
 }
+
+// NetworkRankingWithPoints is the data leaderboard ranking plus the network's
+// points leaderboard settings and ranks (android/POINTSLEADERBOARD.md), so
+// every platform's header reads one call. The points ranks are 0 until the
+// network has points and a snapshot exists.
+type NetworkRankingWithPoints struct {
+	model.NetworkRanking
+	PointsLeaderboardPublic bool   `json:"points_leaderboard_public"`
+	EmojiTag                string `json:"emoji_tag,omitempty"`
+	RankPoints              int64  `json:"rank_points"`
+	RankBlocks              int64  `json:"rank_blocks"`
+	RankStreak              int64  `json:"rank_streak"`
+}
+
+func networkRankingWithPoints(session *session.ClientSession, ranking model.NetworkRanking) NetworkRankingWithPoints {
+	ctx := session.Ctx
+	networkId := session.ByJwt.NetworkId
+	settings := model.GetNetworkPointsLeaderboardSettings(ctx, networkId)
+	out := NetworkRankingWithPoints{
+		NetworkRanking:          ranking,
+		PointsLeaderboardPublic: settings.PointsLeaderboardPublic,
+		EmojiTag:                settings.EmojiTag,
+	}
+	if snapshot := model.GetLatestPointsLeaderboardSnapshot(ctx); snapshot != nil {
+		if row := model.GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, networkId); row != nil {
+			out.RankPoints = row.RankPoints
+			out.RankBlocks = row.RankBlocks
+			out.RankStreak = row.RankStreak
+		}
+	}
+	return out
+}
+
 type GetNetworkRankingError struct {
 	Message string `json:"message"`
 }
@@ -140,7 +173,7 @@ func GetNetworkLeaderboardRanking(
 	}
 
 	return &GetNetworkRankingResult{
-		NetworkRanking: rankings[session.ByJwt.NetworkId],
+		NetworkRanking: networkRankingWithPoints(session, rankings[session.ByJwt.NetworkId]),
 	}, nil
 
 }

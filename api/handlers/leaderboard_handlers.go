@@ -18,3 +18,16 @@ func GetLeaderboardNetworkRanking(w http.ResponseWriter, r *http.Request) {
 func SetNetworkLeaderboardPublic(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.SetNetworkLeaderboardRankingPublic, w, r)
 }
+
+// GetPointsLeaderboard is public; a signed-in caller also gets its own row.
+func GetPointsLeaderboard(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputOptionalAuth(controller.GetPointsLeaderboard, w, r)
+}
+
+func SetNetworkPointsLeaderboardPublic(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SetNetworkPointsLeaderboardPublic, w, r)
+}
+
+func SetNetworkEmojiTag(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SetNetworkEmojiTag, w, r)
+}
