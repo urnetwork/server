@@ -249,6 +249,24 @@ type CoinbaseEventDataCheckout struct {
 
 type CoinbaseEventDataMetadata struct {
 	Email string `json:"email"`
+	// set by /pay/data/checkout when the purchase applies to a named network
+	NetworkId      string `json:"network_id"`
+	NetworkName    string `json:"network_name"`
+	ApplyToNetwork string `json:"apply_to_network"`
+}
+
+// coinbaseAppliedNetwork reads the buy-data checkout metadata: the network the
+// purchase applies to, when the charge was created for one. A malformed id is
+// treated as "no network" so the purchase still delivers as a code by email.
+func coinbaseAppliedNetwork(metadata *CoinbaseEventDataMetadata) (redeemNetworkId *server.Id, appliedNetworkName string) {
+	if metadata == nil || metadata.ApplyToNetwork != payDataMetadataApplyYes {
+		return nil, ""
+	}
+	networkId, err := server.ParseId(metadata.NetworkId)
+	if err != nil {
+		return nil, ""
+	}
+	return &networkId, metadata.NetworkName
 }
 
 type CoinbaseEventDataPayment struct {
@@ -287,10 +305,14 @@ func CoinbaseWebhook(
 		skus := coinbaseSkus()
 		if sku, ok := skus[skuName]; ok {
 			purchaseEmail := ""
-			if coinbaseWebhook.Event.Data.Metadata != nil {
-				purchaseEmail = coinbaseWebhook.Event.Data.Metadata.Email
+			var redeemNetworkId *server.Id
+			appliedNetworkName := ""
+			if metadata := coinbaseWebhook.Event.Data.Metadata; metadata != nil {
+				purchaseEmail = metadata.Email
+				redeemNetworkId, appliedNetworkName = coinbaseAppliedNetwork(metadata)
 			}
-			if purchaseEmail == "" {
+			// with a known network the credit lands directly; the email is optional
+			if purchaseEmail == "" && redeemNetworkId == nil {
 				return nil, errors.New("Missing purchase email to send balance code.")
 			}
 
@@ -310,7 +332,7 @@ func CoinbaseWebhook(
 			}
 			netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * paymentUsd)
 
-			err = CreateBalanceCode(
+			err = createBalanceCode(
 				clientSession.Ctx,
 				sku.BalanceByteCount(),
 				model.Pro().DataCodeDuration,
@@ -318,9 +340,11 @@ func CoinbaseWebhook(
 				coinbaseWebhook.Event.Data.Id,
 				string(coinbaseDataJsonBytes),
 				purchaseEmail,
-				// no network: a Coinbase purchase is not tied to a signed-in session, so
-				// the emailed code IS the delivery mechanism
-				nil,
+				// a Coinbase purchase is not tied to a signed-in session: the network is
+				// known only when the buy-data checkout named one (charge metadata),
+				// otherwise the emailed code IS the delivery mechanism
+				redeemNetworkId,
+				appliedNetworkName,
 			)
 			if err != nil {
 				return nil, err
@@ -359,6 +383,34 @@ func CreateBalanceCode(
 	purchaseRecord string,
 	purchaseEmail string,
 	redeemNetworkId *server.Id,
+) error {
+	return createBalanceCode(
+		ctx,
+		balanceByteCount,
+		duration,
+		netRevenue,
+		purchaseEventId,
+		purchaseRecord,
+		purchaseEmail,
+		redeemNetworkId,
+		"",
+	)
+}
+
+// createBalanceCode is CreateBalanceCode plus the "applied" email. When
+// appliedNetworkName is set -- the customer bought the data FOR that network from
+// the buy-data page -- and the code is on that network, the email says the data
+// is already there instead of offering a code to redeem.
+func createBalanceCode(
+	ctx context.Context,
+	balanceByteCount model.ByteCount,
+	duration time.Duration,
+	netRevenue model.NanoCents,
+	purchaseEventId string,
+	purchaseRecord string,
+	purchaseEmail string,
+	redeemNetworkId *server.Id,
+	appliedNetworkName string,
 ) error {
 	// This is a PAID path -- by the time we are here the customer's money has already
 	// moved. So this one does NOT no-op like the grants do.
@@ -408,8 +460,10 @@ func CreateBalanceCode(
 		}
 	}
 
+	// applied: the data is on redeemNetworkId (this call or an earlier attempt)
+	applied := false
 	if redeemNetworkId != nil {
-		_, err := model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+		redeemResult, err := model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
 			Secret:    balanceCode.Secret,
 			NetworkId: *redeemNetworkId,
 		}, ctx)
@@ -426,7 +480,16 @@ func CreateBalanceCode(
 				"[sub]balance code %s redeem into network %s: %s\n",
 				balanceCode.BalanceCodeId, *redeemNetworkId, err,
 			)
+		} else if redeemResult != nil && redeemResult.Error != nil {
+			// "already redeemed" IS the retry: the data is already where it belongs.
+			// Anything else (expired, voided by a refund) means it is not.
+			applied = strings.Contains(strings.ToLower(redeemResult.Error.Message), "already redeemed")
+			glog.Infof(
+				"[sub]balance code %s redeem into network %s: %s\n",
+				balanceCode.BalanceCodeId, *redeemNetworkId, redeemResult.Error.Message,
+			)
 		} else {
+			applied = true
 			glog.Infof(
 				"[sub]balance code %s redeemed into network %s (%s)\n",
 				balanceCode.BalanceCodeId, *redeemNetworkId,
@@ -443,6 +506,19 @@ func CreateBalanceCode(
 	}
 
 	awsMessageSender := GetAWSMessageSender()
+
+	if applied && appliedNetworkName != "" {
+		// bought FOR this network from the buy-data page, and the data is there:
+		// say so rather than offer a code that is already spent
+		return awsMessageSender.SendAccountMessageTemplate(
+			balanceCode.PurchaseEmail,
+			&SubscriptionDataAppliedTemplate{
+				Secret:           balanceCode.Secret,
+				BalanceByteCount: balanceCode.BalanceByteCount,
+				NetworkName:      appliedNetworkName,
+			},
+		)
+	}
 
 	return awsMessageSender.SendAccountMessageTemplate(
 		balanceCode.PurchaseEmail,

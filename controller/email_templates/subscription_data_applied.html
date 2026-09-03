@@ -1,0 +1,41 @@
+{{define "title"}}Your data is on {{.NetworkName}}{{end}}
+{{define "preheader"}}{{.Balance}} has been added to {{.NetworkName}}. Nothing to redeem.{{end}}
+{{define "eyebrow"}}Data pack{{end}}
+{{define "accent"}}#87fb67{{end}}
+{{define "headline"}}{{.Balance}} added to {{.NetworkName}}{{end}}
+{{define "why"}}You bought a URnetwork data pack and asked for it to go straight to the network &ldquo;{{.NetworkName}}&rdquo;.{{end}}
+{{define "content"}}
+<p style="margin:0 0 16px 0;font-size:16px;line-height:24px;color:#e6e6e6;">
+  The data is already applied. There is nothing to redeem: open any URnetwork app on the
+  &ldquo;{{.NetworkName}}&rdquo; network and the {{.Balance}} is in the balance.
+</p>
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px 0;border-collapse:collapse;">
+  <tr>
+    <td style="padding:4px 12px 4px 0;font-size:14px;line-height:22px;color:#9a9a9a;">Amount</td>
+    <td style="padding:4px 0;font-size:14px;line-height:22px;color:#ffffff;font-weight:600;">{{.Balance}}</td>
+  </tr>
+  <tr>
+    <td style="padding:4px 12px 4px 0;font-size:14px;line-height:22px;color:#9a9a9a;">Network</td>
+    <td style="padding:4px 0;font-size:14px;line-height:22px;color:#ffffff;font-weight:600;">{{.NetworkName}}</td>
+  </tr>
+  <tr>
+    <td style="padding:4px 12px 4px 0;font-size:14px;line-height:22px;color:#9a9a9a;">Valid for</td>
+    <td style="padding:4px 0;font-size:14px;line-height:22px;color:#ffffff;">One year from today</td>
+  </tr>
+  <tr>
+    <td style="padding:4px 12px 4px 0;font-size:14px;line-height:22px;color:#9a9a9a;">Includes</td>
+    <td style="padding:4px 0;font-size:14px;line-height:22px;color:#ffffff;">Data only. It does not start or change a Pro membership.</td>
+  </tr>
+</table>
+<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin:0 0 16px 0;border-collapse:separate;">
+  <tr>
+    <td style="padding:14px 16px;border:1px solid #2a2a2a;border-radius:10px;background:#101010;">
+      <div style="font-size:12px;line-height:18px;color:#9a9a9a;text-transform:uppercase;letter-spacing:0.08em;">Code &middot; already applied</div>
+      <div style="font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:18px;line-height:28px;color:#8a8a8a;text-decoration:line-through;letter-spacing:0.06em;">{{.Secret}}</div>
+    </td>
+  </tr>
+</table>
+<p style="margin:0;font-size:13px;line-height:20px;color:#9a9a9a;">
+  The code is shown for your records only. It has already been applied to &ldquo;{{.NetworkName}}&rdquo; and cannot be redeemed again.
+</p>
+{{end}}

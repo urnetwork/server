@@ -134,6 +134,18 @@ func StripeCreateCheckoutSession(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreateCheckoutSession, w, r)
 }
 
+// PayDataCheckout starts a hosted Stripe or Coinbase checkout for a data pack
+// without a signed-in session (the buy-data page).
+func PayDataCheckout(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.PayDataCheckout, w, r)
+}
+
+// PayDataNetworkLookup answers whether a network with exactly this name exists,
+// for the buy-data page.
+func PayDataNetworkLookup(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.PayDataNetworkLookup, w, r)
+}
+
 func StripeCreateCustomerPortal(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreateCustomerPortal, w, r)
 }

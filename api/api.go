@@ -144,6 +144,8 @@ func Routes() []*router.Route {
 		router.NewRoute("POST", "/stripe/payment-intent", handlers.CreateStripePaymentIntent),
 		router.NewRoute("POST", "/stripe/customer-portal", handlers.StripeCreateCustomerPortal),
 		router.NewRoute("POST", "/stripe/create-checkout-session", handlers.StripeCreateCheckoutSession),
+		router.NewRoute("POST", "/pay/data/checkout", handlers.PayDataCheckout),
+		router.NewRoute("POST", "/pay/data/network-lookup", handlers.PayDataNetworkLookup),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),

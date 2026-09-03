@@ -133,6 +133,29 @@ func (self *SubscriptionTransferBalanceCodeTemplate) Balance() string {
 	return model.ByteCountHumanReadable(self.BalanceByteCount)
 }
 
+// SubscriptionDataAppliedTemplate is the buy-data email when the purchase was made
+// FOR a named network and the data has already been applied there: no code to
+// redeem, just what landed where. The code is included for the customer's records.
+type SubscriptionDataAppliedTemplate struct {
+	Secret           string
+	BalanceByteCount model.ByteCount
+	NetworkName      string
+	BaseTemplate
+}
+
+func (self *SubscriptionDataAppliedTemplate) Name() string {
+	return "subscription_data_applied"
+}
+
+func (self *SubscriptionDataAppliedTemplate) Funcs(funcs texttemplate.FuncMap) {
+	self.BaseTemplate.Funcs(funcs)
+	funcs["Balance"] = self.Balance
+}
+
+func (self *SubscriptionDataAppliedTemplate) Balance() string {
+	return model.ByteCountHumanReadable(self.BalanceByteCount)
+}
+
 // X402ReceiptTemplate is the receipt for a purchase an agent paid for inline over
 // x402. Sent only when the caller supplied an email -- see x402_controller.go.
 type X402ReceiptTemplate struct {

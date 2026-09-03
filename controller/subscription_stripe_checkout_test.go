@@ -334,6 +334,7 @@ func TestStripeCheckoutFulfillsEveryLineAndQuantity(t *testing.T) {
 			lineItems,
 			"", // no email: the known network is the delivery mechanism
 			&networkId,
+			"",
 		)
 		connect.AssertEqual(t, err, nil)
 
@@ -356,6 +357,7 @@ func TestStripeCheckoutFulfillsEveryLineAndQuantity(t *testing.T) {
 			lineItems,
 			"",
 			&networkId,
+			"",
 		)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 2)

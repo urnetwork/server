@@ -50,6 +50,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 		}, true},
 		{&MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "5.00"}, true},
 		{&SubscriptionTransferBalanceCodeTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 10 * model.Tib}, false},
+		{&SubscriptionDataAppliedTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 1 * model.Tib, NetworkName: "brien"}, false},
 		{&X402ReceiptTemplate{
 			Description:      "1 TiB data pack & more",
 			PriceUsd:         5,

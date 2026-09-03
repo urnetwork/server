@@ -1,0 +1,10 @@
+{{define "headline"}}{{.Balance}} added to {{.NetworkName}}{{end}}
+{{define "why"}}You bought a URnetwork data pack and asked for it to go straight to the network "{{.NetworkName}}".{{end}}
+{{define "content"}}The data is already applied. There is nothing to redeem: open any URnetwork app on the "{{.NetworkName}}" network and the {{.Balance}} is in the balance.
+
+- Amount: {{.Balance}}
+- Network: {{.NetworkName}}
+- Valid for one year from today.
+- This adds data only. It does not start or change a Pro membership.
+
+For your records, the code behind this purchase was {{.Secret}}. It has already been applied to "{{.NetworkName}}" and cannot be redeemed again.{{end}}

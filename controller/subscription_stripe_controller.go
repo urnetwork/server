@@ -114,6 +114,24 @@ type StripeEventCheckoutCompleteObject struct {
 	PaymentStatus     string                                `json:"payment_status"`
 	ClientReferenceId string                                `json:"client_reference_id"`
 	Subscription      string                                `json:"subscription"`
+	// set by /pay/data/checkout (apply_to_network, network_id, network_name, item_id)
+	Metadata map[string]string `json:"metadata"`
+}
+
+// stripeAppliedNetworkName is the network a buy-data checkout was made FOR, from
+// the session metadata; empty for every other checkout. The network id itself
+// still comes from client_reference_id, which is what the fulfilment uses.
+func stripeAppliedNetworkName(checkoutComplete *StripeEventCheckoutCompleteObject) string {
+	if checkoutComplete.Metadata == nil {
+		return ""
+	}
+	if checkoutComplete.Metadata[payDataMetadataApplyToNetwork] != payDataMetadataApplyYes {
+		return ""
+	}
+	if checkoutComplete.ClientReferenceId == "" {
+		return ""
+	}
+	return checkoutComplete.Metadata[payDataMetadataNetworkName]
 }
 
 type StripeEventInvoiceObject struct {
@@ -383,12 +401,20 @@ func stripeHandleCheckoutSessionCompleted(
 		return nil, errors.New("missing purchase email to send balance code")
 	}
 
+	// a buy-data checkout made FOR a network: the credit lands there and the
+	// email says so, instead of offering a code
+	appliedNetworkName := ""
+	if redeemNetworkId != nil {
+		appliedNetworkName = stripeAppliedNetworkName(checkoutComplete)
+	}
+
 	if err := stripeFulfillCheckoutLineItems(
 		clientSession.Ctx,
 		stripeSessionId,
 		lineItems.Data,
 		purchaseEmail,
 		redeemNetworkId,
+		appliedNetworkName,
 	); err != nil {
 		return nil, err
 	}
@@ -431,6 +457,7 @@ func stripeFulfillCheckoutLineItems(
 	lineItems []*StripeLineItem,
 	purchaseEmail string,
 	redeemNetworkId *server.Id,
+	appliedNetworkName string,
 ) error {
 	skus := stripeSkusFunc()
 	for lineIndex, lineItem := range lineItems {
@@ -467,7 +494,7 @@ func stripeFulfillCheckoutLineItems(
 
 				glog.Infof("[sub]create balance code: %s %s\n", purchaseEmail, string(stripeItemJsonBytes))
 
-				err = CreateBalanceCode(
+				err = createBalanceCode(
 					ctx,
 					quantity*sku.BalanceByteCount(),
 					model.Pro().DataCodeDuration,
@@ -476,6 +503,7 @@ func stripeFulfillCheckoutLineItems(
 					string(stripeItemJsonBytes),
 					purchaseEmail,
 					redeemNetworkId,
+					appliedNetworkName,
 				)
 				if err != nil {
 					return err
@@ -1586,6 +1614,38 @@ func stripeCheckoutError(message string) *StripeCreateCheckoutSessionResult {
 	}
 }
 
+// stripeDataPackLineItems builds the one line item of a data pack checkout: priced
+// from pro.yml and attached to the EXISTING Stripe product -- so
+// checkout.session.completed can still look the sku up by product id and know how
+// much data to grant. Shared by the signed-in checkout and /pay/data/checkout so
+// both sell exactly the same thing. A non-empty errMessage is customer-facing.
+func stripeDataPackLineItems(itemId string) (lineItems []*stripe.CheckoutSessionLineItemParams, errMessage string) {
+	byteCount, ok := stripeDataPackByteCount(itemId)
+	if !ok {
+		return nil, "Unknown item."
+	}
+	productId, ok := stripeProductForByteCount(byteCount)
+	if !ok {
+		glog.Errorf("[stripe]no product configured for data pack %s\n", itemId)
+		return nil, "That data pack is not available."
+	}
+	priceUsd, ok := stripeDataPackPriceUsd(byteCount)
+	if !ok || priceUsd <= 0 {
+		glog.Errorf("[stripe]no price in pro.yml for data pack %s\n", itemId)
+		return nil, "That data pack is not available."
+	}
+	return []*stripe.CheckoutSessionLineItemParams{
+		{
+			PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
+				Currency:   stripe.String(string(stripe.CurrencyUSD)),
+				Product:    stripe.String(productId),
+				UnitAmount: stripe.Int64(int64(math.Round(priceUsd * 100))),
+			},
+			Quantity: stripe.Int64(1),
+		},
+	}, ""
+}
+
 // stripeDataPackByteCount maps a data item id to the amount it grants, from pro.yml.
 func stripeDataPackByteCount(itemId string) (model.ByteCount, bool) {
 	switch itemId {
@@ -1783,33 +1843,13 @@ func StripeCreateCheckoutSession(
 		}
 
 	case StripeItemData1Tib, StripeItemData10Tib:
-		byteCount, _ := stripeDataPackByteCount(args.ItemId)
-
-		productId, ok := stripeProductForByteCount(byteCount)
-		if !ok {
-			glog.Errorf("[stripe]no product configured for data pack %s\n", args.ItemId)
-			return stripeCheckoutError("That data pack is not available."), nil
+		lineItems, errMessage := stripeDataPackLineItems(args.ItemId)
+		if errMessage != "" {
+			return stripeCheckoutError(errMessage), nil
 		}
-		priceUsd, ok := stripeDataPackPriceUsd(byteCount)
-		if !ok || priceUsd <= 0 {
-			glog.Errorf("[stripe]no price in pro.yml for data pack %s\n", args.ItemId)
-			return stripeCheckoutError("That data pack is not available."), nil
-		}
-
-		// a one-time payment, priced from pro.yml and attached to the EXISTING Stripe
-		// product -- so checkout.session.completed can still look the sku up by product
-		// id and know how much data to grant
+		// a one-time payment
 		params.Mode = stripe.String(string(stripe.CheckoutSessionModePayment))
-		params.LineItems = []*stripe.CheckoutSessionLineItemParams{
-			{
-				PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
-					Currency:   stripe.String(string(stripe.CurrencyUSD)),
-					Product:    stripe.String(productId),
-					UnitAmount: stripe.Int64(int64(math.Round(priceUsd * 100))),
-				},
-				Quantity: stripe.Int64(1),
-			},
-		}
+		params.LineItems = lineItems
 
 	default:
 		return stripeCheckoutError("Unknown item."), nil

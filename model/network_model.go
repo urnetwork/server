@@ -1406,3 +1406,33 @@ func Testing_CreateNetworkSso(
 	})
 
 }
+
+// FindNetworkByName resolves a network by the name the apps display. The name is
+// normalized the same way network creation normalizes it (ValidateNetworkName:
+// trimmed, lower-cased, spaces to dashes), so the match is case-insensitive and
+// exact -- unlike NetworkCheck, which is a sign-up similarity check and reads a
+// name within a few characters of an existing one as taken.
+//
+// Used by the unauthenticated buy-data checkout to apply purchased data to a
+// named network. Unknown or malformed name: nil id, empty name, nil error.
+func FindNetworkByName(ctx context.Context, networkName string) (networkId *server.Id, name string) {
+	validated, err := ValidateNetworkName(networkName)
+	if err != nil {
+		return nil, ""
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`SELECT network_id, network_name FROM network WHERE network_name = $1`,
+			validated,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				var id server.Id
+				server.Raise(result.Scan(&id, &name))
+				networkId = &id
+			}
+		})
+	})
+	return
+}
