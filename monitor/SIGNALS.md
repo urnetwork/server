@@ -12088,6 +12088,38 @@ addresses ending `e380` and `e381`, but its WANv6 permit rules still named
 historical destinations ending `e382` and `e383`; that identity mismatch allowed
 ICMPv6 while silently dropping new TCP/80 and TCP/443 ingress.
 
+`edge-ipv6-policy-route` is the return-path variant. After a timeout, run an
+exact `ip -6 route get` from the configured public source to a fixed external
+IPv6 address. If the interface owns the address, local SNI/TLS returns 200, and
+the public gateway answers, but the lookup selects a different device or
+source, the host's LB policy rule/table is absent. The reply follows the
+lower-metric management default, so an external SYN can arrive while its
+SYN-ACK leaves asymmetrically. Inspect the exact `ip -6 rule` and `warp<N>`
+table; do not change the public address, router ACL, or application container.
+Deploy Warp `8924493`'s bounded policy-table reconciliation for
+non-transparent LBs and,
+with operator authorization, replace/restart only the affected LB controller
+so it runs that code. Recovery requires route lookup to select the configured
+interface and source, source-bound external egress, and three exact-address
+HTTP/1.1 200 responses.
+
+The 2026-09-03 production reproduction began when all four public links on
+edge-3 and edge-4 lost carrier between 06:46:43Z and 06:47:14Z, then regained
+it between 07:00:41Z and 07:01:37Z. The first probe correctly observed the
+interfaces down. After carrier returned, edge-3 retained both IPv4/IPv6 source
+rules and per-interface defaults and recovered externally. Edge-4 owned both
+exact Vault addresses, both gateways answered sub-millisecond ICMPv6, and both
+local SNI probes returned 200, but it had no IPv4 or IPv6 policy rules and its
+public-source route lookups selected the management interface/source; both
+external TLS probes timed out. Its two non-transparent LB workers remained in
+the same active generation throughout. Warpctl periodically reconciled policy
+routing only for transparent LBs; ordinary non-transparent workers initialized
+it once and then only polled versions. A link/network-manager cycle could
+therefore remove their foreign routes/rules without a repair path. The durable
+software fix, Warp `8924493`, replays the existing idempotent reconciliation
+every 30 seconds inside ordinary LB polling; a restart by itself is only a
+temporary repair.
+
 For any other timeout, capture the pinned SYN, check NDP, policy routing, and
 exact DNAT counters, then change only the first layer where packets disappear.
 A connected request with a non-200 response is instead a TLS/SNI, LB generation,

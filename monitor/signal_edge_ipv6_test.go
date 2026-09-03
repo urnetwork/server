@@ -59,6 +59,7 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 		"drift":   "2001:db8:2::2",
 		"reset":   "2001:db8:3::3",
 		"drop":    "2001:db8:4::4",
+		"policy":  "2001:db8:5::5",
 	}
 	source := &syntheticSource{
 		localFn: func(name string, args ...string) (string, error) {
@@ -73,6 +74,8 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 				return edgeHTTPFixture("000", "7", "", "0.041"), errors.New("exit status 7")
 			case strings.Contains(joined, "["+addresses["drop"]+"]"):
 				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.002"), errors.New("exit status 28")
+			case strings.Contains(joined, "["+addresses["policy"]+"]"):
+				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.003"), errors.New("exit status 28")
 			case strings.Contains(joined, "["+addresses["drift"]+"]"):
 				return "curl: (28) Timeout was reached\n" + edgeHTTPFixture("000", "28", "", "3.001"), errors.New("exit status 28")
 			default:
@@ -88,8 +91,11 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 				}
 				return "operstate=up\nconfigured_present=" + present + "\nunit_active=active\n", nil
 			case strings.Contains(command, edgeIPv6EgressMarker):
-				for _, address := range addresses {
+				for name, address := range addresses {
 					if strings.Contains(command, address) {
+						if name == "policy" {
+							return "self_http_code=200\nself_exitcode=0\nself_probe_status=0\nroute_device=management0\nroute_source=2001:db8:ffff::1\nroute_status=0\nsource_egress_status=28\n", nil
+						}
 						return "self_http_code=200\nself_exitcode=0\nself_probe_status=0\nsource_egress=" + address + "\nsource_egress_status=0\n", nil
 					}
 				}
@@ -107,6 +113,7 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 			{Interface: "eno-drift", Address: addresses["drift"], ProbeHostname: "api-v6.example"},
 			{Interface: "eno-reset", Address: addresses["reset"], ProbeHostname: "api-v6.example"},
 			{Interface: "eno-drop", Address: addresses["drop"], ProbeHostname: "api-v6.example"},
+			{Interface: "eno-policy", Address: addresses["policy"], ProbeHostname: "api-v6.example"},
 		},
 	}}
 
@@ -114,13 +121,14 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 4 {
-		t.Fatalf("alerts = %d, want drift plus its path failure, reset, and upstream drop: %+v", len(alerts), alerts)
+	if len(alerts) != 5 {
+		t.Fatalf("alerts = %d, want drift plus its path failure, reset, upstream drop, and policy-route failure: %+v", len(alerts), alerts)
 	}
 	drift := requireAlertClass(t, alerts, "edge-ipv6-identity-drift")
 	reset := requireAlertClass(t, alerts, "edge-ipv6-reset")
 	drop := requireAlertClass(t, alerts, "edge-ipv6-upstream-drop")
-	for _, alert := range []Alert{drift, reset, drop} {
+	policy := requireAlertClass(t, alerts, "edge-ipv6-policy-route")
+	for _, alert := range []Alert{drift, reset, drop, policy} {
 		if alert.SignalNumber != "18.1" || alert.SignalKey != "edge-ipv6" {
 			t.Fatalf("wrong signal identity: %+v", alert)
 		}
@@ -134,6 +142,11 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 	if !strings.Contains(drop.Markdown(), "upstream default-drop/ACL") {
 		t.Fatalf("timeout lacks upstream ACL diagnosis: %s", drop.Markdown())
 	}
+	if !strings.Contains(policy.Markdown(), "lower-metric management default") ||
+		!strings.Contains(policy.Observed, "route_device=management0") ||
+		!strings.Contains(policy.Action, "Warp 8924493") {
+		t.Fatalf("policy-route failure lacks the return-path diagnosis: %s", policy.Markdown())
+	}
 	for _, alert := range alerts {
 		if strings.Contains(alert.Frame, "eno-healthy") {
 			t.Fatalf("healthy interface alerted: %+v", alert)
@@ -143,7 +156,7 @@ func TestEdgeIPv6SignalSyntheticRootCauseClasses(t *testing.T) {
 
 func TestClassifyEdgeIPv6FailureSyntheticBranches(t *testing.T) {
 	base := edgeIPv6Result{
-		configured: EdgeIPv6InterfaceSettings{Address: "2001:db8::1"},
+		configured: EdgeIPv6InterfaceSettings{Interface: "public0", Address: "2001:db8::1"},
 		http:       map[string]string{"monitor_exitcode": "28", "monitor_time_total": "3.001"},
 		httpOutput: "curl: (28) Timeout was reached",
 		identity:   map[string]string{"configured_present": "1"},
@@ -153,6 +166,9 @@ func TestClassifyEdgeIPv6FailureSyntheticBranches(t *testing.T) {
 			"self_probe_status":    "0",
 			"source_egress":        "2001:db8::1",
 			"source_egress_status": "0",
+			"route_device":         "public0",
+			"route_source":         "2001:db8::1",
+			"route_status":         "0",
 		},
 	}
 	tests := []struct {
@@ -161,6 +177,10 @@ func TestClassifyEdgeIPv6FailureSyntheticBranches(t *testing.T) {
 		want string
 	}{
 		{name: "upstream drop", want: "edge-ipv6-upstream-drop", edit: func(*edgeIPv6Result) {}},
+		{name: "policy route mismatch", want: "edge-ipv6-policy-route", edit: func(result *edgeIPv6Result) {
+			result.egress["route_device"] = "management0"
+			result.egress["route_source"] = "2001:db8:ffff::1"
+		}},
 		{name: "unproven timeout", want: "edge-ipv6-timeout", edit: func(result *edgeIPv6Result) {
 			result.egress["self_http_code"] = "000"
 		}},

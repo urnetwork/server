@@ -149,10 +149,14 @@ configured_address=%s
 probe_hostname=%s
 self_probe=$(curl --ipv6 --http1.1 --silent --show-error --connect-timeout 3 --max-time 5 --noproxy '*' --interface "$configured_address" --resolve "$probe_hostname:443:[$configured_address]" --output /dev/null --write-out 'self_http_code=%%{http_code}\nself_exitcode=%%{exitcode}\n' "https://$probe_hostname/hello" 2>&1)
 self_probe_status=$?
+route_probe=$(ip -6 route get 2606:4700:4700::1111 from "$configured_address" 2>&1)
+route_status=$?
+route_device=$(printf '%%s\n' "$route_probe" | awk '{for (i=1; i<=NF; i++) if ($i == "dev" && i < NF) {print $(i+1); exit}}')
+route_source=$(printf '%%s\n' "$route_probe" | awk '{for (i=1; i<=NF; i++) if ($i == "src" && i < NF) {print $(i+1); exit}}')
 source_egress=$(curl --ipv6 --silent --show-error --connect-timeout 3 --max-time 5 --noproxy '*' --interface "$configured_address" https://api64.ipify.org 2>&1)
 source_egress_status=$?
 source_egress=$(printf '%%s' "$source_egress" | tr -d '\r\n')
-printf '%%s\nself_probe_status=%%s\nsource_egress=%%s\nsource_egress_status=%%s\n' "$self_probe" "$self_probe_status" "$source_egress" "$source_egress_status"`,
+printf '%%s\nself_probe_status=%%s\nroute_device=%%s\nroute_source=%%s\nroute_status=%%s\nsource_egress=%%s\nsource_egress_status=%%s\n' "$self_probe" "$self_probe_status" "$route_device" "$route_source" "$route_status" "$source_egress" "$source_egress_status"`,
 		edgeIPv6EgressMarker, address, probeHostname)
 }
 
@@ -188,7 +192,7 @@ func edgeIPv6Findings(result edgeIPv6Result) []finding {
 
 	class, mechanism, action := classifyEdgeIPv6Failure(result)
 	observed := fmt.Sprintf(
-		"address=%s interface=%s http_code=%s curl_exit=%s remote_ip=%s total_seconds=%s operstate=%s configured_present=%s unit_active=%s self_http_code=%s self_exit=%s source_egress=%s source_egress_status=%s",
+		"address=%s interface=%s http_code=%s curl_exit=%s remote_ip=%s total_seconds=%s operstate=%s configured_present=%s unit_active=%s self_http_code=%s self_exit=%s route_device=%s route_source=%s route_status=%s source_egress=%s source_egress_status=%s",
 		result.configured.Address,
 		result.configured.Interface,
 		result.http["monitor_http_code"],
@@ -200,6 +204,9 @@ func edgeIPv6Findings(result edgeIPv6Result) []finding {
 		result.identity["unit_active"],
 		result.egress["self_http_code"],
 		result.egress["self_exitcode"],
+		result.egress["route_device"],
+		result.egress["route_source"],
+		result.egress["route_status"],
 		result.egress["source_egress"],
 		result.egress["source_egress_status"],
 	)
@@ -232,8 +239,17 @@ func classifyEdgeIPv6Failure(result edgeIPv6Result) (class, mechanism, action st
 	selfProbeHealthy := result.egress["self_probe_status"] == "0" &&
 		result.egress["self_exitcode"] == "0" &&
 		result.egress["self_http_code"] == "200"
+	policyRouteMismatch := result.egress["route_status"] == "0" &&
+		result.egress["route_device"] != "" && result.egress["route_source"] != "" &&
+		(result.egress["route_device"] != result.configured.Interface ||
+			result.egress["route_source"] != result.configured.Address)
 
 	if exitCode == "28" || strings.Contains(strings.ToLower(result.httpOutput), "timed out") {
+		if policyRouteMismatch && selfProbeHealthy && result.identity["configured_present"] == "1" {
+			return "edge-ipv6-policy-route",
+				"The host owns and locally serves the configured address, but a source-specific IPv6 lookup selects a different device or source. A carrier or network-manager cycle removed the LB policy routes/rules while its controller remained active, so replies leave through the lower-metric management default and external TLS times out.",
+				"Inspect the exact IPv6 rule and LB route table. If the running Warpctl predates Warp 8924493, deploy that bounded non-transparent LB policy reconciliation and restart only the affected LB controller units with operator authorization; otherwise inspect its route-command errors. Require the route lookup to select this interface and source before repeating three external probes."
+		}
 		if sourceMatches && selfProbeHealthy && result.identity["configured_present"] == "1" {
 			return "edge-ipv6-upstream-drop",
 				"The host owns the configured address, serves HTTP 200 when the same SNI request is pinned locally to it, and returns exact-source IPv6 egress through it, but an external connection silently times out. That confines the fault to external ingress; unchanged host DNAT counters identify the upstream default-drop/ACL signature. A stale permit destination can still allow ICMPv6 and established return traffic.",
