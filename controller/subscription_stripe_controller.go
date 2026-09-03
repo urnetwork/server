@@ -1763,7 +1763,7 @@ func stripeCheckoutApplyUiMode(
 // and the yearly Stripe payment link it opens, the Play Console yearly offer,
 // and the App Store yearly introductory offer (which only allows fixed
 // durations, so iOS shows the nearest one StoreKit reports).
-const StripeSubscriptionTrialDays = 15
+const StripeSubscriptionTrialDays = 14
 
 func StripeCreateCheckoutSession(
 	args *StripeCreateCheckoutSessionArgs,
