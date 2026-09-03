@@ -6,6 +6,8 @@ package model
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -116,34 +118,125 @@ func clockTransferPost(ctx context.Context, byteCount ByteCount) server.PostFunc
 	}
 }
 
-// clockBackfillCandidate recomputes the retained block-9 aggregate. It does
-// not try to decide whether individual contracts were already counted; a
-// scalar Redis value contains no such membership information.
-func clockBackfillCandidate(ctx context.Context) ByteCount {
-	var candidate ByteCount
+type clockDailyRollup struct {
+	day       time.Time
+	byteCount ByteCount
+	rowCount  int
+}
+
+// clockContiguousRollupPrefix accepts only an unbroken prefix of completed
+// UTC-day rollups. If even one day is absent, the raw tail starts at that day;
+// later rollups are deliberately ignored so a missing day can never become a
+// silent hole in the lifetime clock.
+func clockContiguousRollupPrefix(
+	since time.Time,
+	today time.Time,
+	rollups []clockDailyRollup,
+) (byteCount ByteCount, tailStart time.Time) {
+	since = since.UTC()
+	today = startOfUtcDay(today)
+	if !since.Equal(startOfUtcDay(since)) || !since.Before(today) {
+		return 0, since
+	}
+
+	expectedDay := since
+	for _, rollup := range rollups {
+		day := startOfUtcDay(rollup.day)
+		if day.Before(expectedDay) {
+			continue
+		}
+		if !day.Equal(expectedDay) || !day.Before(today) || rollup.rowCount != 1 || rollup.byteCount < 0 {
+			break
+		}
+		if ByteCount(math.MaxInt64)-byteCount < rollup.byteCount {
+			server.Raise(fmt.Errorf("invalid clock rollup total"))
+		}
+		byteCount += rollup.byteCount
+		expectedDay = expectedDay.Add(24 * time.Hour)
+	}
+	return byteCount, expectedDay
+}
+
+func clockBackfillRollupPrefix(ctx context.Context, since time.Time, now time.Time) (ByteCount, time.Time) {
+	today := startOfUtcDay(now)
+	if !since.UTC().Equal(startOfUtcDay(since)) || !since.Before(today) {
+		return 0, since
+	}
+
+	rollups := []clockDailyRollup{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-                SELECT COALESCE(SUM(contract_close.used_transfer_byte_count), 0)
-                FROM transfer_contract
-                INNER JOIN contract_close ON
-                    contract_close.contract_id = transfer_contract.contract_id AND
-                    contract_close.party = $1
-                WHERE
-                    transfer_contract.outcome IS NOT NULL AND
-                    $2 <= transfer_contract.close_time
-            `,
-			ContractPartyDestination,
-			ClockSinceTime,
+				SELECT
+					date_trunc('day', event_time) AS day,
+					SUM(transfer_byte_count)::bigint AS byte_count,
+					COUNT(*)::int AS row_count
+				FROM audit_contract_event
+				WHERE
+					event_details = $1 AND
+					$2 <= event_time AND
+					event_time < $3
+				GROUP BY 1
+				ORDER BY 1
+			`,
+			AuditEventDetailsTransferRollup,
+			since,
+			today,
 		)
 		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&candidate))
+			for result.Next() {
+				rollup := clockDailyRollup{}
+				server.Raise(result.Scan(&rollup.day, &rollup.byteCount, &rollup.rowCount))
+				rollups = append(rollups, rollup)
 			}
 		})
 	})
-	return candidate
+	return clockContiguousRollupPrefix(since, today, rollups)
+}
+
+// clockBackfillTail recomputes only the portion not already represented by a
+// contiguous daily rollup. The marker makes the bounded tail distinguishable
+// from the former full-retained-history query in pg_stat_activity.
+func clockBackfillTail(ctx context.Context, since time.Time) ByteCount {
+	var byteCount ByteCount
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				/* clock_unrolled_tail */
+				SELECT COALESCE(SUM(contract_close.used_transfer_byte_count), 0)
+				FROM transfer_contract
+				INNER JOIN contract_close ON
+					contract_close.contract_id = transfer_contract.contract_id AND
+					contract_close.party = $1
+				WHERE
+					transfer_contract.outcome IS NOT NULL AND
+					$2 <= transfer_contract.close_time
+			`,
+			ContractPartyDestination,
+			since,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&byteCount))
+			}
+		})
+	})
+	return byteCount
+}
+
+// clockBackfillCandidate recomputes the block-9 aggregate from the durable
+// daily-rollup prefix plus the still-unrolled raw tail. It does not try to
+// decide whether individual contracts were already counted; a scalar Redis
+// value contains no such membership information.
+func clockBackfillCandidate(ctx context.Context) ByteCount {
+	prefixByteCount, tailStart := clockBackfillRollupPrefix(ctx, ClockSinceTime, server.NowUtc())
+	tailByteCount := clockBackfillTail(ctx, tailStart)
+	if tailByteCount < 0 || ByteCount(math.MaxInt64)-prefixByteCount < tailByteCount {
+		server.Raise(fmt.Errorf("invalid clock backfill total"))
+	}
+	return prefixByteCount + tailByteCount
 }
 
 func reconcileClockCandidate(ctx context.Context, candidate ByteCount) ByteCount {
@@ -169,17 +262,17 @@ func reconcileClockCandidate(ctx context.Context, candidate ByteCount) ByteCount
 // RollupTransferAuditEvents. The Lua max can fill an aggregate gap without
 // overwriting a newer live value.
 //
-// Recomputing after the first reconcile narrows the initialization window by
-// including contracts committed after the first SQL snapshot. PostgreSQL and
-// Redis are not one atomic system, however, so the second pass is still only a
-// best-effort aggregate reconciliation.
+// Live settlement increments that commit during the SQL snapshot already
+// advance Redis; the monotonic reconcile preserves that newer value. Repeating
+// the same aggregate cannot make PostgreSQL and Redis atomic and formerly
+// doubled a multi-billion-row production scan, so one bounded candidate is the
+// intentional work unit.
 //
 // This compares aggregates; it does not establish per-contract membership or
 // repair an ambiguous increment exactly. Completed contract retention
 // eventually removes source rows, so Redis persistence remains the lifetime
 // source after retained history is gone.
 func BackfillClock(ctx context.Context) ByteCount {
-	reconcileClockCandidate(ctx, clockBackfillCandidate(ctx))
 	return reconcileClockCandidate(ctx, clockBackfillCandidate(ctx))
 }
 

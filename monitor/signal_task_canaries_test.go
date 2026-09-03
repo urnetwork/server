@@ -946,6 +946,51 @@ func TestTaskCanariesSignalTreatsNetEscrowDeadlineAsContainment(t *testing.T) {
 	}
 }
 
+func TestTaskCanariesSignalExplainsClockBackfillDeadline(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{
+				"BackfillClock", "1", "0", "1", "3", "-30",
+				"Interrupted: context canceled", "600", "1", "context-canceled=1",
+			}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
+	for _, want := range []string{
+		"BackfillClock reached its configured safety boundary",
+		"2.18 billion contract_close rows",
+		"repeats the same aggregate",
+		"not a scheduler, RunOnce, Redis, or deadline-size failure",
+		"One pending row and one live lease",
+		"contiguous, unique daily-rollup prefix",
+		"first missing or duplicate day",
+		"clock_unrolled_tail",
+		"Keep the ten-minute task boundary",
+		"Do not add a broad multi-billion-row index",
+		"completes below 600 seconds",
+		"SIGNALS.md §1.2 and §5.7",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("clock-backfill diagnosis missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "undersized task-specific MaxTime") {
+		t.Fatalf("clock backfill was rendered as an undersized deadline:\n%s", markdown)
+	}
+}
+
 func TestTaskCanariesSignalExplainsLiteralTaskDeadlineTimeout(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {

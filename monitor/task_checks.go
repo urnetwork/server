@@ -828,12 +828,15 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		reconcileNetEscrowDeadline := task == "ReconcileNetEscrow" &&
 			strings.Contains(lowerError, "context canceled") &&
 			!strings.Contains(lastError, "Drained:")
+		clockBackfillDeadline := task == "BackfillClock" &&
+			strings.Contains(lowerError, "context canceled") &&
+			!strings.Contains(lastError, "Drained:")
 		alertMechanism, alertAction, alertVerify := "", "", ""
 		alertPlaybook := "SIGNALS.md 5.7"
 		alertContext := "Each task function is grouped before reporting; another noisy function cannot consume a global row limit and hide this failure. Parked and fresh-claim counts are independent predicates and can overlap briefly during reschedule handoff; do not add them together."
 		if strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
 			alertContext += fmt.Sprintf(" This literal Timeout is the task evaluator's configured deadline of %ss. Compare the matching eval-error duration; an exact match means the task needs a smaller checkpointed batch or a justified task-specific MaxTime, not a database restart.", maxTimeSeconds)
-		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry && !reconcileNetEscrowDeadline {
+		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry && !reconcileNetEscrowDeadline && !clockBackfillDeadline {
 			alertContext += fmt.Sprintf(" This is a non-drain context cancellation with a configured task deadline of %ss; compare the taskworker eval-error duration with that deadline. An exact match identifies an undersized task-specific MaxTime, not a deploy drain.", maxTimeSeconds)
 		}
 		if mixedCauses {
@@ -868,6 +871,12 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertAction = "Keep the task deadline. Confirm the balance_id lookup index, page-local additive reconciler, and atomic negative clamp on the exact executor. Retain them where present and roll them out only where version or code evidence says they are absent; if present, profile the bounded page walk and storage waits. Do not raise MaxTime or manually kick the fresh retry."
 			alertVerify = "The migration artifact exists, scheduled reconciliations finish below 120s on every generation, aggregate drift converges, and taskworker, API, and Connect emit no new negative counters for a full interval."
 			alertPlaybook = "SIGNALS.md §5.11 and §8.9"
+		} else if clockBackfillDeadline {
+			alertMechanism = "BackfillClock reached its configured safety boundary because the deployed candidate scans the retained block-9 contract history and joins every destination close, then repeats the same aggregate. During the 2026-09-03 incident, PostgreSQL estimated 2.18 billion contract_close rows, planned one leader plus four parallel workers, assigned the full query a cost near 60 million, and recorded a 635-second maximum. This is repeated historical work, not a scheduler, RunOnce, Redis, or deadline-size failure."
+			alertContext += fmt.Sprintf(" The eval error occurred at the configured %ss boundary. One pending row and one live lease confirm RunOnce is collapsing taskworker startups; parallel PostgreSQL workers must not be mistaken for concurrent task claims. The existing transfer-rollup:v1 feed had exactly one row for every completed UTC day from block 9 through its latest eligible day.", maxTimeSeconds)
+			alertAction = "Deploy the Taskworker clock backfill that consumes only a contiguous, unique daily-rollup prefix, falls back to raw rows at the first missing or duplicate day, and scans the unrolled tail once with the `clock_unrolled_tail` marker. Keep the ten-minute task boundary. Do not add a broad multi-billion-row index, restart PostgreSQL or Redis, pull the fresh retry forward, or enlarge MaxTime."
+			alertVerify = "Every active Taskworker contains the rollup-prefix implementation; pg_stat_activity shows no new unmarked full-retained-history clock aggregate; the marked raw tail begins at the first unrolled UTC day; BackfillClock completes below 600 seconds and clears this row's error; and the public clock remains monotonic while synthetic gap and duplicate-day cases fall back without skipping bytes."
+			alertPlaybook = "SIGNALS.md §1.2 and §5.7"
 		} else if task == "UpdateReliabilities" &&
 			strings.Contains(lowerError, "failed to deallocate cached statement(s): conn closed") {
 			alertMechanism = "A full reliability running-window anchor exhausted the task's configured deadline. pgx surfaced the interrupted connection while deallocating cached statements, after PostgreSQL canceled the work. Without per-lookback commits, the transaction rollback discards every completed lookback and the retry starts the same full anchor sequence again."

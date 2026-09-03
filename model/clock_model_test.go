@@ -147,3 +147,56 @@ func TestBackfillClockUsesBlockNineAggregateAndNeverLowersCounter(t *testing.T) 
 		}
 	})
 }
+
+func TestClockContiguousRollupPrefixStopsAtFirstMissingDay(t *testing.T) {
+	since := time.Date(2026, time.August, 23, 0, 0, 0, 0, time.UTC)
+	today := since.Add(5 * 24 * time.Hour)
+	rollups := []clockDailyRollup{
+		{day: since, byteCount: 10, rowCount: 1},
+		{day: since.Add(24 * time.Hour), byteCount: 20, rowCount: 1},
+		// Day 2 is deliberately absent. A later row must not hide the gap.
+		{day: since.Add(3 * 24 * time.Hour), byteCount: 40, rowCount: 1},
+	}
+
+	byteCount, tailStart := clockContiguousRollupPrefix(since, today, rollups)
+	if byteCount != 30 {
+		t.Fatalf("prefix byte count = %d, want 30", byteCount)
+	}
+	if want := since.Add(2 * 24 * time.Hour); !tailStart.Equal(want) {
+		t.Fatalf("tail start = %s, want %s", tailStart, want)
+	}
+}
+
+func TestClockContiguousRollupPrefixBoundsRawTailToToday(t *testing.T) {
+	since := time.Date(2026, time.August, 23, 0, 0, 0, 0, time.UTC)
+	today := since.Add(3 * 24 * time.Hour)
+	rollups := []clockDailyRollup{
+		{day: since, byteCount: 10, rowCount: 1},
+		{day: since.Add(24 * time.Hour), byteCount: 20, rowCount: 1},
+		{day: since.Add(2 * 24 * time.Hour), byteCount: 30, rowCount: 1},
+	}
+
+	byteCount, tailStart := clockContiguousRollupPrefix(since, today, rollups)
+	if byteCount != 60 {
+		t.Fatalf("prefix byte count = %d, want 60", byteCount)
+	}
+	if !tailStart.Equal(today) {
+		t.Fatalf("tail start = %s, want today %s", tailStart, today)
+	}
+}
+
+func TestClockContiguousRollupPrefixRejectsDuplicateDay(t *testing.T) {
+	since := time.Date(2026, time.August, 23, 0, 0, 0, 0, time.UTC)
+	rollups := []clockDailyRollup{
+		{day: since, byteCount: 10, rowCount: 1},
+		{day: since.Add(24 * time.Hour), byteCount: 40, rowCount: 2},
+	}
+
+	byteCount, tailStart := clockContiguousRollupPrefix(since, since.Add(3*24*time.Hour), rollups)
+	if byteCount != 10 {
+		t.Fatalf("prefix byte count = %d, want only the unique day", byteCount)
+	}
+	if want := since.Add(24 * time.Hour); !tailStart.Equal(want) {
+		t.Fatalf("tail start = %s, want duplicate day %s", tailStart, want)
+	}
+}

@@ -265,6 +265,25 @@ FROM failures GROUP BY task;
   correlation only. Their deterministic failure cases require the rendered
   Markdown to omit the synthetic identifiers. Historical opaque identifiers in
   this catalog are represented as `<redacted-id>`.
+- The 2026-09-03 `BackfillClock` failure is a distinct exact-deadline
+  workload bug, not evidence that its ten-minute `MaxTime` is too small. The
+  task reached 600.00s, rescheduled, and repeated. A direct read-only snapshot
+  found one pending row and one live lease; the five matching PostgreSQL
+  backends were one query leader plus its four parallel workers, so RunOnce
+  was working. The old candidate scanned an estimated 2.18 billion
+  `contract_close` rows, filtered the destination half, probed
+  `transfer_contract` by primary key, and then ran the same full retained-
+  history aggregate a second time. Its plan cost was about 60 million;
+  `pg_stat_statements` had recorded a 635s maximum. Meanwhile the existing
+  `transfer-rollup:v1` feed contained exactly one provenance-marked row for
+  every complete UTC day from block 9 through 2026-09-01, and its bounded
+  three-day rollup tasks had completed in at most 462s. Current source sums
+  only the contiguous, unique completed-day prefix and scans the raw tail once
+  from the first missing or duplicate day, marked `clock_unrolled_tail` for
+  direct attribution. Redis's monotonic max preserves successful live
+  increments that race the snapshot. Deploy that Taskworker path, retain the
+  600s containment, and require the same pending row to complete; do not add a
+  broad billion-row index, restart PostgreSQL/Redis, or increase the deadline.
 - The 2026-09-01 recurrence supplied the non-Redis discriminator. Completions
   were normal through 19:16Z, fell to one at 19:17Z, and were zero for four
   minutes. At 19:17:47Z, while the legacy maintenance worker was rebuilding
@@ -5011,6 +5030,17 @@ before declaring it stuck. The grouped task alert includes the representative
 row's `sample_max_time_s`; for a non-`Drained:` context cancellation, compare
 that value with the taskworker `eval error` duration before deciding whether
 the task-specific deadline is undersized.
+
+For `BackfillClock`, an exact 600s cancellation has its own discriminator.
+One task row plus one lease and one client-backend leader means RunOnce is
+healthy even though PostgreSQL exposes four additional parallel-worker rows.
+An unmarked active aggregate is the legacy full-retained-history candidate;
+`clock_unrolled_tail` is the bounded replacement. The replacement must first
+consume an unbroken sequence of exactly one `transfer-rollup:v1` row per UTC
+day, stop at the first absent or duplicate day, and then query raw settled
+contracts only from that boundary. Verify the marked tail start and a clean
+task completion below 600s. A larger deadline, duplicate task, service or
+database restart, and a new broad index do not repair the repeated scan.
 
 For `UpdateReliabilities`, duration is only the trigger for the direct phase
 diagnostic from §1.2. A recognized `rolling-*` phase falsifies the old
