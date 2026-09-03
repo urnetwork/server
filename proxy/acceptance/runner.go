@@ -96,6 +96,7 @@ type proxyConfigResult struct {
 	APIBaseURL    string           `json:"api_base_url"`
 	AuthToken     string           `json:"auth_token"`
 	ProxyHost     string           `json:"proxy_host"`
+	Block         string           `json:"block"`
 	InstanceID    string           `json:"instance_id"`
 	WgConfig      *wireGuardConfig `json:"wg_config"`
 }
@@ -533,7 +534,11 @@ func (r *runner) runIteration(ctx context.Context) map[string]error {
 	} else if ctx.Err() != nil {
 		result = errorsForEveryProtocol(ctx.Err())
 	} else {
-		r.progressf("temporary client assigned to proxy host %s", provisioned.ProxyConfigResult.ProxyHost)
+		r.progressf(
+			"temporary client assigned to proxy host %s block %s",
+			provisioned.ProxyConfigResult.ProxyHost,
+			provisioned.ProxyConfigResult.Block,
+		)
 		r.progressf(
 			"temporary client public ports http=%s socks=%s wireguard=%d",
 			urlPort(provisioned.ProxyConfigResult.HTTPProxyURL),

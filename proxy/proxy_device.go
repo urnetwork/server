@@ -65,6 +65,10 @@ type ProxyDeviceManagerSettings struct {
 	CheckProxyDeviceIdleTimeout time.Duration
 	SequenceBufferSize          int
 	DeviceMemoryTargetByteCount model.ByteCount
+	// HoldWindowIdentityRestore keeps a replacement from restoring identities
+	// while its predecessor is still draining. Fresh lazy-open identities are
+	// buffered and become durable when ReleaseWindowIdentityRestore runs.
+	HoldWindowIdentityRestore bool
 
 	// when set, this overrides the default client security policy for all devices
 	// opened by this manager (see ProxyDeviceSettings). Integration tests use it
@@ -103,6 +107,7 @@ type ProxyDeviceManager struct {
 	networkSpaceCloser  func(*sdk.NetworkSpace)
 	ownsNetworkSpace    bool
 	proxyDeviceBuilder  func(server.Id) (*ProxyDevice, error)
+	windowIdentityGate  *windowIdentityRestoreGate
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -147,6 +152,9 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		ownsNetworkSpace: settings.NetworkSpace == nil,
 		proxyDevices:     map[server.Id]*proxyDeviceState{},
 		lockCache:        newProxyLockCache(proxyLockCacheMaxEntries),
+		windowIdentityGate: newWindowIdentityRestoreGate(
+			settings.HoldWindowIdentityRestore,
+		),
 	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
 	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
@@ -154,6 +162,12 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 	}
 	manager.proxyDeviceBuilder = manager.newProxyDevice
 	return manager
+}
+
+// Opens restoration after the old instance's drain-complete handoff. The
+// gate first publishes every fresh snapshot formed by early lazy opens.
+func (self *ProxyDeviceManager) ReleaseWindowIdentityRestore() {
+	self.windowIdentityGate.Release()
 }
 
 // newProxyDeviceManagerNetworkSpace builds the one production NetworkSpace
@@ -310,6 +324,7 @@ func (self *ProxyDeviceManager) newProxyDevice(proxyId server.Id) (*ProxyDevice,
 	settings := DefaultProxyDeviceSettingsWithBufferSize(self.settings.SequenceBufferSize)
 	settings.ClientSecurityPolicyGenerator = self.settings.ClientSecurityPolicyGenerator
 	settings.MemoryTargetByteCount = self.settings.DeviceMemoryTargetByteCount
+	settings.windowIdentityGate = self.windowIdentityGate
 	pd, err := NewProxyDevice(self.ctx, proxyDeviceConfig, networkSpace, settings)
 	if err != nil {
 		return nil, err
@@ -616,6 +631,7 @@ type ProxyDeviceSettings struct {
 	// client ids, orphaning established inner flows (the pre-persistence
 	// behavior).
 	DisableWindowIdentityPersistence bool
+	windowIdentityGate               *windowIdentityRestoreGate
 }
 
 type ProxyDevice struct {
@@ -812,7 +828,11 @@ func newProxyDeviceLocalSettings(
 	// restart) reuses them against the same providers, keeping established
 	// inner flows resumable (PROXYDRAIN1.md §3.5)
 	if !proxyDeviceSettings.DisableWindowIdentityPersistence {
-		deviceLocalSettings.MultiClientIdentityStore = newWindowIdentityStore(ctx, proxyDeviceConfig.ProxyId)
+		deviceLocalSettings.MultiClientIdentityStore = newWindowIdentityStore(
+			ctx,
+			proxyDeviceConfig.ProxyId,
+			proxyDeviceSettings.windowIdentityGate,
+		)
 	}
 	// hosted devices must never route traffic locally or provide: local egress
 	// would leave the proxy host's real interface (datacenter LAN, loopback,

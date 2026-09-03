@@ -3,28 +3,29 @@ package proxy
 // The two-container deploy overlap (REVIEW2-UPDATE1 §4.4, FIXPLAN1 decision
 // 3). During a deploy, instance A (old) keeps serving through its drain
 // grace with a live device whose window runs a persisted identity. Instance
-// B (new) becomes ready and — before the beacon gate — would immediately
-// pre-warm devices for exactly A's active clients, force-establishing
-// windows with the SAME persisted identities while A still egresses with
-// them: A's live-ctx window eviction could then api-remove the identity B is
-// using. The gated sequence (cli/proxy/main.go) instead has B publish its
-// handoff generation, BLOCK in ApplyWgHandoff until A's drain-end export
-// appears (an empty peer set is the completion marker — the drain-complete
-// beacon), and only then pre-warm; poll-budget expiry is the
-// old-instance-crashed fallback.
+// B (new) becomes ready and — before the beacon gate — both notification
+// warmup and customer traffic can open a DeviceLocal. Restoring A's persisted
+// identities from either path runs one logical Connect client in two processes:
+// A's live-ctx window eviction can then api-remove the identity B is using.
+// The gated sequence (cli/proxy/main.go) lets those early opens form fresh
+// windows, buffers their snapshots, and releases restoration only after A's
+// drain-end export appears (an empty peer set is the completion marker — the
+// drain-complete beacon). Post-drain prewarm can safely restore any unopened
+// device; poll-budget expiry is the old-instance-crashed fallback.
 //
 // This test runs both instances for real over the full harness (not
 // instrumented fakes): A = the harness device manager + wg server (device
 // live, window identity persisted, activity recorded), B = a fresh device
-// manager running main's exact sequence (ApplyWgHandoff, then Prewarm). B's
+// manager running main's exact sequence (ApplyWgHandoff, release identity
+// restoration, then Prewarm). B's
 // wgServer never binds the wg port (A still holds it — the point is A stays
 // live); with an empty export the apply never touches the wg proxy, so a
 // bare wgServer models B's half faithfully. Asserts:
 //
-//  1. while A drains, B sits at the gate: no devices opened, no identities
-//     restored, generation request published
-//  2. A's real drain-end export (ExportWgHandoff) opens the gate; B
-//     pre-warms and REUSES the persisted identity
+//  1. while A drains, B can lazily open a ready device, but does not restore
+//     or publish A's identities; generation request published
+//  2. A's real drain-end export (ExportWgHandoff) opens the gate; B publishes
+//     its fresh identity snapshot and keeps serving with that device
 //  3. fallback: with no export ever arriving, B still pre-warms at
 //     poll-budget expiry, and the expiry is a clean (non-raising) return
 
@@ -35,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -78,6 +80,7 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		// ---- instance B (new): a fresh manager running main's sequence ----
 		pdmSettings := DefaultProxyDeviceManagerSettings()
 		pdmSettings.NetworkSpace = h.networkSpace
+		pdmSettings.HoldWindowIdentityRestore = true
 		freshManager := NewProxyDeviceManager(h.ctx, pdmSettings)
 		defer closeProxyDeviceManager(t, freshManager)
 
@@ -98,13 +101,10 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		}
 
 		// main's exact post-readiness sequence: the handoff outcome first (in
-		// its own error scope), then the pre-warm
+		// its own error scope), then identity release and pre-warm
 		prewarmed := make(chan int, 1)
 		go func() {
-			server.HandleError(func() {
-				wgB.ApplyWgHandoff(bCtx)
-			})
-			prewarmed <- Prewarm(bCtx, freshManager, &bSettings)
+			prewarmed <- wgB.CompleteDeploymentHandoff(bCtx)
 		}()
 
 		// B publishes its generation request at the gate (the real Prepare
@@ -113,14 +113,49 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 			return model.CurrentProxyWgHandoffGeneration(h.ctx, proxyHost, block) != ""
 		})
 
-		// ---- 1. while A drains, B must hold at the gate ----
+		// ---- 1. while A drains, B may accept a lazy open, but it must mint
+		// fresh identities and leave A's durable snapshot untouched. This is
+		// the path notification warmup and a first post-flip request both use. ----
+		pdB, err := freshManager.OpenProxyDevice(h.proxyId)
+		if err != nil {
+			t.Fatalf("open replacement device before drain completion: %v", err)
+		}
+		if !pdB.WaitForReady(h.ctx, 60*time.Second) {
+			t.Fatal("replacement lazy-open device did not become ready")
+		}
+		var bufferedIdentities []*connect.WindowClientIdentity
+		waitFor(t, 30*time.Second, "replacement fresh identity buffered", func() bool {
+			freshManager.windowIdentityGate.stateLock.Lock()
+			defer freshManager.windowIdentityGate.stateLock.Unlock()
+			for _, pendingSnapshot := range freshManager.windowIdentityGate.pending {
+				if 0 < len(pendingSnapshot.identities) {
+					bufferedIdentities = cloneWindowClientIdentities(pendingSnapshot.identities)
+					return true
+				}
+			}
+			return false
+		})
+		for _, identity := range bufferedIdentities {
+			if identity != nil && windowClientIds[server.Id(identity.ClientId)] {
+				t.Fatal("replacement lazy open restored an identity still live in the draining instance")
+			}
+		}
+		persistedDuringDrain := model.GetProxyWindowIdentities(h.ctx, h.proxyId)
+		if len(persistedDuringDrain) != len(identities) {
+			t.Fatalf("persisted identity count during drain = %d, want old snapshot count %d", len(persistedDuringDrain), len(identities))
+		}
+		for _, identity := range persistedDuringDrain {
+			if !windowClientIds[identity.ClientId] {
+				t.Fatal("replacement published a fresh identity before drain completion")
+			}
+		}
 		select {
 		case count := <-prewarmed:
 			t.Fatalf("pre-warm ran before the old instance's drain-end export (%d ready)", count)
-		case <-time.After(3 * time.Second):
+		default:
 		}
-		if deviceCount := freshManager.DeviceCount(); deviceCount != 0 {
-			t.Fatalf("new instance opened %d devices before the old instance's drain-end export", deviceCount)
+		if deviceCount := freshManager.DeviceCount(); deviceCount != 1 {
+			t.Fatalf("replacement device count during drain = %d, want the one lazy-open device", deviceCount)
 		}
 		if !pdA.Active() {
 			t.Fatalf("old instance device is not live during its drain grace")
@@ -128,7 +163,7 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		if identities = model.GetProxyWindowIdentities(h.ctx, h.proxyId); len(identities) == 0 {
 			t.Fatalf("persisted window identity disappeared while the new instance was gated")
 		}
-		fmt.Printf("[progress]new instance held at the gate while the old instance drains\n")
+		fmt.Printf("[progress]replacement lazy open used fresh identities while the old instance drains\n")
 
 		// ---- 2. A reaches drain end: the real before-exit export (no peer
 		// handshook in this test, so the export is the empty completion
@@ -145,9 +180,12 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		if readyCount != 1 {
 			t.Fatalf("pre-warm ready count = %d, want 1", readyCount)
 		}
-		pdB, err := freshManager.OpenProxyDevice(h.proxyId)
+		pdBAfterRelease, err := freshManager.OpenProxyDevice(h.proxyId)
 		if err != nil {
 			t.Fatalf("open pre-warmed device: %v", err)
+		}
+		if pdBAfterRelease != pdB {
+			t.Fatal("identity release recreated the live replacement device")
 		}
 		if !pdB.Active() {
 			t.Fatalf("pre-warmed device is not active")
@@ -155,18 +193,21 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		if !pdB.WaitForReady(h.ctx, 1*time.Second) {
 			t.Fatalf("pre-warmed device is not ready")
 		}
-		// B's window re-recorded a REUSED persisted identity — restored only
-		// after A's drain completed
-		reused := false
-		waitFor(t, 30*time.Second, "pre-warmed window reuses the persisted identity", func() bool {
-			for _, identity := range model.GetProxyWindowIdentities(h.ctx, h.proxyId) {
+		// The gate publishes B's buffered fresh snapshot only after A's drain
+		// completed. No identity may overlap with A's old live set.
+		waitFor(t, 30*time.Second, "replacement fresh identities published", func() bool {
+			persisted := model.GetProxyWindowIdentities(h.ctx, h.proxyId)
+			if len(persisted) == 0 {
+				return false
+			}
+			for _, identity := range persisted {
 				if windowClientIds[identity.ClientId] {
-					reused = true
+					return false
 				}
 			}
-			return reused
+			return true
 		})
-		fmt.Printf("[progress]gate opened on the drain-end export; identity reused after old drain\n")
+		fmt.Printf("[progress]gate opened on the drain-end export; fresh identities published\n")
 
 		// ---- 3. crashed-old fallback: no export ever arrives; the sequence
 		// still pre-warms once the poll budget expires, via a clean return ----
@@ -208,6 +249,7 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 		if elapsed := time.Since(expiryStart); elapsed < 900*time.Millisecond {
 			t.Fatalf("apply returned before the poll budget: %s", elapsed)
 		}
+		fallbackManager.ReleaseWindowIdentityRestore()
 		readyCount = Prewarm(cCtx, fallbackManager, &cSettings)
 		if readyCount != 1 {
 			t.Fatalf("fallback pre-warm ready count = %d, want 1", readyCount)

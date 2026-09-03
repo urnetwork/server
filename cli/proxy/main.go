@@ -43,6 +43,15 @@ func resizeProxyMessagePools() {
 	)
 }
 
+// Couples the identity-restoration hold to the deployment handoff feature.
+// A plain manager used by tests remains immediately restorable; production
+// releases this hold through wg.CompleteDeploymentHandoff.
+func newProxyDeviceManagerSettings(settings *proxy.ProxySettings) *proxy.ProxyDeviceManagerSettings {
+	managerSettings := proxy.DefaultProxyDeviceManagerSettings()
+	managerSettings.HoldWindowIdentityRestore = settings.EnableWgHandoff
+	return managerSettings
+}
+
 func main() {
 	usage := `BringYour proxy server.
 
@@ -97,7 +106,7 @@ Options:
 		}
 	})
 
-	proxyDeviceManager := proxy.NewProxyDeviceManagerWithDefaults(ctx)
+	proxyDeviceManager := proxy.NewProxyDeviceManager(ctx, newProxyDeviceManagerSettings(settings))
 	defer func() {
 		_ = proxyDeviceManager.CloseAndWait(context.Background())
 	}()
@@ -202,15 +211,15 @@ Options:
 		// could api-remove the exact identity this side is using
 		// (REVIEW2-UPDATE1 §4.4). The accepted trade: the pre-warmed set
 		// turns warm at old-drain-end rather than at flip. Customer-driven
-		// lazy device opens are NOT gated — only the forced pre-warm
-		// establishment is — and the wg endpoint seeding lands before the
-		// pre-warmed devices establish, in the order the packets will flow.
-		// The handoff runs in its own error scope so a handoff failure
-		// still falls through to the pre-warm.
-		server.HandleError(func() {
-			wg.ApplyWgHandoff(ctx)
-		})
-		proxy.Prewarm(ctx, proxyDeviceManager, settings)
+		// lazy device opens are not blocked, but their identity restoration
+		// is held: they form fresh windows during the overlap and publish that
+		// snapshot when the gate opens. This same gate covers notification
+		// warmup, which otherwise bypasses Prewarm entirely. Wg endpoint
+		// seeding lands before the pre-warmed devices establish, in the order
+		// the packets will flow.
+		// The combined boundary isolates a handoff failure, always releases
+		// identity restoration, and only then runs pre-warm.
+		wg.CompleteDeploymentHandoff(ctx)
 	})
 	sub := notif.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) error {
 		if 0 < settings.WarmupTimeout {

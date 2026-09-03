@@ -72,6 +72,7 @@ func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
                         "api_base_url":"https://api.proxy.example:8083",
                         "auth_token":"` + proxyToken + `",
                         "proxy_host":"proxy.example",
+                        "block":"g7",
                         "wg_config":{
                             "wg_proxy_port":8084,
                             "client_private_key":"private-key-secret",
@@ -143,7 +144,7 @@ func TestRunReportsEachProtocolAndAlwaysRemovesClient(t *testing.T) {
 	}
 	for _, milestone := range []string{
 		"repetition 1/1 started",
-		"temporary client assigned to proxy host proxy.example",
+		"temporary client assigned to proxy host proxy.example block g7",
 		"temporary client public ports http=8081 socks=8080 wireguard=8084",
 		"http campaign started",
 		"socks campaign failed",

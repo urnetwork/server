@@ -87,9 +87,9 @@ func (self *wgServer) ExportWgHandoff(ctx context.Context) {
 // `WgHandoffPollTimeout` passes. The export is written at the old instance's
 // drain END (an empty peer set is the completion marker), so the successful
 // wait doubles as the old instance's drain-complete beacon: the caller
-// sequences the device pre-warm after this call returns
-// (cli/proxy/main.go), which keeps the reused persisted window identities
-// from running live in both containers during the drain grace
+// releases identity restoration and sequences device pre-warm after this call
+// returns (cli/proxy/main.go). Early opens use fresh identities while held, so
+// reused identities cannot run live in both containers during the drain grace
 // (REVIEW2-UPDATE1 §4.4). Poll-budget expiry is the old-instance-crashed
 // fallback: return without a handoff and let the caller proceed.
 //
@@ -184,6 +184,18 @@ func (self *wgServer) ApplyWgHandoff(ctx context.Context) <-chan int {
 		reestablishedCount = self.driveHandshakeInitiations(initiateCtx, endpoints)
 	})
 	return reestablished
+}
+
+// Runs the replacement's ordered post-readiness boundary. Handoff failure is
+// best effort, but identity restoration must always be released afterward;
+// post-drain prewarm then observes that released state. Keeping the sequence
+// here prevents another main-path warmup from accidentally separating it.
+func (self *wgServer) CompleteDeploymentHandoff(ctx context.Context) int {
+	server.HandleError(func() {
+		self.ApplyWgHandoff(ctx)
+	})
+	self.proxyDeviceManager.ReleaseWindowIdentityRestore()
+	return Prewarm(ctx, self.proxyDeviceManager, self.settings)
 }
 
 // takeHandoffExport reads the generation-tagged export, treating a poll

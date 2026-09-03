@@ -192,10 +192,11 @@ type ProxySettings struct {
 	// them and initiates handshakes from the server side, so wg clients
 	// re-establish in ~1 RTT after the deploy's conntrack flush instead of
 	// waiting out their own dead-session timers. The export doubles as the
-	// old instance's drain-complete beacon: the replacement sequences its
-	// device pre-warm after the export (or the poll budget), so the reused
-	// persisted window identities never run live in both containers during
-	// the drain grace (REVIEW2-UPDATE1 §4.4).
+	// old instance's drain-complete beacon: the replacement holds identity
+	// restoration across every early open path, then releases it and runs
+	// device pre-warm after the export (or the poll budget). Reused identities
+	// therefore never run live in both containers during the drain grace
+	// (REVIEW2-UPDATE1 §4.4).
 	EnableWgHandoff bool
 	// WgHandoffActivityWindow filters the export to peers with a recent
 	// handshake — the ones plausibly still there to answer an initiation.

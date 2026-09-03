@@ -307,7 +307,9 @@ func TestHostedDeviceTrackerRetainsProviderQuarantineAndRemovalCause(t *testing.
 func TestHostedDeviceDiagnosticRetainsBoundaryAndRouteBeforeTruncation(t *testing.T) {
 	tracker := &sdkHostedDeviceTracker{}
 	start := time.Date(2026, 8, 29, 5, 0, 0, 0, time.UTC)
-	longProviderDetail := strings.Repeat("p1(flow=1 warn=false),", 40)
+	// Keep this larger than hostedDeviceDiagnosticMaxSize so the assertion
+	// continues to exercise truncation when the private diagnostic budget grows.
+	longProviderDetail := strings.Repeat("p1(flow=1 warn=false),", 240)
 	tracker.record(start, fmt.Sprintf(
 		"remote=connected window={9/11 min=true} packets={out=1/40B in=2/80B last_in=05:00:00.000Z(+1/40B)} destinations=[65.49.70.84->p1(1)] active=[%s] reliability={flows=275 exit_loss=21 lost=16 recovery=3/1 pending=1} exits=11",
 		longProviderDetail,

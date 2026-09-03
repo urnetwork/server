@@ -9431,6 +9431,38 @@ are pushed by the standard stats pusher {env, service=proxy, block, host}.
   active peers` on a busy block = wrong: check PeerStatuses/last-handshake
   plumbing.
 
+**Window-identity overlap despite a gated Prewarm (2026-09-03):** gating only
+the post-handoff `Prewarm` call is insufficient. The initial proxy-client sync
+independently runs notification warmup for recently created clients, and a
+first customer request can independently lazy-open the same DeviceLocal. In
+the retained g6 failure, both the old and candidate containers logged warmup
+for the temporary acceptance client at `07:24:48Z`; the candidate immediately
+logged `window identity restore: 2 identities`, the old drain did not begin
+until `07:24:52.050Z`, and a SOCKS request entering the candidate at
+`07:24:53.163Z` then stalled on its inner connect. The candidate therefore ran
+the old process's exact Connect client identities concurrently. This makes
+return ownership nondeterministic and lets old-window eviction remove an
+identity the candidate still uses.
+
+Correlate both container IDs for the block; a process-wide query without the
+container boundary hides the duplicate:
+```bash
+warpctl logs main proxy <block> --since='<candidate-start>' --query='warmup' --utc
+warpctl logs main proxy <block> --since='<candidate-start>' --query='window identity restore' --utc
+warpctl logs main proxy <block> --since='<candidate-start>' --query='[proxy]drain' --utc
+```
+The replacement now holds identity restoration itself, so every open path is
+covered. Early notification/lazy opens remain available but mint fresh IDs and
+buffer their newest snapshot per proxy ID. The drain-complete handoff flushes
+those snapshots and releases restoration before post-drain prewarm. During a
+rollout expect `window identity restore held until drain completion`; any
+candidate `window identity restore: N identities` before the old container's
+handoff export is a regression. The deterministic boundaries are
+`TestWindowIdentityRestoreGateProtectsLazyOpen`,
+`TestWindowIdentityRestoreGateJoinsConcurrentReleaseWrite`,
+`TestWindowIdentityRestoreGateKeepsNewestDeviceGeneration`, and
+`TestProxyDeployOverlapPrewarmGate`.
+
 **Host-memory collapse while drains look correctly staggered:** the rollout
 lease must cover candidate start through old-container drain. Serializing only
 the drain is too late: every independent block worker can first start and
@@ -9539,6 +9571,45 @@ by default; `UR_ACCEPT_PROXY_TARGET_URL` remains available for an explicit
 site-specific investigation. A site-specific EOF is still a real reachability
 result for that site, but it must not be generalized into block-wide proxy loss
 when the validation control passes.
+
+**Redis maintenance collision (2026-09-03):** a public proxy request can reach
+the listener and then remain at `tunnel_connected` without `GotConn` when the
+Connect control plane loses Redis while a newly hosted DeviceLocal is forming
+or repairing its provider window. Do not classify that shape as a proxy-host
+return-path defect until the Redis boundary is excluded. In the retained
+incident, all 32 `redis-cluster@N` masters received `Stopping` at
+`06:57:04Z`; the hosted-device tracker recorded `exit_loss=+1` at
+`06:57:04.552Z`, and the failing HTTP request began at `06:57:07.264Z`.
+Connect, API, and both proxy hosts subsequently emitted connection refusals to
+the individual Redis ports while the RDBs saved and reloaded. The proxy block
+had no drain, DoH panic, or repeated identity restore in that interval. The
+same sustained campaign passed outside the maintenance boundary.
+
+Use all three clocks; a log error that appears after the request deadline can
+still name a restart which began before the request:
+```bash
+# Redis host: simultaneous stop is the decisive full-cluster-outage signal.
+journalctl --utc --since '<request-start - 15s>' --until '<request-end + 30s>' \
+  -u 'redis-cluster@*.service'
+for i in $(seq 1 32); do
+  systemctl show "redis-cluster@$i.service" \
+    -p Id -p ExecMainStartTimestamp -p ActiveEnterTimestamp -p NRestarts
+done
+
+# Fleet consumers: require the same Redis target/port interval, not just a
+# generic timeout near the acceptance run.
+warpctl logs main connect --query='connection refused' --since='<boundary>' --utc
+warpctl logs main api     --query='connection refused' --since='<boundary>' --utc
+warpctl logs main proxy   --query='connection refused' --since='<boundary>' --utc
+```
+The current cluster has one master per shard and no replicas. Reloads must
+therefore restart one instance at a time and wait for that member to report
+`cluster_state:ok`; restarting all instances together is an avoidable complete
+control-plane outage. XOps removes the former `--all-at-once` reload path and
+has a deployment-contract regression which rejects its return. Wait for every
+node PING and cluster state to recover, then repeat the complete sustained and
+overlapping proxy campaign. A post-maintenance pass explains this exact
+failure; it does not waive investigation of a failure outside that boundary.
 
 The proxy service intentionally has no normal public 443 status endpoint;
 `warpctl ls versions main proxy --sample` can therefore return a uniform 404.
