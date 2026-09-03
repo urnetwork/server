@@ -105,9 +105,9 @@ func (egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		if len(taskRows) == 0 {
 			missing = append(missing, "durable ProviderEgressProbe tasks")
 		}
-		action := "Apply the append-only provider-egress migration before deploying the Taskworker generation that schedules ProviderEgressProbe. Let normal task initialization create the shards; do not insert, delete, or hand-edit pending_task rows."
+		action := "Apply the append-only provider-egress migration from server commit 49b51eeb or later, then build and deploy a Taskworker artifact from an intentional checkout containing that commit. Let normal task initialization create the shards; do not insert, delete, or hand-edit pending_task rows."
 		if tlsIntegrityArmed {
-			action = "The append-only provider-egress schema is already armed. Deploy the intended Taskworker generation that schedules ProviderEgressProbe, then let normal task initialization create the shards; do not insert, delete, or hand-edit pending_task rows."
+			action = "The append-only provider-egress schema is already armed. Build and deploy a Taskworker artifact from an intentional server checkout containing commit 49b51eeb, then let normal task initialization create the shards; do not repeat the migration or insert, delete, or hand-edit pending_task rows."
 		}
 		return []finding{{
 			probeId: "pg/egress-coverage", tier: tierWarn,

@@ -51,6 +51,7 @@ func TestEgressCoverageSignalSyntheticUnarmedRollout(t *testing.T) {
 		"tls_integrity_armed=false",
 		"provider_egress_task_rows=0",
 		"not proof that zero providers need measurement",
+		"server commit 49b51eeb",
 		"do not insert, delete, or hand-edit pending_task",
 		"not a Proxy hardware-capacity alert",
 	} {
@@ -82,8 +83,9 @@ func TestEgressCoverageSignalSyntheticSchemaArmedTasksAbsent(t *testing.T) {
 		"tls_integrity_armed=true",
 		"provider_egress_task_rows=0",
 		"schema is already armed",
-		"Deploy the intended Taskworker generation",
+		"Taskworker artifact from an intentional server checkout containing commit 49b51eeb",
 		"let normal task initialization create the shards",
+		"do not repeat the migration",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("schema-armed alert missing %q:\n%s", want, markdown)

@@ -4249,10 +4249,23 @@ cadence. Old evidence is healthy when the exact due count is zero.
   due candidates but no check progress inside the same derived bound.
 - `egress-probe-unarmed` (WARN after two samples): the required schema or all
   durable tasks are absent. When the schema is absent, apply migrations before
-  deploying the Taskworker generation. When the schema is already armed, name
-  the Taskworker rollout as the immediate next boundary instead of asking the
+  deploying a Taskworker artifact from an intentional server checkout
+  containing commit `49b51eeb` or later. When the schema is already armed, name
+  that Taskworker rollout as the immediate next boundary instead of asking the
   operator to repeat the completed migration. In either case, let normal task
-  initialization schedule the rows.
+  initialization schedule the rows; never create or repair shard rows by hand.
+
+The 2026-09-03 main incident is a dated rollout control, not a permanent
+version assertion: the TLS-integrity field was present but zero durable probe
+rows existed. All eight fresh Taskworkers reported the same modified base
+revision `2d6f27c2`, which predates `49b51eeb`; the base has neither the probe
+implementation nor its `InitTasks` scheduler, and a bounded three-hour log
+window contained no provider-egress task line. Because `modified=true` does not
+describe the participating checkout diff, the revision alone was not treated
+as proof. Zero initialized rows after every current process had completed
+startup supplied the behavioral discriminator. The immediate closure boundary
+was therefore a Taskworker artifact containing `49b51eeb`, not another schema
+migration.
 
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
