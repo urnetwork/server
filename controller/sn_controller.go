@@ -43,8 +43,8 @@ type SnSetWalletArgs struct {
 	// Message is the exact single-use challenge text issued by
 	// `POST /auth/wallet-challenge` for blockchain TAO (the ur.io wallet
 	// bridge signs it with purpose "connect"). Both are required unless the
-	// deployment keeps the CLI compatibility gate open (st.yml
-	// `wallet_allow_unsigned`).
+	// deployment keeps the CLI compatibility gate open (the selected st.yml
+	// wallet_allow_unsigned policy).
 	Signature string `json:"signature,omitempty"`
 	Message   string `json:"message,omitempty"`
 }
@@ -84,7 +84,7 @@ func SnSetWallet(
 		if !snUnsignedWalletSetAllowed() {
 			return fail("A coldkey signature over the wallet challenge is required.")
 		}
-		glog.Infof("[sn]unsigned wallet set for network %s (wallet_allow_unsigned)\n", clientSession.ByJwt.NetworkId)
+		glog.Infof("[sn]unsigned wallet set for network %s (selected wallet_allow_unsigned policy)\n", clientSession.ByJwt.NetworkId)
 	} else {
 		use, useErr := model.UseWalletAuthChallenge(&model.UseWalletAuthChallengeArgs{
 			Blockchain: model.TAO.String(),

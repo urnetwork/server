@@ -194,13 +194,13 @@ type StDepositTier struct {
 // is copied into StConfig without any fallback between namespaces.
 type stVaultFile struct {
 	Profile string `yaml:"profile"`
-	// wallet_allow_unsigned keeps the pre-signature `POST /sn/wallet` path
-	// open for CLIs that set a coldkey without a challenge signature. Off by
-	// default; apps always sign.
+	// wallet_allow_unsigned (or testnet-wallet-allow-unsigned) keeps the
+	// pre-signature `POST /sn/wallet` path open for CLIs that set a coldkey
+	// without a challenge signature. Off by default; apps always sign.
 	WalletAllowUnsigned bool `yaml:"wallet_allow_unsigned"`
-	// public_rpc_url is the subtensor EVM JSON-RPC url clients (SDK claims,
-	// web) should use; the gateway rpc_urls are LAN-only. Published through
-	// GET /sn/epoch as rpc_url when set.
+	// public_rpc_url (or testnet-public-rpc-url) is the subtensor EVM JSON-RPC
+	// url clients (SDK claims, web) should use; gateway rpc_urls may be LAN-only.
+	// Published through GET /sn/epoch as rpc_url when set.
 	PublicRpcUrl string `yaml:"public_rpc_url"`
 
 	Enabled                bool            `yaml:"enabled"`
@@ -231,6 +231,8 @@ type stVaultFile struct {
 	DeployBlock            uint64          `yaml:"deploy_block"`
 
 	TestnetEnabled                bool            `yaml:"testnet-enabled"`
+	TestnetWalletAllowUnsigned    bool            `yaml:"testnet-wallet-allow-unsigned"`
+	TestnetPublicRpcUrl           string          `yaml:"testnet-public-rpc-url"`
 	TestnetRpcUrls                []string        `yaml:"testnet-rpc-urls"`
 	TestnetChainId                uint64          `yaml:"testnet-chain-id"`
 	TestnetGenesisHash            string          `yaml:"testnet-genesis-hash"`
@@ -312,11 +314,12 @@ var stConfigFromVault = sync.OnceValue(func() (cfg *StConfig) {
 })
 
 type stSelectedConfig struct {
+	WalletAllowUnsigned                                                                                            bool
 	Enabled                                                                                                        bool
 	ChainId, Netuid, NoId, DepositAlphaRaoPerGib, DepositRateNumerator, DepositRateDenominator, DepositEpochCapRao uint64
 	ReliabilityAMin, BlockSeconds                                                                                  int64
 	DeployBlock                                                                                                    uint64
-	GenesisHash, DeploymentId, PolicyHash                                                                          string
+	PublicRpcUrl, GenesisHash, DeploymentId, PolicyHash                                                            string
 	ContractAddress, SettlementVault, ReserveSink                                                                  string
 	TreasuryHotkey, DepositHotkey                                                                                  string
 	DepositKey, RootKey, ArtifactKey                                                                               string
@@ -327,7 +330,8 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 	switch profile {
 	case stconn.ProfileTestnet:
 		return stSelectedConfig{
-			Enabled: f.TestnetEnabled, ChainId: f.TestnetChainId, GenesisHash: f.TestnetGenesisHash,
+			Enabled: f.TestnetEnabled, WalletAllowUnsigned: f.TestnetWalletAllowUnsigned,
+			PublicRpcUrl: f.TestnetPublicRpcUrl, ChainId: f.TestnetChainId, GenesisHash: f.TestnetGenesisHash,
 			DeploymentId: f.TestnetDeploymentId, PolicyHash: f.TestnetPolicyHash,
 			ContractAddress: f.TestnetContractAddress, SettlementVault: f.TestnetSettlementVault,
 			ReserveSink: f.TestnetReserveSink, Netuid: f.TestnetNetuid, NoId: f.TestnetNoId,
@@ -342,7 +346,8 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
-			Enabled: f.Enabled, ChainId: f.ChainId, GenesisHash: f.GenesisHash,
+			Enabled: f.Enabled, WalletAllowUnsigned: f.WalletAllowUnsigned,
+			PublicRpcUrl: f.PublicRpcUrl, ChainId: f.ChainId, GenesisHash: f.GenesisHash,
 			DeploymentId: f.DeploymentId, PolicyHash: f.PolicyHash,
 			ContractAddress: f.ContractAddress, SettlementVault: f.SettlementVault, ReserveSink: f.ReserveSink,
 			Netuid: f.Netuid, NoId: f.NoId, TreasuryHotkey: f.TreasuryHotkey,
@@ -363,7 +368,7 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	if err != nil {
 		return nil, err
 	}
-	cfg := &StConfig{Profile: profile, Enabled: s.Enabled, WalletAllowUnsigned: file.WalletAllowUnsigned, PublicRpcUrl: file.PublicRpcUrl, RpcUrls: append([]string(nil), rpcUrls...), ChainId: s.ChainId,
+	cfg := &StConfig{Profile: profile, Enabled: s.Enabled, WalletAllowUnsigned: s.WalletAllowUnsigned, PublicRpcUrl: s.PublicRpcUrl, RpcUrls: append([]string(nil), rpcUrls...), ChainId: s.ChainId,
 		DeploymentId: s.DeploymentId, Netuid: s.Netuid, NoId: s.NoId,
 		DepositAlphaRaoPerGib: s.DepositAlphaRaoPerGib, DepositRateNumerator: s.DepositRateNumerator,
 		DepositRateDenominator: s.DepositRateDenominator, DepositEpochCapRao: s.DepositEpochCapRao,

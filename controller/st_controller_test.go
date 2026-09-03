@@ -29,6 +29,7 @@ import (
 func releaseStVaultFile() stVaultFile {
 	return stVaultFile{
 		TestnetEnabled: true, TestnetChainId: 945,
+		TestnetPublicRpcUrl: "https://test.chain.opentensor.ai",
 		TestnetGenesisHash:  "0x" + strings.Repeat("11", 32),
 		TestnetDeploymentId: "test-release", TestnetPolicyHash: "0x" + strings.Repeat("22", 32),
 		TestnetContractAddress: "0x0000000000000000000000000000000000000011",
@@ -71,6 +72,9 @@ func TestStConfigRejectsInvalidDepositTierSchedules(t *testing.T) {
 
 func TestStConfigTestnetNamespaceIsStrict(t *testing.T) {
 	f := releaseStVaultFile()
+	f.WalletAllowUnsigned = true
+	f.PublicRpcUrl = "https://mainnet-rpc.example"
+	f.TestnetWalletAllowUnsigned = false
 	f.ChainId = 964
 	f.ContractAddress = "0x0000000000000000000000000000000000000099"
 	cfg, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"})
@@ -79,6 +83,18 @@ func TestStConfigTestnetNamespaceIsStrict(t *testing.T) {
 	}
 	if cfg.ChainId != 945 || cfg.ContractAddress != common.HexToAddress(f.TestnetContractAddress) {
 		t.Fatalf("testnet selected mainnet values: %+v", cfg)
+	}
+	if cfg.WalletAllowUnsigned || cfg.PublicRpcUrl != "https://test.chain.opentensor.ai" {
+		t.Fatalf("testnet selected global wallet/rpc values: unsigned=%t rpc=%q", cfg.WalletAllowUnsigned, cfg.PublicRpcUrl)
+	}
+	f.TestnetWalletAllowUnsigned = true
+	f.TestnetPublicRpcUrl = ""
+	cfg, err = stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WalletAllowUnsigned || cfg.PublicRpcUrl != "" {
+		t.Fatalf("testnet missing public rpc fell back across profiles: unsigned=%t rpc=%q", cfg.WalletAllowUnsigned, cfg.PublicRpcUrl)
 	}
 	f.TestnetContractAddress = ""
 	if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
@@ -89,6 +105,10 @@ func TestStConfigTestnetNamespaceIsStrict(t *testing.T) {
 func TestStConfigMainnetNamespaceIsStrict(t *testing.T) {
 	f := releaseStVaultFile()
 	f.Enabled = true
+	f.WalletAllowUnsigned = true
+	f.PublicRpcUrl = "https://mainnet-rpc.example"
+	f.TestnetWalletAllowUnsigned = false
+	f.TestnetPublicRpcUrl = "https://test.chain.opentensor.ai"
 	f.ChainId = 964
 	f.GenesisHash = "0x" + strings.Repeat("55", 32)
 	f.DeploymentId = "main-release"
@@ -110,6 +130,19 @@ func TestStConfigMainnetNamespaceIsStrict(t *testing.T) {
 	}
 	if cfg.ChainId != 964 || cfg.ContractAddress != common.HexToAddress(f.ContractAddress) {
 		t.Fatalf("mainnet selected testnet values: %+v", cfg)
+	}
+	if !cfg.WalletAllowUnsigned || cfg.PublicRpcUrl != "https://mainnet-rpc.example" {
+		t.Fatalf("mainnet selected testnet wallet/rpc values: unsigned=%t rpc=%q", cfg.WalletAllowUnsigned, cfg.PublicRpcUrl)
+	}
+	f.WalletAllowUnsigned = false
+	f.PublicRpcUrl = ""
+	f.TestnetWalletAllowUnsigned = true
+	cfg, err = stConfigForProfile(stconn.ProfileMainnet, f, []string{"http://mainnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WalletAllowUnsigned || cfg.PublicRpcUrl != "" {
+		t.Fatalf("mainnet missing public rpc fell back across profiles: unsigned=%t rpc=%q", cfg.WalletAllowUnsigned, cfg.PublicRpcUrl)
 	}
 	f.LegacyContractAddress = f.ContractAddress
 	f.ContractAddress = ""

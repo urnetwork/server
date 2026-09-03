@@ -6,6 +6,7 @@ require (
 	github.com/ChainSafe/go-schnorrkel v1.1.0
 	github.com/TwiN/go-away v1.8.0
 	github.com/aws/aws-sdk-go v1.55.8
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/coreos/go-semver v0.3.1
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
 	github.com/ethereum/go-ethereum v1.17.0
@@ -60,7 +61,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/consensys/gnark-crypto v0.20.1 // indirect
 	github.com/cosmos/go-bip39 v1.0.0 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.4.0 // indirect

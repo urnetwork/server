@@ -3,6 +3,7 @@ package taskworker
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -69,6 +70,78 @@ func TestInitTasksReapsVerificationChainsWhileDisabled(t *testing.T) {
 		InitTasks(ctx)
 
 		connect.AssertEqual(t, countVerifyTasks(), 0)
+	})
+}
+
+// TestInitTasksReapsProviderEgressChainsWhileDisabled is the deployment-race
+// regression: merely stopping new seeds leaves old RunOnce rows alive, and an
+// already-claimed row can otherwise run and post a successor. Startup removes
+// unclaimed, stale-geometry, and actively leased rows by canonical function
+// name while leaving unrelated work intact.
+func TestInitTasksReapsProviderEgressChainsWhileDisabled(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Setenv("WARP_DOMAIN", "bringyour.com")
+		t.Cleanup(server.Config.PushSimpleResource(
+			"provider_egress_probe.yml",
+			[]byte("enabled: false\n"),
+		))
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+
+		var survivorTaskId server.Id
+		server.Tx(ctx, func(tx server.PgTx) {
+			for shardIndex, shardCount := range []int{3, 99, 3} {
+				task.ScheduleTaskInTx(
+					tx,
+					work.ProviderEgressProbe,
+					&work.ProviderEgressProbeArgs{ShardIndex: shardIndex, ShardCount: shardCount},
+					clientSession,
+					task.RunOnce("provider_egress_probe", shardIndex),
+				)
+			}
+			survivorTaskId = task.ScheduleTaskInTx(tx, orphanSeedTask, &orphanSeedArgs{}, clientSession)
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE pending_task
+				 SET claim_time = $2, release_time = $3
+				 WHERE run_once_key = $1`,
+				`["provider_egress_probe",2]`,
+				server.NowUtc(),
+				server.NowUtc().Add(time.Hour),
+			))
+		})
+
+		countProbeTasks := func() (count int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`SELECT count(*) FROM pending_task WHERE function_name = ANY($1)`,
+					work.ProviderEgressProbeTaskFunctionNames(),
+				)
+				server.WithPgResult(result, err, func() {
+					connect.AssertEqual(t, result.Next(), true)
+					server.Raise(result.Scan(&count))
+				})
+			})
+			return
+		}
+		connect.AssertEqual(t, countProbeTasks(), 3)
+
+		InitTasks(ctx)
+
+		connect.AssertEqual(t, countProbeTasks(), 0)
+		var survivorCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT count(*) FROM pending_task WHERE task_id = $1`, survivorTaskId)
+			server.WithPgResult(result, err, func() {
+				connect.AssertEqual(t, result.Next(), true)
+				server.Raise(result.Scan(&survivorCount))
+			})
+		})
+		if survivorCount != 1 {
+			t.Fatalf("disabled probe cleanup removed unrelated task %s (remaining=%d)", survivorTaskId, survivorCount)
+		}
 	})
 }
 

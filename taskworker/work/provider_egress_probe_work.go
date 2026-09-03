@@ -75,6 +75,7 @@ type ProviderEgressProbeResult struct {
 
 // Deployment settings are snapshotted into each task's durable arguments.
 type providerEgressProbeSettings struct {
+	Enabled          bool                         `yaml:"enabled"`
 	ShardCount       int                          `yaml:"shard_count"`
 	IdleDelaySeconds int                          `yaml:"idle_delay_seconds"`
 	MaxTimeSeconds   int                          `yaml:"max_time_seconds"`
@@ -90,6 +91,7 @@ type providerEgressProbeSettings struct {
 func defaultProviderEgressProbeSettings(domain string) providerEgressProbeSettings {
 	apiURL := "https://api." + domain
 	return providerEgressProbeSettings{
+		Enabled:          true,
 		ShardCount:       defaultProviderEgressProbeShardCount,
 		IdleDelaySeconds: 5 * 60,
 		MaxTimeSeconds:   30 * 60,
@@ -170,6 +172,9 @@ func validateProviderEgressProbeConfig(
 
 // Every deployment-level invariant is applied to one settings snapshot.
 func (self providerEgressProbeSettings) validate() error {
+	if !self.Enabled {
+		return nil
+	}
 	return validateProviderEgressProbeConfig(
 		self.ShardCount,
 		self.IdleDelaySeconds,
@@ -239,9 +244,38 @@ func allProviderEgressProbeArgs(settings providerEgressProbeSettings) []*Provide
 func ScheduleProviderEgressProbeTasks(clientSession *session.ClientSession, tx server.PgTx) {
 	settings, err := getProviderEgressProbeSettings()
 	server.Raise(err)
+	if !settings.Enabled {
+		return
+	}
 	for _, args := range allProviderEgressProbeArgs(settings) {
 		scheduleProviderEgressProbeAt(clientSession, tx, args, server.NowUtc())
 	}
+}
+
+// ProviderEgressProbeTaskFunctionNames is the canonical pending-task surface
+// owned by the probe subsystem. Deriving the name from the registered function
+// prevents disabled cleanup from drifting away from task serialization.
+func ProviderEgressProbeTaskFunctionNames() []string {
+	return []string{
+		task.NewTaskTarget(ProviderEgressProbe).TargetFunctionName(),
+	}
+}
+
+// RemoveDisabledProviderEgressProbeTasks removes recurring rows left by an
+// enabled deployment after probing is disabled. Claims are deliberately not a
+// barrier: the task reaper deletes every matching row, so stale and actively
+// leased generations cannot perpetuate themselves through their post hook.
+func RemoveDisabledProviderEgressProbeTasks(ctx context.Context, tx server.PgTx) int64 {
+	settings, err := getProviderEgressProbeSettings()
+	server.Raise(err)
+	if settings.Enabled {
+		return 0
+	}
+	var removedCount int64
+	for _, functionName := range ProviderEgressProbeTaskFunctionNames() {
+		removedCount += task.RemovePendingTasksForFunctionInTx(ctx, tx, functionName)
+	}
+	return removedCount
 }
 
 // The run-once key is shard-index stable so initialization and post scheduling
@@ -288,11 +322,18 @@ func ProviderEgressProbe(
 	args *ProviderEgressProbeArgs,
 	clientSession *session.ClientSession,
 ) (*ProviderEgressProbeResult, error) {
-	if err := validateProviderEgressProbeArgs(args); err != nil {
-		return nil, err
-	}
 	settings, err := getProviderEgressProbeSettings()
 	if err != nil {
+		return nil, err
+	}
+	// A disabled deployment may still have an old claimed row in a worker's
+	// input batch. Retire it before touching its arguments or the execution
+	// path, which is where identity, Vault credentials, and network clients are
+	// acquired.
+	if !settings.Enabled {
+		return &ProviderEgressProbeResult{Stale: true}, nil
+	}
+	if err := validateProviderEgressProbeArgs(args); err != nil {
 		return nil, err
 	}
 	if args.ShardCount != settings.ShardCount || settings.ShardCount <= args.ShardIndex {
@@ -312,6 +353,9 @@ func ProviderEgressProbePost(
 	settings, err := getProviderEgressProbeSettings()
 	if err != nil {
 		return err
+	}
+	if !settings.Enabled {
+		return nil
 	}
 	if args.ShardIndex < 0 || settings.ShardCount <= args.ShardIndex {
 		return nil

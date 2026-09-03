@@ -14,6 +14,7 @@ slice of providers.
 The settings live in `config/<env>/provider_egress_probe.yml`:
 
 ```yaml
+enabled: true
 shard_count: 4
 idle_delay_seconds: 300
 max_time_seconds: 1800
@@ -35,6 +36,14 @@ blackhole:
   concurrency: 4
   probe_timeout_seconds: 15
 ```
+
+`enabled` defaults to `true` to preserve existing deployments. Set it
+explicitly to `false` in a simulation or environment that must not contact the
+provider control plane. Disabled startup seeds no probe shards and removes any
+pending shard rows left by an older enabled generation, including claimed rows.
+An already-dispatched row exits before reading `provider_egress.yml` or creating
+any network client, and its post-step schedules no successor. Re-enabling and
+running `taskworker init-tasks` seeds a fresh canonical shard set.
 
 The prober identity is created and refreshed by the immediate recurring
 `ProberBootstrap` task. The operator ingest secret remains in

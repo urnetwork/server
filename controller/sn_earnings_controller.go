@@ -155,7 +155,8 @@ func SnValidateWallet(
 }
 
 // snUnsignedWalletSetAllowed is the CLI compatibility gate for an unsigned
-// `POST /sn/wallet`: only when st.yml sets `wallet_allow_unsigned`.
+// `POST /sn/wallet`: only when the selected st.yml profile enables its
+// wallet_allow_unsigned policy.
 func snUnsignedWalletSetAllowed() bool {
 	cfg := stConfig()
 	return cfg != nil && cfg.WalletAllowUnsigned
@@ -214,8 +215,8 @@ func snChainState(ctx context.Context) (*StConfig, StClient, *StEpochState) {
 
 // snEpochSummaryWithChainSettings overlays the release chain settings that
 // direct claims need onto the epoch summary: settlement vault, no_id
-// (decimal), netuid and the public rpc url (st.yml `public_rpc_url`). Unset
-// values stay empty so the SDK/web defaults win.
+// (decimal), netuid and the selected profile's public rpc url. Unset values
+// stay empty so the SDK/web defaults win.
 func snEpochSummaryWithChainSettings(cfg *StConfig, summary *model.StEpochSummary) *model.StEpochSummary {
 	if cfg == nil || summary == nil {
 		return summary

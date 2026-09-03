@@ -94,6 +94,9 @@ blackhole:
 	if settings.ShardCount != 7 || settings.IdleDelaySeconds != 123 || settings.MaxTimeSeconds != 456 {
 		t.Fatalf("task settings = %+v", settings)
 	}
+	if !settings.Enabled {
+		t.Fatal("an existing config without enabled lost the deployed default true")
+	}
 	if settings.Full.Limit != 9 || settings.Full.Concurrency != 3 {
 		t.Fatalf("full settings = %+v", settings.Full)
 	}
@@ -105,6 +108,20 @@ blackhole:
 	}
 	if settings.Full.ProbeTimeoutSeconds != 60 {
 		t.Fatalf("unspecified full timeout lost its default: %+v", settings.Full)
+	}
+}
+
+// Explicit disablement must remain valid even when every operational field is
+// absent. A simulation should not have to carry usable production endpoints or
+// batch geometry for a subsystem that is forbidden from running.
+func TestProviderEgressProbeDisabledSettingsSkipOperationalValidation(t *testing.T) {
+	settings := providerEgressProbeSettings{Enabled: false}
+	if err := settings.validate(); err != nil {
+		t.Fatalf("disabled settings: %v", err)
+	}
+	settings.Enabled = true
+	if err := settings.validate(); err == nil {
+		t.Fatal("enabled empty settings passed operational validation")
 	}
 }
 
@@ -167,6 +184,64 @@ func TestProviderEgressProbeRetiresStaleShardGeometryWithoutNetworkWork(t *testi
 	}
 	if called {
 		t.Fatal("stale shard geometry ran provider network work")
+	}
+}
+
+// A worker may have claimed an old row just before a deploy disables probing.
+// The disabled check must precede even persisted-argument validation: reaching
+// executeProviderEgressProbe would read the prober identity and Vault secret
+// and construct external clients.
+func TestProviderEgressProbeDisabledRetiresClaimedWorkBeforeExecution(t *testing.T) {
+	settings := testProviderEgressProbeSettings(3)
+	settings.Enabled = false
+	withProviderEgressProbeSettings(t, settings)
+
+	previous := executeProviderEgressProbe
+	called := false
+	executeProviderEgressProbe = func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+		called = true
+		return nil, errors.New("disabled probe execution reached")
+	}
+	t.Cleanup(func() {
+		executeProviderEgressProbe = previous
+	})
+
+	clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	result, err := ProviderEgressProbe(nil, clientSession)
+	if err != nil {
+		t.Fatalf("ProviderEgressProbe: %v", err)
+	}
+	if result == nil || !result.Stale {
+		t.Fatalf("disabled result = %+v, want retired work", result)
+	}
+	if called {
+		t.Fatal("disabled worker entered credential/network execution")
+	}
+}
+
+// The disabled fast path must not weaken validation when probing is enabled.
+func TestProviderEgressProbeEnabledStillRejectsInvalidPersistedArguments(t *testing.T) {
+	settings := testProviderEgressProbeSettings(3)
+	withProviderEgressProbeSettings(t, settings)
+
+	previous := executeProviderEgressProbe
+	called := false
+	executeProviderEgressProbe = func(context.Context, *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+		called = true
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		executeProviderEgressProbe = previous
+	})
+
+	clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	if _, err := ProviderEgressProbe(nil, clientSession); err == nil {
+		t.Fatal("enabled worker accepted missing persisted arguments")
+	}
+	if called {
+		t.Fatal("invalid enabled work reached credential/network execution")
 	}
 }
 
@@ -487,6 +562,39 @@ func TestScheduleProviderEgressProbeTasksIsIdempotentAndHostIndependent(t *testi
 	})
 }
 
+// Disabled initialization must not create a new recurring chain.
+func TestScheduleProviderEgressProbeTasksDisabledSeedsNothing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		settings := testProviderEgressProbeSettings(3)
+		settings.Enabled = false
+		withProviderEgressProbeSettings(t, settings)
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			ScheduleProviderEgressProbeTasks(clientSession, tx)
+		})
+
+		var count int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT count(*)
+				FROM pending_task
+				WHERE function_name = $1
+			`, ProviderEgressProbeTaskFunctionNames()[0])
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&count))
+				}
+			})
+		})
+		if count != 0 {
+			t.Fatalf("disabled scheduler seeded %d probe tasks", count)
+		}
+	})
+}
+
 func TestProviderEgressProbePostImmediatelyContinuesAFullBatch(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		settings := testProviderEgressProbeSettings(2)
@@ -603,6 +711,42 @@ func TestProviderEgressProbePostRetiresAShardRemovedByConfiguration(t *testing.T
 		})
 		if count != 0 {
 			t.Fatalf("removed shard scheduled %d successors, want zero", count)
+		}
+	})
+}
+
+// A task that completed while disablement was racing must not recreate the
+// chain. Nil old arguments/results force the disabled guard to be first.
+func TestProviderEgressProbePostDisabledSchedulesNoSuccessor(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		settings := testProviderEgressProbeSettings(3)
+		settings.Enabled = false
+		withProviderEgressProbeSettings(t, settings)
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			if err := ProviderEgressProbePost(nil, nil, clientSession, tx); err != nil {
+				t.Fatalf("ProviderEgressProbePost: %v", err)
+			}
+		})
+
+		var count int
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT count(*)
+				FROM pending_task
+				WHERE function_name = $1
+			`, ProviderEgressProbeTaskFunctionNames()[0])
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&count))
+				}
+			})
+		})
+		if count != 0 {
+			t.Fatalf("disabled post-step scheduled %d successors", count)
 		}
 	})
 }
