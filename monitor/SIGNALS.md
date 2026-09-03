@@ -9013,6 +9013,34 @@ is operational: inspect the router/WAN evidence for the interval. The software
 closure remains preserving the partial and bounded retry; do not route bulk
 archives back through the VPN or restart the healthy resumed writer.
 
+The `2026-09-03T04:09:23Z` recurrence refined that unresolved boundary. The
+direct PostgreSQL client was reset after receiving 82,888,740,773 bytes. Its
+source sshd had authenticated that session at `01:13:48Z` and recorded no
+orderly close. Two seconds after the client failure, the Redis flow reached and
+authenticated to the separate edge-6 sshd, then vanished while Planetoid
+reported another reset; that source also recorded no orderly close. Both source
+hosts kept their boot generation and ssh service, Planetoid had no local
+carrier or NetworkManager connectivity transition, and its unrelated VPN
+endpoint emitted no concurrent reachability error. The two direct sessions
+arrived through different Planetoid public egress identities. That proves the
+offsite side can present more than one source-NAT identity, whether through
+multi-WAN policy or an upstream carrier-grade NAT pool, and rules out rsync,
+authentication, either source daemon, and one individually failed source host.
+It does not by itself distinguish Planetoid gateway/upstream state from the
+Fremont public-forward edge, which are the remaining shared boundaries. Obtain
+bounded lifecycle, WAN-selection, and conntrack evidence from both sides
+before assigning or changing either one.
+
+Systemd again supplied the safe recovery control. At `04:39:27Z`, exactly 30
+minutes later, one new writer resumed PostgreSQL through the configured direct
+port and `enp65s0`, using the same public egress identity as the preceding
+PostgreSQL attempt. The process and socket remained stable while receive bytes
+advanced by 199,659,676 in 15 seconds (about 106.5 Mbit/s). Preserve that
+writer and its partial. If router evidence proves destination flows are being
+moved or evicted, the operational repair is a stable policy route/NAT mapping
+and adequate conntrack capacity for the direct endpoint; it is not a return to
+the management VPN, a duplicate rsync, or a larger software retry loop.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the

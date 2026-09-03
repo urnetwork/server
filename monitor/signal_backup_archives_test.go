@@ -322,15 +322,22 @@ func TestBackupArchivesSignalSyntheticDetectsFailedPullInRestartBackoff(t *testi
 		"NetworkManager connectivity state",
 		"independent public control",
 		"Planetoid's router or upstream Internet path",
-		"Only when independent Internet stayed healthy",
+		"If independent Internet stayed healthy",
 		"both source sshd journals",
-		"no orderly close",
-		"sibling forward reset before authentication",
-		"shared public-forward path",
+		"no orderly source close",
+		"either before authentication or after authentication without an orderly source close",
+		"shared direct-path infrastructure",
+		"source-observed public egress identity",
+		"Planetoid WAN/NAT evidence",
+		"does not distinguish Planetoid gateway policy from the Fremont public-forward edge",
+		"router lifecycle/conntrack evidence",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("failed pull alert missing %q:\n%s", want, alert.Markdown())
 		}
+	}
+	if strings.Contains(alert.Markdown(), "sibling forward reset before authentication") {
+		t.Fatalf("failed pull alert still requires the obsolete pre-auth-only discriminator:\n%s", alert.Markdown())
 	}
 }
 
