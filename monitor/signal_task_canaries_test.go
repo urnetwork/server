@@ -280,9 +280,10 @@ func TestTaskCanariesSignalDoesNotMistakeDueQueueDelayForExecutionTime(t *testin
 	}
 }
 
-func TestTaskCanariesSignalExplainsReliabilityReanchorOverrun(t *testing.T) {
+func TestTaskCanariesSignalDiagnosesReliabilityRollingIndexRegression(t *testing.T) {
 	taskID := "01a05700-1111-2222-3333-444444444444"
 	otherTaskID := "01a05700-5555-6666-7777-888888888888"
+	var diagnosticQuery string
 	source := &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {
 			switch {
@@ -290,6 +291,12 @@ func TestTaskCanariesSignalExplainsReliabilityReanchorOverrun(t *testing.T) {
 				return []Row{{"12"}}, nil
 			case strings.Contains(query, "WITH history AS"):
 				return []Row{{"UpdateReliabilities", "2482", "1158", "t", "7200", "78", taskID}}, nil
+			case strings.Contains(query, "monitor_reliability_task_diagnostic"):
+				diagnosticQuery = query
+				return []Row{{
+					"rolling-leave", "1515", "", "", "192.0.2.44/32",
+					"2", "1", "4", "4", "4", "55", "true", "true", "3", "1900",
+				}}, nil
 			case strings.Contains(query, "WITH failures AS"):
 				return nil, nil
 			default:
@@ -309,6 +316,146 @@ func TestTaskCanariesSignalExplainsReliabilityReanchorOverrun(t *testing.T) {
 		},
 	}
 
+	settings := syntheticSettings(source)
+	settings.Hosts = append(settings.Hosts, HostSettings{
+		Name:       "edge-4",
+		LANAddress: "192.0.2.44",
+		Roles:      []string{"services"},
+	})
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-overdue")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"heartbeat_attempt_correlated=true",
+		"active_host=edge-4 active_generation=g1 active_container=reliabilityworker",
+		"reliability_sql_phase=rolling-leave",
+		"sql_source=edge-4",
+		"transaction_blocked_queries=1",
+		"current_windows=true",
+		"old_index_present=true covering_index_ready=true",
+		"directly falsifies the old repeated-full-anchor diagnosis",
+		"All 4 running windows",
+		"legacy child for a 30-block rolling-leave slice estimated at 2,142,377 rows",
+		"PostgreSQL retained that transaction",
+		"Server commit fcb4de54",
+		"transaction-local two-hour PostgreSQL checkpoint timeout",
+		"supported finalizer drops the old parent",
+		"Do not redeploy only for the already-present four-hour/checkpoint fix",
+		"representative bounded rolling EXPLAIN selects the covering child",
+		"SIGNALS.md §1.2, §5.7, and §8.10",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("reliability diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	for _, stale := range []string{
+		"threshold was shorter than the task cadence",
+		"forcing a full re-anchor of the multi-billion-row history on every cycle",
+		"Roll out the four-hour re-anchor cadence",
+	} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("rolling reliability diagnosis retained stale guidance %q", stale)
+		}
+	}
+	for _, want := range []string{
+		"monitor_reliability_task_diagnostic",
+		"pg_stat_all_indexes",
+		"last_idx_scan",
+		"client_reliability_running_window",
+		"a.pid <> pg_backend_pid()",
+	} {
+		if !strings.Contains(diagnosticQuery, want) {
+			t.Fatalf("reliability diagnostic query missing %q", want)
+		}
+	}
+	requireAlertOmits(t, alert, taskID, otherTaskID, "192.0.2.44")
+}
+
+func TestTaskCanariesSignalDiagnosesIntentionalReliabilityAnchor(t *testing.T) {
+	taskID := "01a05700-aaaa-bbbb-cccc-111111111111"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return []Row{{"UpdateReliabilities", "2482", "1158", "t", "7200", "78", taskID}}, nil
+			case strings.Contains(query, "monitor_reliability_task_diagnostic"):
+				return []Row{{
+					"full-anchor-insert", "1515", "IO", "DataFileRead", "2001:db8::3/128",
+					"1", "0", "4", "4", "4", "245", "false", "true", "-1", "12",
+				}}, nil
+			case strings.Contains(query, "WITH failures AS"):
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		localFn: func(name string, args ...string) (string, error) {
+			joined := strings.Join(args, " ")
+			if name != "warpctl" || !strings.Contains(joined, "--query=UpdateReliabilities") ||
+				strings.Contains(joined, taskID) {
+				t.Fatal("reliability heartbeat lookup did not use the identifier-free task-family query")
+			}
+			return "[edge-3][taskworker][g2][cid:reliabilityworker][I][2026-08-29T11:59:50Z][task.go:1938][" + taskID + "]eval active(1510.00s) github.com/urnetwork/server/taskworker/work.UpdateReliabilities({})", nil
+		},
+	}
+
+	settings := syntheticSettings(source)
+	settings.Hosts = append(settings.Hosts, HostSettings{
+		Name:           "edge-3",
+		OverlayAddress: "2001:db8::3",
+		Roles:          []string{"services"},
+	})
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-overdue")
+	markdown := alert.Markdown()
+	for _, want := range []string{
+		"reliability_sql_phase=full-anchor-insert",
+		"sql_wait=IO:DataFileRead",
+		"sql_source=edge-3",
+		"max_reanchor_distance_blocks=245",
+		"directly confirming a full reliability re-anchor",
+		"four-hour (240-block) recompute boundary",
+		"deploy Taskworker from Server commit fcb4de54 or later",
+		"transaction-local two-hour PostgreSQL checkpoint timeout",
+		"next ordinary half-hour cycle uses the rolling path",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("intentional reliability anchor diagnosis missing %q: %s", want, markdown)
+		}
+	}
+	requireAlertOmits(t, alert, taskID, "2001:db8::3")
+}
+
+func TestTaskCanariesSignalDoesNotInventReliabilityCauseWithoutDiagnostic(t *testing.T) {
+	taskID := "01a05700-dddd-eeee-ffff-222222222222"
+	source := &syntheticSource{
+		postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "UpdateClientLocations"):
+				return []Row{{"12"}}, nil
+			case strings.Contains(query, "WITH history AS"):
+				return []Row{{"UpdateReliabilities", "2482", "1158", "t", "7200", "78", taskID}}, nil
+			case strings.Contains(query, "monitor_reliability_task_diagnostic"):
+				return nil, nil
+			case strings.Contains(query, "WITH failures AS"):
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		localFn: func(_ string, _ ...string) (string, error) {
+			return "[edge-2][taskworker][g1][cid:reliabilityworker][I][2026-08-29T11:59:50Z][task.go:1938][" + taskID + "]eval active(1510.00s) github.com/urnetwork/server/taskworker/work.UpdateReliabilities({})", nil
+		},
+	}
+
 	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
 	if err != nil {
 		t.Fatal(err)
@@ -316,19 +463,24 @@ func TestTaskCanariesSignalExplainsReliabilityReanchorOverrun(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "task-overdue")
 	markdown := alert.Markdown()
 	for _, want := range []string{
-		"multi-billion-row history",
-		"heartbeat_attempt_correlated=true",
-		"active_host=edge-4 active_generation=g1 active_container=reliabilityworker",
-		"active INSERT into client_reliability_running",
-		"four-hour re-anchor cadence",
-		"per-lookback transaction checkpoints",
-		"interrupted retry preserves those checkpoints",
+		"reliability_diagnostic=unavailable",
+		"former repeating-full-anchor mechanism is not established",
+		"Restore the bounded read-only phase diagnostic",
+		"Do not redeploy the already-present cadence fix",
 	} {
 		if !strings.Contains(markdown, want) {
-			t.Fatalf("reliability diagnosis missing %q: %s", want, markdown)
+			t.Fatalf("unavailable reliability diagnosis missing %q: %s", want, markdown)
 		}
 	}
-	requireAlertOmits(t, alert, taskID, otherTaskID)
+	for _, stale := range []string{
+		"forcing a full re-anchor of the multi-billion-row history on every cycle",
+		"Roll out the four-hour re-anchor cadence",
+	} {
+		if strings.Contains(markdown, stale) {
+			t.Fatalf("unavailable reliability diagnostic invented stale cause %q", stale)
+		}
+	}
+	requireAlertOmits(t, alert, taskID)
 }
 
 func TestTaskCanariesSignalExplainsMaintenanceBlockedByReliabilityAnchor(t *testing.T) {

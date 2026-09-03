@@ -5,7 +5,9 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -14,6 +16,352 @@ var taskErrorIDPattern = regexp.MustCompile(`(?i)\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3
 
 func redactTaskErrorIdentifiers(value string) string {
 	return taskErrorIDPattern.ReplaceAllString(value, "<task-id>")
+}
+
+const reliabilityTaskDiagnosticQuery = `
+	/* monitor_reliability_task_diagnostic */
+	WITH reliability_activity AS MATERIALIZED (
+		SELECT
+			a.pid,
+			a.query_start,
+			coalesce(a.wait_event_type, '') AS wait_event_type,
+			coalesce(a.wait_event, '') AS wait_event,
+			coalesce(a.client_addr::text, '') AS client_address,
+			CASE
+				WHEN a.query ~* 'INSERT[[:space:]]+INTO[[:space:]]+client_reliability_running[[:space:]]*\('
+				 AND a.query ~* 'ON[[:space:]]+CONFLICT[[:space:]]*\([[:space:]]*client_id[[:space:]]*,[[:space:]]*lookback_index[[:space:]]*\)[[:space:]]+DO[[:space:]]+UPDATE'
+					THEN 'rolling-enter'
+				WHEN a.query ~* 'UPDATE[[:space:]]+client_reliability_running[[:space:]]+r[[:space:]]+SET'
+				 AND a.query ~* 'independent_sum[[:space:]]*=[[:space:]]*r\.independent_sum[[:space:]]*-[[:space:]]*agg\.ind'
+					THEN 'rolling-leave'
+				WHEN a.query ~* 'DELETE[[:space:]]+FROM[[:space:]]+client_reliability_running'
+				 AND a.query ~* 'independent_sum[[:space:]]*<[[:space:]]*0\.5'
+					THEN 'rolling-cleanup'
+				WHEN a.query ~* 'INSERT[[:space:]]+INTO[[:space:]]+client_reliability_running[[:space:]]*\('
+					THEN 'full-anchor-insert'
+				WHEN a.query ~* 'DELETE[[:space:]]+FROM[[:space:]]+client_reliability_running'
+					THEN 'full-anchor-delete'
+				ELSE 'other'
+			END AS phase
+		FROM pg_stat_activity a
+		WHERE
+			a.pid <> pg_backend_pid() AND
+			a.backend_type = 'client backend' AND
+			a.state = 'active' AND
+			a.query ~* '\mclient_reliability_running\M'
+	), oldest_activity AS (
+		SELECT *
+		FROM reliability_activity
+		ORDER BY query_start, pid
+		LIMIT 1
+	), window_state AS (
+		SELECT
+			count(*)::int AS window_count,
+			count(*) FILTER (WHERE degraded_classification_version = 1)::int AS version_one_count,
+			count(*) FILTER (WHERE degraded_classification_write_token IS NOT NULL)::int AS token_count,
+			coalesce(max(max_block_number-last_recompute_block), -1)::bigint AS max_reanchor_distance
+		FROM client_reliability_running_window
+	), table_state AS (
+		SELECT c.oid, c.relkind
+		FROM pg_class c
+		WHERE c.oid = to_regclass('public.client_reliability')
+	), old_index AS (
+		SELECT i.indexrelid
+		FROM pg_index i
+		JOIN pg_class ic ON ic.oid = i.indexrelid
+		JOIN table_state t ON t.oid = i.indrelid
+		WHERE ic.relname = 'client_reliability_valid_block_number_client_address_hash'
+	), desired_index AS (
+		SELECT
+			i.indexrelid,
+			i.indisvalid,
+			pg_get_indexdef(i.indexrelid) LIKE '% USING btree (valid, block_number, client_address_hash) INCLUDE (network_id, client_id)' AS shape_matches
+		FROM pg_index i
+		JOIN pg_class ic ON ic.oid = i.indexrelid
+		JOIN table_state t ON t.oid = i.indrelid
+		WHERE ic.relname = 'client_reliability_valid_bnch_net_client'
+	), table_partitions AS (
+		SELECT inheritance.inhrelid
+		FROM pg_inherits inheritance
+		WHERE inheritance.inhparent = (SELECT oid FROM table_state)
+	), desired_children AS (
+		SELECT child.indexrelid, child.indisvalid
+		FROM desired_index parent
+		JOIN pg_inherits inheritance ON inheritance.inhparent = parent.indexrelid
+		JOIN pg_index child ON child.indexrelid = inheritance.inhrelid
+	), old_family AS (
+		SELECT indexrelid FROM old_index
+		UNION ALL
+		SELECT inheritance.inhrelid
+		FROM old_index parent
+		JOIN pg_inherits inheritance ON inheritance.inhparent = parent.indexrelid
+	), desired_family AS (
+		SELECT indexrelid FROM desired_index
+		UNION ALL
+		SELECT indexrelid FROM desired_children
+	), index_state AS (
+		SELECT
+			EXISTS (SELECT 1 FROM old_index) AS old_exists,
+			coalesce((SELECT indisvalid AND shape_matches FROM desired_index), false) AND
+			coalesce((SELECT relkind = 'p' FROM table_state), false) AND
+			(SELECT count(*) FROM desired_children) = (SELECT count(*) FROM table_partitions) AND
+			NOT EXISTS (SELECT 1 FROM desired_children WHERE NOT indisvalid) AS covering_ready,
+			coalesce(round(extract(epoch FROM clock_timestamp()-max(s.last_idx_scan)))::bigint, -1) AS old_scan_age_s,
+			coalesce((
+				SELECT round(extract(epoch FROM clock_timestamp()-max(s.last_idx_scan)))::bigint
+				FROM pg_stat_all_indexes s
+				WHERE s.indexrelid IN (SELECT indexrelid FROM desired_family)
+			), -1) AS covering_scan_age_s
+		FROM pg_stat_all_indexes s
+		WHERE s.indexrelid IN (SELECT indexrelid FROM old_family)
+	)
+	SELECT
+		coalesce((SELECT phase FROM oldest_activity), 'none'),
+		coalesce((SELECT round(extract(epoch FROM clock_timestamp()-query_start))::bigint FROM oldest_activity), 0),
+		coalesce((SELECT wait_event_type FROM oldest_activity), ''),
+		coalesce((SELECT wait_event FROM oldest_activity), ''),
+		coalesce((SELECT client_address FROM oldest_activity), ''),
+		(SELECT count(*)::int FROM reliability_activity),
+		(SELECT count(*)::int FROM reliability_activity WHERE wait_event_type = 'Lock' AND wait_event = 'transactionid'),
+		w.window_count,
+		w.version_one_count,
+		w.token_count,
+		w.max_reanchor_distance,
+		i.old_exists,
+		i.covering_ready,
+		i.old_scan_age_s,
+		i.covering_scan_age_s
+	FROM window_state w
+	CROSS JOIN index_state i;
+`
+
+type reliabilityTaskDiagnostic struct {
+	phase                    string
+	elapsedSeconds           int
+	waitType                 string
+	waitEvent                string
+	sourceHost               string
+	activeQueries            int
+	blockedQueries           int
+	windowCount              int
+	versionOneWindowCount    int
+	tokenWindowCount         int
+	maxReanchorDistance      int
+	oldIndexPresent          bool
+	coveringIndexReady       bool
+	oldIndexLastScanAge      int
+	coveringIndexLastScanAge int
+}
+
+func parseReliabilityTaskDiagnostic(row pgRow, cfg *monitorConfig) (reliabilityTaskDiagnostic, error) {
+	if len(row) != 15 {
+		return reliabilityTaskDiagnostic{}, fmt.Errorf("reliability task diagnostic returned %d columns, want 15", len(row))
+	}
+	parseInt := func(column int, name string, allowNegative bool) (int, error) {
+		value, err := strconv.Atoi(row.str(column))
+		if err != nil || (!allowNegative && value < 0) {
+			return 0, fmt.Errorf("invalid reliability %s %q", name, row.str(column))
+		}
+		return value, nil
+	}
+	parseBool := func(column int, name string) (bool, error) {
+		value, err := strconv.ParseBool(row.str(column))
+		if err != nil {
+			return false, fmt.Errorf("invalid reliability %s %q", name, row.str(column))
+		}
+		return value, nil
+	}
+
+	diagnostic := reliabilityTaskDiagnostic{
+		phase:      row.str(0),
+		waitType:   row.str(2),
+		waitEvent:  row.str(3),
+		sourceHost: reliabilityTaskSourceHost(cfg, row.str(4)),
+	}
+	if diagnostic.phase == "" {
+		return reliabilityTaskDiagnostic{}, fmt.Errorf("empty reliability SQL phase")
+	}
+	var err error
+	if diagnostic.elapsedSeconds, err = parseInt(1, "SQL elapsed seconds", false); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.activeQueries, err = parseInt(5, "active query count", false); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.blockedQueries, err = parseInt(6, "blocked query count", false); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.windowCount, err = parseInt(7, "window count", false); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.versionOneWindowCount, err = parseInt(8, "version-one window count", false); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.tokenWindowCount, err = parseInt(9, "token window count", false); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.maxReanchorDistance, err = parseInt(10, "re-anchor distance", true); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.oldIndexPresent, err = parseBool(11, "old-index state"); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.coveringIndexReady, err = parseBool(12, "covering-index state"); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.oldIndexLastScanAge, err = parseInt(13, "old-index scan age", true); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if diagnostic.coveringIndexLastScanAge, err = parseInt(14, "covering-index scan age", true); err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	return diagnostic, nil
+}
+
+func reliabilityTaskSourceHost(cfg *monitorConfig, rawAddress string) string {
+	address, ok := parseMonitorAddress(rawAddress)
+	if !ok {
+		return "unmapped-service-client"
+	}
+	match := ""
+	for _, candidate := range cfg.hosts {
+		matched := false
+		for _, configuredAddress := range []string{candidate.lanIp, candidate.overlayIp} {
+			configured, configuredOK := parseMonitorAddress(configuredAddress)
+			if configuredOK && configured == address {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if match != "" && match != candidate.name {
+			return "ambiguous-service-client"
+		}
+		match = candidate.name
+	}
+	if match == "" {
+		return "unmapped-service-client"
+	}
+	return match
+}
+
+func parseMonitorAddress(value string) (netip.Addr, bool) {
+	value = strings.TrimSpace(value)
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Addr().Unmap(), true
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return address.Unmap(), true
+}
+
+func readReliabilityTaskDiagnostic(ctx context.Context, env *probeEnv) (reliabilityTaskDiagnostic, error) {
+	rows, err := env.runner.pg(ctx, reliabilityTaskDiagnosticQuery)
+	if err != nil {
+		return reliabilityTaskDiagnostic{}, err
+	}
+	if len(rows) != 1 {
+		return reliabilityTaskDiagnostic{}, fmt.Errorf("reliability task diagnostic returned %d rows, want 1", len(rows))
+	}
+	return parseReliabilityTaskDiagnostic(rows[0], env.cfg)
+}
+
+func applyReliabilityTaskDiagnostic(alert *finding, diagnostic reliabilityTaskDiagnostic, diagnosticErr error) {
+	if diagnosticErr != nil {
+		alert.mechanism = "Task duration alone cannot distinguish a full reliability re-anchor from its rolling enter, leave, or cleanup checkpoints. The bounded PostgreSQL phase diagnostic was unavailable, so the former repeating-full-anchor mechanism is not established by this alert."
+		alert.context += " Restore the read-only reliability phase observation and inspect the active taskworker artifact before assigning a code or deployment cause. Diagnostic error: " + redactTaskErrorIdentifiers(diagnosticErr.Error())
+		alert.observed += " reliability_diagnostic=unavailable"
+		alert.action = "Restore the bounded read-only phase diagnostic, then classify the active SQL and running-window markers before changing the task. Do not redeploy the already-present cadence fix, raise MaxTime, cancel PostgreSQL work, or restart a database or taskworker based only on elapsed duration."
+		alert.verify = "The diagnostic returns a concrete phase and marker/index state, the exact cause receives its own repair boundary, and later UpdateReliabilities attempts return below their historical duration band."
+		return
+	}
+
+	wait := "running"
+	if diagnostic.waitType != "" || diagnostic.waitEvent != "" {
+		wait = diagnostic.waitType + ":" + diagnostic.waitEvent
+		wait = strings.Trim(wait, ":")
+	}
+	currentWindows := diagnostic.windowCount > 0 &&
+		diagnostic.versionOneWindowCount == diagnostic.windowCount &&
+		diagnostic.tokenWindowCount == diagnostic.windowCount &&
+		0 <= diagnostic.maxReanchorDistance && diagnostic.maxReanchorDistance < 240
+	alert.observed += fmt.Sprintf(
+		" reliability_sql_phase=%s sql_elapsed_s=%d sql_wait=%s sql_source=%s active_reliability_queries=%d transaction_blocked_queries=%d running_windows=%d version_one_windows=%d token_windows=%d max_reanchor_distance_blocks=%d current_windows=%t old_index_present=%t covering_index_ready=%t old_index_last_scan_age_s=%d covering_index_last_scan_age_s=%d",
+		diagnostic.phase,
+		diagnostic.elapsedSeconds,
+		wait,
+		diagnostic.sourceHost,
+		diagnostic.activeQueries,
+		diagnostic.blockedQueries,
+		diagnostic.windowCount,
+		diagnostic.versionOneWindowCount,
+		diagnostic.tokenWindowCount,
+		diagnostic.maxReanchorDistance,
+		currentWindows,
+		diagnostic.oldIndexPresent,
+		diagnostic.coveringIndexReady,
+		diagnostic.oldIndexLastScanAge,
+		diagnostic.coveringIndexLastScanAge,
+	)
+	alert.evidence = "The bounded pg_stat_activity, running-window, pg_catalog, and pg_stat_all_indexes diagnostic identifies the active phase and physical access-path state without emitting SQL text, client addresses, or task identifiers."
+
+	rolling := diagnostic.phase == "rolling-enter" ||
+		diagnostic.phase == "rolling-leave" ||
+		diagnostic.phase == "rolling-cleanup"
+	if rolling {
+		alert.mechanism = fmt.Sprintf("The active PostgreSQL phase is %s, which directly falsifies the old repeated-full-anchor diagnosis for this attempt.", diagnostic.phase)
+		if currentWindows {
+			alert.mechanism += fmt.Sprintf(" All %d running windows have current classification tokens and are only %d blocks beyond their last re-anchor, so this is the intended incremental path.", diagnostic.windowCount, diagnostic.maxReanchorDistance)
+		}
+		oldIndexUsedDuringQuery := 0 <= diagnostic.oldIndexLastScanAge &&
+			diagnostic.oldIndexLastScanAge <= diagnostic.elapsedSeconds+60 &&
+			(diagnostic.coveringIndexLastScanAge < 0 ||
+				diagnostic.oldIndexLastScanAge < diagnostic.coveringIndexLastScanAge)
+		if diagnostic.oldIndexPresent && diagnostic.coveringIndexReady && oldIndexUsedDuringQuery {
+			alert.mechanism += " The covering parent and every child have the exact ready shape, but incomplete finalization leaves the old non-covering family eligible; PostgreSQL used that family during this active interval, more recently than the covering family. The old path requires heap fetches for network_id and client_id; an exact read-only EXPLAIN during the 2026-09-03 incident selected the legacy child for a 30-block rolling-leave slice estimated at 2,142,377 rows, explaining the severe regression from the historical rolling-query band."
+			if diagnostic.blockedQueries > 0 {
+				alert.mechanism += " A second reliability statement is transaction-ID blocked behind the oldest active checkpoint, so reclaiming the task does not create independent progress."
+			}
+			alert.context += " During the 2026-09-03 control, edge-4 rebooted while the rolling UPDATE was active; PostgreSQL retained that transaction after the worker connection disappeared, and the reclaimed edge-1 attempt waited behind it. This is a legacy-index finalization plus lifecycle-overlap incident, not evidence that current Taskworker source still has the 20-minute cadence bug. Server commit fcb4de54 adds the missing transaction-local PostgreSQL timeout for future hard-loss containment; it cannot alter this already-running backend."
+			alert.action = "Preserve the current bounded database work. Deploy Taskworker from Server commit fcb4de54 or later to blocks whose artifact lacks its transaction-local two-hour PostgreSQL checkpoint timeout; this bounds future hard-loss orphans but does not accelerate the current query. After the protected measurement ends and explicit DBA authorization is granted, run `bringyourctl model upgrade-client-reliability-index` so its supported finalizer drops the old parent; do not rebuild the already-valid covering children. Coordinate future maintenance reboots with a task drain. Do not redeploy only for the already-present four-hour/checkpoint fix, raise MaxTime, cancel the query, or restart PostgreSQL or taskworkers merely to clear this alert."
+			alert.verify = "Every Taskworker artifact contains fcb4de54; its reliability checkpoint sets a transaction-local two-hour statement timeout while unrelated sessions retain their configured value. The old parent is absent, the desired parent and every child remain valid, a representative bounded rolling EXPLAIN selects the covering child without the legacy heap-fetch path, the current backend reaches a bounded terminal outcome, any transaction-blocked retry proceeds, and subsequent rolling cycles return below their historical duration band."
+			alert.playbook = "SIGNALS.md §1.2, §5.7, and §8.10"
+			return
+		}
+		alert.context += " A rolling phase can still regress because of its chosen child index, heap visibility, storage contention, or lock coupling. The phase alone does not select among those causes."
+		alert.action = "Capture a bounded EXPLAIN without ANALYZE for the exact rolling bounds, compare old and covering child-index usage, and repair the demonstrated access-path or contention owner. Do not deploy a re-anchor cadence change, raise MaxTime, cancel work, or restart services based only on this duration."
+		alert.verify = "The demonstrated rolling access path is corrected, any blocked successor proceeds, and multiple later rolling cycles finish below the historical duration band with equivalent sums."
+		alert.playbook = "SIGNALS.md §1.2, §5.7, and §8.10"
+		return
+	}
+
+	fullAnchor := diagnostic.phase == "full-anchor-insert" || diagnostic.phase == "full-anchor-delete"
+	if fullAnchor {
+		anchorReason := "The marker snapshot does not by itself distinguish a backward-window repair from a missing schema guard; inspect the task artifact and bounds before deciding whether this anchor is mandatory."
+		switch {
+		case diagnostic.windowCount == 0:
+			anchorReason = "No running-window marker exists, so bootstrap requires a full anchor."
+		case diagnostic.versionOneWindowCount != diagnostic.windowCount || diagnostic.tokenWindowCount != diagnostic.windowCount:
+			anchorReason = "At least one marker lacks the current classification version or guarded write token, so the one-time classification transition requires a full anchor."
+		case 240 <= diagnostic.maxReanchorDistance:
+			anchorReason = "The oldest marker has reached the four-hour (240-block) recompute boundary, so this is the scheduled associativity/classification correction."
+		}
+		alert.mechanism = fmt.Sprintf("The active PostgreSQL phase is %s, directly confirming a full reliability re-anchor. %s", diagnostic.phase, anchorReason)
+		alert.context += " Bootstrap, classification-generation changes, backward windows, and the four-hour correction are intentional full scans; artifact provenance and marker state must distinguish them from a stale 20-minute implementation."
+		alert.action = "Let the current per-lookback checkpoint reach its bounded outcome. Confirm the active artifact contains the four-hour cadence and per-lookback commits, and deploy Taskworker from Server commit fcb4de54 or later only where the transaction-local two-hour PostgreSQL checkpoint timeout is absent. Do not raise MaxTime, schedule a duplicate task, cancel the database statement, or restart PostgreSQL."
+		alert.verify = "Every Taskworker artifact contains fcb4de54 and applies its transaction-local server timeout; each completed lookback advances its own marker durably, an interrupted later checkpoint preserves earlier progress, the next ordinary half-hour cycle uses the rolling path, and the next intentional anchor occurs only at a mandatory repair or quiet four-hour boundary."
+		alert.playbook = "SIGNALS.md §1.2 and §5.7"
+		return
+	}
+
+	alert.mechanism = "The bounded PostgreSQL diagnostic found no recognized active reliability maintenance phase at the sample instant, so elapsed duration does not establish either a full-anchor or rolling-query cause."
+	alert.context += " The task may be between statements, in a different reliability phase, or represented by a stale claim; use its lifecycle heartbeat and a repeated bounded phase sample before attributing it."
+	alert.action = "Repeat the bounded phase observation and correlate the exact active artifact and running-window markers. Do not deploy, raise MaxTime, cancel PostgreSQL work, or restart a service until a concrete phase and owner are established."
+	alert.verify = "A concrete phase and owner are observed or the claim reaches a clean terminal state, followed by UpdateReliabilities durations inside the historical band."
 }
 
 // taskFailureSummarySQL returns one representative row per failing task
@@ -397,10 +745,8 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alert.verify = "A large reaper run returns toward its seconds/minutes band, the five PostgreSQL eligibility probes remain drained, target Redis state is removed, a reassigned forward egress owner is preserved, and co-resident task durations normalize."
 		}
 		if task == "UpdateReliabilities" {
-			alert.mechanism = "The reliability running-window threshold was shorter than the task cadence, forcing a full re-anchor of the multi-billion-row history on every cycle instead of using the exact add-entering/subtract-leaving path. The 7-day anchor has a long I/O-contention tail and can reach the task deadline when its lookbacks share one transaction."
-			alert.context += ". Confirm this variant with an active INSERT into client_reliability_running and running-window markers whose last re-anchor is only a few blocks behind; a different active statement requires separate diagnosis"
-			alert.action = "Roll out the four-hour re-anchor cadence plus per-lookback transaction checkpoints, and defer optional anchors while established VACUUM/REINDEX work is active. Retain the 30-minute incremental cadence; do not raise the two-hour task deadline or cancel a progressing query merely to hide this alert."
-			alert.verify = "Most half-hour cycles take the rolling path and finish below the historical p95. A quiet-period anchor commits one lookback at a time; an interrupted retry preserves those checkpoints, and rolling-equivalence tests remain green."
+			diagnostic, diagnosticErr := readReliabilityTaskDiagnostic(ctx, env)
+			applyReliabilityTaskDiagnostic(&alert, diagnostic, diagnosticErr)
 		}
 		if task == "ReconcileNetEscrow" {
 			alert.mechanism = "ReconcileNetEscrow is beyond its historical duration band. An older full-fleet absolute writer can create stale-snapshot exposure; the current page-local additive path can instead be paying migration catch-up, index warmup, a large dirty page set, or storage contention. Duration alone does not identify which algorithm is running."

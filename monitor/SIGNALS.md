@@ -595,6 +595,30 @@ WHERE function_name LIKE '%UpdateClient%'
   The 2026-08-30 reaper recurrence supplied the regression values: p50 42s,
   p95 3,552s, due age 6,283s, and matching heartbeat 6,220s. The old p95-only
   rule waited until 7,104s; the median-tail guard alerts at 1,200s.
+- GOTCHA — an overdue `UpdateReliabilities` duration does not identify its SQL
+  phase. A full anchor, rolling enter, rolling leave, and post-leave cleanup
+  have different causes and closure gates. When this family crosses the
+  duration guard, run one bounded read-only diagnostic over
+  `pg_stat_activity`, `client_reliability_running_window`, `pg_catalog`, and
+  `pg_stat_all_indexes`. Report the recognized phase, SQL elapsed time and
+  wait class, active/transaction-blocked statement counts, current-format
+  marker counts and maximum re-anchor distance, old/covering index state, and
+  each index family's last-scan age. Map `client_addr` internally to the
+  configured host and emit only that host name; an address with no unique
+  inventory match becomes `unmapped-service-client`, never a raw IP. Never
+  emit query text, PID, task identifier, or customer fields. If this
+  diagnostic is unavailable or samples between statements, say the cause is
+  unknown: do not fall back to the historical repeated-full-anchor claim.
+  The 2026-09-03 incident proved why this is required. The deployed worker
+  already contained the four-hour cadence and per-lookback checkpoints, all
+  four markers were current-format and only 54–55 blocks past re-anchor, and
+  the active phase was `rolling-leave`, not an anchor. See §5.7 and §8.10 for
+  the legacy-index and reboot-overlap root cause. Server commit `fcb4de54`
+  adds a transaction-local two-hour PostgreSQL statement timeout to every
+  checkpoint, matching the existing task ceiling so a hard worker loss cannot
+  leave a server-side statement unbounded. This is a Taskworker software
+  containment, not a replacement for index finalization or a reason to disturb
+  the already-running transaction.
 
 ### 1.3 pg idle-in-transaction count — the redis-latency mirror
 Probe: `pg-state`
@@ -4988,6 +5012,27 @@ row's `sample_max_time_s`; for a non-`Drained:` context cancellation, compare
 that value with the taskworker `eval error` duration before deciding whether
 the task-specific deadline is undersized.
 
+For `UpdateReliabilities`, duration is only the trigger for the direct phase
+diagnostic from §1.2. A recognized `rolling-*` phase falsifies the old
+repeating-full-anchor explanation for that attempt. A recognized
+`full-anchor-*` phase still needs its marker reason: missing state,
+classification version/token repair, backward bounds, or the quiet four-hour
+boundary are mandatory/current behaviors, while artifact ancestry is required
+before claiming the obsolete 20-minute cadence is deployed. On 2026-09-03 the
+task was running `rolling-leave` for more than 2,600s even though its historical
+rolling-leave maximum was about 30s. PostgreSQL had selected an old
+non-covering partition child and a scheduled edge reboot then disconnected the
+worker without stopping the server-side UPDATE; the reclaimed attempt was
+transaction-ID blocked behind the surviving transaction. Preserve the bounded
+work, finish §8.10's supported index finalization only after the protected
+measurement and explicit DBA authorization, and coordinate future maintenance
+reboots with a task drain. Deploy Taskworker from Server commit `fcb4de54` or
+later to add the transaction-local two-hour PostgreSQL timeout for future hard
+worker losses; it does not accelerate or cancel this incident's existing
+backend. A redeploy solely for the already-present cadence/checkpoint changes,
+larger MaxTime, query cancel, or database restart is not the repair for this
+variant.
+
 Two 2026-08-29 task-family variants were formerly hidden behind the raw-row
 limit:
 
@@ -6894,6 +6939,55 @@ state the supported command skips every child and attempts only its final old
 partitioned-index drop under the existing 15-second lock timeout and bounded
 retry policy. It still needs an operational window because the metadata drop
 takes a lock, but it does not rescan or sort the 34 large partitions.
+
+The 2026-09-03 reliability overrun made that unfinished finalization causal,
+not merely theoretical. Both running Taskworkers on the executing host exposed
+Server source `2d6f27c237d7c00d225ea45dab229dad12188e3d`; ancestry checks proved
+that revision already contains the four-hour re-anchor, per-lookback
+checkpoint, classification-v1, and mixed-rollout guard changes. The four
+durable running-window rows all had version 1 plus guarded write tokens and
+were only 54–55 one-minute blocks beyond their last re-anchor. Direct
+`pg_stat_activity` instead showed an active `rolling-leave` UPDATE from edge-4
+for more than 2,600 seconds and a reclaimed `rolling-enter` attempt from edge-1
+waiting on its transaction ID. Historical statement stats put the rolling-leave
+maximum near 30 seconds, separating this run from ordinary variance and from a
+full anchor.
+
+A bounded `EXPLAIN` without `ANALYZE` supplied the access-path discriminator:
+for the same 30-block leaving slice PostgreSQL chose
+`client_reliability_p20260903_valid_block_number_client_add_idx1`, the old
+non-covering child, for an estimated 2,142,377 rows. The ready covering family
+had all 34 valid attached children, but the old parent and children were still
+eligible; live index statistics showed the old family used seconds earlier
+while the covering family's last use was much older. Fetching `network_id` and
+`client_id` from the heap explains the rolling regression. During that query,
+edge-4 entered its scheduled reboot. The worker disappeared, but PostgreSQL
+could not observe the dead client while executing and retained the UPDATE and
+its transaction; the newly claimed edge-1 attempt therefore waited rather than
+making independent progress.
+
+This incident has three distinct closure boundaries. The software containment
+is Server commit `fcb4de54`: each reliability checkpoint installs a
+transaction-local two-hour PostgreSQL statement timeout matching the existing
+task ceiling, so a server eventually cancels and rolls back an orphan even if
+an abrupt worker-host loss removes the client context. Deploy it in Taskworker;
+it cannot change the already-running incident backend, and unrelated pooled
+sessions retain their configured timeout. The operational database fix is
+still the existing idempotent
+`bringyourctl model upgrade-client-reliability-index`, run only after the
+protected measurement ends and explicit DBA authorization permits its final
+metadata lock; no application deployment can remove the old parent. Future
+scheduled host maintenance must drain task ownership before reboot so a
+server-side statement is not orphaned behind a reclaimed lease. Recovery
+requires every Taskworker artifact to contain `fcb4de54`, its checkpoint-local
+timeout to leave unrelated sessions unchanged, the old parent to be absent,
+the covering parent and all children to remain valid, a representative bounded
+rolling plan to choose the covering child without the legacy heap-fetch path,
+the old backend to reach a bounded terminal outcome, the blocked successor to
+proceed, and later rolling cycles to return to their historical band. Do not
+redeploy only for the already-present four-hour/checkpoint change, rebuild the
+34 valid children, raise the task deadline, cancel a progressing statement, or
+restart PostgreSQL to make the alert disappear.
 
 The focused probe reads only `pg_catalog`; it never scans
 `client_reliability` rows. Require all of these as one physical contract:
