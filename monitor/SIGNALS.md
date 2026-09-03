@@ -7586,6 +7586,34 @@ substitute for the exact executable's base/modified tuple. Local and managed
 copies can legitimately identify different checkout generations between
 operator runs, so this probe does not invent a fleet-equality requirement.
 
+Repository-local operational commands have a stricter path-selection rule.
+Invoke `warp/warpctl/run.sh`, which selects only the Makefile artifact at
+`warp/warpctl/build/<goos>/<goarch>/warpctl`; never invoke the ignored
+`warp/warpctl/warpctl` binary or select a checkout binary through `PATH`. The
+launcher supports Darwin and Linux on arm64 and amd64, fails closed when its
+canonical artifact is absent or non-executable, and uses `exec` so arguments,
+signals, and exit status retain their normal Warpctl semantics. Before an
+incident query, use `warp/warpctl/run.sh --print-executable`, then record the
+printed artifact's SHA-256 and `go version -m` identity. This path rule does not
+require a clean tree or exact-HEAD build; the base revision and modified bit
+remain the attribution boundary described above.
+
+The 2026-09-03 API status-sampling incident is the discriminator. Every false
+sample used the ignored `warp/warpctl/warpctl`, whose 2026-04-29 mtime,
+`2eec73...` SHA-256, dirty `2f02fd5` base revision, and DNS trace identified a
+stale executable resolving retired `main-lb.ur.io`; that hostname had no A or
+AAAA answer. Apparent failing API block labels changed between runs because
+the local client failed before reaching any block. The canonical
+`warp/warpctl/build/darwin/arm64/warpctl` instead had a 2026-09-02 mtime,
+`222ffa...` SHA-256, clean `8797d48` base revision, resolved
+`main-lb.bringyour.com`, and immediately returned 20/20 successful samples.
+Host-side checks independently showed all API block listeners and status paths
+healthy. Therefore `error status request failed` plus a failed DNS trace for a
+retired hostname is a local executable-provenance failure, not evidence of a
+bad API block or load-balancer destination. `TestServicesConfigLookups`
+retains the source-level domain-selection contract; the launcher tests retain
+the operational path-selection contract.
+
 The 2026-09-01 production discriminator joined all three boundaries. Running
 Taskworker image digest
 `sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a`

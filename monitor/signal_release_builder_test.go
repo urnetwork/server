@@ -211,3 +211,45 @@ func TestParseReleaseBuilderSampleRejectsMissingField(t *testing.T) {
 		t.Fatalf("missing release-builder field error = %v", err)
 	}
 }
+
+// Retains the stale-local-binary discriminator and guarded recovery command.
+func TestReleaseBuilderDocumentationRetainsLocalLauncherContract(t *testing.T) {
+	catalogBytes, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := string(catalogBytes)
+	start := strings.Index(catalog, "### 8.13 ")
+	if start < 0 {
+		t.Fatal("SIGNALS.md is missing §8.13")
+	}
+	section := catalog[start:]
+	end := strings.Index(section, "\n## 9. ")
+	if end < 0 {
+		t.Fatal("SIGNALS.md is missing the end of §8.13")
+	}
+	section = strings.Join(strings.Fields(section[:end]), " ")
+
+	for _, required := range []string{
+		"`warp/warpctl/run.sh`",
+		"`warp/warpctl/build/<goos>/<goarch>/warpctl`",
+		"ignored `warp/warpctl/warpctl`",
+		"`warp/warpctl/run.sh --print-executable`",
+		"2026-04-29",
+		"`2eec73...` SHA-256",
+		"dirty `2f02fd5` base revision",
+		"retired `main-lb.ur.io`",
+		"no A or AAAA answer",
+		"`warp/warpctl/build/darwin/arm64/warpctl`",
+		"`222ffa...` SHA-256",
+		"clean `8797d48` base revision",
+		"`main-lb.bringyour.com`",
+		"20/20 successful samples",
+		"local executable-provenance failure",
+		"`TestServicesConfigLookups`",
+	} {
+		if !strings.Contains(section, required) {
+			t.Errorf("release-builder runbook missing %q", required)
+		}
+	}
+}
