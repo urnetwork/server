@@ -1308,6 +1308,28 @@ func findingByClass(t *testing.T, findings []finding, class string) finding {
 	return finding{}
 }
 
+func TestLogTailerRendersServiceTargetAndEndpointFrame(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	for range 10 {
+		tailer.classify("dial tcp 192.0.2.10:6380: i/o timeout")
+	}
+	finding := findingByClass(t, tailer.drainWindow(), "dial-io-timeout")
+	if finding.healthy {
+		t.Fatal("dial timeout at threshold did not alert")
+	}
+	if finding.target != "api" || finding.frame != "192.0.2.10:6380" {
+		t.Fatalf("finding identity target=%q frame=%q", finding.target, finding.frame)
+	}
+	for _, want := range []string{"target=api", "frame=192.0.2.10:6380"} {
+		if !strings.Contains(finding.observed, want) {
+			t.Fatalf("observed values missing %q: %s", want, finding.observed)
+		}
+	}
+	if strings.Contains(finding.observed, "target=192.0.2.10:6380") {
+		t.Fatalf("endpoint replaced stable service target: %s", finding.observed)
+	}
+}
+
 // the §3.7 tailer self-health thresholds: silent-too-long and restarting-hot
 // raise monitor/visibility findings; a live, stable tailer reports healthy.
 func TestTailerHealthFindings(t *testing.T) {

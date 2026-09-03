@@ -1452,12 +1452,13 @@ func (self *logTailer) drainWindow() []finding {
 			attribution := self.classTargets[key]
 			if c.observationOnly {
 				observed += fmt.Sprintf(" observation_service=%s affected_selector=unknown", self.service)
+			} else if c.groupBy != nil {
+				observed += fmt.Sprintf(" frame=%s", attribution)
 			} else {
-				attributionLabel := "target"
-				if c.groupBy != nil {
-					attributionLabel = "frame"
+				observed += fmt.Sprintf(" target=%s", self.service)
+				if attribution != "" {
+					observed += fmt.Sprintf(" frame=%s", attribution)
 				}
-				observed += fmt.Sprintf(" %s=%s", attributionLabel, attribution)
 			}
 			canonicalEvidence := ""
 			if c.canonical != nil {

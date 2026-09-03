@@ -114,6 +114,7 @@ func TestLogErrorsSignalDoesNotAttributeConnectionResetToServer(t *testing.T) {
 		"Proxy accepts this /device-rpc WebSocket and the remote DeviceRemote initiates it",
 		"exact 500-millisecond pace matches failed-sync retry pacing",
 		"capture a bounded early-sync stage/result on each endpoint",
+		"rate=50/min class=conn-reset target=proxy",
 		"Do not call the event a server close",
 		"remains below 50/min for 10 minutes",
 	} {
