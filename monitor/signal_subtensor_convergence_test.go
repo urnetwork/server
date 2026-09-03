@@ -108,6 +108,43 @@ func TestSubtensorConvergenceSignalSyntheticTreatsShortHistoryAsUnknown(t *testi
 	}
 }
 
+func TestSubtensorConvergenceSignalSyntheticPrioritizesStaleSourceOverBrokenSlope(t *testing.T) {
+	now := time.Date(2026, 9, 3, 8, 1, 0, 0, time.UTC)
+	_, err := runSubtensorConvergenceFixture(t, now, subtensorConvergenceFixture{
+		lag: 1_401_819, netRate: 18.450862, targetRate: -17.904045,
+		importRate: 0.353584, importSeconds: 1.827060,
+		queuedBlocks: 2112, sampleCount: 143, sampleAge: 260,
+	})
+	if err == nil || !strings.Contains(err.Error(), "source sample is 260s old") {
+		t.Fatalf("stale broken-slope error = %v", err)
+	}
+	if strings.Contains(err.Error(), "inconsistent one-hour measures") || strings.Contains(err.Error(), "143 one-hour samples") {
+		t.Fatalf("stale source was obscured by a derived value: %v", err)
+	}
+}
+
+func TestSubtensorConvergenceValidationOrderAndMissingNamesAreDeterministic(t *testing.T) {
+	targets := map[string]subtensorConvergenceTarget{
+		"snow\x00subtensor-lightnode": {host: "snow", job: "subtensor-lightnode"},
+		"snow\x00subtensor":           {host: "snow", job: "subtensor"},
+	}
+	wantKeys := []string{"snow\x00subtensor", "snow\x00subtensor-lightnode"}
+	gotKeys := sortedSubtensorConvergenceTargetKeys(targets)
+	if strings.Join(gotKeys, "|") != strings.Join(wantKeys, "|") {
+		t.Fatalf("target validation order = %q, want %q", gotKeys, wantKeys)
+	}
+	missing := missingSubtensorConvergenceMeasures(
+		subtensorConvergenceNetRate |
+			subtensorConvergenceTargetRate |
+			subtensorConvergenceImportRate |
+			subtensorConvergenceImportSeconds |
+			subtensorConvergenceSamples,
+	)
+	if got, want := strings.Join(missing, ","), "lag,queued_blocks,sample_age"; got != want {
+		t.Fatalf("missing measure names = %q, want %q", got, want)
+	}
+}
+
 func TestSubtensorConvergenceQueryUsesExactFreshOneHourSourceSeries(t *testing.T) {
 	query := subtensorConvergenceQuery(
 		"main",

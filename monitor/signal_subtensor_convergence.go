@@ -53,6 +53,20 @@ const (
 	subtensorConvergenceAll = (1 << iota) - 1
 )
 
+var subtensorConvergenceMeasureNames = []struct {
+	bit  int
+	name string
+}{
+	{bit: subtensorConvergenceLag, name: "lag"},
+	{bit: subtensorConvergenceNetRate, name: "net_rate"},
+	{bit: subtensorConvergenceTargetRate, name: "target_rate"},
+	{bit: subtensorConvergenceImportRate, name: "import_rate"},
+	{bit: subtensorConvergenceImportSeconds, name: "import_seconds"},
+	{bit: subtensorConvergenceQueue, name: "queued_blocks"},
+	{bit: subtensorConvergenceSamples, name: "sample_count"},
+	{bit: subtensorConvergenceSampleAge, name: "sample_age"},
+}
+
 type subtensorConvergenceTarget struct {
 	host     string
 	node     string
@@ -286,23 +300,27 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 		metrics[key] = metric
 	}
 
-	for key, target := range targets {
+	for _, key := range sortedSubtensorConvergenceTargetKeys(targets) {
+		target := targets[key]
 		metric, ok := metrics[key]
 		if !ok || metric.mask != subtensorConvergenceAll {
 			mask := 0
 			if ok {
 				mask = metric.mask
 			}
-			return nil, fmt.Errorf("subtensor convergence: incomplete one-hour measures for %s/%s mask=%d want=%d", target.host, target.job, mask, subtensorConvergenceAll)
-		}
-		if metric.lag < 0 || metric.targetRate < 0 || metric.importRate <= 0 ||
-			metric.importSeconds <= 0 || metric.queuedBlocks < 0 || metric.sampleAge < -subtensorConvergenceFutureSkew.Seconds() {
-			return nil, fmt.Errorf("subtensor convergence: inconsistent one-hour measures for %s/%s", target.host, target.job)
-		}
-		if metric.sampleCount < subtensorConvergenceMinSamples {
 			return nil, fmt.Errorf(
-				"subtensor convergence: %s/%s has %.0f one-hour samples, want at least %d",
-				target.host, target.job, metric.sampleCount, subtensorConvergenceMinSamples,
+				"subtensor convergence: incomplete one-hour measures for %s/%s missing=%s mask=%d want=%d",
+				target.host, target.job, strings.Join(missingSubtensorConvergenceMeasures(mask), ","), mask, subtensorConvergenceAll,
+			)
+		}
+		// Validate the observation window before interpreting its derivatives.
+		// A stale or short series can produce a physically impossible slope when
+		// the range crosses a scrape/restart boundary; that is observation loss,
+		// not evidence that the chain target moved backwards.
+		if metric.sampleAge < -subtensorConvergenceFutureSkew.Seconds() {
+			return nil, fmt.Errorf(
+				"subtensor convergence: %s/%s source sample is %.0fs in the future, want at most %.0fs",
+				target.host, target.job, -metric.sampleAge, subtensorConvergenceFutureSkew.Seconds(),
 			)
 		}
 		if metric.sampleAge > subtensorConvergenceFreshness.Seconds() {
@@ -311,8 +329,40 @@ func parseSubtensorConvergence(raw string, targets map[string]subtensorConvergen
 				target.host, target.job, metric.sampleAge, subtensorConvergenceFreshness.Seconds(),
 			)
 		}
+		if metric.sampleCount < subtensorConvergenceMinSamples {
+			return nil, fmt.Errorf(
+				"subtensor convergence: %s/%s has %.0f one-hour samples, want at least %d",
+				target.host, target.job, metric.sampleCount, subtensorConvergenceMinSamples,
+			)
+		}
+		if metric.lag < 0 || metric.targetRate < 0 || metric.importRate <= 0 ||
+			metric.importSeconds <= 0 || metric.queuedBlocks < 0 {
+			return nil, fmt.Errorf(
+				"subtensor convergence: inconsistent one-hour measures for %s/%s lag=%.6f target_rate=%.6f import_rate=%.6f import_seconds=%.6f queued_blocks=%.6f",
+				target.host, target.job, metric.lag, metric.targetRate, metric.importRate, metric.importSeconds, metric.queuedBlocks,
+			)
+		}
 	}
 	return metrics, nil
+}
+
+func sortedSubtensorConvergenceTargetKeys(targets map[string]subtensorConvergenceTarget) []string {
+	keys := make([]string, 0, len(targets))
+	for key := range targets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func missingSubtensorConvergenceMeasures(mask int) []string {
+	missing := []string{}
+	for _, measure := range subtensorConvergenceMeasureNames {
+		if mask&measure.bit == 0 {
+			missing = append(missing, measure.name)
+		}
+	}
+	return missing
 }
 
 func evaluateSubtensorConvergence(metric subtensorConvergenceMetrics, metricHost string) (finding, bool) {

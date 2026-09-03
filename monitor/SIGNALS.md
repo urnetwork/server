@@ -12001,6 +12001,11 @@ instant response is observable only when every configured node supplies the
 complete measure tuple, at least 200 samples in the one-hour range, and a raw
 best-head sample no more than 90 seconds old. Missing, partial, stale,
 non-finite, or inconsistent values are observation loss, not zero lag.
+Validate configured host/job pairs in stable lexical order and name missing
+measures rather than emitting only a bit mask. Check current-sample freshness,
+then window sample count, before interpreting derivatives: a short or stale
+range that crosses a scrape/restart boundary can produce a negative target
+slope, but that slope is not chain convergence evidence.
 
 - READY: lag is at most 128 blocks for a full node or the configured
   `warp_max_lag` for a warp node. No catch-up alert is needed inside that band.
@@ -12025,6 +12030,19 @@ If there is no CPU quota/throttling, OOM, sustained I/O wait, or host-wide CPU
 pressure, more peers and spare host cores do not accelerate that serial stage.
 Do not restart a progressing generation, enlarge a timeout, or replace the
 archive merely because its ETA is long.
+
+The 2026-09-03 Grafana restart supplied the discriminator for that validation
+order. During Mimir history warmup, the archive had 143 one-hour samples and a
+260-second-old last source sample. Its truncated target series produced a
+spurious `target_rate=-17.904045` and therefore a nominal
+`net_rate=18.450862`; the old parser reported only “inconsistent one-hour
+measures” before checking the stale source. On the next evaluation the current
+archive gauges aged out entirely and the tuple retained only mask 94, missing
+`lag`, `queued_blocks`, and `sample_age`, while the lightnode still published a
+fresh sample. In parallel, direct SSH/RPC observation of snow over the
+management overlay timed out from both the monitor workstation and an enabled
+edge. Treat this as metrics/overlay observation loss and preserve the node
+generation; it does not prove an 18-block/s catch-up burst or a node restart.
 
 This class may require an operational or hardware fix that software alone
 cannot supply. The available closures are a measured node import optimization,
