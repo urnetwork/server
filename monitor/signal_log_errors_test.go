@@ -38,6 +38,7 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 		{"Loki tail dropped streams", `level=info caller=tailer.go:271 msg="tailer dropped streams is reset" length=100`, "loki-tail-dropped-streams"},
 		{"Warpctl direct Loki tail loss", `[warpctl][loki-tail-dropped-entries] service=proxy count=2`, "loki-tail-dropped-entries"},
 		{"connection reset", "read: connection reset by peer", "conn-reset"},
+		{"WebSocket abnormal EOF", "websocket: close 1006 (abnormal closure): unexpected EOF", "conn-reset"},
 		{"redis loading", "LOADING Redis is loading the dataset in memory", "redis-loading"},
 		{"required vault", "panic: Resource not found in vault (verify.yml)", "required-vault-resource"},
 		{"grafana plugin", "error=\"the result-set has errors: [plugin.notRegistered] plugin not registered\"", "grafana-plugin-unregistered"},
@@ -82,6 +83,46 @@ func TestLogErrorsSignalSyntheticStructuredProblemClasses(t *testing.T) {
 			}
 			requireAlertClass(t, alerts, tc.class)
 		})
+	}
+}
+
+func TestLogErrorsSignalDoesNotAttributeConnectionResetToServer(t *testing.T) {
+	line := `[fireside][proxy][g8][cid:test][I][2026-09-03T04:56:58.402388-05:00][device_rpc_transport.go:339][mux]read done = websocket: close 1006 (abnormal closure): unexpected EOF`
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-proxy", nil
+		}
+		return strings.Repeat(line+"\n", 50), nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "conn-reset").Markdown()
+	for _, want := range []string{
+		"abrupt transport termination without an orderly close",
+		"Connection reset by peer is peer-relative",
+		"WebSocket close 1006 with unexpected EOF",
+		"without a WebSocket close frame",
+		"NAT, load balancer, firewall, or other intermediary",
+		"cannot distinguish peer lifecycle, path failure, remote process replacement, or resource pressure",
+		"proxy-memory, proxy-pool, proxy-runtime, and proxy-cache controls were all healthy",
+		"contemporaneous controls reject Proxy resource pressure as the demonstrated cause",
+		"1,176 attach/EOF/detach triplets from one logical hosted device",
+		"1,075 of 1,175 measured sessions lasted under one second",
+		"zero write, keepalive, receive-budget, receive-queue, version-rejection, instance-rejection, or SyncReverse markers",
+		"Proxy accepts this /device-rpc WebSocket and the remote DeviceRemote initiates it",
+		"exact 500-millisecond pace matches failed-sync retry pacing",
+		"capture a bounded early-sync stage/result on each endpoint",
+		"Do not call the event a server close",
+		"remains below 50/min for 10 minutes",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("connection-reset alert missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "server closed the conn") {
+		t.Fatalf("connection-reset alert made an unsupported server attribution:\n%s", markdown)
 	}
 }
 
