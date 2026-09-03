@@ -8,6 +8,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
@@ -31,6 +32,11 @@ func TestInitTasksReapsVerificationChainsWhileDisabled(t *testing.T) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 
+		// Enabling the subsystem makes RefreshVerifyProxyEgress's schedule use
+		// its configured interval. This test owns that enabled fixture and must
+		// not fall through to the deployment-only verify.yml vault resource.
+		controller.SetVerifySettings(model.DefaultVerifySettings())
+		defer controller.SetVerifySettings(nil)
 		controller.SetStConfig(&controller.StConfig{Enabled: true})
 		defer controller.SetStConfig(nil)
 		server.Tx(ctx, func(tx server.PgTx) {
