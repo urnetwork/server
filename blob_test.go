@@ -4,14 +4,22 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
 	"github.com/minio/minio-go/v7/pkg/replication"
 )
@@ -38,7 +46,7 @@ func TestLiveBlobStoreContentAddressedCanary(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := store.Put(ctx, key, localPath, "application/octet-stream"); err != nil {
+	if _, err := store.PutIfAbsent(ctx, key, localPath, "application/octet-stream"); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := store.Get(ctx, key)
@@ -116,6 +124,244 @@ func TestLocalBlobStoreRoundTrip(t *testing.T) {
 	// a non-existent root is empty, not an error
 	if objs, err := NewLocalBlobStore(filepath.Join(root, "nope"), "").List(ctx, ""); err != nil || len(objs) != 0 {
 		t.Fatalf("non-existent root: got %v err=%v, want empty", objs, err)
+	}
+}
+
+func TestLocalBlobStorePutIfAbsentIsAtomicAcrossInstances(t *testing.T) {
+	root := t.TempDir()
+	stores := []*localBlobStore{
+		NewLocalBlobStore(root, "blob").(*localBlobStore),
+		NewLocalBlobStore(root, "blob").(*localBlobStore),
+	}
+	contents := [][]byte{[]byte("first immutable value"), []byte("second immutable value")}
+	sourcePaths := make([]string, len(contents))
+	for i, content := range contents {
+		sourcePaths[i] = filepath.Join(t.TempDir(), fmt.Sprintf("source-%d", i))
+		if err := os.WriteFile(sourcePaths[i], content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	entered := make(chan int, len(stores))
+	release := make(chan struct{})
+	for i, store := range stores {
+		writerIndex := i
+		store.beforeCreateCommitForTest = func() {
+			entered <- writerIndex
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+	}
+	type putResult struct {
+		writerIndex int
+		created     bool
+		err         error
+	}
+	results := make(chan putResult, len(stores))
+	for i, store := range stores {
+		writerIndex := i
+		go func() {
+			created, err := store.PutIfAbsent(ctx, "blob/evidence.json", sourcePaths[writerIndex], "application/json")
+			results <- putResult{writerIndex: writerIndex, created: created, err: err}
+		}()
+	}
+	for range stores {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			close(release)
+			t.Fatalf("writers did not reach the commit barrier: %v", ctx.Err())
+		}
+	}
+	close(release)
+
+	createdIndex := -1
+	for range stores {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatalf("writer %d: %v", result.writerIndex, result.err)
+			}
+			if result.created {
+				if createdIndex != -1 {
+					t.Fatalf("writers %d and %d both created the key", createdIndex, result.writerIndex)
+				}
+				createdIndex = result.writerIndex
+			}
+		case <-ctx.Done():
+			t.Fatalf("writers did not leave the commit barrier: %v", ctx.Err())
+		}
+	}
+	if createdIndex == -1 {
+		t.Fatal("neither writer created the key")
+	}
+	reader, err := stores[0].Get(ctx, "blob/evidence.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || !bytes.Equal(winner, contents[createdIndex]) {
+		t.Fatalf("winner = %q, read error = %v, close error = %v", winner, readErr, closeErr)
+	}
+	var partialPaths []string
+	if err := filepath.Walk(root, func(filePath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.IsDir() && strings.HasSuffix(filePath, blobPartialSuffix) {
+			partialPaths = append(partialPaths, filePath)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(partialPaths) != 0 {
+		t.Fatalf("partial files remain after the race: %v", partialPaths)
+	}
+}
+
+func TestLocalBlobStorePutIfAbsentPreservesCapacity(t *testing.T) {
+	store := NewLocalBlobStoreWithMaxBytes(t.TempDir(), "blob", 5)
+	first := filepath.Join(t.TempDir(), "first")
+	second := filepath.Join(t.TempDir(), "second")
+	if err := os.WriteFile(first, []byte("1234"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("56"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := store.PutIfAbsent(ctx, "blob/first", first, "application/octet-stream")
+	if err != nil || !created {
+		t.Fatalf("first create = %t, %v", created, err)
+	}
+	if created, err := store.PutIfAbsent(ctx, "blob/second", second, "application/octet-stream"); err == nil || created {
+		t.Fatalf("over-capacity create = %t, %v", created, err)
+	}
+	if created, err := store.PutIfAbsent(ctx, "blob/first", second, "application/octet-stream"); err != nil || created {
+		t.Fatalf("existing key create = %t, %v", created, err)
+	}
+	reader, err := store.Get(ctx, "blob/first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || string(content) != "1234" {
+		t.Fatalf("stored content = %q, read error = %v, close error = %v", content, readErr, closeErr)
+	}
+}
+
+func TestMinIOBlobStorePutIfAbsentUsesConditionalRequest(t *testing.T) {
+	type requestRecord struct {
+		method      string
+		path        string
+		ifNoneMatch string
+		contentType string
+		body        string
+	}
+	responseStatuses := []int{
+		http.StatusOK,
+		http.StatusPreconditionFailed,
+		http.StatusForbidden,
+		http.StatusConflict,
+	}
+	responseCodes := []string{"", minio.PreconditionFailed, minio.AccessDenied, "ConditionalRequestConflict"}
+	var requestStateLock sync.Mutex
+	var requests []requestRecord
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requestStateLock.Lock()
+		requests = append(requests, requestRecord{
+			method:      r.Method,
+			path:        r.URL.Path,
+			ifNoneMatch: r.Header.Get("If-None-Match"),
+			contentType: r.Header.Get("Content-Type"),
+			body:        string(body),
+		})
+		responseIndex := len(requests) - 1
+		requestStateLock.Unlock()
+		if len(responseStatuses) <= responseIndex {
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+			return
+		}
+		status := responseStatuses[responseIndex]
+		if status == http.StatusOK {
+			w.Header().Set("ETag", `"created"`)
+			w.WriteHeader(status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, "<Error><Code>%s</Code><Message>rejected</Message></Error>", responseCodes[responseIndex])
+	}))
+	defer server.Close()
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := minio.New(endpoint.Host, &minio.Options{
+		Creds:        credentials.NewStaticV4("access", "secret", ""),
+		Secure:       false,
+		Region:       "us-east-1",
+		BucketLookup: minio.BucketLookupPath,
+		MaxRetries:   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &minioBlobStore{client: client, bucket: "evidence", prefix: "blob", authority: endpoint.Host}
+	source := filepath.Join(t.TempDir(), "evidence.json")
+	if err := os.WriteFile(source, []byte(`{"evidence":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := store.PutIfAbsent(context.Background(), "blob/evidence.json", source, "application/json")
+	if err != nil || !created {
+		t.Fatalf("successful conditional create = %t, %v", created, err)
+	}
+	created, err = store.PutIfAbsent(context.Background(), "blob/evidence.json", source, "application/json")
+	if err != nil || created {
+		t.Fatalf("precondition conflict = %t, %v", created, err)
+	}
+	if created, err = store.PutIfAbsent(context.Background(), "blob/evidence.json", source, "application/json"); err == nil || created {
+		t.Fatalf("access denial = %t, %v", created, err)
+	}
+	if created, err = store.PutIfAbsent(context.Background(), "blob/evidence.json", source, "application/json"); err == nil || created {
+		t.Fatalf("non-precondition conflict = %t, %v", created, err)
+	}
+	requestStateLock.Lock()
+	defer requestStateLock.Unlock()
+	if len(requests) != len(responseStatuses) {
+		t.Fatalf("request count = %d, want %d", len(requests), len(responseStatuses))
+	}
+	for i, request := range requests {
+		if request.method != http.MethodPut || request.path != "/evidence/blob/evidence.json" ||
+			request.ifNoneMatch != "*" || request.contentType != "application/json" || request.body != `{"evidence":true}` {
+			t.Errorf("request %d = %+v", i, request)
+		}
+	}
+}
+
+func TestMinIOPreconditionConflictClassificationIsExact(t *testing.T) {
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{err: minio.ErrorResponse{Code: minio.PreconditionFailed, StatusCode: http.StatusPreconditionFailed}, want: true},
+		{err: minio.ErrorResponse{Code: minio.PreconditionFailed, StatusCode: http.StatusConflict}, want: false},
+		{err: minio.ErrorResponse{Code: minio.AccessDenied, StatusCode: http.StatusPreconditionFailed}, want: false},
+		{err: errors.New("transport failed"), want: false},
+	}
+	for _, test := range tests {
+		if got := isMinioPreconditionConflict(test.err); got != test.want {
+			t.Errorf("isMinioPreconditionConflict(%v) = %t, want %t", test.err, got, test.want)
+		}
 	}
 }
 

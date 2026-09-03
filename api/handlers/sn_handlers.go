@@ -18,6 +18,15 @@ import (
 	"github.com/urnetwork/server/startifact"
 )
 
+const maximumSnEvidenceBytes = 64 * 1024 * 1024
+
+// Swappable boundaries let handler tests force exact storage interleavings
+// while production uses the configured controller and blob store.
+var (
+	publishSnEvidence       = controller.StPublishEvidence
+	loadSnEvidenceBlobStore = server.LoadBlobStore
+)
+
 // SnSetWallet backs `POST /sn/wallet` (sn/PLAN.md §5): sets the caller
 // network's subnet claim coldkey. Network JWT auth; the ss58 format is
 // validated in the controller.
@@ -163,12 +172,12 @@ func payoutArtifactHistoryPrefix(blobPrefix, deploymentRaw, netuidRaw, epochRaw,
 // together with chain/deployment/netuid by the controller.
 func SnEvidence(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		body, err := io.ReadAll(io.LimitReader(r.Body, maximumSnEvidenceBytes))
 		if err != nil || len(body) == 0 {
 			http.Error(w, "Evidence body is required.", http.StatusBadRequest)
 			return
 		}
-		published, err := controller.StPublishEvidence(r.Context(), body)
+		published, err := publishSnEvidence(r.Context(), body)
 		if err != nil {
 			http.Error(w, "Evidence rejected.", http.StatusBadRequest)
 			return
@@ -177,7 +186,7 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(published)
 		return
 	}
-	store, ok := server.LoadBlobStore()
+	store, ok := loadSnEvidenceBlobStore()
 	if !ok {
 		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
 		return
@@ -194,7 +203,7 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
-	b, err := io.ReadAll(io.LimitReader(reader, 64<<20))
+	b, err := io.ReadAll(io.LimitReader(reader, maximumSnEvidenceBytes))
 	if err != nil {
 		http.Error(w, "Evidence read failed.", http.StatusBadGateway)
 		return
@@ -211,7 +220,7 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 }
 
 func SnEvidenceHistory(w http.ResponseWriter, r *http.Request) {
-	store, ok := server.LoadBlobStore()
+	store, ok := loadSnEvidenceBlobStore()
 	if !ok {
 		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
 		return

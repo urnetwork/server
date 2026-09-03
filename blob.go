@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -115,6 +116,10 @@ const DefaultLocalBlobMaxBytes int64 = 8 * 1024 * 1024 * 1024
 type BlobStore interface {
 	// Put uploads the file at localPath to key with the given content type.
 	Put(ctx context.Context, key string, localPath string, contentType string) error
+	// PutIfAbsent atomically uploads only when key does not exist. created is
+	// false only when another writer already owns the key; implementations must
+	// not emulate this with a separate existence check and Put.
+	PutIfAbsent(ctx context.Context, key string, localPath string, contentType string) (created bool, err error)
 	// Get opens key for reading; the caller closes the returned reader.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	// List returns every object whose key starts with keyPrefix.
@@ -360,6 +365,30 @@ func (self *minioBlobStore) Put(ctx context.Context, key string, localPath strin
 		ContentType: contentType,
 	})
 	return err
+}
+
+// PutIfAbsent uses one non-multipart conditional request so the condition is
+// evaluated when the object is committed, not during a separate lookup.
+func (self *minioBlobStore) PutIfAbsent(ctx context.Context, key string, localPath string, contentType string) (bool, error) {
+	options := minio.PutObjectOptions{
+		ContentType:      contentType,
+		DisableMultipart: true,
+	}
+	options.SetMatchETagExcept("*")
+	_, err := self.client.FPutObject(ctx, self.bucket, key, localPath, options)
+	if err == nil {
+		return true, nil
+	}
+	if isMinioPreconditionConflict(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+// Only the exact conditional-create rejection proves another object won.
+func isMinioPreconditionConflict(err error) bool {
+	response := minio.ToErrorResponse(err)
+	return response.StatusCode == http.StatusPreconditionFailed && response.Code == minio.PreconditionFailed
 }
 
 func (self *minioBlobStore) PutRetained(
@@ -641,10 +670,11 @@ type localBlobStore struct {
 	prefix   string
 	maxBytes int64
 
-	putMu    sync.Mutex
-	reapMu   sync.Mutex
-	rules    []BlobLifecycleRule
-	reapOnce sync.Once
+	putMu                     sync.Mutex
+	reapMu                    sync.Mutex
+	rules                     []BlobLifecycleRule
+	reapOnce                  sync.Once
+	beforeCreateCommitForTest func()
 }
 
 func (self *localBlobStore) pathFor(key string) string {
@@ -652,14 +682,26 @@ func (self *localBlobStore) pathFor(key string) string {
 }
 
 func (self *localBlobStore) Put(ctx context.Context, key string, localPath string, contentType string) error {
+	_, err := self.putFile(ctx, key, localPath, false)
+	return err
+}
+
+// PutIfAbsent stages each attempt separately and hard-links it into place.
+// Link is an atomic no-replace operation even between independent processes.
+func (self *localBlobStore) PutIfAbsent(ctx context.Context, key string, localPath string, contentType string) (bool, error) {
+	return self.putFile(ctx, key, localPath, true)
+}
+
+// putFile preserves ordinary Put replacement while sharing capacity and
+// partial-file handling with the atomic create path.
+func (self *localBlobStore) putFile(ctx context.Context, key string, localPath string, ifAbsent bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
 	dst := self.pathFor(key)
-	tmp := dst + blobPartialSuffix
 	srcInfo, err := os.Stat(localPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Serialize capacity checks with writes and reaping. Otherwise concurrent
@@ -668,23 +710,27 @@ func (self *localBlobStore) Put(ctx context.Context, key string, localPath strin
 	self.putMu.Lock()
 	defer self.putMu.Unlock()
 
+	if ifAbsent {
+		if _, err := os.Stat(dst); err == nil {
+			return false, nil
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
 	usage, err := self.usageBytes()
 	if err != nil {
-		return err
+		return false, err
 	}
 	var replacedBytes int64
-	if info, err := os.Stat(dst); err == nil {
-		replacedBytes = info.Size()
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if info, err := os.Stat(tmp); err == nil {
-		replacedBytes += info.Size()
-	} else if !os.IsNotExist(err) {
-		return err
+	if !ifAbsent {
+		if info, err := os.Stat(dst); err == nil {
+			replacedBytes = info.Size()
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
 	}
 	if self.maxBytes < usage-replacedBytes+srcInfo.Size() {
-		return fmt.Errorf(
+		return false, fmt.Errorf(
 			"local blob capacity exceeded: usage=%d replacement=%d incoming=%d max=%d",
 			usage,
 			replacedBytes,
@@ -694,28 +740,50 @@ func (self *localBlobStore) Put(ctx context.Context, key string, localPath strin
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
+		return false, err
 	}
 	src, err := os.Open(localPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer src.Close()
-	// write to a temp file then rename, so a List never sees a partial object
-	out, err := os.Create(tmp)
+	// Each writer owns its partial, so losing or failed attempts cannot remove
+	// another writer's staged bytes.
+	out, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+"-*"+blobPartialSuffix)
 	if err != nil {
-		return err
+		return false, err
 	}
+	tmp := out.Name()
+	defer os.Remove(tmp)
 	if _, err := io.Copy(out, src); err != nil {
 		out.Close()
-		os.Remove(tmp)
-		return err
+		return false, err
 	}
 	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
+		return false, err
 	}
-	return os.Rename(tmp, dst)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if ifAbsent {
+		if self.beforeCreateCommitForTest != nil {
+			self.beforeCreateCommitForTest()
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if err := os.Link(tmp, dst); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (self *localBlobStore) PutRetained(
@@ -757,7 +825,7 @@ func (self *localBlobStore) usageBytes() (int64, error) {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
+		if !info.IsDir() && !strings.HasSuffix(path, blobPartialSuffix) {
 			total += info.Size()
 		}
 		return nil

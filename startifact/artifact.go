@@ -99,33 +99,9 @@ func Read(ctx context.Context, store server.BlobStore, contentHash string) (*Art
 	return artifact, value, nil
 }
 
+// Atomically claims key, then byte-compares the stored winner regardless of
+// whether this attempt created it or collided with an earlier writer.
 func putImmutable(ctx context.Context, store server.BlobStore, key string, b []byte) error {
-	objects, err := store.List(ctx, key)
-	if err != nil {
-		return fmt.Errorf("list immutable artifact key: %w", err)
-	}
-	exists := false
-	for _, object := range objects {
-		if object.Key == key {
-			exists = true
-			break
-		}
-	}
-	if exists {
-		reader, err := store.Get(ctx, key)
-		if err != nil {
-			return err
-		}
-		existing, readErr := io.ReadAll(io.LimitReader(reader, int64(len(b)+1)))
-		reader.Close()
-		if readErr != nil {
-			return readErr
-		}
-		if !bytes.Equal(existing, b) {
-			return fmt.Errorf("immutable artifact key %s already contains different bytes", key)
-		}
-		return nil
-	}
 	tmp, err := os.CreateTemp("", "urnetwork-st-artifact-*.json")
 	if err != nil {
 		return err
@@ -147,7 +123,25 @@ func putImmutable(ctx context.Context, store server.BlobStore, key string, b []b
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return store.Put(ctx, key, path, "application/json")
+	if _, err := store.PutIfAbsent(ctx, key, path, "application/json"); err != nil {
+		return fmt.Errorf("create immutable artifact key: %w", err)
+	}
+	reader, err := store.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	existing, readErr := io.ReadAll(io.LimitReader(reader, int64(len(b)+1)))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if !bytes.Equal(existing, b) {
+		return fmt.Errorf("immutable artifact key %s already contains different bytes", key)
+	}
+	return nil
 }
 
 func ContentKey(store server.BlobStore, hash string) (string, error) {

@@ -48,6 +48,25 @@ func (self *stubBlobStore) Put(ctx context.Context, key string, localPath string
 	return nil
 }
 
+func (self *stubBlobStore) PutIfAbsent(ctx context.Context, key string, localPath string, contentType string) (bool, error) {
+	if self.putErr != nil {
+		if err := self.putErr(key); err != nil {
+			return false, err
+		}
+	}
+	content, err := os.ReadFile(localPath)
+	if err != nil {
+		return false, err
+	}
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if _, ok := self.objects[key]; ok {
+		return false, nil
+	}
+	self.objects[key] = content
+	return true, nil
+}
+
 func (self *stubBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	self.lock.Lock()
 	defer self.lock.Unlock()
