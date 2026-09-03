@@ -1,8 +1,9 @@
 # Sim-latency competition live-deployment playbook
 
-Status date: 2026-08-29
+Status date: 2026-09-03
 
-Evaluator/baseline qualification: **complete — 10/10 required gates pass**
+Evaluator/baseline qualification: **measured-product qualification complete;
+replacement epoch-0 evaluator image pending after source-lock expansion**
 
 Launch-control validation: **complete locally; release deployment and external actions pending**
 
@@ -40,9 +41,9 @@ Read these first:
 | Public patch-authoring tag | `apex-season-1` at `eb697281cbe0a19a27d7771fe69fb24c2c3dab8c` |
 | Evaluator source | Epoch ledger `config/main/sim-latency.yml` is the sole authority for branch, epoch commits, and the significant-improvement percentage |
 | Control plane | API and worker follow `main`; their commits are not scoring inputs. Every job persists the exact API and worker runtime image digests. |
-| Evaluator image | Local epoch-0 image `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; rebuild and record a new immutable digest whenever the measured source epoch changes |
+| Evaluator image | The prior four-repository epoch-0 image is superseded. Rebuild from source commit `8f4cde37b382ab735e40f9471dca4d051b1f326d` and record the new immutable digest before launch. |
 | Host qualification | `acf226db6b8e50d67f8957cddb3903d5d4e9e82566935d61d270ccb5b03463a3` |
-| Simulator / scorer | Epoch-0 image binary `a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b` |
+| Simulator / scorer | Replacement epoch-0 image binary digest pending the required eight-repository rebuild. |
 | Workload | 1,800 providers; 200 clients; 80 arrivals/min; quality window 2; 4 exchange hosts; 4 shards |
 | Measurement | 180 seconds; impairment on; median of `R=9` |
 | Takeover rule | Epoch 1 starts at `candidate <= same-round baseline * 0.839`; every epoch also requires G1–G6 and one-sided Welch `p <= 0.05`. The source ledger supplies later percentages. |
@@ -110,7 +111,7 @@ has an owner and a recorded value.
 | Control-plane data services | **Complete by operator confirmation.** PostgreSQL is authoritative for admission, exact FIFO order, leases, results, and finalization. A main-Redis list is the rebuildable FIFO dispatch index; a flush or interrupted push recovers from PostgreSQL. | Run the normal migration verification for the final commit; no new durable data service is needed. |
 | Service supervision | **Complete by operator confirmation.** Main API plus one competition worker per epoch use the reviewed main-environment migration and boot ordering. The worker exits zero after close and FIFO drain, leaving significant candidates embargoed for the separate honesty-review command. | Verify the final deployed versions, singleton worker heartbeat, clean one-shot exit handling, and review-harness handoff in the agentic controller. |
 | Public ingress | **Complete by operator confirmation.** DNS/TLS/reverse proxy/firewall/rate limits are provided by main. | Smoke the final `/competition/*` routes, including the 262,144-byte request ceiling and ordinary ingress rate limiting. There is no epoch job-count rejection. |
-| Release distribution | **Epoch-0 complete by local immutable load.** Docker resolves `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`; the public info response exposes the current evaluator image, and each job response exposes its frozen evaluator plus exact API/worker runtime images. Main API/worker releases continue normally and are not scoring inputs. | Set the same evaluator digest in live `competition.yml`, then verify runtime API/worker digest injection on the deployed services. |
+| Release distribution | **Replacement epoch-0 evaluator build pending.** The prior local image predates the complete eight-repository source lock and is not launchable. The public info response exposes the current evaluator image, and each job response exposes its frozen evaluator plus exact API/worker runtime images. Main API/worker releases continue normally and are not scoring inputs. | Build and qualify the replacement image, set its immutable digest in live `competition.yml`, then verify runtime API/worker digest injection on the deployed services. |
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` now fails unless object lock, versioning, and an enabled server-validated replication destination all pass. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Run and retain the live protection/capacity preflight. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, 15-second runner heartbeat, 30-second stale warning, service-labeled alert rules, and the `support@ur.xyz` contact-policy reconciler are implemented for main Mimir/Grafana. | Deploy the final server and warp commits and retain the live Grafana routing proof. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. The Go-only onboarding and atomic token rotation/revocation flows are documented in `launch/ONBOARDING.md`. | Deliver the token through the private channel and exercise live revocation once. No separate API is required. |
@@ -256,7 +257,7 @@ curl -fsS "$COMPETITION_API_BASE/healthz" | \
   jq -e '.status == "alive"'
 curl -fsS "$COMPETITION_API_BASE/info" | \
   jq -e '.enabled == true and
-         .base_sha == "859be81191fafcc576b617ebec716fa49401643a" and
+         .base_sha == "8f4cde37b382ab735e40f9471dca4d051b1f326d" and
          .evaluation_policy.provider_count == 1800 and
          .evaluation_policy.replicates == 9 and
          .evaluation_policy.takeover_margin == 0.161'
@@ -578,11 +579,12 @@ the new ledger percentage. A no-winner transition repeats both prior commits
 and prior percentage unchanged, and is rejected unless the round finalized
 without a winner.
 
-The command creates one additional temporary root, freshly clones `connect`,
-`sdk`, `server`, and `proxy`, checks out each `sim-latency` branch at the prior
-epoch commit, applies the winner, and creates at most one commit per changed
-repository. The long-lived local checkouts are verified preflight inputs and
-are never patched. Repository branches are pushed first;
+The command creates one additional temporary root and freshly clones `server`,
+`connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`, and `sn`.
+It checks out every `sim-latency` branch at the prior epoch commit, applies the
+winner only to the evaluated server-tree surface, and verifies all dependency
+commits remain unchanged. The long-lived local checkouts are discovery-only
+preflight inputs and are never patched. Changed source branches are pushed first;
 `config/main/sim-latency.yml` is cloned, committed, and pushed last, so an
 interrupted cross-repository update never activates a partial source epoch.
 `--dry-run` performs every staging and validation step without a push or local
@@ -682,8 +684,9 @@ Still to add or approve before a public competition starts:
   six-epoch weekly cadence and post-review finalization reveal are already frozen);
 - [ ] atomic live credential/seed-key rotation or explicit approval to promote
   the staging-generated bundle;
-- [x] epoch-0 evaluator image locally loaded as immutable Docker image id
-  `sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b`;
+- [ ] rebuild and qualify the epoch-0 evaluator image from the complete
+  eight-repository source lock at server commit
+  `8f4cde37b382ab735e40f9471dca4d051b1f326d`;
   main API/worker releases remain on `main`, and every job API response persists
   and exposes its frozen evaluator plus exact API/worker runtime image digests;
 - [ ] live MinIO `/readyz` proof, backup-replication record, and capacity check;

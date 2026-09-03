@@ -1,6 +1,6 @@
 schema: 1
-status_date: 2026-08-29
-launch_state: local_validation_complete_release_and_external_actions_pending
+status_date: 2026-09-03
+launch_state: local_validation_complete_evaluator_rebuild_and_external_actions_pending
 
 evaluation_host:
   authoritative_hosts_required: 1
@@ -50,6 +50,16 @@ honesty_review:
 evaluation_source:
   manifest: config/main/sim-latency.yml
   authoritative_fields: branch_epoch_commits_and_significant_improvement_percent
+  repositories:
+    - server
+    - connect
+    - sdk
+    - proxy
+    - glog
+    - goidenticons
+    - userwireguard
+    - sn
+  canonical_patch_repository: server
   round_source_epoch_offset: -1
   promotion_command: sim-latency promote
   activation_order: repository_branches_then_config_ledger
@@ -60,14 +70,19 @@ evaluation_source:
 
 evaluator_release:
   source_epoch: 0
-  evaluator_image_id: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
+  server_source_commit: 8f4cde37b382ab735e40f9471dca4d051b1f326d
+  evaluator_image_id: null
   local_image_load:
-    status: verified
+    status: rebuild_required_after_source_lock_expansion
     runtime: docker
-    immutable_reference: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
-    convenience_tag: urnetwork/sim-latency-evaluator-base:epoch0-859be811
-    verified_at: 2026-08-28T18:21:43Z
-  simulator_sha256: a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b
+    immutable_reference: null
+    convenience_tag: null
+    verified_at: null
+  simulator_sha256: null
+  superseded_release:
+    evaluator_image_id: sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
+    simulator_sha256: a345375aa543839b49dff6bd4b663217902a7a924a373a1eb9ffdc8349c83b6b
+    reason: incomplete_four_repository_source_lock
 
 release_record:
   control_plane_branch: main
@@ -173,8 +188,8 @@ checklist:
     status: complete
     evidence: server/controller/competition_controller.go
   - id: epoch_zero_evaluator_image
-    status: complete_local_load
-    evidence: docker image inspect sha256:2cc50a579199dc111a9265d5a7e4840aba0b1b794ba82cdd741724c683f90f6b
+    status: rebuild_required_after_source_lock_expansion
+    evidence: config/main/sim-latency.yml and server/connect/sim-latency/evaluator/container/build-base.sh
   - id: live_minio_readiness_backup_capacity_and_deletion_owner
     status: deployment_verification_required
     deletion_owner: support@ur.xyz
