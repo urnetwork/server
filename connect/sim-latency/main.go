@@ -55,7 +55,7 @@ Usage:
   sim-latency compare --a=<paths> --b=<paths> [--baseline=<path>] [--p=<a>] [--window=<w>] [--json]
   sim-latency score-baseline --run=<paths> --stderr=<paths> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> --round-id=<id> --takeover-margin=<m> [--out=<path>]
   sim-latency score --run=<paths> --stderr=<paths> --baseline=<path> --accounting=<paths> --samples=<paths> --resource-report=<paths> --marker=<paths> [--out=<path>]
-  sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency promote --epoch=<n> --winner=<dir> --winner-job-id=<id> [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
   sim-latency reset
   sim-latency -h | --help
@@ -66,7 +66,7 @@ Options:
   --version              Show version.
   --epoch=<n>            Source epoch: 0 is baseline; 1..6 follow winning promotions.
   --source-config=<path> Epoch ledger path [default: discovered config/main/sim-latency.yml].
-  --repos-root=<dir>     Parent of connect, sdk, server, and proxy [default: discovered workspace].
+  --repos-root=<dir>     Parent of all repositories in the frozen evaluator source graph [default: discovered workspace].
   --winner=<dir>         Winner directory containing one or more <repository>.patch files.
   --winner-job-id=<id>   Published winning competition job id recorded in the next epoch.
   --message=<text>       Promotion commit message suffix.

@@ -1,9 +1,10 @@
 package main
 
-// Epoch source control binds every measured run to the four repositories that
-// can affect the product result. Host runs require clean sim-latency branches
-// at the configured heads. Evaluator images use their authenticated source-lock
-// record so a one-commit candidate can run against its configured base epoch.
+// Epoch source control binds every measured run to the complete local-module
+// graph that can affect the product result. Host runs require clean
+// sim-latency branches at the configured heads. Evaluator images use their
+// authenticated source-lock record so a one-commit candidate can run against
+// its configured base epoch.
 
 import (
 	"bytes"
@@ -24,8 +25,10 @@ import (
 )
 
 const (
-	maximumCompetitionEpoch  = 6
-	maximumSourceConfigBytes = 1024 * 1024
+	maximumCompetitionEpoch        = 6
+	maximumSourceConfigBytes       = 1024 * 1024
+	sourceLedgerSignificanceAlpha  = 0.05
+	sourceLedgerSignificanceMethod = "one-sided-welch-t"
 )
 
 var sourceGitShaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -35,29 +38,74 @@ type sourceRepository struct {
 }
 
 type sourceRepositories struct {
-	Connect sourceRepository `yaml:"connect"`
-	Sdk     sourceRepository `yaml:"sdk"`
-	Server  sourceRepository `yaml:"server"`
-	Proxy   sourceRepository `yaml:"proxy"`
+	Server        sourceRepository `yaml:"server"`
+	Connect       sourceRepository `yaml:"connect"`
+	Sdk           sourceRepository `yaml:"sdk"`
+	Proxy         sourceRepository `yaml:"proxy"`
+	Glog          sourceRepository `yaml:"glog"`
+	Goidenticons  sourceRepository `yaml:"goidenticons"`
+	Userwireguard sourceRepository `yaml:"userwireguard"`
+	Sn            sourceRepository `yaml:"sn"`
 }
 
-// commits returns the complete measured-source identity for one epoch.
+// sourceRepositoryNames returns every repository copied into and built by the
+// evaluator. A fresh slice keeps callers from mutating the package policy.
+func sourceRepositoryNames() []string {
+	return []string{
+		"server",
+		"connect",
+		"sdk",
+		"proxy",
+		"glog",
+		"goidenticons",
+		"userwireguard",
+		"sn",
+	}
+}
+
+// commits returns the complete evaluation-source identity for one epoch.
 func (self sourceRepositories) commits() map[string]string {
 	return map[string]string{
-		"connect": self.Connect.Commit,
-		"sdk":     self.Sdk.Commit,
-		"server":  self.Server.Commit,
-		"proxy":   self.Proxy.Commit,
+		"server":        self.Server.Commit,
+		"connect":       self.Connect.Commit,
+		"sdk":           self.Sdk.Commit,
+		"proxy":         self.Proxy.Commit,
+		"glog":          self.Glog.Commit,
+		"goidenticons":  self.Goidenticons.Commit,
+		"userwireguard": self.Userwireguard.Commit,
+		"sn":            self.Sn.Commit,
 	}
 }
 
 type sourceEpoch struct {
-	Epoch             int                `yaml:"epoch"`
-	Kind              string             `yaml:"kind"`
-	WinnerJobId       string             `yaml:"winner_job_id,omitempty"`
-	PromotedFromEpoch *int               `yaml:"promoted_from_epoch,omitempty"`
-	PromotedAt        string             `yaml:"promoted_at,omitempty"`
-	Repositories      sourceRepositories `yaml:"repositories"`
+	Epoch                         int                 `yaml:"epoch"`
+	Kind                          string              `yaml:"kind"`
+	SignificantImprovementPercent float64             `yaml:"significant_improvement_percent"`
+	WinnerJobId                   string              `yaml:"winner_job_id,omitempty"`
+	WinnerSignificance            *sourceSignificance `yaml:"winner_significance,omitempty"`
+	PromotedFromEpoch             *int                `yaml:"promoted_from_epoch,omitempty"`
+	PromotedAt                    string              `yaml:"promoted_at,omitempty"`
+	Repositories                  sourceRepositories  `yaml:"repositories"`
+}
+
+// sourceSignificance preserves the winning evaluation statistics that define
+// the next epoch's incumbent and recommended threshold.
+type sourceSignificance struct {
+	ScoreSha256                               string  `yaml:"score_sha256"`
+	Method                                    string  `yaml:"method"`
+	Alpha                                     float64 `yaml:"alpha"`
+	ReplicateCount                            int     `yaml:"replicate_count"`
+	BaselineMeanRawScore                      float64 `yaml:"baseline_mean_raw_score"`
+	CandidateMeanRawScore                     float64 `yaml:"candidate_mean_raw_score"`
+	BaselineSampleVariance                    float64 `yaml:"baseline_sample_variance"`
+	CandidateSampleVariance                   float64 `yaml:"candidate_sample_variance"`
+	ObservedImprovementPercent                float64 `yaml:"observed_improvement_percent"`
+	TakeoverMarginPercent                     float64 `yaml:"takeover_margin_percent"`
+	MinimumSignificantImprovementPercent      float64 `yaml:"minimum_significant_improvement_percent"`
+	RequiredImprovementPercent                float64 `yaml:"required_improvement_percent"`
+	OneSidedPValue                            float64 `yaml:"one_sided_p_value"`
+	NextEpochMinimumImprovementPercent        float64 `yaml:"next_epoch_minimum_improvement_percent"`
+	RecommendedNextEpochTakeoverMarginPercent float64 `yaml:"recommended_next_epoch_takeover_margin_percent"`
 }
 
 type evaluationSource struct {
@@ -146,19 +194,44 @@ func validateSourceManifest(manifest *sourceManifest) error {
 		if epoch.Epoch != epochIndex {
 			return fmt.Errorf("source epochs must be contiguous: entry %d has epoch %d", epochIndex, epoch.Epoch)
 		}
+		if !finitePositive(epoch.SignificantImprovementPercent) ||
+			50 < epoch.SignificantImprovementPercent {
+			return fmt.Errorf("source epoch %d has an invalid significant improvement percentage", epochIndex)
+		}
 		if epochIndex == 0 && epoch.Kind != "baseline" {
 			return errors.New("source epoch 0 must be the baseline")
 		}
-		if 0 < epochIndex && epoch.Kind != "winner_promotion" {
-			return fmt.Errorf("source epoch %d must be a winner promotion", epochIndex)
-		}
 		if epochIndex == 0 {
-			if epoch.WinnerJobId != "" || epoch.PromotedFromEpoch != nil || epoch.PromotedAt != "" {
+			if epoch.WinnerJobId != "" || epoch.WinnerSignificance != nil ||
+				epoch.PromotedFromEpoch != nil || epoch.PromotedAt != "" {
 				return errors.New("source epoch 0 cannot contain winner promotion metadata")
 			}
 		} else {
-			if epoch.WinnerJobId == "" {
-				return fmt.Errorf("source epoch %d must identify its winning job", epochIndex)
+			switch epoch.Kind {
+			case "winner_promotion":
+				if epoch.WinnerJobId == "" || epoch.WinnerSignificance == nil {
+					return fmt.Errorf("source epoch %d must identify its winning job and significance", epochIndex)
+				}
+				if err := validateSourceSignificance(epoch.WinnerSignificance); err != nil {
+					return fmt.Errorf("source epoch %d winner significance: %w", epochIndex, err)
+				}
+				if epoch.SignificantImprovementPercent !=
+					epoch.WinnerSignificance.RecommendedNextEpochTakeoverMarginPercent {
+					return fmt.Errorf("source epoch %d threshold does not match its winner recommendation", epochIndex)
+				}
+			case "no_winner_carry_forward":
+				if epoch.WinnerJobId != "" || epoch.WinnerSignificance != nil {
+					return fmt.Errorf("source epoch %d cannot identify a winner or significance when carrying forward", epochIndex)
+				}
+				previous := manifest.EvaluationSource.Epochs[epochIndex-1]
+				if epoch.Repositories != previous.Repositories {
+					return fmt.Errorf("source epoch %d no-winner transition must carry repository commits forward unchanged", epochIndex)
+				}
+				if epoch.SignificantImprovementPercent != previous.SignificantImprovementPercent {
+					return fmt.Errorf("source epoch %d no-winner transition must carry the significance percentage forward unchanged", epochIndex)
+				}
+			default:
+				return fmt.Errorf("source epoch %d has unsupported transition kind %q", epochIndex, epoch.Kind)
 			}
 			if epoch.PromotedFromEpoch == nil || *epoch.PromotedFromEpoch != epochIndex-1 {
 				return fmt.Errorf("source epoch %d must promote epoch %d", epochIndex, epochIndex-1)
@@ -179,6 +252,37 @@ func validateSourceManifest(manifest *sourceManifest) error {
 		!manifest.ControlPlaneIdentity.PersistPerEvaluation ||
 		manifest.ControlPlaneIdentity.RuntimeImageDigestEnvironment != "WARP_IMAGE_DIGEST" {
 		return errors.New("control-plane identity policy is invalid")
+	}
+	return nil
+}
+
+func validateSourceSignificance(significance *sourceSignificance) error {
+	if significance == nil || !validSha256(significance.ScoreSha256) ||
+		significance.Method != sourceLedgerSignificanceMethod ||
+		significance.Alpha != sourceLedgerSignificanceAlpha ||
+		significance.ReplicateCount != 9 ||
+		!finitePositive(significance.BaselineMeanRawScore) ||
+		!finitePositive(significance.CandidateMeanRawScore) ||
+		!finiteNonnegative(significance.BaselineSampleVariance) ||
+		!finiteNonnegative(significance.CandidateSampleVariance) ||
+		!finite(significance.ObservedImprovementPercent) ||
+		significance.ObservedImprovementPercent <= 0 ||
+		!finitePositive(significance.TakeoverMarginPercent) ||
+		50 < significance.TakeoverMarginPercent ||
+		!finiteNonnegative(significance.MinimumSignificantImprovementPercent) ||
+		!finiteNonnegative(significance.RequiredImprovementPercent) ||
+		!finite(significance.OneSidedPValue) || significance.OneSidedPValue < 0 ||
+		significance.Alpha < significance.OneSidedPValue ||
+		!finiteNonnegative(significance.NextEpochMinimumImprovementPercent) ||
+		!finitePositive(significance.RecommendedNextEpochTakeoverMarginPercent) ||
+		50 < significance.RecommendedNextEpochTakeoverMarginPercent {
+		return errors.New("record is incomplete or not statistically significant")
+	}
+	if significance.RequiredImprovementPercent < significance.TakeoverMarginPercent ||
+		significance.RequiredImprovementPercent < significance.MinimumSignificantImprovementPercent ||
+		significance.RecommendedNextEpochTakeoverMarginPercent < significance.TakeoverMarginPercent ||
+		significance.RecommendedNextEpochTakeoverMarginPercent < significance.NextEpochMinimumImprovementPercent {
+		return errors.New("record contains an inconsistent significance margin")
 	}
 	return nil
 }
@@ -234,10 +338,19 @@ func loadEvaluatorSourceLock(path string) (*evaluatorSourceLock, error) {
 	if lock.DevelopmentSnapshot {
 		return nil, errors.New("development snapshot cannot be used for an epoch-bound evaluation")
 	}
+	repositoryNames := sourceRepositoryNames()
+	if len(lock.Repositories) != len(repositoryNames) {
+		return nil, errors.New("evaluator source lock must contain the complete repository set")
+	}
+	for _, repository := range repositoryNames {
+		if !sourceGitShaPattern.MatchString(lock.Repositories[repository]) {
+			return nil, fmt.Errorf("evaluator source lock repository %s has an invalid commit", repository)
+		}
+	}
 	return lock, nil
 }
 
-// verifySourceEpoch fails closed unless every measured repository matches the ledger.
+// verifySourceEpoch fails closed unless every evaluator repository matches the ledger.
 func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRoot string, sourceLockPath string) error {
 	epoch, err := manifest.epoch(epochNumber)
 	if err != nil {
@@ -251,7 +364,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 			return fmt.Errorf("load evaluator source lock: %w", err)
 		}
 	}
-	for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
 		expectedCommit := commits[repository]
 		repositoryRoot := filepath.Join(repositoriesRoot, repository)
 		status, err := gitOutput(repositoryRoot, "status", "--porcelain=v1", "--untracked-files=all")
@@ -296,7 +409,7 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 	return nil
 }
 
-// findRepositoriesRoot discovers the common parent of the four measured repositories.
+// findRepositoriesRoot discovers the common parent of the complete source graph.
 func findRepositoriesRoot() (string, error) {
 	if root := strings.TrimSpace(os.Getenv("SIM_LATENCY_REPOSITORIES_ROOT")); root != "" {
 		return filepath.Abs(root)
@@ -317,7 +430,7 @@ func findRepositoriesRoot() (string, error) {
 	candidates = append(candidates, "/workspace")
 	for _, candidate := range candidates {
 		complete := true
-		for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+		for _, repository := range sourceRepositoryNames() {
 			if _, err := os.Stat(filepath.Join(candidate, repository)); err != nil {
 				complete = false
 				break
@@ -327,7 +440,7 @@ func findRepositoriesRoot() (string, error) {
 			return filepath.Clean(candidate), nil
 		}
 	}
-	return "", errors.New("could not locate connect, sdk, server, and proxy repositories")
+	return "", errors.New("could not locate the complete sim-latency source repository set")
 }
 
 // findSourceConfig locates the non-secret source epoch ledger.
@@ -426,6 +539,31 @@ func runSourceCheck(opts docopt.Opts) {
 	epochNumber, sourceConfig, repositoriesRoot, err := checkConfiguredSource(opts)
 	if err != nil {
 		fatalf("source epoch preflight: %s", err)
+	}
+	if optBool(opts, "--json") {
+		manifest, err := loadSourceManifest(sourceConfig)
+		if err != nil {
+			fatalf("source epoch config: %s", err)
+		}
+		epoch, err := manifest.epoch(epochNumber)
+		if err != nil {
+			fatalf("source epoch config: %s", err)
+		}
+		result := struct {
+			Schema                        int     `json:"schema"`
+			Epoch                         int     `json:"epoch"`
+			SignificantImprovementPercent float64 `json:"significant_improvement_percent"`
+		}{
+			Schema:                        1,
+			Epoch:                         epochNumber,
+			SignificantImprovementPercent: epoch.SignificantImprovementPercent,
+		}
+		resultBytes, err := json.Marshal(result)
+		if err != nil {
+			fatalf("encode source epoch: %s", err)
+		}
+		fmt.Printf("%s\n", resultBytes)
+		return
 	}
 	fmt.Printf("source epoch %d verified: config=%s repositories=%s\n", epochNumber, sourceConfig, repositoriesRoot)
 }

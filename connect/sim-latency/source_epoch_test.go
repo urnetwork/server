@@ -58,13 +58,18 @@ func sourceTestManifest(repositoryCommits map[string]string) *sourceManifest {
 		EvaluationSource: evaluationSource{
 			Branch: "sim-latency",
 			Epochs: []sourceEpoch{{
-				Epoch: 0,
-				Kind:  "baseline",
+				Epoch:                         0,
+				Kind:                          "baseline",
+				SignificantImprovementPercent: 16.1,
 				Repositories: sourceRepositories{
-					Connect: sourceRepository{Commit: repositoryCommits["connect"]},
-					Sdk:     sourceRepository{Commit: repositoryCommits["sdk"]},
-					Server:  sourceRepository{Commit: repositoryCommits["server"]},
-					Proxy:   sourceRepository{Commit: repositoryCommits["proxy"]},
+					Server:        sourceRepository{Commit: repositoryCommits["server"]},
+					Connect:       sourceRepository{Commit: repositoryCommits["connect"]},
+					Sdk:           sourceRepository{Commit: repositoryCommits["sdk"]},
+					Proxy:         sourceRepository{Commit: repositoryCommits["proxy"]},
+					Glog:          sourceRepository{Commit: repositoryCommits["glog"]},
+					Goidenticons:  sourceRepository{Commit: repositoryCommits["goidenticons"]},
+					Userwireguard: sourceRepository{Commit: repositoryCommits["userwireguard"]},
+					Sn:            sourceRepository{Commit: repositoryCommits["sn"]},
 				},
 			}},
 		},
@@ -75,6 +80,34 @@ func sourceTestManifest(repositoryCommits map[string]string) *sourceManifest {
 			PersistPerEvaluation:          true,
 			FreezeMainCommits:             false,
 		},
+	}
+}
+
+func sourceTestCommits(commit string) map[string]string {
+	repositoryCommits := map[string]string{}
+	for _, repository := range sourceRepositoryNames() {
+		repositoryCommits[repository] = commit
+	}
+	return repositoryCommits
+}
+
+func validSourceTestSignificance() *sourceSignificance {
+	return &sourceSignificance{
+		ScoreSha256:                               strings.Repeat("b", 64),
+		Method:                                    sourceLedgerSignificanceMethod,
+		Alpha:                                     sourceLedgerSignificanceAlpha,
+		ReplicateCount:                            9,
+		BaselineMeanRawScore:                      100,
+		CandidateMeanRawScore:                     80,
+		BaselineSampleVariance:                    1,
+		CandidateSampleVariance:                   1,
+		ObservedImprovementPercent:                20,
+		TakeoverMarginPercent:                     16.1,
+		MinimumSignificantImprovementPercent:      5,
+		RequiredImprovementPercent:                16.1,
+		OneSidedPValue:                            0.01,
+		NextEpochMinimumImprovementPercent:        10,
+		RecommendedNextEpochTakeoverMarginPercent: 16.1,
 	}
 }
 
@@ -93,7 +126,7 @@ func writeSourceTestManifest(t *testing.T, path string, manifest *sourceManifest
 func TestConfiguredSourceAcceptsExactEpochHeads(t *testing.T) {
 	repositoriesRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
-	for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
 		repositoryCommits[repository] = sourceTestRepository(t, repositoriesRoot, repository)
 	}
 	manifestPath := filepath.Join(t.TempDir(), "sim-latency.yml")
@@ -115,7 +148,7 @@ func TestConfiguredSourceAcceptsExactEpochHeads(t *testing.T) {
 func TestConfiguredSourceRejectsRepositoryHeadMismatch(t *testing.T) {
 	repositoriesRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
-	for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
 		repositoryCommits[repository] = sourceTestRepository(t, repositoriesRoot, repository)
 	}
 	serverRoot := filepath.Join(repositoriesRoot, "server")
@@ -139,7 +172,7 @@ func TestConfiguredSourceRejectsRepositoryHeadMismatch(t *testing.T) {
 func TestConfiguredSourceRejectsDirtyRepository(t *testing.T) {
 	repositoriesRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
-	for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
 		repositoryCommits[repository] = sourceTestRepository(t, repositoriesRoot, repository)
 	}
 	if err := os.WriteFile(filepath.Join(repositoriesRoot, "proxy", "untracked.txt"), []byte("dirty\n"), 0600); err != nil {
@@ -154,7 +187,7 @@ func TestConfiguredSourceRejectsDirtyRepository(t *testing.T) {
 func TestConfiguredSourceRejectsMissingEpoch(t *testing.T) {
 	repositoriesRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
-	for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
 		repositoryCommits[repository] = sourceTestRepository(t, repositoriesRoot, repository)
 	}
 	manifestPath := filepath.Join(t.TempDir(), "sim-latency.yml")
@@ -171,21 +204,80 @@ func TestConfiguredSourceRejectsMissingEpoch(t *testing.T) {
 
 func TestSourceManifestRejectsMissingRepositoryCommit(t *testing.T) {
 	repositoryCommit := strings.Repeat("a", 40)
-	manifest := sourceTestManifest(map[string]string{
-		"connect": repositoryCommit,
-		"sdk":     repositoryCommit,
-		"server":  "",
-		"proxy":   repositoryCommit,
-	})
+	repositoryCommits := sourceTestCommits(repositoryCommit)
+	repositoryCommits["server"] = ""
+	manifest := sourceTestManifest(repositoryCommits)
 	if err := validateSourceManifest(manifest); err == nil || !strings.Contains(err.Error(), "repository server has an invalid commit") {
 		t.Fatalf("missing repository commit was accepted: %v", err)
+	}
+}
+
+func TestSourceManifestRejectsMissingDependencyCommits(t *testing.T) {
+	for _, repository := range []string{"glog", "goidenticons", "userwireguard", "sn"} {
+		repositoryCommits := sourceTestCommits(strings.Repeat("a", 40))
+		repositoryCommits[repository] = ""
+		err := validateSourceManifest(sourceTestManifest(repositoryCommits))
+		if err == nil || !strings.Contains(err.Error(), "repository "+repository+" has an invalid commit") {
+			t.Errorf("missing %s commit was accepted: %v", repository, err)
+		}
+	}
+}
+
+func TestEvaluatorSourceLockRequiresCompleteRepositorySet(t *testing.T) {
+	for _, omittedRepository := range sourceRepositoryNames() {
+		repositoryCommits := sourceTestCommits(strings.Repeat("a", 40))
+		delete(repositoryCommits, omittedRepository)
+		lockBytes, err := json.Marshal(evaluatorSourceLock{
+			Schema:              1,
+			DevelopmentSnapshot: false,
+			Repositories:        repositoryCommits,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lockPath := filepath.Join(t.TempDir(), "source-lock.json")
+		if err := os.WriteFile(lockPath, lockBytes, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadEvaluatorSourceLock(lockPath); err == nil ||
+			!strings.Contains(err.Error(), "complete repository set") {
+			t.Errorf("source lock without %s was accepted: %v", omittedRepository, err)
+		}
+	}
+}
+
+func TestSourceManifestAcceptsFutureWinnerAndNoWinnerTransitions(t *testing.T) {
+	commits := sourceTestCommits(strings.Repeat("a", 40))
+	manifest := sourceTestManifest(commits)
+	previousEpoch := 0
+	manifest.EvaluationSource.Epochs = append(manifest.EvaluationSource.Epochs, sourceEpoch{
+		Epoch:                         1,
+		Kind:                          "winner_promotion",
+		SignificantImprovementPercent: 16.1,
+		WinnerJobId:                   "winner-1",
+		WinnerSignificance:            validSourceTestSignificance(),
+		PromotedFromEpoch:             &previousEpoch,
+		PromotedAt:                    "2026-08-29T00:00:00Z",
+		Repositories:                  manifest.EvaluationSource.Epochs[0].Repositories,
+	})
+	previousEpoch = 1
+	manifest.EvaluationSource.Epochs = append(manifest.EvaluationSource.Epochs, sourceEpoch{
+		Epoch:                         2,
+		Kind:                          "no_winner_carry_forward",
+		SignificantImprovementPercent: 16.1,
+		PromotedFromEpoch:             &previousEpoch,
+		PromotedAt:                    "2026-09-05T00:00:00Z",
+		Repositories:                  manifest.EvaluationSource.Epochs[1].Repositories,
+	})
+	if err := validateSourceManifest(manifest); err != nil {
+		t.Fatalf("future source transitions rejected: %s", err)
 	}
 }
 
 func TestEvaluatorSourceLockAcceptsOnlyOneServerCandidateCommit(t *testing.T) {
 	repositoriesRoot := t.TempDir()
 	repositoryCommits := map[string]string{}
-	for _, repository := range []string{"connect", "sdk", "server", "proxy"} {
+	for _, repository := range sourceRepositoryNames() {
 		repositoryCommits[repository] = sourceTestRepository(t, repositoriesRoot, repository)
 	}
 	serverRoot := filepath.Join(repositoriesRoot, "server")
@@ -210,12 +302,12 @@ func TestEvaluatorSourceLockAcceptsOnlyOneServerCandidateCommit(t *testing.T) {
 	if err := verifySourceEpoch(manifest, 0, repositoriesRoot, lockPath); err != nil {
 		t.Fatal(err)
 	}
-	proxyRoot := filepath.Join(repositoriesRoot, "proxy")
-	if err := os.WriteFile(filepath.Join(proxyRoot, "source.txt"), []byte("unapproved\n"), 0600); err != nil {
+	dependencyRoot := filepath.Join(repositoriesRoot, "userwireguard")
+	if err := os.WriteFile(filepath.Join(dependencyRoot, "source.txt"), []byte("unapproved\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	sourceTestGit(t, proxyRoot, "add", "source.txt")
-	sourceTestGit(t, proxyRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "unapproved")
+	sourceTestGit(t, dependencyRoot, "add", "source.txt")
+	sourceTestGit(t, dependencyRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "unapproved")
 	if err := verifySourceEpoch(manifest, 0, repositoriesRoot, lockPath); err == nil || !strings.Contains(err.Error(), "does not match its authenticated source lock") {
 		t.Fatalf("non-server candidate commit was accepted: %v", err)
 	}
