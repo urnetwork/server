@@ -8789,6 +8789,25 @@ transition to direct Redis port 8023; another reset must retain the partial and
 reopen the router, conntrack, or upstream-network discriminator rather than
 falling back to the VPN.
 
+A later retry supplied the independent network control that the first reset
+lacked. Planetoid's NetworkManager state had fallen from `CONNECTED_GLOBAL` to
+`CONNECTED_SITE` at `2026-09-03T00:28:10Z`. Beginning at `00:35:04Z`, its
+OpenVPN client received repeated `EHOSTUNREACH` results while contacting the
+unrelated public VPN endpoint `50.18.105.84:443`. At `00:43:44Z`, the direct
+PostgreSQL session to `65.49.70.73:8022` timed out after 4h10m and about 103.3
+GB received; three seconds later the first direct Redis connection to the same
+public address on port 8023 failed with `No route to host`. There was no kernel
+carrier or physical-interface transition. The VPN reauthenticated at
+`00:44:10Z`, NetworkManager returned to `CONNECTED_GLOBAL` at `00:46:57Z`, and
+the systemd-owned retry resumed PostgreSQL at `01:13:48Z`. Because an unrelated
+public target and both backup ports failed inside the same site-only interval,
+this occurrence is a Planetoid router or upstream-Internet outage, not a
+PostgreSQL, Redis, SSH daemon, or Fremont-forward failure. It does not identify
+whether the offsite router or its WAN provider failed. That final distinction
+is operational: inspect the router/WAN evidence for the interval. The software
+closure remains preserving the partial and bounded retry; do not route bulk
+archives back through the VPN or restart the healthy resumed writer.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
