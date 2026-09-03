@@ -1,0 +1,6 @@
+# Public, throwaway credentials used only by local/docker-compose.yml.
+# They are deliberately not production secrets.
+authority: "{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:5432"
+user: "bringyour"
+password: "urnetwork-local-test"
+db: "bringyour"

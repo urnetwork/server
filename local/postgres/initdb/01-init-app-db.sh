@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Provisions the application role + database described by vault/local/pg.yml.
+# Provisions the application role + database described by the selected pg.yml.
 #
 # The official postgres entrypoint runs this once, on first cluster init (empty
 # data volume), connected over the local socket as the $POSTGRES_USER superuser.
 # The credentials arrive as APP_DB_* env vars, which ../../run-local.sh reads
-# from vault/local/pg.yml so this stays a single source of truth.
+# from the selected local resource so this stays a single source of truth.
 #
 # The role is granted CREATEDB deliberately: server/test_util.go creates a fresh
 # `test_<...>` database (OWNER=<app user>) for every test and drops it at

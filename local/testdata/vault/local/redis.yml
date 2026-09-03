@@ -1,0 +1,5 @@
+# The local Redis container is isolated and intentionally has no password.
+authority: "{{ env:BRINGYOUR_REDIS_HOSTNAME }}:6379"
+password: ""
+db: 0
+cluster: false

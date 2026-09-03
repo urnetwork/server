@@ -4,8 +4,8 @@
 # github.com/urnetwork/server and point the well-known hostnames at them.
 #
 # It:
-#   1. reads the postgres/redis credentials + ports from vault/local/{pg,redis}.yml
-#      (the single source of truth),
+#   1. reads the postgres/redis credentials + ports from the selected local
+#      vault resources (or the checked-in throwaway fallback),
 #   2. on Linux, temporarily widens the ephemeral TCP port range and listen
 #      queues for full-scale local load simulations,
 #   3. adds a dedicated loopback-alias IP (LOCAL_HOST_IP, default 10.213.0.1) to
@@ -66,13 +66,21 @@ COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 OS="$(uname -s)"
 
 WARP_ENV="${WARP_ENV:-local}"
-# Prefer explicit warp overrides, else $WARP_HOME/vault, else the repo layout.
-if [[ -n "${WARP_VAULT_HOME:-}" ]]; then
+[[ "$WARP_ENV" == "local" ]] || die "refusing WARP_ENV=$WARP_ENV; the local test stack requires WARP_ENV=local"
+
+# Prefer an explicit warp override, then an existing sibling vault checkout, and
+# finally the checked-in throwaway fixture. An explicit override remains
+# fail-closed so a typo never silently selects different credentials.
+if [[ "${WARP_TEST_ENV_USE_PORTABLE_RESOURCES:-0}" == "1" ]]; then
+  VAULT_ROOT="$SCRIPT_DIR/testdata/vault"
+elif [[ -n "${WARP_VAULT_HOME:-}" ]]; then
   VAULT_ROOT="$WARP_VAULT_HOME"
-elif [[ -n "${WARP_HOME:-}" ]]; then
+elif [[ -n "${WARP_HOME:-}" && -f "$WARP_HOME/vault/$WARP_ENV/pg.yml" && -f "$WARP_HOME/vault/$WARP_ENV/redis.yml" ]]; then
   VAULT_ROOT="$WARP_HOME/vault"
-else
+elif [[ -f "$URNETWORK_HOME/vault/$WARP_ENV/pg.yml" && -f "$URNETWORK_HOME/vault/$WARP_ENV/redis.yml" ]]; then
   VAULT_ROOT="$URNETWORK_HOME/vault"
+else
+  VAULT_ROOT="$SCRIPT_DIR/testdata/vault"
 fi
 VAULT_LOCAL="$VAULT_ROOT/$WARP_ENV"
 PG_YML="$VAULT_LOCAL/pg.yml"
@@ -81,6 +89,7 @@ REDIS_YML="$VAULT_LOCAL/redis.yml"
 [[ -f "$COMPOSE_FILE" ]] || die "compose file not found: $COMPOSE_FILE"
 [[ -f "$PG_YML" ]]       || die "postgres vault config not found: $PG_YML (set WARP_VAULT_HOME?)"
 [[ -f "$REDIS_YML" ]]    || die "redis vault config not found: $REDIS_YML (set WARP_VAULT_HOME?)"
+log "using local test resources from $VAULT_LOCAL"
 
 # --- dedicated addressing (never 127.0.0.1) ----------------------------------
 

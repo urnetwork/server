@@ -1,25 +1,31 @@
-#!/usr/bin/env zsh
+#!/usr/bin/env bash
 
-for d in `find . -iname '*_test.go' | xargs -n 1 dirname | sort | uniq | paste -sd ' ' -`; do
+set -o pipefail
+
+script_path="${BASH_SOURCE[0]}"
+script_dir="${script_path%/*}"
+[[ "$script_dir" != "$script_path" ]] || script_dir="."
+script_dir="$(cd -- "$script_dir" >/dev/null 2>&1 && pwd)" || exit $?
+server_dir="${script_dir%/*}"
+cd "$script_dir" || exit $?
+source "$server_dir/test-env.sh" || exit $?
+
+test_directories="$(find . -iname '*_test.go' -print | while IFS= read -r test_file; do dirname "$test_file"; done | sort -u)" || exit $?
+while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
     # if [[ $1 == "" || $1 == `basename $d` ]]; then
-        pushd $d
+        pushd "$d"
         # highlight source files in this dir
-        match="/$(basename $(pwd))/\\S*\.go\|^\\S*_test.go"
-        export WARP_ENV="local"
-        export WARP_SERVICE="test"
-        export WARP_DOMAIN="bringyour.com"
-        export WARP_BLOCK="test"
-        export WARP_VERSION="0.0.0"
-        export BRINGYOUR_POSTGRES_HOSTNAME="local-pg.bringyour.com"
-        export BRINGYOUR_REDIS_HOSTNAME="local-redis.bringyour.com"
+        match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
         GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 900m "$@" -args -v 0 -logtostderr true | grep --color=always -e "^" -e "$match"
             # -trace profile/trace -coverprofile profile/cover 
-        if [[ ${pipestatus[1]} != 0 ]]; then
-            exit ${pipestatus[1]}
+        test_status=${PIPESTATUS[0]}
+        if [[ $test_status != 0 ]]; then
+            exit "$test_status"
         fi
         popd
     # fi
-done
+done <<< "$test_directories"
 # stdbuf -i0 -o0 -e0 
 
 # go tool trace profile/trace

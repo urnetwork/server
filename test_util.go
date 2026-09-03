@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -22,6 +23,7 @@ import (
 
 	_ "net/http/pprof" // Import for side effects
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/glog"
 )
@@ -44,6 +46,7 @@ const (
 	testRedisLeaseRetryTimeout      = 2 * time.Minute
 	testRedisLeaseRetryMinWait      = 100 * time.Millisecond
 	testRedisLeaseRetryMaxWait      = 5 * time.Second
+	testEnvironmentProbeTimeout     = 3 * time.Second
 )
 
 // The coordinator client auto-retries a command whose response was lost on a
@@ -330,6 +333,266 @@ func (self *testRedisDbLease) release(ctx context.Context) {
 	Raise(closeErr)
 }
 
+// Holds the connection coordinates needed before an integration test may
+// create disposable PostgreSQL databases or lease logical Redis databases.
+type testEnvironmentConfiguration struct {
+	postgresAuthority string
+	postgresUser      string
+	postgresPassword  string
+	postgresDatabase  string
+	redisAuthority    string
+	redisPassword     string
+	redisReservedDb   int
+}
+
+// Refuses an unset or non-local environment before any destructive test setup
+// can resolve credentials or connect to a backing service.
+func validateTestEnvironmentName() error {
+	env, err := Env()
+	if err != nil {
+		return errors.New("WARP_ENV must be set to local")
+	}
+	if env != "local" {
+		return fmt.Errorf("WARP_ENV must be local, got %q", env)
+	}
+	return nil
+}
+
+// Loads only the Redis fixture used by lease integration tests that do not
+// create a PostgreSQL database.
+func loadTestRedisLeaseConfiguration() (
+	configuration testEnvironmentConfiguration,
+	returnErr error,
+) {
+	if err := validateTestEnvironmentName(); err != nil {
+		return configuration, err
+	}
+	redisResource, err := Vault.SimpleResource("redis.yml")
+	if err != nil {
+		return configuration, fmt.Errorf("required vault resource redis.yml: %w", err)
+	}
+	defer func() {
+		if value := recover(); value != nil {
+			returnErr = fmt.Errorf("invalid local redis test resource: %v", value)
+		}
+	}()
+	configuration.redisAuthority = redisResource.RequireString("authority")
+	configuration.redisPassword = redisResource.RequireString("password")
+	configuration.redisReservedDb = redisResource.RequireInt("db")
+	if redisResource.RequireBool("cluster") {
+		return configuration, errors.New("local tests require logical redis databases, not a redis cluster")
+	}
+	host, _, err := net.SplitHostPort(configuration.redisAuthority)
+	if err != nil {
+		return configuration, fmt.Errorf("invalid redis authority: %w", err)
+	}
+	if expectedHost := os.Getenv("BRINGYOUR_REDIS_HOSTNAME"); expectedHost != "" && host != expectedHost {
+		return configuration, fmt.Errorf(
+			"redis authority host %q does not match configured local host %q",
+			host,
+			expectedHost,
+		)
+	}
+	return configuration, nil
+}
+
+// Converts resource parser panics into one non-retryable preflight error. The
+// returned error names resources and keys but never includes credential values.
+func loadTestEnvironmentConfiguration() (
+	configuration testEnvironmentConfiguration,
+	returnErr error,
+) {
+	if err := validateTestEnvironmentName(); err != nil {
+		return configuration, err
+	}
+
+	pgResource, err := Vault.SimpleResource(DefaultPgVaultResourceName)
+	if err != nil {
+		return configuration, fmt.Errorf("required vault resource %s: %w", DefaultPgVaultResourceName, err)
+	}
+	redisResource, err := Vault.SimpleResource("redis.yml")
+	if err != nil {
+		return configuration, fmt.Errorf("required vault resource redis.yml: %w", err)
+	}
+	dbConfigResource, err := Config.SimpleResource(DefaultPgConfigResourceName)
+	if err != nil {
+		return configuration, fmt.Errorf("required config resource %s: %w", DefaultPgConfigResourceName, err)
+	}
+	redisConfigResource, err := Config.SimpleResource("redis.yml")
+	if err != nil {
+		return configuration, fmt.Errorf("required config resource redis.yml: %w", err)
+	}
+
+	defer func() {
+		if value := recover(); value != nil {
+			returnErr = fmt.Errorf("invalid local integration test resource: %v", value)
+		}
+	}()
+	configuration.postgresAuthority = pgResource.RequireString("authority")
+	configuration.postgresUser = pgResource.RequireString("user")
+	configuration.postgresPassword = pgResource.RequireString("password")
+	configuration.postgresDatabase = pgResource.RequireString("db")
+	configuration.redisAuthority = redisResource.RequireString("authority")
+	configuration.redisPassword = redisResource.RequireString("password")
+	configuration.redisReservedDb = redisResource.RequireInt("db")
+	if redisResource.RequireBool("cluster") {
+		return configuration, errors.New("local tests require logical redis databases, not a redis cluster")
+	}
+	dbConfigResource.RequireInt("min_connections")
+	dbConfigResource.RequireInt("max_connections")
+	redisConfigResource.RequireInt("min_connections")
+	redisConfigResource.RequireInt("max_connections")
+	services := []struct {
+		name         string
+		authority    string
+		expectedHost string
+	}{
+		{
+			name:         "postgres",
+			authority:    configuration.postgresAuthority,
+			expectedHost: os.Getenv("BRINGYOUR_POSTGRES_HOSTNAME"),
+		},
+		{
+			name:         "redis",
+			authority:    configuration.redisAuthority,
+			expectedHost: os.Getenv("BRINGYOUR_REDIS_HOSTNAME"),
+		},
+	}
+	for _, service := range services {
+		host, _, err := net.SplitHostPort(service.authority)
+		if err != nil {
+			return configuration, fmt.Errorf("invalid %s authority: %w", service.name, err)
+		}
+		if service.expectedHost != "" && host != service.expectedHost {
+			return configuration, fmt.Errorf(
+				"%s authority host %q does not match configured local host %q",
+				service.name,
+				host,
+				service.expectedHost,
+			)
+		}
+	}
+	return configuration, nil
+}
+
+// Authenticates and checks the exact read-only capabilities setup needs before
+// it can safely enter longer Redis operation retries or create a database.
+func probeTestEnvironmentService(
+	ctx context.Context,
+	serviceName string,
+	configuration testEnvironmentConfiguration,
+) error {
+	switch serviceName {
+	case "postgres":
+		postgresUrl := (&url.URL{
+			Scheme:   "postgres",
+			User:     url.UserPassword(configuration.postgresUser, configuration.postgresPassword),
+			Host:     configuration.postgresAuthority,
+			Path:     "/" + configuration.postgresDatabase,
+			RawQuery: "sslmode=disable",
+		}).String()
+		connectionConfig, err := pgx.ParseConfig(postgresUrl)
+		if err != nil {
+			return fmt.Errorf("parse PostgreSQL test configuration: %w", err)
+		}
+		connection, err := pgx.ConnectConfig(ctx, connectionConfig)
+		if err != nil {
+			return fmt.Errorf("authenticate PostgreSQL test connection: %w", err)
+		}
+		defer connection.Close(ctx)
+		var canCreateDatabase bool
+		if err := connection.QueryRow(
+			ctx,
+			"SELECT rolcreatedb FROM pg_roles WHERE rolname = current_user",
+		).Scan(&canCreateDatabase); err != nil {
+			return fmt.Errorf("read PostgreSQL test role: %w", err)
+		}
+		if !canCreateDatabase {
+			return errors.New("PostgreSQL test role lacks CREATEDB")
+		}
+		return nil
+	case "redis":
+		client := redis.NewClient(&redis.Options{
+			Addr:                  configuration.redisAuthority,
+			Password:              configuration.redisPassword,
+			DB:                    testRedisLeaseCoordinatorDb,
+			ContextTimeoutEnabled: true,
+		})
+		defer client.Close()
+		redisConfig, err := client.ConfigGet(ctx, "databases").Result()
+		if err != nil {
+			return fmt.Errorf("authenticate and read Redis logical databases: %w", err)
+		}
+		databaseCount, err := strconv.Atoi(redisConfig["databases"])
+		if err != nil {
+			return fmt.Errorf("parse Redis logical database count: %w", err)
+		}
+		if len(testRedisDbCandidates(databaseCount, configuration.redisReservedDb, 0)) == 0 {
+			return fmt.Errorf(
+				"Redis has no test database besides coordinator db %d and reserved db %d",
+				testRedisLeaseCoordinatorDb,
+				configuration.redisReservedDb,
+			)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown test environment service %q", serviceName)
+	}
+}
+
+// Returns the address used in diagnostics without exposing credentials.
+func testEnvironmentServiceAuthority(
+	serviceName string,
+	configuration testEnvironmentConfiguration,
+) string {
+	switch serviceName {
+	case "postgres":
+		return configuration.postgresAuthority
+	case "redis":
+		return configuration.redisAuthority
+	default:
+		return "unknown"
+	}
+}
+
+// Applies the same short connection budget to each dependency without
+// consuming the Redis lease operation's two-minute transient retry horizon.
+func preflightTestEnvironmentService(
+	serviceName string,
+	configuration testEnvironmentConfiguration,
+	probe func(context.Context, string, testEnvironmentConfiguration) error,
+) error {
+	authority := testEnvironmentServiceAuthority(serviceName, configuration)
+	ctx, cancel := context.WithTimeout(context.Background(), testEnvironmentProbeTimeout)
+	err := probe(ctx, serviceName, configuration)
+	cancel()
+	if err != nil {
+		return fmt.Errorf(
+			"%s preflight failed at %s: %w; start ./local/run-local.sh",
+			serviceName,
+			authority,
+			err,
+		)
+	}
+	return nil
+}
+
+// Checks both backing services exactly once before flaky-test retries begin.
+func preflightTestEnvironment(
+	probe func(context.Context, string, testEnvironmentConfiguration) error,
+) error {
+	configuration, err := loadTestEnvironmentConfiguration()
+	if err != nil {
+		return err
+	}
+	for _, serviceName := range []string{"postgres", "redis"} {
+		if err := preflightTestEnvironmentService(serviceName, configuration, probe); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type TestEnv struct {
 	ApplyDbMigrations bool
 	Warmup            bool
@@ -405,10 +668,38 @@ func pushTestPgResources(pg, maintenancePg map[string]any, database string) func
 // in each test file, `func TestMain(m *testing.M) {(&server.TestEnv{}).TestMain(m)}`
 // https://pkg.go.dev/testing
 func (self *TestEnv) TestMain(m *testing.M) {
+	if err := preflightTestEnvironment(probeTestEnvironmentService); err != nil {
+		fmt.Fprintf(os.Stderr, "local integration test preflight: %v\n", err)
+		os.Exit(1)
+		return
+	}
 	os.Exit(runTestMain(self.setup, m.Run))
 }
 
+// Runs a test against disposable PostgreSQL and Redis state after validating
+// the shared local dependencies once, outside the flaky-attempt loop.
 func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
+	self.runWithSetup(
+		t,
+		callback,
+		func() error {
+			return preflightTestEnvironment(probeTestEnvironmentService)
+		},
+		self.setup,
+	)
+}
+
+// Accepts injected lifecycle boundaries so retry mechanics can be tested
+// hermetically without provisioning databases that those unit tests never use.
+func (self *TestEnv) runWithSetup(
+	t *testing.T,
+	callback func(t testing.TB),
+	preflight func() error,
+	setup func() func(),
+) {
+	if err := preflight(); err != nil {
+		t.Fatalf("local integration test preflight: %v", err)
+	}
 	n := self.RerunCount + 1
 	for i := 0; i < n; i += 1 {
 		// Each attempt runs against a retryTB wrapper, so a failed assertion is
@@ -434,7 +725,7 @@ func (self *TestEnv) Run(t *testing.T, callback func(t testing.TB)) {
 					tb.Fail()
 				}
 			}()
-			teardown := self.setup()
+			teardown := setup()
 			defer func() {
 				// Teardown can block forever when the attempt failed an
 				// assertion while sibling goroutines it spawned still hold

@@ -24,7 +24,7 @@ Press `Ctrl-C` in the `run-local.sh` terminal to stop the containers, restore
 
 - Starts `postgres:18` and `redis:8-alpine` via [`docker-compose.yml`](docker-compose.yml)
   on a dedicated bridge network (`urnetwork-local`, subnet `10.213.1.0/24`).
-- Postgres provisions the role + database from `vault/local/pg.yml` via
+- Postgres provisions the role + database from the selected local `pg.yml` via
   [`postgres/initdb/01-init-app-db.sh`](postgres/initdb/01-init-app-db.sh). The
   role gets `CREATEDB` because the test harness creates/drops a database per test.
   The cluster is initialized with `LOCALE=en_US.UTF-8` so the harness's
@@ -69,8 +69,15 @@ and the tests run as you.
 
 ## Notes
 
-- Credentials/ports come from `vault/local/{pg,redis}.yml`. If you change them,
-  re-run with `--fresh` so the postgres init script re-provisions.
+- Unless the portable-resource override below is set, an explicit
+  `WARP_VAULT_HOME` is authoritative. Otherwise the launcher uses
+  `WARP_HOME/vault`, a sibling `vault` checkout, or finally the checked-in
+  `testdata/vault` fixture. The fallback credentials are public and throwaway;
+  no production secret is stored in this repository.
+- `WARP_TEST_ENV_USE_PORTABLE_RESOURCES=1` forces the checked-in fixture when a
+  sibling vault checkout also exists.
+- If you change the selected `pg.yml`, re-run with `--fresh` so the postgres
+  init script re-provisions the role.
 - The postgres data volume (`pgdata`) persists across runs; the init script only
   runs on a fresh volume.
 - The postgres image must be the glibc (debian) build, not alpine: the test

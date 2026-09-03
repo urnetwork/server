@@ -1,0 +1,11 @@
+min_connections: 4
+max_connections: 16
+api:
+  min_connections: 16
+  max_connections: 64
+connect:
+  min_connections: 8
+  max_connections: 32
+sim:
+  min_connections: 4
+  max_connections: 32

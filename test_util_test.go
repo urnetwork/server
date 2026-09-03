@@ -20,12 +20,9 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-// These tests exercise the real TestEnv.Run (including per-attempt environment
-// setup/teardown): a flaky failure on early attempts is retried and rescued,
-// while a failure that persists across every attempt still fails the test.
-//
-// ApplyDbMigrations is false (callbacks touch no schema) and RerunTimeout is
-// zero so reruns happen back-to-back.
+// These tests exercise the TestEnv retry loop with hermetic lifecycle
+// boundaries: a flaky failure on early attempts is retried and rescued, while
+// a failure that persists across every attempt still fails the test.
 
 func retryTestEnv(rerunCount int) *TestEnv {
 	return &TestEnv{
@@ -33,6 +30,21 @@ func retryTestEnv(rerunCount int) *TestEnv {
 		RerunCount:        rerunCount,
 		RerunTimeout:      0,
 	}
+}
+
+// Avoids provisioning PostgreSQL and Redis for tests concerned only with the
+// retry state machine.
+func runRetryTestEnv(t *testing.T, testEnv *TestEnv, callback func(testing.TB)) {
+	testEnv.runWithSetup(
+		t,
+		callback,
+		func() error {
+			return nil
+		},
+		func() func() {
+			return func() {}
+		},
+	)
 }
 
 // Pins the lifecycle ordering that os.Exit would otherwise cut short.
@@ -120,13 +132,210 @@ db: "maintenance-db"
 	}
 }
 
+// Installs complete in-memory resources so preflight behavior can be tested
+// without reading a developer's vault or opening network connections.
+func pushTestEnvironmentPreflightResources(t *testing.T) {
+	t.Helper()
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_VAULT_HOME", filepath.Join(t.TempDir(), "vault"))
+	t.Setenv("WARP_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	t.Setenv("TEST_POSTGRES_HOST", "postgres.test")
+	t.Setenv("TEST_REDIS_HOST", "redis.test")
+	t.Setenv("BRINGYOUR_POSTGRES_HOSTNAME", "postgres.test")
+	t.Setenv("BRINGYOUR_REDIS_HOSTNAME", "redis.test")
+	popPg := Vault.PushSimpleResource(DefaultPgVaultResourceName, []byte(`
+authority: "{{ env:TEST_POSTGRES_HOST }}:5432"
+user: "test"
+password: "not-a-secret"
+db: "test"
+`))
+	popRedis := Vault.PushSimpleResource("redis.yml", []byte(`
+authority: "{{ env:TEST_REDIS_HOST }}:6379"
+password: ""
+db: 0
+cluster: false
+`))
+	popDbConfig := Config.PushSimpleResource(DefaultPgConfigResourceName, []byte(`
+min_connections: 1
+max_connections: 2
+`))
+	popRedisConfig := Config.PushSimpleResource("redis.yml", []byte(`
+min_connections: 1
+max_connections: 2
+`))
+	t.Cleanup(func() {
+		popRedisConfig()
+		popDbConfig()
+		popRedis()
+		popPg()
+	})
+}
+
+// An unset or non-local environment is a deterministic configuration error,
+// never a flaky test attempt.
+func TestTestEnvironmentNameRequiresLocal(t *testing.T) {
+	cases := []struct {
+		env      string
+		expected string
+	}{
+		{env: "", expected: "WARP_ENV must be set to local"},
+		{env: "main", expected: `WARP_ENV must be local, got "main"`},
+	}
+	for _, c := range cases {
+		t.Setenv("WARP_ENV", c.env)
+		err := validateTestEnvironmentName()
+		if err == nil || !strings.Contains(err.Error(), c.expected) {
+			t.Errorf("WARP_ENV=%q error = %v; want %q", c.env, err, c.expected)
+		}
+	}
+}
+
+// Every PostgreSQL/Redis vault and pool resource consumed during setup must be
+// named before any service probe or retry can begin.
+func TestTestEnvironmentPreflightReportsEachMissingResource(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_VAULT_HOME", filepath.Join(t.TempDir(), "vault"))
+	t.Setenv("WARP_CONFIG_HOME", filepath.Join(t.TempDir(), "config"))
+	fixtures := []struct {
+		resolver *Resolver
+		name     string
+		content  []byte
+		expected string
+	}{
+		{
+			resolver: Vault,
+			name:     DefaultPgVaultResourceName,
+			content:  []byte("authority: postgres.test:5432\nuser: test\npassword: test\ndb: test\n"),
+			expected: "required vault resource pg.yml",
+		},
+		{
+			resolver: Vault,
+			name:     "redis.yml",
+			content:  []byte("authority: redis.test:6379\npassword: \"\"\ndb: 0\ncluster: false\n"),
+			expected: "required vault resource redis.yml",
+		},
+		{
+			resolver: Config,
+			name:     DefaultPgConfigResourceName,
+			content:  []byte("min_connections: 1\nmax_connections: 2\n"),
+			expected: "required config resource db.yml",
+		},
+		{
+			resolver: Config,
+			name:     "redis.yml",
+			content:  []byte("min_connections: 1\nmax_connections: 2\n"),
+			expected: "required config resource redis.yml",
+		},
+	}
+	for missingIndex, missingFixture := range fixtures {
+		pops := []func(){}
+		for fixtureIndex, fixture := range fixtures {
+			if fixtureIndex != missingIndex {
+				pops = append(pops, fixture.resolver.PushSimpleResource(fixture.name, fixture.content))
+			}
+		}
+		probeCalled := false
+		err := preflightTestEnvironment(func(context.Context, string, testEnvironmentConfiguration) error {
+			probeCalled = true
+			return nil
+		})
+		for i := len(pops) - 1; 0 <= i; i -= 1 {
+			pops[i]()
+		}
+		if err == nil || !strings.Contains(err.Error(), missingFixture.expected) {
+			t.Errorf("missing %s error = %v; want %q", missingFixture.name, err, missingFixture.expected)
+		}
+		if probeCalled {
+			t.Errorf("missing %s reached the service probe", missingFixture.name)
+		}
+	}
+}
+
+// A valid portable fixture expands environment-backed hostnames and probes
+// both services in deterministic order.
+func TestTestEnvironmentPreflightExpandsAndProbesPortableResources(t *testing.T) {
+	pushTestEnvironmentPreflightResources(t)
+	authorities := []string{}
+	err := preflightTestEnvironment(func(
+		ctx context.Context,
+		serviceName string,
+		configuration testEnvironmentConfiguration,
+	) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("service probe context has no deadline")
+		}
+		authorities = append(authorities, testEnvironmentServiceAuthority(serviceName, configuration))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect.AssertEqual(t, authorities, []string{"postgres.test:5432", "redis.test:6379"})
+}
+
+// A missing environment value referenced by a fixture fails during resource
+// validation rather than entering network setup or the flaky retry loop.
+func TestTestEnvironmentPreflightReportsMissingFixtureEnvironment(t *testing.T) {
+	pushTestEnvironmentPreflightResources(t)
+	t.Setenv("TEST_POSTGRES_HOST", "")
+	probeCalled := false
+	err := preflightTestEnvironment(func(context.Context, string, testEnvironmentConfiguration) error {
+		probeCalled = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "Missing env var TEST_POSTGRES_HOST") {
+		t.Fatalf("preflight error = %v; want missing fixture environment", err)
+	}
+	if probeCalled {
+		t.Fatal("invalid fixture reached the service probe")
+	}
+}
+
+// An unavailable dependency is reported on its first bounded probe; Redis's
+// two-minute transient operation retry is reserved for an environment that was
+// reachable when the test started.
+func TestTestEnvironmentPreflightReportsUnavailableService(t *testing.T) {
+	pushTestEnvironmentPreflightResources(t)
+	redisUnavailableErr := errors.New("redis test endpoint refused the connection")
+	authorities := []string{}
+	err := preflightTestEnvironment(func(
+		ctx context.Context,
+		serviceName string,
+		configuration testEnvironmentConfiguration,
+	) error {
+		authority := testEnvironmentServiceAuthority(serviceName, configuration)
+		authorities = append(authorities, authority)
+		if authority == "redis.test:6379" {
+			return redisUnavailableErr
+		}
+		return nil
+	})
+	if !errors.Is(err, redisUnavailableErr) {
+		t.Fatalf("preflight error = %v; want Redis probe error", err)
+	}
+	connect.AssertEqual(t, authorities, []string{"postgres.test:5432", "redis.test:6379"})
+}
+
+// Redis-only integration tests diagnose their exact missing fixture without
+// depending on the PostgreSQL or pool configuration resources.
+func TestLoadTestRedisLeaseConfigurationReportsMissingFixture(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_VAULT_HOME", filepath.Join(t.TempDir(), "vault"))
+	_, err := loadTestRedisLeaseConfiguration()
+	if err == nil || !strings.Contains(err.Error(), "required vault resource redis.yml") {
+		t.Fatalf("Redis fixture error = %v; want missing redis.yml", err)
+	}
+}
+
 // TestRunRetriesUntilPass checks every failure mode is retried: attempt 1
 // panics, 2 calls t.Fail, 3 fails an assertion (assert.Equal -> FailNow ->
 // runtime.Goexit), and 4 passes. Each failure is recorded only on the retryTB
 // wrapper, so the real *testing.T never fails and the test passes.
 func TestRunRetriesUntilPass(t *testing.T) {
 	var attempts atomic.Int32
-	retryTestEnv(3).Run(t, func(tb testing.TB) {
+	var preflights atomic.Int32
+	testEnv := retryTestEnv(3)
+	testEnv.runWithSetup(t, func(tb testing.TB) {
 		switch attempts.Add(1) {
 		case 1:
 			panic("flaky panic on the first attempt")
@@ -136,9 +345,17 @@ func TestRunRetriesUntilPass(t *testing.T) {
 			connect.AssertEqual(tb, 1, 2)
 		}
 		// the fourth attempt falls through and passes
+	}, func() error {
+		preflights.Add(1)
+		return nil
+	}, func() func() {
+		return func() {}
 	})
 	if got := attempts.Load(); got != 4 {
 		t.Fatalf("expected 4 attempts before success, got %d", got)
+	}
+	if got := preflights.Load(); got != 1 {
+		t.Fatalf("preflight count = %d; want 1 outside the retry loop", got)
 	}
 }
 
@@ -149,7 +366,7 @@ func TestRunRetriesUntilPass(t *testing.T) {
 func TestRunFailsAfterExhaustion(t *testing.T) {
 	if os.Getenv("URNETWORK_RERUN_EXHAUSTION_CHILD") == "1" {
 		// Child process: always fails, so Run exhausts its reruns and fails.
-		retryTestEnv(1).Run(t, func(tb testing.TB) {
+		runRetryTestEnv(t, retryTestEnv(1), func(tb testing.TB) {
 			tb.Fatal("persistent failure")
 		})
 		return
@@ -169,7 +386,7 @@ func TestRunFailsAfterExhaustion(t *testing.T) {
 // and hides the line that actually failed.
 func TestRunReportsPanicOriginAfterExhaustion(t *testing.T) {
 	if os.Getenv("URNETWORK_RERUN_PANIC_CHILD") == "1" {
-		retryTestEnv(0).Run(t, func(tb testing.TB) {
+		runRetryTestEnv(t, retryTestEnv(0), func(tb testing.TB) {
 			panic("persistent panic")
 		})
 		return
@@ -273,16 +490,16 @@ func TestRedisLeaseConnectionOperationStopsAfterCancellation(t *testing.T) {
 }
 
 func TestRedisDatabaseLeaseRenewsWhileOwnerIsActive(t *testing.T) {
+	authority, password, reservedDb := testRedisLeaseConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	redisResource := Vault.RequireSimpleResource("redis.yml")
 	token := strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	lease := acquireTestRedisDbLease(
 		ctx,
-		redisResource.RequireString("authority"),
-		redisResource.RequireString("password"),
-		redisResource.RequireInt("db"),
+		authority,
+		password,
+		reservedDb,
 		token,
 		0,
 		180*time.Millisecond,
@@ -306,13 +523,24 @@ func TestRedisDatabaseLeaseRenewsWhileOwnerIsActive(t *testing.T) {
 	}
 }
 
-// testRedisLeaseConfig reads the coordinator connection settings the same way
-// acquireTestRedisDbLease's callers do.
-func testRedisLeaseConfig() (authority string, password string, reservedDb int) {
-	redisResource := Vault.RequireSimpleResource("redis.yml")
-	return redisResource.RequireString("authority"),
-		redisResource.RequireString("password"),
-		redisResource.RequireInt("db")
+// Reads and probes only the Redis dependency needed by lease integration
+// tests, without imposing an unrelated PostgreSQL requirement.
+func testRedisLeaseConfig(t *testing.T) (authority string, password string, reservedDb int) {
+	t.Helper()
+	configuration, err := loadTestRedisLeaseConfiguration()
+	if err == nil {
+		err = preflightTestEnvironmentService(
+			"redis",
+			configuration,
+			probeTestEnvironmentService,
+		)
+	}
+	if err != nil {
+		t.Fatalf("redis integration test preflight: %v", err)
+	}
+	return configuration.redisAuthority,
+		configuration.redisPassword,
+		configuration.redisReservedDb
 }
 
 func testRedisLeaseToken() string {
@@ -324,10 +552,10 @@ func testRedisLeaseToken() string {
 // connection: go-redis then retries the script, and the retry must read the
 // released marker as success instead of misreporting the lease as not owned.
 func TestRedisDatabaseLeaseReleaseSurvivesRetriedRelease(t *testing.T) {
+	authority, password, reservedDb := testRedisLeaseConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	authority, password, reservedDb := testRedisLeaseConfig()
 	lease := acquireTestRedisDbLease(
 		ctx,
 		authority,
@@ -361,10 +589,10 @@ func TestRedisDatabaseLeaseReleaseSurvivesRetriedRelease(t *testing.T) {
 // retried SET NX reports not-acquired even though the key holds this process's
 // token, and acquisition must claim the lease instead of skipping the db.
 func TestRedisDatabaseLeaseAcquireClaimsOwnTokenAfterLostSetResponse(t *testing.T) {
+	authority, password, reservedDb := testRedisLeaseConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	authority, password, reservedDb := testRedisLeaseConfig()
 	token := testRedisLeaseToken()
 
 	client := redis.NewClient(&redis.Options{
@@ -420,10 +648,10 @@ func TestRedisDatabaseLeaseAcquireClaimsOwnTokenAfterLostSetResponse(t *testing.
 // TestRedisDatabaseLeaseReleaseDetectsForeignOwner: a lease key rewritten by
 // another owner must fail release with the foreign-owner diagnostic.
 func TestRedisDatabaseLeaseReleaseDetectsForeignOwner(t *testing.T) {
+	authority, password, reservedDb := testRedisLeaseConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	authority, password, reservedDb := testRedisLeaseConfig()
 	lease := acquireTestRedisDbLease(
 		ctx,
 		authority,
@@ -464,10 +692,10 @@ func TestRedisDatabaseLeaseReleaseDetectsForeignOwner(t *testing.T) {
 // entirely (flush, expiry) must still fail release with the not-owned
 // diagnostic.
 func TestRedisDatabaseLeaseReleaseDetectsMissingKey(t *testing.T) {
+	authority, password, reservedDb := testRedisLeaseConfig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	authority, password, reservedDb := testRedisLeaseConfig()
 	lease := acquireTestRedisDbLease(
 		ctx,
 		authority,
@@ -501,6 +729,9 @@ func TestRedisDatabaseLeaseSeparatesProcesses(t *testing.T) {
 	)
 
 	if role := os.Getenv(roleEnv); role != "" {
+		if err := preflightTestEnvironment(probeTestEnvironmentService); err != nil {
+			t.Fatalf("local integration test preflight: %v", err)
+		}
 		teardown := (&TestEnv{ApplyDbMigrations: false}).setup()
 		defer teardown()
 

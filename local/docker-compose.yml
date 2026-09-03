@@ -1,11 +1,11 @@
 # Local test/dev backing stores for github.com/urnetwork/server.
 #
-#   postgres  ->  local-pg.bringyour.com:5432     (role/db per vault/local/pg.yml)
+#   postgres  ->  local-pg.bringyour.com:5432     (role/db per selected pg.yml)
 #   redis     ->  local-redis.bringyour.com:6379  (no auth, single node)
 #
 # Don't run this directly with `docker compose up`. Use ./run-local.sh, which
-# reads the credentials + ports from vault/local/{pg,redis}.yml (the single
-# source of truth), stands up the dedicated loopback address these ports bind
+# reads the selected local credentials + ports (with a checked-in throwaway
+# fallback), stands up the dedicated loopback address these ports bind
 # to, and manages the /etc/hosts aliases. The APP_DB_* vars are required (`:?`)
 # so a bare `docker compose up` fails fast with a pointer back to run-local.sh.
 #
@@ -50,7 +50,7 @@ services:
       POSTGRES_INITDB_ARGS: --locale=en_US.UTF-8
       # Throwaway local superuser. The application role + database are created
       # by initdb/01-init-app-db.sh from the APP_DB_* values below, which
-      # run-local.sh sources from vault/local/pg.yml.
+      # run-local.sh sources from the selected local pg.yml.
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-postgres}
       POSTGRES_DB: postgres
@@ -101,7 +101,7 @@ services:
     sysctls:
       net.core.somaxconn: "65535"
       net.ipv4.tcp_max_syn_backlog: "65535"
-    # No password, single node (cluster: false in vault/local/redis.yml). The
+    # No password, single node (cluster: false in the local redis.yml). The
     # full 100k-provider simulation moves large score/sample pipelines through
     # Redis while tens of thousands of sockets are active. I/O threads keep
     # parsing and socket writes from blocking the command thread long enough
