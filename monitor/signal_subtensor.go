@@ -339,8 +339,39 @@ func evaluateSubtensor(target *host, observation subtensorObservation) []finding
 	publicHead, publicHeadErr := subtensorHex(observation.Public.Head)
 	if len(observation.Public.Errors) > 0 || publicHeadErr != nil {
 		findings = append(findings, cannotObserveFinding(target.name+"/subtensor-public-reference", fmt.Errorf("public RPC: %s", subtensorErrors(observation.Public.Errors, publicHeadErr))))
-	} else if problems := subtensorIdentityProblems(settings, observation.Public, true); len(problems) > 0 {
-		findings = append(findings, subtensorIdentityFinding(target.name, "public-reference", problems, observation.Public))
+	} else {
+		identityProblems := subtensorIdentityProblems(settings, observation.Public, true)
+		runtimeAhead := observation.Public.Runtime.SpecVersion > settings.ExpectedSpecVersion &&
+			observation.Public.Chain == settings.ExpectedChain &&
+			strings.EqualFold(observation.Public.Genesis, settings.ExpectedGenesisHash) &&
+			observation.Public.Runtime.SpecName == settings.ExpectedSpecName &&
+			strings.EqualFold(observation.Public.EVMChainID, settings.ExpectedEVMChainID)
+		if runtimeAhead {
+			findings = append(findings, finding{
+				probeId: "subtensor/node-health", tier: tierPage, class: "subtensor-runtime-ahead",
+				target: target.name, frame: "public-reference", sustain: 1,
+				symptom:   "The public Subtensor runtime is newer than the configured current-runtime pin",
+				mechanism: "The public RPC still matches the exact configured chain, genesis, runtime name, and EVM chain identity, but its on-chain Wasm spec version advanced beyond the static monitor/Xops expectation. This is an upstream runtime transition and stale conformance pin, not evidence of a wrong RPC surface or failed local node.",
+				baseline:  "The independently verified current upstream runtime and transaction versions match the monitor inventory and Subtensor Xops host variables.",
+				observed: fmt.Sprintf(
+					"public_head=%d specVersion=%d expected_specVersion=%d transactionVersion=%d expected_transactionVersion=%d",
+					publicHead, observation.Public.Runtime.SpecVersion, settings.ExpectedSpecVersion,
+					observation.Public.Runtime.TransactionVersion, settings.ExpectedTransactionVersion,
+				),
+				evidence: fmt.Sprintf(
+					"chain=%q genesis=%q runtime=%s/%d transaction=%d evm=%q",
+					observation.Public.Chain, observation.Public.Genesis, observation.Public.Runtime.SpecName,
+					observation.Public.Runtime.SpecVersion, observation.Public.Runtime.TransactionVersion,
+					observation.Public.EVMChainID,
+				),
+				context:  "This is an upstream/configuration boundary. Lagging local nodes correctly report the historical runtime at their own heads until they import the transition block; do not restart, replace, or reset a progressing database merely because the public current runtime advanced.",
+				action:   "Independently verify the official upstream release artifact and exact on-chain transition, then update expected_spec_version—and expected_transaction_version if it changed—together in the owning monitor inventory and Subtensor Xops host variables. Rebuild and promote the monitor after the inventory change; do not restart either node solely for this pin update.",
+				verify:   "The public reference repeatedly retains the exact chain/genesis/EVM identity at the verified newer runtime, both configuration owners agree on it, and the runtime-ahead alert clears after monitor promotion while progressing historical nodes retain their ordinary lag classifications. At convergence, each node and gateway must report the new pinned runtime.",
+				playbook: "SIGNALS.md §17.1",
+			})
+		} else if len(identityProblems) > 0 {
+			findings = append(findings, subtensorIdentityFinding(target.name, "public-reference", identityProblems, observation.Public))
+		}
 	}
 
 	configuredNodes := map[string]SubtensorNodeSettings{}

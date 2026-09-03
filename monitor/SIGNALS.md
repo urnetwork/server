@@ -11817,10 +11817,39 @@ reaches Frontier, `evm_chain_id` can be unavailable and
 `evm_chain_id_error.message` can say that
 `EthereumRuntimeRPCApi_chain_id` is not found; this is bootstrap state only
 when peers and heads are progressing. Application cutover requires
-`ready=true`, `isSyncing=false`, runtime specification 452, transaction version
-1, EVM chain ID `0x3b1`, and an available `eth_getLogs`. A missing preflight or
-a mutable `v3.x` image is an undeployed/stale node even when the oneshot unit
-is green.
+`ready=true`, `isSyncing=false`, the current independently verified runtime and
+transaction versions configured identically in monitor and Xops, EVM chain ID
+`0x3b1`, and an available `eth_getLogs`. A missing preflight or a mutable
+`v3.x` image is an undeployed/stale node even when the oneshot unit is green.
+
+The public current-runtime pin is intentionally strict but is not immutable.
+When the public reference retains the exact configured chain, genesis, runtime
+name, and EVM identity while reporting a spec version greater than the pin,
+the probe emits `subtensor-runtime-ahead`. That is an upstream runtime
+transition and stale configuration boundary, not the generic wrong-RPC
+`subtensor-identity` class. Preserve page severity: independently verify the
+official release artifact and exact on-chain transition, then update
+`expected_spec_version` (and transaction version if it changed) together in
+the owning monitor inventory and the Xops Subtensor host vars. Do not restart,
+replace, or reset a progressing historical node solely because the public
+current runtime advanced. A lower public spec, or any chain/genesis/runtime
+name/EVM mismatch, remains `subtensor-identity`.
+
+On 2026-09-03, the public testfinney endpoint retained chain `Bittensor`,
+genesis `0x8f9cf856bf558a14440e75569c9e58594757048d7b3a84b5d25f6bd978263105`,
+runtime name `node-subtensor`, transaction version 1, and EVM chain ID `0x3b1`,
+but advanced from configured spec 452 to 453 exactly between blocks 7,925,774
+and 7,925,775. Repeated direct calls at and around that boundary supplied the
+on-chain discriminator. RaoFoundation's official v453 release was published
+at 16:12:43Z with commit `823bdcbc58a29f60b243be4737a7c72b34ac7d93`
+and Wasm SHA-256
+`9e51859faf28a69365005e7dd7f152f239a305c468869b2f54303aba938d840e`.
+Monitor and Xops remained pinned to 452, so updating those two configuration
+owners is the operational closure; the archive and lightnode were still about
+1.39 million historical blocks behind and correctly retained historical
+runtimes. After the pin update and monitor promotion, require the
+runtime-ahead page to clear while both lag/progress alerts remain truthful;
+at eventual convergence, direct and gateway RPC must both report spec 453.
 
 P2P listening is not P2P exposure. From an independent internet host, probe
 snow's current WAN IPv4 (do not use snow itself; NAT hairpin behavior is not a
@@ -11857,8 +11886,9 @@ interval. Deployment-healthy bootstrap means peers are greater than zero, the
 best/finalized head advances, and the direct and proxied identity agree; it is
 valid for `isSyncing` to remain true while millions of archive blocks download.
 Chain-ready additionally requires `isSyncing=false`, preflight `ready=true`,
-and runtime specification 452. An RPC response alone is insufficient: a
-zero-peer node can serve a permanently stale local chain.
+and the configured, independently verified current runtime. An RPC response
+alone is insufficient: a zero-peer node can serve a permanently stale local
+chain.
 
 `isSyncing=false` is especially unsafe by itself. With no peers, Subtensor can
 set `system_syncState.highestBlock` equal to its own stale `currentBlock` and
@@ -11958,8 +11988,10 @@ independent-host handshake and rising inbound-connection counter.
 Gateway recovery and archive bootstrap deployment are complete after deploying
 `run-subtensor.sh`: the pinned image/chain identity, temporary peers, advancing
 heads, `/healthz`, and JSON-RPC on overlay 9944 are proven. Chain cutover waits
-for live convergence at runtime 452; a historical `preflight.json` is only a
-deployment-time observation and must not be treated as current status.
+for live convergence at the current monitor/Xops runtime pin; runtime 452 was
+the verified current value at this historical deployment boundary, not a
+permanent constant. A historical `preflight.json` is only a deployment-time
+observation and must not be treated as current status.
 Reboot snow once as a deployment gate: nginx must wait until
 `172.28.208.185` exists or restart on the transient bind failure.
 `network-online.target` alone does not guarantee that the later OpenVPN address

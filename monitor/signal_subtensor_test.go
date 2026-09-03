@@ -325,6 +325,63 @@ func TestSubtensorSignalDetectsGatewayAndIdentityProblems(t *testing.T) {
 	requireAlertClass(t, alerts, "subtensor-identity")
 }
 
+// A same-chain public runtime advance must identify the stale configuration
+// boundary without accusing the public RPC or progressing local databases.
+func TestSubtensorSignalClassifiesPublicRuntimeAhead(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Public.Runtime.SpecVersion = 453
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "subtensor-runtime-ahead")
+	if alert.Severity != SeverityPage || alert.Target != "snow" || alert.Frame != "public-reference" || alert.Sustain != 1 {
+		t.Fatalf("runtime-ahead alert framing = %+v", alert)
+	}
+	for _, want := range []string{
+		"public_head=7910000",
+		"specVersion=453",
+		"expected_specVersion=452",
+		"exact configured chain, genesis, runtime name, and EVM chain identity",
+		"official upstream release artifact and exact on-chain transition",
+		"monitor inventory and Subtensor Xops host variables",
+		"do not restart either node solely for this pin update",
+		"progressing historical nodes retain their ordinary lag classifications",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("runtime-ahead alert missing %q:\n%s", want, alert.Markdown())
+		}
+	}
+	for _, candidate := range alerts {
+		if candidate.Class == "subtensor-identity" && candidate.Frame == "public-reference" {
+			t.Fatalf("same-chain runtime advance retained generic identity diagnosis: %+v", candidate)
+		}
+	}
+}
+
+// A higher version does not override a mismatched stable chain identity; that
+// remains a potentially wrong RPC surface rather than a routine pin update.
+func TestSubtensorSignalRejectsRuntimeAheadClassificationOnWrongGenesis(t *testing.T) {
+	observation := healthySubtensorObservation()
+	observation.Public.Runtime.SpecVersion = 453
+	observation.Public.Genesis = "0xwrong"
+
+	alerts, err := runSyntheticSubtensor(t, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := requireAlertClass(t, alerts, "subtensor-identity")
+	if identity.Frame != "public-reference" || !strings.Contains(identity.Observed, "genesis=") {
+		t.Fatalf("wrong-genesis identity alert = %+v", identity)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "subtensor-runtime-ahead" {
+			t.Fatalf("wrong genesis was misclassified as a routine runtime advance: %+v", alert)
+		}
+	}
+}
+
 func TestSubtensorSignalTurnsMalformedObservationIntoVisibilityAlert(t *testing.T) {
 	source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
 		if !strings.Contains(command, subtensorMarker) {

@@ -454,7 +454,7 @@ hosts:                # only monitor-specific facts; lan ips come
       expected_chain: Bittensor
       expected_genesis_hash: "0x..."
       expected_spec_name: node-subtensor
-      expected_spec_version: 452
+      expected_spec_version: 453  # current verified upstream pin; update with Xops
       expected_transaction_version: 1
       expected_evm_chain_id: "0x3b1"
       warp_max_lag: 4096
