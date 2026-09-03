@@ -151,6 +151,19 @@ monitor_preflight_dir=$(mktemp -d "$BRINGYOUR_HOME/monitor/server-monitor.prefli
 go build -o "$monitor_preflight_dir/monitor" ./cli/monitor
 ```
 
+Keep every disposable repository checkout or Git worktree under a per-run
+workspace in `$BRINGYOUR_HOME/temp`, for example
+`$BRINGYOUR_HOME/temp/server-monitor-source.<revision>.<suffix>/server`. Go
+modules in this repository use sibling `replace ../...` paths, so put only the
+required dependency symlinks beside that `server` checkout inside the same
+per-run workspace; do not create shared dependency symlinks directly in
+`$BRINGYOUR_HOME/temp`. Keep monitor evidence and immutable binaries under
+`$BRINGYOUR_HOME/monitor`; do not place a repository checkout beside the normal
+repositories in `$BRINGYOUR_HOME` or inside the monitor evidence directory.
+Create the temp parent with mode 0700 before adding a worktree, and move or
+remove the registered worktree with Git rather than renaming or deleting it
+behind Git's back.
+
 Treat a failing preflight as a monitor/repository problem to diagnose, not as a
 production alert.
 
