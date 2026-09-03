@@ -24,6 +24,4 @@ https://ur.io/app/account/claim{{end}}
 
 Earnings come from the UR protocol. Learn how it works at ur.xyz
 (https://ur.xyz).
-
-Questions about earlier payouts? Email support@ur.io.
 {{end}}
