@@ -1086,6 +1086,28 @@ const reliabilityDegradedClassificationVersion = 1
 // half-hour cycle reconsider the anchor.
 const reliabilityRunningMaintenanceDeferralAfter = 5 * time.Minute
 
+// The UpdateReliabilities evaluator has a two-hour MaxTime, but that client-side
+// context disappears during an abrupt host loss. PostgreSQL can continue a
+// compute-heavy statement without reading the dead socket, retain its
+// transaction, and block the replacement task after the five-minute lease is
+// reclaimed. Keep the same ceiling inside each checkpoint transaction so the
+// server eventually cancels and rolls back an orphan even when no worker
+// remains to send a cancel request. SET LOCAL keeps unrelated maintenance and
+// later pooled sessions unchanged.
+const reliabilityRunningCheckpointStatementTimeout = 2 * time.Hour
+
+type reliabilityRunningCheckpointConfigurer interface {
+	Exec(context.Context, string, ...any) (server.PgTag, error)
+}
+
+func configureReliabilityRunningCheckpoint(ctx context.Context, tx reliabilityRunningCheckpointConfigurer) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT set_config('statement_timeout', $1, true)`,
+		strconv.FormatInt(reliabilityRunningCheckpointStatementTimeout.Milliseconds(), 10)+"ms",
+	))
+}
+
 // reliabilityRunningLookback pairs a lookback_index with its window width.
 type reliabilityRunningLookback struct {
 	lookbackIndex int
@@ -1441,6 +1463,7 @@ func updateClientReliabilityRunningCheckpointed(
 ) {
 	for _, lb := range lookbacks {
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			configureReliabilityRunningCheckpoint(ctx, tx)
 			baseMaxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1
 			shift := reliabilityRollupBlockShift(ctx, tx, baseMaxBlockNumber)
 			newMax := baseMaxBlockNumber - shift
