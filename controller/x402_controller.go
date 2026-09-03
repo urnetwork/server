@@ -151,8 +151,8 @@ type X402PaymentRequired struct {
 	Accepts     []X402Accept `json:"accepts"`
 }
 
-// X402Sku is a thing an agent can buy, resolved from pro.yml (amount) + x402.yml
-// (price).
+// X402Sku is a thing an agent can buy, with availability from x402.yml and price and
+// amount from pro.yml.
 type X402Sku struct {
 	SkuId       string  `json:"sku_id"`
 	Description string  `json:"description"`
@@ -163,8 +163,8 @@ type X402Sku struct {
 	ByteCount model.ByteCount `json:"byte_count,omitempty"`
 }
 
-// X402Skus is everything purchasable over x402, with amounts from pro.yml so the
-// product spec stays in one place.
+// X402Skus is everything purchasable over x402, with prices and amounts from pro.yml
+// so the product spec stays in one place.
 func X402Skus() []*X402Sku {
 	return x402SkusForConfig(X402())
 }

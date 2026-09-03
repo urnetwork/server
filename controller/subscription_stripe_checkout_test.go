@@ -38,11 +38,11 @@ func TestStripeDataPackPriceUsd(t *testing.T) {
 
 	priceUsd, ok := stripeDataPackPriceUsd(1 * model.Tib)
 	connect.AssertEqual(t, ok, true)
-	connect.AssertEqual(t, priceUsd, float64(5))
+	connect.AssertEqual(t, priceUsd, float64(3))
 
 	priceUsd, ok = stripeDataPackPriceUsd(10 * model.Tib)
 	connect.AssertEqual(t, ok, true)
-	connect.AssertEqual(t, priceUsd, float64(30))
+	connect.AssertEqual(t, priceUsd, float64(20))
 
 	// an amount we do not sell has no price -- checkout must refuse, not guess
 	_, ok = stripeDataPackPriceUsd(7 * model.Tib)
@@ -50,15 +50,15 @@ func TestStripeDataPackPriceUsd(t *testing.T) {
 }
 
 // TestStripeCheckoutAmountsAreWholeCents pins the USD -> cents conversion Stripe wants.
-// $30 must be 3000, never 2999 (float truncation) and never 30.
+// $20 must be 2000, never 1999 (float truncation) and never 20.
 func TestStripeCheckoutAmountsAreWholeCents(t *testing.T) {
 	cents := func(priceUsd float64) int64 {
 		// mirrors StripeCreateCheckoutSession
 		return int64(round(priceUsd * 100))
 	}
 
-	connect.AssertEqual(t, cents(5), int64(500))
-	connect.AssertEqual(t, cents(30), int64(3000))
+	connect.AssertEqual(t, cents(3), int64(300))
+	connect.AssertEqual(t, cents(20), int64(2000))
 	connect.AssertEqual(t, cents(12.34), int64(1234))
 	// float noise must not shave a cent off
 	connect.AssertEqual(t, cents(0.1+0.2), int64(30))
