@@ -409,7 +409,7 @@ func backupArchiveRemoteWriterRunning(observation backupArchiveWriterObservation
 	}
 }
 
-const backupArchiveNetworkPathGuidance = "A bounded TCP path trace that exposes carrier-private or ECMP hops makes upstream multi-egress NAT a candidate, but does not assign reset ownership. Require UDM WAN-event/config and carrier NAT/session evidence before choosing that owner. If the direct WAN cannot retain active multi-hour TCP state, the network closure is stable public/no-CGNAT egress or another approved direct WAN path, never the management VPN."
+const backupArchiveNetworkPathGuidance = "A bounded TCP path trace that exposes carrier-private or ECMP hops makes upstream multi-egress NAT a candidate, but does not assign reset ownership. A NetworkManager IPv6 route/DNS reselection is not an IPv4-reset cause by itself: an isolated reselection while the same transfer survives is a negative control. Repeated reselection bursts bracketing resets, with no link-carrier loss and no whole-site Internet transition, support a narrower router/WAN/NAT/RA lifecycle event, but are not proof that NetworkManager reset IPv4. Require UDM WAN-event/config/conntrack and carrier NAT/session evidence before choosing that owner. If the direct WAN cannot retain active multi-hour TCP state, the network closure is stable public/no-CGNAT egress or another approved direct WAN path, never the management VPN."
 
 func evaluateBackupArchiveRun(observation backupArchiveWriterObservation) finding {
 	target := observation.host + "/remote"

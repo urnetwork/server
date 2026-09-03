@@ -9086,6 +9086,40 @@ public/no-CGNAT egress or another approved direct WAN path; retain rsync's
 bounded retry and partial-resume safety, and do not move bulk data onto the
 management VPN.
 
+The next recurrence at `2026-09-03T05:30:07Z` further narrowed that candidate
+without turning correlation into a router verdict. The systemd-owned
+PostgreSQL retry ran for 50m40s and received 34,223,902,479 bytes before the
+client saw another reset. The separate Redis source authenticated the serial
+follow-up one second later, then its client reset after only 622,804 bytes;
+neither source sshd recorded an orderly close, and both source ssh services
+retained their generations. The PostgreSQL source observed the same public
+egress identity used by the preceding and subsequent PostgreSQL retries, while
+Redis used the other identity. That is stable per-endpoint selection, not
+evidence that one PostgreSQL flow changed egress mid-session.
+
+Planetoid did record a burst of NetworkManager messages reselecting the same
+wired interface for IPv6 routing and DNS around both reset boundaries: the
+first burst bracketed the `04:09:23Z` reset and the next message followed the
+`05:30:07Z` reset by three seconds. There was no link-carrier loss, and the UDM
+continued reporting Internet available with its last whole-site state change
+near the earlier `00:28Z` outage. An isolated identical reselection at
+`01:17:04Z` did not interrupt the then-active PostgreSQL transfer, so the
+NetworkManager line itself is a negative control and cannot be named as the
+IPv4 reset cause. Repeated bursts bracketing failures instead support a
+narrower router/WAN/NAT/router-advertisement lifecycle event that can preserve
+coarse Internet availability while invalidating long-lived state. The
+remaining proof requires UDM WAN-selection/event and conntrack evidence plus
+carrier NAT/session evidence; do not change NetworkManager, rsync, or source
+hosts from this correlation alone.
+
+Systemd started exactly one fourth retry at `06:00:11Z`. Its PostgreSQL source
+again observed the same per-endpoint public egress, and a direct 15-second
+sample retained one stable PID, one `enp65s0` socket, and another 17,773,660
+received bytes. Preserve that writer and partial. If UDM or carrier evidence
+confirms that the direct path cannot preserve an active multi-hour mapping,
+the operational closure remains a pinned stable public/no-CGNAT WAN path with
+adequate conntrack lifetime/capacity, never the management VPN.
+
 Diagnosis order is: query both raw Mimir gateways; read the exact `.prom` files
 as the Fluent Bit identity and compare their mtime with the direct unit state;
 reproduce the textfile input with a bounded stdout-only process; inspect the
