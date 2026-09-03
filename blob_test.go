@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -257,13 +259,115 @@ func TestLocalBlobStorePutIfAbsentPreservesCapacity(t *testing.T) {
 	}
 }
 
+// Decodes the application-level framing emitted by SigV4 streaming uploads.
+// Every chunk and the terminal chunk must be complete and carry a hex signature.
+func decodeAWSSignedChunkedBody(encoded []byte) ([]byte, error) {
+	const signaturePrefix = ";chunk-signature="
+	decoded := make([]byte, 0, len(encoded))
+	remaining := encoded
+	for {
+		headerEnd := bytes.Index(remaining, []byte("\r\n"))
+		if headerEnd < 0 {
+			return nil, errors.New("aws signed chunk header is truncated")
+		}
+		header := string(remaining[:headerEnd])
+		remaining = remaining[headerEnd+2:]
+		sizeHex, signature, ok := strings.Cut(header, signaturePrefix)
+		if !ok || sizeHex == "" {
+			return nil, fmt.Errorf("invalid aws signed chunk header %q", header)
+		}
+		for i := range sizeHex {
+			sizeByte := sizeHex[i]
+			if ('0' <= sizeByte && sizeByte <= '9') ||
+				('a' <= sizeByte && sizeByte <= 'f') ||
+				('A' <= sizeByte && sizeByte <= 'F') {
+				continue
+			}
+			return nil, fmt.Errorf("invalid aws signed chunk size %q", sizeHex)
+		}
+		chunkSize, err := strconv.ParseUint(sizeHex, 16, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid aws signed chunk size %q: %w", sizeHex, err)
+		}
+		if len(signature) != sha256.Size*2 {
+			return nil, fmt.Errorf("invalid aws signed chunk signature length %d", len(signature))
+		}
+		if _, err := hex.DecodeString(signature); err != nil {
+			return nil, fmt.Errorf("invalid aws signed chunk signature: %w", err)
+		}
+		if uint64(len(remaining)) < chunkSize {
+			return nil, fmt.Errorf("aws signed chunk data is truncated: have %d bytes, want %d", len(remaining), chunkSize)
+		}
+		chunkSizeInt := int(chunkSize)
+		decoded = append(decoded, remaining[:chunkSizeInt]...)
+		remaining = remaining[chunkSizeInt:]
+		if len(remaining) < 2 || remaining[0] != '\r' || remaining[1] != '\n' {
+			return nil, errors.New("aws signed chunk data delimiter is missing")
+		}
+		remaining = remaining[2:]
+		if chunkSize == 0 {
+			if len(remaining) != 0 {
+				return nil, fmt.Errorf("aws signed chunk body has %d trailing bytes", len(remaining))
+			}
+			return decoded, nil
+		}
+	}
+}
+
+// Malformed framing must not pass merely because it contains the expected
+// object bytes before the damaged terminal chunk or trailing data.
+func TestDecodeAWSSignedChunkedBodyRejectsMalformedFraming(t *testing.T) {
+	payload := `{"evidence":true}`
+	signature := strings.Repeat("a", sha256.Size*2)
+	chunk := func(size string, data string) string {
+		return size + ";chunk-signature=" + signature + "\r\n" + data + "\r\n"
+	}
+	terminal := chunk("0", "")
+	tests := []struct {
+		name    string
+		encoded string
+		want    string
+		wantErr bool
+	}{
+		{name: "multiple complete chunks", encoded: chunk("c", `{"evidence":`) + chunk("5", `true}`) + terminal, want: payload},
+		{name: "missing terminal chunk", encoded: chunk("11", payload), wantErr: true},
+		{name: "truncated terminal header", encoded: chunk("11", payload) + "0;chunk-signature=" + signature[:len(signature)-1], wantErr: true},
+		{name: "truncated data", encoded: "11;chunk-signature=" + signature + "\r\n" + payload[:len(payload)-1], wantErr: true},
+		{name: "missing data delimiter", encoded: "11;chunk-signature=" + signature + "\r\n" + payload + "\n" + terminal, wantErr: true},
+		{name: "invalid signature", encoded: "11;chunk-signature=" + signature[:len(signature)-1] + "g\r\n" + payload + "\r\n" + terminal, wantErr: true},
+		{name: "invalid size", encoded: "11x;chunk-signature=" + signature + "\r\n" + payload + "\r\n" + terminal, wantErr: true},
+		{name: "signed size", encoded: "+11;chunk-signature=" + signature + "\r\n" + payload + "\r\n" + terminal, wantErr: true},
+		{name: "unsigned chunks", encoded: "11\r\n" + payload + "\r\n0\r\n\r\n", wantErr: true},
+		{name: "trailing data", encoded: chunk("11", payload) + terminal + "ignored", wantErr: true},
+	}
+	for _, test := range tests {
+		decoded, err := decodeAWSSignedChunkedBody([]byte(test.encoded))
+		if test.wantErr {
+			if err == nil {
+				t.Errorf("%s framing passed with body %q", test.name, decoded)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s framing failed: %v", test.name, err)
+			continue
+		}
+		if string(decoded) != test.want {
+			t.Errorf("%s body = %q, want %q", test.name, decoded, test.want)
+		}
+	}
+}
+
 func TestMinIOBlobStorePutIfAbsentUsesConditionalRequest(t *testing.T) {
 	type requestRecord struct {
-		method      string
-		path        string
-		ifNoneMatch string
-		contentType string
-		body        string
+		method               string
+		path                 string
+		ifNoneMatch          string
+		contentType          string
+		contentSHA256        string
+		decodedContentLength string
+		body                 []byte
+		bodyErr              error
 	}
 	responseStatuses := []int{
 		http.StatusOK,
@@ -275,14 +379,17 @@ func TestMinIOBlobStorePutIfAbsentUsesConditionalRequest(t *testing.T) {
 	var requestStateLock sync.Mutex
 	var requests []requestRecord
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body, bodyErr := io.ReadAll(r.Body)
 		requestStateLock.Lock()
 		requests = append(requests, requestRecord{
-			method:      r.Method,
-			path:        r.URL.Path,
-			ifNoneMatch: r.Header.Get("If-None-Match"),
-			contentType: r.Header.Get("Content-Type"),
-			body:        string(body),
+			method:               r.Method,
+			path:                 r.URL.Path,
+			ifNoneMatch:          r.Header.Get("If-None-Match"),
+			contentType:          r.Header.Get("Content-Type"),
+			contentSHA256:        r.Header.Get("X-Amz-Content-Sha256"),
+			decodedContentLength: r.Header.Get("X-Amz-Decoded-Content-Length"),
+			body:                 body,
+			bodyErr:              bodyErr,
 		})
 		responseIndex := len(requests) - 1
 		requestStateLock.Unlock()
@@ -340,10 +447,25 @@ func TestMinIOBlobStorePutIfAbsentUsesConditionalRequest(t *testing.T) {
 	if len(requests) != len(responseStatuses) {
 		t.Fatalf("request count = %d, want %d", len(requests), len(responseStatuses))
 	}
+	expectedBody := []byte(`{"evidence":true}`)
 	for i, request := range requests {
 		if request.method != http.MethodPut || request.path != "/evidence/blob/evidence.json" ||
-			request.ifNoneMatch != "*" || request.contentType != "application/json" || request.body != `{"evidence":true}` {
+			request.ifNoneMatch != "*" || request.contentType != "application/json" ||
+			request.contentSHA256 != "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" ||
+			request.decodedContentLength != strconv.Itoa(len(expectedBody)) {
 			t.Errorf("request %d = %+v", i, request)
+		}
+		if request.bodyErr != nil {
+			t.Errorf("request %d body read: %v", i, request.bodyErr)
+			continue
+		}
+		decodedBody, err := decodeAWSSignedChunkedBody(request.body)
+		if err != nil {
+			t.Errorf("request %d signed body: %v", i, err)
+			continue
+		}
+		if !bytes.Equal(decodedBody, expectedBody) {
+			t.Errorf("request %d decoded body = %q, want %q", i, decodedBody, expectedBody)
 		}
 	}
 }
